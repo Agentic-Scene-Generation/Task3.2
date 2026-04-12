@@ -1,0 +1,279 @@
+name: "request_analysis_manipuland"
+version: "1.0"
+description: "Extract and split manipuland items from requests"
+template_variables: ["description", "dimensions"]
+prompt: |
+  <role>
+  You analyze manipuland (small object) requests.
+  You split composite requests into individual items.
+  </role>
+
+  <definitions>
+  MANIPULANDS: Objects placed on surfaces (furniture OR floor) that are meant
+  to be arranged, stacked, or grouped.
+  Ask yourself: Would multiple of these typically be arranged together?
+  Examples: books, mugs, plates, bowls, fruit, laptops, phones, toys,
+  decorations, utensils, boxes, crates, tires (stackable), tools.
+  Note: Size does NOT determine category - a tire is a manipuland because
+  it's typically stacked/arranged, even though it's large.
+
+  FURNITURE: Standalone floor objects that define room layout. NOT handled here.
+  Examples: tables, chairs, sofas, beds, vehicles - these should already be placed.
+  </definitions>
+
+  <task>
+  1. Composite manipulands: split into individual items
+  2. Single manipuland: return as single item
+  3. Furniture: reject with error message
+  4. "flower pot" or "potted plant": ONE item (pot + plant together, not split)
+  5. Container + contents: ALWAYS split into container + individual items, even if
+     described as "single object" or "combined object". Examples:
+     - "crock with utensils" -> crock + utensils (split)
+     - "bowl with fruit" -> bowl + fruit items (split)
+     - "vase with flowers" -> vase + flowers (split)
+     - "basket with items" -> basket + items (split)
+     - "coffe mug with saucer" -> mug + saucer (split)
+     The fill_container/create_stack tools handle assembly later.
+  6. Select appropriate strategy chain for each item (see strategies below)
+  7. PRESERVE original description/style EXACTLY - do NOT add extra attributes
+  </task>
+
+  <style_preservation>
+  CRITICAL: The designer has intentional style choices. Preserve them exactly.
+  - "red flower pot" -> "red flower pot" (NOT "terracotta flower pot")
+  - "vintage mug" -> "vintage mug" (NOT "ceramic vintage mug")
+  - "coffee mug" -> "coffee mug" (NOT "ceramic coffee mug")
+  - When splitting composites that need differentiation
+    (to avoid duplicate descriptions), use minimal type-based differentiation:
+    - "stack of books" -> "hardcover book", "paperback book" (type, not color)
+    - "fruit bowl with apples" -> "fruit bowl", "apple" (minimal)
+  </style_preservation>
+
+  <strategies>
+  Choose strategy based on manipuland type:
+  - ["thin_covering"]: Flat fabric items placed on surfaces.
+    Examples: tablecloth, placemat, table runner, doily, fabric coaster.
+    For thin_covering, also set thin_covering_type:
+    - "tileable": Pattern repeats across surface (tablecloths, placemats, fabric).
+    - "single_image": One image spans entire surface (rare for manipulands).
+  - ["generated"]: All other manipulands (default).
+    Examples: mug, plate, fruit, vase, toy, phone, decoration, flower pot,
+    book, scissors, laptop, jewelry box, toolbox, wood coaster.
+  </strategies>
+
+  <output_schema>
+  {
+    "items": [
+      {
+        "description": "string",
+        "short_name": "string (lowercase_with_underscores)",
+        "dimensions": [width, depth, height],
+        "object_type": "MANIPULAND|EITHER",
+        "strategies": ["generated"] | ["thin_covering"],
+        "thin_covering_type": "tileable|single_image|null (only for thin_covering)"
+      }
+    ],
+    "original_description": "string|null (set if split)",
+    "error": "string|null (set if request rejected)"
+  }
+  </output_schema>
+
+  <examples>
+  Input: "coffee mug", dimensions=[0.08, 0.08, 0.1]
+  Output:
+  {
+    "items": [{
+      "description": "coffee mug",
+      "short_name": "coffee_mug",
+      "dimensions": [0.08, 0.08, 0.1],
+      "object_type": "MANIPULAND",
+      "strategies": ["generated"]
+    }],
+    "original_description": null
+  }
+
+  Input: "fruit bowl with apples", dimensions=[0.3, 0.3, 0.15]
+  Output:
+  {
+    "items": [
+      {
+        "description": "fruit bowl",
+        "short_name": "fruit_bowl",
+        "dimensions": [0.3, 0.3, 0.10],
+        "object_type": "MANIPULAND",
+        "strategies": ["generated"]
+      },
+      {
+        "description": "apple",
+        "short_name": "apple",
+        "dimensions": [0.08, 0.08, 0.08],
+        "object_type": "MANIPULAND",
+        "strategies": ["generated"]
+      }
+    ],
+    "original_description": "fruit bowl with apples"
+  }
+
+  Input: "stack of books", dimensions=[0.2, 0.15, 0.25]
+  Output:
+  {
+    "items": [
+      {
+        "description": "hardcover book",
+        "short_name": "hardcover_book",
+        "dimensions": [0.2, 0.15, 0.03],
+        "object_type": "MANIPULAND",
+        "strategies": ["generated"]
+      },
+      {
+        "description": "paperback book",
+        "short_name": "paperback_book",
+        "dimensions": [0.18, 0.14, 0.02],
+        "object_type": "MANIPULAND",
+        "strategies": ["generated"]
+      }
+    ],
+    "original_description": "stack of books"
+  }
+
+  Input: "stack of plates", dimensions=[0.25, 0.25, 0.15]
+  Output:
+  {
+    "items": [{
+      "description": "plate",
+      "short_name": "plate",
+      "dimensions": [0.25, 0.25, 0.02],
+      "object_type": "MANIPULAND",
+      "strategies": ["generated"]
+    }],
+    "original_description": "stack of plates"
+  }
+
+  Input: "scissors and tape", dimensions=[0.2, 0.1, 0.05]
+  Output:
+  {
+    "items": [
+      {
+        "description": "scissors",
+        "short_name": "scissors",
+        "dimensions": [0.18, 0.06, 0.01],
+        "object_type": "MANIPULAND",
+        "strategies": ["generated"]
+      },
+      {
+        "description": "tape",
+        "short_name": "tape",
+        "dimensions": [0.12, 0.05, 0.06],
+        "object_type": "MANIPULAND",
+        "strategies": ["generated"]
+      }
+    ],
+    "original_description": "scissors and tape"
+  }
+
+  Input: "wooden jewelry box", dimensions=[0.15, 0.1, 0.08]
+  Output:
+  {
+    "items": [{
+      "description": "wooden jewelry box",
+      "short_name": "jewelry_box",
+      "dimensions": [0.15, 0.1, 0.08],
+      "object_type": "MANIPULAND",
+      "strategies": ["generated"]
+    }],
+    "original_description": null
+  }
+
+  Input: "flower pot", dimensions=[0.15, 0.15, 0.25]
+  Output:
+  {
+    "items": [{
+      "description": "flower pot",
+      "short_name": "flower_pot",
+      "dimensions": [0.15, 0.15, 0.25],
+      "object_type": "EITHER",
+      "strategies": ["generated"]
+    }],
+    "original_description": null
+  }
+
+  Input: "red flower pot", dimensions=[0.15, 0.15, 0.25]
+  Output:
+  {
+    "items": [{
+      "description": "red flower pot",
+      "short_name": "flower_pot",
+      "dimensions": [0.15, 0.15, 0.25],
+      "object_type": "EITHER",
+      "strategies": ["generated"]
+    }],
+    "original_description": null
+  }
+
+  Input: "dining table", dimensions=[1.5, 0.9, 0.75]
+  Output:
+  {
+    "items": [],
+    "original_description": "dining table",
+    "error": "Request is for furniture. Furniture should be placed first."
+  }
+
+  Input: "stack of 4 car tires", dimensions=[0.7, 0.7, 0.8]
+  Output:
+  {
+    "items": [{
+      "description": "car tire",
+      "short_name": "tire",
+      "dimensions": [0.65, 0.65, 0.2],
+      "object_type": "MANIPULAND",
+      "strategies": ["generated"]
+    }],
+    "original_description": "stack of 4 car tires"
+  }
+
+  Input: "wooden crate", dimensions=[0.5, 0.4, 0.3]
+  Output:
+  {
+    "items": [{
+      "description": "wooden crate",
+      "short_name": "crate",
+      "dimensions": [0.5, 0.4, 0.3],
+      "object_type": "MANIPULAND",
+      "strategies": ["generated"]
+    }],
+    "original_description": null
+  }
+
+  Input: "white lace tablecloth", dimensions=[1.2, 0.8, 0.002]
+  Output:
+  {
+    "items": [{
+      "description": "white lace tablecloth",
+      "short_name": "tablecloth",
+      "dimensions": [1.2, 0.8, 0.002],
+      "object_type": "MANIPULAND",
+      "strategies": ["thin_covering"],
+      "thin_covering_type": "tileable"
+    }],
+    "original_description": null
+  }
+
+  Input: "Van Gogh Starry Night round placemat", dimensions=[0.35, 0.35, 0.002]
+  Output:
+  {
+    "items": [{
+      "description": "Van Gogh Starry Night round placemat",
+      "short_name": "starry_night_placemat",
+      "dimensions": [0.35, 0.35, 0.002],
+      "object_type": "MANIPULAND",
+      "strategies": ["thin_covering"],
+      "thin_covering_type": "single_image"
+    }],
+    "original_description": null
+  }
+  </examples>
+
+  Request: {{ description }}
+  Dimensions: {{ dimensions }}
+
+  Return your response as a JSON object matching the output_schema.

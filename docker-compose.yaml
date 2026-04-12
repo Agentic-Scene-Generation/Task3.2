@@ -1,0 +1,32 @@
+services:
+  scenesmith:
+    build: .
+    runtime: nvidia
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
+      - OPENAI_TRACING_KEY=${OPENAI_TRACING_KEY:-}
+      - NVIDIA_VISIBLE_DEVICES=all
+    volumes:
+      # Data directories (download on host, mount into container).
+      - ./data:/app/data
+      # SAM3D model checkpoints (requires HuggingFace auth).
+      - ./external/checkpoints:/app/external/checkpoints
+      # Generated scene outputs.
+      - ./outputs:/app/outputs
+    # Required for bubblewrap (GPU isolation for multi-GPU Blender rendering).
+    cap_add:
+      - SYS_ADMIN
+      - SYS_CHROOT
+    security_opt:
+      - apparmor=unconfined
+      - seccomp=unconfined
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    stdin_open: true
+    tty: true

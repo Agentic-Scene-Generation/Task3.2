@@ -1,0 +1,113 @@
+# Tasks to run sequantially
+tasks: [generate_scenes]
+
+# Path to CSV file with scene prompts (optional).
+# If set, overrides the prompts list below.
+# CSV format: scene_index,prompt (header row required).
+# Example:
+#   scene_index,prompt
+#   4,"A modern kitchen with an island"
+#   7,"A living room with a sectional sofa"
+# This would produce output directories: scene_004/, scene_007/
+csv_path: null
+
+# List of scene prompts.
+prompts: [
+  "A bedroom with a bed, two nightstands, and a wardrobe in the corner of the room.",
+  "A living room with a two-seater sofa against the wall, a square rug in the middle in
+  front of the sofa, and two large plants on the floor near the sofa.",
+  "A classroom with six student desks, each with a chair. A teacher's desk sits at the
+  front near the chalkboard, which hangs on the wall."
+]
+
+# Number of parallel workers; 1 = sequential for debugging
+num_workers: 1
+
+# Pipeline stage control
+# Stages run in order: floor_plan → furniture → wall_mounted → manipuland
+# Set start_stage to resume from a specific stage (loads previous stage's state)
+# Set stop_stage to stop after a specific stage (saves state for later resumption)
+# Set resume_from_path to branch from a previous experiment's output
+pipeline:
+  start_stage: "floor_plan"  # Options: "floor_plan", "furniture", "wall_mounted", "manipuland"
+  stop_stage: "manipuland"  # Options: "floor_plan", "furniture", "wall_mounted", "manipuland"
+  # Path to source experiment dir (e.g., "outputs/2025-12-21/10-30-45")
+  resume_from_path: null
+  # Parallelize rooms within a house (mutually exclusive with num_workers > 1).
+  parallel_rooms: false
+  # Max concurrent rooms when parallel_rooms=true.
+  max_parallel_rooms: 1
+
+# Geometry generation server settings
+geometry_generation_server:
+  host: "127.0.0.1"
+  port: 7005
+
+# HSSD retrieval server settings
+hssd_retrieval_server:
+  host: "127.0.0.1"
+  port: 7006
+
+# Articulated retrieval server settings
+articulated_retrieval_server:
+  host: "127.0.0.1"
+  port: 7007
+
+# Objaverse retrieval server settings
+objaverse_retrieval_server:
+  host: "127.0.0.1"
+  port: 7009
+
+# Materials retrieval server settings
+materials_retrieval_server:
+  host: "127.0.0.1"
+  port: 7008
+  data_path: "data/materials"
+  embeddings_path: "data/materials/embeddings"
+  use_top_k: 5
+
+# SceneEval export configuration.
+sceneeval_export:
+  enabled: true
+  asset_id_prefix: "scenesmith"
+
+# Physical feasibility post-processing configuration.
+# Two-stage process: projection (IK-based) → simulation (physics settling).
+projection:
+  enabled: true  # Master enable/disable flag.
+
+  # Threshold for DOF reduction optimization. When scene has more objects
+  # than this threshold, only colliding objects are made free in IK.
+  # Per-furniture projections have ~7 objects, final projection has 300+.
+  # Set to 0 to always use optimization, very high to disable.
+  large_scene_optimization_threshold: 100
+
+  # Minimum penetration depth (meters) to consider an object as colliding.
+  # Objects with penetration below this are treated as surface contacts.
+  # 0.001m = 1mm filters out resting objects while catching real penetrations.
+  collision_penetration_threshold_m: 0.001
+
+  furniture:
+    enabled: true             # Enable furniture post-processing.
+    xy_only: false            # XYZ to resolve floor collisions.
+    fix_rotation: true        # Fix rotations during projection.
+    influence_distance: 0.02  # 2cm collision influence.
+    solver_name: "snopt"      # NLP solver ("snopt" or "ipopt").
+    iteration_limit: 5000     # Max solver iterations.
+    time_limit_s: 360.0       # Max solver time (seconds).
+
+  final:
+    enabled: true             # Enable final scene post-processing.
+    xy_only: false            # XYZ (default for manipulands - allow vertical).
+    fix_rotation: true        # Fix rotations during projection.
+    influence_distance: 0.02
+    solver_name: "snopt"
+    iteration_limit: 10000
+    time_limit_s: 360.0       # Max solver time (seconds).
+
+  simulation:
+    enabled: true             # Enable forward simulation after projection.
+    simulation_time_s: 15.0    # Simulation duration (seconds).
+    time_step_s: 1.0e-3       # Physics time step (1ms).
+    timeout_s: 600.0          # Max wall-clock time (10 minutes).
+    save_html: false          # Save meshcat visualization HTML (for debugging).

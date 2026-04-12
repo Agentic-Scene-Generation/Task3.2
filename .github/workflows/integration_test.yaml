@@ -1,0 +1,106 @@
+name: Integration Test
+
+on:
+  pull_request:
+    types:
+      - opened
+      - reopened
+      - synchronize
+  push:
+    branches:
+      - main
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    # Get environment variables.
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.7.8"
+          enable-cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: ".python-version"
+
+      - name: Install system dependencies for rendering
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb libegl1
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Restore testmon cache
+        id: cache-testmon-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            .testmondata
+            .testmondata-shm
+            .testmondata-wal
+          key: testmon-integration-${{ runner.os }}-${{ github.sha }}
+          restore-keys: |
+            testmon-integration-${{ runner.os }}-
+
+      - name: Run integration tests
+        timeout-minutes: 30
+        run: uv run pytest tests/integration/ --testmon -x
+
+      - name: Save testmon cache
+        uses: actions/cache/save@v4
+        if: >-
+          (success() || failure()) &&
+          steps.cache-testmon-restore.outputs.cache-hit != 'true'
+        with:
+          path: |
+            .testmondata
+            .testmondata-shm
+            .testmondata-wal
+          key: ${{ steps.cache-testmon-restore.outputs.cache-primary-key }}
+
+  usd-export-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      SCENESMITH_RUN_USD_EXPORT_TESTS: "1"
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.7.8"
+          enable-cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: ".python-version"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1
+
+      - name: Set up MuJoCo/USD export environment
+        run: bash scripts/setup_mujoco_export.sh
+
+      - name: Run USD export integration test
+        run: |
+          source .mujoco_venv/bin/activate
+          python -m unittest tests.integration.test_usd_export_pipeline

@@ -1,0 +1,39 @@
+# Build outputs and generated data.
+outputs/
+export_logs/
+
+# Data directories (mounted at runtime).
+data/
+external/checkpoints/
+
+# Virtual environments.
+.venv/
+.mujoco_venv/
+
+# Python caches.
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# Git.
+.git/
+
+# Archives.
+*.zip
+
+# Test caches.
+.testmondata*
+.pytest_cache/
+
+# IDE and editor files.
+.serena/
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Docker.
+Dockerfile
+docker-compose.yaml
+.dockerignore

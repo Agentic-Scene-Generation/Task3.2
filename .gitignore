@@ -1,0 +1,13 @@
+.venv
+.mujoco_venv
+*.egg-info
+__pycache__
+outputs
+.serena
+debug_asset_gen
+debug_rendering
+debug_furniture_agent
+.testmondata*
+.pytest_cache/
+.vscode/
+.mcp.json
