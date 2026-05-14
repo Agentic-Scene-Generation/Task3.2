@@ -1,7 +1,7 @@
 # Base floor plan agent configuration with shared settings
 
 # Floor plan mode: "room" (single room) or "house" (multi-room)
-mode: "room"
+mode: "house"
 
 # Session memory management for context efficiency.
 # Trims old conversation turns by removing images and optionally summarizing text.

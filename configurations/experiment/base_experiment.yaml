@@ -12,12 +12,63 @@ tasks: [generate_scenes]
 csv_path: null
 
 # List of scene prompts.
+#一定要加引号！
 prompts: [
-  "A bedroom with a bed, two nightstands, and a wardrobe in the corner of the room.",
-  "A living room with a two-seater sofa against the wall, a square rug in the middle in
-  front of the sofa, and two large plants on the floor near the sofa.",
-  "A classroom with six student desks, each with a chair. A teacher's desk sits at the
-  front near the chalkboard, which hangs on the wall."
+  # "A bedroom with a bed, two nightstands, and a wardrobe in the corner of the room.",
+  # "A living room with a two-seater sofa against the wall, a square rug in the middle in
+  # front of the sofa, and two large plants on the floor near the sofa.",
+  # "A classroom with six student desks, each with a chair. A teacher's desk sits at the
+  # front near the chalkboard, which hangs on the wall."
+
+  #kunming
+  # "A bedroom featuring rustic farmhouse decor with exposed wooden beams."
+  # "A bedroom where a chunky knit throw blanket is casually draped over the foot of the bed."
+  # "A livingroom flooded with natural light from floor-to-ceiling windows."
+
+  #大单房间
+  # --- 1a. 逼近尺寸上限 + 功能区划分 ---
+  # 测试点: 20m接近max_floor_plan_dim_m上限, agent能否在大空间中合理划分功能区而不是把家具堆在一起
+  # "A 19m x 18m open-plan coworking space with four distinct zones: a lounge area with two sofas and a coffee table, a hot-desk zone with eight individual desks each with a monitor and desk lamp, a meeting corner with a conference table for six people and a whiteboard on the wall, and a kitchenette area with a counter, a microwave, a coffee machine, and bar stools. Each zone should feel spatially separated.",
+
+  # --- 1b. 极高密度物体 + 精确空间关系 ---
+  # 测试点: 大量物体的碰撞检测、support surface提取、manipuland堆叠稳定性
+  # "A 15m x 12m restaurant dining hall with ten round tables, each surrounded by four chairs. Each table has a tablecloth, four complete place settings (plate, fork, knife, spoon, napkin, wine glass), a centerpiece vase with flowers, and a candle holder. There is a long buffet counter along one wall with chafing dishes, a salad bar section with bowls, and a dessert display stand. A hostess podium stands near the entrance door.",
+
+  # # --- 1c. 不规则大房间 + 大尺度差异物体 ---
+  # # 测试点: L形房间的layout推理, 极大和极小物体共存时的渲染和碰撞精度
+  # "An L-shaped 18m x 15m industrial workshop. The main section has a large CNC machine (3m x 2m), a metal lathe, a drill press, and two heavy steel workbenches with vises. The smaller wing has a precision electronics workstation with a magnifying lamp, soldering station, small component bins, and a microscope. Tool pegboards line the walls. A forklift is parked in the corner near the loading door.",
+
+  # # --- 1d. 大量墙面物体 + 天花板物体 ---
+  # # 测试点: wall_mounted和ceiling_mounted agent在大空间中的分布合理性
+  # "A 16m x 14m art gallery with white walls. Hang twenty framed paintings of varying sizes (from 0.5m to 2m wide) along all four walls with proper spacing. The ceiling has twelve track lighting fixtures aimed at the paintings. Place four freestanding sculpture pedestals in the center area, two leather benches for visitors, and a reception desk near the entrance. A large chandelier hangs in the center of the room.",
+
+  # # --- 1e. 功能性约束密集 ---
+  # # 测试点: 物体间的功能性空间关系(过道宽度、朝向、可达性)在大房间中是否被正确维护
+  # "A 17m x 13m kindergarten classroom. Along one wall, place ten small cubbies for children's belongings. In the center, arrange six small round tables with four tiny chairs each. One corner has a reading nook with a small bookshelf, bean bags, and a rug. Another corner has a play kitchen set with a toy stove, sink, and refrigerator. The teacher's desk faces the room near the door. A large interactive whiteboard hangs on the front wall. Ensure all pathways between furniture groups are at least 1.2m wide for safety."
+
+  #多房间
+  # --- 2a. 房间数量多 + 连接复杂 ---
+  # # 测试点: room_placement backtracking在5s timeout内能否处理10+房间, 门的连接是否合理
+  # "A two-story-style community center on a single floor with: a large main hall (8m x 10m), a kitchen (4m x 5m) connected to the hall, two restrooms (2m x 3m each), a storage room (2m x 2m), an office (3m x 4m), a children's playroom (5m x 6m), a library reading room (4m x 5m), a music practice room (3m x 3m), a craft workshop (4m x 4m), and a reception lobby (3m x 5m) connecting to the main entrance. All rooms should be accessible from the lobby or main hall.",
+
+  # # --- 2b. 房间尺寸差异极大 ---
+  # # 测试点: 极大和极小房间共存时的布局紧凑性, 墙体对齐, 门的放置
+  "A mansion with: a grand ballroom (18m x 15m) with a chandelier and dance floor, a tiny powder room (1.5m x 2m) with just a toilet and sink, a master bedroom (6m x 7m) with a king bed and walk-in closet area, a narrow hallway (1.5m x 8m) connecting rooms, a wine cellar room (3m x 3m) with wine racks along all walls, and a home theater (5m x 8m) with tiered seating for twelve people and a projection screen."
+
+  # # --- 2c. 开放式连接 + 视线通透 ---
+  # # 测试点: 开放连接(无门)的处理, 跨房间的家具布局一致性, clearance zone
+  # "A modern open-concept apartment: an open kitchen (4m x 5m) flowing into a dining area (4m x 4m) flowing into a living room (6m x 5m) with no doors between them, just open archways. A separate master bedroom (4m x 5m) with a door, an ensuite bathroom (2.5m x 3m), and a small home office (2.5m x 3m). The kitchen has an island counter that visually separates it from the dining area. The living room has a sectional sofa facing a TV wall.",
+
+  # --- 2d. 重复房间 + 对称性 ---
+  # 测试点: agent能否生成相似但不完全相同的重复房间, 避免copy-paste感
+  # "A hotel floor with: a central corridor (2m x 15m), six identical-sized guest rooms (4m x 5m each) branching off the corridor (three on each side). Each room should have a bed, nightstand, desk with chair, wardrobe, and a small bathroom area with a toilet and sink. The rooms should feel similar in layout but with slight natural variations in furniture placement. An elevator lobby (3m x 3m) is at one end, and a housekeeping closet (2m x 2m) at the other.",
+
+  # --- 2e. 功能性跨房间依赖 ---
+  # 测试点: 房间间的逻辑依赖(厨房靠近餐厅, 卧室远离噪音源), 门的朝向和通行性
+  # "A family home with: a front porch entry leading to a foyer (2m x 3m), a living room (5m x 6m) with a fireplace, a formal dining room (4m x 5m) adjacent to the kitchen (4m x 5m) with a connecting doorway, a laundry room (2m x 3m) near the kitchen, a master bedroom (5m x 5m) with ensuite bathroom (3m x 3m) on the quiet side of the house away from the kitchen, two children's bedrooms (3.5m x 4m each) sharing a bathroom (2.5m x 3m), and a garage (5m x 6m) accessible from the kitchen side."
+
+
+
 ]
 
 # Number of parallel workers; 1 = sequential for debugging

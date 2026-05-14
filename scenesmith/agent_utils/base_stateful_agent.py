@@ -218,6 +218,13 @@ class BaseStatefulAgent(ABC):
             verbosity = getattr(verbosity_cfg, settings_key)
             kwargs["verbosity"] = verbosity
 
+            # Request encrypted reasoning content so that reasoning items
+            # survive session trimming and can be replayed in later turns.
+            # Without this, trimmed reasoning items leave orphan function_call
+            # items, causing 400 "function_call was provided without its
+            # required reasoning item" on reasoning models (GPT-5, o-series).
+            # kwargs["response_include"] = ["reasoning.encrypted_content"]
+
         # Add tool_choice to force specific tool call first.
         if tool_choice:
             kwargs["tool_choice"] = tool_choice

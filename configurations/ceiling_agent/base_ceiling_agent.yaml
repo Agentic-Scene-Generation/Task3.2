@@ -58,7 +58,7 @@ rendering:
 
 # Asset manager configuration
 asset_manager:
-  general_asset_source: "generated"
+  general_asset_source: "hssd"
   backend: "sam3d"
 
   router:
