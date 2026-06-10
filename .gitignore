@@ -1,13 +1,54 @@
-.venv
-.mujoco_venv
-*.egg-info
-__pycache__
-outputs
-.serena
-debug_asset_gen
-debug_rendering
-debug_furniture_agent
-.testmondata*
+# Virtual environments
+.venv/
+.mujoco_venv/
+
+# Python
+*.egg-info/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
 .pytest_cache/
+.testmondata*
+.mypy_cache/
+.ruff_cache/
+
+# Editor / IDE
 .vscode/
+.serena/
 .mcp.json
+
+# Hydra / experiment outputs
+outputs/
+debug_asset_gen/
+debug_rendering/
+debug_furniture_agent/
+
+# Data — datasets, assets, materials
+data/
+materials/
+artvip/
+
+# Model weights
+models/
+external/checkpoints/
+
+# Large binary / archive files
+*.zip
+*.tar.gz
+*.run
+*.whl
+
+# Logs
+*.log
+vllm_server.log
+
+# Secrets
+.env
+
+# Hugging Face cache
+.cache/
+
+# Misc
+meeting_notes.md
+*.pdf

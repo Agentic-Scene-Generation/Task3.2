@@ -1,0 +1,43 @@
+# SceneExpert MVP configuration
+# Loaded via Hydra defaults as: scene_expert: base_scene_expert
+#
+# Override in ablation experiment YAMLs:
+#   scene_expert.enabled: false   → disable SceneExpert entirely
+#   scene_expert.mode: "harness_only" | "harness_memory" | "full" | "disabled"
+
+# Master switch
+enabled: false   # Default: off. Set true in ablation_3/4/5 experiment configs.
+
+# Ablation mode controls which components are active:
+#   "disabled"       → no-op; hooks are never built
+#   "harness_only"   → TaskCompiler + Harness + GlobalPlanner; no memory
+#   "harness_memory" → TaskCompiler + Harness + GlobalPlanner + FastMemory (MVP)
+#   "full"           → harness_memory + LoRA model (model ID differs, behavior same)
+mode: "disabled"
+
+# Memory system
+memory:
+  # Directory for persistent memory storage (relative to project root)
+  dir: "outputs/scene_expert_memory"
+  retrieval:
+    max_success_cases: 3
+    max_failure_cases: 3
+    max_skills: 2
+
+# Per-stage execution budget
+stage_budget:
+  # Default budget applies to all stages not explicitly listed below
+  default:
+    max_designer_iterations: 2
+    max_repair_steps: 1
+  # Manipuland is the most error-prone stage — allow more repair attempts
+  manipuland:
+    max_designer_iterations: 2
+    max_repair_steps: 2
+
+# Verifier pass thresholds
+verifier:
+  # Minimum average score (0-1) to consider a stage passing
+  stage_pass_threshold: 0.6
+  # Minimum overall score (0-1) to consider the full scene passing
+  full_pass_threshold: 0.7

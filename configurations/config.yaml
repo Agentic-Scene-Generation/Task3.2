@@ -7,7 +7,7 @@ openai:
   #   "default"  - Standard pricing and performance
   #   "flex"     - Lower cost, slower processing (Batch API rates)
   #   "priority" - Lower latency, premium pricing
-  service_tier: "default"
+  service_tier: null
 
 defaults:
   - experiment: indoor_scene_generation # Experiment yaml file name in configurations/experiment folder

@@ -10,7 +10,7 @@ session_memory:
   # Summarize older turns via LLM (if false, just strip images).
   enable_summarization: true
   # Model for summarization ("agent" uses cfg.openai.model).
-  summarization_model: "gpt-5.2"
+  summarization_model: "Qwen/Qwen3.5-35B-A3B"
   # Thinking effort for summarization ("none", "low", "medium", "high").
   summarization_thinking: "low"
   # Intra-turn observation stripping: strip images from older observe_scene outputs
@@ -236,7 +236,7 @@ collision_geometry:
 
 # OpenAI model and reasoning configuration
 openai:
-  model: "gpt-5.2"
+  model: "Qwen/Qwen3.5-35B-A3B"
   service_tier: ${openai.service_tier}
   # Vision detail level for image processing
   vision_detail: "high"

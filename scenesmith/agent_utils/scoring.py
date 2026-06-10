@@ -219,11 +219,13 @@ def compute_score_deltas(
     Returns:
         Dictionary mapping category names to score changes (can be negative).
     """
-    current_scores = {s.name: s.grade for s in current.get_scores()}
-    previous_scores = {s.name: s.grade for s in previous.get_scores()}
+    current_scores = {s.name.lower(): s.grade for s in current.get_scores()}
+    previous_scores = {s.name.lower(): s.grade for s in previous.get_scores()}
 
     return {
-        name: current_scores[name] - previous_scores[name] for name in current_scores
+        name: current_scores[name] - previous_scores[name]
+        for name in current_scores
+        if name in previous_scores
     }
 
 
@@ -304,8 +306,8 @@ def format_score_deltas_for_planner(
     deltas = compute_score_deltas(current_scores, previous_scores)
     sum_delta = sum(deltas.values())
 
-    current_by_name = {s.name: s for s in current_scores.get_scores()}
-    previous_by_name = {s.name: s for s in previous_scores.get_scores()}
+    current_by_name = {s.name.lower(): s for s in current_scores.get_scores()}
+    previous_by_name = {s.name.lower(): s for s in previous_scores.get_scores()}
 
     if format_style == "detailed":
         max_drop = abs(min(min(deltas.values(), default=0), 0))

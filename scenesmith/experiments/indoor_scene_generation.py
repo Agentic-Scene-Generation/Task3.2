@@ -46,6 +46,13 @@ from scenesmith.utils.parallel import run_parallel_isolated
 from scenesmith.utils.print_utils import bold_green, yellow
 from scenesmith.wall_agents.stateful_wall_agent import StatefulWallAgent
 
+# SceneExpert hook runner (imported lazily to avoid circular imports at module level)
+# TYPE_CHECKING block keeps the type hint available without a hard import.
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from scenesmith.scene_expert.hooks import SceneExpertHookRunner
+
 console_logger = logging.getLogger(__name__)
 
 # Pipeline stages in execution order (derived from AgentType enum).
@@ -158,6 +165,8 @@ def _reset_inherited_sdk_state() -> None:
     1. Active trace/span ContextVars - makes workers think they're in parent's trace
     2. BatchTraceProcessor with orphaned threading.Lock and dead background thread
     3. BackendSpanExporter with corrupted httpx.Client connections
+    4. SQLiteSession thread-local connections - file descriptors shared with parent
+       cause SIGABRT when SQLite detects cross-process connection reuse
 
     We clear all of these so workers start fresh. Workers can reinitialize
     tracing if needed.
@@ -183,6 +192,32 @@ def _reset_inherited_sdk_state() -> None:
             provider._multi_processor.set_processors([])
     except Exception:
         pass  # Best effort - don't crash on reset failure.
+
+    # Close any SQLiteSession thread-local connections inherited via fork.
+    # SQLiteSession lazily opens a sqlite3.Connection per thread and stores it in
+    # threading.local(). After fork() the child inherits the parent's main-thread
+    # connection (same file descriptor), so two processes share one SQLite handle.
+    # SQLite's internal mutex state is then inconsistent and triggers SIGABRT.
+    # We close and discard the connection so the child gets a fresh one on first use.
+    try:
+        from agents.memory.sqlite_session import SQLiteSession
+
+        local = SQLiteSession.__init__.__globals__.get("threading")
+        # Walk every live SQLiteSession instance via gc and close its thread-local conn.
+        import gc
+
+        for obj in gc.get_objects():
+            if type(obj) is SQLiteSession and hasattr(obj, "_local"):
+                conn = getattr(obj._local, "connection", None)
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+                    obj._local.connection = None  # type: ignore[attr-defined]
+        del local
+    except Exception:
+        pass  # Best effort.
 
 
 def _load_prompts_from_csv(csv_path: str) -> list[tuple[int, str]]:
@@ -472,6 +507,7 @@ def _generate_room(
     stop_stage: str = "manipuland",
     house_layout: HouseLayout | None = None,
     render_gpu_id: int | None = None,
+    scene_expert_hooks: "SceneExpertHookRunner | None" = None,
 ) -> RoomScene:
     """Generate a single room with furniture, wall/ceiling objects, and manipulands.
 
@@ -541,6 +577,8 @@ def _generate_room(
         with custom_span("furniture_placement"):
             console_logger.info("Adding furniture to scene")
             start_time = time.time()
+            if scene_expert_hooks:
+                scene_expert_hooks.pre_stage("furniture", scene)
             furniture_agent = BaseExperiment.build_furniture_agent(
                 cfg_dict=cfg_dict,
                 compatible_agents=(
@@ -629,6 +667,8 @@ def _generate_room(
             name="scene_after_furniture",
         )
         console_logger.info("Saved furniture checkpoint (scene_after_furniture)")
+        if scene_expert_hooks:
+            scene_expert_hooks.post_stage("furniture", scene, room_dir)
     elif start_idx == 1:
         # Starting from wall_objects - load scene from saved furniture state.
         console_logger.info("Loading scene from saved furniture state for wall_objects")
@@ -672,6 +712,8 @@ def _generate_room(
                 house_layout_dict, house_dir=room_dir.parent
             )
 
+            if scene_expert_hooks:
+                scene_expert_hooks.pre_stage("wall_mounted", scene)
             wall_agent = BaseExperiment.build_wall_agent(
                 cfg_dict=cfg_dict,
                 compatible_agents=IndoorSceneGenerationExperiment.compatible_wall_agents,
@@ -701,6 +743,8 @@ def _generate_room(
             name="scene_after_wall_objects",
         )
         console_logger.info("Saved wall_objects checkpoint (scene_after_wall_objects)")
+        if scene_expert_hooks:
+            scene_expert_hooks.post_stage("wall_mounted", scene, room_dir)
     elif start_idx == 2:
         # Starting from ceiling_mounted - load scene from saved wall_objects state.
         console_logger.info("Loading scene from saved wall_objects state for ceiling")
@@ -731,6 +775,8 @@ def _generate_room(
             console_logger.info("Adding ceiling-mounted objects to scene")
             start_time = time.time()
 
+            if scene_expert_hooks:
+                scene_expert_hooks.pre_stage("ceiling_mounted", scene)
             ceiling_agent = BaseExperiment.build_ceiling_agent(
                 cfg_dict=cfg_dict,
                 compatible_agents=(
@@ -762,6 +808,8 @@ def _generate_room(
         console_logger.info(
             "Saved ceiling_objects checkpoint (scene_after_ceiling_objects)"
         )
+        if scene_expert_hooks:
+            scene_expert_hooks.post_stage("ceiling_mounted", scene, room_dir)
     else:
         # Starting from manipulands - load scene from saved ceiling_objects state.
         console_logger.info("Loading scene from saved ceiling_objects state")
@@ -793,6 +841,8 @@ def _generate_room(
     with custom_span("manipuland_placement"):
         console_logger.info("Adding manipulands to scene")
         start_time = time.time()
+        if scene_expert_hooks:
+            scene_expert_hooks.pre_stage("manipuland", scene)
         manipuland_agent = BaseExperiment.build_manipuland_agent(
             cfg_dict=cfg_dict,
             compatible_agents=(
@@ -880,6 +930,8 @@ def _generate_room(
     _export_scene_blend_file(
         scene=scene, scene_dir=room_dir, cfg_dict=cfg_dict, name="final_scene"
     )
+    if scene_expert_hooks:
+        scene_expert_hooks.post_stage("manipuland", scene, room_dir)
 
     # Export to SceneEval format if enabled.
     sceneeval_cfg = cfg_dict["experiment"]["sceneeval_export"]
@@ -910,6 +962,7 @@ def _run_sequential_room_generation(
     start_stage: str,
     stop_stage: str,
     render_gpu_id: int | None = None,
+    scene_expert_hooks: "SceneExpertHookRunner | None" = None,
 ) -> dict[str, RoomScene]:
     """Generate rooms sequentially (existing behavior).
 
@@ -921,6 +974,8 @@ def _run_sequential_room_generation(
         stop_stage: Stage to stop after.
         render_gpu_id: GPU device ID for Blender rendering. When set, uses
             bubblewrap to isolate the BlenderServer to this GPU.
+        scene_expert_hooks: Optional SceneExpert hook runner for pre/post-stage
+            hooks (memory retrieval, StageBrief injection, verification, tracing).
 
     Returns:
         Dictionary mapping room_id to RoomScene.
@@ -946,6 +1001,7 @@ def _run_sequential_room_generation(
                     stop_stage=stop_stage,
                     house_layout=house_layout,
                     render_gpu_id=render_gpu_id,
+                    scene_expert_hooks=scene_expert_hooks,
                 )
                 rooms[room_id] = room_scene
     return rooms
@@ -1769,6 +1825,15 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                     )
                     room_stop_stage = stop_stage
 
+                    # Build SceneExpert hook runner (None when mode="disabled").
+                    from scenesmith.scene_expert.hooks import build_hook_runner
+                    scene_expert_hooks = build_hook_runner(
+                        prompt=prompt,
+                        scene_id=scene_id,
+                        output_dir=output_dir,
+                        cfg_dict=cfg_dict,
+                    )
+
                     # Generate rooms (parallel or sequential based on config).
                     parallel_rooms = pipeline_cfg["parallel_rooms"]
                     max_parallel_rooms = pipeline_cfg["max_parallel_rooms"]
@@ -1799,10 +1864,17 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                             start_stage=room_start_stage,
                             stop_stage=room_stop_stage,
                             render_gpu_id=render_gpu_id,
+                            scene_expert_hooks=scene_expert_hooks,
                         )
 
                     # Build HouseScene from generated rooms.
                     house_scene = HouseScene(layout=house_layout, rooms=rooms)
+
+                    # SceneExpert: finalize trace + memory update after all rooms done.
+                    if scene_expert_hooks:
+                        scene_expert_hooks.finalize(
+                            final_scene_path=str(scene_dir / "combined_house")
+                        )
 
                     # Assemble house with intermediate snapshots filtered by object type.
                     # Each snapshot includes objects from completed stages only.
@@ -1859,18 +1931,29 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
         # GPU distribution is useful for parallel rooms within each scene.
         gpu_allocator = RenderGPUAllocator()
 
+        failed_scenes: list[tuple[int, str]] = []
         for scene_id, prompt in prompts_with_ids:
             render_gpu_id = gpu_allocator.allocate()
-            self._generate_single_scene(
-                prompt=prompt,
-                scene_id=scene_id,
-                output_dir=self.output_dir,
-                cfg_dict=cfg_dict,
-                capture_logs=False,
-                experiment_run_id=experiment_run_id,
-                render_gpu_id=render_gpu_id,
+            try:
+                self._generate_single_scene(
+                    prompt=prompt,
+                    scene_id=scene_id,
+                    output_dir=self.output_dir,
+                    cfg_dict=cfg_dict,
+                    capture_logs=False,
+                    experiment_run_id=experiment_run_id,
+                    render_gpu_id=render_gpu_id,
+                )
+                console_logger.info(f"Completed scene {scene_id:03d}")
+            except Exception as e:
+                console_logger.error(f"Scene {scene_id:03d} failed, continuing: {e}")
+                failed_scenes.append((scene_id, str(e)))
+
+        if failed_scenes:
+            details = "\n".join(f"  scene_{sid:03d}: {err}" for sid, err in failed_scenes)
+            raise RuntimeError(
+                f"{len(failed_scenes)} scene(s) failed:\n{details}"
             )
-            console_logger.info(f"Completed scene {scene_id:03d}")
 
     def _run_parallel_generation(
         self,

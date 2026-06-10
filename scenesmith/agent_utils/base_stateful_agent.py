@@ -16,6 +16,8 @@ from typing import Any
 
 import yaml
 
+import os
+
 from agents import (
     Agent,
     FunctionTool,
@@ -27,9 +29,9 @@ from agents import (
     function_tool,
 )
 from agents.memory.session import Session
+from agents.models.openai_provider import OpenAIProvider
 from omegaconf import DictConfig
 from openai import Timeout
-from openai.types.shared import Reasoning
 
 from scenesmith.agent_utils.action_logger import log_scene_action
 from scenesmith.agent_utils.checkpoint_state import initialize_checkpoint_attributes
@@ -208,22 +210,8 @@ class BaseStatefulAgent(ABC):
         if extra_args:
             kwargs["extra_args"] = extra_args
 
-        # Add reasoning effort and verbosity if key is provided.
-        if settings_key:
-            reasoning_cfg = self.cfg.openai.reasoning_effort
-            effort = getattr(reasoning_cfg, settings_key)
-            kwargs["reasoning"] = Reasoning(effort=effort)
-
-            verbosity_cfg = self.cfg.openai.verbosity
-            verbosity = getattr(verbosity_cfg, settings_key)
-            kwargs["verbosity"] = verbosity
-
-            # Request encrypted reasoning content so that reasoning items
-            # survive session trimming and can be replayed in later turns.
-            # Without this, trimmed reasoning items leave orphan function_call
-            # items, causing 400 "function_call was provided without its
-            # required reasoning item" on reasoning models (GPT-5, o-series).
-            # kwargs["response_include"] = ["reasoning.encrypted_content"]
+        # Note: reasoning_effort and verbosity are OpenAI Responses API specific
+        # parameters and are not supported by open-source model APIs (e.g., vLLM).
 
         # Add tool_choice to force specific tool call first.
         if tool_choice:
@@ -388,11 +376,24 @@ class BaseStatefulAgent(ABC):
         Returns:
             RunConfig with call_model_input_filter set if enabled, empty otherwise.
         """
+        # Use an OpenAIProvider pointed at the vLLM endpoint so that model names
+        # with arbitrary org prefixes (e.g. "Qwen/...") are passed through as-is
+        # instead of being routed through MultiProvider's prefix registry.
+        # use_responses=False forces /chat/completions instead of /responses,
+        # because vLLM's --tool-call-parser hermes only works on /chat/completions.
+        provider = OpenAIProvider(
+            base_url=os.environ.get("OPENAI_BASE_URL", "http://localhost:8000/v1"),
+            api_key=os.environ.get("OPENAI_API_KEY", "dummy"),
+            use_responses=False,
+        )
         intra_cfg = self.cfg.session_memory.intra_turn_observation_stripping
         if intra_cfg.enabled:
-            return RunConfig(call_model_input_filter=IntraTurnImageFilter(cfg=self.cfg))
+            return RunConfig(
+                model_provider=provider,
+                call_model_input_filter=IntraTurnImageFilter(cfg=self.cfg),
+            )
 
-        return RunConfig()
+        return RunConfig(model_provider=provider)
 
     def _should_reset_to_checkpoint(
         self,
@@ -759,8 +760,15 @@ class BaseStatefulAgent(ABC):
     async def _request_critique_impl(self, update_checkpoint: bool = True) -> str:
         """Implementation for critique request.
 
-        Runs critic agent (which calls observe_scene to render and get images),
-        saves scores, and manages checkpoint state.
+        Runs critic agent in three deterministic steps to guarantee the tool
+        call sequence observe_scene → get_current_scene_state → free evaluation:
+
+          Step 1 (tool_choice=observe_scene):   forces visual render first.
+          Step 2 (tool_choice=get_current_scene_state): forces scene data fetch.
+          Step 3 (tool_choice=none, output_type set): critic scores freely.
+
+        Each step feeds its output into the next via to_input_list(), so the
+        session accumulates the full context before the scoring turn.
 
         Args:
             update_checkpoint: Whether to shift checkpoints. Set to False for
@@ -783,11 +791,7 @@ class BaseStatefulAgent(ABC):
             agent_type=self.agent_type,
         )
 
-        # Critic evaluates with physics context. It will call observe_scene to
-        # render and get visual context (images persist in session via ToolOutputImage).
         prompt_enum = self._get_critique_prompt_enum()
-
-        # Get any agent-specific extra kwargs for the prompt (e.g., reachability).
         extra_kwargs = self._get_extra_critique_kwargs()
 
         critique_instruction = self.prompt_registry.get_prompt(
@@ -796,14 +800,82 @@ class BaseStatefulAgent(ABC):
             placement_style=self.placement_style,
             **extra_kwargs,
         )
-        result = await Runner.run(
-            starting_agent=self.critic,
+        run_config = self._create_run_config()
+
+        # Build three critic variants that differ only in model_settings.
+        # Steps 1 and 2 use tool_use_behavior="stop_on_first_tool" so the runner
+        # exits cleanly after the forced tool call (no extra LLM turn needed),
+        # which avoids MaxTurnsExceeded. parallel_tool_calls=False keeps the
+        # forced step to a single tool invocation. output_type=None on steps 1/2
+        # prevents premature attempts to emit structured JSON before scoring.
+        base_settings = self.critic.model_settings
+
+        critic_observe = self.critic.clone(
+            output_type=None,
+            tool_use_behavior="stop_on_first_tool",
+            model_settings=base_settings.resolve(
+                ModelSettings(
+                    tool_choice="observe_scene", parallel_tool_calls=False
+                )
+            ),
+        )
+        critic_scene_state = self.critic.clone(
+            output_type=None,
+            tool_use_behavior="stop_on_first_tool",
+            model_settings=base_settings.resolve(
+                ModelSettings(
+                    tool_choice="get_current_scene_state",
+                    parallel_tool_calls=False,
+                )
+            ),
+        )
+        # Step 3 uses the original critic (with output_type and no forced tool).
+        critic_score = self.critic.clone(
+            model_settings=base_settings.resolve(ModelSettings(tool_choice=None))
+        )
+
+        # All three steps share self.critic_session so history accumulates
+        # naturally; inputs are strings (lists are illegal when a session is
+        # used without a custom session_input_callback).
+
+        # Step 1: force observe_scene; stop_on_first_tool returns immediately.
+        console_logger.info("[CRITIC harness] Step 1: observe_scene")
+        result_observe = await Runner.run(
+            starting_agent=critic_observe,
             input=critique_instruction,
             session=self.critic_session,
-            max_turns=self.cfg.agents.critic_agent.max_turns,
-            run_config=self._create_run_config(),
+            run_config=run_config,
         )
-        log_agent_usage(result=result, agent_name="CRITIC")
+        log_agent_usage(result=result_observe, agent_name="CRITIC (observe)")
+
+        # Step 2: force get_current_scene_state; session carries Step 1 history.
+        console_logger.info("[CRITIC harness] Step 2: get_current_scene_state")
+        result_scene = await Runner.run(
+            starting_agent=critic_scene_state,
+            input="Now retrieve exact object data with get_current_scene_state.",
+            session=self.critic_session,
+            run_config=run_config,
+        )
+        log_agent_usage(result=result_scene, agent_name="CRITIC (scene_state)")
+
+        # Step 3: free evaluation with structured output. The critic now has
+        # the observation images and the scene-state JSON in its session
+        # history and can run STEPS 3-6 of the YAML workflow.
+        console_logger.info("[CRITIC harness] Step 3: evaluate and score")
+        result = await Runner.run(
+            starting_agent=critic_score,
+            input=(
+                "Steps 1 and 2 of the MANDATORY EVALUATION WORKFLOW are "
+                "complete (scene observed, object data retrieved). Now perform "
+                "STEPS 3-6 (physics review, placement evaluation, "
+                "lighting/coverage analysis, synthesis) and return your final "
+                "critique with scores."
+            ),
+            session=self.critic_session,
+            max_turns=self.cfg.agents.critic_agent.max_turns,
+            run_config=run_config,
+        )
+        log_agent_usage(result=result, agent_name="CRITIC (score)")
 
         # Parse structured output.
         response = result.final_output_as(CritiqueWithScores)

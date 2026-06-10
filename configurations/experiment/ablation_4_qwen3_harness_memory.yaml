@@ -1,0 +1,38 @@
+# Ablation 4: Qwen3 + Expert Harness + Fast Memory  (MVP default)
+# Full online closed-loop: Harness + GlobalPlanner + FastMemory retrieval + MemoryWriter.
+# This is the primary SceneExpert MVP configuration.
+#
+# Component status:
+#   TaskCompiler:    ON  (prompt → SceneTaskSpec)
+#   Harness FSM:     ON  (budget control, stage order enforcement)
+#   Global Planner:  ON  (StageBrief with memory hints injected)
+#   Fast Memory:     ON  (BM25 retrieval + JSON Lines store + MemoryWriter update)
+#   Repair loop:     ON  (repair decisions logged; local_repair/stage_regen decisions)
+#   Trace logger:    ON
+#   Memory writer:   ON  (Qwen3 memory_writer role updates memory after each scene)
+#
+# Usage:
+#   python main.py experiment=ablation_4_qwen3_harness_memory
+
+defaults:
+  - base_experiment
+
+scene_expert:
+  enabled: true
+  mode: "harness_memory"   # harness + global planner + fast memory
+  memory:
+    dir: "outputs/scene_expert_memory/ablation_4"
+    retrieval:
+      max_success_cases: 3
+      max_failure_cases: 3
+      max_skills: 2
+  stage_budget:
+    default:
+      max_designer_iterations: 2
+      max_repair_steps: 1
+    manipuland:
+      max_designer_iterations: 2
+      max_repair_steps: 2
+  verifier:
+    stage_pass_threshold: 0.6
+    full_pass_threshold: 0.7

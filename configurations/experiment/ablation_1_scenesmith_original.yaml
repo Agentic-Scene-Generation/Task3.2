@@ -1,0 +1,28 @@
+# Ablation 1: SceneSmith Original
+# Uses the original SceneSmith pipeline with GPT-4o (no Qwen3, no SceneExpert).
+# Baseline for all comparisons.
+#
+# Usage:
+#   python main.py experiment=ablation_1_scenesmith_original \
+#                  furniture_agent=stateful_furniture_agent \
+#                  [other agent overrides if model differs]
+#
+# Note: To use GPT-4o, set openai.model in each agent config,
+#       or override via CLI: furniture_agent.openai.model="gpt-4o"
+
+defaults:
+  - base_experiment
+
+# SceneExpert disabled — pure SceneSmith behavior.
+scene_expert:
+  enabled: false
+  mode: "disabled"
+  memory:
+    dir: "outputs/scene_expert_memory/ablation_1"
+  stage_budget:
+    default:
+      max_designer_iterations: 2
+      max_repair_steps: 1
+  verifier:
+    stage_pass_threshold: 0.6
+    full_pass_threshold: 0.7

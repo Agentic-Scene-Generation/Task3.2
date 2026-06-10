@@ -1,0 +1,23 @@
+# Ablation 2: Qwen3 Naive Orchestrator
+# Qwen3 backbone, SceneSmith pipeline run as-is — no harness, no memory.
+# Tests baseline Qwen3 performance without any SceneExpert intervention.
+#
+# Usage:
+#   python main.py experiment=ablation_2_qwen3_naive
+
+defaults:
+  - base_experiment
+
+# SceneExpert disabled — run Qwen3 through SceneSmith without any expert guidance.
+scene_expert:
+  enabled: false
+  mode: "disabled"
+  memory:
+    dir: "outputs/scene_expert_memory/ablation_2"
+  stage_budget:
+    default:
+      max_designer_iterations: 2
+      max_repair_steps: 1
+  verifier:
+    stage_pass_threshold: 0.6
+    full_pass_threshold: 0.7

@@ -1,0 +1,47 @@
+# Ablation 5: Qwen3 + Expert Harness + Fast Memory + Slow LoRA  (Full SceneExpert)
+# Complete system: online closed-loop + Qwen3 LoRA specialization (offline pre-trained).
+# LoRA checkpoint must be available at the path specified in agent configs.
+#
+# Component status:
+#   TaskCompiler:    ON
+#   Harness FSM:     ON
+#   Global Planner:  ON  (using LoRA-specialized Qwen3)
+#   Fast Memory:     ON
+#   Repair loop:     ON
+#   Trace logger:    ON
+#   Memory writer:   ON
+#   Slow LoRA:       ON  (set openai.model to the LoRA-merged/served model ID)
+#
+# Prerequisites:
+#   1. Run offline SFT/DPO training on traces from ablation_4.
+#   2. Start a vLLM server with the LoRA-merged model.
+#   3. Set OPENAI_BASE_URL to the LoRA model endpoint.
+#   4. Override model ID: furniture_agent.openai.model="Qwen/Qwen3-SceneExpert-LoRA"
+#
+# Usage:
+#   python main.py experiment=ablation_5_qwen3_full \
+#                  furniture_agent.openai.model="Qwen/Qwen3-SceneExpert-LoRA" \
+#                  [other agent model overrides]
+
+defaults:
+  - base_experiment
+
+scene_expert:
+  enabled: true
+  mode: "full"   # harness + memory + LoRA (same as harness_memory at runtime; model is the difference)
+  memory:
+    dir: "outputs/scene_expert_memory/ablation_5"
+    retrieval:
+      max_success_cases: 3
+      max_failure_cases: 3
+      max_skills: 2
+  stage_budget:
+    default:
+      max_designer_iterations: 2
+      max_repair_steps: 1
+    manipuland:
+      max_designer_iterations: 2
+      max_repair_steps: 2
+  verifier:
+    stage_pass_threshold: 0.6
+    full_pass_threshold: 0.7

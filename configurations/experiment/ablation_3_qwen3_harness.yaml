@@ -1,0 +1,38 @@
+# Ablation 3: Qwen3 + Expert Harness
+# Qwen3 backbone + SceneExpert Harness FSM + Global Planner (StageBrief injection).
+# Memory retrieval is DISABLED — tests the harness and structured prompting alone.
+#
+# Component status:
+#   TaskCompiler:    ON  (prompt → SceneTaskSpec)
+#   Harness FSM:     ON  (budget control, stage order enforcement)
+#   Global Planner:  ON  (StageBrief injected into stage prompts)
+#   Fast Memory:     OFF (no retrieval, no memory write)
+#   Repair loop:     OFF (repair decisions logged but not executed)
+#   Trace logger:    ON
+#   Memory writer:   OFF
+#
+# Usage:
+#   python main.py experiment=ablation_3_qwen3_harness
+
+defaults:
+  - base_experiment
+
+scene_expert:
+  enabled: true
+  mode: "harness_only"   # harness + global planner, NO memory
+  memory:
+    dir: "outputs/scene_expert_memory/ablation_3"
+    retrieval:
+      max_success_cases: 3
+      max_failure_cases: 3
+      max_skills: 2
+  stage_budget:
+    default:
+      max_designer_iterations: 2
+      max_repair_steps: 1
+    manipuland:
+      max_designer_iterations: 2
+      max_repair_steps: 2
+  verifier:
+    stage_pass_threshold: 0.6
+    full_pass_threshold: 0.7
