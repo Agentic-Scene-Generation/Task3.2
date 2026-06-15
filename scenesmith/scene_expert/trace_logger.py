@@ -163,6 +163,7 @@ class TraceLogger:
         if self._full_report:
             lines.append(
                 f"Final: overall={self._full_report.overall_score:.2f} "
+                f"plausibility={self._full_report.plausibility_score:.2f} "
                 f"pass={'YES' if self._full_report.pass_scene else 'NO'}"
             )
         return "\n".join(lines)

@@ -457,6 +457,10 @@ class FullVerifier:
         )
 
         console_logger.info(
-            f"FullVerifier: overall={overall:.2f} pass={'YES' if report.pass_scene else 'NO'}"
+            "FullVerifier: "
+            f"semantic={semantic:.2f} aesthetic={aesthetic:.2f} "
+            f"plausibility_score={plausibility:.2f} physics={physics:.2f} "
+            f"interaction={interaction:.2f} walkability={walkability:.2f} "
+            f"overall={overall:.2f} pass={'YES' if report.pass_scene else 'NO'}"
         )
         return report

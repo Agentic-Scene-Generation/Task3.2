@@ -94,8 +94,11 @@ def _trace_to_summary(trace: dict) -> str:
 
     final = trace.get("final_report", {})
     overall = final.get("overall_score", 0.0)
+    plausibility = final.get("plausibility_score", 0.0)
     passed = "YES" if final.get("pass_scene") else "NO"
-    lines.append(f"Final: overall={overall:.2f} pass={passed}")
+    lines.append(
+        f"Final: overall={overall:.2f} plausibility={plausibility:.2f} pass={passed}"
+    )
     return "\n".join(lines)
 
 
