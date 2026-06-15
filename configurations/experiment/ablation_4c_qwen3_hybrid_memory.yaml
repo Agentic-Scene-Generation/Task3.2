@@ -1,0 +1,47 @@
+# Ablation 4c: Qwen3 + Expert Harness + Hybrid Memory
+# Uses BGE-M3 numpy recall plus structured filter and hybrid score.
+#
+# Prerequisite:
+#   python scripts/build_memory_index.py \
+#     --memory-dir "$SCENEEXPERT_MEMORY_DIR/ablation_4c" \
+#     --embedding-model-dir "$SCENEEXPERT_MEMORY_EMBEDDING_MODEL_DIR"
+#
+# Usage:
+#   python main.py experiment=ablation_4c_qwen3_hybrid_memory
+
+defaults:
+  - base_experiment
+
+scene_expert:
+  enabled: true
+  mode: "harness_memory"
+  memory:
+    dir: "${paths.memory_dir}/ablation_4c"
+    retriever_type: "hybrid"
+    retrieval:
+      max_success_cases: 3
+      max_failure_cases: 3
+      max_skills: 2
+      recall_top_k: 30
+      sim_threshold: 0.0
+      object_overlap_threshold: 0.15
+    index:
+      backend: "numpy"
+      dir: ""
+      require_ready: true
+    hybrid_weights:
+      embedding_similarity: 0.45
+      object_overlap: 0.20
+      room_stage_match: 0.15
+      memory_quality_score: 0.10
+      recency_or_verified: 0.10
+  stage_budget:
+    default:
+      max_designer_iterations: 2
+      max_repair_steps: 1
+    manipuland:
+      max_designer_iterations: 2
+      max_repair_steps: 2
+  verifier:
+    stage_pass_threshold: 0.6
+    full_pass_threshold: 0.7

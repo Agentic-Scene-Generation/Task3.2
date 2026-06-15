@@ -1,0 +1,29 @@
+# Ablation 4a: Qwen3 + Expert Harness + Lexical Fast Memory
+# Uses the original keyword/alias memory retriever.
+#
+# Usage:
+#   python main.py experiment=ablation_4a_qwen3_lexical_memory
+
+defaults:
+  - base_experiment
+
+scene_expert:
+  enabled: true
+  mode: "harness_memory"
+  memory:
+    dir: "${paths.memory_dir}/ablation_4a"
+    retriever_type: "lexical"
+    retrieval:
+      max_success_cases: 3
+      max_failure_cases: 3
+      max_skills: 2
+  stage_budget:
+    default:
+      max_designer_iterations: 2
+      max_repair_steps: 1
+    manipuland:
+      max_designer_iterations: 2
+      max_repair_steps: 2
+  verifier:
+    stage_pass_threshold: 0.6
+    full_pass_threshold: 0.7

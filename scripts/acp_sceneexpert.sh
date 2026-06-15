@@ -49,7 +49,10 @@ fi
 # TODO: Choose experiment. Recommended values:
 #   ablation_2_qwen3_naive            baseline Qwen3 without SceneExpert
 #   ablation_3_qwen3_harness          SceneExpert harness without memory
-#   ablation_4_qwen3_harness_memory   primary SceneExpert MVP
+#   ablation_4_qwen3_harness_memory   legacy SceneExpert memory MVP
+#   ablation_4a_qwen3_lexical_memory  lexical memory ablation, no vector index
+#   ablation_4b_qwen3_vector_memory   BGE-M3 vector memory, requires index
+#   ablation_4c_qwen3_hybrid_memory   recommended hybrid memory, requires index
 #   ablation_5_qwen3_full             full/LoRA model, only after LoRA merge exists
 ACP_EXPERIMENT="ablation_2_qwen3_naive"
 

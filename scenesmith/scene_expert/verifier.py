@@ -33,6 +33,12 @@ _SCENESMITH_SCORE_MAPPING = {
     # Actual keys written by SceneSmith critics (Title Case, lowercased for matching)
     "realism": "aesthetic",
     "functionality": "semantic",
+    # Keep specific keys before generic "layout" because matching is substring-based.
+    "layout plausibility": "plausibility",
+    "layout_plausibility": "plausibility",
+    "human likeness": "plausibility",
+    "human-likeness": "plausibility",
+    "professional arrangement": "plausibility",
     "layout": "aesthetic",
     "holistic completeness": "semantic",
     "prompt following": "semantic",
@@ -307,7 +313,13 @@ class StageVerifier:
         # If no scores available, use conservative defaults
         if not mapped_scores:
             console_logger.warning(f"No scores.yaml found for stage {stage}, using defaults")
-            mapped_scores = {"semantic": 0.5, "aesthetic": 0.5, "physics": 0.5, "interaction": 0.5}
+            mapped_scores = {
+                "semantic": 0.5,
+                "aesthetic": 0.5,
+                "plausibility": 0.5,
+                "physics": 0.5,
+                "interaction": 0.5,
+            }
 
         # --- 2. Rule-based checks ---
         if scene_state_info:
@@ -334,11 +346,26 @@ class StageVerifier:
 
         # --- 4. Compute pass/fail ---
         avg_score = sum(mapped_scores.values()) / max(len(mapped_scores), 1)
-        pass_stage = avg_score >= self._pass_threshold and len(issues) == 0
+        plausibility_score = mapped_scores.get("plausibility")
+        pass_plausibility = (
+            plausibility_score is None or plausibility_score >= self._pass_threshold
+        )
+        pass_stage = (
+            avg_score >= self._pass_threshold
+            and pass_plausibility
+            and len(issues) == 0
+        )
+        if not pass_plausibility:
+            repair_suggestions.append(
+                "Improve layout plausibility: revise major furniture anchors and "
+                "door/window/opening relationships so the room follows human-use "
+                "and professional arrangement conventions"
+            )
 
         console_logger.info(
             f"StageVerifier stage={stage}: avg_score={avg_score:.2f} "
-            f"pass={pass_stage} issues={len(issues)}"
+            f"pass={pass_stage} issues={len(issues)} "
+            f"plausibility={plausibility_score if plausibility_score is not None else 'n/a'}"
         )
 
         return StageVerifyReport(
@@ -386,19 +413,39 @@ class FullVerifier:
 
         semantic = avg("semantic")
         aesthetic = avg("aesthetic")
+        plausibility = avg("plausibility")
         physics = avg("physics")
         interaction = avg("interaction")
         walkability = avg("walkability")
 
         # Derived overall score
-        overall = (semantic + aesthetic + physics + interaction + walkability) / max(
-            sum(1 for k in ["semantic", "aesthetic", "physics", "interaction", "walkability"] if k in all_scores),
+        overall = (
+            semantic + aesthetic + plausibility + physics + interaction + walkability
+        ) / max(
+            sum(
+                1
+                for k in [
+                    "semantic",
+                    "aesthetic",
+                    "plausibility",
+                    "physics",
+                    "interaction",
+                    "walkability",
+                ]
+                if k in all_scores
+            ),
             1,
+        )
+
+        has_plausibility = "plausibility" in all_scores
+        pass_plausibility = (
+            not has_plausibility or plausibility >= self._pass_threshold
         )
 
         report = FullVerifyReport(
             semantic_score=semantic,
             aesthetic_score=aesthetic,
+            plausibility_score=plausibility,
             style_consistency=aesthetic,  # proxy
             collision_free_rate=physics,
             stability_score=physics,      # proxy
@@ -406,7 +453,7 @@ class FullVerifier:
             reachability_score=interaction,
             support_relation_accuracy=interaction,  # proxy
             overall_score=overall,
-            pass_scene=overall >= self._pass_threshold,
+            pass_scene=overall >= self._pass_threshold and pass_plausibility,
         )
 
         console_logger.info(

@@ -22,10 +22,48 @@ from scenesmith.scene_expert.memory.schemas import (
 from scenesmith.scene_expert.memory.store import FastMemoryStore
 from scenesmith.scene_expert.memory.text_builder import build_embedding_text
 from scenesmith.scene_expert.memory.writer import MemoryWriter
-from scenesmith.scene_expert.schemas import FullVerifyReport, SceneTaskSpec
+from scenesmith.scene_expert.schemas import (
+    FullVerifyReport,
+    SceneTaskSpec,
+    StageVerifyReport,
+)
+from scenesmith.scene_expert.verifier import FullVerifier, _map_scenesmith_scores
 
 
 class SceneExpertMemoryTest(unittest.TestCase):
+    def test_layout_plausibility_maps_to_scene_expert_category(self) -> None:
+        mapped = _map_scenesmith_scores(
+            {
+                "Layout Plausibility": 4,
+                "Layout": 9,
+                "Realism": 8,
+            }
+        )
+
+        self.assertAlmostEqual(0.4, mapped["plausibility"])
+        self.assertAlmostEqual(0.85, mapped["aesthetic"])
+
+    def test_full_verifier_gates_low_plausibility_even_with_high_average(
+        self,
+    ) -> None:
+        report = StageVerifyReport(
+            stage="furniture",
+            pass_stage=True,
+            scores={
+                "semantic": 1.0,
+                "aesthetic": 1.0,
+                "plausibility": 0.4,
+                "physics": 1.0,
+                "interaction": 1.0,
+            },
+        )
+
+        full_report = FullVerifier(pass_threshold=0.7).verify([report])
+
+        self.assertAlmostEqual(0.4, full_report.plausibility_score)
+        self.assertAlmostEqual(0.88, full_report.overall_score)
+        self.assertFalse(full_report.pass_scene)
+
     def test_chinese_aliases_expand_to_english_tokens(self) -> None:
         tokens = set(_tokenize("卧室里需要一张床、两个床头柜和一个衣柜"))
 

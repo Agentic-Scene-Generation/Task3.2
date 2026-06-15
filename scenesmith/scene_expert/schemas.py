@@ -187,6 +187,7 @@ class FullVerifyReport(BaseModel):
 
     semantic_score: float = 0.0
     aesthetic_score: float = 0.0
+    plausibility_score: float = 0.0
     style_consistency: float = 0.0
     collision_free_rate: float = 0.0
     stability_score: float = 0.0

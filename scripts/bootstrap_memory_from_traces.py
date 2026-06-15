@@ -54,6 +54,7 @@ def _trace_to_full_report(trace: dict) -> FullVerifyReport:
     return FullVerifyReport(
         semantic_score=final.get("semantic_score", 0.5),
         aesthetic_score=final.get("aesthetic_score", 0.5),
+        plausibility_score=final.get("plausibility_score", 0.5),
         style_consistency=final.get("style_consistency", 0.5),
         collision_free_rate=final.get("collision_free_rate", 0.5),
         stability_score=final.get("stability_score", 0.5),

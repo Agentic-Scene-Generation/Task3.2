@@ -163,6 +163,7 @@ class MemoryWriter:
             f"overall={full_report.overall_score:.2f}, "
             f"semantic={full_report.semantic_score:.2f}, "
             f"aesthetic={full_report.aesthetic_score:.2f}, "
+            f"plausibility={full_report.plausibility_score:.2f}, "
             f"reachability={full_report.reachability_score:.2f}, "
             f"physics={full_report.collision_free_rate:.2f}"
         )

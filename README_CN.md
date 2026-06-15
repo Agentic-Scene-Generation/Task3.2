@@ -16,11 +16,14 @@ SceneExpert 基于 SceneSmith 的室内场景生成管线开发。主入口是 `
 4. `ceiling_mounted`：放置天花板物体。
 5. `manipuland`：放置桌面、柜面等小物体。
 
-SceneExpert 增加在 `ablation_3/4/5` 中：
+SceneExpert 增加在 `ablation_3/4/4a/4b/4c/5` 中：
 
 - `ablation_2_qwen3_naive`：只用 Qwen + 原 SceneSmith。
 - `ablation_3_qwen3_harness`：启用 SceneExpert harness 和 stage brief。
-- `ablation_4_qwen3_harness_memory`：再启用快速记忆。
+- `ablation_4_qwen3_harness_memory`：旧版快速记忆 MVP 配置。
+- `ablation_4a_qwen3_lexical_memory`：lexical 快速记忆消融。
+- `ablation_4b_qwen3_vector_memory`：BGE-M3 + numpy 向量记忆消融。
+- `ablation_4c_qwen3_hybrid_memory`：structured filter + vector recall + hybrid score 的推荐记忆配置。
 - `ablation_5_qwen3_full`：用于 LoRA/合并模型版本，运行时核心机制同 memory 版本，区别是 served model。
 
 `scripts/run_experiment.sh` 会在同一个 job 里启动 vLLM，然后运行：
@@ -33,9 +36,9 @@ python main.py experiment="$EXPERIMENT" +name="$RUN_NAME"
 
 当前主运行路径采用 `scenesmith/scene_expert/hooks.py` 的 hook runner，而不是单独调用 `SceneExpertPipeline`：
 
-- SceneExpert 配置优先读 `experiment.scene_expert`，也就是 `ablation_3/4/5` 中的配置；根级 `scene_expert` 是默认禁用的 fallback。
-- `floor_plan` 阶段仍按原 SceneSmith 执行；SceneExpert 的 StageBrief 注入主要作用于 `furniture`、`wall_mounted`、`ceiling_mounted`、`manipuland` 四个房间级阶段。
-- StageBrief 会追加到 `scene.text_description`，再进入各 stage agent 的初始设计 prompt；核心 SceneSmith agent 循环没有被改写。
+- SceneExpert 配置优先读 `experiment.scene_expert`，也就是 `ablation_3/4/4a/4b/4c/5` 中的配置；根级 `scene_expert` 是默认禁用的 fallback。
+- `floor_plan` 阶段通过 `pre_floor_plan` 把 StageBrief 和 memory directives 注入原始 prompt；`furniture`、`wall_mounted`、`ceiling_mounted`、`manipuland` 四个房间级阶段则把 StageBrief 和 memory directives 追加到 `scene.text_description`。
+- 核心 SceneSmith agent 循环没有被改写；PR-4 只增强 hook 层注入，确保检索到的成功经验、失败约束和技能文本能显式进入后续 stage prompt。
 - 当前 hook 路径中的 RepairController 会记录修复建议、写入 trace/memory，但不会在同一次 hook 中真正重跑失败阶段。
 - SceneExpert hook 是 per-scene、非线程安全对象。启用 SceneExpert 时，即使设置了 `experiment.pipeline.parallel_rooms=true`，代码也会自动退回顺序房间生成；跨 scene 的 `experiment.num_workers` 仍可用，但 memory 模式建议先用 `num_workers=1`，避免多个进程同时写同一个 JSONL memory。
 
@@ -238,6 +241,14 @@ python -m pip install "numpy>=1.26,<2.0" -i https://pypi.tuna.tsinghua.edu.cn/si
 
 注意：`vllm` 和 `modelscope` 是运行脚本需要的依赖，不在 `pyproject.toml` 主依赖里，需要单独装。`vllm` 安装过程可能把 NumPy 升级到 2.x，但 `bpy==4.5.4` / Blender 扩展通常按 NumPy 1.x ABI 编译；如果日志出现 `A module that was compiled using NumPy 1.x cannot be run in NumPy 2.x`，必须重新执行上面的 NumPy pin 命令。`scripts/run_experiment.sh` 已加入预检查，发现 NumPy 2.x 会在启动 vLLM 前直接停止，避免浪费 30 分钟模型启动时间。
 
+如果要运行向量 / hybrid memory 版本，还需要安装可选 memory 依赖。`requirements-memory.txt` 不是可执行脚本，而是 pip 的依赖清单；在项目根目录执行：
+
+```bash
+python -m pip install -r requirements-memory.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+```
+
+其中 `-r requirements-memory.txt` 的意思是让 pip 按文件内容安装依赖。当前第一版只包含 `FlagEmbedding` 和 `numpy`，不包含 FAISS、reranker 或 ModelScope。只跑 `ablation_4a_qwen3_lexical_memory` 时不需要这一步；跑 `ablation_4b_qwen3_vector_memory` / `ablation_4c_qwen3_hybrid_memory`，或执行 `scripts/build_memory_index.py` 时需要。
+
 完全无外网时，建议在同系统、同 Python 版本的联网机器或内网构建节点准备 wheel/cache：
 
 ```bash
@@ -245,6 +256,7 @@ python -m pip install "numpy>=1.26,<2.0" -i https://pypi.tuna.tsinghua.edu.cn/si
 python -m pip install uv
 uv sync --frozen --no-dev
 python -m pip download modelscope vllm -d wheelhouse -i https://pypi.tuna.tsinghua.edu.cn/simple
+python -m pip download -r requirements-memory.txt -d wheelhouse_memory -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 # 打包 uv cache、wheelhouse、代码仓库后传到集群共享盘
 ```
@@ -257,6 +269,7 @@ export UV_CACHE_DIR=/share/cache/uv_sceneexpert
 uv sync --frozen --no-dev --offline
 python -m pip install --no-index --find-links /share/wheelhouse modelscope vllm
 python -m pip install --no-index --find-links /share/wheelhouse "numpy>=1.26,<2.0"
+python -m pip install --no-index --find-links /share/wheelhouse_memory -r requirements-memory.txt
 ```
 
 如果 `bpy==4.5.4` 无法离线解析，需要把 Blender PyPI 的对应 wheel 也预先放进 cache 或 wheelhouse。
@@ -757,15 +770,20 @@ export SCENEEXPERT_MAX_MODEL_LEN=65536
 | `ablation_1_scenesmith_original` | 原 SceneSmith + GPT-4o 风格 baseline，不启用 Qwen/SceneExpert。 | 不建议用于当前本地 Qwen 复现，除非要对齐原论文 baseline。 |
 | `ablation_2_qwen3_naive` | Qwen3.5 + 原 SceneSmith 流程，不启用 SceneExpert harness/memory。 | 建议先跑，作为最小 baseline 和环境冒烟测试。 |
 | `ablation_3_qwen3_harness` | Qwen3.5 + SceneExpert harness + StageBrief，不启用 memory。 | 建议第二个跑，用来验证 SceneExpert hook 和 trace。 |
-| `ablation_4_qwen3_harness_memory` | Qwen3.5 + harness + StageBrief + fast memory。 | 当前主实验，建议 ACP 多卡正式跑这个。 |
+| `ablation_4_qwen3_harness_memory` | Qwen3.5 + harness + StageBrief + 旧版 fast memory。 | 保留作兼容配置；正式 memory 对比优先使用 4a/4b/4c。 |
+| `ablation_4a_qwen3_lexical_memory` | Qwen3.5 + harness + lexical fast memory。 | memory 消融实验；不需要 BGE-M3 或 numpy index。 |
+| `ablation_4b_qwen3_vector_memory` | Qwen3.5 + harness + BGE-M3 numpy vector memory。 | memory 消融实验；需要先构建 memory index。 |
+| `ablation_4c_qwen3_hybrid_memory` | Qwen3.5 + harness + structured filter + vector recall + hybrid score。 | 推荐的增强 memory 实验；需要先构建 memory index。 |
 | `ablation_5_qwen3_full` | harness + memory + LoRA/合并后的专用模型。 | 只有 LoRA/合并模型已经准备好并由 vLLM served 时再跑。 |
 
 推荐顺序：
 
 1. `ablation_2_qwen3_naive`：确认 vLLM、HSSD、基础 pipeline 能跑通。
 2. `ablation_3_qwen3_harness`：确认 SceneExpert trace/harness 生效。
-3. `ablation_4_qwen3_harness_memory`：正式主实验。
-4. `ablation_5_qwen3_full`：仅在 LoRA/合并模型完成后运行。
+3. `ablation_4a_qwen3_lexical_memory`：确认 memory JSONL 读写和 lexical 检索可用。
+4. `ablation_4b_qwen3_vector_memory`：验证 BGE-M3 embedding + numpy index。
+5. `ablation_4c_qwen3_hybrid_memory`：正式 memory 增强实验。
+6. `ablation_5_qwen3_full`：仅在 LoRA/合并模型完成后运行。
 
 默认运行 Qwen naive baseline：
 
@@ -778,6 +796,17 @@ bash scripts/run_experiment.sh ablation_2_qwen3_naive
 
 ```bash
 bash scripts/run_experiment.sh ablation_4_qwen3_harness_memory
+```
+
+运行 PR-4 拆分后的 memory 消融版本：
+
+```bash
+# lexical memory，不需要向量索引
+bash scripts/run_experiment.sh ablation_4a_qwen3_lexical_memory
+
+# vector / hybrid memory，运行前先按第 9 节构建 numpy index
+bash scripts/run_experiment.sh ablation_4b_qwen3_vector_memory
+bash scripts/run_experiment.sh ablation_4c_qwen3_hybrid_memory
 ```
 
 运行 full/LoRA 合并模型版本：
@@ -799,7 +828,7 @@ bash scripts/acp_sceneexpert.sh
 ACP 相关参数不要写在终端前缀里，也不建议再写进 `.env`。推荐直接改 `scripts/acp_sceneexpert.sh` 顶部 `# TODO` 配置区，让 ACP 脚本成为多卡作业参数的唯一入口。2 张 H100 80GB 推荐：
 
 ```bash
-ACP_EXPERIMENT="ablation_4_qwen3_harness_memory"
+ACP_EXPERIMENT="ablation_4c_qwen3_hybrid_memory"  # 未构建 index 时先用 ablation_4a_qwen3_lexical_memory
 ACP_GPUS=2
 ACP_CUDA_VISIBLE_DEVICES=""
 ACP_MAX_MODEL_LEN=65536
@@ -956,7 +985,20 @@ export SCENEEXPERT_MEMORY_EMBEDDING_MODEL_DIR="${SCENEEXPERT_MODELS_DIR}/bge-m3"
 安装可选 memory embedding 依赖：
 
 ```bash
+# requirements-memory.txt 是 pip 依赖清单，不是 shell 脚本
 python -m pip install -r requirements-memory.txt
+```
+
+如果集群只能访问内网镜像，使用：
+
+```bash
+python -m pip install -r requirements-memory.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+```
+
+完全离线时，按第 4 节提前准备 `wheelhouse_memory/`，然后执行：
+
+```bash
+python -m pip install --no-index --find-links /share/wheelhouse_memory -r requirements-memory.txt
 ```
 
 确认本地模型目录存在：
@@ -1007,6 +1049,46 @@ export SCENEEXPERT_MEMORY_INDEX_REQUIRE_READY=true
 3. 用 embedding similarity、object overlap、stage/room match、memory quality、verified/deterministic signal 做 hybrid score 排序。
 
 如果某个非空 memory bank 没有对应 index，默认会在启动时 fail fast，并提示先运行 `scripts/build_memory_index.py`。这是为了避免用户以为已经启用向量 memory，实际却静默退回空检索。
+
+### PR-4 memory 消融配置
+
+PR-4 后推荐用三组独立实验对比 memory 检索方式：
+
+| 实验名 | 检索方式 | 运行前准备 |
+| --- | --- | --- |
+| `ablation_4a_qwen3_lexical_memory` | lexical token/alias overlap | 不需要 BGE-M3，不需要 index。 |
+| `ablation_4b_qwen3_vector_memory` | BGE-M3 embedding + numpy 向量召回 | 需要安装 `requirements-memory.txt` 并构建 index。 |
+| `ablation_4c_qwen3_hybrid_memory` | structured filter + vector recall + hybrid score | 需要安装 `requirements-memory.txt` 并构建 index；推荐正式 memory 实验使用。 |
+
+`ablation_4a/4b/4c` 会在各自的 experiment YAML 中显式设置 `retriever_type`。因此运行这些实验时，通常不需要在 `.env` 里手动改 `SCENEEXPERT_MEMORY_RETRIEVER_TYPE`。
+
+如果已经有对应 memory JSONL，分别构建 4b/4c 的 numpy index：
+
+```bash
+# 4b: vector memory
+python scripts/build_memory_index.py \
+  --memory-dir "$SCENEEXPERT_MEMORY_DIR/ablation_4b" \
+  --embedding-model-dir "$SCENEEXPERT_MEMORY_EMBEDDING_MODEL_DIR" \
+  --index-backend numpy \
+  --device cpu
+
+# 4c: hybrid memory
+python scripts/build_memory_index.py \
+  --memory-dir "$SCENEEXPERT_MEMORY_DIR/ablation_4c" \
+  --embedding-model-dir "$SCENEEXPERT_MEMORY_EMBEDDING_MODEL_DIR" \
+  --index-backend numpy \
+  --device cpu
+```
+
+运行：
+
+```bash
+bash scripts/run_experiment.sh ablation_4a_qwen3_lexical_memory
+bash scripts/run_experiment.sh ablation_4b_qwen3_vector_memory
+bash scripts/run_experiment.sh ablation_4c_qwen3_hybrid_memory
+```
+
+注意：4b/4c 默认 `index.require_ready=true`。如果 memory bank 里已有 JSONL 但没有 index，会在启动时直接停止；这是预期行为，用来避免“以为启用了向量检索，实际没有检索到任何东西”的隐性错误。
 
 ## 10. 配置文件使用建议
 

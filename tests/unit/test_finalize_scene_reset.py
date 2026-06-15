@@ -19,6 +19,7 @@ def _make_scores(
     realism: int = 7,
     functionality: int = 7,
     layout: int = 7,
+    layout_plausibility: int = 7,
     holistic: int = 7,
     prompt: int = 7,
     reachability: int = 7,
@@ -31,6 +32,9 @@ def _make_scores(
             name="Functionality", grade=functionality, comment="test"
         ),
         layout=CategoryScore(name="Layout", grade=layout, comment="test"),
+        layout_plausibility=CategoryScore(
+            name="Layout Plausibility", grade=layout_plausibility, comment="test"
+        ),
         holistic_completeness=CategoryScore(
             name="Holistic Completeness", grade=holistic, comment="test"
         ),
@@ -221,7 +225,7 @@ class TestFinalizeSceneReset(unittest.TestCase):
         agent.previous_checkpoint_scores = _make_scores()
         agent.previous_checkpoint_render_dir = self.n2_render_dir
 
-        # N-1 state with good scores (all 7s = 42 total for 6 categories).
+        # N-1 state with good scores (all 7s = 49 total for 7 categories).
         agent.scene_checkpoint = {"state": "N-1"}
         agent.checkpoint_scores = _make_scores()  # All 7s.
         agent.checkpoint_render_dir = self.n1_render_dir

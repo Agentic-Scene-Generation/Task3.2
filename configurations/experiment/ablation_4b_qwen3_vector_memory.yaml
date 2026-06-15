@@ -1,0 +1,47 @@
+# Ablation 4b: Qwen3 + Expert Harness + Vector Memory
+# Uses BGE-M3 numpy index with embedding-only scoring.
+#
+# Prerequisite:
+#   python scripts/build_memory_index.py \
+#     --memory-dir "$SCENEEXPERT_MEMORY_DIR/ablation_4b" \
+#     --embedding-model-dir "$SCENEEXPERT_MEMORY_EMBEDDING_MODEL_DIR"
+#
+# Usage:
+#   python main.py experiment=ablation_4b_qwen3_vector_memory
+
+defaults:
+  - base_experiment
+
+scene_expert:
+  enabled: true
+  mode: "harness_memory"
+  memory:
+    dir: "${paths.memory_dir}/ablation_4b"
+    retriever_type: "hybrid"
+    retrieval:
+      max_success_cases: 3
+      max_failure_cases: 3
+      max_skills: 2
+      recall_top_k: 30
+      sim_threshold: 0.0
+      object_overlap_threshold: 0.0
+    index:
+      backend: "numpy"
+      dir: ""
+      require_ready: true
+    hybrid_weights:
+      embedding_similarity: 1.0
+      object_overlap: 0.0
+      room_stage_match: 0.0
+      memory_quality_score: 0.0
+      recency_or_verified: 0.0
+  stage_budget:
+    default:
+      max_designer_iterations: 2
+      max_repair_steps: 1
+    manipuland:
+      max_designer_iterations: 2
+      max_repair_steps: 2
+  verifier:
+    stage_pass_threshold: 0.6
+    full_pass_threshold: 0.7

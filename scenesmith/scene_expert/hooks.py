@@ -95,6 +95,105 @@ def _cfg_float(value: Any, default: float) -> float:
     return float(value)
 
 
+def _compact_memory_text(text: str, max_chars: int = 300) -> str:
+    """Compress multiline memory hints for prompt/directive injection."""
+    compact = " ".join(text.strip().split())
+    return compact if len(compact) <= max_chars else compact[: max_chars - 3] + "..."
+
+
+def _extend_unique(target: list[str], items: list[str]) -> list[str]:
+    """Append non-empty unique strings while preserving order."""
+    seen = {item.strip() for item in target if item.strip()}
+    for item in items:
+        text = item.strip()
+        if text and text not in seen:
+            target.append(text)
+            seen.add(text)
+    return target
+
+
+def _skill_name_from_text(skill_text: str) -> str:
+    first_line = skill_text.strip().splitlines()[0] if skill_text.strip() else ""
+    if first_line.startswith("[Skill:") and first_line.endswith("]"):
+        return first_line[len("[Skill:") : -1].strip()
+    return _compact_memory_text(first_line, max_chars=80)
+
+
+def _apply_memory_to_stage_brief(
+    stage_brief: StageBrief,
+    memory_pack: MemoryPack,
+) -> StageBrief:
+    """Make retrieved memory survive even if GlobalPlanner underuses it."""
+    success_rules = [
+        "Retrieved success memory: " + _compact_memory_text(hint)
+        for hint in memory_pack.success_hints[:3]
+    ]
+    failure_rules = [
+        _compact_memory_text(hint)
+        for hint in memory_pack.failure_hints[:3]
+    ]
+    critic_checks = [
+        "Verify retrieved failure is avoided: " + _compact_memory_text(hint)
+        for hint in memory_pack.failure_hints[:3]
+    ]
+    skill_names = [
+        name
+        for text in memory_pack.skill_texts[:3]
+        if (name := _skill_name_from_text(text))
+    ]
+
+    return stage_brief.model_copy(
+        update={
+            "constraints_for_designer": _extend_unique(
+                list(stage_brief.constraints_for_designer),
+                success_rules,
+            ),
+            "failure_patterns_to_avoid": _extend_unique(
+                list(stage_brief.failure_patterns_to_avoid),
+                failure_rules,
+            ),
+            "checks_for_critic": _extend_unique(
+                list(stage_brief.checks_for_critic),
+                critic_checks,
+            ),
+            "recommended_skills": _extend_unique(
+                list(stage_brief.recommended_skills),
+                skill_names,
+            ),
+        }
+    )
+
+
+def _format_memory_directives(memory_pack: MemoryPack) -> str:
+    """Format retrieved memory as a direct hook-level prompt block."""
+    parts: list[str] = []
+    if memory_pack.success_hints:
+        parts.append("Positive guidance from retrieved memory:")
+        parts.extend(
+            f"  - {_compact_memory_text(hint)}"
+            for hint in memory_pack.success_hints[:3]
+        )
+    if memory_pack.failure_hints:
+        parts.append("Negative constraints from retrieved memory:")
+        parts.extend(
+            f"  - {_compact_memory_text(hint)}"
+            for hint in memory_pack.failure_hints[:3]
+        )
+    if memory_pack.skill_texts:
+        parts.append("Reusable skills from retrieved memory:")
+        parts.extend(
+            f"  - {_compact_memory_text(skill)}"
+            for skill in memory_pack.skill_texts[:2]
+        )
+    if not parts:
+        return ""
+    return (
+        "=== SceneExpert Retrieved Memory Directives ===\n"
+        + "\n".join(parts)
+        + "\n=== End Retrieved Memory Directives ==="
+    )
+
+
 def _build_hybrid_retriever(
     memory_store: FastMemoryStore,
     memory_dir: str,
@@ -108,10 +207,7 @@ def _build_hybrid_retriever(
 
     emb_cfg = memory_cfg.get("embedding", {})
     idx_cfg = memory_cfg.get("index", {})
-    backend = os.environ.get(
-        "SCENEEXPERT_MEMORY_INDEX_BACKEND",
-        idx_cfg.get("backend", "numpy"),
-    )
+    backend = idx_cfg.get("backend", "numpy")
     if backend != "numpy":
         raise NotImplementedError(
             f"SceneExpert hybrid memory currently supports numpy index only, got {backend!r}."
@@ -275,6 +371,10 @@ class SceneExpertHookRunner:
                     context=context,
                     scene_state_summary="No floor plan has been generated yet.",
                 )
+                self._current_stage_brief = _apply_memory_to_stage_brief(
+                    self._current_stage_brief,
+                    self._current_memory_pack,
+                )
                 self._qwen_calls += 1
                 console_logger.info(
                     f"[SceneExpert] StageBrief generated for {stage}: "
@@ -288,6 +388,9 @@ class SceneExpertHookRunner:
         enhanced = self._prompt
         if self._current_stage_brief is not None:
             enhanced += "\n\n" + self._current_stage_brief.to_injection_text()
+        memory_directives = _format_memory_directives(self._current_memory_pack)
+        if memory_directives:
+            enhanced += "\n\n" + memory_directives
         if self._current_memory_pack.placement_reference:
             enhanced += "\n\n" + self._current_memory_pack.placement_reference
         self._last_injected_floor_plan_prompt = enhanced
@@ -404,6 +507,10 @@ class SceneExpertHookRunner:
                     context=context,
                     scene_state_summary=scene_state_summary,
                 )
+                self._current_stage_brief = _apply_memory_to_stage_brief(
+                    self._current_stage_brief,
+                    self._current_memory_pack,
+                )
                 self._qwen_calls += 1
                 console_logger.info(
                     f"[SceneExpert] StageBrief generated for {stage}: "
@@ -415,23 +522,32 @@ class SceneExpertHookRunner:
                 )
 
         # --- Step 3: Inject StageBrief into scene.text_description ---
+        memory_directives = _format_memory_directives(self._current_memory_pack)
         if self._current_stage_brief is not None:
+            brief_text = self._current_stage_brief.to_injection_text()
+            injection_text = brief_text
+            if memory_directives:
+                injection_text += "\n\n" + memory_directives
             enhanced = (
                 scene.text_description
                 + "\n\n"
-                + self._current_stage_brief.to_injection_text()
+                + injection_text
             )
             scene.text_description = enhanced
-            brief_text = self._current_stage_brief.to_injection_text()
-            setattr(scene, "scene_expert_brief", brief_text)
+            setattr(scene, "scene_expert_brief", injection_text)
+            if memory_directives:
+                setattr(scene, "scene_expert_memory_directives", memory_directives)
             briefs = getattr(scene, "scene_expert_briefs", {})
             if not isinstance(briefs, dict):
                 briefs = {}
-            briefs[stage] = brief_text
+            briefs[stage] = injection_text
             setattr(scene, "scene_expert_briefs", briefs)
             console_logger.debug(
                 f"[SceneExpert] Injected StageBrief into scene.text_description for {stage}"
             )
+        elif memory_directives:
+            scene.text_description = scene.text_description + "\n\n" + memory_directives
+            setattr(scene, "scene_expert_memory_directives", memory_directives)
 
         # --- Step 4: Inject placement reference directly (bypasses GlobalPlanner) ---
         # This gives the designer exact coordinates/surfaces from the best historical
@@ -775,10 +891,7 @@ def build_hook_runner(
     if use_memory:
         ret_cfg = memory_cfg.get("retrieval", {})
         memory_store = FastMemoryStore(memory_dir)
-        retriever_type = os.environ.get(
-            "SCENEEXPERT_MEMORY_RETRIEVER_TYPE",
-            memory_cfg.get("retriever_type", "lexical"),
-        )
+        retriever_type = memory_cfg.get("retriever_type", "lexical")
         if retriever_type == "hybrid":
             retriever = _build_hybrid_retriever(
                 memory_store=memory_store,
