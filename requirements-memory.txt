@@ -1,0 +1,9 @@
+# Optional SceneExpert memory retrieval dependencies.
+#
+# Install this only when enabling local embedding/vector memory:
+#   python -m pip install -r requirements-memory.txt
+#
+# BGE-M3 should already be downloaded locally, e.g.:
+#   SCENEEXPERT_MEMORY_EMBEDDING_MODEL_DIR="${SCENEEXPERT_MODELS_DIR}/bge-m3"
+FlagEmbedding>=1.3.5
+numpy>=1.26,<2.0
