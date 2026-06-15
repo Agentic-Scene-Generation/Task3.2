@@ -19,10 +19,25 @@ mode: "disabled"
 memory:
   # Directory for persistent memory storage (relative to project root)
   dir: "${paths.memory_dir}"
+  retriever_type: "${oc.env:SCENEEXPERT_MEMORY_RETRIEVER_TYPE,lexical}"
   retrieval:
     max_success_cases: 3
     max_failure_cases: 3
     max_skills: 2
+    recall_top_k: ${oc.env:SCENEEXPERT_MEMORY_RECALL_TOP_K,30}
+  embedding:
+    model_id: "${oc.env:SCENEEXPERT_MEMORY_EMBEDDING_MODEL_ID,BAAI/bge-m3}"
+    # Actual local loading path. Keep BGE-M3 directly under models_dir/bge-m3.
+    model_dir: "${oc.env:SCENEEXPERT_MEMORY_EMBEDDING_MODEL_DIR,${paths.models_dir}/bge-m3}"
+    # Online retrieval should default to CPU to avoid competing with vLLM/OpenCLIP.
+    device: "${oc.env:SCENEEXPERT_MEMORY_EMBEDDING_DEVICE,cpu}"
+    # Offline index builds may override this to cuda.
+    index_device: "${oc.env:SCENEEXPERT_MEMORY_EMBEDDING_INDEX_DEVICE,cpu}"
+    batch_size: ${oc.env:SCENEEXPERT_MEMORY_EMBEDDING_BATCH_SIZE,8}
+    max_length: ${oc.env:SCENEEXPERT_MEMORY_EMBEDDING_MAX_LENGTH,512}
+    normalize: true
+  index:
+    backend: "${oc.env:SCENEEXPERT_MEMORY_INDEX_BACKEND,numpy}"
 
 # Per-stage execution budget
 stage_budget:

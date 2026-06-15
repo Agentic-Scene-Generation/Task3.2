@@ -940,6 +940,58 @@ python scripts/parse_log_to_memory.py \
   --scene-states-dir /path/to/scene_000/room_xxx/scene_states
 ```
 
+### 构建 memory embedding 索引
+
+当前运行主路径仍默认使用 lexical memory retriever；下面的步骤只是在 PR-2 阶段提前准备本地向量索引，供后续 hybrid retriever 使用。
+
+BGE-M3 已按本项目约定下载到：
+
+```bash
+export SCENEEXPERT_MEMORY_EMBEDDING_MODEL_ID="BAAI/bge-m3"
+export SCENEEXPERT_MEMORY_EMBEDDING_MODEL_DIR="${SCENEEXPERT_MODELS_DIR}/bge-m3"
+```
+
+注意：`model_id` 只是语义标识，实际加载必须使用 `SCENEEXPERT_MEMORY_EMBEDDING_MODEL_DIR`，不要写成 `${SCENEEXPERT_MODELS_DIR}/BAAI/bge-m3`。
+
+安装可选 memory embedding 依赖：
+
+```bash
+python -m pip install -r requirements-memory.txt
+```
+
+确认本地模型目录存在：
+
+```bash
+test -d "$SCENEEXPERT_MEMORY_EMBEDDING_MODEL_DIR"
+```
+
+为 `ablation_4` 的 JSONL memory 构建 numpy index：
+
+```bash
+python scripts/build_memory_index.py \
+  --memory-dir "$SCENEEXPERT_MEMORY_DIR/ablation_4" \
+  --embedding-model-dir "$SCENEEXPERT_MEMORY_EMBEDDING_MODEL_DIR" \
+  --index-backend numpy \
+  --device cpu
+```
+
+如果是在离线构建任务中且 GPU 空闲，可以把最后一行改成 `--device cuda`。在线运行阶段建议继续保持：
+
+```bash
+export SCENEEXPERT_MEMORY_EMBEDDING_DEVICE="cpu"
+export SCENEEXPERT_MEMORY_INDEX_BACKEND="numpy"
+```
+
+构建完成后会生成：
+
+```text
+$SCENEEXPERT_MEMORY_DIR/ablation_4/indexes/
+  success_furniture.npy
+  success_furniture.metadata.jsonl
+  success_furniture.manifest.json
+  ...
+```
+
 ## 10. 配置文件使用建议
 
 推荐直接使用 `.env.example` 生成项目根目录 `.env`：
