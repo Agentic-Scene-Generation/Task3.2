@@ -92,7 +92,7 @@ def _format_task_spec(task_spec: SceneTaskSpec, stage: str) -> str:
     ]
 
     stage_objects = {
-        "floor_plan": [],
+        "floor_plan": task_spec.required_large_objects,
         "furniture": task_spec.required_large_objects,
         "wall_mounted": task_spec.required_wall_objects,
         "ceiling_mounted": task_spec.required_ceiling_objects,
@@ -232,6 +232,7 @@ class GlobalPlanner:
         """Minimal safe StageBrief used when the model call fails."""
         stage = context.stage
         required = {
+            "floor_plan": context.task_spec.required_large_objects,
             "furniture": context.task_spec.required_large_objects,
             "wall_mounted": context.task_spec.required_wall_objects,
             "ceiling_mounted": context.task_spec.required_ceiling_objects,

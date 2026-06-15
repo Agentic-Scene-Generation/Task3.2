@@ -1,4 +1,11 @@
-"""SceneExpertPipeline: orchestrates the full SceneExpert MVP online loop.
+"""Legacy SceneExpertPipeline compatibility path.
+
+The production SceneExpert integration is the hook runner in hooks.py, built
+from IndoorSceneGenerationExperiment. Keep this class for older experiments and
+offline prototyping only; avoid adding new runtime behavior here unless the
+project intentionally promotes it back to the official entry point.
+
+SceneExpertPipeline: orchestrates the full SceneExpert MVP online loop.
 
 Architecture: runs SceneSmith stage-by-stage (using start_stage/stop_stage),
 inserting SceneExpert's pre/post hooks between each stage:
@@ -265,7 +272,7 @@ class SceneExpertPipeline:
                 memory_pack=memory_pack,
             )
 
-            # 2c. Generate StageBrief (skip for floor_plan in MVP — geometry is less memory-sensitive)
+            # 2c. Generate StageBrief in this legacy path.
             stage_brief: StageBrief | None = None
             scene_state_summary = self._build_scene_state_summary(scene_dir, completed_stages)
 

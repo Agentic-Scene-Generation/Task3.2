@@ -1765,6 +1765,19 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                     workflow_name=f"scene_{scene_id:03d}_generation",
                     metadata=trace_metadata,
                 ):
+                    # Build SceneExpert hook runner before floor_plan so fast
+                    # memory and StageBrief can guide the house-level layout too.
+                    from scenesmith.scene_expert.hooks import build_hook_runner
+                    scene_expert_hooks = build_hook_runner(
+                        prompt=prompt,
+                        scene_id=scene_id,
+                        output_dir=output_dir,
+                        cfg_dict=cfg_dict,
+                    )
+                    floor_plan_prompt = prompt
+                    if scene_expert_hooks and start_stage == "floor_plan":
+                        floor_plan_prompt = scene_expert_hooks.pre_floor_plan()
+
                     # Stage 1: Floor plan generation (or load from saved state).
                     if start_stage == "floor_plan":
                         # Run floor plan in subprocess to isolate fork-unsafe SDK
@@ -1783,7 +1796,7 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                                     "floor_plan",
                                     _generate_floor_plan_worker,
                                     {
-                                        "prompt": prompt,
+                                        "prompt": floor_plan_prompt,
                                         "scene_dir": str(scene_dir),
                                         "cfg_dict": cfg_dict,
                                         "experiment_run_id": experiment_run_id,
@@ -1812,6 +1825,8 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                             f"House layout generated in "
                             f"{timedelta(seconds=layout_end_time - layout_start_time)}"
                         )
+                        if scene_expert_hooks:
+                            scene_expert_hooks.post_floor_plan(scene_dir)
                     else:
                         # Load house layout from saved state.
                         house_layout_path = scene_dir / "house_layout.json"
@@ -1835,6 +1850,8 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                         console_logger.info(
                             "Stopping after floor_plan stage as configured"
                         )
+                        if scene_expert_hooks:
+                            scene_expert_hooks.finalize(final_scene_path=str(scene_dir))
                         console_logger.info(
                             "Scene generation completed successfully in "
                             f"{timedelta(seconds=time.time() - scene_generation_start_time)}"
@@ -1847,15 +1864,6 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                         "furniture" if start_stage == "floor_plan" else start_stage
                     )
                     room_stop_stage = stop_stage
-
-                    # Build SceneExpert hook runner (None when mode="disabled").
-                    from scenesmith.scene_expert.hooks import build_hook_runner
-                    scene_expert_hooks = build_hook_runner(
-                        prompt=prompt,
-                        scene_id=scene_id,
-                        output_dir=output_dir,
-                        cfg_dict=cfg_dict,
-                    )
 
                     # Generate rooms (parallel or sequential based on config).
                     parallel_rooms = pipeline_cfg["parallel_rooms"]

@@ -5,8 +5,9 @@ Three strategies (lightest to heaviest):
 2. stage_regeneration — re-runs the stage from its checkpoint with an updated brief
 3. rollback — reverts to the previous stage checkpoint (uses SceneSmith resume_from_path)
 
-MVP implements local_repair and stage_regeneration fully.
-Rollback is scaffolded but not fully wired (requires SceneSmith pipeline changes).
+Hook-runner MVP records local_repair / stage_regeneration / rollback decisions
+in trace and memory context, but does not re-enter SceneSmith agents in the
+same hook call. Actual re-execution requires explicit pipeline-level support.
 """
 
 from __future__ import annotations

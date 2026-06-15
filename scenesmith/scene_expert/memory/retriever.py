@@ -7,16 +7,70 @@ Retrieval matches on: room_type, stage, and keyword overlap with task_signature.
 from __future__ import annotations
 
 import re
-from collections import Counter
 
 from scenesmith.scene_expert.memory.schemas import FailureCase, Skill, SuccessCase
 from scenesmith.scene_expert.memory.store import FastMemoryStore
 from scenesmith.scene_expert.schemas import MemoryPack, SceneTaskSpec
 
 
+_ALIASES = {
+    "卧室": ["bedroom"],
+    "客厅": ["living_room", "living", "room"],
+    "厨房": ["kitchen"],
+    "餐厅": ["dining_room", "dining"],
+    "办公室": ["office"],
+    "书房": ["study", "office"],
+    "床头柜": ["nightstand", "bedside_table"],
+    "床": ["bed"],
+    "衣柜": ["wardrobe", "closet"],
+    "柜子": ["cabinet"],
+    "沙发": ["sofa", "couch"],
+    "茶几": ["coffee_table"],
+    "桌子": ["table", "desk"],
+    "书桌": ["desk"],
+    "椅子": ["chair"],
+    "窗": ["window"],
+    "窗户": ["window"],
+    "门": ["door"],
+    "地毯": ["rug", "carpet"],
+    "灯": ["lamp", "light"],
+    "吊灯": ["ceiling_light"],
+    "画": ["painting", "wall_art"],
+    "架子": ["shelf"],
+    "书架": ["bookshelf"],
+    "night stand": ["nightstand", "bedside_table"],
+    "night stands": ["nightstand", "bedside_table"],
+    "bedside table": ["nightstand", "bedside_table"],
+    "closet": ["wardrobe"],
+    "couch": ["sofa"],
+}
+
+
 def _tokenize(text: str) -> list[str]:
-    """Lowercase, split on non-alphanumeric, filter short tokens."""
-    return [t for t in re.split(r"[^a-z0-9]+", text.lower()) if len(t) > 2]
+    """Tokenize English and Chinese text with light synonym expansion."""
+    text = text.lower()
+    tokens: list[str] = []
+
+    for phrase, aliases in _ALIASES.items():
+        if phrase in text:
+            tokens.extend(aliases)
+
+    for token in re.split(r"[^a-z0-9_]+", text):
+        if len(token) > 2:
+            tokens.append(token)
+            for phrase, aliases in _ALIASES.items():
+                if phrase.isascii() and phrase.replace(" ", "_") == token:
+                    tokens.extend(aliases)
+
+    for segment in re.findall(r"[\u4e00-\u9fff]+", text):
+        if len(segment) > 1:
+            tokens.append(segment)
+        if len(segment) >= 2:
+            tokens.extend(segment[i : i + 2] for i in range(len(segment) - 1))
+        if len(segment) >= 3:
+            tokens.extend(segment[i : i + 3] for i in range(len(segment) - 2))
+
+    return tokens
 
 
 def _keyword_score(query_tokens: set[str], candidate_tokens: list[str]) -> float:

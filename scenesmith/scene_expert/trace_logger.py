@@ -32,13 +32,25 @@ class TraceLogger:
     One TraceLogger instance per scene generation run.
     """
 
-    def __init__(self, output_dir: str, scene_index: int, prompt: str) -> None:
+    SCHEMA_VERSION = "1.1"
+
+    def __init__(
+        self,
+        output_dir: str,
+        scene_index: int,
+        prompt: str,
+        experiment_name: str = "",
+        config_hash: str = "",
+    ) -> None:
         self._output_dir = Path(output_dir)
         self._traces_dir = self._output_dir / "traces"
         self._traces_dir.mkdir(parents=True, exist_ok=True)
 
         self._trace_id = f"trace_{scene_index:06d}"
+        self._scene_id = f"scene_{scene_index:03d}"
         self._prompt = prompt
+        self._experiment_name = experiment_name
+        self._config_hash = config_hash
         self._stage_entries: list[StageTraceEntry] = []
         self._start_time = time.time()
         self._full_report: FullVerifyReport | None = None
@@ -53,9 +65,10 @@ class TraceLogger:
         verify_report: StageVerifyReport | None,
         repair_actions: list[RepairResult],
         qwen_calls: int = 0,
+        stage_time_sec: float | None = None,
     ) -> None:
         """Record a completed stage's data."""
-        elapsed = time.time() - self._start_time
+        elapsed = time.time() - self._start_time if stage_time_sec is None else stage_time_sec
         entry = StageTraceEntry(
             stage=stage,
             memory_pack=memory_pack,
@@ -79,7 +92,11 @@ class TraceLogger:
         self._exports = exports
 
         trace = {
+            "schema_version": self.SCHEMA_VERSION,
             "trace_id": self._trace_id,
+            "scene_id": self._scene_id,
+            "experiment_name": self._experiment_name,
+            "config_hash": self._config_hash,
             "prompt": self._prompt,
             "model": model,
             "total_time_sec": round(time.time() - self._start_time, 1),
@@ -94,7 +111,11 @@ class TraceLogger:
         if trace is None:
             # Build minimal trace if finalize() was not called
             trace = {
+                "schema_version": self.SCHEMA_VERSION,
                 "trace_id": self._trace_id,
+                "scene_id": self._scene_id,
+                "experiment_name": self._experiment_name,
+                "config_hash": self._config_hash,
                 "prompt": self._prompt,
                 "stages": [entry.model_dump() for entry in self._stage_entries],
             }

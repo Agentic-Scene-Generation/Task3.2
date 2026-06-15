@@ -19,9 +19,9 @@ from __future__ import annotations
 import logging
 import os
 import time
+import hashlib
+import json
 from pathlib import Path
-
-from omegaconf import DictConfig
 
 from scenesmith.agent_utils.room import RoomScene
 from scenesmith.scene_expert.global_planner import GlobalPlanner
@@ -52,6 +52,15 @@ def _empty_memory_pack() -> MemoryPack:
     return MemoryPack(success_hints=[], failure_hints=[], skill_texts=[])
 
 
+def _stable_config_hash(cfg_dict: dict) -> str:
+    """Return a short stable hash for trace reproducibility metadata."""
+    try:
+        payload = json.dumps(cfg_dict, sort_keys=True, default=str)
+    except TypeError:
+        payload = repr(cfg_dict)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
 class SceneExpertHookRunner:
     """Per-scene hook runner that wraps SceneSmith stage execution.
 
@@ -77,6 +86,9 @@ class SceneExpertHookRunner:
         memory_writer: MemoryWriter | None,
         memory_store: FastMemoryStore | None,
         qwen_model: str,
+        experiment_name: str = "",
+        config_hash: str = "",
+        start_stage: str = "floor_plan",
     ) -> None:
         self._prompt = prompt
         self._scene_id = scene_id
@@ -93,12 +105,24 @@ class SceneExpertHookRunner:
         self._memory_writer = memory_writer
         self._memory_store = memory_store
         self._qwen_model = qwen_model
+        self._experiment_name = experiment_name
+        self._config_hash = config_hash
+        self._start_stage = start_stage
+        self._stage_order_baseline = self._initial_completed_stages(start_stage)
+        self._room_start_stage = "furniture" if start_stage == "floor_plan" else start_stage
+        self._room_stage_order_baseline = self._initial_completed_stages(
+            self._room_start_stage
+        )
 
         self._trace_logger = TraceLogger(
-            output_dir=str(output_dir), scene_index=scene_id, prompt=prompt
+            output_dir=str(output_dir),
+            scene_index=scene_id,
+            prompt=prompt,
+            experiment_name=experiment_name,
+            config_hash=config_hash,
         )
         self._stage_reports: list[StageVerifyReport] = []
-        self._completed_stages: list[str] = []
+        self._completed_stages: list[str] = list(self._stage_order_baseline)
         self._qwen_calls = 0
 
         # Current stage state (populated in pre_stage, consumed in post_stage)
@@ -108,10 +132,133 @@ class SceneExpertHookRunner:
         self._stage_start_time: float = 0.0
         # Original text_description per stage (so we can restore if needed)
         self._original_text_descriptions: dict[str, str] = {}
+        self._last_injected_floor_plan_prompt: str = prompt
 
     # ------------------------------------------------------------------
     # Pre-stage hook: called BEFORE the SceneSmith stage agent runs
     # ------------------------------------------------------------------
+
+    def pre_floor_plan(self) -> str:
+        """Prepare SceneExpert context for the house-level floor_plan stage.
+
+        Floor plan generation runs in an isolated subprocess and receives only a
+        prompt string, so this returns an enhanced prompt instead of mutating a
+        RoomScene.
+        """
+        stage = "floor_plan"
+        console_logger.info(f"[SceneExpert/{self._mode}] pre_stage: {stage}")
+        self._validate_stage_transition(stage)
+        self._current_stage = stage
+        self._stage_start_time = time.time()
+        self._qwen_calls = 0
+
+        if self._retriever is not None and self._mode in ("harness_memory", "full"):
+            try:
+                self._current_memory_pack = self._retriever.retrieve(
+                    self._task_spec, stage
+                )
+                n_hints = (
+                    len(self._current_memory_pack.success_hints)
+                    + len(self._current_memory_pack.failure_hints)
+                )
+                console_logger.info(
+                    f"[SceneExpert] Memory retrieved for {stage}: "
+                    f"{n_hints} hints, {len(self._current_memory_pack.skill_texts)} skills"
+                )
+            except Exception as e:
+                console_logger.warning(f"Memory retrieval failed for {stage}: {e}")
+                self._current_memory_pack = _empty_memory_pack()
+        else:
+            self._current_memory_pack = _empty_memory_pack()
+
+        self._current_stage_brief = None
+        if self._mode in ("harness_only", "harness_memory", "full"):
+            try:
+                context = self._harness.build_context(
+                    stage=stage,
+                    task_spec=self._task_spec,
+                    memory_pack=self._current_memory_pack,
+                )
+                self._current_stage_brief = self._global_planner.generate_stage_brief(
+                    context=context,
+                    scene_state_summary="No floor plan has been generated yet.",
+                )
+                self._qwen_calls += 1
+                console_logger.info(
+                    f"[SceneExpert] StageBrief generated for {stage}: "
+                    f"{len(self._current_stage_brief.constraints_for_designer)} constraints"
+                )
+            except Exception as e:
+                console_logger.warning(
+                    f"GlobalPlanner failed for {stage}, running without StageBrief: {e}"
+                )
+
+        enhanced = self._prompt
+        if self._current_stage_brief is not None:
+            enhanced += "\n\n" + self._current_stage_brief.to_injection_text()
+        if self._current_memory_pack.placement_reference:
+            enhanced += "\n\n" + self._current_memory_pack.placement_reference
+        self._last_injected_floor_plan_prompt = enhanced
+        return enhanced
+
+    def post_floor_plan(self, scene_dir: Path) -> None:
+        """Verify and log the house-level floor_plan stage."""
+        stage = "floor_plan"
+        console_logger.info(f"[SceneExpert/{self._mode}] post_stage: {stage}")
+
+        scene_state_info = self._extract_floor_plan_state_info(scene_dir)
+        verify_report: StageVerifyReport | None = None
+        repair_actions: list[RepairResult] = []
+        try:
+            verify_report = self._stage_verifier.verify(
+                stage=stage,
+                stage_output_dir=str(scene_dir),
+                task_spec=self._task_spec,
+                stage_brief=self._current_stage_brief,
+                scene_state_info=scene_state_info,
+            )
+            self._stage_reports.append(verify_report)
+
+            if not verify_report.pass_stage:
+                console_logger.warning(
+                    f"[SceneExpert] Stage {stage} FAILED verification: "
+                    f"issues={[i.issue_type for i in verify_report.issues]}"
+                )
+                decision = self._harness.decide_repair(stage, verify_report)
+                if decision.should_repair:
+                    repair_result = self._repair_controller.repair(
+                        repair_type=decision.strategy,
+                        stage=stage,
+                        verify_report=verify_report,
+                        scene_path=str(scene_dir),
+                        stage_brief=self._current_stage_brief,
+                        task_spec=self._task_spec,
+                    )
+                    repair_actions.append(repair_result)
+                    self._repair_controller.record_failure_to_memory(
+                        stage=stage,
+                        room_type=self._task_spec.room_type,
+                        repair_result=repair_result,
+                        verify_report=verify_report,
+                        repair_verified=False,
+                    )
+            else:
+                console_logger.info(f"[SceneExpert] Stage {stage} PASSED verification")
+        except Exception as e:
+            console_logger.warning(f"[SceneExpert] Verification failed for {stage}: {e}")
+
+        elapsed = time.time() - self._stage_start_time
+        self._trace_logger.log_stage(
+            stage=stage,
+            memory_pack=self._current_memory_pack,
+            stage_brief=self._current_stage_brief,
+            scene_state_path=str(scene_dir),
+            verify_report=verify_report,
+            repair_actions=repair_actions,
+            qwen_calls=self._qwen_calls,
+            stage_time_sec=round(elapsed, 1),
+        )
+        self._completed_stages.append(stage)
 
     def pre_stage(self, stage: str, scene: RoomScene) -> None:
         """Retrieve memory, generate StageBrief, inject into scene.text_description.
@@ -123,6 +270,7 @@ class SceneExpertHookRunner:
             scene: The RoomScene that will be passed to the stage agent.
         """
         console_logger.info(f"[SceneExpert/{self._mode}] pre_stage: {stage}")
+        self._validate_stage_transition(stage)
         self._current_stage = stage
         self._stage_start_time = time.time()
         self._qwen_calls = 0
@@ -150,9 +298,9 @@ class SceneExpertHookRunner:
         else:
             self._current_memory_pack = _empty_memory_pack()
 
-        # --- Step 2: Global Planner → StageBrief (skip for floor_plan in MVP) ---
+        # --- Step 2: Global Planner -> StageBrief ---
         self._current_stage_brief = None
-        if stage != "floor_plan" and self._mode in ("harness_only", "harness_memory", "full"):
+        if self._mode in ("harness_only", "harness_memory", "full"):
             try:
                 scene_state_summary = self._build_scene_state_summary()
                 context = self._harness.build_context(
@@ -182,6 +330,13 @@ class SceneExpertHookRunner:
                 + self._current_stage_brief.to_injection_text()
             )
             scene.text_description = enhanced
+            brief_text = self._current_stage_brief.to_injection_text()
+            setattr(scene, "scene_expert_brief", brief_text)
+            briefs = getattr(scene, "scene_expert_briefs", {})
+            if not isinstance(briefs, dict):
+                briefs = {}
+            briefs[stage] = brief_text
+            setattr(scene, "scene_expert_briefs", briefs)
             console_logger.debug(
                 f"[SceneExpert] Injected StageBrief into scene.text_description for {stage}"
             )
@@ -277,6 +432,7 @@ class SceneExpertHookRunner:
             verify_report=verify_report,
             repair_actions=repair_actions,
             qwen_calls=self._qwen_calls,
+            stage_time_sec=round(elapsed, 1),
         )
         self._completed_stages.append(stage)
         console_logger.debug(
@@ -309,10 +465,16 @@ class SceneExpertHookRunner:
             console_logger.warning(f"FullVerifier failed: {e}")
 
         # Save trace
+        final_path = Path(final_scene_path)
+        combined_path = (
+            final_path
+            if final_path.name == "combined_house"
+            else final_path / "combined_house"
+        )
         exports = {
             "scene_dir": final_scene_path,
-            "drake": str(Path(final_scene_path) / "combined_house" / "house.dmd.yaml"),
-            "blend": str(Path(final_scene_path) / "combined_house" / "house.blend"),
+            "drake": str(combined_path / "house.dmd.yaml"),
+            "blend": str(combined_path / "house.blend"),
         }
         trace_dict = self._trace_logger.finalize(
             full_report=full_report,
@@ -330,9 +492,11 @@ class SceneExpertHookRunner:
         ):
             try:
                 trace_summary = self._trace_logger.build_trace_summary()
+                related_old_memory = self._format_related_memory_for_writer()
                 ops = self._memory_writer.write(
                     trace_summary=trace_summary,
                     full_report=full_report,
+                    related_old_memory=related_old_memory,
                 )
                 self._memory_store.apply_updates(ops)
                 console_logger.info(
@@ -352,18 +516,95 @@ class SceneExpertHookRunner:
     # Internal helpers
     # ------------------------------------------------------------------
 
+    def _initial_completed_stages(self, start_stage: str) -> list[str]:
+        """Return the stage-order prefix already satisfied by a resumed run."""
+        if start_stage not in STAGE_ORDER:
+            return []
+        return STAGE_ORDER[: STAGE_ORDER.index(start_stage)]
+
+    def _validate_stage_transition(self, stage: str) -> None:
+        """Enforce Harness FSM order while tolerating sequential multi-room runs."""
+        try:
+            self._harness.validate_stage_order(self._completed_stages, stage)
+            return
+        except ValueError:
+            # _generate_room runs a full room pipeline per room. When a new room
+            # starts, the same per-scene hook sees the start stage again. Reset the
+            # FSM baseline for that room instead of treating it as an LLM skip.
+            if stage == self._room_start_stage and self._completed_stages:
+                console_logger.info(
+                    "[SceneExpert] Resetting Harness stage-order baseline for "
+                    f"new room at stage '{stage}'"
+                )
+                self._completed_stages = list(self._room_stage_order_baseline)
+                self._harness.validate_stage_order(self._completed_stages, stage)
+                return
+            raise
+
     def _build_scene_state_summary(self) -> str:
         """Build a text summary of completed stages for the GlobalPlanner."""
         if not self._completed_stages:
             return "Empty scene — no objects placed yet."
         return "Completed stages: " + ", ".join(self._completed_stages)
 
+    def _extract_floor_plan_state_info(self, scene_dir: Path) -> dict:
+        """Extract lightweight floor-plan facts for rule-based verification."""
+        layout_path = scene_dir / "house_layout.json"
+        if not layout_path.exists():
+            return {"layout_exists": False, "room_count": 0, "rooms": []}
+        try:
+            with layout_path.open() as f:
+                data = json.load(f)
+        except Exception as e:
+            return {
+                "layout_exists": False,
+                "room_count": 0,
+                "rooms": [],
+                "layout_error": str(e),
+            }
+
+        rooms = data.get("room_specs") or data.get("rooms") or []
+        if isinstance(rooms, dict):
+            rooms = list(rooms.values())
+        if not isinstance(rooms, list):
+            rooms = []
+        return {
+            "layout_exists": True,
+            "room_count": len(rooms),
+            "rooms": rooms,
+        }
+
+    def _format_related_memory_for_writer(self) -> str:
+        """Build compact related-memory context for MemoryWriter deduplication."""
+        if self._retriever is None:
+            return ""
+
+        lines: list[str] = []
+        seen: set[str] = set()
+        for stage in STAGE_ORDER:
+            try:
+                pack = self._retriever.retrieve(self._task_spec, stage)
+            except Exception:
+                continue
+            for item in (
+                pack.success_hints
+                + pack.failure_hints
+                + pack.skill_texts
+                + ([pack.placement_reference] if pack.placement_reference else [])
+            ):
+                text = item.strip()
+                if not text or text in seen:
+                    continue
+                seen.add(text)
+                lines.append(f"- [{stage}] {text}")
+        return "\n".join(lines[:24])
+
     def _extract_scene_state_info_from_scene(self, scene: RoomScene) -> dict:
         """Extract object names from the live RoomScene for rule-based checks."""
         try:
             names = [
                 obj.name
-                for obj in scene.objects
+                for obj in scene.objects.values()
                 if hasattr(obj, "name") and obj.name
             ]
             return {"object_names": names}
@@ -479,6 +720,11 @@ def build_hook_runner(
         model=model, api_base_url=api_base, api_key=api_key
     )
     repair_controller = RepairController(memory_store=memory_store)
+    start_stage = (
+        cfg_dict.get("experiment", {})
+        .get("pipeline", {})
+        .get("start_stage", "floor_plan")
+    )
 
     return SceneExpertHookRunner(
         prompt=prompt,
@@ -495,4 +741,7 @@ def build_hook_runner(
         memory_writer=memory_writer,
         memory_store=memory_store,
         qwen_model=model,
+        experiment_name=cfg_dict.get("name", ""),
+        config_hash=_stable_config_hash(cfg_dict),
+        start_stage=start_stage,
     )

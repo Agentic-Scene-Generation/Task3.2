@@ -115,6 +115,14 @@ def _find_scores_yaml(stage_output_dir: str, stage: str = "") -> Path | None:
     if not root.exists():
         return None
 
+    if stage == "floor_plan":
+        for candidate in (
+            root / "final_floor_plan" / "scores.yaml",
+            root / "floor_plans" / "final_floor_plan" / "scores.yaml",
+        ):
+            if candidate.exists():
+                return candidate
+
     # Try stage-specific known path first.
     subdir = _STAGE_SCORES_SUBDIR.get(stage)
     if subdir:
@@ -208,6 +216,55 @@ def _check_required_objects(
     return issues
 
 
+def _check_floor_plan_layout(scene_state_info: dict) -> list[VerifyIssue]:
+    """Check minimal structural validity of the generated floor plan."""
+    issues: list[VerifyIssue] = []
+    if not scene_state_info.get("layout_exists", True):
+        issues.append(
+            VerifyIssue(
+                issue_type="missing_floor_plan_layout",
+                description="house_layout.json was not found or could not be parsed",
+            )
+        )
+        return issues
+
+    room_count = int(scene_state_info.get("room_count", 0) or 0)
+    if room_count <= 0:
+        issues.append(
+            VerifyIssue(
+                issue_type="empty_floor_plan",
+                description="Floor plan contains no rooms",
+            )
+        )
+
+    invalid_rooms: list[str] = []
+    for room in scene_state_info.get("rooms", []):
+        if not isinstance(room, dict):
+            continue
+        room_id = str(room.get("room_id") or room.get("id") or room.get("name") or "")
+        width = room.get("width") or room.get("width_m")
+        depth = room.get("depth") or room.get("depth_m")
+        try:
+            if width is not None and float(width) <= 0:
+                invalid_rooms.append(room_id or "<unknown>")
+            if depth is not None and float(depth) <= 0:
+                invalid_rooms.append(room_id or "<unknown>")
+        except (TypeError, ValueError):
+            invalid_rooms.append(room_id or "<unknown>")
+
+    if invalid_rooms:
+        issues.append(
+            VerifyIssue(
+                issue_type="invalid_room_dimensions",
+                description=(
+                    "Rooms have non-positive or unparsable dimensions: "
+                    + ", ".join(sorted(set(invalid_rooms)))
+                ),
+            )
+        )
+    return issues
+
+
 class StageVerifier:
     """Verifies a single stage output against task spec and stage brief."""
 
@@ -254,6 +311,13 @@ class StageVerifier:
 
         # --- 2. Rule-based checks ---
         if scene_state_info:
+            if stage == "floor_plan":
+                layout_issues = _check_floor_plan_layout(scene_state_info)
+                issues.extend(layout_issues)
+                if layout_issues:
+                    repair_suggestions.append(
+                        "Regenerate the floor plan with at least one valid room and positive dimensions"
+                    )
             object_issues = _check_required_objects(task_spec, stage, scene_state_info)
             issues.extend(object_issues)
             if object_issues:
