@@ -98,6 +98,12 @@ ACP_DISABLE_ARTICULATED=0
 # not start the materials retrieval server.
 ACP_DISABLE_MATERIALS=0
 
+# TODO: ACP nodes can expose 100+ CPU cores and be slow to spawn native
+# geometry libraries from AFS/FUSE. 180s + 32 OMP threads avoids false startup
+# failures without changing the collision geometry algorithm.
+ACP_CONVEX_READY_TIMEOUT=180
+ACP_CONVEX_MAX_OMP_THREADS=32
+
 # TODO: Leave empty to use SCENEEXPERT_OUTPUT_DIR from .env.
 ACP_OUTPUT_DIR=""
 
@@ -161,6 +167,8 @@ export SCENEEXPERT_VLLM_DEEP_GEMM_WARMUP="$ACP_VLLM_DEEP_GEMM_WARMUP"
 export SCENEEXPERT_VLLM_ENFORCE_EAGER=$ACP_VLLM_ENFORCE_EAGER
 export SCENEEXPERT_DISABLE_ARTICULATED=$ACP_DISABLE_ARTICULATED
 export SCENEEXPERT_DISABLE_MATERIALS=$ACP_DISABLE_MATERIALS
+export SCENEEXPERT_CONVEX_READY_TIMEOUT=$ACP_CONVEX_READY_TIMEOUT
+export SCENEEXPERT_CONVEX_MAX_OMP_THREADS=$ACP_CONVEX_MAX_OMP_THREADS
 export SCENEEXPERT_VLLM_LOG="$LOG_DIR/vllm_server.log"
 EOF
 
@@ -188,6 +196,8 @@ echo "DeepGEMM: use=${ACP_VLLM_USE_DEEP_GEMM}, moe_use=${ACP_VLLM_MOE_USE_DEEP_G
 echo "enforce eager: ${ACP_VLLM_ENFORCE_EAGER}"
 echo "disable articulated retrieval: ${ACP_DISABLE_ARTICULATED}"
 echo "disable materials retrieval: ${ACP_DISABLE_MATERIALS}"
+echo "convex ready timeout: ${ACP_CONVEX_READY_TIMEOUT}s"
+echo "convex max OMP threads: ${ACP_CONVEX_MAX_OMP_THREADS}"
 echo "Env file: $SCENEEXPERT_ENV_FILE"
 
 if command -v nvidia-smi >/dev/null 2>&1; then

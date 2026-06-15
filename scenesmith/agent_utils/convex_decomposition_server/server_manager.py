@@ -18,6 +18,28 @@ from scenesmith.utils.network_utils import find_available_port, is_port_availabl
 console_logger = logging.getLogger(__name__)
 
 
+def resolve_runtime_settings(
+    collision_geometry_cfg: object,
+    num_workers: int,
+    default_ready_timeout: float = 10.0,
+) -> tuple[int, float]:
+    """Resolve convex decomposition server runtime limits from agent config."""
+    cpu_count = os.cpu_count() or 1
+    worker_count = max(1, int(num_workers or 1))
+    omp_threads = max(1, cpu_count // worker_count)
+
+    max_omp_threads = getattr(collision_geometry_cfg, "max_omp_threads", None)
+    if max_omp_threads not in (None, "", 0, "0"):
+        omp_threads = min(omp_threads, max(1, int(max_omp_threads)))
+
+    server_ready_timeout = getattr(
+        collision_geometry_cfg, "server_ready_timeout", default_ready_timeout
+    )
+    server_ready_timeout = max(1.0, float(server_ready_timeout))
+
+    return omp_threads, server_ready_timeout
+
+
 class ConvexDecompositionServer:
     """Manages a convex decomposition server running in a separate subprocess.
 
@@ -268,6 +290,11 @@ class ConvexDecompositionServer:
         start_time = time.time()
         max_retries = int(timeout * 2)  # Check twice per second.
         for i in range(max_retries):
+            if self._server_process and self._server_process.poll() is not None:
+                raise RuntimeError(
+                    "Convex decomposition server exited before becoming ready "
+                    f"({self.get_process_status()})"
+                )
             try:
                 response = requests.get(f"{self.get_url()}/health", timeout=2)
                 if response.status_code == 200:

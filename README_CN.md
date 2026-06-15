@@ -814,6 +814,8 @@ ACP_VLLM_DEEP_GEMM_WARMUP="skip"
 ACP_VLLM_ENFORCE_EAGER=1
 ACP_DISABLE_ARTICULATED=1
 ACP_DISABLE_MATERIALS=1
+ACP_CONVEX_READY_TIMEOUT=180
+ACP_CONVEX_MAX_OMP_THREADS=32
 ACP_HYDRA_OVERRIDES="experiment.num_workers=1"
 ```
 
@@ -833,6 +835,8 @@ ACP_VLLM_DEEP_GEMM_WARMUP="skip"
 ACP_VLLM_ENFORCE_EAGER=1
 ACP_DISABLE_ARTICULATED=1
 ACP_DISABLE_MATERIALS=1
+ACP_CONVEX_READY_TIMEOUT=180
+ACP_CONVEX_MAX_OMP_THREADS=32
 ```
 
 参数原则：
@@ -848,6 +852,7 @@ ACP_DISABLE_MATERIALS=1
 - 当前离线环境没有兼容的 DeepGEMM 后端，保持 `ACP_VLLM_USE_DEEP_GEMM=0`、`ACP_VLLM_MOE_USE_DEEP_GEMM=0`、`ACP_VLLM_DEEP_GEMM_WARMUP="skip"`，并设置 `ACP_VLLM_ENFORCE_EAGER=1`。当前日志显示仅禁用 DeepGEMM 环境变量仍可能进入 `deep_gemm_warmup`；`--enforce-eager` 是本环境下更直接的稳定规避路线。
 - 如果当前可写的 `SCENEEXPERT_DATA_DIR` 还没有 `artvip_sdf/` 或 `partnet_mobility_sdf/`，保持 `ACP_DISABLE_ARTICULATED=1`。脚本会自动关闭四个 agent 的 articulated 策略，避免启动 articulated retrieval server 后因没有任何可用 source 失败。
 - 如果当前可写的 `SCENEEXPERT_DATA_DIR` 还没有 `materials/` 或 `materials/embeddings/`，保持 `ACP_DISABLE_MATERIALS=1`。脚本会自动关闭 floor-plan 材料检索和四个 agent 的 `thin_covering` 策略，避免启动 materials retrieval server 后失败。
+- 如果日志出现 `Convex decomposition server did not become ready within 10.0s`，优先保持 `ACP_CONVEX_READY_TIMEOUT=180`、`ACP_CONVEX_MAX_OMP_THREADS=32`。该服务用于生成碰撞几何，不需要额外模型或数据；它依赖 Python 包 `coacd`、`vhacdx`、`trimesh` 和 `flask`，这些已在项目依赖中声明。
 - memory 版本默认用 `experiment.num_workers=1`，避免多个进程同时写 memory；需要批量并行时再显式覆盖。
 
 优先级规则：ACP 脚本会先复制当前 `.env`，再生成本次 job 专用 env 文件，并在文件末尾追加 `SCENEEXPERT_TENSOR_PARALLEL_SIZE`、`SCENEEXPERT_MAX_MODEL_LEN`、`SCENEEXPERT_GPU_MEMORY_UTILIZATION`、`SCENEEXPERT_VLLM_CPU_OFFLOAD_GB` 等多卡覆盖项。因此最终运行时，ACP 脚本生成的覆盖项优先级更高；`.env` 只保留模型目录、数据目录、输出目录、端口等服务器固定配置。

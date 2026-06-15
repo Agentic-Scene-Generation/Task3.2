@@ -1,5 +1,4 @@
 import logging
-import os
 
 from abc import ABC, abstractmethod
 
@@ -7,7 +6,10 @@ from omegaconf import DictConfig
 
 from scenesmith.agent_utils.asset_manager import AssetManager
 from scenesmith.agent_utils.blender import BlenderServer
-from scenesmith.agent_utils.convex_decomposition_server import ConvexDecompositionServer
+from scenesmith.agent_utils.convex_decomposition_server import (
+    ConvexDecompositionServer,
+    resolve_runtime_settings,
+)
 from scenesmith.agent_utils.rendering_manager import RenderingManager
 from scenesmith.agent_utils.room import AgentType, RoomScene
 from scenesmith.agent_utils.scene_analyzer import SceneAnalyzer
@@ -85,11 +87,13 @@ class BaseFurnitureAgent(ABC):
 
             # Start ConvexDecompositionServer for collision geometry generation.
             # This isolates OpenMP from ThreadPoolExecutor to prevent deadlocks.
-            # Calculate OMP threads: each worker gets a fair share of CPU cores.
-            cpu_count = os.cpu_count() or 1
-            omp_threads = max(1, cpu_count // num_workers)
+            omp_threads, server_ready_timeout = resolve_runtime_settings(
+                cfg.collision_geometry, num_workers
+            )
             console_logger.info(
-                f"Starting ConvexDecompositionServer (omp_threads={omp_threads})"
+                "Starting ConvexDecompositionServer "
+                f"(omp_threads={omp_threads}, "
+                f"ready_timeout={server_ready_timeout}s)"
             )
             self.collision_server = ConvexDecompositionServer(
                 port_range=tuple(cfg.collision_geometry.server_port_range),
@@ -97,7 +101,7 @@ class BaseFurnitureAgent(ABC):
                 log_file=logger.output_dir / "room.log",
             )
             self.collision_server.start()
-            self.collision_server.wait_until_ready()
+            self.collision_server.wait_until_ready(timeout=server_ready_timeout)
         except Exception:
             # Clean up any servers that were started before the failure.
             self.cleanup()

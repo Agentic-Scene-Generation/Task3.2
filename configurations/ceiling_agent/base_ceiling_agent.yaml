@@ -147,6 +147,10 @@ collision_geometry:
   method: "vhacd"
 
   server_port_range: [7100, 7350]
+  # ACP/FUSE nodes can be slow to spawn Python + native geometry libraries.
+  server_ready_timeout: 120.0
+  # Do not let a single server consume all visible CPU cores on large nodes.
+  max_omp_threads: 32
 
   # CoACD parameters (used when method="coacd")
   coacd:

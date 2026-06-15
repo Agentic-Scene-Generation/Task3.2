@@ -57,6 +57,8 @@ REASONING_PARSER="${SCENEEXPERT_REASONING_PARSER:-qwen3}"
 START_VLLM="${SCENEEXPERT_START_VLLM:-1}"
 DISABLE_ARTICULATED="${SCENEEXPERT_DISABLE_ARTICULATED:-0}"
 DISABLE_MATERIALS="${SCENEEXPERT_DISABLE_MATERIALS:-0}"
+CONVEX_READY_TIMEOUT="${SCENEEXPERT_CONVEX_READY_TIMEOUT:-}"
+CONVEX_MAX_OMP_THREADS="${SCENEEXPERT_CONVEX_MAX_OMP_THREADS:-}"
 RUN_NAME="${SCENEEXPERT_RUN_NAME:-$EXPERIMENT}"
 DATA_DIR="${SCENEEXPERT_DATA_DIR:-$PROJECT_DIR/data}"
 HSSD_DATA_DIR="${SCENEEXPERT_HSSD_DATA_DIR:-$DATA_DIR}"
@@ -104,6 +106,12 @@ echo "  可写数据目录: $DATA_DIR"
 echo "  HSSD/HSM 只读目录: $HSSD_DATA_DIR"
 echo "  OpenCLIP 目录: $OPENCLIP_DIR"
 echo "  OpenCLIP checkpoint: $OPENCLIP_CHECKPOINT_FILE"
+if [ -n "$CONVEX_READY_TIMEOUT" ]; then
+    echo "  ConvexDecompositionServer ready timeout: ${CONVEX_READY_TIMEOUT}s"
+fi
+if [ -n "$CONVEX_MAX_OMP_THREADS" ]; then
+    echo "  ConvexDecompositionServer max OMP threads: $CONVEX_MAX_OMP_THREADS"
+fi
 echo "  输出目录: $OUTPUT_DIR"
 echo "  禁用 articulated retrieval: $DISABLE_ARTICULATED"
 echo "  禁用 materials retrieval: $DISABLE_MATERIALS"
@@ -118,6 +126,24 @@ if [ "$REQUIRE_LOCAL_OPENCLIP" = "1" ] && [ ! -f "$OPENCLIP_CHECKPOINT_FILE" ]; 
 fi
 
 EXTRA_HYDRA_OVERRIDES=()
+if [ -n "$CONVEX_READY_TIMEOUT" ]; then
+    EXTRA_HYDRA_OVERRIDES+=(
+        "furniture_agent.collision_geometry.server_ready_timeout=$CONVEX_READY_TIMEOUT"
+        "manipuland_agent.collision_geometry.server_ready_timeout=$CONVEX_READY_TIMEOUT"
+        "wall_agent.collision_geometry.server_ready_timeout=$CONVEX_READY_TIMEOUT"
+        "ceiling_agent.collision_geometry.server_ready_timeout=$CONVEX_READY_TIMEOUT"
+    )
+fi
+
+if [ -n "$CONVEX_MAX_OMP_THREADS" ]; then
+    EXTRA_HYDRA_OVERRIDES+=(
+        "furniture_agent.collision_geometry.max_omp_threads=$CONVEX_MAX_OMP_THREADS"
+        "manipuland_agent.collision_geometry.max_omp_threads=$CONVEX_MAX_OMP_THREADS"
+        "wall_agent.collision_geometry.max_omp_threads=$CONVEX_MAX_OMP_THREADS"
+        "ceiling_agent.collision_geometry.max_omp_threads=$CONVEX_MAX_OMP_THREADS"
+    )
+fi
+
 if [ "$DISABLE_ARTICULATED" = "1" ]; then
     EXTRA_HYDRA_OVERRIDES+=(
         "furniture_agent.asset_manager.router.strategies.articulated.enabled=false"
