@@ -992,6 +992,22 @@ $SCENEEXPERT_MEMORY_DIR/ablation_4/indexes/
   ...
 ```
 
+构建完成并确认索引齐全后，可以在 `.env` 中启用 hybrid memory retrieval：
+
+```bash
+export SCENEEXPERT_MEMORY_RETRIEVER_TYPE="hybrid"
+export SCENEEXPERT_MEMORY_INDEX_BACKEND="numpy"
+export SCENEEXPERT_MEMORY_INDEX_REQUIRE_READY=true
+```
+
+`hybrid` 模式会读取 `$SCENEEXPERT_MEMORY_DIR/ablation_4/indexes/` 下的 numpy index，并执行：
+
+1. 按 `memory_type + stage` 做向量召回。
+2. 用 `room_type`、required objects、failure `scope/is_deterministic` 做结构化过滤。
+3. 用 embedding similarity、object overlap、stage/room match、memory quality、verified/deterministic signal 做 hybrid score 排序。
+
+如果某个非空 memory bank 没有对应 index，默认会在启动时 fail fast，并提示先运行 `scripts/build_memory_index.py`。这是为了避免用户以为已经启用向量 memory，实际却静默退回空检索。
+
 ## 10. 配置文件使用建议
 
 推荐直接使用 `.env.example` 生成项目根目录 `.env`：

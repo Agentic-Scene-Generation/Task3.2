@@ -22,6 +22,7 @@ import time
 import hashlib
 import json
 from pathlib import Path
+from typing import Any
 
 from scenesmith.agent_utils.room import RoomScene
 from scenesmith.scene_expert.global_planner import GlobalPlanner
@@ -61,6 +62,97 @@ def _stable_config_hash(cfg_dict: dict) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
+def _deep_merge_dicts(base: dict, override: dict) -> dict:
+    """Merge nested dicts without mutating either input."""
+    merged = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge_dicts(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _cfg_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "y", "on")
+    return bool(value)
+
+
+def _cfg_int(value: Any, default: int) -> int:
+    if value is None or value == "":
+        return default
+    return int(value)
+
+
+def _cfg_float(value: Any, default: float) -> float:
+    if value is None or value == "":
+        return default
+    return float(value)
+
+
+def _build_hybrid_retriever(
+    memory_store: FastMemoryStore,
+    memory_dir: str,
+    memory_cfg: dict,
+    ret_cfg: dict,
+):
+    """Construct the optional hybrid retriever from memory config."""
+    from scenesmith.scene_expert.memory.embedding import SceneMemoryEmbedder
+    from scenesmith.scene_expert.memory.hybrid_retriever import HybridMemoryRetriever
+    from scenesmith.scene_expert.memory.scoring import HybridScoreWeights
+
+    emb_cfg = memory_cfg.get("embedding", {})
+    idx_cfg = memory_cfg.get("index", {})
+    backend = os.environ.get(
+        "SCENEEXPERT_MEMORY_INDEX_BACKEND",
+        idx_cfg.get("backend", "numpy"),
+    )
+    if backend != "numpy":
+        raise NotImplementedError(
+            f"SceneExpert hybrid memory currently supports numpy index only, got {backend!r}."
+        )
+
+    weights_cfg = memory_cfg.get("hybrid_weights", {})
+    weights = HybridScoreWeights(
+        embedding_similarity=_cfg_float(weights_cfg.get("embedding_similarity"), 0.45),
+        object_overlap=_cfg_float(weights_cfg.get("object_overlap"), 0.20),
+        room_stage_match=_cfg_float(weights_cfg.get("room_stage_match"), 0.15),
+        memory_quality_score=_cfg_float(weights_cfg.get("memory_quality_score"), 0.10),
+        recency_or_verified=_cfg_float(weights_cfg.get("recency_or_verified"), 0.10),
+    )
+
+    embedder = SceneMemoryEmbedder(
+        model_dir=emb_cfg.get("model_dir"),
+        model_id=emb_cfg.get("model_id", "BAAI/bge-m3"),
+        device=emb_cfg.get("device", "cpu"),
+        batch_size=_cfg_int(emb_cfg.get("batch_size"), 8),
+        max_length=_cfg_int(emb_cfg.get("max_length"), 512),
+        normalize=_cfg_bool(emb_cfg.get("normalize"), True),
+    )
+    return HybridMemoryRetriever(
+        store=memory_store,
+        memory_dir=memory_dir,
+        embedder=embedder,
+        index_dir=idx_cfg.get("dir"),
+        max_success=_cfg_int(ret_cfg.get("max_success_cases"), 3),
+        max_failure=_cfg_int(ret_cfg.get("max_failure_cases"), 3),
+        max_skills=_cfg_int(ret_cfg.get("max_skills"), 2),
+        recall_top_k=_cfg_int(ret_cfg.get("recall_top_k"), 30),
+        sim_threshold=_cfg_float(ret_cfg.get("sim_threshold"), 0.0),
+        object_overlap_threshold=_cfg_float(
+            ret_cfg.get("object_overlap_threshold"),
+            0.15,
+        ),
+        weights=weights,
+        require_indexes=_cfg_bool(idx_cfg.get("require_ready"), True),
+    )
+
+
 class SceneExpertHookRunner:
     """Per-scene hook runner that wraps SceneSmith stage execution.
 
@@ -79,7 +171,7 @@ class SceneExpertHookRunner:
         task_spec: SceneTaskSpec,
         harness: Harness,
         global_planner: GlobalPlanner,
-        retriever: MemoryRetriever | None,
+        retriever: Any | None,
         stage_verifier: StageVerifier,
         full_verifier: FullVerifier,
         repair_controller: RepairController,
@@ -637,12 +729,16 @@ def build_hook_runner(
         Configured SceneExpertHookRunner, or None if disabled.
     """
     # Ablation configs set experiment.scene_expert. The root scene_expert block is
-    # a disabled default and can be enabled manually via CLI overrides.
-    se_cfg = cfg_dict.get("experiment", {}).get("scene_expert") or cfg_dict.get(
-        "scene_expert", {}
-    )
+    # a disabled default and also carries memory sub-config defaults.
+    root_se_cfg = cfg_dict.get("scene_expert", {})
+    exp_se_cfg = cfg_dict.get("experiment", {}).get("scene_expert")
+    se_cfg = exp_se_cfg or root_se_cfg
     if not se_cfg:
         return None
+    memory_cfg = _deep_merge_dicts(
+        root_se_cfg.get("memory", {}),
+        se_cfg.get("memory", {}),
+    )
 
     mode = se_cfg.get("mode", "disabled")
     if mode == "disabled" or not se_cfg.get("enabled", False):
@@ -666,25 +762,42 @@ def build_hook_runner(
     api_key = os.environ.get("OPENAI_API_KEY", "dummy")
 
     # Memory system (skip if harness_only)
-    memory_dir = se_cfg.get("memory", {}).get(
+    memory_dir = memory_cfg.get(
         "dir",
         cfg_dict.get("paths", {}).get("memory_dir", "outputs/scene_expert_memory"),
     )
     use_memory = mode in ("harness_memory", "full")
 
     memory_store: FastMemoryStore | None = None
-    retriever: MemoryRetriever | None = None
+    retriever: Any | None = None
     memory_writer: MemoryWriter | None = None
 
     if use_memory:
-        ret_cfg = se_cfg.get("memory", {}).get("retrieval", {})
+        ret_cfg = memory_cfg.get("retrieval", {})
         memory_store = FastMemoryStore(memory_dir)
-        retriever = MemoryRetriever(
-            store=memory_store,
-            max_success=ret_cfg.get("max_success_cases", 3),
-            max_failure=ret_cfg.get("max_failure_cases", 3),
-            max_skills=ret_cfg.get("max_skills", 2),
+        retriever_type = os.environ.get(
+            "SCENEEXPERT_MEMORY_RETRIEVER_TYPE",
+            memory_cfg.get("retriever_type", "lexical"),
         )
+        if retriever_type == "hybrid":
+            retriever = _build_hybrid_retriever(
+                memory_store=memory_store,
+                memory_dir=memory_dir,
+                memory_cfg=memory_cfg,
+                ret_cfg=ret_cfg,
+            )
+        elif retriever_type == "lexical":
+            retriever = MemoryRetriever(
+                store=memory_store,
+                max_success=_cfg_int(ret_cfg.get("max_success_cases"), 3),
+                max_failure=_cfg_int(ret_cfg.get("max_failure_cases"), 3),
+                max_skills=_cfg_int(ret_cfg.get("max_skills"), 2),
+            )
+        else:
+            raise ValueError(
+                f"Unsupported SceneExpert memory retriever_type={retriever_type!r}. "
+                "Use 'lexical' or 'hybrid'."
+            )
         memory_writer = MemoryWriter(
             model=model, api_base_url=api_base, api_key=api_key
         )

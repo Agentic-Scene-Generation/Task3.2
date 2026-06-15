@@ -10,12 +10,19 @@ from scripts.build_memory_index import build_memory_indexes
 from scenesmith.scene_expert.memory.embedding import (
     resolve_memory_embedding_model_dir,
 )
+from scenesmith.scene_expert.memory.hybrid_retriever import HybridMemoryRetriever
 from scenesmith.scene_expert.memory.index import NumpyMemoryIndex
 from scenesmith.scene_expert.memory.retriever import _tokenize
-from scenesmith.scene_expert.memory.schemas import FailureCase, MemoryUpdateOp, SuccessCase
+from scenesmith.scene_expert.memory.schemas import (
+    FailureCase,
+    MemoryUpdateOp,
+    Skill,
+    SuccessCase,
+)
+from scenesmith.scene_expert.memory.store import FastMemoryStore
 from scenesmith.scene_expert.memory.text_builder import build_embedding_text
 from scenesmith.scene_expert.memory.writer import MemoryWriter
-from scenesmith.scene_expert.schemas import FullVerifyReport
+from scenesmith.scene_expert.schemas import FullVerifyReport, SceneTaskSpec
 
 
 class SceneExpertMemoryTest(unittest.TestCase):
@@ -216,6 +223,93 @@ class SceneExpertMemoryTest(unittest.TestCase):
                 str(Path("/models/bge-m3")),
                 index.manifest["embedding_model_dir"],
             )
+
+    def test_hybrid_retriever_reads_numpy_indexes_and_reranks_memory(self) -> None:
+        class DummyEmbedder:
+            def encode(self, texts: list[str]) -> np.ndarray:
+                del texts
+                return np.asarray([[1.0, 0.0]], dtype=np.float32)
+
+        with TemporaryDirectory() as tmp:
+            memory_dir = Path(tmp) / "memory"
+            memory_dir.mkdir()
+            success = SuccessCase(
+                case_id="success_bedroom_001",
+                room_type="bedroom",
+                style="modern",
+                stage="furniture",
+                required_objects=["bed", "nightstand", "wardrobe"],
+                successful_pattern=["bed centered on main wall"],
+                positive_guidance=["use bed as the anchor"],
+                placement_reference=["bed_1 (bed): x=0.0, y=0.0, yaw=0"],
+                scores={"semantic": 0.9, "aesthetic": 0.8, "physics": 0.9},
+            )
+            failure = FailureCase(
+                failure_id="fail_asset_001",
+                room_type="kitchen",
+                stage="furniture",
+                failure_type="missing_mesh",
+                bad_pattern="HSSD candidate file missing",
+                negative_constraint="do not retry the same missing HSSD file",
+                repair_action="retrieve another asset",
+                is_deterministic=True,
+                scope="stage",
+            )
+            skill = Skill(
+                skill_name="arrange_bedroom_anchor",
+                stage="furniture",
+                room_types=["bedroom"],
+                required_objects=["bed", "nightstand"],
+                preconditions=["bedroom furniture stage"],
+                procedure=["place bed first", "place nightstands beside bed"],
+                failure_avoidance=["do not block the wardrobe"],
+            )
+            (memory_dir / "success_cases.jsonl").write_text(
+                success.model_dump_json() + "\n",
+                encoding="utf-8",
+            )
+            (memory_dir / "failure_cases.jsonl").write_text(
+                failure.model_dump_json() + "\n",
+                encoding="utf-8",
+            )
+            (memory_dir / "skills.jsonl").write_text(
+                skill.model_dump_json() + "\n",
+                encoding="utf-8",
+            )
+
+            build_memory_indexes(
+                memory_dir=memory_dir,
+                embedding_model_dir=Path("/models/bge-m3"),
+                stages=("furniture",),
+                memory_types=("success", "failure", "skill"),
+                embedder=DummyEmbedder(),
+            )
+            store = FastMemoryStore(str(memory_dir))
+            retriever = HybridMemoryRetriever(
+                store=store,
+                memory_dir=str(memory_dir),
+                embedder=DummyEmbedder(),
+                max_success=1,
+                max_failure=1,
+                max_skills=1,
+                require_indexes=True,
+            )
+            task_spec = SceneTaskSpec(
+                room_type="bedroom",
+                style="modern",
+                required_large_objects=["bed", "nightstand", "wardrobe"],
+                functional_zones=["sleeping_zone", "storage_zone"],
+            )
+
+            pack = retriever.retrieve(task_spec, "furniture")
+
+            self.assertEqual(1, len(pack.success_hints))
+            self.assertIn("use bed as the anchor", pack.success_hints[0])
+            self.assertIn("Reference Layout", pack.placement_reference)
+            self.assertEqual(1, len(pack.failure_hints))
+            self.assertIn("do not retry", pack.failure_hints[0])
+            self.assertEqual(1, len(pack.skill_texts))
+            self.assertIn("arrange_bedroom_anchor", pack.skill_texts[0])
 
 
 if __name__ == "__main__":
