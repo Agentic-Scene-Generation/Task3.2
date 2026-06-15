@@ -6,6 +6,11 @@ from typing import Iterator
 
 import requests
 
+from scenesmith.agent_utils.retrieval_errors import (
+    FatalRetrievalError,
+    is_fatal_retrieval_error,
+)
+
 from .dataclasses import (
     HssdRetrievalServerRequest,
     HssdRetrievalServerResponse,
@@ -111,11 +116,13 @@ class HssdRetrievalClient:
                             streamed_result = StreamedResult(**result_data)
 
                             if streamed_result.status == "error":
-                                raise RuntimeError(
+                                error_message = (
                                     f"HSSD retrieval failed for request "
-                                    f"{streamed_result.index}: "
-                                    f"{streamed_result.error}"
+                                    f"{streamed_result.index}: {streamed_result.error}"
                                 )
+                                if is_fatal_retrieval_error(error_message):
+                                    raise FatalRetrievalError(error_message)
+                                raise RuntimeError(error_message)
 
                             # Convert to response object using from_dict for proper
                             # nested deserialization.
@@ -173,6 +180,10 @@ class HssdRetrievalClient:
                 console_logger.error(
                     f"HTTP error from HSSD retrieval server: {error_detail}"
                 )
+                if is_fatal_retrieval_error(error_detail):
+                    raise FatalRetrievalError(
+                        f"HSSD retrieval server error: {error_detail}"
+                    ) from e
                 raise RuntimeError(
                     f"HSSD retrieval server error: {error_detail}"
                 ) from e

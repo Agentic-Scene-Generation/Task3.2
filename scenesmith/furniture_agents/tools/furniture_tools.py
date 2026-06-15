@@ -852,10 +852,21 @@ class FurnitureTools:
             message_parts.append(f"  - {failed.description}: {failed.error_message}")
             failure_details.append(f"- {failed.description}: {failed.error_message}")
 
-        message_parts.append(
-            "\nRECOMMENDATION: Regenerate only the failed assets with adjusted "
-            "prompts if needed."
+        has_fatal_setup_error = any(
+            "Fatal asset retrieval setup error" in failed.error_message
+            for failed in result.failed_assets
         )
+        if has_fatal_setup_error:
+            message_parts.append(
+                "\nRECOMMENDATION: Stop calling generate_assets. This is an "
+                "environment setup error, not a prompt problem. Fix the missing "
+                "retrieval dependency first, then rerun the scene."
+            )
+        else:
+            message_parts.append(
+                "\nRECOMMENDATION: Regenerate only the failed assets with adjusted "
+                "prompts if needed."
+            )
 
         # Add duplicate warning if applicable.
         self._add_duplicate_warning(message_parts)

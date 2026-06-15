@@ -42,6 +42,7 @@ external/checkpoints/
 # Logs
 *.log
 vllm_server.log
+/tmp
 
 # Secrets
 .env

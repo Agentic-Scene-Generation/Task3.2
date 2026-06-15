@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import re
 import sys
 import uuid
@@ -444,7 +445,13 @@ def run(log_path: Path, memory_dir: str, top_n: int, dry_run: bool,
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--log', required=True, help='Path to experiment.log')
-    parser.add_argument('--memory-dir', default='outputs/scene_expert_memory/ablation_4')
+    parser.add_argument(
+        '--memory-dir',
+        default=str(
+            Path(os.environ.get('SCENEEXPERT_MEMORY_DIR', 'outputs/scene_expert_memory'))
+            / 'ablation_4'
+        ),
+    )
     parser.add_argument('--scene-states-dir', default=None,
                         help='Path to room_bedroom/scene_states/ directory. '
                              'When provided, the top-1 success case per stage is '

@@ -10,7 +10,7 @@ session_memory:
   # Summarize older turns via LLM (if false, just strip images).
   enable_summarization: true
   # Model for summarization ("agent" uses cfg.openai.model).
-  summarization_model: "Qwen/Qwen3.5-35B-A3B"
+  summarization_model: ${llm.model_id}
   # Thinking effort for summarization ("none", "low", "medium", "high").
   summarization_thinking: "low"
   # Intra-turn observation stripping: strip images from older observe_scene outputs
@@ -108,9 +108,9 @@ asset_manager:
   # SAM3D backend configuration (only used when backend="sam3d")
   sam3d:
     # Path to SAM3 model checkpoint
-    sam3_checkpoint: "external/checkpoints/sam3.pt"
+    sam3_checkpoint: "${paths.checkpoints_dir}/sam3.pt"
     # Path to SAM 3D Objects pipeline config
-    sam3d_checkpoint: "external/checkpoints/pipeline.yaml"
+    sam3d_checkpoint: "${paths.checkpoints_dir}/pipeline.yaml"
     # Segmentation mode: "foreground" or "object_description"
     # - foreground: automatic foreground detection (best for uniform backgrounds)
     # - object_description: uses the asset description for semantic segmentation
@@ -120,8 +120,8 @@ asset_manager:
 
   # HSSD retrieval configuration (only used when general_asset_source="hssd")
   hssd:
-    data_path: "data/hssd-models"
-    preprocessed_path: "data/preprocessed"
+    data_path: "${paths.hssd_data_dir}/hssd-models"
+    preprocessed_path: "${paths.hssd_data_dir}/preprocessed"
     use_top_k: 5  # Number of top CLIP candidates before size ranking
     use_lenient_validation: true  # Use lenient validation for retrieved assets
     object_type_mapping:
@@ -132,8 +132,8 @@ asset_manager:
 
   # Objaverse (ObjectThor) retrieval configuration (only used when general_asset_source="objaverse")
   objaverse:
-    data_path: "data/objathor-assets"
-    preprocessed_path: "data/objathor-assets/preprocessed"
+    data_path: "${paths.data_dir}/objathor-assets"
+    preprocessed_path: "${paths.data_dir}/objathor-assets/preprocessed"
     use_top_k: 5  # Number of top CLIP candidates before size ranking
     use_lenient_validation: true  # Use lenient validation for retrieved assets
     object_type_mapping:
@@ -150,12 +150,12 @@ asset_manager:
     sources:
       partnet_mobility:
         enabled: false
-        data_path: "data/partnet_mobility_sdf"
-        embeddings_path: "data/partnet_mobility_sdf/embeddings"
+        data_path: "${paths.data_dir}/partnet_mobility_sdf"
+        embeddings_path: "${paths.data_dir}/partnet_mobility_sdf/embeddings"
       artvip:
         enabled: true
-        data_path: "data/artvip_sdf"
-        embeddings_path: "data/artvip_sdf/embeddings"
+        data_path: "${paths.data_dir}/artvip_sdf"
+        embeddings_path: "${paths.data_dir}/artvip_sdf/embeddings"
 
   # Image generation configuration
   image_generation:
@@ -236,7 +236,7 @@ collision_geometry:
 
 # OpenAI model and reasoning configuration
 openai:
-  model: "Qwen/Qwen3.5-35B-A3B"
+  model: ${llm.model_id}
   service_tier: ${openai.service_tier}
   # Vision detail level for image processing
   vision_detail: "high"
@@ -339,6 +339,7 @@ clearance_zones:
 support_surface_extraction:
   # HSSD surface handling
   hssd:
+    data_dir: "${paths.hssd_data_dir}"
     # If true, recompute surfaces using HSM algorithm instead of loading pre-validated
     # surfaces from JSON.
     recompute_surfaces: false

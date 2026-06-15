@@ -135,7 +135,10 @@ class SceneExpertPipeline:
 
     def __init__(self, cfg: DictConfig) -> None:
         self._cfg = cfg
-        se_cfg = getattr(cfg, "scene_expert", None)
+        experiment_cfg = getattr(cfg, "experiment", None)
+        se_cfg = getattr(experiment_cfg, "scene_expert", None) or getattr(
+            cfg, "scene_expert", None
+        )
 
         # Model settings
         model = cfg.furniture_agent.openai.model
@@ -143,8 +146,14 @@ class SceneExpertPipeline:
         api_key = os.environ.get("OPENAI_API_KEY", "dummy")
 
         # Memory system
+        paths_cfg = getattr(cfg, "paths", None)
+        default_memory_dir = getattr(
+            paths_cfg, "memory_dir", "outputs/scene_expert_memory"
+        )
         memory_dir = (
-            se_cfg.memory.dir if se_cfg and hasattr(se_cfg, "memory") else "outputs/scene_expert_memory"
+            se_cfg.memory.dir
+            if se_cfg and hasattr(se_cfg, "memory")
+            else default_memory_dir
         )
         self._memory_store = FastMemoryStore(memory_dir)
         max_success = getattr(getattr(se_cfg, "memory", None), "retrieval", None)

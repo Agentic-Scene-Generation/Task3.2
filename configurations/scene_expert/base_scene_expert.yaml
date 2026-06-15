@@ -18,7 +18,7 @@ mode: "disabled"
 # Memory system
 memory:
   # Directory for persistent memory storage (relative to project root)
-  dir: "outputs/scene_expert_memory"
+  dir: "${paths.memory_dir}"
   retrieval:
     max_success_cases: 3
     max_failure_cases: 3

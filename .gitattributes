@@ -1,0 +1,16 @@
+* text=auto
+
+# Linux cluster entrypoints must never be checked out with CRLF.
+*.sh text eol=lf
+*.bash text eol=lf
+*.env text eol=lf
+*.example text eol=lf
+
+# Keep source/config/docs stable when edited from Windows.
+*.py text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.json text eol=lf
+*.toml text eol=lf
+*.md text eol=lf
+*.txt text eol=lf

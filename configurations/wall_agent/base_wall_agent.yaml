@@ -10,7 +10,7 @@ session_memory:
   # Summarize older turns via LLM (if false, just strip images).
   enable_summarization: true
   # Model for summarization ("agent" uses cfg.openai.model).
-  summarization_model: "Qwen/Qwen3.5-35B-A3B"
+  summarization_model: ${llm.model_id}
   # Thinking effort for summarization ("none", "low", "medium", "high").
   summarization_thinking: "low"
   # Intra-turn observation stripping: strip images from older observe_scene outputs
@@ -91,14 +91,14 @@ asset_manager:
           texture_scale: 0.5
 
   sam3d:
-    sam3_checkpoint: "external/checkpoints/sam3.pt"
-    sam3d_checkpoint: "external/checkpoints/pipeline.yaml"
+    sam3_checkpoint: "${paths.checkpoints_dir}/sam3.pt"
+    sam3d_checkpoint: "${paths.checkpoints_dir}/pipeline.yaml"
     mode: "foreground"
     threshold: 0.5
 
   hssd:
-    data_path: "data/hssd-models"
-    preprocessed_path: "data/preprocessed"
+    data_path: "${paths.hssd_data_dir}/hssd-models"
+    preprocessed_path: "${paths.hssd_data_dir}/preprocessed"
     use_top_k: 5
     use_lenient_validation: true  # Use lenient validation for retrieved assets
     object_type_mapping:
@@ -108,8 +108,8 @@ asset_manager:
       CEILING_MOUNTED: "ceiling_objects"
 
   objaverse:
-    data_path: "data/objathor-assets"
-    preprocessed_path: "data/objathor-assets/preprocessed"
+    data_path: "${paths.data_dir}/objathor-assets"
+    preprocessed_path: "${paths.data_dir}/objathor-assets/preprocessed"
     use_top_k: 5
     use_lenient_validation: true  # Use lenient validation for retrieved assets
     object_type_mapping:
@@ -124,12 +124,12 @@ asset_manager:
     sources:
       partnet_mobility:
         enabled: false
-        data_path: "data/partnet_mobility_sdf"
-        embeddings_path: "data/partnet_mobility_sdf/embeddings"
+        data_path: "${paths.data_dir}/partnet_mobility_sdf"
+        embeddings_path: "${paths.data_dir}/partnet_mobility_sdf/embeddings"
       artvip:
         enabled: true
-        data_path: "data/artvip_sdf"
-        embeddings_path: "data/artvip_sdf/embeddings"
+        data_path: "${paths.data_dir}/artvip_sdf"
+        embeddings_path: "${paths.data_dir}/artvip_sdf/embeddings"
 
   image_generation:
     backend: "openai"
@@ -201,7 +201,7 @@ early_finish_min_score: 7
 
 # OpenAI model and reasoning configuration.
 openai:
-  model: "Qwen/Qwen3.5-35B-A3B"
+  model: ${llm.model_id}
   service_tier: ${openai.service_tier}
   vision_detail: "high"
   reasoning_effort:

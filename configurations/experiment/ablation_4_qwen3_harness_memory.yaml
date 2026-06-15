@@ -21,7 +21,7 @@ scene_expert:
   enabled: true
   mode: "harness_memory"   # harness + global planner + fast memory
   memory:
-    dir: "outputs/scene_expert_memory/ablation_4"
+    dir: "${paths.memory_dir}/ablation_4"
     retrieval:
       max_success_cases: 3
       max_failure_cases: 3

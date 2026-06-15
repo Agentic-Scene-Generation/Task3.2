@@ -173,12 +173,18 @@ def main() -> None:
     )
     parser.add_argument(
         "--memory-dir",
-        default="outputs/scene_expert_memory/ablation_4",
+        default=str(
+            Path(os.environ.get("SCENEEXPERT_MEMORY_DIR", "outputs/scene_expert_memory"))
+            / "ablation_4"
+        ),
         help="Target memory store directory (default: outputs/scene_expert_memory/ablation_4)",
     )
     parser.add_argument(
         "--model",
-        default=os.environ.get("SCENEEXPERT_MODEL", "Qwen/Qwen3.5-35B-A3B"),
+        default=os.environ.get(
+            "SCENEEXPERT_MODEL_ID",
+            os.environ.get("SCENEEXPERT_MODEL", "Qwen/Qwen3.5-35B-A3B"),
+        ),
         help="Qwen3 model name (default: Qwen/Qwen3.5-35B-A3B)",
     )
     parser.add_argument(

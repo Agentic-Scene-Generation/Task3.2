@@ -395,8 +395,11 @@ def build_hook_runner(
     Returns:
         Configured SceneExpertHookRunner, or None if disabled.
     """
-    # scene_expert config lives under cfg.experiment (set by ablation yamls), not at root.
-    se_cfg = cfg_dict.get("experiment", {}).get("scene_expert", {})
+    # Ablation configs set experiment.scene_expert. The root scene_expert block is
+    # a disabled default and can be enabled manually via CLI overrides.
+    se_cfg = cfg_dict.get("experiment", {}).get("scene_expert") or cfg_dict.get(
+        "scene_expert", {}
+    )
     if not se_cfg:
         return None
 
@@ -415,13 +418,17 @@ def build_hook_runner(
 
     # Model / API settings (shared with SceneSmith agents)
     model = cfg_dict.get("furniture_agent", {}).get("openai", {}).get(
-        "model", "Qwen/Qwen3.5-35B-A3B"
+        "model",
+        cfg_dict.get("llm", {}).get("model_id", "Qwen/Qwen3.5-35B-A3B"),
     )
     api_base = os.environ.get("OPENAI_BASE_URL", "http://localhost:8000/v1")
     api_key = os.environ.get("OPENAI_API_KEY", "dummy")
 
     # Memory system (skip if harness_only)
-    memory_dir = se_cfg.get("memory", {}).get("dir", "outputs/scene_expert_memory")
+    memory_dir = se_cfg.get("memory", {}).get(
+        "dir",
+        cfg_dict.get("paths", {}).get("memory_dir", "outputs/scene_expert_memory"),
+    )
     use_memory = mode in ("harness_memory", "full")
 
     memory_store: FastMemoryStore | None = None

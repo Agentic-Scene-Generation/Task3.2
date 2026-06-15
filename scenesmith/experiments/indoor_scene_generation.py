@@ -105,6 +105,14 @@ def _get_retrieval_gpu_device() -> str | None:
     return None
 
 
+def _get_config_bool(cfg: DictConfig, key: str, default: bool = False) -> bool:
+    """Read a nested OmegaConf bool without assuming every node exists."""
+    value = OmegaConf.select(cfg, key, default=default)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
 class RenderGPUAllocator:
     """Round-robin GPU allocator for distributing Blender rendering.
 
@@ -1596,6 +1604,21 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
 
     def _start_materials_server(self) -> None:
         """Start materials retrieval server."""
+        materials_enabled_paths = (
+            "floor_plan_agent.materials.use_retrieval_server",
+            "furniture_agent.asset_manager.router.strategies.thin_covering.enabled",
+            "manipuland_agent.asset_manager.router.strategies.thin_covering.enabled",
+            "wall_agent.asset_manager.router.strategies.thin_covering.enabled",
+            "ceiling_agent.asset_manager.router.strategies.thin_covering.enabled",
+        )
+        if not any(
+            _get_config_bool(self.cfg, path) for path in materials_enabled_paths
+        ):
+            console_logger.info(
+                "Materials retrieval disabled by config; skipping materials server"
+            )
+            return
+
         # Get server configuration from experiment config.
         server_config = self.cfg.experiment.materials_retrieval_server
 
@@ -1843,6 +1866,13 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                     use_parallel = (
                         parallel_rooms and max_parallel_rooms > 1 and num_rooms > 1
                     )
+                    if scene_expert_hooks and use_parallel:
+                        console_logger.warning(
+                            "SceneExpert hooks are per-scene and not thread-safe for "
+                            "parallel room generation; disabling parallel_rooms for "
+                            "this scene."
+                        )
+                        use_parallel = False
 
                     if use_parallel:
                         rooms = _run_parallel_room_generation(

@@ -122,6 +122,7 @@ def _fallback_spec_from_prompt(prompt: str) -> SceneTaskSpec:
     return SceneTaskSpec(room_type=room_type, style=style)
 
 
+class TaskCompiler:
     """Converts a raw text prompt to a structured SceneTaskSpec via Qwen3."""
 
     def __init__(
