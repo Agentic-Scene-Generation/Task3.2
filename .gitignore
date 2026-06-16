@@ -28,6 +28,8 @@ debug_furniture_agent/
 data/
 materials/
 artvip/
+outputs/
+sceneexpert_outputs/
 
 # Model weights
 models/
