@@ -110,6 +110,9 @@ prompt: |
   **WARNING (evaluate intent):** Window blocking can be intentional (desk/chair facing
   window for light) or problematic (wardrobe blocking window). Assess whether each warning
   reflects a design choice or an oversight that should be fixed.
+  Window-only blocking is soft/medium priority by default: it must not be described
+  as critical and must not trigger deletion of required furniture or global rearrangement
+  unless it is paired with collision, missing required objects, or door/opening blockage.
 
   Opening labels in renders: `{type}_{id}` (e.g., door_1, window_2, open_living_kitchen)
 
@@ -164,7 +167,8 @@ prompt: |
     rather than "add a storage cabinet").
   - Absence of furniture required by scene prompt (for constrained prompts), or
     absence of essential furniture for room type (for open-ended prompts)
-  - Furniture unnecessarily blocking natural light
+  - Furniture unnecessarily blocking natural light (soft/medium unless paired with
+    collision, missing required objects, or door/opening blockage)
   - Deterioration after previous fixes; if issues worsened, recommend reverting
   - **Scale Mismatch Between Related Furniture** - When furniture pieces that must work
     together have incompatible sizes (e.g., desk too tall for its chair, dining table

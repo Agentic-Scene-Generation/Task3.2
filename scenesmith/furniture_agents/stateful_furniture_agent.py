@@ -192,7 +192,10 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             blender_server=self.blender_server,
         )
         self.furniture_tools = FurnitureTools(
-            scene=self.scene, asset_manager=self.asset_manager, cfg=self.cfg
+            scene=self.scene,
+            asset_manager=self.asset_manager,
+            cfg=self.cfg,
+            safety_controller=getattr(self, "furniture_safety_controller", None),
         )
         scene_tools = SceneTools(scene=self.scene, cfg=self.cfg)
         workflow_tools = WorkflowTools()
@@ -266,6 +269,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         """
         # Store everything as instance variables for closure access.
         self.scene = scene
+        self._configure_furniture_safety_for_scene(scene.text_description)
 
         # Generate context image if configured. If generation fails, continue without it.
         if self.cfg.context_image_generation.enabled:

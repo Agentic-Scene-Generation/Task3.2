@@ -247,6 +247,66 @@ max_turns: 1000
 # Maximum number of critique-and-improve rounds before stopping
 max_critique_rounds: 3
 
+# Code-level guardrails for furniture refinement. This is separate from planner
+# prompting: even if the LLM asks for more changes, these limits are enforced in
+# tools and checkpoint handling.
+furniture_safety_controller:
+  enabled: true
+  max_critique_design_cycles: 3
+  max_move_calls: 80
+  max_rescales_per_object: 1
+  max_generate_assets_calls_after_initial: 0
+  min_accept_delta: 0.05
+  accept_score_threshold: 0.78
+  rescale_min_factor: 0.8
+  rescale_max_factor: 1.25
+  prompt_following_hard_min: 8
+  functionality_hard_min: 4
+  reachability_hard_min: 5
+  required_object_names: []
+  score_weights:
+    prompt_following: 0.25
+    functionality: 0.20
+    layout_plausibility: 0.20
+    layout: 0.15
+    realism: 0.10
+    reachability: 0.05
+    holistic_completeness: 0.05
+  size_bounds:
+    bed:
+      min: [1.20, 1.60, 0.25]
+      max: [2.40, 2.40, 1.30]
+    twin_bed:
+      min: [0.80, 1.60, 0.25]
+      max: [1.40, 2.30, 1.30]
+    nightstand:
+      min: [0.25, 0.25, 0.30]
+      max: [0.85, 0.85, 0.95]
+    wardrobe:
+      min: [0.45, 0.30, 1.20]
+      max: [2.40, 0.95, 2.50]
+    dresser:
+      min: [0.50, 0.30, 0.55]
+      max: [2.20, 0.90, 1.40]
+    desk:
+      min: [0.70, 0.40, 0.55]
+      max: [2.20, 1.20, 1.10]
+    chair:
+      min: [0.30, 0.30, 0.55]
+      max: [1.10, 1.10, 1.30]
+    sofa:
+      min: [1.10, 0.55, 0.55]
+      max: [3.50, 1.30, 1.30]
+    table:
+      min: [0.35, 0.35, 0.25]
+      max: [3.00, 1.60, 1.20]
+    cabinet:
+      min: [0.35, 0.25, 0.45]
+      max: [2.50, 0.95, 2.50]
+    bookshelf:
+      min: [0.35, 0.20, 0.80]
+      max: [2.50, 0.80, 2.70]
+
 # Scene reset thresholds for detecting quality degradation
 # Reset is suggested when EITHER threshold is exceeded
 reset_single_category_threshold: 2  # Max drop in any single score category (0-10 scale)

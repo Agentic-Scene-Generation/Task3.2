@@ -84,9 +84,9 @@ prompt: |
 
   # Scene Reset Tool
 
-  After each critique, you'll see score changes across 6 categories (Realism,
-  Functionality, Layout, Holistic Completeness, Prompt Following, Reachability), each
-  scored 0-10.
+  After each critique, you'll see score changes across 7 categories (Realism,
+  Functionality, Layout, Layout Plausibility, Holistic Completeness, Prompt Following,
+  Reachability), each scored 0-10.
 
   **Reset Guidance**: Strongly consider calling reset_scene_to_checkpoint() if:
   - ANY single category dropped ≥{{ reset_single_category_threshold }} points, OR
@@ -108,7 +108,7 @@ prompt: |
   - A cycle is only complete after both critique AND the designer's response
 
   **STOP CONDITIONS** (check after EVERY critique):
-  1. **Score threshold met**: If ALL 6 scores are ≥{{ early_finish_min_score }}/10,
+  1. **Score threshold met**: If ALL 7 scores are ≥{{ early_finish_min_score }}/10,
      STOP IMMEDIATELY. This is a mandatory exit - do not continue iterating.
      High scores mean the scene is excellent; further changes risk regression.
   2. **Max cycles reached**: {{ max_critique_rounds }} complete cycles
@@ -122,10 +122,14 @@ prompt: |
   - For initial design: "Create the initial furniture layout for this room..."
   - For critique: "Evaluate whether this scene meets the requirements above and
     check for any issues..."
-  - For changes: Pass the critic's feedback VERBATIM to the designer.
-    Do NOT filter, censor, or add your own caveats/reminders.
-    If the critic suggests something, pass it through unchanged.
-    The critic is the authority on what improvements are needed.
+  - For changes: Pass only the actionable, priority-ranked subset of critic feedback.
+    Preserve hard issues first: collisions, missing required furniture, door/opening
+    blockage, and severe reachability failures.
+  - Treat window-only concerns and general layout-plausibility refinements as soft or
+    medium priority. They may justify small local moves, but they must not trigger
+    global rearrangement, deletion of required furniture, or repeated asset generation.
+  - If the Safety Controller message says to finish, do not request more design
+    changes. Finish the stage with the accepted checkpoint.
 
   # Productive Dialogue Principles (Preserving Creative Diversity):
   **Clear Communication**: Give designer specific functional requirements while leaving

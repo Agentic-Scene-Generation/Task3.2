@@ -35,6 +35,7 @@ from openai import Timeout
 
 from scenesmith.agent_utils.action_logger import log_scene_action
 from scenesmith.agent_utils.checkpoint_state import initialize_checkpoint_attributes
+from scenesmith.agent_utils.furniture_safety import FurnitureSafetyController
 from scenesmith.agent_utils.intra_turn_image_filter import IntraTurnImageFilter
 from scenesmith.agent_utils.physics_tools import check_physics_violations
 from scenesmith.agent_utils.placement_noise import PlacementNoiseMode
@@ -166,6 +167,66 @@ class BaseStatefulAgent(ABC):
 
         # Initialize checkpoint state (N-1 and N pattern for rollback).
         initialize_checkpoint_attributes(target=self)
+
+        safety_cfg = getattr(cfg, "furniture_safety_controller", None)
+        self.furniture_safety_controller = FurnitureSafetyController(safety_cfg)
+
+    def _configure_furniture_safety_for_scene(self, scene_description: str) -> None:
+        """Reset furniture safety counters and required-object inference."""
+        controller = getattr(self, "furniture_safety_controller", None)
+        if controller and controller.enabled:
+            controller.reset_for_scene(scene_description=scene_description)
+
+    def _record_furniture_design_change_budget(self) -> str | None:
+        """Gate planner-requested furniture design changes."""
+        controller = getattr(self, "furniture_safety_controller", None)
+        if not controller or not controller.enabled:
+            return None
+
+        allowed, message = controller.record_design_change(
+            has_prior_critique=self.previous_scores is not None
+        )
+        if allowed:
+            return None
+
+        console_logger.info(message)
+        return message
+
+    def _apply_furniture_safety_after_critique(
+        self,
+        scores: CritiqueWithScores,
+        images_dir: Path | None,
+    ) -> tuple[str, CritiqueWithScores, Path | None]:
+        """Evaluate a critiqued scene and rollback to best if needed."""
+        controller = getattr(self, "furniture_safety_controller", None)
+        if not controller or not controller.enabled:
+            return "", scores, images_dir
+
+        candidate_state = copy.deepcopy(self.scene.to_state_dict())
+        decision = controller.consider_candidate(
+            scores=scores,
+            scene_state=candidate_state,
+            render_dir=images_dir,
+        )
+
+        checkpoint_scores = scores
+        checkpoint_render_dir = images_dir
+        if decision.rollback_to_best and controller.best_scene_state is not None:
+            self.scene.restore_from_state_dict(controller.best_scene_state)
+            self.rendering_manager.clear_cache()
+            if controller.best_scores is not None:
+                checkpoint_scores = controller.best_scores
+            checkpoint_render_dir = controller.best_render_dir
+            console_logger.info(
+                "Safety controller restored best hard-valid checkpoint "
+                f"(weighted_score={controller.best_weighted_score:.3f})."
+            )
+
+        return (
+            f"\n\n**Safety Controller:** {decision.message}",
+            checkpoint_scores,
+            checkpoint_render_dir,
+        )
 
     def _get_model_settings(
         self,
@@ -484,6 +545,24 @@ class BaseStatefulAgent(ABC):
         The final directory path is determined by the subclass implementation
         of _get_final_scores_directory().
         """
+        controller = getattr(self, "furniture_safety_controller", None)
+        if (
+            controller
+            and controller.enabled
+            and controller.best_scene_state is not None
+            and controller.best_scores is not None
+        ):
+            self.scene.restore_from_state_dict(controller.best_scene_state)
+            self.rendering_manager.clear_cache()
+            self.scene_checkpoint = copy.deepcopy(controller.best_scene_state)
+            self.checkpoint_scores = controller.best_scores
+            self.checkpoint_render_dir = controller.best_render_dir
+            self.final_render_dir = controller.best_render_dir
+            console_logger.info(
+                "Final furniture scene restored to best hard-valid checkpoint "
+                f"(weighted_score={controller.best_weighted_score:.3f})."
+            )
+
         # Check if final scores warrant resetting to previous checkpoint.
         # Use previous_scores (actual final critique) vs checkpoint_scores (last checkpoint).
         # Note: Final critique uses update_checkpoint=False, so previous_scores holds the
@@ -710,6 +789,10 @@ class BaseStatefulAgent(ABC):
             Returns:
                 Designer's report of what was changed.
             """
+            safety_block = self._record_furniture_design_change_budget()
+            if safety_block:
+                return safety_block
+
             return await self._request_design_change_impl(instruction)
 
         tools: list[FunctionTool] = [request_initial_design]
@@ -911,6 +994,13 @@ class BaseStatefulAgent(ABC):
                 format_style="detailed",
             )
 
+        safety_msg, checkpoint_scores, checkpoint_render_dir = (
+            self._apply_furniture_safety_after_critique(
+                scores=response,
+                images_dir=images_dir,
+            )
+        )
+
         # Shift checkpoints only during iteration critiques, not final critique.
         # This preserves N-1 checkpoint for reset check in _finalize_scene_and_scores.
         if update_checkpoint:
@@ -922,8 +1012,8 @@ class BaseStatefulAgent(ABC):
 
             # Save new checkpoint (current scene state).
             self.scene_checkpoint = copy.deepcopy(self.scene.to_state_dict())
-            self.checkpoint_scores = response
-            self.checkpoint_render_dir = images_dir
+            self.checkpoint_scores = checkpoint_scores
+            self.checkpoint_render_dir = checkpoint_render_dir
 
             # Reuse render cache hash for checkpoint change detection.
             self.checkpoint_scene_hash = self.scene.content_hash()
@@ -934,10 +1024,10 @@ class BaseStatefulAgent(ABC):
         # Always track the final render directory (separate from checkpoint logic).
         # This is needed because final critique uses update_checkpoint=False, but we
         # still need to know the actual last render dir for copying to final output.
-        self.final_render_dir = images_dir
+        self.final_render_dir = checkpoint_render_dir or images_dir
 
         # Return natural language critique with score deltas for planner.
-        return response.critique + score_change_msg
+        return response.critique + score_change_msg + safety_msg
 
     @abstractmethod
     def _get_design_change_prompt_enum(self) -> Any:

@@ -21,6 +21,7 @@ from scenesmith.agent_utils.placement_noise import (
     PlacementNoiseMode,
     apply_placement_noise,
 )
+from scenesmith.agent_utils.rescale_result import RescaleErrorType, RescaleResult
 from scenesmith.agent_utils.rescale_helpers import rescale_object_common
 from scenesmith.agent_utils.response_datatypes import (
     AssetGenerationResult,
@@ -62,7 +63,13 @@ class FurnitureTools:
     - remove_furniture_tool: Delete furniture from scene
     """
 
-    def __init__(self, scene: RoomScene, asset_manager: AssetManager, cfg: DictConfig):
+    def __init__(
+        self,
+        scene: RoomScene,
+        asset_manager: AssetManager,
+        cfg: DictConfig,
+        safety_controller: Any | None = None,
+    ):
         """Initialize furniture tools.
 
         Args:
@@ -73,6 +80,7 @@ class FurnitureTools:
         self.scene = scene
         self.asset_manager = asset_manager
         self.cfg = cfg
+        self.safety_controller = safety_controller
 
         # Initialize placement noise configuration.
         # Start with natural profile as default until planner sets it.
@@ -114,6 +122,73 @@ class FurnitureTools:
             console_logger.warning(
                 f"Unsupported noise mode {mode}, keeping current profile"
             )
+
+    def _safety_denial_generate_assets(self) -> str | None:
+        controller = self.safety_controller
+        if controller is None or not getattr(controller, "enabled", False):
+            return None
+        allowed, message = controller.record_generate_assets()
+        if allowed:
+            return None
+        console_logger.info(message)
+        return message
+
+    def _safety_denial_move(self, object_id: str) -> str | None:
+        controller = self.safety_controller
+        if controller is None or not getattr(controller, "enabled", False):
+            return None
+        allowed, message = controller.record_move(object_id=object_id)
+        if allowed:
+            return None
+        console_logger.info(message)
+        return message
+
+    def _safety_denial_remove(self, object_id: str, scene_obj: SceneObject) -> str | None:
+        controller = self.safety_controller
+        if controller is None or not getattr(controller, "enabled", False):
+            return None
+        object_text = f"{scene_obj.name} {scene_obj.description}"
+        allowed, message = controller.record_remove(
+            object_id=object_id,
+            object_text=object_text,
+        )
+        if allowed:
+            return None
+        console_logger.info(message)
+        return message
+
+    def _safety_denial_rescale(
+        self,
+        object_id: str,
+        scale_factor: float,
+    ) -> str | None:
+        controller = self.safety_controller
+        if controller is None or not getattr(controller, "enabled", False):
+            return None
+
+        scene_obj = self.scene.get_object(UniqueID(object_id))
+        object_text = ""
+        current_dimensions = None
+        if scene_obj is not None:
+            object_text = f"{scene_obj.name} {scene_obj.description}"
+            if scene_obj.bbox_min is not None and scene_obj.bbox_max is not None:
+                size = scene_obj.bbox_max - scene_obj.bbox_min
+                current_dimensions = (
+                    float(size[0]),
+                    float(size[1]),
+                    float(size[2]),
+                )
+
+        allowed, message = controller.record_rescale(
+            object_id=object_id,
+            scale_factor=scale_factor,
+            object_text=object_text,
+            current_dimensions=current_dimensions,
+        )
+        if allowed:
+            return None
+        console_logger.info(message)
+        return message
 
     def _check_floor_bounds(self, x: float, y: float) -> tuple[bool, str]:
         """Check if position (center point) is within floor plan bounds.
@@ -259,6 +334,10 @@ class FurnitureTools:
                 f"Generating batch of {len(object_descriptions)} assets: "
                 f"{object_descriptions}"
             )
+            safety_denial = self._safety_denial_generate_assets()
+            if safety_denial:
+                return safety_denial
+
             request = AssetGenerationRequest(
                 object_descriptions=object_descriptions,
                 short_names=short_names,
@@ -591,6 +670,16 @@ class FurnitureTools:
                     ),
                 ).to_json()
 
+            safety_denial = self._safety_denial_move(object_id=object_id)
+            if safety_denial:
+                return FurnitureOperationResult(
+                    success=False,
+                    message=safety_denial,
+                    object_id=object_id,
+                    error_type=FurnitureErrorType.INVALID_POSITION,
+                    suggested_action="Request a critique or finish with the best checkpoint.",
+                ).to_json()
+
             # Validate position is within floor plan bounds.
             is_valid, error_msg = self._check_floor_bounds(x=x, y=y)
             if not is_valid:
@@ -751,6 +840,19 @@ class FurnitureTools:
                     ),
                 ).to_json()
 
+            safety_denial = self._safety_denial_remove(
+                object_id=object_id,
+                scene_obj=scene_obj,
+            )
+            if safety_denial:
+                return FurnitureOperationResult(
+                    success=False,
+                    message=safety_denial,
+                    object_id=object_id,
+                    error_type=FurnitureErrorType.IMMUTABLE_OBJECT,
+                    suggested_action="Move required furniture locally instead of deleting it.",
+                ).to_json()
+
             # Remove from scene.
             removed = self.scene.remove_object(unique_id)
 
@@ -798,6 +900,18 @@ class FurnitureTools:
         console_logger.info(
             f"Tool called: rescale_furniture (id={object_id}, scale={scale_factor})"
         )
+        safety_denial = self._safety_denial_rescale(
+            object_id=object_id,
+            scale_factor=scale_factor,
+        )
+        if safety_denial:
+            return RescaleResult(
+                success=False,
+                message=safety_denial,
+                object_id=object_id,
+                error_type=RescaleErrorType.INVALID_SCALE_FACTOR,
+            ).to_json()
+
         result = rescale_object_common(
             scene=self.scene,
             object_id=object_id,
