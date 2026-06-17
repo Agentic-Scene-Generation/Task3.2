@@ -254,12 +254,18 @@ furniture_safety_controller:
   enabled: true
   max_critique_design_cycles: 3
   max_move_calls: 80
+  max_moves_initial_design: 30
+  max_moves_design_change: 12
+  max_moves_per_object_per_call: 4
+  max_physics_checks_per_designer_call: 4
   max_rescales_per_object: 1
   max_generate_assets_calls_after_initial: 0
   min_accept_delta: 0.05
   accept_score_threshold: 0.78
   rescale_min_factor: 0.8
   rescale_max_factor: 1.25
+  room_bounds_tolerance_m: 0.02
+  score_thresholds_are_hard: false
   prompt_following_hard_min: 8
   functionality_hard_min: 4
   reachability_hard_min: 5

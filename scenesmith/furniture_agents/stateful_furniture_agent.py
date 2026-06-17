@@ -190,6 +190,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             rendering_manager=self.rendering_manager,
             cfg=self.cfg,
             blender_server=self.blender_server,
+            safety_controller=getattr(self, "furniture_safety_controller", None),
         )
         self.furniture_tools = FurnitureTools(
             scene=self.scene,

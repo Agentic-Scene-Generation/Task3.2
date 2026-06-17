@@ -44,12 +44,32 @@ DEFAULT_ALIASES = {
     "bookshelf": ["bookshelf", "bookshelves", "bookcase", "bookcases"],
 }
 
+NUMBER_WORDS = {
+    "a": 1,
+    "an": 1,
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+}
+
 
 @dataclass
 class SafetyEvaluation:
     """Hard-validity and weighted score for one critique candidate."""
 
     weighted_score: float
+    hard_valid: bool
+    hard_reasons: list[str] = field(default_factory=list)
+    soft_reasons: list[str] = field(default_factory=list)
+
+
+@dataclass
+class HardStateEvaluation:
+    """Deterministic hard-check result independent of critic scoring."""
+
     hard_valid: bool
     hard_reasons: list[str] = field(default_factory=list)
     soft_reasons: list[str] = field(default_factory=list)
@@ -133,6 +153,18 @@ class FurnitureSafetyController:
             _cfg_get(cfg, "max_critique_design_cycles", 3)
         )
         self.max_move_calls = int(_cfg_get(cfg, "max_move_calls", 80))
+        self.max_moves_initial_design = int(
+            _cfg_get(cfg, "max_moves_initial_design", 30)
+        )
+        self.max_moves_design_change = int(
+            _cfg_get(cfg, "max_moves_design_change", 12)
+        )
+        self.max_moves_per_object_per_call = int(
+            _cfg_get(cfg, "max_moves_per_object_per_call", 4)
+        )
+        self.max_physics_checks_per_designer_call = int(
+            _cfg_get(cfg, "max_physics_checks_per_designer_call", 4)
+        )
         self.max_rescales_per_object = int(_cfg_get(cfg, "max_rescales_per_object", 1))
         self.max_generate_assets_calls_after_initial = int(
             _cfg_get(cfg, "max_generate_assets_calls_after_initial", 0)
@@ -148,6 +180,12 @@ class FurnitureSafetyController:
         )
         self.functionality_hard_min = int(_cfg_get(cfg, "functionality_hard_min", 4))
         self.reachability_hard_min = int(_cfg_get(cfg, "reachability_hard_min", 5))
+        self.score_thresholds_are_hard = bool(
+            _cfg_get(cfg, "score_thresholds_are_hard", False)
+        )
+        self.room_bounds_tolerance_m = float(
+            _cfg_get(cfg, "room_bounds_tolerance_m", 0.02)
+        )
 
         self.score_weights = {
             **DEFAULT_SCORE_WEIGHTS,
@@ -161,8 +199,13 @@ class FurnitureSafetyController:
 
         self.scene_description = ""
         self.required_terms: set[str] = set()
+        self.required_counts: dict[str, int] = {}
         self.design_change_calls = 0
         self.move_calls = 0
+        self.active_designer_call: str | None = None
+        self.move_calls_this_call = 0
+        self.physics_checks_this_call = 0
+        self.moves_by_object_this_call: dict[str, int] = {}
         self.generate_asset_calls = 0
         self.rescale_counts: dict[str, int] = {}
         self.should_finish = False
@@ -177,10 +220,17 @@ class FurnitureSafetyController:
         """Reset counters and infer required objects for a new scene."""
         self.scene_description = scene_description or ""
         self.required_terms = self._infer_required_terms(self.scene_description)
+        self.required_counts = self._infer_required_counts(self.scene_description)
         if self.required_object_names:
             self.required_terms.update(self.required_object_names)
+            for name in self.required_object_names:
+                self.required_counts.setdefault(name, 1)
         self.design_change_calls = 0
         self.move_calls = 0
+        self.active_designer_call = None
+        self.move_calls_this_call = 0
+        self.physics_checks_this_call = 0
+        self.moves_by_object_this_call = {}
         self.generate_asset_calls = 0
         self.rescale_counts = {}
         self.should_finish = False
@@ -200,7 +250,38 @@ class FurnitureSafetyController:
         for canonical, aliases in DEFAULT_ALIASES.items():
             if any(_contains_alias(text, alias) for alias in aliases):
                 terms.add(canonical)
+        if "twin_bed" in terms:
+            terms.discard("bed")
         return terms
+
+    def _infer_required_counts(self, prompt: str) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        text = prompt.lower().replace("_", " ")
+        number_pattern = "|".join([r"\d+", *NUMBER_WORDS.keys()])
+        for canonical, aliases in DEFAULT_ALIASES.items():
+            best_count = 0
+            for alias in aliases:
+                escaped_alias = re.escape(alias.lower())
+                pattern = (
+                    rf"(^|[^a-z0-9])(?:(?P<count>{number_pattern})\s+)?"
+                    rf"(?:\w+\s+){{0,2}}{escaped_alias}"
+                    rf"([^a-z0-9]|$)"
+                )
+                for match in re.finditer(pattern, text):
+                    count_text = match.groupdict().get("count")
+                    count = 1
+                    if count_text:
+                        count = (
+                            int(count_text)
+                            if count_text.isdigit()
+                            else NUMBER_WORDS.get(count_text, 1)
+                        )
+                    best_count = max(best_count, count)
+            if best_count > 0:
+                counts[canonical] = best_count
+        if "twin_bed" in counts:
+            counts.pop("bed", None)
+        return counts
 
     def _infer_category(self, text: str) -> str | None:
         for canonical, aliases in DEFAULT_ALIASES.items():
@@ -240,6 +321,29 @@ class FurnitureSafetyController:
         self.design_change_calls += 1
         return True, ""
 
+    def begin_designer_call(self, call_kind: str) -> None:
+        """Start per-designer-call budgets."""
+        if not self.enabled:
+            return
+        self.active_designer_call = call_kind
+        self.move_calls_this_call = 0
+        self.physics_checks_this_call = 0
+        self.moves_by_object_this_call = {}
+
+    def end_designer_call(self) -> None:
+        """Clear per-designer-call budget state."""
+        if not self.enabled:
+            return
+        self.active_designer_call = None
+        self.move_calls_this_call = 0
+        self.physics_checks_this_call = 0
+        self.moves_by_object_this_call = {}
+
+    def _current_move_limit(self) -> int:
+        if self.active_designer_call == "initial":
+            return self.max_moves_initial_design
+        return self.max_moves_design_change
+
     def record_move(self, object_id: str) -> tuple[bool, str]:
         if not self.enabled:
             return True, ""
@@ -249,7 +353,50 @@ class FurnitureSafetyController:
                 "Safety controller blocked move_furniture_tool: move budget "
                 f"exhausted ({self.max_move_calls}). Request a critique or finish.",
             )
+        call_limit = self._current_move_limit()
+        if self.active_designer_call and call_limit > 0:
+            if self.move_calls_this_call >= call_limit:
+                return (
+                    False,
+                    "Safety controller blocked move_furniture_tool: this designer "
+                    f"call already used {call_limit} move(s). Request a critique "
+                    "or finish instead of continuing local search.",
+                )
+        object_moves = self.moves_by_object_this_call.get(object_id, 0)
+        if (
+            self.active_designer_call
+            and self.max_moves_per_object_per_call > 0
+            and object_moves >= self.max_moves_per_object_per_call
+        ):
+            return (
+                False,
+                "Safety controller blocked move_furniture_tool: object "
+                f"{object_id} has already been moved {object_moves} time(s) in "
+                "this designer call. Stop iterating on the same object and "
+                "request a critique.",
+            )
         self.move_calls += 1
+        self.move_calls_this_call += 1
+        self.moves_by_object_this_call[object_id] = object_moves + 1
+        return True, ""
+
+    def record_physics_check(self) -> tuple[bool, str]:
+        if not self.enabled:
+            return True, ""
+        if (
+            self.active_designer_call
+            and self.max_physics_checks_per_designer_call > 0
+            and self.physics_checks_this_call
+            >= self.max_physics_checks_per_designer_call
+        ):
+            return (
+                False,
+                "Safety controller blocked check_physics: this designer call "
+                f"already used {self.max_physics_checks_per_designer_call} "
+                "physics check(s). Use the latest result, request critique, or "
+                "finish instead of continuing local search.",
+            )
+        self.physics_checks_this_call += 1
         return True, ""
 
     def record_generate_assets(self) -> tuple[bool, str]:
@@ -378,17 +525,20 @@ class FurnitureSafetyController:
                 f"{self.prompt_following_hard_min}"
             )
 
-        functionality = score_by_name.get("functionality")
-        if functionality and functionality.grade < self.functionality_hard_min:
-            hard_reasons.append(
-                f"functionality={functionality.grade} below {self.functionality_hard_min}"
-            )
+        if self.score_thresholds_are_hard:
+            functionality = score_by_name.get("functionality")
+            if functionality and functionality.grade < self.functionality_hard_min:
+                hard_reasons.append(
+                    f"functionality={functionality.grade} below "
+                    f"{self.functionality_hard_min}"
+                )
 
-        reachability = score_by_name.get("reachability")
-        if reachability and reachability.grade < self.reachability_hard_min:
-            hard_reasons.append(
-                f"reachability={reachability.grade} below {self.reachability_hard_min}"
-            )
+            reachability = score_by_name.get("reachability")
+            if reachability and reachability.grade < self.reachability_hard_min:
+                hard_reasons.append(
+                    f"reachability={reachability.grade} below "
+                    f"{self.reachability_hard_min}"
+                )
 
         if _has_unnegated_collision(text):
             hard_reasons.append("physics collision indicated by critique")
@@ -418,14 +568,164 @@ class FurnitureSafetyController:
             soft_reasons=soft_reasons,
         )
 
+    def evaluate_scene_state(
+        self, scene: Any, physics_context: str | None = None
+    ) -> HardStateEvaluation:
+        """Run deterministic hard checks that do not depend on critic judgment."""
+        hard_reasons: list[str] = []
+        soft_reasons: list[str] = []
+
+        required_counts = self.required_counts or {
+            term: 1 for term in self.required_terms
+        }
+        if required_counts:
+            observed_counts = {term: 0 for term in required_counts}
+            for object_id, obj in getattr(scene, "objects", {}).items():
+                if getattr(obj, "immutable", False):
+                    continue
+                category = self._infer_category(
+                    f"{object_id} {getattr(obj, 'name', '')} "
+                    f"{getattr(obj, 'description', '')}"
+                )
+                if category in observed_counts:
+                    observed_counts[category] += 1
+            for term, required_count in required_counts.items():
+                if observed_counts.get(term, 0) < required_count:
+                    hard_reasons.append(
+                        f"missing required {term}: expected {required_count}, "
+                        f"found {observed_counts.get(term, 0)}"
+                    )
+
+        room_bounds = self._room_bounds_xy(scene)
+        if room_bounds is not None:
+            min_x, min_y, max_x, max_y = room_bounds
+            tol = self.room_bounds_tolerance_m
+            for object_id, obj in getattr(scene, "objects", {}).items():
+                if getattr(obj, "immutable", False):
+                    continue
+                if not self._is_furniture_object(obj):
+                    continue
+                world_bounds = obj.compute_world_bounds()
+                if world_bounds is None:
+                    continue
+                world_min, world_max = world_bounds
+                if (
+                    world_min[0] < min_x - tol
+                    or world_max[0] > max_x + tol
+                    or world_min[1] < min_y - tol
+                    or world_max[1] > max_y + tol
+                ):
+                    hard_reasons.append(
+                        f"{object_id} full bounding box exceeds room bounds: "
+                        f"x=[{world_min[0]:.3f}, {world_max[0]:.3f}] vs "
+                        f"[{min_x:.3f}, {max_x:.3f}], "
+                        f"y=[{world_min[1]:.3f}, {world_max[1]:.3f}] vs "
+                        f"[{min_y:.3f}, {max_y:.3f}]"
+                    )
+
+        if physics_context:
+            hard_from_physics, soft_from_physics = self._parse_physics_context(
+                physics_context
+            )
+            hard_reasons.extend(hard_from_physics)
+            soft_reasons.extend(soft_from_physics)
+
+        return HardStateEvaluation(
+            hard_valid=not hard_reasons,
+            hard_reasons=hard_reasons,
+            soft_reasons=soft_reasons,
+        )
+
+    def _room_bounds_xy(self, scene: Any) -> tuple[float, float, float, float] | None:
+        room_geometry = getattr(scene, "room_geometry", None)
+        if room_geometry is None:
+            return None
+        length = float(getattr(room_geometry, "length", 0.0) or 0.0)
+        width = float(getattr(room_geometry, "width", 0.0) or 0.0)
+        if length <= 0 or width <= 0:
+            return None
+        return (-length / 2.0, -width / 2.0, length / 2.0, width / 2.0)
+
+    def _is_furniture_object(self, obj: Any) -> bool:
+        object_type = getattr(obj, "object_type", "")
+        value = getattr(object_type, "value", object_type)
+        return str(value).lower() == "furniture"
+
+    def _parse_physics_context(self, physics_context: str) -> tuple[list[str], list[str]]:
+        text = physics_context.lower()
+        if "no physics violations detected" in text:
+            return [], []
+
+        hard_reasons: list[str] = []
+        soft_reasons: list[str] = []
+
+        hard_sections = (
+            "collisions (",
+            "thin covering overlaps",
+            "thin covering boundary violations",
+            "door clearance violations",
+            "open connection blocked",
+            "wall height exceeded",
+        )
+        for section in hard_sections:
+            if section in text:
+                hard_reasons.append(f"physics hard violation: {section.rstrip(' (')}")
+
+        if "window access warnings" in text:
+            soft_reasons.append("window access warning")
+
+        if not hard_reasons and "physics violations detected" in text:
+            soft_reasons.append("non-hard physics warning")
+
+        return hard_reasons, soft_reasons
+
+    def remember_hard_valid_scene_state(
+        self,
+        scene_state: dict[str, Any],
+        source: str,
+        weighted_score: float | None = None,
+        scores: CritiqueWithScores | None = None,
+        render_dir: Path | None = None,
+    ) -> bool:
+        """Save a deterministic hard-valid checkpoint when useful."""
+        if not self.enabled:
+            return False
+        candidate_score = 0.0 if weighted_score is None else weighted_score
+        if self.best_scene_state is not None and weighted_score is None:
+            return False
+        if (
+            self.best_scene_state is not None
+            and weighted_score is not None
+            and candidate_score < self.best_weighted_score + self.min_accept_delta
+        ):
+            return False
+
+        self.best_scene_state = copy.deepcopy(scene_state)
+        self.best_scores = copy.deepcopy(scores) if scores is not None else None
+        self.best_render_dir = render_dir
+        self.best_weighted_score = max(candidate_score, self.best_weighted_score)
+        self.best_reasons = [f"deterministic hard-valid checkpoint from {source}"]
+        console_logger.info(
+            "Safety controller saved deterministic hard-valid checkpoint from %s",
+            source,
+        )
+        return True
+
     def consider_candidate(
         self,
         scores: CritiqueWithScores,
         scene_state: dict[str, Any],
         render_dir: Path | None,
+        hard_state_evaluation: HardStateEvaluation | None = None,
     ) -> CandidateDecision:
         """Evaluate a critiqued candidate and update/rollback best state metadata."""
         evaluation = self.evaluate_scores(scores)
+        if hard_state_evaluation is not None:
+            evaluation.hard_reasons.extend(hard_state_evaluation.hard_reasons)
+            evaluation.soft_reasons.extend(hard_state_evaluation.soft_reasons)
+            evaluation.hard_valid = (
+                evaluation.hard_valid and hard_state_evaluation.hard_valid
+            )
         accepted = False
         rollback_to_best = False
 
@@ -457,7 +757,12 @@ class FurnitureSafetyController:
                 f"({'; '.join(evaluation.hard_reasons)})."
             )
 
-        if evaluation.hard_valid and evaluation.weighted_score >= self.accept_score_threshold:
+        if rollback_to_best:
+            self.should_finish = True
+        if (
+            evaluation.hard_valid
+            and evaluation.weighted_score >= self.accept_score_threshold
+        ):
             self.should_finish = True
         if self.design_change_calls >= self.max_critique_design_cycles:
             self.should_finish = True

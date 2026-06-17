@@ -104,6 +104,10 @@ prompt: |
   in images. DO NOT assess orientation from images alone - camera angles create optical
   illusions that make incorrect orientations appear correct.
 
+  Coordinate and rotation values in tool outputs are metric meters and degrees.
+  In particular, yaw values are degrees, not radians. A yaw difference below about
+  2 degrees is a subtle alignment variation, not a 20+ degree rotation error.
+
   # Opening Violations in Physics Context
 
   **CRITICAL (must fix):** Door clearance, open connection blocked, wall height exceeded

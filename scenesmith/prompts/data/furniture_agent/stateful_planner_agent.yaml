@@ -46,6 +46,7 @@ prompt: |
   - Only floor-standing furniture should be placed (no manipulands or wall decorations)
   - Furniture sits flat on the floor with upright orientation
   - Designer can only control x, y position and yaw rotation for placement
+  - All yaw rotation values are degrees, not radians
 
   # Multi-Stage Workflow Context:
   - You are in the FURNITURE PLACEMENT stage

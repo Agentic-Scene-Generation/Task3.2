@@ -35,7 +35,10 @@ from openai import Timeout
 
 from scenesmith.agent_utils.action_logger import log_scene_action
 from scenesmith.agent_utils.checkpoint_state import initialize_checkpoint_attributes
-from scenesmith.agent_utils.furniture_safety import FurnitureSafetyController
+from scenesmith.agent_utils.furniture_safety import (
+    FurnitureSafetyController,
+    HardStateEvaluation,
+)
 from scenesmith.agent_utils.intra_turn_image_filter import IntraTurnImageFilter
 from scenesmith.agent_utils.physics_tools import check_physics_violations
 from scenesmith.agent_utils.placement_noise import PlacementNoiseMode
@@ -192,28 +195,141 @@ class BaseStatefulAgent(ABC):
         console_logger.info(message)
         return message
 
+    def _evaluate_current_furniture_hard_state(
+        self, physics_context: str | None = None
+    ) -> HardStateEvaluation | None:
+        """Run deterministic furniture hard checks for the current scene."""
+        controller = getattr(self, "furniture_safety_controller", None)
+        if not controller or not controller.enabled:
+            return None
+        if physics_context is None:
+            current_furniture_id = getattr(self, "current_furniture_id", None)
+            physics_context = check_physics_violations(
+                scene=self.scene,
+                cfg=self.cfg,
+                current_furniture_id=current_furniture_id,
+                agent_type=self.agent_type,
+            )
+        return controller.evaluate_scene_state(
+            scene=self.scene,
+            physics_context=physics_context,
+        )
+
+    def _begin_furniture_design_transaction(
+        self, call_kind: str
+    ) -> dict[str, Any] | None:
+        """Start a guarded furniture designer call with a rollback snapshot."""
+        controller = getattr(self, "furniture_safety_controller", None)
+        if not controller or not controller.enabled:
+            return None
+
+        controller.begin_designer_call(call_kind=call_kind)
+        pre_state = copy.deepcopy(self.scene.to_state_dict())
+        pre_hard = self._evaluate_current_furniture_hard_state()
+        if pre_hard and pre_hard.hard_valid:
+            controller.remember_hard_valid_scene_state(
+                scene_state=pre_state,
+                source=f"pre-{call_kind}",
+            )
+
+        return {
+            "call_kind": call_kind,
+            "pre_state": pre_state,
+            "pre_hard_valid": bool(pre_hard and pre_hard.hard_valid),
+        }
+
+    def _restore_furniture_scene_state(self, scene_state: dict[str, Any]) -> None:
+        self.scene.restore_from_state_dict(scene_state)
+        self.rendering_manager.clear_cache()
+
+    def _end_furniture_design_transaction(
+        self, transaction: dict[str, Any] | None
+    ) -> str:
+        """Validate a designer call and rollback if hard constraints fail."""
+        if transaction is None:
+            return ""
+
+        controller = getattr(self, "furniture_safety_controller", None)
+        if not controller or not controller.enabled:
+            return ""
+
+        try:
+            hard_eval = self._evaluate_current_furniture_hard_state()
+            call_kind = transaction["call_kind"]
+            if hard_eval and hard_eval.hard_valid:
+                controller.remember_hard_valid_scene_state(
+                    scene_state=copy.deepcopy(self.scene.to_state_dict()),
+                    source=f"post-{call_kind}",
+                )
+                return (
+                    "\n\n**Safety Controller:** deterministic hard checks passed "
+                    f"after {call_kind} designer call."
+                )
+
+            reasons = (
+                "; ".join(hard_eval.hard_reasons)
+                if hard_eval and hard_eval.hard_reasons
+                else "unknown deterministic hard-check failure"
+            )
+            rollback_state = controller.best_scene_state
+            rollback_source = "best hard-valid checkpoint"
+            if rollback_state is None and transaction.get("pre_hard_valid"):
+                rollback_state = transaction["pre_state"]
+                rollback_source = "pre-call hard-valid snapshot"
+
+            if rollback_state is not None:
+                self._restore_furniture_scene_state(rollback_state)
+                controller.should_finish = True
+                console_logger.info(
+                    "Safety controller rolled back %s designer call to %s: %s",
+                    transaction["call_kind"],
+                    rollback_source,
+                    reasons,
+                )
+                return (
+                    "\n\n**Safety Controller:** rolled back this designer call to "
+                    f"the {rollback_source}; deterministic hard checks failed "
+                    f"({reasons}). Finish with the restored checkpoint."
+                )
+
+            console_logger.info(
+                "Safety controller found hard-invalid state but no rollback "
+                "snapshot is available: %s",
+                reasons,
+            )
+            return (
+                "\n\n**Safety Controller:** deterministic hard checks failed "
+                f"({reasons}), but no hard-valid rollback snapshot exists yet."
+            )
+        finally:
+            controller.end_designer_call()
+
     def _apply_furniture_safety_after_critique(
         self,
         scores: CritiqueWithScores,
         images_dir: Path | None,
+        physics_context: str | None = None,
     ) -> tuple[str, CritiqueWithScores, Path | None]:
         """Evaluate a critiqued scene and rollback to best if needed."""
         controller = getattr(self, "furniture_safety_controller", None)
         if not controller or not controller.enabled:
             return "", scores, images_dir
 
+        hard_state_evaluation = self._evaluate_current_furniture_hard_state(
+            physics_context=physics_context
+        )
         candidate_state = copy.deepcopy(self.scene.to_state_dict())
         decision = controller.consider_candidate(
             scores=scores,
             scene_state=candidate_state,
             render_dir=images_dir,
+            hard_state_evaluation=hard_state_evaluation,
         )
 
         checkpoint_scores = scores
         checkpoint_render_dir = images_dir
         if decision.rollback_to_best and controller.best_scene_state is not None:
-            self.scene.restore_from_state_dict(controller.best_scene_state)
-            self.rendering_manager.clear_cache()
+            self._restore_furniture_scene_state(controller.best_scene_state)
             if controller.best_scores is not None:
                 checkpoint_scores = controller.best_scores
             checkpoint_render_dir = controller.best_render_dir
@@ -550,14 +666,14 @@ class BaseStatefulAgent(ABC):
             controller
             and controller.enabled
             and controller.best_scene_state is not None
-            and controller.best_scores is not None
         ):
-            self.scene.restore_from_state_dict(controller.best_scene_state)
-            self.rendering_manager.clear_cache()
+            self._restore_furniture_scene_state(controller.best_scene_state)
             self.scene_checkpoint = copy.deepcopy(controller.best_scene_state)
-            self.checkpoint_scores = controller.best_scores
-            self.checkpoint_render_dir = controller.best_render_dir
-            self.final_render_dir = controller.best_render_dir
+            if controller.best_scores is not None:
+                self.checkpoint_scores = controller.best_scores
+            if controller.best_render_dir is not None:
+                self.checkpoint_render_dir = controller.best_render_dir
+                self.final_render_dir = controller.best_render_dir
             console_logger.info(
                 "Final furniture scene restored to best hard-valid checkpoint "
                 f"(weighted_score={controller.best_weighted_score:.3f})."
@@ -998,6 +1114,7 @@ class BaseStatefulAgent(ABC):
             self._apply_furniture_safety_after_critique(
                 scores=response,
                 images_dir=images_dir,
+                physics_context=physics_context,
             )
         )
 
@@ -1047,6 +1164,7 @@ class BaseStatefulAgent(ABC):
             Designer's report of what was changed.
         """
         console_logger.info("Tool called: request_design_change")
+        transaction = self._begin_furniture_design_transaction(call_kind="change")
 
         # Get instruction from prompt registry with domain-specific enum.
         prompt_enum = self._get_design_change_prompt_enum()
@@ -1056,13 +1174,17 @@ class BaseStatefulAgent(ABC):
         )
 
         # Designer run with critique-based instruction.
-        result = await Runner.run(
-            starting_agent=self.designer,
-            input=full_instruction,
-            session=self.designer_session,
-            max_turns=self.cfg.agents.designer_agent.max_turns,
-            run_config=self._create_run_config(),
-        )
+        try:
+            result = await Runner.run(
+                starting_agent=self.designer,
+                input=full_instruction,
+                session=self.designer_session,
+                max_turns=self.cfg.agents.designer_agent.max_turns,
+                run_config=self._create_run_config(),
+            )
+        except Exception:
+            self._end_furniture_design_transaction(transaction)
+            raise
         log_agent_usage(result=result, agent_name="DESIGNER (CHANGE)")
 
         if result.final_output:
@@ -1070,7 +1192,8 @@ class BaseStatefulAgent(ABC):
                 response=result.final_output, agent_name="DESIGNER (CHANGE)"
             )
 
-        return result.final_output
+        safety_msg = self._end_furniture_design_transaction(transaction)
+        return (result.final_output or "") + safety_msg
 
     @abstractmethod
     def _get_initial_design_prompt_enum(self) -> Any:
@@ -1140,6 +1263,7 @@ class BaseStatefulAgent(ABC):
             Designer's report of initial design.
         """
         console_logger.info("Tool called: request_initial_design")
+        transaction = self._begin_furniture_design_transaction(call_kind="initial")
 
         # Get instruction from prompt registry with domain-specific enum and kwargs.
         prompt_enum = self._get_initial_design_prompt_enum()
@@ -1152,13 +1276,17 @@ class BaseStatefulAgent(ABC):
         input_message = self._build_initial_design_input(instruction)
 
         # Designer runs with initial design instruction.
-        result = await Runner.run(
-            starting_agent=self.designer,
-            input=input_message,
-            session=self.designer_session,
-            max_turns=self.cfg.agents.designer_agent.max_turns,
-            run_config=self._create_run_config(),
-        )
+        try:
+            result = await Runner.run(
+                starting_agent=self.designer,
+                input=input_message,
+                session=self.designer_session,
+                max_turns=self.cfg.agents.designer_agent.max_turns,
+                run_config=self._create_run_config(),
+            )
+        except Exception:
+            self._end_furniture_design_transaction(transaction)
+            raise
         log_agent_usage(result=result, agent_name="DESIGNER (INITIAL)")
 
         if result.final_output:
@@ -1166,4 +1294,5 @@ class BaseStatefulAgent(ABC):
                 response=result.final_output, agent_name="DESIGNER (INITIAL)"
             )
 
-        return result.final_output
+        safety_msg = self._end_furniture_design_transaction(transaction)
+        return (result.final_output or "") + safety_msg

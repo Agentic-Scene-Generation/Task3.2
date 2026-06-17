@@ -42,6 +42,7 @@ class VisionTools:
         rendering_manager: RenderingManager,
         cfg: DictConfig,
         blender_server: "BlenderServer",
+        safety_controller: Any | None = None,
     ):
         """Initialize vision tools.
 
@@ -57,6 +58,7 @@ class VisionTools:
         self.rendering_manager = rendering_manager
         self.cfg = cfg
         self.blender_server = blender_server
+        self.safety_controller = safety_controller
         self.tools = self._create_tool_closures()
 
     def _get_room_bounds(self) -> tuple[float, float, float, float] | None:
@@ -179,6 +181,12 @@ class VisionTools:
             String describing collision status.
         """
         console_logger.info("Tool called: check_physics")
+        controller = self.safety_controller
+        if controller is not None and getattr(controller, "enabled", False):
+            allowed, message = controller.record_physics_check()
+            if not allowed:
+                console_logger.info(message)
+                return message
         return check_physics_violations(
             scene=self.scene, cfg=self.cfg, agent_type=AgentType.FURNITURE
         )
