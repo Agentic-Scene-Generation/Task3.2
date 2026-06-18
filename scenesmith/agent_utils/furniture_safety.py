@@ -15,6 +15,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from scenesmith.agent_utils.furniture_layout_planning import (
+    evaluate_bedroom_layout_plausibility,
+)
 from scenesmith.agent_utils.scoring import CritiqueWithScores
 
 console_logger = logging.getLogger(__name__)
@@ -73,6 +76,8 @@ class HardStateEvaluation:
     hard_valid: bool
     hard_reasons: list[str] = field(default_factory=list)
     soft_reasons: list[str] = field(default_factory=list)
+    weighted_score_penalty: float = 0.0
+    plausibility_report: dict[str, Any] | None = None
 
 
 @dataclass
@@ -192,6 +197,7 @@ class FurnitureSafetyController:
             **_plain_dict(_cfg_get(cfg, "score_weights", {})),
         }
         self.size_bounds = _plain_dict(_cfg_get(cfg, "size_bounds", {}))
+        self.bedroom_layout_cfg = _cfg_get(cfg, "bedroom_layout", {})
         self.required_object_names = [
             str(x).lower()
             for x in list(_cfg_get(cfg, "required_object_names", []) or [])
@@ -215,6 +221,7 @@ class FurnitureSafetyController:
         self.best_render_dir: Path | None = None
         self.best_weighted_score = -1.0
         self.best_reasons: list[str] = []
+        self.best_plausibility_report: dict[str, Any] | None = None
 
     def reset_for_scene(self, scene_description: str) -> None:
         """Reset counters and infer required objects for a new scene."""
@@ -239,6 +246,7 @@ class FurnitureSafetyController:
         self.best_render_dir = None
         self.best_weighted_score = -1.0
         self.best_reasons = []
+        self.best_plausibility_report = None
         console_logger.info(
             "Furniture safety controller reset: required_terms=%s",
             sorted(self.required_terms),
@@ -630,10 +638,19 @@ class FurnitureSafetyController:
             hard_reasons.extend(hard_from_physics)
             soft_reasons.extend(soft_from_physics)
 
+        plausibility_report = evaluate_bedroom_layout_plausibility(
+            scene=scene,
+            cfg=self.bedroom_layout_cfg,
+        )
+        if plausibility_report.issues:
+            soft_reasons.extend(plausibility_report.issues)
+
         return HardStateEvaluation(
             hard_valid=not hard_reasons,
             hard_reasons=hard_reasons,
             soft_reasons=soft_reasons,
+            weighted_score_penalty=plausibility_report.penalty,
+            plausibility_report=plausibility_report.to_dict(),
         )
 
     def _room_bounds_xy(self, scene: Any) -> tuple[float, float, float, float] | None:
@@ -711,6 +728,13 @@ class FurnitureSafetyController:
         )
         return True
 
+    def _summarize_reasons(self, reasons: list[str], limit: int = 3) -> str:
+        if not reasons:
+            return ""
+        shown = reasons[:limit]
+        suffix = "" if len(reasons) <= limit else f"; +{len(reasons) - limit} more"
+        return "; ".join(shown) + suffix
+
     def consider_candidate(
         self,
         scores: CritiqueWithScores,
@@ -726,6 +750,18 @@ class FurnitureSafetyController:
             evaluation.hard_valid = (
                 evaluation.hard_valid and hard_state_evaluation.hard_valid
             )
+            if hard_state_evaluation.weighted_score_penalty > 0:
+                raw_score = evaluation.weighted_score
+                evaluation.weighted_score = max(
+                    0.0,
+                    evaluation.weighted_score
+                    - hard_state_evaluation.weighted_score_penalty,
+                )
+                evaluation.soft_reasons.append(
+                    "deterministic plausibility penalty "
+                    f"{hard_state_evaluation.weighted_score_penalty:.3f} "
+                    f"applied to critic score {raw_score:.3f}"
+                )
         accepted = False
         rollback_to_best = False
 
@@ -737,6 +773,11 @@ class FurnitureSafetyController:
                 self.best_render_dir = render_dir
                 self.best_weighted_score = evaluation.weighted_score
                 self.best_reasons = []
+                self.best_plausibility_report = (
+                    copy.deepcopy(hard_state_evaluation.plausibility_report)
+                    if hard_state_evaluation is not None
+                    else None
+                )
                 accepted = True
                 message = (
                     "Safety controller accepted new best hard-valid checkpoint "
@@ -766,6 +807,10 @@ class FurnitureSafetyController:
             self.should_finish = True
         if self.design_change_calls >= self.max_critique_design_cycles:
             self.should_finish = True
+
+        soft_summary = self._summarize_reasons(evaluation.soft_reasons)
+        if soft_summary:
+            message += f" Soft issues: {soft_summary}."
 
         if self.should_finish:
             message += " Stage should finish now."

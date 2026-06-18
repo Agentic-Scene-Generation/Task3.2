@@ -17,6 +17,9 @@ from scenesmith.agent_utils.base_stateful_agent import (
     BaseStatefulAgent,
     log_agent_usage,
 )
+from scenesmith.agent_utils.furniture_layout_planning import (
+    format_bedroom_anchor_guidance,
+)
 from scenesmith.agent_utils.placement_noise import PlacementNoiseMode
 from scenesmith.agent_utils.reachability import (
     compute_reachability,
@@ -364,6 +367,22 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             "scene_description": self.scene.text_description,
             "has_reference_image": self.context_image_path is not None,
         }
+
+    def _build_initial_design_input(self, instruction: str) -> str | list[dict]:
+        """Add deterministic room-aware bedroom guidance to the initial design."""
+        safety_cfg = getattr(self.cfg, "furniture_safety_controller", None)
+        bedroom_cfg = getattr(safety_cfg, "bedroom_layout", None)
+        guidance = format_bedroom_anchor_guidance(
+            scene=self.scene,
+            cfg=bedroom_cfg,
+        )
+        if guidance:
+            instruction = (
+                f"{instruction}\n\n"
+                "# Deterministic Room-Aware Layout Guidance\n"
+                f"{guidance}"
+            )
+        return super()._build_initial_design_input(instruction)
 
     def _get_context_image_path(self) -> Path | None:
         """Get the AI-generated context image for initial design.

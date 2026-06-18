@@ -16,6 +16,9 @@ from scenesmith.agent_utils.asset_manager import (
     AssetGenerationResult as DomainAssetGenerationResult,
     AssetManager,
 )
+from scenesmith.agent_utils.furniture_layout_planning import (
+    apply_bedroom_asset_size_policy,
+)
 from scenesmith.agent_utils.loop_detector import LoopDetector
 from scenesmith.agent_utils.placement_noise import (
     PlacementNoiseMode,
@@ -418,11 +421,26 @@ class FurnitureTools:
             if safety_denial:
                 return safety_denial
 
-            request = AssetGenerationRequest(
+            safety_cfg = getattr(self.cfg, "furniture_safety_controller", None)
+            bedroom_cfg = getattr(safety_cfg, "bedroom_layout", None)
+            size_policy_result = apply_bedroom_asset_size_policy(
+                scene=self.scene,
                 object_descriptions=object_descriptions,
                 short_names=short_names,
-                object_type=ObjectType.FURNITURE,
                 desired_dimensions=desired_dimensions,
+                cfg=bedroom_cfg,
+            )
+            if size_policy_result.notes:
+                console_logger.info(
+                    "Bedroom asset size policy applied: %s",
+                    "; ".join(size_policy_result.notes),
+                )
+
+            request = AssetGenerationRequest(
+                object_descriptions=size_policy_result.object_descriptions,
+                short_names=size_policy_result.short_names,
+                object_type=ObjectType.FURNITURE,
+                desired_dimensions=size_policy_result.desired_dimensions,
                 style_context=style_context,
                 scene_id=self.scene.scene_dir.name,
             )

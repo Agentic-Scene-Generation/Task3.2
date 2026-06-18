@@ -736,6 +736,25 @@ class BaseStatefulAgent(ABC):
                     f"Scores file not found at {scores_source}, cannot copy"
                 )
 
+            controller = getattr(self, "furniture_safety_controller", None)
+            plausibility_report = (
+                getattr(controller, "best_plausibility_report", None)
+                if controller and controller.enabled
+                else None
+            )
+            if plausibility_report:
+                plausibility_dest = final_scene_dir / "plausibility.yaml"
+                with open(plausibility_dest, "w") as f:
+                    yaml.dump(
+                        data=plausibility_report,
+                        stream=f,
+                        default_flow_style=False,
+                        sort_keys=False,
+                    )
+                console_logger.info(
+                    f"Saved deterministic plausibility report to {plausibility_dest}"
+                )
+
             # Copy render images.
             render_images = list(render_dir_to_copy.glob("*.png"))
             if render_images:
