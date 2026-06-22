@@ -201,6 +201,22 @@ def _build_hybrid_retriever(
     ret_cfg: dict,
 ):
     """Construct the optional hybrid retriever from memory config."""
+    if not (
+        memory_store.success_cases
+        or memory_store.failure_cases
+        or memory_store.skills
+    ):
+        console_logger.info(
+            "Hybrid memory requested but memory store is empty; using "
+            "lightweight lexical retriever and skipping BGE-M3 initialization."
+        )
+        return MemoryRetriever(
+            store=memory_store,
+            max_success=_cfg_int(ret_cfg.get("max_success_cases"), 3),
+            max_failure=_cfg_int(ret_cfg.get("max_failure_cases"), 3),
+            max_skills=_cfg_int(ret_cfg.get("max_skills"), 2),
+        )
+
     from scenesmith.scene_expert.memory.embedding import SceneMemoryEmbedder
     from scenesmith.scene_expert.memory.hybrid_retriever import HybridMemoryRetriever
     from scenesmith.scene_expert.memory.scoring import HybridScoreWeights

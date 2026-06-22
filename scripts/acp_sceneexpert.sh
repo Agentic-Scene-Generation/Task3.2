@@ -113,6 +113,11 @@ ACP_OUTPUT_DIR=""
 # TODO: Keep memory experiments sequential by default.
 ACP_HYDRA_OVERRIDES="experiment.num_workers=1"
 
+# TODO: Online SceneExpert memory retrieval must stay CPU-only. BGE-M3 on CUDA
+# can make FlagEmbedding spawn subprocesses that re-import main.py outside
+# Blender and fail with "No module named '_bpy'".
+ACP_MEMORY_EMBEDDING_DEVICE="cpu"
+
 EXPERIMENT="${1:-$ACP_EXPERIMENT}"
 shift || true
 
@@ -172,6 +177,7 @@ export SCENEEXPERT_DISABLE_ARTICULATED=$ACP_DISABLE_ARTICULATED
 export SCENEEXPERT_DISABLE_MATERIALS=$ACP_DISABLE_MATERIALS
 export SCENEEXPERT_CONVEX_READY_TIMEOUT=$ACP_CONVEX_READY_TIMEOUT
 export SCENEEXPERT_CONVEX_MAX_OMP_THREADS=$ACP_CONVEX_MAX_OMP_THREADS
+export SCENEEXPERT_MEMORY_EMBEDDING_DEVICE="$ACP_MEMORY_EMBEDDING_DEVICE"
 export SCENEEXPERT_VLLM_LOG="$LOG_DIR/vllm_server.log"
 EOF
 
@@ -195,12 +201,16 @@ echo "CPU offload GB/GPU: $ACP_CPU_OFFLOAD_GB"
 echo "vLLM wait timeout: ${ACP_VLLM_WAIT_TIMEOUT_SECONDS}s"
 echo "vLLM engine ready timeout: ${ACP_VLLM_ENGINE_READY_TIMEOUT_S}s"
 echo "safetensors load strategy: ${ACP_SAFETENSORS_LOAD_STRATEGY:-default}"
-echo "DeepGEMM: use=${ACP_VLLM_USE_DEEP_GEMM}, moe_use=${ACP_VLLM_MOE_USE_DEEP_GEMM}, warmup=${ACP_VLLM_DEEP_GEMM_WARMUP}"
+printf 'DeepGEMM: use=%s, moe_use=%s, warmup=%s\n' \
+    "$ACP_VLLM_USE_DEEP_GEMM" \
+    "$ACP_VLLM_MOE_USE_DEEP_GEMM" \
+    "$ACP_VLLM_DEEP_GEMM_WARMUP"
 echo "enforce eager: ${ACP_VLLM_ENFORCE_EAGER}"
 echo "disable articulated retrieval: ${ACP_DISABLE_ARTICULATED}"
 echo "disable materials retrieval: ${ACP_DISABLE_MATERIALS}"
 echo "convex ready timeout: ${ACP_CONVEX_READY_TIMEOUT}s"
 echo "convex max OMP threads: ${ACP_CONVEX_MAX_OMP_THREADS}"
+echo "memory embedding device: ${ACP_MEMORY_EMBEDDING_DEVICE}"
 echo "Env file: $SCENEEXPERT_ENV_FILE"
 
 if command -v nvidia-smi >/dev/null 2>&1; then

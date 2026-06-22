@@ -1,5 +1,8 @@
 import unittest
 
+import sys
+import types
+
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -8,6 +11,7 @@ import numpy as np
 
 from scripts.build_memory_index import build_memory_indexes
 from scenesmith.scene_expert.memory.embedding import (
+    SceneMemoryEmbedder,
     resolve_memory_embedding_model_dir,
 )
 from scenesmith.scene_expert.memory.hybrid_retriever import HybridMemoryRetriever
@@ -190,6 +194,29 @@ class SceneExpertMemoryTest(unittest.TestCase):
                 Path("/custom/bge-m3"),
                 resolve_memory_embedding_model_dir(),
             )
+
+    def test_embedder_pins_flagembedding_to_single_device(self) -> None:
+        calls: dict[str, object] = {}
+
+        class DummyBGEM3FlagModel:
+            def __init__(self, model_dir: str, **kwargs: object) -> None:
+                calls["model_dir"] = model_dir
+                calls["kwargs"] = kwargs
+
+            def encode(self, texts: list[str], **kwargs: object) -> dict[str, object]:
+                return {"dense_vecs": [[1.0, 0.0] for _ in texts]}
+
+        fake_module = types.SimpleNamespace(BGEM3FlagModel=DummyBGEM3FlagModel)
+        with TemporaryDirectory() as tmp:
+            with patch.dict(sys.modules, {"FlagEmbedding": fake_module}):
+                embedder = SceneMemoryEmbedder(model_dir=tmp, device="cpu")
+                matrix = embedder.encode(["bedroom furniture"])
+
+        self.assertEqual(str(Path(tmp)), calls["model_dir"])
+        kwargs = calls["kwargs"]
+        self.assertIsInstance(kwargs, dict)
+        self.assertEqual(["cpu"], kwargs["devices"])
+        self.assertEqual((1, 2), matrix.shape)
 
     def test_numpy_memory_index_searches_normalized_vectors(self) -> None:
         with TemporaryDirectory() as tmp:

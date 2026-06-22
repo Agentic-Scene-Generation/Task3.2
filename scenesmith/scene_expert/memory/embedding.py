@@ -1,11 +1,9 @@
-"""Local embedding wrapper for SceneExpert vector memory.
-
-PR-2 only provides an offline/standalone embedding API. The online hook path
-still uses the lexical retriever until the hybrid retriever is introduced.
-"""
+"""Local embedding wrapper for SceneExpert vector memory."""
 
 from __future__ import annotations
 
+import inspect
+import logging
 import os
 
 from pathlib import Path
@@ -14,6 +12,7 @@ import numpy as np
 
 DEFAULT_EMBEDDING_MODEL_ID = "BAAI/bge-m3"
 DEFAULT_EMBEDDING_DIRNAME = "bge-m3"
+console_logger = logging.getLogger(__name__)
 
 
 def resolve_memory_embedding_model_dir(model_dir: str | None = None) -> Path:
@@ -89,9 +88,38 @@ class SceneMemoryEmbedder:
 
         self._model = BGEM3FlagModel(
             str(self.model_dir),
-            use_fp16=self.use_fp16,
-            device=self.device,
+            **self._flag_embedding_kwargs(BGEM3FlagModel),
         )
+
+    def _flag_embedding_kwargs(self, model_cls: object) -> dict[str, object]:
+        """Build version-tolerant FlagEmbedding constructor kwargs.
+
+        Newer FlagEmbedding releases use ``devices`` and auto-detect all visible
+        CUDA devices when it is omitted. In SceneExpert online retrieval this is
+        dangerous: multi-process embedding workers re-import ``main.py`` and can
+        fail outside Blender with ``No module named '_bpy'``. Always pass a
+        single explicit target device.
+        """
+        kwargs: dict[str, object] = {"use_fp16": self.use_fp16}
+        try:
+            parameters = inspect.signature(model_cls.__init__).parameters
+        except (TypeError, ValueError):
+            parameters = {}
+
+        accepts_var_kwargs = any(
+            param.kind == inspect.Parameter.VAR_KEYWORD
+            for param in parameters.values()
+        )
+        if "devices" in parameters or accepts_var_kwargs:
+            kwargs["devices"] = [self.device]
+        elif "device" in parameters:
+            kwargs["device"] = self.device
+        else:
+            console_logger.warning(
+                "FlagEmbedding BGEM3FlagModel signature does not expose "
+                "'devices' or 'device'; falling back to constructor defaults."
+            )
+        return kwargs
 
     def encode(self, texts: list[str]) -> np.ndarray:
         """Encode texts to a float32 dense matrix."""
