@@ -1052,6 +1052,34 @@ class BaseStatefulAgent(ABC):
                 result += self._planner_budget_hint_after_design_change()
             return result
 
+        @function_tool
+        async def finish_stage(summary: str = "") -> str:
+            """Finish the current stage and stop planner tool use.
+
+            Use this when the design is accepted, the Safety Controller says to
+            finish, or the critique/design budget is exhausted.
+
+            Args:
+                summary: Concise final workflow summary for this stage.
+
+            Returns:
+                Confirmation that the planner should return its final answer.
+            """
+            console_logger.info("Tool called: finish_stage")
+            self._planner_budget_exhausted = True
+            controller = getattr(self, "furniture_safety_controller", None)
+            if controller and getattr(controller, "enabled", False):
+                controller.should_finish = True
+            compact_summary = " ".join(str(summary or "").split())
+            if compact_summary:
+                console_logger.info("Planner finish_stage summary: %s", compact_summary)
+            return (
+                "FINISH_STAGE_ACCEPTED: do not call any more planner tools. "
+                "Return your final concise workflow summary now. The framework "
+                "will run the final critique automatically after the planner exits."
+                + (f"\nSummary: {compact_summary}" if compact_summary else "")
+            )
+
         tools: list[FunctionTool] = [request_initial_design]
 
         # Only add critique-related tools if critique rounds are enabled.
@@ -1068,6 +1096,7 @@ class BaseStatefulAgent(ABC):
             placement_style_tool = self._create_placement_style_tool()
             tools.insert(0, placement_style_tool)
 
+        tools.append(finish_stage)
         return tools
 
     @abstractmethod

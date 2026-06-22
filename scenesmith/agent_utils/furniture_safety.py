@@ -308,6 +308,20 @@ class FurnitureSafetyController:
                 return True
         return False
 
+    def _count_category_in_scene(self, scene: Any, category: str) -> int:
+        """Count non-immutable scene objects matching a furniture category."""
+        count = 0
+        for object_id, obj in getattr(scene, "objects", {}).items():
+            if getattr(obj, "immutable", False):
+                continue
+            object_text = (
+                f"{object_id} {getattr(obj, 'name', '')} "
+                f"{getattr(obj, 'description', '')}"
+            )
+            if self._infer_category(object_text) == category:
+                count += 1
+        return count
+
     def record_design_change(self, has_prior_critique: bool) -> tuple[bool, str]:
         """Gate critique-design cycles."""
         if not self.enabled or not has_prior_critique:
@@ -421,14 +435,59 @@ class FurnitureSafetyController:
         self.generate_asset_calls += 1
         return True, ""
 
-    def record_remove(self, object_id: str, object_text: str = "") -> tuple[bool, str]:
+    def record_add(
+        self,
+        scene: Any,
+        asset_text: str = "",
+    ) -> tuple[bool, str]:
+        """Block adding extra copies of prompt-required furniture categories."""
         if not self.enabled:
             return True, ""
-        if self.is_required_object(object_id, object_text):
+        required_counts = self.required_counts or {
+            term: 1 for term in self.required_terms
+        }
+        if not required_counts:
+            return True, ""
+        category = self._infer_category(asset_text)
+        if category is None or category not in required_counts:
+            return True, ""
+        current_count = self._count_category_in_scene(scene, category)
+        required_count = required_counts[category]
+        if current_count >= required_count:
+            return (
+                False,
+                "Safety controller blocked add_furniture_to_scene_tool: prompt "
+                f"requires {required_count} {category}(s), and {current_count} "
+                "are already present. Move existing objects instead of adding "
+                "duplicates.",
+            )
+        return True, ""
+
+    def record_remove(
+        self,
+        object_id: str,
+        object_text: str = "",
+        scene: Any | None = None,
+    ) -> tuple[bool, str]:
+        if not self.enabled:
+            return True, ""
+        category = self._infer_category(f"{object_id} {object_text}")
+        required_counts = self.required_counts or {
+            term: 1 for term in self.required_terms
+        }
+        if (
+            scene is not None
+            and category is not None
+            and category in required_counts
+            and self._count_category_in_scene(scene, category) > required_counts[category]
+        ):
+            return True, ""
+        if category in required_counts or self.is_required_object(object_id, object_text):
             return (
                 False,
                 "Safety controller blocked remove_furniture_tool: this object appears "
-                "to satisfy a prompt-required furniture item. Move it locally instead "
+                "to satisfy a prompt-required furniture item, and removing it would "
+                "drop the scene below the requested count. Move it locally instead "
                 "of deleting it.",
             )
         return True, ""

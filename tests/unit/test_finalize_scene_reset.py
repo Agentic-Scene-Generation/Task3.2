@@ -85,6 +85,8 @@ class TestFinalizeSceneReset(unittest.TestCase):
         mock_cfg = MagicMock()
         mock_cfg.reset_single_category_threshold = 3  # Trigger reset on 3+ point drop.
         mock_cfg.reset_total_sum_threshold = 6
+        mock_cfg.max_critique_rounds = 1
+        mock_cfg.planner_context_limits = {}
 
         # Set up action_log_path as a real path for the action logger decorator.
         mock_scene.action_log_path = self.temp_dir / "action_log.json"
@@ -119,6 +121,17 @@ class TestFinalizeSceneReset(unittest.TestCase):
                 pass
 
         return TestableAgent()
+
+    def test_planner_tools_include_finish_stage(self):
+        """Planner should have a legal explicit stage-completion tool."""
+        mock_scene = MagicMock()
+        mock_rendering_manager = MagicMock()
+        agent = self._create_testable_agent(mock_scene, mock_rendering_manager)
+
+        tools = agent._create_planner_tools()
+        tool_names = {getattr(tool, "name", "") for tool in tools}
+
+        self.assertIn("finish_stage", tool_names)
 
     def test_finalize_resets_to_n1_not_n2_when_scores_degrade(self):
         """When final scores are worse than N-1, reset should use N-1 state (not N-2).

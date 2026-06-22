@@ -1,6 +1,7 @@
 import unittest
 
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 from scenesmith.agent_utils.furniture_safety import FurnitureSafetyController
 from scenesmith.agent_utils.scoring import CategoryScore, CritiqueWithScores
@@ -137,6 +138,73 @@ class FurnitureSafetyControllerTest(unittest.TestCase):
         self.assertEqual(controller.required_counts.get("nightstand"), 2)
         self.assertEqual(controller.required_counts.get("bed"), 1)
         self.assertEqual(controller.required_counts.get("wardrobe"), 1)
+
+    def test_add_required_object_is_blocked_after_requested_count(self) -> None:
+        controller = FurnitureSafetyController({"enabled": True})
+        controller.reset_for_scene("A bedroom with a bed, two nightstands, and a wardrobe.")
+        scene = SimpleNamespace(
+            objects={
+                "nightstand_0": SimpleNamespace(
+                    name="nightstand",
+                    description="wooden nightstand",
+                    immutable=False,
+                ),
+                "nightstand_1": SimpleNamespace(
+                    name="nightstand",
+                    description="wooden nightstand",
+                    immutable=False,
+                ),
+            }
+        )
+
+        allowed, message = controller.record_add(
+            scene=scene,
+            asset_text="wooden nightstand with drawer",
+        )
+
+        self.assertFalse(allowed)
+        self.assertIn("requires 2 nightstand", message)
+
+    def test_extra_required_object_can_be_removed_but_last_required_is_blocked(
+        self,
+    ) -> None:
+        controller = FurnitureSafetyController({"enabled": True})
+        controller.reset_for_scene("A bedroom with a bed, two nightstands, and a wardrobe.")
+        scene = SimpleNamespace(
+            objects={
+                "nightstand_0": SimpleNamespace(
+                    name="nightstand",
+                    description="wooden nightstand",
+                    immutable=False,
+                ),
+                "nightstand_1": SimpleNamespace(
+                    name="nightstand",
+                    description="wooden nightstand",
+                    immutable=False,
+                ),
+                "nightstand_2": SimpleNamespace(
+                    name="nightstand",
+                    description="wooden nightstand",
+                    immutable=False,
+                ),
+            }
+        )
+
+        allowed_extra, _ = controller.record_remove(
+            "nightstand_2",
+            "wooden nightstand",
+            scene=scene,
+        )
+        scene.objects.pop("nightstand_2")
+        allowed_required, message = controller.record_remove(
+            "nightstand_1",
+            "wooden nightstand",
+            scene=scene,
+        )
+
+        self.assertTrue(allowed_extra)
+        self.assertFalse(allowed_required)
+        self.assertIn("below the requested count", message)
 
     def test_per_designer_call_move_budget_is_enforced(self) -> None:
         controller = FurnitureSafetyController(

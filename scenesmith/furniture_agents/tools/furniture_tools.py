@@ -147,6 +147,19 @@ class FurnitureTools:
         console_logger.info(message)
         return message
 
+    def _safety_denial_add(self, asset_text: str) -> str | None:
+        controller = self.safety_controller
+        if controller is None or not getattr(controller, "enabled", False):
+            return None
+        allowed, message = controller.record_add(
+            scene=self.scene,
+            asset_text=asset_text,
+        )
+        if allowed:
+            return None
+        console_logger.info(message)
+        return message
+
     def _safety_denial_remove(self, object_id: str, scene_obj: SceneObject) -> str | None:
         controller = self.safety_controller
         if controller is None or not getattr(controller, "enabled", False):
@@ -155,6 +168,7 @@ class FurnitureTools:
         allowed, message = controller.record_remove(
             object_id=object_id,
             object_text=object_text,
+            scene=self.scene,
         )
         if allowed:
             return None
@@ -620,6 +634,19 @@ class FurnitureTools:
                     message=f"Asset {asset_id} not found in registry. "
                     f"Available: {available_ids}",
                     error_type=FurnitureErrorType.ASSET_NOT_FOUND,
+                )
+
+            safety_denial = self._safety_denial_add(
+                asset_text=(
+                    f"{original_asset.name} "
+                    f"{getattr(original_asset, 'description', '')}"
+                )
+            )
+            if safety_denial:
+                return self._create_failure_result(
+                    asset_id=asset_id,
+                    message=safety_denial,
+                    error_type=FurnitureErrorType.INVALID_POSITION,
                 )
 
             console_logger.debug(

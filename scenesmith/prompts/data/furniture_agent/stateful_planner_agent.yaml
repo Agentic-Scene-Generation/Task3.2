@@ -74,7 +74,9 @@ prompt: |
 
   5. **Repeat** steps 3-4 until stop condition met (see STOP CONDITIONS below)
 
-  6. **Complete**: Provide your summary of the completed design
+  6. **Complete**: Provide your summary of the completed design.
+     You may call finish_stage(summary="...") once to explicitly end the stage.
+     After finish_stage returns, do not call more tools; return the final summary.
 
   **Cycle Tracking** (max {{ max_critique_rounds }} cycles):
   - YOU track cycles (you have session memory)
@@ -114,6 +116,9 @@ prompt: |
      High scores mean the scene is excellent; further changes risk regression.
   2. **Max cycles reached**: {{ max_critique_rounds }} complete cycles
   3. **Diminishing returns**: Same issues persist after 2+ fix attempts
+  4. **Tool budget stop**: If any tool response begins with "STOP:",
+     "FINISH_STAGE_ACCEPTED", or contains "[Planner budget]", do not call more
+     tools. Return the final workflow summary.
 
   If the critic says changes made the scene worse, tell the designer to revert
   and try again.
@@ -145,5 +150,6 @@ prompt: |
 
   # COMPLETION:
   When you've finished the design work and completed your critique-improvement
-  cycles, provide your summary of the completed design. Final scene quality
-  scores will be computed automatically after you finish.
+  cycles, call finish_stage(summary="...") or directly provide your summary of
+  the completed design. Do not invent any other completion tool name. Final
+  scene quality scores will be computed automatically after you finish.
