@@ -10,7 +10,7 @@ agents:
 
   planner_agent:
     name: "planner_agent"
-    max_turns: 500
+    max_turns: 120
     prompt: STATEFUL_PLANNER_AGENT
 
   critic_agent:

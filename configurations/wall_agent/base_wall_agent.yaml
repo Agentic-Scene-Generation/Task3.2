@@ -196,6 +196,15 @@ max_turns: 1000
 # Maximum number of critique-and-improve rounds before stopping.
 max_critique_rounds: 1
 
+# Hard context limits for values returned to the planner inside one Runner.run.
+# The full critic/designer outputs are still logged; these limits only bound the
+# text that is fed back into planner context to prevent long wall workflows from
+# exceeding the local vLLM context window.
+planner_context_limits:
+  initial_design_max_chars: 5000
+  critique_max_chars: 7000
+  design_change_max_chars: 5000
+
 # Scene reset thresholds for detecting quality degradation.
 reset_single_category_threshold: 2
 reset_total_sum_threshold: 1

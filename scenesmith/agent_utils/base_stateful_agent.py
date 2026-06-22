@@ -59,6 +59,17 @@ from scenesmith.utils.openai import encode_image_to_base64
 console_logger = logging.getLogger(__name__)
 
 
+def _cfg_get(cfg: Any, key: str, default: Any) -> Any:
+    if cfg is None:
+        return default
+    try:
+        if hasattr(cfg, "get"):
+            return cfg.get(key, default)
+    except Exception:
+        pass
+    return getattr(cfg, key, default)
+
+
 def log_agent_usage(result: RunResult, agent_name: str) -> None:
     """Log token usage from an agent run.
 
@@ -173,6 +184,9 @@ class BaseStatefulAgent(ABC):
 
         safety_cfg = getattr(cfg, "furniture_safety_controller", None)
         self.furniture_safety_controller = FurnitureSafetyController(safety_cfg)
+        self._planner_critique_tool_calls = 0
+        self._planner_design_change_tool_calls = 0
+        self._planner_budget_exhausted = False
 
     def _configure_furniture_safety_for_scene(self, scene_description: str) -> None:
         """Reset furniture safety counters and required-object inference."""
@@ -790,6 +804,8 @@ class BaseStatefulAgent(ABC):
                 Confirmation with checkpoint details and scores.
             """
             console_logger.info("Tool called: reset_scene_to_checkpoint")
+            if self._planner_budget_exhausted:
+                return self._planner_budget_stop_message("reset_scene_to_checkpoint")
 
             if (
                 self.previous_scene_checkpoint is None
@@ -872,6 +888,74 @@ class BaseStatefulAgent(ABC):
 
         return select_placement_style
 
+    def _reset_planner_budget_tracking(self) -> None:
+        self._planner_critique_tool_calls = 0
+        self._planner_design_change_tool_calls = 0
+        self._planner_budget_exhausted = False
+
+    def _planner_context_limit(self, key: str, default: int) -> int:
+        limits_cfg = getattr(self.cfg, "planner_context_limits", None)
+        try:
+            return int(_cfg_get(limits_cfg, key, default))
+        except (TypeError, ValueError):
+            return default
+
+    def _truncate_planner_tool_output(
+        self,
+        text: str,
+        *,
+        label: str,
+        max_chars: int,
+    ) -> str:
+        """Keep planner tool outputs bounded inside a single Runner.run."""
+        if max_chars <= 0 or len(text) <= max_chars:
+            return text
+        head_chars = max_chars // 2
+        tail_chars = max_chars - head_chars
+        console_logger.info(
+            "Truncated %s result for planner context from %d to %d chars",
+            label,
+            len(text),
+            max_chars,
+        )
+        return (
+            text[:head_chars]
+            + "\n\n[... planner context truncated; middle omitted ...]\n\n"
+            + text[-tail_chars:]
+        )
+
+    def _planner_budget_stop_message(self, tool_name: str) -> str:
+        self._planner_budget_exhausted = True
+        return (
+            f"STOP: {tool_name} is blocked because the configured "
+            f"max_critique_rounds={self.cfg.max_critique_rounds} budget has "
+            "been reached. Do not call request_critique(), "
+            "request_design_change(), or reset_scene_to_checkpoint() again. "
+            "Return your final concise workflow summary now. The framework will "
+            "run the final critique automatically after the planner exits."
+        )
+
+    def _planner_budget_hint_after_critique(self) -> str:
+        if self._planner_critique_tool_calls < int(self.cfg.max_critique_rounds):
+            return ""
+        return (
+            "\n\n[Planner budget] This is the last allowed planner critique. "
+            "If changes are still needed, call request_design_change() once to "
+            "address the critique, then return the final summary. Do not call "
+            "request_critique() again."
+        )
+
+    def _planner_budget_hint_after_design_change(self) -> str:
+        if self._planner_design_change_tool_calls < int(self.cfg.max_critique_rounds):
+            return ""
+        self._planner_budget_exhausted = True
+        return (
+            "\n\n[Planner budget] The configured critique-improvement cycle "
+            "budget is complete. Do not call more planner tools. Return the "
+            "final concise workflow summary now; the final critique will be "
+            "computed automatically."
+        )
+
     def _create_planner_tools(self) -> list[FunctionTool]:
         """Create planner tools for the design workflow.
 
@@ -885,6 +969,7 @@ class BaseStatefulAgent(ABC):
         Returns:
             List of function tools for planner agent.
         """
+        self._reset_planner_budget_tracking()
 
         @function_tool
         async def request_initial_design() -> str:
@@ -896,7 +981,14 @@ class BaseStatefulAgent(ABC):
             Returns:
                 Designer's report of what was created and why.
             """
-            return await self._request_initial_design_impl()
+            result = await self._request_initial_design_impl()
+            return self._truncate_planner_tool_output(
+                result,
+                label="initial design",
+                max_chars=self._planner_context_limit(
+                    "initial_design_max_chars", 5000
+                ),
+            )
 
         @function_tool
         async def request_critique() -> str:
@@ -908,7 +1000,17 @@ class BaseStatefulAgent(ABC):
             Returns:
                 Critic's detailed evaluation with specific improvement suggestions.
             """
-            return await self._request_critique_impl()
+            if self._planner_critique_tool_calls >= int(self.cfg.max_critique_rounds):
+                return self._planner_budget_stop_message("request_critique")
+
+            self._planner_critique_tool_calls += 1
+            result = await self._request_critique_impl()
+            result = self._truncate_planner_tool_output(
+                result,
+                label="critique",
+                max_chars=self._planner_context_limit("critique_max_chars", 7000),
+            )
+            return result + self._planner_budget_hint_after_critique()
 
         @function_tool
         async def request_design_change(instruction: str) -> str:
@@ -924,11 +1026,31 @@ class BaseStatefulAgent(ABC):
             Returns:
                 Designer's report of what was changed.
             """
+            counts_as_critique_cycle = (
+                self._planner_critique_tool_calls
+                > self._planner_design_change_tool_calls
+            )
+            if counts_as_critique_cycle and self._planner_design_change_tool_calls >= int(
+                self.cfg.max_critique_rounds
+            ):
+                return self._planner_budget_stop_message("request_design_change")
+
             safety_block = self._record_furniture_design_change_budget()
             if safety_block:
                 return safety_block
 
-            return await self._request_design_change_impl(instruction)
+            result = await self._request_design_change_impl(instruction)
+            result = self._truncate_planner_tool_output(
+                result,
+                label="design change",
+                max_chars=self._planner_context_limit(
+                    "design_change_max_chars", 5000
+                ),
+            )
+            if counts_as_critique_cycle:
+                self._planner_design_change_tool_calls += 1
+                result += self._planner_budget_hint_after_design_change()
+            return result
 
         tools: list[FunctionTool] = [request_initial_design]
 
