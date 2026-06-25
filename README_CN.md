@@ -926,7 +926,7 @@ $SCENEEXPERT_OUTPUT_DIR/YYYY-MM-DD/HH-MM-SS/
 
 ## 9. SceneExpert trace 与 memory
 
-启用 `ablation_3/4/5` 后，每个 experiment 输出目录会生成：
+启用 `ablation_3/4/4a/4b/4c/5` 后，每个 experiment 输出目录会生成全局 trace；同时每个单场景目录会生成一个更适合调试和展示的 `scene_expert/` 目录：
 
 ```text
 $SCENEEXPERT_OUTPUT_DIR/YYYY-MM-DD/HH-MM-SS/
@@ -934,16 +934,49 @@ $SCENEEXPERT_OUTPUT_DIR/YYYY-MM-DD/HH-MM-SS/
   experiment.log
   traces/
     trace_000000.json
+  scene_000/
+    timing_stats.jsonl
+    stage_working_memory/
+      furniture/
+        memory.jsonl
+      wall_mounted/
+        memory.jsonl
+    scene_expert/
+      trace/
+        trace_000000.json
+        trace_000000_partial.json
+      stages/
+        000_floor_plan_pre.json
+        001_floor_plan.json
+        stage_trace.jsonl
+      memory/
+        memory_update_ops.json
+        memory_update_ops.jsonl
+      visuals/
+        floor_plan_visuals.json
+        furniture_visuals.json
 ```
 
-`ablation_4/5` 会把经验写到各自的 memory 子目录，例如 `ablation_4` 默认是：
+说明：
+
+- `trace/trace_000000_partial.json` 会在每个 stage 结束后刷新；即使任务中途报错，也会保留已完成 stage 的结构化记录。
+- `stages/*_pre.json` 保存该 stage 开始前的 retrieved memory、StageBrief 和注入信息，便于检查 memory 是否真正进入 prompt。
+- `stages/NNN_<stage>.json` 与 `stage_trace.jsonl` 保存该 stage 的 verifier report、scores、repair decision 和耗时。
+- `memory/memory_update_ops.jsonl` 是本次场景结束时 MemoryWriter 生成的更新操作镜像，用于 debug；真正长期记忆仍写入下面的全局 memory bank。
+- `visuals/*_visuals.json` 不重复拷贝大图，而是索引该 stage 已生成的 PNG、scores、scene_state、DMD 路径，便于快速定位可视化结果。
+- `stage_working_memory/<stage>/memory.jsonl` 是单场景、单 stage 的在线工作记忆。每次 render 会写入一条记录；critic 评分后会把 scores 和 critique 追加到同一类记录中；下一次 designer 调用前会检索这些记录并注入 compact memory context。
+- `timing_stats.jsonl` 记录 designer、critic、rendering_manager 等模块耗时；日志中也会打印 `[Timing]` 和 `[SceneExpertTiming]` 行，便于定位慢模块。
+
+`ablation_4/4a/4b/4c/5` 会把长期经验写到各自的 memory 子目录，例如 `ablation_4c` 默认是：
 
 ```text
-$SCENEEXPERT_MEMORY_DIR/ablation_4/
+$SCENEEXPERT_MEMORY_DIR/ablation_4c/
   success_cases.jsonl
   failure_cases.jsonl
   skills.jsonl
 ```
+
+这三个 JSONL 文件在 memory store 初始化时就会创建。文件存在但为空，表示当前还没有通过质量门控写入长期 memory；不是路径错误。
 
 推荐流程：
 

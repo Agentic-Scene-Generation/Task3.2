@@ -358,16 +358,19 @@ class SceneExpertHookRunner:
 
         if self._retriever is not None and self._mode in ("harness_memory", "full"):
             try:
+                retrieval_start = time.time()
                 self._current_memory_pack = self._retriever.retrieve(
                     self._task_spec, stage
                 )
+                retrieval_elapsed = time.time() - retrieval_start
                 n_hints = (
                     len(self._current_memory_pack.success_hints)
                     + len(self._current_memory_pack.failure_hints)
                 )
                 console_logger.info(
                     f"[SceneExpert] Memory retrieved for {stage}: "
-                    f"{n_hints} hints, {len(self._current_memory_pack.skill_texts)} skills"
+                    f"{n_hints} hints, {len(self._current_memory_pack.skill_texts)} skills "
+                    f"in {retrieval_elapsed:.2f}s"
                 )
             except Exception as e:
                 console_logger.warning(f"Memory retrieval failed for {stage}: {e}")
@@ -378,6 +381,7 @@ class SceneExpertHookRunner:
         self._current_stage_brief = None
         if self._mode in ("harness_only", "harness_memory", "full"):
             try:
+                planner_start = time.time()
                 context = self._harness.build_context(
                     stage=stage,
                     task_spec=self._task_spec,
@@ -394,7 +398,8 @@ class SceneExpertHookRunner:
                 self._qwen_calls += 1
                 console_logger.info(
                     f"[SceneExpert] StageBrief generated for {stage}: "
-                    f"{len(self._current_stage_brief.constraints_for_designer)} constraints"
+                    f"{len(self._current_stage_brief.constraints_for_designer)} constraints "
+                    f"in {time.time() - planner_start:.2f}s"
                 )
             except Exception as e:
                 console_logger.warning(
@@ -410,6 +415,12 @@ class SceneExpertHookRunner:
         if self._current_memory_pack.placement_reference:
             enhanced += "\n\n" + self._current_memory_pack.placement_reference
         self._last_injected_floor_plan_prompt = enhanced
+        self._trace_logger.save_stage_context(
+            stage=stage,
+            memory_pack=self._current_memory_pack,
+            stage_brief=self._current_stage_brief,
+            phase="pre",
+        )
         return enhanced
 
     def post_floor_plan(self, scene_dir: Path) -> None:
@@ -421,12 +432,18 @@ class SceneExpertHookRunner:
         verify_report: StageVerifyReport | None = None
         repair_actions: list[RepairResult] = []
         try:
+            verify_start = time.time()
             verify_report = self._stage_verifier.verify(
                 stage=stage,
                 stage_output_dir=str(scene_dir),
                 task_spec=self._task_spec,
                 stage_brief=self._current_stage_brief,
                 scene_state_info=scene_state_info,
+            )
+            console_logger.info(
+                "[SceneExpertTiming] stage=%s module=stage_verifier elapsed=%.2fs",
+                stage,
+                time.time() - verify_start,
             )
             self._stage_reports.append(verify_report)
 
@@ -469,7 +486,19 @@ class SceneExpertHookRunner:
             qwen_calls=self._qwen_calls,
             stage_time_sec=round(elapsed, 1),
         )
+        self._trace_logger.save_stage_context(
+            stage=stage,
+            memory_pack=self._current_memory_pack,
+            stage_brief=self._current_stage_brief,
+            phase="post",
+        )
+        self._trace_logger.save_stage_visual_manifest(stage, str(scene_dir))
         self._completed_stages.append(stage)
+        console_logger.info(
+            "[SceneExpertTiming] stage=%s module=stage_total elapsed=%.2fs",
+            stage,
+            elapsed,
+        )
 
     def pre_stage(self, stage: str, scene: RoomScene) -> None:
         """Retrieve memory, generate StageBrief, inject into scene.text_description.
@@ -492,16 +521,19 @@ class SceneExpertHookRunner:
         # --- Step 1: Memory retrieval (skip in harness_only mode) ---
         if self._retriever is not None and self._mode in ("harness_memory", "full"):
             try:
+                retrieval_start = time.time()
                 self._current_memory_pack = self._retriever.retrieve(
                     self._task_spec, stage
                 )
+                retrieval_elapsed = time.time() - retrieval_start
                 n_hints = (
                     len(self._current_memory_pack.success_hints)
                     + len(self._current_memory_pack.failure_hints)
                 )
                 console_logger.info(
                     f"[SceneExpert] Memory retrieved for {stage}: "
-                    f"{n_hints} hints, {len(self._current_memory_pack.skill_texts)} skills"
+                    f"{n_hints} hints, {len(self._current_memory_pack.skill_texts)} skills "
+                    f"in {retrieval_elapsed:.2f}s"
                 )
             except Exception as e:
                 console_logger.warning(f"Memory retrieval failed for {stage}: {e}")
@@ -513,6 +545,7 @@ class SceneExpertHookRunner:
         self._current_stage_brief = None
         if self._mode in ("harness_only", "harness_memory", "full"):
             try:
+                planner_start = time.time()
                 scene_state_summary = self._build_scene_state_summary()
                 context = self._harness.build_context(
                     stage=stage,
@@ -530,7 +563,8 @@ class SceneExpertHookRunner:
                 self._qwen_calls += 1
                 console_logger.info(
                     f"[SceneExpert] StageBrief generated for {stage}: "
-                    f"{len(self._current_stage_brief.constraints_for_designer)} constraints"
+                    f"{len(self._current_stage_brief.constraints_for_designer)} constraints "
+                    f"in {time.time() - planner_start:.2f}s"
                 )
             except Exception as e:
                 console_logger.warning(
@@ -575,6 +609,12 @@ class SceneExpertHookRunner:
                 f"[SceneExpert] Injected placement reference for {stage} "
                 f"({placement_ref.count(chr(10))+1} lines)"
             )
+        self._trace_logger.save_stage_context(
+            stage=stage,
+            memory_pack=self._current_memory_pack,
+            stage_brief=self._current_stage_brief,
+            phase="pre",
+        )
 
     # ------------------------------------------------------------------
     # Post-stage hook: called AFTER the SceneSmith stage agent completes
@@ -606,12 +646,18 @@ class SceneExpertHookRunner:
         verify_report: StageVerifyReport | None = None
         repair_actions: list[RepairResult] = []
         try:
+            verify_start = time.time()
             verify_report = self._stage_verifier.verify(
                 stage=stage,
                 stage_output_dir=str(room_dir),
                 task_spec=self._task_spec,
                 stage_brief=self._current_stage_brief,
                 scene_state_info=scene_state_info,
+            )
+            console_logger.info(
+                "[SceneExpertTiming] stage=%s module=stage_verifier elapsed=%.2fs",
+                stage,
+                time.time() - verify_start,
             )
             self._stage_reports.append(verify_report)
 
@@ -658,9 +704,18 @@ class SceneExpertHookRunner:
             qwen_calls=self._qwen_calls,
             stage_time_sec=round(elapsed, 1),
         )
+        self._trace_logger.save_stage_context(
+            stage=stage,
+            memory_pack=self._current_memory_pack,
+            stage_brief=self._current_stage_brief,
+            phase="post",
+        )
+        self._trace_logger.save_stage_visual_manifest(stage, str(room_dir))
         self._completed_stages.append(stage)
-        console_logger.debug(
-            f"[SceneExpert] Logged trace for {stage} in {elapsed:.1f}s"
+        console_logger.info(
+            "[SceneExpertTiming] stage=%s module=stage_total elapsed=%.2fs",
+            stage,
+            elapsed,
         )
 
     # ------------------------------------------------------------------
@@ -677,13 +732,19 @@ class SceneExpertHookRunner:
             final_scene_path: Path to the final scene output directory.
         """
         console_logger.info(f"[SceneExpert/{self._mode}] finalizing scene {self._scene_id:03d}")
+        finalize_start = time.time()
 
         # Full verifier
         full_report = FullVerifyReport()
         try:
+            full_verify_start = time.time()
             full_report = self._full_verifier.verify(
                 stage_reports=self._stage_reports,
                 final_scene_path=final_scene_path,
+            )
+            console_logger.info(
+                "[SceneExpertTiming] stage=full_scene module=full_verifier elapsed=%.2fs",
+                time.time() - full_verify_start,
             )
         except Exception as e:
             console_logger.warning(f"FullVerifier failed: {e}")
@@ -715,6 +776,7 @@ class SceneExpertHookRunner:
             and self._mode in ("harness_memory", "full")
         ):
             try:
+                memory_start = time.time()
                 trace_summary = self._trace_logger.build_trace_summary()
                 related_old_memory = self._format_related_memory_for_writer()
                 ops = self._memory_writer.write(
@@ -722,12 +784,15 @@ class SceneExpertHookRunner:
                     full_report=full_report,
                     related_old_memory=related_old_memory,
                 )
+                self._trace_logger.save_memory_update_ops(ops, full_report)
                 self._memory_store.apply_updates(ops)
                 console_logger.info(
-                    f"[SceneExpert] Memory updated: {len(ops)} ops applied"
+                    f"[SceneExpert] Memory updated: {len(ops)} ops applied "
+                    f"in {time.time() - memory_start:.2f}s"
                 )
             except Exception as e:
                 console_logger.warning(f"Memory update failed (non-fatal): {e}")
+                self._trace_logger.save_memory_update_ops([], full_report)
 
         console_logger.info(
             f"[SceneExpert] Scene {self._scene_id:03d} complete: "
@@ -735,6 +800,20 @@ class SceneExpertHookRunner:
             f"pass={'YES' if full_report.pass_scene else 'NO'} "
             f"mode={self._mode}"
         )
+        console_logger.info(
+            "[SceneExpertTiming] stage=full_scene module=finalize_total elapsed=%.2fs",
+            time.time() - finalize_start,
+        )
+
+    def save_partial_trace(self, error: str = "") -> None:
+        """Persist a partial trace from an exception path."""
+        try:
+            path = self._trace_logger.save_partial(status="failed", error=error)
+            console_logger.info(f"[SceneExpert] Partial trace saved to {path}")
+        except Exception as save_error:
+            console_logger.warning(
+                f"[SceneExpert] Failed to save partial trace: {save_error}"
+            )
 
     # ------------------------------------------------------------------
     # Internal helpers

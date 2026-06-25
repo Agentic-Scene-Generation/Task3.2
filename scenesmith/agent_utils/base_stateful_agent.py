@@ -9,6 +9,7 @@ subclass-defined tools.
 import copy
 import logging
 import shutil
+import time
 
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -51,6 +52,7 @@ from scenesmith.agent_utils.scoring import (
     log_critique_scores,
     scores_to_dict,
 )
+from scenesmith.agent_utils.stage_working_memory import StageWorkingMemory
 from scenesmith.agent_utils.turn_trimming_session import TurnTrimmingSession
 from scenesmith.prompts import prompt_registry
 from scenesmith.utils.logging import BaseLogger
@@ -187,6 +189,104 @@ class BaseStatefulAgent(ABC):
         self._planner_critique_tool_calls = 0
         self._planner_design_change_tool_calls = 0
         self._planner_budget_exhausted = False
+        working_memory_cfg = _cfg_get(cfg, "stage_working_memory", {})
+        working_memory_enabled = bool(
+            _cfg_get(working_memory_cfg, "enabled", True)
+        )
+        self.stage_working_memory = StageWorkingMemory(
+            root_dir=logger.output_dir,
+            stage=self.agent_type.value,
+            enabled=working_memory_enabled,
+        )
+
+    def _record_module_timing(
+        self,
+        module: str,
+        event: str,
+        start_time: float,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        """Record elapsed time for per-stage optimization analysis."""
+        elapsed = time.time() - start_time
+        try:
+            self.stage_working_memory.record_timing(
+                module=module,
+                event=event,
+                elapsed_sec=elapsed,
+                extra=extra,
+            )
+        except Exception as e:
+            console_logger.warning("Failed to record timing %s/%s: %s", module, event, e)
+
+    def _retrieve_working_memory_for_designer(self, query: str) -> str:
+        """Fetch compact online memory to inject into the next designer call."""
+        try:
+            memory_text = self.stage_working_memory.retrieve_for_designer(
+                query=query,
+                max_items=int(
+                    _cfg_get(
+                        _cfg_get(self.cfg, "stage_working_memory", {}),
+                        "max_retrieved_items",
+                        3,
+                    )
+                ),
+            )
+        except Exception as e:
+            console_logger.warning("Stage working memory retrieval failed: %s", e)
+            return ""
+        if memory_text:
+            console_logger.info(
+                "[StageWorkingMemory] injecting %d chars into designer prompt",
+                len(memory_text),
+            )
+        return memory_text
+
+    def _save_designer_working_memory(
+        self,
+        *,
+        render_dir_before: Path | None,
+        event: str,
+        text: str,
+    ) -> None:
+        """Attach designer output to a newly created render, if one exists."""
+        render_dir = self.rendering_manager.last_render_dir
+        if render_dir is None or render_dir == render_dir_before:
+            return
+        try:
+            self.stage_working_memory.save_render_record(
+                render_dir=render_dir,
+                role="designer",
+                event=event,
+                scene=self.scene,
+                text=text,
+            )
+        except Exception as e:
+            console_logger.warning("Failed to save designer working memory: %s", e)
+
+    def _save_critic_working_memory(
+        self,
+        *,
+        render_dir: Path | None,
+        event: str,
+        scores: CritiqueWithScores,
+        critique: str,
+        physics_context: str,
+    ) -> None:
+        """Attach critic scores and critique text to the current render memory."""
+        if render_dir is None:
+            return
+        try:
+            self.stage_working_memory.save_render_record(
+                render_dir=render_dir,
+                role="critic",
+                event=event,
+                scene=self.scene,
+                scores=scores,
+                critique=critique,
+                extra={"physics_context": physics_context[:1500]},
+            )
+        except Exception as e:
+            console_logger.warning("Failed to save critic working memory: %s", e)
 
     def _configure_furniture_safety_for_scene(self, scene_description: str) -> None:
         """Reset furniture safety counters and required-object inference."""
@@ -956,6 +1056,63 @@ class BaseStatefulAgent(ABC):
             "computed automatically."
         )
 
+    def _auto_score_after_design_attempts_enabled(self) -> bool:
+        """Whether planner-level design attempts should be critiqued immediately."""
+        return bool(_cfg_get(self.cfg, "auto_score_after_design_attempts", False))
+
+    async def _score_design_attempt_if_configured(self, attempt_label: str) -> str:
+        """Run a critique after a planner-level design attempt when configured.
+
+        This closes the candidate-evaluation loop without scoring every transient
+        observe_scene render inside a designer call.  The critic's forced
+        observe_scene step saves scores.yaml next to the render for the current
+        final candidate state.
+        """
+        if not self._auto_score_after_design_attempts_enabled():
+            return ""
+        if self.cfg.max_critique_rounds <= 0:
+            return ""
+        if self._planner_critique_tool_calls >= int(self.cfg.max_critique_rounds):
+            self._planner_budget_exhausted = True
+            return "\n\n" + self._planner_budget_stop_message(
+                f"auto_score_after_{attempt_label.replace(' ', '_')}"
+            )
+
+        current_hash = self.scene.content_hash()
+        if (
+            self.checkpoint_scene_hash is not None
+            and current_hash == self.checkpoint_scene_hash
+        ):
+            return (
+                "\n\n[Auto scoring] Scene is unchanged since the previous scored "
+                f"candidate; skipped duplicate critique after {attempt_label}."
+            )
+
+        self._planner_critique_tool_calls += 1
+        score_start = time.time()
+        console_logger.info(
+            "Auto-scoring planner-level design attempt after %s", attempt_label
+        )
+        critique = await self._request_critique_impl(update_checkpoint=True)
+        self._record_module_timing(
+            "planner",
+            f"auto_score_after_{attempt_label.replace(' ', '_')}",
+            score_start,
+        )
+        budget_hint = ""
+        if self._planner_critique_tool_calls >= int(self.cfg.max_critique_rounds):
+            self._planner_budget_exhausted = True
+            budget_hint = (
+                "\n\n[Planner budget] The configured scored-candidate budget "
+                "is complete. Do not call more planner tools. Return the final "
+                "concise workflow summary now."
+            )
+        return (
+            f"\n\n## Auto Critique After {attempt_label.title()}\n"
+            f"{critique}"
+            f"{budget_hint}"
+        )
+
     def _create_planner_tools(self) -> list[FunctionTool]:
         """Create planner tools for the design workflow.
 
@@ -982,6 +1139,9 @@ class BaseStatefulAgent(ABC):
                 Designer's report of what was created and why.
             """
             result = await self._request_initial_design_impl()
+            result += await self._score_design_attempt_if_configured(
+                "initial design"
+            )
             return self._truncate_planner_tool_output(
                 result,
                 label="initial design",
@@ -1000,6 +1160,17 @@ class BaseStatefulAgent(ABC):
             Returns:
                 Critic's detailed evaluation with specific improvement suggestions.
             """
+            if (
+                self._auto_score_after_design_attempts_enabled()
+                and self.checkpoint_scene_hash is not None
+                and self.scene.content_hash() == self.checkpoint_scene_hash
+            ):
+                return (
+                    "Current scene already has a critique score from the latest "
+                    "auto-scored candidate. Read the previous Auto Critique instead "
+                    "of re-scoring an unchanged layout."
+                )
+
             if self._planner_critique_tool_calls >= int(self.cfg.max_critique_rounds):
                 return self._planner_budget_stop_message("request_critique")
 
@@ -1030,6 +1201,13 @@ class BaseStatefulAgent(ABC):
                 self._planner_critique_tool_calls
                 > self._planner_design_change_tool_calls
             )
+            if (
+                self._auto_score_after_design_attempts_enabled()
+                and self._planner_critique_tool_calls
+                >= int(self.cfg.max_critique_rounds)
+            ):
+                return self._planner_budget_stop_message("request_design_change")
+
             if counts_as_critique_cycle and self._planner_design_change_tool_calls >= int(
                 self.cfg.max_critique_rounds
             ):
@@ -1040,6 +1218,9 @@ class BaseStatefulAgent(ABC):
                 return safety_block
 
             result = await self._request_design_change_impl(instruction)
+            result += await self._score_design_attempt_if_configured(
+                "design change"
+            )
             result = self._truncate_planner_tool_output(
                 result,
                 label="design change",
@@ -1049,7 +1230,8 @@ class BaseStatefulAgent(ABC):
             )
             if counts_as_critique_cycle:
                 self._planner_design_change_tool_calls += 1
-                result += self._planner_budget_hint_after_design_change()
+                if not self._auto_score_after_design_attempts_enabled():
+                    result += self._planner_budget_hint_after_design_change()
             return result
 
         @function_tool
@@ -1147,18 +1329,21 @@ class BaseStatefulAgent(ABC):
             Critique text with optional score deltas for planner.
         """
         console_logger.info("Tool called: request_critique")
+        critique_start = time.time()
 
         # Get current furniture ID for manipuland agents.
         current_furniture_id = getattr(self, "current_furniture_id", None)
 
         # Get physics violations using the same logic as the check_physics tool.
         # This ensures the critic sees exactly the same information as the designer.
+        physics_start = time.time()
         physics_context = check_physics_violations(
             scene=self.scene,
             cfg=self.cfg,
             current_furniture_id=current_furniture_id,
             agent_type=self.agent_type,
         )
+        self._record_module_timing("critic", "physics_context", physics_start)
 
         prompt_enum = self._get_critique_prompt_enum()
         extra_kwargs = self._get_extra_critique_kwargs()
@@ -1209,21 +1394,27 @@ class BaseStatefulAgent(ABC):
 
         # Step 1: force observe_scene; stop_on_first_tool returns immediately.
         console_logger.info("[CRITIC harness] Step 1: observe_scene")
+        observe_start = time.time()
         result_observe = await Runner.run(
             starting_agent=critic_observe,
             input=critique_instruction,
             session=self.critic_session,
             run_config=run_config,
         )
+        self._record_module_timing("critic", "observe_scene", observe_start)
         log_agent_usage(result=result_observe, agent_name="CRITIC (observe)")
 
         # Step 2: force get_current_scene_state; session carries Step 1 history.
         console_logger.info("[CRITIC harness] Step 2: get_current_scene_state")
+        scene_state_start = time.time()
         result_scene = await Runner.run(
             starting_agent=critic_scene_state,
             input="Now retrieve exact object data with get_current_scene_state.",
             session=self.critic_session,
             run_config=run_config,
+        )
+        self._record_module_timing(
+            "critic", "get_current_scene_state", scene_state_start
         )
         log_agent_usage(result=result_scene, agent_name="CRITIC (scene_state)")
 
@@ -1231,6 +1422,7 @@ class BaseStatefulAgent(ABC):
         # the observation images and the scene-state JSON in its session
         # history and can run STEPS 3-6 of the YAML workflow.
         console_logger.info("[CRITIC harness] Step 3: evaluate and score")
+        score_start = time.time()
         result = await Runner.run(
             starting_agent=critic_score,
             input=(
@@ -1244,6 +1436,7 @@ class BaseStatefulAgent(ABC):
             max_turns=self.cfg.agents.critic_agent.max_turns,
             run_config=run_config,
         )
+        self._record_module_timing("critic", "score_scene", score_start)
         log_agent_usage(result=result, agent_name="CRITIC (score)")
 
         # Parse structured output.
@@ -1266,6 +1459,13 @@ class BaseStatefulAgent(ABC):
                     sort_keys=False,
                 )
             console_logger.info(f"Scores saved to: {scores_path}")
+            self._save_critic_working_memory(
+                render_dir=images_dir,
+                event="critique",
+                scores=response,
+                critique=response.critique,
+                physics_context=physics_context,
+            )
         else:
             console_logger.error(
                 "No render directory available - scores not saved to file"
@@ -1314,6 +1514,12 @@ class BaseStatefulAgent(ABC):
         self.final_render_dir = checkpoint_render_dir or images_dir
 
         # Return natural language critique with score deltas for planner.
+        self._record_module_timing(
+            "critic",
+            "request_critique_total",
+            critique_start,
+            extra={"update_checkpoint": update_checkpoint},
+        )
         return response.critique + score_change_msg + safety_msg
 
     @abstractmethod
@@ -1342,8 +1548,13 @@ class BaseStatefulAgent(ABC):
             prompt_enum=prompt_enum,
             instruction=instruction,
         )
+        memory_context = self._retrieve_working_memory_for_designer(instruction)
+        if memory_context:
+            full_instruction += "\n\n" + memory_context
 
         # Designer run with critique-based instruction.
+        designer_start = time.time()
+        render_dir_before = self.rendering_manager.last_render_dir
         try:
             result = await Runner.run(
                 starting_agent=self.designer,
@@ -1355,6 +1566,7 @@ class BaseStatefulAgent(ABC):
         except Exception:
             self._end_furniture_design_transaction(transaction)
             raise
+        self._record_module_timing("designer", "request_design_change", designer_start)
         log_agent_usage(result=result, agent_name="DESIGNER (CHANGE)")
 
         if result.final_output:
@@ -1363,6 +1575,11 @@ class BaseStatefulAgent(ABC):
             )
 
         safety_msg = self._end_furniture_design_transaction(transaction)
+        self._save_designer_working_memory(
+            render_dir_before=render_dir_before,
+            event="design_change",
+            text=(result.final_output or "") + safety_msg,
+        )
         return (result.final_output or "") + safety_msg
 
     @abstractmethod
@@ -1441,11 +1658,16 @@ class BaseStatefulAgent(ABC):
         instruction = self.prompt_registry.get_prompt(
             prompt_enum=prompt_enum, **prompt_kwargs
         )
+        memory_context = self._retrieve_working_memory_for_designer("initial design")
+        if memory_context:
+            instruction += "\n\n" + memory_context
 
         # Build input (may include context image if enabled).
         input_message = self._build_initial_design_input(instruction)
 
         # Designer runs with initial design instruction.
+        designer_start = time.time()
+        render_dir_before = self.rendering_manager.last_render_dir
         try:
             result = await Runner.run(
                 starting_agent=self.designer,
@@ -1457,6 +1679,7 @@ class BaseStatefulAgent(ABC):
         except Exception:
             self._end_furniture_design_transaction(transaction)
             raise
+        self._record_module_timing("designer", "request_initial_design", designer_start)
         log_agent_usage(result=result, agent_name="DESIGNER (INITIAL)")
 
         if result.final_output:
@@ -1465,4 +1688,9 @@ class BaseStatefulAgent(ABC):
             )
 
         safety_msg = self._end_furniture_design_transaction(transaction)
+        self._save_designer_working_memory(
+            render_dir_before=render_dir_before,
+            event="initial_design",
+            text=(result.final_output or "") + safety_msg,
+        )
         return (result.final_output or "") + safety_msg

@@ -21,6 +21,13 @@ session_memory:
     # Default 2 allows comparison between current and previous state.
     keep_last_n_observations: 2
 
+# Scene-local online memory for the current stage. This is not the long-term
+# SceneExpert JSONL memory; it saves per-render notes/scores and injects compact
+# recent lessons into the next designer call.
+stage_working_memory:
+  enabled: true
+  max_retrieved_items: 3
+
 # Rendering configuration
 rendering:
   # Layout type for ablations.
@@ -244,8 +251,25 @@ collision_geometry:
 # Maximum number of agent turns before stopping (applies to all agent interactions)
 max_turns: 1000
 
-# Maximum number of critique-and-improve rounds before stopping
+# Maximum number of critique-and-improve rounds before stopping.
+# When auto_score_after_design_attempts=true, this is the maximum number of
+# scored candidate layouts, including the initial design.
 max_critique_rounds: 3
+
+# Score each planner-level candidate layout automatically after the designer
+# finishes an initial design or design-change call. This keeps every accepted
+# candidate in the comparison pool tied to a scores.yaml, while avoiding an
+# expensive critic call for every transient observe_scene render inside a
+# designer call.
+auto_score_after_design_attempts: true
+
+# Planner tool output limits. Initial/design-change responses can now include
+# an automatic critique block, so keep enough tail context for score deltas and
+# Safety Controller messages.
+planner_context_limits:
+  initial_design_max_chars: 9000
+  critique_max_chars: 7000
+  design_change_max_chars: 9000
 
 # Code-level guardrails for furniture refinement. This is separate from planner
 # prompting: even if the LLM asks for more changes, these limits are enforced in

@@ -35,6 +35,8 @@ class FastMemoryStore:
         self._success_path = self._dir / "success_cases.jsonl"
         self._failure_path = self._dir / "failure_cases.jsonl"
         self._skills_path = self._dir / "skills.jsonl"
+        for path in (self._success_path, self._failure_path, self._skills_path):
+            path.touch(exist_ok=True)
 
         self.success_cases: list[SuccessCase] = self._load(self._success_path, SuccessCase)
         self.failure_cases: list[FailureCase] = self._load(self._failure_path, FailureCase)

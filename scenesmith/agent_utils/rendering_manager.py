@@ -10,6 +10,7 @@ from omegaconf import OmegaConf
 
 from scenesmith.agent_utils.rendering import render_scene_for_agent_observation
 from scenesmith.agent_utils.room import RoomScene
+from scenesmith.agent_utils.stage_working_memory import save_generic_render_memory
 from scenesmith.utils.logging import BaseLogger
 
 if TYPE_CHECKING:
@@ -212,6 +213,7 @@ class RenderingManager:
         num_attempts = self.cfg.retry_count
         for attempt in range(num_attempts):
             try:
+                render_start_time = time.time()
                 console_logger.info(f"Rendering attempt {attempt + 1}/{num_attempts}")
 
                 # Render.
@@ -273,6 +275,22 @@ class RenderingManager:
                 self._render_cache[cache_key] = images_dir
                 self._last_render_dir = images_dir
                 console_logger.info(f"Cached render with key: {cache_key}")
+                try:
+                    save_generic_render_memory(
+                        root_dir=self._base_output_dir,
+                        stage=self._subdirectory or rendering_mode,
+                        render_dir=images_dir,
+                        scene=scene,
+                        rendering_mode=rendering_mode,
+                        render_name=render_name,
+                        elapsed_sec=time.time() - render_start_time,
+                    )
+                except Exception as memory_error:
+                    console_logger.warning(
+                        "Failed to save render working memory for %s: %s",
+                        images_dir,
+                        memory_error,
+                    )
 
                 return images_dir
 

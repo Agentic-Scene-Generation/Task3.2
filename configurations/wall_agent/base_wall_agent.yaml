@@ -21,6 +21,12 @@ session_memory:
     # Default 2 allows comparison between current and previous state.
     keep_last_n_observations: 2
 
+# Scene-local online memory for the current stage. This saves per-render
+# notes/scores and injects compact recent lessons into the next designer call.
+stage_working_memory:
+  enabled: true
+  max_retrieved_items: 3
+
 # Rendering configuration.
 rendering:
   # Top-down context view dimensions.

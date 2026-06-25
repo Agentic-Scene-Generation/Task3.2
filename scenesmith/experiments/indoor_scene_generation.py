@@ -290,6 +290,76 @@ def _export_scene_blend_file(
         console_logger.error(f"Failed to export .blend file: {e}")
 
 
+async def _rescore_furniture_after_postprocessing(
+    furniture_agent: StatefulFurnitureAgent,
+    scene: RoomScene,
+) -> None:
+    """Re-score the canonical furniture state after projection/simulation.
+
+    The furniture agent writes its normal scores during add_furniture(), before
+    the experiment-level physical feasibility post-processing runs.  That
+    post-processing can move or remove objects, and the wall stage receives this
+    updated in-memory scene.  Re-scoring here keeps scene_renders/furniture,
+    scene_states/furniture, and the scene handed to wall_mounted aligned.
+    """
+    console_logger.info(
+        "Furniture post-processing changed the scene; re-scoring canonical "
+        "post-processed furniture layout"
+    )
+    furniture_agent.scene = scene
+    critic_tools = furniture_agent._create_critic_tools()
+    furniture_agent.critic = furniture_agent._create_critic_agent(
+        scene=scene,
+        tools=critic_tools,
+    )
+    try:
+        furniture_agent.rendering_manager.clear_cache()
+    except Exception:
+        console_logger.debug("Could not clear furniture render cache", exc_info=True)
+
+    await furniture_agent._request_critique_impl(update_checkpoint=False)
+    await furniture_agent._finalize_scene_and_scores()
+
+
+def _sync_scene_room_geometry_from_layout(
+    scene: RoomScene,
+    house_layout: HouseLayout,
+    room_id: str,
+) -> None:
+    """Ensure a RoomScene uses the latest geometry/material assets from layout."""
+    latest_geometry = house_layout.get_room_geometry(room_id)
+    if latest_geometry is None:
+        return
+
+    current_geometry = scene.room_geometry
+    try:
+        if (
+            current_geometry is not None
+            and current_geometry.content_hash() == latest_geometry.content_hash()
+        ):
+            return
+    except Exception:
+        console_logger.debug(
+            "Could not compare room geometry hashes; synchronizing from layout",
+            exc_info=True,
+        )
+
+    # Replace architectural wall objects so wall extraction/rendering sees the
+    # same materialized room geometry that floor_plan saved in house_layout.json.
+    for object_id, obj in list(scene.objects.items()):
+        if obj.object_type == ObjectType.WALL:
+            del scene.objects[object_id]
+    scene.room_geometry = latest_geometry
+    for wall in latest_geometry.walls:
+        scene.add_object(wall)
+
+    console_logger.info(
+        "Synchronized room geometry for room %s from house_layout before "
+        "downstream stage execution",
+        room_id,
+    )
+
+
 def _fix_paths_in_json_file(
     json_path: Path, new_room_dir: Path, new_scene_dir: Path | None = None
 ) -> None:
@@ -597,74 +667,103 @@ def _generate_room(
             )
             try:
                 asyncio.run(furniture_agent.add_furniture(scene=scene))
+                end_time = time.time()
+                console_logger.info(
+                    f"Furniture added to room {room_id} in "
+                    f"{timedelta(seconds=end_time - start_time)}"
+                )
+
+                pre_postprocess_hash = scene.content_hash()
+
+                # Furniture post-processing (projection + simulation).
+                if projection_cfg["enabled"] and projection_cfg["furniture"]["enabled"]:
+                    furniture_cfg = projection_cfg["furniture"]
+                    sim_cfg = projection_cfg["simulation"]
+
+                    # Log pre-projection state for debugging.
+                    logger.log_scene(scene=scene, name="furniture_only_pre_projection")
+
+                    console_logger.info(
+                        "Running furniture post-processing (projection + simulation)"
+                    )
+                    postprocess_start_time = time.time()
+
+                    # Determine HTML output path for simulation.
+                    furniture_sim_html_path = None
+                    if sim_cfg.get("save_html", False):
+                        furniture_sim_html_path = (
+                            logger.output_dir
+                            / "simulation"
+                            / "furniture_simulation.html"
+                        )
+
+                    # Get fallen furniture config from physics_validation.
+                    physics_val_cfg = cfg_dict["furniture_agent"][
+                        "physics_validation"
+                    ]
+                    scene, projection_success, removed_ids = (
+                        apply_physical_feasibility_postprocessing(
+                            scene=scene,
+                            weld_furniture=False,
+                            projection_enabled=True,
+                            projection_influence_distance=furniture_cfg[
+                                "influence_distance"
+                            ],
+                            projection_solver_name=furniture_cfg["solver_name"],
+                            projection_iteration_limit=furniture_cfg[
+                                "iteration_limit"
+                            ],
+                            projection_time_limit_s=furniture_cfg["time_limit_s"],
+                            projection_xy_only=furniture_cfg["xy_only"],
+                            projection_fix_rotation=furniture_cfg["fix_rotation"],
+                            simulation_enabled=sim_cfg["enabled"],
+                            simulation_time_s=sim_cfg["simulation_time_s"],
+                            simulation_time_step_s=sim_cfg["time_step_s"],
+                            simulation_timeout_s=sim_cfg["timeout_s"],
+                            simulation_html_path=furniture_sim_html_path,
+                            remove_fallen_furniture=physics_val_cfg[
+                                "remove_fallen_furniture"
+                            ],
+                            fallen_tilt_threshold_degrees=physics_val_cfg[
+                                "fallen_tilt_threshold_degrees"
+                            ],
+                        )
+                    )
+                    postprocess_end_time = time.time()
+                    if removed_ids:
+                        console_logger.info(
+                            f"Removed {len(removed_ids)} fallen furniture item(s) "
+                            f"during simulation: {removed_ids}"
+                        )
+                    if not projection_success:
+                        console_logger.error(
+                            "Furniture projection failed, keeping original positions"
+                        )
+                    else:
+                        console_logger.info(
+                            f"Furniture post-processing completed for room {room_id} "
+                            f"in {postprocess_end_time - postprocess_start_time:.2f} "
+                            "seconds"
+                        )
+
+                if scene.content_hash() != pre_postprocess_hash:
+                    try:
+                        asyncio.run(
+                            _rescore_furniture_after_postprocessing(
+                                furniture_agent=furniture_agent,
+                                scene=scene,
+                            )
+                        )
+                    except Exception as e:
+                        console_logger.error(
+                            "Failed to re-score post-processed furniture layout: %s",
+                            e,
+                            exc_info=True,
+                        )
             finally:
-                # Always cleanup server subprocesses.
+                # Always cleanup server subprocesses after all furniture-stage
+                # scoring/rendering that depends on the agent's Blender server.
                 furniture_agent.cleanup()
-            end_time = time.time()
-            console_logger.info(
-                f"Furniture added to room {room_id} in "
-                f"{timedelta(seconds=end_time - start_time)}"
-            )
-
-        # Furniture post-processing (projection + simulation).
-        if projection_cfg["enabled"] and projection_cfg["furniture"]["enabled"]:
-            furniture_cfg = projection_cfg["furniture"]
-            sim_cfg = projection_cfg["simulation"]
-
-            # Log pre-projection state for debugging.
-            logger.log_scene(scene=scene, name="furniture_only_pre_projection")
-
-            console_logger.info(
-                "Running furniture post-processing (projection + simulation)"
-            )
-            start_time = time.time()
-
-            # Determine HTML output path for simulation.
-            furniture_sim_html_path = None
-            if sim_cfg.get("save_html", False):
-                furniture_sim_html_path = (
-                    logger.output_dir / "simulation" / "furniture_simulation.html"
-                )
-
-            # Get fallen furniture config from physics_validation.
-            physics_val_cfg = cfg_dict["furniture_agent"]["physics_validation"]
-            scene, projection_success, removed_ids = (
-                apply_physical_feasibility_postprocessing(
-                    scene=scene,
-                    weld_furniture=False,
-                    projection_enabled=True,
-                    projection_influence_distance=furniture_cfg["influence_distance"],
-                    projection_solver_name=furniture_cfg["solver_name"],
-                    projection_iteration_limit=furniture_cfg["iteration_limit"],
-                    projection_time_limit_s=furniture_cfg["time_limit_s"],
-                    projection_xy_only=furniture_cfg["xy_only"],
-                    projection_fix_rotation=furniture_cfg["fix_rotation"],
-                    simulation_enabled=sim_cfg["enabled"],
-                    simulation_time_s=sim_cfg["simulation_time_s"],
-                    simulation_time_step_s=sim_cfg["time_step_s"],
-                    simulation_timeout_s=sim_cfg["timeout_s"],
-                    simulation_html_path=furniture_sim_html_path,
-                    remove_fallen_furniture=physics_val_cfg["remove_fallen_furniture"],
-                    fallen_tilt_threshold_degrees=physics_val_cfg[
-                        "fallen_tilt_threshold_degrees"
-                    ],
-                )
-            )
-            end_time = time.time()
-            if removed_ids:
-                console_logger.info(
-                    f"Removed {len(removed_ids)} fallen furniture item(s) during "
-                    f"simulation: {removed_ids}"
-                )
-            if not projection_success:
-                console_logger.error(
-                    "Furniture projection failed, keeping original positions"
-                )
-            else:
-                console_logger.info(
-                    f"Furniture post-processing completed for room {room_id} in "
-                    f"{end_time - start_time:.2f} seconds"
-                )
 
         # Always save state after furniture stage (unconditional for resumability).
         logger.log_scene(scene=scene, name="scene_after_furniture")
@@ -719,6 +818,11 @@ def _generate_room(
             house_layout = HouseLayout.from_dict(
                 house_layout_dict, house_dir=room_dir.parent
             )
+            _sync_scene_room_geometry_from_layout(
+                scene=scene,
+                house_layout=house_layout,
+                room_id=room_id,
+            )
 
             if scene_expert_hooks:
                 scene_expert_hooks.pre_stage("wall_mounted", scene)
@@ -727,8 +831,8 @@ def _generate_room(
                 compatible_agents=IndoorSceneGenerationExperiment.compatible_wall_agents,
                 logger=logger,
                 house_layout=house_layout,
-                ceiling_height=room_geometry.wall_height,
-                wall_thickness=room_geometry.wall_thickness,
+                ceiling_height=scene.room_geometry.wall_height,
+                wall_thickness=scene.room_geometry.wall_thickness,
                 render_gpu_id=render_gpu_id,
             )
             try:
@@ -1703,6 +1807,7 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
 
         # Create a logger for this scene.
         logger = ConsoleLogger(output_dir=scene_dir)
+        scene_expert_hooks = None
 
         # Get pipeline stage configuration.
         pipeline_cfg = cfg_dict["experiment"]["pipeline"]
@@ -1954,6 +2059,8 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                     )
 
             except Exception as e:
+                if scene_expert_hooks:
+                    scene_expert_hooks.save_partial_trace(error=str(e))
                 console_logger.error(f"Scene generation failed: {e}")
                 raise
 
