@@ -88,6 +88,13 @@ else
     echo "  跳过脚本内虚拟环境激活，使用当前 Python: $(python -c 'import sys; print(sys.executable)')"
 fi
 
+# Fail before the expensive vLLM startup when a repository edit contains a
+# Python syntax error.
+if [ "${SCENEEXPERT_SKIP_PYTHON_PREFLIGHT:-0}" != "1" ]; then
+    echo "  Running Python syntax preflight..."
+    python -m compileall -q main.py scenesmith
+fi
+
 NUMPY_VERSION="$(python -c 'import numpy as np; print(np.__version__)' 2>/dev/null || echo missing)"
 if [[ "$NUMPY_VERSION" == 2.* ]] && [ "${SCENEEXPERT_ALLOW_NUMPY2:-0}" != "1" ]; then
     echo "错误：当前 NumPy 版本为 $NUMPY_VERSION，但 bpy/Blender 扩展需要 NumPy 1.x ABI。"
@@ -95,6 +102,13 @@ if [[ "$NUMPY_VERSION" == 2.* ]] && [ "${SCENEEXPERT_ALLOW_NUMPY2:-0}" != "1" ];
     echo "  python -m pip install 'numpy>=1.26,<2.0'"
     echo "如果你确认当前 bpy wheel 已兼容 NumPy 2.x，可设置 SCENEEXPERT_ALLOW_NUMPY2=1 跳过该检查。"
     exit 1
+fi
+
+# Import the same core chain used by main.py before allocating GPU memory.
+if [ "${SCENEEXPERT_SKIP_PYTHON_PREFLIGHT:-0}" != "1" ]; then
+    echo "  Running Python import preflight..."
+    PYTHONDONTWRITEBYTECODE=1 python -c \
+        "from scenesmith.experiments import build_experiment; from scenesmith.agent_utils.stage_working_memory import StageWorkingMemory; print('  Python preflight passed')"
 fi
 
 NUM_GPUS=$(python -c "import torch; print(torch.cuda.device_count())" 2>/dev/null || echo 1)

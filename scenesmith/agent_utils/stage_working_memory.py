@@ -61,7 +61,11 @@ def _score_dict(scores: Any | None) -> dict[str, Any]:
 
 def _score_total(scores: Any | None) -> float | None:
     if scores is None:
-    return None
+        return None
+    try:
+        return float(compute_total_score(scores))
+    except Exception:
+        return None
 
 
 def _canonical_stage(stage: str) -> str:
@@ -72,10 +76,6 @@ def _canonical_stage(stage: str) -> str:
     if stage.startswith("manipulands_"):
         return "manipuland"
     return stage
-    try:
-        return float(compute_total_score(scores))
-    except Exception:
-        return None
 
 
 def _append_jsonl(path: Path, record: dict[str, Any]) -> None:
