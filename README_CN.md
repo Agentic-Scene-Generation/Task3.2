@@ -924,6 +924,73 @@ $SCENEEXPERT_OUTPUT_DIR/YYYY-MM-DD/HH-MM-SS/
 
 每次运行会保存 `resolved_config.yaml`，便于复现。
 
+### 将 `.blend` 渲染为 PNG 检查图
+
+SceneExpert 最终或中间结果里可能只有 `house.blend`，但没有对应的 Blender 渲染图。这个转换可以用 Python 脚本实现，不过必须用 **Blender 自带的 Python** 执行；普通虚拟环境里的 `python scripts/render_blend_views.py` 不能直接导入 `bpy`。
+
+先确认服务器上有 Blender 命令：
+
+```bash
+which blender
+blender --version
+```
+
+如果集群使用 module 管理软件，通常需要先执行类似命令：
+
+```bash
+module avail blender
+module load blender/4.2
+```
+
+如果没有 module，需要让管理员安装 Blender，或在有外网机器下载 Blender Linux 压缩包后上传到集群并把 `blender` 加入 `PATH`。无 GUI 服务器也可以运行，关键是使用 `-b` 后台模式。
+
+渲染一个 `.blend` 文件的推荐命令：
+
+```bash
+blender -b tmp/house.blend \
+  --python scripts/render_blend_views.py -- \
+  --output tmp/house_blend_views \
+  --resolution 1024 \
+  --engine eevee \
+  --views top,north,east,south,west,iso
+```
+
+也可以不把 `.blend` 放在 `blender -b` 后面，而是显式传给脚本：
+
+```bash
+blender -b \
+  --python scripts/render_blend_views.py -- \
+  --input tmp/house.blend \
+  --output tmp/house_blend_views
+```
+
+输出目录会包含多张 PNG，例如：
+
+```text
+tmp/house_blend_views/
+  00_top.png
+  01_north.png
+  02_east.png
+  03_south.png
+  04_west.png
+  05_iso.png
+  render_manifest.json
+```
+
+如果顶视图被天花板遮挡，可以加：
+
+```bash
+--hide-ceiling
+```
+
+或者按名称隐藏任意对象：
+
+```bash
+--hide-name-contains ceiling --hide-name-contains roof
+```
+
+如果渲染太慢，优先使用 `--engine eevee`；只需要快速看几何布局时可改用 `--engine workbench`。如果服务器完全没有 Blender，只能在本地或图形节点打开 `.blend`：`File -> Open` 打开文件，设置相机视角后执行 `Render -> Render Image`，再通过 `Image -> Save As` 保存 PNG。
+
 ## 9. SceneExpert trace 与 memory
 
 启用 `ablation_3/4/4a/4b/4c/5` 后，每个 experiment 输出目录会生成全局 trace；同时每个单场景目录会生成一个更适合调试和展示的 `scene_expert/` 目录：
