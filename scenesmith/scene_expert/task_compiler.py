@@ -167,7 +167,7 @@ class TaskCompiler:
 
         raw = response.choices[0].message.content
         # Qwen3 with --reasoning-parser may put output in reasoning_content
-        if raw is None:
+        if not raw:
             raw = getattr(response.choices[0].message, "reasoning_content", None)
         console_logger.debug(f"TaskCompiler raw response: {raw}")
 

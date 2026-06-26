@@ -34,7 +34,7 @@ def load_mesh_as_trimesh(mesh_path: Path, force_merge: bool = True) -> trimesh.T
         raise FileNotFoundError(f"Mesh file not found: {mesh_path}")
 
     try:
-        mesh = trimesh.load(mesh_path, force="mesh")
+        mesh = trimesh.load(mesh_path)
     except Exception as e:
         raise ValueError(f"Failed to load mesh from {mesh_path}: {e}")
 
@@ -44,12 +44,18 @@ def load_mesh_as_trimesh(mesh_path: Path, force_merge: bool = True) -> trimesh.T
                 f"Expected single Trimesh, got Scene with multiple meshes: {mesh_path}"
             )
 
-        # Extract all valid Trimesh objects from the Scene.
-        meshes = [
-            geom
-            for geom in mesh.geometry.values()
-            if isinstance(geom, trimesh.Trimesh) and len(geom.vertices) > 0
-        ]
+        # Apply scene-graph transforms before merging. GLTF import commonly stores
+        # its coordinate conversion and node placement on graph nodes rather than
+        # baking them into raw geometry.
+        meshes = []
+        for node_name in mesh.graph.nodes_geometry:
+            transform, geometry_name = mesh.graph[node_name]
+            geometry = mesh.geometry[geometry_name]
+            if not isinstance(geometry, trimesh.Trimesh) or not len(geometry.vertices):
+                continue
+            transformed = geometry.copy()
+            transformed.apply_transform(transform)
+            meshes.append(transformed)
 
         if not meshes:
             raise ValueError(f"Scene contains no valid meshes: {mesh_path}")

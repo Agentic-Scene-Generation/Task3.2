@@ -2,6 +2,7 @@ import math
 import unittest
 
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import lxml.etree as ET
 import numpy as np
@@ -21,6 +22,7 @@ from scenesmith.agent_utils.physics_validation import (
     ThinCoveringBoundaryViolation,
     ThinCoveringOverlap,
     _get_furniture_id_for_manipuland,
+    _is_implausible_floor_penetration,
     compute_scene_collisions,
     compute_thin_covering_boundary_violations,
     filter_collisions_by_agent,
@@ -68,6 +70,31 @@ class TestCollisionPair(unittest.TestCase):
             "dining_table_5c9d7e2f (5.0cm penetration)"
         )
         self.assertEqual(collision.to_description(), expected)
+
+    def test_meter_scale_floor_penetration_is_proxy_error(self):
+        """A floor contact deeper than the visual height is not placement noise."""
+        scene = MagicMock()
+        scene.objects = {
+            UniqueID("bed_0"): MagicMock(
+                bbox_min=np.array([-0.8, -1.0, 0.0]),
+                bbox_max=np.array([0.8, 1.0, 1.0]),
+            )
+        }
+
+        self.assertTrue(
+            _is_implausible_floor_penetration(
+                scene=scene,
+                object_id="bed_0",
+                penetration_depth=2.0,
+            )
+        )
+        self.assertFalse(
+            _is_implausible_floor_penetration(
+                scene=scene,
+                object_id="bed_0",
+                penetration_depth=0.04,
+            )
+        )
 
     def test_to_description_with_minimal_penetration(self):
         """Test description formatting for sub-millimeter penetration."""

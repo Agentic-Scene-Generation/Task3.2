@@ -186,9 +186,11 @@ class BaseStatefulAgent(ABC):
 
         safety_cfg = getattr(cfg, "furniture_safety_controller", None)
         self.furniture_safety_controller = FurnitureSafetyController(safety_cfg)
+        self._planner_initial_design_tool_calls = 0
         self._planner_critique_tool_calls = 0
         self._planner_design_change_tool_calls = 0
         self._planner_budget_exhausted = False
+        self._critic_failed = False
         working_memory_cfg = _cfg_get(cfg, "stage_working_memory", {})
         working_memory_enabled = bool(
             _cfg_get(working_memory_cfg, "enabled", True)
@@ -989,9 +991,22 @@ class BaseStatefulAgent(ABC):
         return select_placement_style
 
     def _reset_planner_budget_tracking(self) -> None:
+        self._planner_initial_design_tool_calls = 0
         self._planner_critique_tool_calls = 0
         self._planner_design_change_tool_calls = 0
         self._planner_budget_exhausted = False
+        self._critic_failed = False
+
+    def _stop_planner_after_failure(self, reason: str) -> str:
+        """Convert a nested agent failure into a deterministic planner stop."""
+        self._planner_budget_exhausted = True
+        controller = getattr(self, "furniture_safety_controller", None)
+        if controller and getattr(controller, "enabled", False):
+            controller.should_finish = True
+        return (
+            f"STOP: {reason} Do not restart the initial design or call more "
+            "planner tools. Return the final concise workflow summary now."
+        )
 
     def _planner_context_limit(self, key: str, default: int) -> int:
         limits_cfg = getattr(self.cfg, "planner_context_limits", None)
@@ -1026,6 +1041,9 @@ class BaseStatefulAgent(ABC):
 
     def _planner_budget_stop_message(self, tool_name: str) -> str:
         self._planner_budget_exhausted = True
+        controller = getattr(self, "furniture_safety_controller", None)
+        if controller and getattr(controller, "enabled", False):
+            controller.should_finish = True
         return (
             f"STOP: {tool_name} is blocked because the configured "
             f"max_critique_rounds={self.cfg.max_critique_rounds} budget has "
@@ -1093,7 +1111,18 @@ class BaseStatefulAgent(ABC):
         console_logger.info(
             "Auto-scoring planner-level design attempt after %s", attempt_label
         )
-        critique = await self._request_critique_impl(update_checkpoint=True)
+        try:
+            critique = await self._request_critique_impl(update_checkpoint=True)
+        except Exception as exc:
+            self._critic_failed = True
+            console_logger.exception(
+                "Automatic critic scoring failed after %s; stopping planner",
+                attempt_label,
+            )
+            return "\n\n" + self._stop_planner_after_failure(
+                "Critic scoring failed with "
+                f"{type(exc).__name__}: {exc}."
+            )
         self._record_module_timing(
             "planner",
             f"auto_score_after_{attempt_label.replace(' ', '_')}",
@@ -1138,6 +1167,16 @@ class BaseStatefulAgent(ABC):
             Returns:
                 Designer's report of what was created and why.
             """
+            if self._planner_budget_exhausted:
+                return self._stop_planner_after_failure(
+                    "The current design stage has already been marked complete or failed."
+                )
+            if self._planner_initial_design_tool_calls >= 1:
+                return self._stop_planner_after_failure(
+                    "request_initial_design is a one-shot operation and has already "
+                    "completed."
+                )
+            self._planner_initial_design_tool_calls += 1
             result = await self._request_initial_design_impl()
             result += await self._score_design_attempt_if_configured(
                 "initial design"
@@ -1160,6 +1199,10 @@ class BaseStatefulAgent(ABC):
             Returns:
                 Critic's detailed evaluation with specific improvement suggestions.
             """
+            if self._planner_budget_exhausted:
+                return self._stop_planner_after_failure(
+                    "The current design stage has already been marked complete or failed."
+                )
             if (
                 self._auto_score_after_design_attempts_enabled()
                 and self.checkpoint_scene_hash is not None
@@ -1175,7 +1218,15 @@ class BaseStatefulAgent(ABC):
                 return self._planner_budget_stop_message("request_critique")
 
             self._planner_critique_tool_calls += 1
-            result = await self._request_critique_impl()
+            try:
+                result = await self._request_critique_impl()
+            except Exception as exc:
+                self._critic_failed = True
+                console_logger.exception("Planner-requested critic scoring failed")
+                return self._stop_planner_after_failure(
+                    "Critic scoring failed with "
+                    f"{type(exc).__name__}: {exc}."
+                )
             result = self._truncate_planner_tool_output(
                 result,
                 label="critique",
@@ -1197,6 +1248,10 @@ class BaseStatefulAgent(ABC):
             Returns:
                 Designer's report of what was changed.
             """
+            if self._planner_budget_exhausted:
+                return self._stop_planner_after_failure(
+                    "The current design stage has already been marked complete or failed."
+                )
             counts_as_critique_cycle = (
                 self._planner_critique_tool_calls
                 > self._planner_design_change_tool_calls
@@ -1383,9 +1438,15 @@ class BaseStatefulAgent(ABC):
                 )
             ),
         )
-        # Step 3 uses the original critic (with output_type and no forced tool).
+        # Step 3 must be a pure structured-output request. Keeping the original
+        # tools or resolving tool_choice=None can preserve the forced
+        # observe_scene choice and creates an invalid tools + response_format
+        # request for vLLM's Qwen tool parser.
         critic_score = self.critic.clone(
-            model_settings=base_settings.resolve(ModelSettings(tool_choice=None))
+            tools=[],
+            model_settings=base_settings.resolve(
+                ModelSettings(tool_choice="none", parallel_tool_calls=False)
+            ),
         )
 
         # All three steps share self.critic_session so history accumulates
@@ -1440,7 +1501,12 @@ class BaseStatefulAgent(ABC):
         log_agent_usage(result=result, agent_name="CRITIC (score)")
 
         # Parse structured output.
-        response = result.final_output_as(CritiqueWithScores)
+        response = result.final_output
+        if not isinstance(response, CritiqueWithScores):
+            raise TypeError(
+                "Critic returned an unexpected final output type: "
+                f"{type(response).__name__}"
+            )
 
         # Log critique text and scores to console.
         log_agent_response(response=response.critique, agent_name="CRITIC")

@@ -251,6 +251,24 @@ class FurnitureSafetyControllerTest(unittest.TestCase):
         self.assertFalse(allowed)
         self.assertIn("already used 1", message)
 
+    def test_repeated_blocked_tools_end_designer_call(self) -> None:
+        controller = FurnitureSafetyController(
+            {
+                "enabled": True,
+                "max_moves_per_object_per_call": 1,
+                "max_blocked_tool_calls_per_designer_call": 2,
+            }
+        )
+        controller.begin_designer_call("change")
+
+        self.assertTrue(controller.record_move("bed_0")[0])
+        self.assertFalse(controller.record_move("bed_0")[0])
+        allowed, message = controller.record_move("bed_0")
+
+        self.assertFalse(allowed)
+        self.assertTrue(controller.should_finish)
+        self.assertIn("STOP:", message)
+
 
 if __name__ == "__main__":
     unittest.main()

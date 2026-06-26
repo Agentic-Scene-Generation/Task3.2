@@ -159,9 +159,11 @@ class TestGenerateDrakeSDF(unittest.TestCase):
         visual_path = self.temp_path / "multi_collision.gltf"
         visual_mesh.export(visual_path)
 
-        # Create multiple collision pieces.
-        piece1 = trimesh.creation.box(extents=[0.5, 0.5, 0.5])
-        piece2 = trimesh.creation.box(extents=[0.3, 0.3, 0.3])
+        # Create two convex pieces whose union covers the visual bounds.
+        piece1 = trimesh.creation.box(extents=[0.5, 1.0, 1.0])
+        piece1.apply_translation([-0.25, 0.0, 0.0])
+        piece2 = trimesh.creation.box(extents=[0.5, 1.0, 1.0])
+        piece2.apply_translation([0.25, 0.0, 0.0])
         collision_pieces = [piece1, piece2]
 
         physics = MeshPhysicsAnalysis(
@@ -378,23 +380,17 @@ class TestGenerateDrakeSDF(unittest.TestCase):
                     msg=f"Material: {material}",
                 )
 
-    def test_generate_drake_sdf_com_coordinate_transform(self):
-        """Test center of mass is correctly transformed from Y-up to Z-up.
-
-        Regression test for coordinate system bug where COM computed in Y-up
-        GLTF coordinates was written to SDF without transformation to Z-up.
-        Drake expects Z-up coordinates since it auto-converts Y-up GLTF visuals.
-        """
-        # Create box offset in Y direction (Y-up space).
-        # In Y-up: COM at (0, 2, 0).
-        # After Y-up to Z-up transform: COM should be at (0, 0, 2).
+    def test_generate_drake_sdf_preserves_loaded_mesh_frame(self):
+        """The GLTF scene transform must be applied exactly once."""
         mesh = trimesh.creation.box(extents=[1.0, 1.0, 1.0])
         mesh.apply_translation([0, 2, 0])
 
         visual_path = self.temp_path / "offset_cube.gltf"
         mesh.export(visual_path)
 
-        collision_pieces = [trimesh.creation.box(extents=[1.0, 1.0, 1.0])]
+        collision_piece = trimesh.creation.box(extents=[1.0, 1.0, 1.0])
+        collision_piece.apply_translation([0, 2, 0])
+        collision_pieces = [collision_piece]
 
         physics = MeshPhysicsAnalysis(
             up_axis="+Z",
@@ -421,10 +417,61 @@ class TestGenerateDrakeSDF(unittest.TestCase):
         pose_values = [float(v) for v in com_pose.text.split()]
         com_x, com_y, com_z = pose_values[0], pose_values[1], pose_values[2]
 
-        # After Y-up to Z-up transform, (0, 2, 0) becomes (0, 0, 2).
         self.assertAlmostEqual(com_x, 0.0, delta=0.01)
-        self.assertAlmostEqual(com_y, 0.0, delta=0.01)
-        self.assertAlmostEqual(com_z, 2.0, delta=0.01)
+        self.assertAlmostEqual(com_y, 2.0, delta=0.01)
+        self.assertAlmostEqual(com_z, 0.0, delta=0.01)
+
+    def test_collision_mesh_axis_is_not_rotated_twice(self):
+        """A non-symmetric collision proxy keeps its Z-up dimensions."""
+        mesh = trimesh.creation.box(extents=[1.0, 2.0, 3.0])
+        mesh.apply_translation([0.0, 0.0, 1.5])
+        visual_path = self.temp_path / "asymmetric.gltf"
+        mesh.export(visual_path)
+
+        physics = MeshPhysicsAnalysis(
+            up_axis="+Z",
+            front_axis="+Y",
+            material="wood",
+            mass_kg=10.0,
+            mass_range_kg=(8.0, 12.0),
+        )
+        output_path = self.temp_path / "asymmetric.sdf"
+        generate_drake_sdf(
+            visual_mesh_path=visual_path,
+            collision_pieces=[mesh.copy()],
+            physics_analysis=physics,
+            output_path=output_path,
+        )
+
+        collision_mesh = trimesh.load(
+            self.temp_path / "asymmetric_collision_0.obj",
+            force="mesh",
+        )
+        self.assertTrue(
+            all(abs(a - b) < 0.01 for a, b in zip(collision_mesh.extents, [1, 2, 3]))
+        )
+
+    def test_collision_mesh_mismatch_fails_fast(self):
+        """Broken collision proxies must fail during asset preparation."""
+        visual = trimesh.creation.box(extents=[1.0, 2.0, 3.0])
+        visual_path = self.temp_path / "visual.gltf"
+        visual.export(visual_path)
+        wrong_collision = trimesh.creation.box(extents=[1.0, 3.0, 2.0])
+        physics = MeshPhysicsAnalysis(
+            up_axis="+Z",
+            front_axis="+Y",
+            material="wood",
+            mass_kg=10.0,
+            mass_range_kg=(8.0, 12.0),
+        )
+
+        with self.assertRaisesRegex(ValueError, "Collision geometry does not match"):
+            generate_drake_sdf(
+                visual_mesh_path=visual_path,
+                collision_pieces=[wrong_collision],
+                physics_analysis=physics,
+                output_path=self.temp_path / "bad.sdf",
+            )
 
 
 class TestAddSelfCollisionFilter(unittest.TestCase):

@@ -282,6 +282,7 @@ furniture_safety_controller:
   max_moves_design_change: 12
   max_moves_per_object_per_call: 4
   max_physics_checks_per_designer_call: 4
+  max_blocked_tool_calls_per_designer_call: 3
   max_rescales_per_object: 1
   max_generate_assets_calls_after_initial: 0
   min_accept_delta: 0.05
@@ -407,7 +408,7 @@ api_timeout:
 # Loop detection configuration for function tools
 loop_detection:
   enabled: true
-  max_repeated_attempts: 25  # Block after 2 identical attempts
+  max_repeated_attempts: 3
   tracking_window: 30  # Track last 30 calls
 
 # Physics validation configuration

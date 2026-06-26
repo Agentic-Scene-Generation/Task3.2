@@ -639,28 +639,8 @@ class AssetManager:
                     asset_name=config.short_name,
                 )
 
-                # Extract bounding box from Y-up GLTF.
-                bounds = mesh.bounds  # In Y-up coordinates (GLTF native format).
-
-                # Transform from Y-up (GLTF) to Z-up (Drake) coordinate system.
-                # Y-up → Z-up transformation: (x, y, z) → (x, -z, y)
-                # Maps: X→X (right), Y→Z (up), Z→-Y (forward with sign flip).
-                bbox_min_yup = bounds[0]
-                bbox_max_yup = bounds[1]
-
-                # Apply coordinate transformation.
-                bbox_min = np.array(
-                    [bbox_min_yup[0], -bbox_min_yup[2], bbox_min_yup[1]]
-                )
-                bbox_max = np.array(
-                    [bbox_max_yup[0], -bbox_max_yup[2], bbox_max_yup[1]]
-                )
-
-                # Ensure min < max after transformation (negation can swap order).
-                bbox_min, bbox_max = (
-                    np.minimum(bbox_min, bbox_max),
-                    np.maximum(bbox_min, bbox_max),
-                )
+                # Scene-graph transforms are already applied by the mesh loader.
+                bbox_min, bbox_max = mesh.bounds
 
                 # Create SceneObject using shared helper.
                 scene_obj = self._create_scene_object(
@@ -844,27 +824,8 @@ class AssetManager:
                     asset_name=config.short_name,
                 )
 
-                # Extract bounding box from Y-up GLTF.
-                bounds = mesh.bounds  # In Y-up coordinates (GLTF native format).
-
-                # Transform from Y-up (GLTF) to Z-up (Drake) coordinate system.
-                # Y-up → Z-up transformation: (x, y, z) → (x, -z, y)
-                bbox_min_yup = bounds[0]
-                bbox_max_yup = bounds[1]
-
-                # Apply coordinate transformation.
-                bbox_min = np.array(
-                    [bbox_min_yup[0], -bbox_min_yup[2], bbox_min_yup[1]]
-                )
-                bbox_max = np.array(
-                    [bbox_max_yup[0], -bbox_max_yup[2], bbox_max_yup[1]]
-                )
-
-                # Ensure min < max after transformation (negation can swap order).
-                bbox_min, bbox_max = (
-                    np.minimum(bbox_min, bbox_max),
-                    np.maximum(bbox_min, bbox_max),
-                )
+                # Scene-graph transforms are already applied by the mesh loader.
+                bbox_min, bbox_max = mesh.bounds
 
                 # Create SceneObject using shared helper.
                 scene_obj = self._create_scene_object(
@@ -2008,23 +1969,8 @@ class AssetManager:
         )
 
         # Extract bounding box from scaled mesh.
-        bounds = mesh.bounds  # In Y-up coordinates (GLTF native format).
-
-        # Transform from Y-up (GLTF) to Z-up (Drake) coordinate system.
-        # Y-up → Z-up transformation: (x, y, z) → (x, -z, y)
-        # Maps: X→X (right), Y→Z (up), Z→-Y (forward with sign flip).
-        bbox_min_yup = bounds[0]
-        bbox_max_yup = bounds[1]
-
-        # Apply coordinate transformation.
-        bbox_min = np.array([bbox_min_yup[0], -bbox_min_yup[2], bbox_min_yup[1]])
-        bbox_max = np.array([bbox_max_yup[0], -bbox_max_yup[2], bbox_max_yup[1]])
-
-        # Ensure min < max after transformation (negation can swap order).
-        bbox_min, bbox_max = (
-            np.minimum(bbox_min, bbox_max),
-            np.maximum(bbox_min, bbox_max),
-        )
+        # Scene-graph transforms are already applied by the mesh loader.
+        bbox_min, bbox_max = mesh.bounds
 
         console_logger.info(
             f"Drake SDF complete: SDF at {sdf_path}, bounds: {bbox_min} to {bbox_max}"
@@ -2087,21 +2033,8 @@ class AssetManager:
 
         # Load mesh for bounding box calculation.
         mesh = load_mesh_as_trimesh(gltf_path, force_merge=True)
-        bounds = mesh.bounds  # In Y-up coordinates (GLTF native format).
-
-        # Transform from Y-up (GLTF) to Z-up (Drake) coordinate system.
-        bbox_min_yup = bounds[0]
-        bbox_max_yup = bounds[1]
-
-        # Apply coordinate transformation: (x, y, z)_Yup → (x, -z, y)_Zup
-        bbox_min = np.array([bbox_min_yup[0], -bbox_min_yup[2], bbox_min_yup[1]])
-        bbox_max = np.array([bbox_max_yup[0], -bbox_max_yup[2], bbox_max_yup[1]])
-
-        # Ensure min < max after transformation.
-        bbox_min, bbox_max = (
-            np.minimum(bbox_min, bbox_max),
-            np.maximum(bbox_min, bbox_max),
-        )
+        # Scene-graph transforms are already applied by the mesh loader.
+        bbox_min, bbox_max = mesh.bounds
 
         console_logger.info(
             f"Thin covering SDF complete: {sdf_path}, bounds: {bbox_min} to {bbox_max}"

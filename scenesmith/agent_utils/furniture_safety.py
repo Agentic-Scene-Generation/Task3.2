@@ -170,6 +170,9 @@ class FurnitureSafetyController:
         self.max_physics_checks_per_designer_call = int(
             _cfg_get(cfg, "max_physics_checks_per_designer_call", 4)
         )
+        self.max_blocked_tool_calls_per_designer_call = int(
+            _cfg_get(cfg, "max_blocked_tool_calls_per_designer_call", 3)
+        )
         self.max_rescales_per_object = int(_cfg_get(cfg, "max_rescales_per_object", 1))
         self.max_generate_assets_calls_after_initial = int(
             _cfg_get(cfg, "max_generate_assets_calls_after_initial", 0)
@@ -211,6 +214,7 @@ class FurnitureSafetyController:
         self.active_designer_call: str | None = None
         self.move_calls_this_call = 0
         self.physics_checks_this_call = 0
+        self.blocked_tool_calls_this_call = 0
         self.moves_by_object_this_call: dict[str, int] = {}
         self.generate_asset_calls = 0
         self.rescale_counts: dict[str, int] = {}
@@ -237,6 +241,7 @@ class FurnitureSafetyController:
         self.active_designer_call = None
         self.move_calls_this_call = 0
         self.physics_checks_this_call = 0
+        self.blocked_tool_calls_this_call = 0
         self.moves_by_object_this_call = {}
         self.generate_asset_calls = 0
         self.rescale_counts = {}
@@ -350,6 +355,7 @@ class FurnitureSafetyController:
         self.active_designer_call = call_kind
         self.move_calls_this_call = 0
         self.physics_checks_this_call = 0
+        self.blocked_tool_calls_this_call = 0
         self.moves_by_object_this_call = {}
 
     def end_designer_call(self) -> None:
@@ -359,7 +365,33 @@ class FurnitureSafetyController:
         self.active_designer_call = None
         self.move_calls_this_call = 0
         self.physics_checks_this_call = 0
+        self.blocked_tool_calls_this_call = 0
         self.moves_by_object_this_call = {}
+
+    def _record_tool_denial(self, message: str) -> str:
+        """Escalate repeated blocked tool calls into an explicit designer stop."""
+        self.blocked_tool_calls_this_call += 1
+        if (
+            self.active_designer_call
+            and self.max_blocked_tool_calls_per_designer_call > 0
+            and self.blocked_tool_calls_this_call
+            >= self.max_blocked_tool_calls_per_designer_call
+        ):
+            self.should_finish = True
+            return (
+                f"{message} STOP: {self.blocked_tool_calls_this_call} tool calls "
+                "have been blocked in this designer call. Return your concise "
+                "designer summary now without calling another tool."
+            )
+        return message
+
+    def _designer_stop_message(self) -> str | None:
+        if self.active_designer_call and self.should_finish:
+            return (
+                "STOP: the Safety Controller has ended this designer call. "
+                "Return your concise designer summary now without calling another tool."
+            )
+        return None
 
     def _current_move_limit(self) -> int:
         if self.active_designer_call == "initial":
@@ -369,20 +401,27 @@ class FurnitureSafetyController:
     def record_move(self, object_id: str) -> tuple[bool, str]:
         if not self.enabled:
             return True, ""
+        stop_message = self._designer_stop_message()
+        if stop_message:
+            return False, stop_message
         if self.move_calls >= self.max_move_calls:
             return (
                 False,
-                "Safety controller blocked move_furniture_tool: move budget "
-                f"exhausted ({self.max_move_calls}). Request a critique or finish.",
+                self._record_tool_denial(
+                    "Safety controller blocked move_furniture_tool: move budget "
+                    f"exhausted ({self.max_move_calls}). Request a critique or finish."
+                ),
             )
         call_limit = self._current_move_limit()
         if self.active_designer_call and call_limit > 0:
             if self.move_calls_this_call >= call_limit:
                 return (
                     False,
-                    "Safety controller blocked move_furniture_tool: this designer "
-                    f"call already used {call_limit} move(s). Request a critique "
-                    "or finish instead of continuing local search.",
+                    self._record_tool_denial(
+                        "Safety controller blocked move_furniture_tool: this designer "
+                        f"call already used {call_limit} move(s). Request a critique "
+                        "or finish instead of continuing local search."
+                    ),
                 )
         object_moves = self.moves_by_object_this_call.get(object_id, 0)
         if (
@@ -392,10 +431,12 @@ class FurnitureSafetyController:
         ):
             return (
                 False,
-                "Safety controller blocked move_furniture_tool: object "
-                f"{object_id} has already been moved {object_moves} time(s) in "
-                "this designer call. Stop iterating on the same object and "
-                "request a critique.",
+                self._record_tool_denial(
+                    "Safety controller blocked move_furniture_tool: object "
+                    f"{object_id} has already been moved {object_moves} time(s) in "
+                    "this designer call. Stop iterating on the same object and "
+                    "request a critique."
+                ),
             )
         self.move_calls += 1
         self.move_calls_this_call += 1
@@ -405,6 +446,9 @@ class FurnitureSafetyController:
     def record_physics_check(self) -> tuple[bool, str]:
         if not self.enabled:
             return True, ""
+        stop_message = self._designer_stop_message()
+        if stop_message:
+            return False, stop_message
         if (
             self.active_designer_call
             and self.max_physics_checks_per_designer_call > 0
@@ -413,10 +457,12 @@ class FurnitureSafetyController:
         ):
             return (
                 False,
-                "Safety controller blocked check_physics: this designer call "
-                f"already used {self.max_physics_checks_per_designer_call} "
-                "physics check(s). Use the latest result, request critique, or "
-                "finish instead of continuing local search.",
+                self._record_tool_denial(
+                    "Safety controller blocked check_physics: this designer call "
+                    f"already used {self.max_physics_checks_per_designer_call} "
+                    "physics check(s). Use the latest result, request critique, or "
+                    "finish instead of continuing local search."
+                ),
             )
         self.physics_checks_this_call += 1
         return True, ""
@@ -424,13 +470,18 @@ class FurnitureSafetyController:
     def record_generate_assets(self) -> tuple[bool, str]:
         if not self.enabled:
             return True, ""
+        stop_message = self._designer_stop_message()
+        if stop_message:
+            return False, stop_message
         max_calls = 1 + self.max_generate_assets_calls_after_initial
         if self.generate_asset_calls >= max_calls:
             return (
                 False,
-                "Safety controller blocked generate_assets: asset generation has "
-                "already run for this furniture stage. Reuse available assets, "
-                "repair placement, or finish with the best checkpoint.",
+                self._record_tool_denial(
+                    "Safety controller blocked generate_assets: asset generation has "
+                    "already run for this furniture stage. Reuse available assets, "
+                    "repair placement, or finish with the best checkpoint."
+                ),
             )
         self.generate_asset_calls += 1
         return True, ""
@@ -443,6 +494,9 @@ class FurnitureSafetyController:
         """Block adding extra copies of prompt-required furniture categories."""
         if not self.enabled:
             return True, ""
+        stop_message = self._designer_stop_message()
+        if stop_message:
+            return False, stop_message
         required_counts = self.required_counts or {
             term: 1 for term in self.required_terms
         }
@@ -456,10 +510,12 @@ class FurnitureSafetyController:
         if current_count >= required_count:
             return (
                 False,
-                "Safety controller blocked add_furniture_to_scene_tool: prompt "
-                f"requires {required_count} {category}(s), and {current_count} "
-                "are already present. Move existing objects instead of adding "
-                "duplicates.",
+                self._record_tool_denial(
+                    "Safety controller blocked add_furniture_to_scene_tool: prompt "
+                    f"requires {required_count} {category}(s), and {current_count} "
+                    "are already present. Move existing objects instead of adding "
+                    "duplicates."
+                ),
             )
         return True, ""
 
@@ -471,6 +527,9 @@ class FurnitureSafetyController:
     ) -> tuple[bool, str]:
         if not self.enabled:
             return True, ""
+        stop_message = self._designer_stop_message()
+        if stop_message:
+            return False, stop_message
         category = self._infer_category(f"{object_id} {object_text}")
         required_counts = self.required_counts or {
             term: 1 for term in self.required_terms
@@ -485,10 +544,12 @@ class FurnitureSafetyController:
         if category in required_counts or self.is_required_object(object_id, object_text):
             return (
                 False,
-                "Safety controller blocked remove_furniture_tool: this object appears "
-                "to satisfy a prompt-required furniture item, and removing it would "
-                "drop the scene below the requested count. Move it locally instead "
-                "of deleting it.",
+                self._record_tool_denial(
+                    "Safety controller blocked remove_furniture_tool: this object "
+                    "appears to satisfy a prompt-required furniture item, and "
+                    "removing it would drop the scene below the requested count. "
+                    "Move it locally instead of deleting it."
+                ),
             )
         return True, ""
 
@@ -501,19 +562,26 @@ class FurnitureSafetyController:
     ) -> tuple[bool, str]:
         if not self.enabled:
             return True, ""
+        stop_message = self._designer_stop_message()
+        if stop_message:
+            return False, stop_message
         if not (self.rescale_min_factor <= scale_factor <= self.rescale_max_factor):
             return (
                 False,
-                "Safety controller blocked rescale_furniture_tool: scale_factor "
-                f"{scale_factor:.3f} is outside "
-                f"[{self.rescale_min_factor}, {self.rescale_max_factor}].",
+                self._record_tool_denial(
+                    "Safety controller blocked rescale_furniture_tool: scale_factor "
+                    f"{scale_factor:.3f} is outside "
+                    f"[{self.rescale_min_factor}, {self.rescale_max_factor}]."
+                ),
             )
         count = self.rescale_counts.get(object_id, 0)
         if count >= self.max_rescales_per_object:
             return (
                 False,
-                "Safety controller blocked rescale_furniture_tool: each object may "
-                f"be rescaled at most {self.max_rescales_per_object} time(s).",
+                self._record_tool_denial(
+                    "Safety controller blocked rescale_furniture_tool: each object "
+                    f"may be rescaled at most {self.max_rescales_per_object} time(s)."
+                ),
             )
         bounds_message = self._check_size_bounds(
             object_id=object_id,
@@ -522,7 +590,7 @@ class FurnitureSafetyController:
             current_dimensions=current_dimensions,
         )
         if bounds_message:
-            return False, bounds_message
+            return False, self._record_tool_denial(bounds_message)
         self.rescale_counts[object_id] = count + 1
         return True, ""
 

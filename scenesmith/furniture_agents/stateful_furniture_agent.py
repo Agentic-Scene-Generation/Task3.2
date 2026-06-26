@@ -316,7 +316,12 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         # Check if scene changed since last checkpoint to avoid redundant critique.
         current_scene_hash = self.scene.content_hash()
 
-        if (
+        if self._critic_failed:
+            console_logger.warning(
+                "Skipping final furniture critique because critic scoring already "
+                "failed in this stage"
+            )
+        elif (
             self.checkpoint_scene_hash is not None
             and current_scene_hash == self.checkpoint_scene_hash
         ):
@@ -328,7 +333,14 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 "Scene changed since last critique, computing final critique"
             )
             # Pass update_checkpoint=False to preserve N-1 checkpoint for reset check.
-            await self._request_critique_impl(update_checkpoint=False)
+            try:
+                await self._request_critique_impl(update_checkpoint=False)
+            except Exception:
+                self._critic_failed = True
+                console_logger.exception(
+                    "Final furniture critique failed; preserving the best available "
+                    "hard-valid checkpoint instead of restarting the planner"
+                )
 
         # Validate final scene and save scores.
         await self._finalize_scene_and_scores()
