@@ -199,6 +199,7 @@ def _build_hybrid_retriever(
     memory_dir: str,
     memory_cfg: dict,
     ret_cfg: dict,
+    timing_path: Path | None = None,
 ):
     """Construct the optional hybrid retriever from memory config."""
     if not (
@@ -262,6 +263,7 @@ def _build_hybrid_retriever(
         ),
         weights=weights,
         require_indexes=_cfg_bool(idx_cfg.get("require_ready"), True),
+        timing_path=timing_path,
     )
 
 
@@ -987,12 +989,14 @@ def build_hook_runner(
         ret_cfg = memory_cfg.get("retrieval", {})
         memory_store = FastMemoryStore(memory_dir)
         retriever_type = memory_cfg.get("retriever_type", "lexical")
+        scene_debug_dir = output_dir / f"scene_{scene_id:03d}" / "scene_expert"
         if retriever_type == "hybrid":
             retriever = _build_hybrid_retriever(
                 memory_store=memory_store,
                 memory_dir=memory_dir,
                 memory_cfg=memory_cfg,
                 ret_cfg=ret_cfg,
+                timing_path=scene_debug_dir / "timing" / "memory_retrieval.jsonl",
             )
         elif retriever_type == "lexical":
             retriever = MemoryRetriever(
@@ -1007,7 +1011,10 @@ def build_hook_runner(
                 "Use 'lexical' or 'hybrid'."
             )
         memory_writer = MemoryWriter(
-            model=model, api_base_url=api_base, api_key=api_key
+            model=model,
+            api_base_url=api_base,
+            api_key=api_key,
+            debug_dir=scene_debug_dir / "memory",
         )
 
     # Verifier thresholds

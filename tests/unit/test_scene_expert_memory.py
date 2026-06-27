@@ -1,5 +1,6 @@
 import unittest
 
+import json
 import sys
 import types
 
@@ -168,6 +169,56 @@ class SceneExpertMemoryTest(unittest.TestCase):
         self.assertIs(True, failure.content["is_deterministic"])
         self.assertEqual("stage", failure.content["scope"])
         self.assertTrue(failure.content["embedding_text"])
+
+    def test_memory_writer_extracts_reasoning_content_and_markdown_json(self) -> None:
+        writer = MemoryWriter.__new__(MemoryWriter)
+        message = types.SimpleNamespace(
+            content=None,
+            model_dump=lambda: {
+                "content": None,
+                "model_extra": {
+                    "reasoning_content": (
+                        "```json\n"
+                        '{"updates":[{"op":"NOOP","memory_type":"success_case","content":{}}]}'
+                        "\n```"
+                    )
+                },
+            },
+        )
+        response = types.SimpleNamespace(
+            choices=[types.SimpleNamespace(message=message, finish_reason="stop")]
+        )
+
+        raw = writer._extract_response_text(response)
+        data = writer._parse_json_payload(raw)
+
+        self.assertEqual(1, len(data["updates"]))
+        self.assertEqual("NOOP", data["updates"][0]["op"])
+
+    def test_memory_writer_builds_conservative_fallback_success_ops(self) -> None:
+        writer = MemoryWriter.__new__(MemoryWriter)
+        trace_summary = "\n".join(
+            [
+                "Trace: trace_000001",
+                "Prompt: A bedroom with a bed, two nightstands, and a wardrobe.",
+                "Stages:",
+                "  [furniture] objective='Complete furniture' verify=PASS "
+                "scores=(semantic=0.90, aesthetic=0.80, physics=0.90)",
+            ]
+        )
+        full_report = FullVerifyReport(overall_score=0.8, pass_scene=True)
+
+        ops = writer._fallback_success_ops(trace_summary, full_report)
+        filtered = writer._gate_and_enrich_ops(ops, full_report)
+
+        self.assertEqual(1, len(filtered))
+        op = filtered[0]
+        self.assertEqual("ADD", op.op)
+        self.assertEqual("success_case", op.memory_type)
+        self.assertEqual("furniture", op.content["stage"])
+        self.assertEqual("bedroom", op.content["room_type"])
+        self.assertIn("bed", op.content["required_objects"])
+        self.assertTrue(op.content["embedding_text"])
 
     def test_embedding_model_dir_resolves_to_bge_m3_under_models_dir(self) -> None:
         with patch.dict(
@@ -375,6 +426,60 @@ class SceneExpertMemoryTest(unittest.TestCase):
             self.assertIn("do not retry", pack.failure_hints[0])
             self.assertEqual(1, len(pack.skill_texts))
             self.assertIn("arrange_bedroom_anchor", pack.skill_texts[0])
+
+    def test_hybrid_retriever_writes_timing_jsonl(self) -> None:
+        class DummyEmbedder:
+            def encode(self, texts: list[str]) -> np.ndarray:
+                del texts
+                return np.asarray([[1.0, 0.0]], dtype=np.float32)
+
+        with TemporaryDirectory() as tmp:
+            memory_dir = Path(tmp) / "memory"
+            memory_dir.mkdir()
+            timing_path = Path(tmp) / "scene_expert" / "timing" / "memory_retrieval.jsonl"
+            success = SuccessCase(
+                case_id="success_bedroom_001",
+                room_type="bedroom",
+                stage="furniture",
+                required_objects=["bed"],
+                positive_guidance=["place bed first"],
+            )
+            (memory_dir / "success_cases.jsonl").write_text(
+                success.model_dump_json() + "\n",
+                encoding="utf-8",
+            )
+            build_memory_indexes(
+                memory_dir=memory_dir,
+                embedding_model_dir=Path("/models/bge-m3"),
+                stages=("furniture",),
+                memory_types=("success",),
+                embedder=DummyEmbedder(),
+            )
+            store = FastMemoryStore(str(memory_dir))
+            retriever = HybridMemoryRetriever(
+                store=store,
+                memory_dir=str(memory_dir),
+                embedder=DummyEmbedder(),
+                max_success=1,
+                max_failure=0,
+                max_skills=0,
+                require_indexes=True,
+                timing_path=timing_path,
+            )
+
+            retriever.retrieve(
+                SceneTaskSpec(room_type="bedroom", required_large_objects=["bed"]),
+                "furniture",
+            )
+
+            self.assertTrue(timing_path.exists())
+            timing = json.loads(timing_path.read_text(encoding="utf-8").splitlines()[0])
+            self.assertEqual("hybrid", timing["retriever_type"])
+            self.assertIn("embedding_encode_sec", timing)
+            self.assertIn("index_load_sec", timing)
+            self.assertIn("vector_search_sec", timing)
+            self.assertIn("rerank_sec", timing)
+            self.assertIn("total_sec", timing)
 
 
 if __name__ == "__main__":

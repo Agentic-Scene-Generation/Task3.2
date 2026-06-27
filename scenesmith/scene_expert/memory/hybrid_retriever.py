@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import time
 
 from pathlib import Path
 from typing import Any
@@ -44,6 +46,7 @@ class HybridMemoryRetriever:
         object_overlap_threshold: float = 0.15,
         weights: HybridScoreWeights | None = None,
         require_indexes: bool = True,
+        timing_path: str | Path | None = None,
     ) -> None:
         self._store = store
         self._memory_dir = Path(memory_dir)
@@ -57,22 +60,28 @@ class HybridMemoryRetriever:
         self._object_overlap_threshold = object_overlap_threshold
         self._weights = weights or HybridScoreWeights()
         self._index_cache: dict[tuple[str, str], NumpyMemoryIndex | None] = {}
+        self._timing_path = Path(timing_path) if timing_path else None
 
         if require_indexes:
             self._validate_required_indexes()
 
     def retrieve(self, task_spec: SceneTaskSpec, stage: str) -> MemoryPack:
+        total_start = time.perf_counter()
         query_text = build_query_text(task_spec, stage)
+        encode_start = time.perf_counter()
         query_vec = self._embedder.encode([query_text])
+        embedding_encode_sec = time.perf_counter() - encode_start
         if query_vec.ndim == 2:
             query_vec = query_vec[0]
 
+        bank_timings: list[dict[str, Any]] = []
         success = self._retrieve_bank(
             "success",
             stage,
             query_vec,
             task_spec,
             final_top_k=self._max_success,
+            bank_timings=bank_timings,
         )
         failure = self._retrieve_bank(
             "failure",
@@ -80,6 +89,7 @@ class HybridMemoryRetriever:
             query_vec,
             task_spec,
             final_top_k=self._max_failure,
+            bank_timings=bank_timings,
         )
         skills = self._retrieve_bank(
             "skill",
@@ -87,6 +97,7 @@ class HybridMemoryRetriever:
             query_vec,
             task_spec,
             final_top_k=self._max_skills,
+            bank_timings=bank_timings,
         )
 
         placement_reference = ""
@@ -95,6 +106,18 @@ class HybridMemoryRetriever:
                 placement_reference = record.to_placement_text()
                 if placement_reference:
                     break
+
+        total_sec = time.perf_counter() - total_start
+        self._record_timing(
+            stage=stage,
+            query_text=query_text,
+            embedding_encode_sec=embedding_encode_sec,
+            bank_timings=bank_timings,
+            success_count=len(success),
+            failure_count=len(failure),
+            skill_count=len(skills),
+            total_sec=total_sec,
+        )
 
         return MemoryPack(
             success_hints=[
@@ -122,22 +145,53 @@ class HybridMemoryRetriever:
         query_vec: np.ndarray,
         task_spec: SceneTaskSpec,
         final_top_k: int,
+        bank_timings: list[dict[str, Any]],
     ) -> list[tuple[float, MemoryRecord]]:
+        bank_timing: dict[str, Any] = {
+            "memory_type": memory_type,
+            "stage": stage,
+            "requested_top_k": final_top_k,
+            "index_cache_hit": (memory_type, stage) in self._index_cache,
+            "index_found": False,
+            "candidate_count": 0,
+            "below_threshold_count": 0,
+            "stale_count": 0,
+            "structured_filtered_count": 0,
+            "accepted_count": 0,
+            "returned_count": 0,
+            "index_load_sec": 0.0,
+            "vector_search_sec": 0.0,
+            "rerank_sec": 0.0,
+        }
         if final_top_k <= 0:
+            bank_timings.append(bank_timing)
             return []
 
+        load_start = time.perf_counter()
         index = self._load_index(memory_type, stage)
+        bank_timing["index_load_sec"] = time.perf_counter() - load_start
         if index is None:
+            bank_timings.append(bank_timing)
             return []
+        bank_timing["index_found"] = True
 
         scored: list[tuple[float, MemoryRecord]] = []
-        for emb_score, metadata in index.search(query_vec, top_k=self._recall_top_k):
+        search_start = time.perf_counter()
+        search_results = index.search(query_vec, top_k=self._recall_top_k)
+        bank_timing["vector_search_sec"] = time.perf_counter() - search_start
+        bank_timing["candidate_count"] = len(search_results)
+
+        rerank_start = time.perf_counter()
+        for emb_score, metadata in search_results:
             if emb_score < self._sim_threshold:
+                bank_timing["below_threshold_count"] += 1
                 continue
             record = self._record_from_metadata(memory_type, metadata)
             if record is None:
+                bank_timing["stale_count"] += 1
                 continue
             if not self._structured_filter(record, task_spec, stage, memory_type):
+                bank_timing["structured_filtered_count"] += 1
                 continue
             score = hybrid_score(
                 embedding_similarity=emb_score,
@@ -150,7 +204,12 @@ class HybridMemoryRetriever:
             scored.append((score, record))
 
         scored.sort(key=lambda x: x[0], reverse=True)
-        return scored[:final_top_k]
+        output = scored[:final_top_k]
+        bank_timing["rerank_sec"] = time.perf_counter() - rerank_start
+        bank_timing["accepted_count"] = len(scored)
+        bank_timing["returned_count"] = len(output)
+        bank_timings.append(bank_timing)
+        return output
 
     def _structured_filter(
         self,
@@ -256,6 +315,71 @@ class HybridMemoryRetriever:
                 + ". Run scripts/build_memory_index.py before setting "
                 "SCENEEXPERT_MEMORY_RETRIEVER_TYPE=hybrid."
             )
+
+    def _record_timing(
+        self,
+        *,
+        stage: str,
+        query_text: str,
+        embedding_encode_sec: float,
+        bank_timings: list[dict[str, Any]],
+        success_count: int,
+        failure_count: int,
+        skill_count: int,
+        total_sec: float,
+    ) -> None:
+        index_load_sec = sum(float(x.get("index_load_sec", 0.0)) for x in bank_timings)
+        vector_search_sec = sum(
+            float(x.get("vector_search_sec", 0.0)) for x in bank_timings
+        )
+        rerank_sec = sum(float(x.get("rerank_sec", 0.0)) for x in bank_timings)
+        payload = {
+            "schema_version": "1.0",
+            "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "stage": stage,
+            "retriever_type": "hybrid",
+            "memory_dir": str(self._memory_dir),
+            "index_dir": str(self._index_dir),
+            "query_text": query_text,
+            "embedding_encode_sec": round(embedding_encode_sec, 6),
+            "index_load_sec": round(index_load_sec, 6),
+            "vector_search_sec": round(vector_search_sec, 6),
+            "rerank_sec": round(rerank_sec, 6),
+            "total_sec": round(total_sec, 6),
+            "returned": {
+                "success": success_count,
+                "failure": failure_count,
+                "skill": skill_count,
+            },
+            "banks": [
+                {
+                    **bank,
+                    "index_load_sec": round(float(bank["index_load_sec"]), 6),
+                    "vector_search_sec": round(float(bank["vector_search_sec"]), 6),
+                    "rerank_sec": round(float(bank["rerank_sec"]), 6),
+                }
+                for bank in bank_timings
+            ],
+        }
+        console_logger.info(
+            "[SceneExpertTiming] stage=%s module=hybrid_memory_retrieval "
+            "embedding_encode=%.3fs index_load=%.3fs vector_search=%.3fs "
+            "rerank=%.3fs total=%.3fs returned=%s/%s/%s",
+            stage,
+            embedding_encode_sec,
+            index_load_sec,
+            vector_search_sec,
+            rerank_sec,
+            total_sec,
+            success_count,
+            failure_count,
+            skill_count,
+        )
+        if self._timing_path is None:
+            return
+        self._timing_path.parent.mkdir(parents=True, exist_ok=True)
+        with self._timing_path.open("a", encoding="utf-8", newline="\n") as f:
+            f.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
 
 
 def _record_id(record: MemoryRecord) -> str:
