@@ -18,6 +18,12 @@ from scenesmith.agent_utils.scoring import compute_total_score, scores_to_dict
 
 console_logger = logging.getLogger(__name__)
 
+_OBJECT_ALIASES: dict[str, tuple[str, ...]] = {
+    "bed": ("bed", "beds"),
+    "nightstand": ("nightstand", "nightstands", "bedside table", "bedside_table"),
+    "wardrobe": ("wardrobe", "wardrobes", "closet", "closets", "corner_wardrobe"),
+}
+
 
 def _now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -39,6 +45,92 @@ def _object_names(scene: Any) -> list[str]:
         ]
     except Exception:
         return []
+
+
+def _infer_category(text: str) -> str | None:
+    normalized = str(text or "").lower().replace("_", " ")
+    for category, aliases in _OBJECT_ALIASES.items():
+        if any(alias.replace("_", " ") in normalized for alias in aliases):
+            return category
+    return None
+
+
+def _count_required_categories(object_names: list[str]) -> dict[str, int]:
+    counts = {category: 0 for category in _OBJECT_ALIASES}
+    for name in object_names:
+        category = _infer_category(name)
+        if category in counts:
+            counts[category] += 1
+    return counts
+
+
+def _extract_grade(scores: dict[str, Any], *name_parts: str) -> float | None:
+    for key, value in scores.items():
+        key_lower = str(key).lower().replace("_", " ")
+        if not all(part.lower().replace("_", " ") in key_lower for part in name_parts):
+            continue
+        if isinstance(value, dict):
+            grade = value.get("grade") or value.get("score")
+            if isinstance(grade, (int, float)):
+                return float(grade)
+        if isinstance(value, (int, float)):
+            return float(value)
+    return None
+
+
+def _deterministic_quality(
+    *,
+    object_names: list[str],
+    required_counts: dict[str, int],
+    scores: dict[str, Any],
+    critique: str,
+) -> dict[str, Any]:
+    required_counts = {
+        str(key).lower(): int(value)
+        for key, value in (required_counts or {}).items()
+        if int(value) > 0
+    }
+    observed_counts = _count_required_categories(object_names)
+    missing: list[str] = []
+    for category, required in required_counts.items():
+        observed = observed_counts.get(category, 0)
+        if observed < required:
+            missing.extend([category] * (required - observed))
+
+    prompt_following = _extract_grade(scores, "prompt", "following")
+    critique_lower = str(critique or "").lower()
+    claims_complete = any(
+        term in critique_lower
+        for term in (
+            "all required",
+            "all furniture quantities match",
+            "bed - present",
+            "bed, two nightstands",
+            "all required furniture",
+        )
+    )
+    inconsistent = bool(missing) and (
+        claims_complete or (prompt_following is not None and prompt_following >= 8)
+    )
+    hard_valid = not missing
+    note = ""
+    if missing:
+        note = (
+            "Deterministic state check: missing required furniture "
+            + ", ".join(missing)
+            + f"; observed_counts={observed_counts}."
+        )
+        if inconsistent:
+            note += " Ignore contradictory critic/designer text that claims completion."
+
+    return {
+        "required_counts": required_counts,
+        "observed_counts": observed_counts,
+        "missing_required_objects": missing,
+        "hard_valid": hard_valid,
+        "critic_inconsistent_with_state": inconsistent,
+        "deterministic_note": note,
+    }
 
 
 def _scene_hash(scene: Any) -> str:
@@ -110,6 +202,7 @@ class StageWorkingMemory:
         self.debug_timing_path = (
             self.scene_root_dir / "scene_expert" / "timing" / "stage_working_timing.jsonl"
         )
+        self.required_counts: dict[str, int] = {}
         if enabled:
             self.memory_dir.mkdir(parents=True, exist_ok=True)
             self.memory_path.touch(exist_ok=True)
@@ -118,6 +211,14 @@ class StageWorkingMemory:
             self.debug_memory_path.touch(exist_ok=True)
             self.debug_timing_path.parent.mkdir(parents=True, exist_ok=True)
             self.debug_timing_path.touch(exist_ok=True)
+
+    def set_required_counts(self, required_counts: dict[str, int] | None) -> None:
+        """Set deterministic required-object counts for this stage."""
+        self.required_counts = {
+            str(key).lower(): int(value)
+            for key, value in (required_counts or {}).items()
+            if int(value) > 0
+        }
 
     def save_render_record(
         self,
@@ -138,6 +239,13 @@ class StageWorkingMemory:
         render_dir = Path(render_dir)
         images = sorted(str(path) for path in render_dir.glob("*.png"))
         score_data = _score_dict(scores)
+        object_names = _object_names(scene)
+        deterministic_quality = _deterministic_quality(
+            object_names=object_names,
+            required_counts=self.required_counts,
+            scores=score_data,
+            critique=critique or text,
+        )
         record = {
             "schema_version": "1.0",
             "created_at": _now(),
@@ -154,8 +262,9 @@ class StageWorkingMemory:
             "critique": _compact(critique, max_chars=900),
             "text": _compact(text, max_chars=900),
             "scene_hash": _scene_hash(scene),
-            "object_names": _object_names(scene),
-            "object_count": len(_object_names(scene)),
+            "object_names": object_names,
+            "object_count": len(object_names),
+            "deterministic_quality": deterministic_quality,
             "extra": extra or {},
         }
         _write_json(render_dir / "render_memory.json", record)
@@ -205,17 +314,29 @@ class StageWorkingMemory:
         query_tokens = {token.lower() for token in query.replace(",", " ").split()}
 
         def rank(record: dict[str, Any]) -> tuple[float, float]:
+            quality = record.get("deterministic_quality") or {}
             text = " ".join(
                 [
                     str(record.get("text", "")),
                     str(record.get("critique", "")),
+                    str(quality.get("deterministic_note", "")),
                     " ".join(record.get("object_names", [])),
                 ]
             ).lower()
             overlap = sum(1 for token in query_tokens if token and token in text)
             has_scores = 1.0 if record.get("scores") else 0.0
             is_critic = 1.0 if record.get("role") == "critic" else 0.0
-            return (overlap + has_scores + is_critic, record.get("score_total") or 0.0)
+            invalid_penalty = 4.0 if quality.get("critic_inconsistent_with_state") else 0.0
+            hard_valid_bonus = 0.5 if quality.get("hard_valid", True) else 0.0
+            # Invalid records with high hallucinated scores must not outrank
+            # deterministic failure notes.
+            score_total = 0.0 if quality.get("critic_inconsistent_with_state") else (
+                record.get("score_total") or 0.0
+            )
+            return (
+                overlap + has_scores + is_critic + hard_valid_bonus - invalid_penalty,
+                score_total,
+            )
 
         selected = sorted(records, key=rank, reverse=True)[:max_items]
         console_logger.info(
@@ -236,7 +357,12 @@ class StageWorkingMemory:
                 f"{index}. [{record.get('role')}/{record.get('event')}{score_text}] "
                 f"objects={record.get('object_names', [])}"
             )
-            if record.get("critique"):
+            quality = record.get("deterministic_quality") or {}
+            if quality.get("deterministic_note"):
+                lines.append(
+                    f"   deterministic: {_compact(quality['deterministic_note'], 320)}"
+                )
+            if record.get("critique") and not quality.get("critic_inconsistent_with_state"):
                 lines.append(f"   critic: {_compact(record['critique'], 260)}")
             elif record.get("text"):
                 lines.append(f"   note: {_compact(record['text'], 260)}")

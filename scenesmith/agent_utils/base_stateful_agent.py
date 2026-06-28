@@ -295,6 +295,15 @@ class BaseStatefulAgent(ABC):
         controller = getattr(self, "furniture_safety_controller", None)
         if controller and controller.enabled:
             controller.reset_for_scene(scene_description=scene_description)
+            try:
+                self.stage_working_memory.set_required_counts(
+                    controller.required_counts
+                )
+            except Exception as e:
+                console_logger.warning(
+                    "Failed to configure stage working memory requirements: %s",
+                    e,
+                )
 
     def _record_furniture_design_change_budget(self) -> str | None:
         """Gate planner-requested furniture design changes."""
@@ -425,11 +434,11 @@ class BaseStatefulAgent(ABC):
         scores: CritiqueWithScores,
         images_dir: Path | None,
         physics_context: str | None = None,
-    ) -> tuple[str, CritiqueWithScores, Path | None]:
+    ) -> tuple[str, CritiqueWithScores | None, Path | None, bool]:
         """Evaluate a critiqued scene and rollback to best if needed."""
         controller = getattr(self, "furniture_safety_controller", None)
         if not controller or not controller.enabled:
-            return "", scores, images_dir
+            return "", scores, images_dir, True
 
         hard_state_evaluation = self._evaluate_current_furniture_hard_state(
             physics_context=physics_context
@@ -442,22 +451,33 @@ class BaseStatefulAgent(ABC):
             hard_state_evaluation=hard_state_evaluation,
         )
 
-        checkpoint_scores = scores
-        checkpoint_render_dir = images_dir
+        checkpoint_scores: CritiqueWithScores | None = None
+        checkpoint_render_dir: Path | None = None
+        checkpoint_accepted = decision.accepted
+        if decision.accepted:
+            checkpoint_scores = scores
+            checkpoint_render_dir = images_dir
         if decision.rollback_to_best and controller.best_scene_state is not None:
             self._restore_furniture_scene_state(controller.best_scene_state)
             if controller.best_scores is not None:
                 checkpoint_scores = controller.best_scores
             checkpoint_render_dir = controller.best_render_dir
+            checkpoint_accepted = True
             console_logger.info(
                 "Safety controller restored best hard-valid checkpoint "
                 f"(weighted_score={controller.best_weighted_score:.3f})."
+            )
+        elif not decision.accepted:
+            console_logger.info(
+                "Safety controller did not accept this critique as a checkpoint; "
+                "hard-invalid candidates will not be used for final rollback."
             )
 
         return (
             f"\n\n**Safety Controller:** {decision.message}",
             checkpoint_scores,
             checkpoint_render_dir,
+            checkpoint_accepted,
         )
 
     def _get_model_settings(
@@ -1546,7 +1566,7 @@ class BaseStatefulAgent(ABC):
                 format_style="detailed",
             )
 
-        safety_msg, checkpoint_scores, checkpoint_render_dir = (
+        safety_msg, checkpoint_scores, checkpoint_render_dir, checkpoint_accepted = (
             self._apply_furniture_safety_after_critique(
                 scores=response,
                 images_dir=images_dir,
@@ -1556,7 +1576,7 @@ class BaseStatefulAgent(ABC):
 
         # Shift checkpoints only during iteration critiques, not final critique.
         # This preserves N-1 checkpoint for reset check in _finalize_scene_and_scores.
-        if update_checkpoint:
+        if update_checkpoint and checkpoint_accepted:
             # Shift current checkpoint to previous before saving new one.
             # This maintains N-1 and N checkpoints for rollback functionality.
             self.previous_scene_checkpoint = self.scene_checkpoint
@@ -1570,6 +1590,11 @@ class BaseStatefulAgent(ABC):
 
             # Reuse render cache hash for checkpoint change detection.
             self.checkpoint_scene_hash = self.scene.content_hash()
+        elif update_checkpoint:
+            console_logger.info(
+                "Skipping checkpoint update because furniture safety rejected "
+                "the current candidate."
+            )
 
         # Always update previous_scores for delta formatting in planner.
         self.previous_scores = response

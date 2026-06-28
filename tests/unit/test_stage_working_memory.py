@@ -28,6 +28,18 @@ class _DummyScene:
         return "scene-hash"
 
 
+class _MissingBedScene:
+    def __init__(self) -> None:
+        self.objects = {
+            "nightstand_0": _DummyObject("nightstand"),
+            "nightstand_1": _DummyObject("nightstand"),
+            "corner_wardrobe_0": _DummyObject("corner_wardrobe"),
+        }
+
+    def content_hash(self) -> str:
+        return "missing-bed-scene"
+
+
 def _score(name: str, grade: int) -> CategoryScore:
     return CategoryScore(name=name, grade=grade, comment=f"{name} score")
 
@@ -86,6 +98,51 @@ class StageWorkingMemoryTest(unittest.TestCase):
             )
             self.assertIn("keep both nightstands beside the bed", retrieved)
             self.assertIn(str(render_dir), retrieved)
+
+    def test_missing_required_object_overrides_hallucinated_success_critique(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root_dir = Path(tmp)
+            render_dir = root_dir / "scene_renders" / "furniture" / "renders_003"
+            render_dir.mkdir(parents=True)
+            (render_dir / "0_top.png").write_bytes(b"image")
+
+            scores = FurnitureCritiqueWithScores(
+                critique="All required furniture is present: bed, two nightstands, wardrobe.",
+                realism=_score("realism", 8),
+                functionality=_score("functionality", 10),
+                layout=_score("layout", 9),
+                layout_plausibility=_score("layout_plausibility", 8),
+                holistic_completeness=_score("holistic_completeness", 7),
+                prompt_following=_score("prompt_following", 10),
+                reachability=_score("reachability", 10),
+            )
+            memory = StageWorkingMemory(
+                root_dir=root_dir,
+                stage="furniture",
+                enabled=True,
+            )
+            memory.set_required_counts({"bed": 1, "nightstand": 2, "wardrobe": 1})
+            record = memory.save_render_record(
+                render_dir=render_dir,
+                role="critic",
+                event="critique",
+                scene=_MissingBedScene(),
+                scores=scores,
+                critique=scores.critique,
+            )
+
+            quality = record["deterministic_quality"]
+            self.assertFalse(quality["hard_valid"])
+            self.assertTrue(quality["critic_inconsistent_with_state"])
+            self.assertEqual(["bed"], quality["missing_required_objects"])
+
+            retrieved = memory.retrieve_for_designer(
+                query="bed missing required furniture",
+                max_items=1,
+            )
+            self.assertIn("missing required furniture bed", retrieved)
+            self.assertIn("Ignore contradictory critic", retrieved)
+            self.assertNotIn("critic: All required furniture is present", retrieved)
 
 
 if __name__ == "__main__":
