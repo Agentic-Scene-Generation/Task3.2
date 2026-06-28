@@ -332,18 +332,42 @@ class FurnitureSafetyController:
         if not self.enabled or not has_prior_critique:
             return True, ""
         if self.should_finish:
-            return (
-                False,
-                "Safety controller: a hard-valid checkpoint is already accepted; "
-                "do not request further design changes. Finish the furniture stage.",
-            )
+            if self.best_scene_state is not None:
+                return (
+                    False,
+                    "Safety controller: a hard-valid checkpoint is already accepted; "
+                    "do not request further design changes. Finish the furniture stage.",
+                )
+            if self.design_change_calls < self.max_critique_design_cycles:
+                self.should_finish = False
+                self.active_designer_call = None
+                console_logger.info(
+                    "Safety controller cleared finish flag because no hard-valid "
+                    "checkpoint exists yet; allowing one repair design change."
+                )
+            else:
+                return (
+                    False,
+                    "Safety controller: critique-design cycle budget exhausted, "
+                    "but no hard-valid checkpoint exists. Finish the stage as "
+                    "FAILED and preserve the critic report for repair/memory "
+                    "instead of claiming success.",
+                )
         if self.design_change_calls >= self.max_critique_design_cycles:
             self.should_finish = True
+            if self.best_scene_state is not None:
+                return (
+                    False,
+                    "Safety controller: critique-design cycle budget exhausted "
+                    f"({self.max_critique_design_cycles}). Finish with the best "
+                    "hard-valid checkpoint instead of making more changes.",
+                )
             return (
                 False,
                 "Safety controller: critique-design cycle budget exhausted "
-                f"({self.max_critique_design_cycles}). Finish with the best "
-                "hard-valid checkpoint instead of making more changes.",
+                f"({self.max_critique_design_cycles}) and no hard-valid "
+                "checkpoint exists. Finish the stage as FAILED; do not report a "
+                "successful furniture layout.",
             )
         self.design_change_calls += 1
         return True, ""

@@ -32,10 +32,68 @@ from scenesmith.scene_expert.schemas import (
     SceneTaskSpec,
     StageVerifyReport,
 )
-from scenesmith.scene_expert.verifier import FullVerifier, _map_scenesmith_scores
+from scenesmith.scene_expert.task_compiler import _fallback_spec_from_prompt
+from scenesmith.scene_expert.verifier import (
+    FullVerifier,
+    StageVerifier,
+    _map_scenesmith_scores,
+)
 
 
 class SceneExpertMemoryTest(unittest.TestCase):
+    def test_task_compiler_fallback_preserves_required_bedroom_objects(self) -> None:
+        spec = _fallback_spec_from_prompt(
+            "A bedroom with a bed, two nightstands, and a wardrobe in the corner."
+        )
+
+        self.assertEqual("bedroom", spec.room_type)
+        self.assertEqual(
+            ["bed", "nightstand", "nightstand", "wardrobe"],
+            spec.required_large_objects,
+        )
+        self.assertIn("sleeping_zone", spec.functional_zones)
+
+    def test_furniture_stage_verifier_fails_hard_missing_and_collision(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scores_dir = root / "scene_states" / "furniture"
+            scores_dir.mkdir(parents=True)
+            (scores_dir / "scores.yaml").write_text(
+                "\n".join(
+                    [
+                        "Realism:",
+                        "  grade: 4",
+                        "  comment: collision detected with wall",
+                        "Functionality:",
+                        "  grade: 3",
+                        "  comment: room incomplete",
+                        "Layout Plausibility:",
+                        "  grade: 7",
+                        "Prompt Following:",
+                        "  grade: 4",
+                        "  comment: missing primary bed",
+                        "Summary: bed missing and collision detected",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            report = StageVerifier(pass_threshold=0.6).verify(
+                stage="furniture",
+                stage_output_dir=str(root),
+                task_spec=SceneTaskSpec(
+                    room_type="bedroom",
+                    style="standard",
+                    required_large_objects=["bed", "nightstand", "nightstand", "wardrobe"],
+                ),
+                scene_state_info={"object_names": ["nightstand_0", "nightstand_1", "wardrobe_0"]},
+            )
+
+            self.assertFalse(report.pass_stage)
+            issue_types = {issue.issue_type for issue in report.issues}
+            self.assertIn("missing_object", issue_types)
+            self.assertIn("physics_collision", issue_types)
+
     def test_layout_plausibility_maps_to_scene_expert_category(self) -> None:
         mapped = _map_scenesmith_scores(
             {
@@ -468,7 +526,11 @@ class SceneExpertMemoryTest(unittest.TestCase):
             )
 
             retriever.retrieve(
-                SceneTaskSpec(room_type="bedroom", required_large_objects=["bed"]),
+                SceneTaskSpec(
+                    room_type="bedroom",
+                    style="standard",
+                    required_large_objects=["bed"],
+                ),
                 "furniture",
             )
 

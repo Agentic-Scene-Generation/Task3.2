@@ -11,8 +11,6 @@ import logging
 import os
 import re
 
-from openai import OpenAI
-
 from scenesmith.scene_expert.schemas import SceneTaskSpec
 
 console_logger = logging.getLogger(__name__)
@@ -83,6 +81,79 @@ _STYLE_KEYWORDS: dict[str, list[str]] = {
     "luxury": ["luxury", "elegant", "upscale", "premium"],
 }
 
+_NUMBER_WORDS: dict[str, int] = {
+    "one": 1,
+    "a": 1,
+    "an": 1,
+    "single": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+}
+
+_OBJECT_ALIASES: dict[str, tuple[str, list[str], str]] = {
+    "bed": ("large", ["bed", "beds"], "bed"),
+    "nightstand": (
+        "large",
+        ["nightstand", "nightstands", "bedside table", "bedside tables"],
+        "nightstand",
+    ),
+    "wardrobe": ("large", ["wardrobe", "wardrobes", "closet", "closets"], "wardrobe"),
+    "sofa": ("large", ["sofa", "sofas", "couch", "couches"], "sofa"),
+    "table": ("large", ["table", "tables", "desk", "desks"], "table"),
+    "chair": ("large", ["chair", "chairs"], "chair"),
+    "painting": ("wall", ["painting", "paintings", "artwork", "artworks"], "painting"),
+    "mirror": ("wall", ["mirror", "mirrors"], "mirror"),
+    "shelf": ("wall", ["shelf", "shelves", "floating shelf", "floating shelves"], "shelf"),
+    "ceiling light": (
+        "ceiling",
+        ["ceiling light", "ceiling lights", "pendant light", "pendant lights", "lamp"],
+        "ceiling light",
+    ),
+    "book": ("small", ["book", "books"], "book"),
+    "plant": ("small", ["plant", "plants"], "plant"),
+}
+
+
+def _extract_count_before_alias(text: str, alias: str) -> int:
+    """Return a conservative count for an object mention in fallback parsing."""
+    alias_pattern = re.escape(alias.lower()).replace(r"\ ", r"\s+")
+    number_pattern = "|".join([r"\d+", *map(re.escape, _NUMBER_WORDS)])
+    pattern = (
+        rf"(?:(?P<count>{number_pattern})\s+)?"
+        rf"(?:\w+\s+){{0,2}}{alias_pattern}\b"
+    )
+    best = 0
+    for match in re.finditer(pattern, text):
+        count_text = match.groupdict().get("count")
+        if not count_text:
+            count = 1
+        elif count_text.isdigit():
+            count = int(count_text)
+        else:
+            count = _NUMBER_WORDS.get(count_text, 1)
+        best = max(best, count)
+    return best
+
+
+def _extract_required_objects_from_prompt(prompt_lower: str) -> dict[str, list[str]]:
+    """Small deterministic parser used only when the model compiler fails."""
+    required = {
+        "large": [],
+        "wall": [],
+        "ceiling": [],
+        "small": [],
+    }
+    for _, (bucket, aliases, canonical) in _OBJECT_ALIASES.items():
+        count = 0
+        for alias in aliases:
+            count = max(count, _extract_count_before_alias(prompt_lower, alias))
+        if count > 0:
+            required[bucket].extend([canonical] * count)
+    return required
+
 
 def _extract_json_from_text(text: str) -> dict:
     """Extract JSON from model output, handling markdown code fences."""
@@ -116,10 +187,43 @@ def _fallback_spec_from_prompt(prompt: str) -> SceneTaskSpec:
             style = stype
             break
 
+    required = _extract_required_objects_from_prompt(prompt_lower)
+    functional_zones: list[str] = []
+    if room_type == "bedroom" or any(
+        obj in required["large"] for obj in ("bed", "nightstand", "wardrobe")
+    ):
+        functional_zones.extend(["sleeping_zone", "storage_zone"])
+    if any(obj in required["large"] for obj in ("table", "chair")):
+        functional_zones.append("working_or_dining_zone")
+
+    interaction_constraints: list[str] = []
+    if "bed" in required["large"] and "nightstand" in required["large"]:
+        interaction_constraints.append(
+            "nightstands should flank the bed and remain reachable from the bed"
+        )
+    if "wardrobe" in required["large"]:
+        interaction_constraints.append(
+            "wardrobe doors should have clear access and should not block the room door"
+        )
+
     console_logger.info(
-        f"TaskCompiler: fallback spec from prompt text: room_type={room_type}, style={style}"
+        "TaskCompiler: fallback spec from prompt text: room_type=%s, style=%s, "
+        "large_objects=%s",
+        room_type,
+        style,
+        required["large"],
     )
-    return SceneTaskSpec(room_type=room_type, style=style)
+    return SceneTaskSpec(
+        room_type=room_type,
+        style=style,
+        required_large_objects=required["large"],
+        required_wall_objects=required["wall"],
+        required_ceiling_objects=required["ceiling"],
+        required_small_objects=required["small"],
+        functional_zones=functional_zones,
+        interaction_constraints=interaction_constraints,
+        aesthetic_constraints=["balanced placement", "clear walking paths"],
+    )
 
 
 class TaskCompiler:
@@ -133,6 +237,8 @@ class TaskCompiler:
         max_tokens: int = 1024,
         temperature: float = 0.1,
     ) -> None:
+        from openai import OpenAI
+
         self._model = model
         self._max_tokens = max_tokens
         self._temperature = temperature
@@ -165,10 +271,15 @@ class TaskCompiler:
             max_tokens=self._max_tokens,
         )
 
-        raw = response.choices[0].message.content
-        # Qwen3 with --reasoning-parser may put output in reasoning_content
+        message = response.choices[0].message
+        raw = message.content
+        # Qwen3 with --reasoning-parser may put output in reasoning_content.
         if not raw:
-            raw = getattr(response.choices[0].message, "reasoning_content", None)
+            raw = getattr(message, "reasoning_content", None)
+        if not raw:
+            extra = getattr(message, "model_extra", None)
+            if isinstance(extra, dict):
+                raw = extra.get("reasoning_content")
         console_logger.debug(f"TaskCompiler raw response: {raw}")
 
         try:

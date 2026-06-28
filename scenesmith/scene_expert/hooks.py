@@ -300,6 +300,10 @@ class SceneExpertHookRunner:
         self._scene_id = scene_id
         self._output_dir = output_dir
         self._mode = mode
+        self._scene_debug_dir = output_dir / f"scene_{scene_id:03d}" / "scene_expert"
+        self._retrieval_timing_path = (
+            self._scene_debug_dir / "timing" / "memory_retrieval.jsonl"
+        )
 
         self._task_spec = task_spec
         self._harness = harness
@@ -340,6 +344,44 @@ class SceneExpertHookRunner:
         self._original_text_descriptions: dict[str, str] = {}
         self._last_injected_floor_plan_prompt: str = prompt
 
+    def _record_memory_retrieval_timing(
+        self,
+        *,
+        stage: str,
+        elapsed_sec: float,
+        pack: MemoryPack | None = None,
+        error: str = "",
+    ) -> None:
+        """Record pre-stage memory retrieval timing even for empty/fallback stores."""
+        try:
+            record = {
+                "schema_version": "1.0",
+                "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "stage": stage,
+                "module": "scene_expert_memory_retrieval",
+                "retriever": type(self._retriever).__name__
+                if self._retriever is not None
+                else "none",
+                "elapsed_sec": round(float(elapsed_sec), 6),
+                "success_hints": len(pack.success_hints) if pack else 0,
+                "failure_hints": len(pack.failure_hints) if pack else 0,
+                "skills": len(pack.skill_texts) if pack else 0,
+                "has_placement_reference": bool(pack and pack.placement_reference),
+                "error": error,
+            }
+            self._retrieval_timing_path.parent.mkdir(parents=True, exist_ok=True)
+            with self._retrieval_timing_path.open(
+                "a",
+                encoding="utf-8",
+                newline="\n",
+            ) as f:
+                f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+        except Exception as timing_error:
+            console_logger.warning(
+                "Failed to record SceneExpert memory retrieval timing: %s",
+                timing_error,
+            )
+
     # ------------------------------------------------------------------
     # Pre-stage hook: called BEFORE the SceneSmith stage agent runs
     # ------------------------------------------------------------------
@@ -369,12 +411,25 @@ class SceneExpertHookRunner:
                     len(self._current_memory_pack.success_hints)
                     + len(self._current_memory_pack.failure_hints)
                 )
+                self._record_memory_retrieval_timing(
+                    stage=stage,
+                    elapsed_sec=retrieval_elapsed,
+                    pack=self._current_memory_pack,
+                )
                 console_logger.info(
                     f"[SceneExpert] Memory retrieved for {stage}: "
                     f"{n_hints} hints, {len(self._current_memory_pack.skill_texts)} skills "
                     f"in {retrieval_elapsed:.2f}s"
                 )
             except Exception as e:
+                self._record_memory_retrieval_timing(
+                    stage=stage,
+                    elapsed_sec=time.time() - retrieval_start
+                    if "retrieval_start" in locals()
+                    else 0.0,
+                    pack=None,
+                    error=str(e),
+                )
                 console_logger.warning(f"Memory retrieval failed for {stage}: {e}")
                 self._current_memory_pack = _empty_memory_pack()
         else:
@@ -532,12 +587,25 @@ class SceneExpertHookRunner:
                     len(self._current_memory_pack.success_hints)
                     + len(self._current_memory_pack.failure_hints)
                 )
+                self._record_memory_retrieval_timing(
+                    stage=stage,
+                    elapsed_sec=retrieval_elapsed,
+                    pack=self._current_memory_pack,
+                )
                 console_logger.info(
                     f"[SceneExpert] Memory retrieved for {stage}: "
                     f"{n_hints} hints, {len(self._current_memory_pack.skill_texts)} skills "
                     f"in {retrieval_elapsed:.2f}s"
                 )
             except Exception as e:
+                self._record_memory_retrieval_timing(
+                    stage=stage,
+                    elapsed_sec=time.time() - retrieval_start
+                    if "retrieval_start" in locals()
+                    else 0.0,
+                    pack=None,
+                    error=str(e),
+                )
                 console_logger.warning(f"Memory retrieval failed for {stage}: {e}")
                 self._current_memory_pack = _empty_memory_pack()
         else:

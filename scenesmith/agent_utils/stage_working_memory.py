@@ -100,10 +100,24 @@ class StageWorkingMemory:
         self.memory_dir = self.root_dir / "stage_working_memory" / stage
         self.memory_path = self.memory_dir / "memory.jsonl"
         self.timing_path = self.root_dir / "timing_stats.jsonl"
+        self.scene_root_dir = (
+            self.root_dir.parent if self.root_dir.name.startswith("room_") else self.root_dir
+        )
+        self.debug_memory_dir = (
+            self.scene_root_dir / "scene_expert" / "working_memory" / stage
+        )
+        self.debug_memory_path = self.debug_memory_dir / "memory.jsonl"
+        self.debug_timing_path = (
+            self.scene_root_dir / "scene_expert" / "timing" / "stage_working_timing.jsonl"
+        )
         if enabled:
             self.memory_dir.mkdir(parents=True, exist_ok=True)
             self.memory_path.touch(exist_ok=True)
             self.timing_path.touch(exist_ok=True)
+            self.debug_memory_dir.mkdir(parents=True, exist_ok=True)
+            self.debug_memory_path.touch(exist_ok=True)
+            self.debug_timing_path.parent.mkdir(parents=True, exist_ok=True)
+            self.debug_timing_path.touch(exist_ok=True)
 
     def save_render_record(
         self,
@@ -146,6 +160,7 @@ class StageWorkingMemory:
         }
         _write_json(render_dir / "render_memory.json", record)
         _append_jsonl(self.memory_path, record)
+        _append_jsonl(self.debug_memory_path, record)
         console_logger.info(
             "[StageWorkingMemory] saved stage=%s role=%s event=%s render=%s "
             "scores=%s objects=%d",
@@ -251,6 +266,7 @@ class StageWorkingMemory:
             "extra": extra or {},
         }
         _append_jsonl(self.timing_path, record)
+        _append_jsonl(self.debug_timing_path, record)
         console_logger.info(
             "[Timing] stage=%s module=%s event=%s elapsed=%.3fs",
             self.stage,

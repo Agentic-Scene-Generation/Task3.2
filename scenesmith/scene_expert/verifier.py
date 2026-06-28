@@ -12,6 +12,7 @@ by SceneSmith's CritiqueWithScores system.
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 
 import yaml
@@ -176,6 +177,65 @@ def _map_scenesmith_scores(raw_scores: dict[str, float]) -> dict[str, float]:
     return {cat: sum(vals) / len(vals) for cat, vals in mapped.items()}
 
 
+def _score_value(raw_scores: dict[str, float], *name_parts: str) -> float | None:
+    """Return a raw 0-10 score by fuzzy key parts."""
+    for key, value in raw_scores.items():
+        key_lower = key.lower().replace("_", " ")
+        if all(part.lower().replace("_", " ") in key_lower for part in name_parts):
+            return float(value)
+    return None
+
+
+def _critique_has_hard_collision(text: str) -> bool:
+    """Detect explicit collision/penetration reports while ignoring negations."""
+    lowered = text.lower()
+    negated = (
+        "no collision",
+        "no collisions",
+        "no overlaps detected",
+        "all physics violations have been resolved",
+    )
+    if any(term in lowered for term in negated):
+        return False
+    hard_terms = (
+        "collision detected",
+        "collides with",
+        "penetration",
+        "physics collision",
+        "physically impossible",
+        "critical issue: physics collision",
+    )
+    return any(term in lowered for term in hard_terms)
+
+
+def _critique_mentions_missing_required(
+    text: str,
+    required_objects: list[str],
+) -> list[str]:
+    """Extract missing required objects from critic prose."""
+    lowered = text.lower()
+    missing: list[str] = []
+    for obj in required_objects:
+        obj_lower = obj.lower()
+        patterns = (
+            rf"\b{re.escape(obj_lower)}\s+missing\b",
+            rf"\bmissing\s+(?:required\s+|primary\s+)?{re.escape(obj_lower)}\b",
+            rf"\bwithout\s+(?:the\s+)?{re.escape(obj_lower)}\b",
+            rf"\b{re.escape(obj_lower)}\s+is\s+absent\b",
+        )
+        if any(re.search(pattern, lowered) for pattern in patterns):
+            missing.append(obj)
+    return missing
+
+
+def _add_issue_once(issues: list[VerifyIssue], issue: VerifyIssue) -> None:
+    signature = (issue.issue_type, issue.object_name, issue.description)
+    for existing in issues:
+        if (existing.issue_type, existing.object_name, existing.description) == signature:
+            return
+    issues.append(issue)
+
+
 def _check_required_objects(
     task_spec: SceneTaskSpec, stage: str, scene_state_info: dict
 ) -> list[VerifyIssue]:
@@ -337,6 +397,74 @@ class StageVerifier:
                     repair_suggestions.append(
                         f"Add missing object '{issue.object_name}' to the scene"
                     )
+
+        # --- 2b. Hard critique/score checks for stages where averages are unsafe ---
+        # A low average can hide hard failures such as "missing bed" if other
+        # dimensions score well. Treat these as blocking issues before pass/fail.
+        if stage == "furniture":
+            if _critique_has_hard_collision(critique_summary):
+                _add_issue_once(
+                    issues,
+                    VerifyIssue(
+                        issue_type="physics_collision",
+                        description=(
+                            "Furniture critique reports a hard collision or "
+                            "wall penetration"
+                        ),
+                    ),
+                )
+                repair_suggestions.append(
+                    "Resolve reported furniture collisions before accepting the stage"
+                )
+
+            missing_from_critique = _critique_mentions_missing_required(
+                critique_summary,
+                task_spec.required_large_objects,
+            )
+            for required in missing_from_critique:
+                _add_issue_once(
+                    issues,
+                    VerifyIssue(
+                        issue_type="missing_object",
+                        object_name=required,
+                        description=(
+                            f"Critic reports required furniture '{required}' "
+                            "is missing"
+                        ),
+                    ),
+                )
+                repair_suggestions.append(
+                    f"Add missing required furniture '{required}' and rescore"
+                )
+
+            prompt_following = _score_value(raw_scores, "prompt", "following")
+            if prompt_following is not None and prompt_following < 8:
+                _add_issue_once(
+                    issues,
+                    VerifyIssue(
+                        issue_type="low_prompt_following",
+                        description=(
+                            f"Prompt Following score {prompt_following:g}/10 "
+                            "is below the furniture hard minimum 8/10"
+                        ),
+                    ),
+                )
+                repair_suggestions.append(
+                    "Do not accept furniture stage until prompt-required objects are present"
+                )
+
+            functionality = _score_value(raw_scores, "functionality")
+            if functionality is not None and functionality < 4:
+                _add_issue_once(
+                    issues,
+                    VerifyIssue(
+                        issue_type="low_functionality",
+                        description=(
+                            f"Functionality score {functionality:g}/10 indicates "
+                            "a hard functional failure"
+                        ),
+                    ),
+                )
 
         # --- 3. Stage brief constraint check (heuristic) ---
         # If issues exist and brief has failure patterns, add them as avoidance hints
