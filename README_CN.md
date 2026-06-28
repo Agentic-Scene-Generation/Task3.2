@@ -1140,6 +1140,7 @@ $SCENEEXPERT_MEMORY_DIR/ablation_4/indexes/
 export SCENEEXPERT_MEMORY_RETRIEVER_TYPE="hybrid"
 export SCENEEXPERT_MEMORY_INDEX_BACKEND="numpy"
 export SCENEEXPERT_MEMORY_INDEX_REQUIRE_READY=true
+export SCENEEXPERT_MEMORY_INDEX_AUTO_BUILD_MISSING=true
 ```
 
 `hybrid` 模式会读取 `$SCENEEXPERT_MEMORY_DIR/ablation_4/indexes/` 下的 numpy index，并执行：
@@ -1148,7 +1149,7 @@ export SCENEEXPERT_MEMORY_INDEX_REQUIRE_READY=true
 2. 用 `room_type`、required objects、failure `scope/is_deterministic` 做结构化过滤。
 3. 用 embedding similarity、object overlap、stage/room match、memory quality、verified/deterministic signal 做 hybrid score 排序。
 
-如果某个非空 memory bank 没有对应 index，默认会在启动时 fail fast，并提示先运行 `scripts/build_memory_index.py`。这是为了避免用户以为已经启用向量 memory，实际却静默退回空检索。
+如果某个非空 memory bank 没有对应 index，当前默认策略是先自动构建缺失的 numpy index；只有 BGE-M3 本地模型、`FlagEmbedding` 依赖或写入目录不可用时才会停止。正式跑大量实验前仍建议手动执行一次 `scripts/build_memory_index.py`，这样可以把索引构建耗时从场景生成日志中剥离出来。
 
 ### PR-4 memory 消融配置
 
@@ -1157,8 +1158,8 @@ PR-4 后推荐用三组独立实验对比 memory 检索方式：
 | 实验名 | 检索方式 | 运行前准备 |
 | --- | --- | --- |
 | `ablation_4a_qwen3_lexical_memory` | lexical token/alias overlap | 不需要 BGE-M3，不需要 index。 |
-| `ablation_4b_qwen3_vector_memory` | BGE-M3 embedding + numpy 向量召回 | 需要安装 `requirements-memory.txt` 并构建 index。 |
-| `ablation_4c_qwen3_hybrid_memory` | structured filter + vector recall + hybrid score | 需要安装 `requirements-memory.txt` 并构建 index；推荐正式 memory 实验使用。 |
+| `ablation_4b_qwen3_vector_memory` | BGE-M3 embedding + numpy 向量召回 | 需要安装 `requirements-memory.txt`；index 可自动构建，正式实验建议提前构建。 |
+| `ablation_4c_qwen3_hybrid_memory` | structured filter + vector recall + hybrid score | 需要安装 `requirements-memory.txt`；index 可自动构建，推荐正式 memory 实验使用。 |
 
 `ablation_4a/4b/4c` 会在各自的 experiment YAML 中显式设置 `retriever_type`。因此运行这些实验时，通常不需要在 `.env` 里手动改 `SCENEEXPERT_MEMORY_RETRIEVER_TYPE`。
 
@@ -1188,7 +1189,7 @@ bash scripts/run_experiment.sh ablation_4b_qwen3_vector_memory
 bash scripts/run_experiment.sh ablation_4c_qwen3_hybrid_memory
 ```
 
-注意：4b/4c 默认 `index.require_ready=true`。如果 memory bank 里已有 JSONL 但没有 index，会在启动时直接停止；这是预期行为，用来避免“以为启用了向量检索，实际没有检索到任何东西”的隐性错误。
+注意：4b/4c 默认 `index.require_ready=true` 且 `index.auto_build_missing=true`。也就是说，memory bank 里已有 JSONL 但没有 index 时，程序会先尝试自动构建；构建失败才会停止。这可以避免 ACP 任务因为忘记手动运行 `build_memory_index.py` 而在场景开始前直接退出。
 
 ## 10. 配置文件使用建议
 

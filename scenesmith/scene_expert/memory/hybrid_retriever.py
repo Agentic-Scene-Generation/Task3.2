@@ -46,6 +46,7 @@ class HybridMemoryRetriever:
         object_overlap_threshold: float = 0.15,
         weights: HybridScoreWeights | None = None,
         require_indexes: bool = True,
+        auto_build_indexes: bool = False,
         timing_path: str | Path | None = None,
     ) -> None:
         self._store = store
@@ -61,9 +62,10 @@ class HybridMemoryRetriever:
         self._weights = weights or HybridScoreWeights()
         self._index_cache: dict[tuple[str, str], NumpyMemoryIndex | None] = {}
         self._timing_path = Path(timing_path) if timing_path else None
+        self._auto_build_indexes = auto_build_indexes
 
         if require_indexes:
-            self._validate_required_indexes()
+            self._ensure_required_indexes()
 
     def retrieve(self, task_spec: SceneTaskSpec, stage: str) -> MemoryPack:
         total_start = time.perf_counter()
@@ -297,8 +299,8 @@ class HybridMemoryRetriever:
         )
         return None
 
-    def _validate_required_indexes(self) -> None:
-        missing: list[str] = []
+    def _missing_required_indexes(self) -> list[tuple[str, str]]:
+        missing_keys: list[tuple[str, str]] = []
         for memory_type, records in (
             ("success", self._store.success_cases),
             ("failure", self._store.failure_cases),
@@ -307,14 +309,57 @@ class HybridMemoryRetriever:
             for stage in sorted({record.stage for record in records}):
                 index = NumpyMemoryIndex.for_bank(self._index_dir, memory_type, stage)
                 if not index.vectors_path.exists() or not index.metadata_path.exists():
-                    missing.append(f"{memory_type}/{stage}")
+                    missing_keys.append((memory_type, stage))
+        return missing_keys
+
+    def _ensure_required_indexes(self) -> None:
+        missing = self._missing_required_indexes()
+        if missing and self._auto_build_indexes:
+            self._auto_build_missing_indexes(missing)
+            self._index_cache.clear()
+            missing = self._missing_required_indexes()
         if missing:
+            missing_text = ", ".join(f"{memory_type}/{stage}" for memory_type, stage in missing)
             raise FileNotFoundError(
                 "Hybrid memory index is missing for non-empty memory banks: "
-                + ", ".join(missing)
+                + missing_text
                 + ". Run scripts/build_memory_index.py before setting "
-                "SCENEEXPERT_MEMORY_RETRIEVER_TYPE=hybrid."
+                "SCENEEXPERT_MEMORY_RETRIEVER_TYPE=hybrid, or set "
+                "scene_expert.memory.index.auto_build_missing=true."
             )
+
+    def _auto_build_missing_indexes(self, missing: list[tuple[str, str]]) -> None:
+        """Build missing numpy indexes in-process before hybrid retrieval starts."""
+        stages = tuple(sorted({stage for _, stage in missing}))
+        memory_types = tuple(sorted({memory_type for memory_type, _ in missing}))
+        console_logger.info(
+            "HybridMemoryRetriever: auto-building missing memory indexes for %s "
+            "under %s",
+            ", ".join(f"{memory_type}/{stage}" for memory_type, stage in missing),
+            self._index_dir,
+        )
+        try:
+            from scripts.build_memory_index import build_memory_indexes
+        except Exception as e:
+            raise RuntimeError(
+                "Cannot auto-build SceneExpert hybrid memory indexes because "
+                "scripts/build_memory_index.py is not importable."
+            ) from e
+
+        model_dir = getattr(self._embedder, "model_dir", None)
+        build_memory_indexes(
+            memory_dir=self._memory_dir,
+            embedding_model_dir=Path(model_dir) if model_dir else None,
+            embedding_model_id=str(getattr(self._embedder, "model_id", "BAAI/bge-m3")),
+            index_dir=self._index_dir,
+            index_backend="numpy",
+            device=str(getattr(self._embedder, "device", "cpu")),
+            batch_size=int(getattr(self._embedder, "batch_size", 8)),
+            max_length=int(getattr(self._embedder, "max_length", 512)),
+            stages=stages,
+            memory_types=memory_types,
+            embedder=self._embedder,
+        )
 
     def _record_timing(
         self,

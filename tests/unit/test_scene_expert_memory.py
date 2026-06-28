@@ -398,6 +398,95 @@ class SceneExpertMemoryTest(unittest.TestCase):
                 index.manifest["embedding_model_dir"],
             )
 
+    def test_hybrid_retriever_strict_mode_fails_on_missing_index(self) -> None:
+        class DummyEmbedder:
+            def encode(self, texts: list[str]) -> np.ndarray:
+                return np.asarray([[1.0, 0.0] for _ in texts], dtype=np.float32)
+
+        with TemporaryDirectory() as tmp:
+            memory_dir = Path(tmp) / "memory"
+            memory_dir.mkdir()
+            success = SuccessCase(
+                case_id="success_bedroom_001",
+                room_type="bedroom",
+                stage="furniture",
+                required_objects=["bed"],
+                positive_guidance=["place bed first"],
+            )
+            (memory_dir / "success_cases.jsonl").write_text(
+                success.model_dump_json() + "\n",
+                encoding="utf-8",
+            )
+            store = FastMemoryStore(str(memory_dir))
+
+            with self.assertRaisesRegex(
+                FileNotFoundError,
+                "Hybrid memory index is missing",
+            ):
+                HybridMemoryRetriever(
+                    store=store,
+                    memory_dir=str(memory_dir),
+                    embedder=DummyEmbedder(),
+                    require_indexes=True,
+                    auto_build_indexes=False,
+                )
+
+    def test_hybrid_retriever_auto_builds_missing_index(self) -> None:
+        class DummyEmbedder:
+            model_dir = Path("/models/bge-m3")
+            model_id = "BAAI/bge-m3"
+            device = "cpu"
+            batch_size = 8
+            max_length = 512
+
+            def encode(self, texts: list[str]) -> np.ndarray:
+                return np.asarray([[1.0, 0.0] for _ in texts], dtype=np.float32)
+
+        with TemporaryDirectory() as tmp:
+            memory_dir = Path(tmp) / "memory"
+            memory_dir.mkdir()
+            success = SuccessCase(
+                case_id="success_bedroom_001",
+                room_type="bedroom",
+                stage="furniture",
+                required_objects=["bed"],
+                positive_guidance=["place bed first"],
+            )
+            (memory_dir / "success_cases.jsonl").write_text(
+                success.model_dump_json() + "\n",
+                encoding="utf-8",
+            )
+            store = FastMemoryStore(str(memory_dir))
+            retriever = HybridMemoryRetriever(
+                store=store,
+                memory_dir=str(memory_dir),
+                embedder=DummyEmbedder(),
+                max_success=1,
+                max_failure=0,
+                max_skills=0,
+                require_indexes=True,
+                auto_build_indexes=True,
+            )
+
+            index = NumpyMemoryIndex.for_bank(
+                memory_dir / "indexes",
+                "success",
+                "furniture",
+            )
+            self.assertTrue(index.vectors_path.exists())
+            self.assertTrue(index.metadata_path.exists())
+
+            pack = retriever.retrieve(
+                SceneTaskSpec(
+                    room_type="bedroom",
+                    style="standard",
+                    required_large_objects=["bed"],
+                ),
+                "furniture",
+            )
+            self.assertEqual(1, len(pack.success_hints))
+            self.assertIn("place bed first", pack.success_hints[0])
+
     def test_hybrid_retriever_reads_numpy_indexes_and_reranks_memory(self) -> None:
         class DummyEmbedder:
             def encode(self, texts: list[str]) -> np.ndarray:

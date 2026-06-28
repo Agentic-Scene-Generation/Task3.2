@@ -43,6 +43,10 @@ memory:
     # Empty means <memory.dir>/indexes. Set env only for a custom shared index dir.
     dir: "${oc.env:SCENEEXPERT_MEMORY_INDEX_DIR,}"
     require_ready: ${oc.env:SCENEEXPERT_MEMORY_INDEX_REQUIRE_READY,true}
+    # If true, hybrid/vector memory builds missing numpy indexes in-process
+    # before retrieval starts. This keeps ACP runs robust when JSONL memory
+    # grows between experiments.
+    auto_build_missing: ${oc.env:SCENEEXPERT_MEMORY_INDEX_AUTO_BUILD_MISSING,false}
   hybrid_weights:
     embedding_similarity: 0.45
     object_overlap: 0.20

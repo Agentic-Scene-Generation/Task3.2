@@ -263,6 +263,7 @@ def _build_hybrid_retriever(
         ),
         weights=weights,
         require_indexes=_cfg_bool(idx_cfg.get("require_ready"), True),
+        auto_build_indexes=_cfg_bool(idx_cfg.get("auto_build_missing"), False),
         timing_path=timing_path,
     )
 

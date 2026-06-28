@@ -118,6 +118,12 @@ ACP_HYDRA_OVERRIDES="experiment.num_workers=1"
 # Blender and fail with "No module named '_bpy'".
 ACP_MEMORY_EMBEDDING_DEVICE="cpu"
 
+# TODO: Keep this enabled for ablation_4b/4c. It rebuilds the numpy memory
+# index before vLLM starts, so non-empty JSONL banks cannot crash hybrid memory
+# with a missing-index error.
+ACP_MEMORY_INDEX_AUTO_BUILD=1
+ACP_MEMORY_INDEX_DEVICE="cpu"
+
 EXPERIMENT="${1:-$ACP_EXPERIMENT}"
 shift || true
 
@@ -178,6 +184,8 @@ export SCENEEXPERT_DISABLE_MATERIALS=$ACP_DISABLE_MATERIALS
 export SCENEEXPERT_CONVEX_READY_TIMEOUT=$ACP_CONVEX_READY_TIMEOUT
 export SCENEEXPERT_CONVEX_MAX_OMP_THREADS=$ACP_CONVEX_MAX_OMP_THREADS
 export SCENEEXPERT_MEMORY_EMBEDDING_DEVICE="$ACP_MEMORY_EMBEDDING_DEVICE"
+export SCENEEXPERT_MEMORY_EMBEDDING_INDEX_DEVICE="$ACP_MEMORY_INDEX_DEVICE"
+export SCENEEXPERT_MEMORY_INDEX_AUTO_BUILD_MISSING=$ACP_MEMORY_INDEX_AUTO_BUILD
 export SCENEEXPERT_VLLM_LOG="$LOG_DIR/vllm_server.log"
 EOF
 
@@ -189,6 +197,7 @@ EOF
 fi
 
 export SCENEEXPERT_ENV_FILE="$JOB_ENV_FILE"
+source_env_file "$JOB_ENV_FILE"
 
 echo "Project: $PROJECT_DIR"
 echo "Experiment: $EXPERIMENT"
@@ -211,6 +220,8 @@ echo "disable materials retrieval: ${ACP_DISABLE_MATERIALS}"
 echo "convex ready timeout: ${ACP_CONVEX_READY_TIMEOUT}s"
 echo "convex max OMP threads: ${ACP_CONVEX_MAX_OMP_THREADS}"
 echo "memory embedding device: ${ACP_MEMORY_EMBEDDING_DEVICE}"
+echo "memory index auto-build: ${ACP_MEMORY_INDEX_AUTO_BUILD}"
+echo "memory index build device: ${ACP_MEMORY_INDEX_DEVICE}"
 echo "Env file: $SCENEEXPERT_ENV_FILE"
 
 if command -v nvidia-smi >/dev/null 2>&1; then
@@ -219,7 +230,55 @@ if command -v nvidia-smi >/dev/null 2>&1; then
 fi
 
 # ---------------------------------------------------------------------------
-# 5. Run SceneExpert. Keep memory-mode runs conservative by default.
+# 5. Prepare memory indexes for vector/hybrid memory experiments.
+# ---------------------------------------------------------------------------
+memory_dir_for_experiment() {
+    local experiment_name="$1"
+    local memory_base="${SCENEEXPERT_MEMORY_DIR:-${SCENEEXPERT_OUTPUT_DIR:-$PROJECT_DIR/sceneexpert_outputs}/scene_expert_memory}"
+
+    case "$experiment_name" in
+        ablation_4b_qwen3_vector_memory)
+            printf '%s/ablation_4b\n' "$memory_base"
+            ;;
+        ablation_4c_qwen3_hybrid_memory)
+            printf '%s/ablation_4c\n' "$memory_base"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+prepare_memory_index_if_needed() {
+    if [ "$ACP_MEMORY_INDEX_AUTO_BUILD" != "1" ]; then
+        return 0
+    fi
+
+    local memory_bank_dir
+    if ! memory_bank_dir="$(memory_dir_for_experiment "$EXPERIMENT")"; then
+        return 0
+    fi
+
+    local embedding_model_dir="${SCENEEXPERT_MEMORY_EMBEDDING_MODEL_DIR:-${SCENEEXPERT_MODELS_DIR:-$PROJECT_DIR/models}/bge-m3}"
+    local index_device="${SCENEEXPERT_MEMORY_EMBEDDING_INDEX_DEVICE:-cpu}"
+
+    echo "========== BUILD SCENEEXPERT MEMORY INDEX =========="
+    echo "Memory bank: $memory_bank_dir"
+    echo "Embedding model dir: $embedding_model_dir"
+    echo "Index backend: numpy"
+    echo "Index build device: $index_device"
+
+    python scripts/build_memory_index.py \
+        --memory-dir "$memory_bank_dir" \
+        --embedding-model-dir "$embedding_model_dir" \
+        --index-backend numpy \
+        --device "$index_device"
+}
+
+prepare_memory_index_if_needed
+
+# ---------------------------------------------------------------------------
+# 6. Run SceneExpert. Keep memory-mode runs conservative by default.
 # ---------------------------------------------------------------------------
 echo "========== START SCENEEXPERT =========="
 set +e

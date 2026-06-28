@@ -1,7 +1,8 @@
 # Ablation 4c: Qwen3 + Expert Harness + Hybrid Memory
 # Uses BGE-M3 numpy recall plus structured filter and hybrid score.
 #
-# Prerequisite:
+# Optional pre-build step for cleaner timing logs. Missing indexes are also
+# auto-built at startup because index.auto_build_missing=true below.
 #   python scripts/build_memory_index.py \
 #     --memory-dir "$SCENEEXPERT_MEMORY_DIR/ablation_4c" \
 #     --embedding-model-dir "$SCENEEXPERT_MEMORY_EMBEDDING_MODEL_DIR"
@@ -29,6 +30,7 @@ scene_expert:
       backend: "numpy"
       dir: ""
       require_ready: true
+      auto_build_missing: true
     hybrid_weights:
       embedding_similarity: 0.45
       object_overlap: 0.20
