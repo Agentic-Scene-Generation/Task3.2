@@ -35,6 +35,27 @@ copy_lf_file() {
     sed 's/\r$//' "$src" > "$dst"
 }
 
+activate_python_env() {
+    local activate_venv="${SCENEEXPERT_ACTIVATE_VENV:-1}"
+    local venv_path="${SCENEEXPERT_VENV_PATH:-$PROJECT_DIR/.venv}"
+
+    if [ "$activate_venv" = "1" ]; then
+        if [ ! -f "$venv_path/bin/activate" ]; then
+            echo "ERROR: cannot find virtual environment activation script: $venv_path/bin/activate"
+            echo "Set SCENEEXPERT_VENV_PATH to the environment containing vLLM/FlagEmbedding,"
+            echo "or set SCENEEXPERT_ACTIVATE_VENV=0 to use the already active Python."
+            exit 1
+        fi
+        # shellcheck disable=SC1090
+        source "$venv_path/bin/activate"
+        echo "Activated Python env: $venv_path"
+    else
+        echo "Skipping script venv activation; using current Python."
+    fi
+
+    echo "Python executable: $(python -c 'import sys; print(sys.executable)')"
+}
+
 if [ -f "$BASE_ENV_FILE" ]; then
     source_env_file "$BASE_ENV_FILE"
 fi
@@ -198,6 +219,7 @@ fi
 
 export SCENEEXPERT_ENV_FILE="$JOB_ENV_FILE"
 source_env_file "$JOB_ENV_FILE"
+activate_python_env
 
 echo "Project: $PROJECT_DIR"
 echo "Experiment: $EXPERIMENT"

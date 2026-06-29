@@ -177,6 +177,15 @@ export SCENEEXPERT_VENV_PATH="/path/to/your/venv"
 
 否则会出现一种很容易误判的情况：你在当前环境里安装了 `vllm`，但 `run_experiment.sh` 启动时又切换到另一个 `.venv`，于是脚本里仍然找不到 `vllm`。
 
+`scripts/acp_sceneexpert.sh` 也会按同样规则在启动前激活 Python 环境，并在日志里打印：
+
+```text
+Activated Python env: ...
+Python executable: ...
+```
+
+如果 ACP 日志显示 `ModuleNotFoundError: No module named 'FlagEmbedding'`，但你手动执行 `python -m pip install -r requirements-memory.txt` 时又提示已经安装，优先检查 ACP 日志中的 `Python executable` 是否指向同一个 `.venv/bin/python`。如果不是同一个环境，设置 `SCENEEXPERT_VENV_PATH`，或把 `SCENEEXPERT_ACTIVATE_VENV=0` 与提交任务时已经激活的 Conda/venv 环境配套使用。
+
 先确认当前虚拟环境里有 `pip`：
 
 ```bash
