@@ -127,6 +127,8 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             blender_server=self.blender_server,
         )
         scene_tools = SceneTools(scene=self.scene, cfg=self.cfg)
+        self._critic_vision_tools = vision_tools
+        self._critic_scene_tools = scene_tools
 
         # Return vision tools + read-only scene tools.
         # Note: check_physics is NOT included since physics_context is already
@@ -321,10 +323,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 "Skipping final furniture critique because critic scoring already "
                 "failed in this stage"
             )
-        elif (
-            self.checkpoint_scene_hash is not None
-            and current_scene_hash == self.checkpoint_scene_hash
-        ):
+        elif self._can_skip_final_critique(current_scene_hash):
             console_logger.info(
                 "Scene unchanged since last critique, skipping final critique"
             )

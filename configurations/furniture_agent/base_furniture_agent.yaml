@@ -59,6 +59,17 @@ rendering:
   # Higher values = better quality but slower. Default 8 is a good balance.
   taa_samples: 8
 
+  # Low-cost candidate renders used inside iterative critic loops. Final stage
+  # renders keep the full settings above.
+  intermediate_profile:
+    enabled: true
+    top_view_width: 768
+    top_view_height: 768
+    side_view_count: 2
+    side_view_width: 384
+    side_view_height: 384
+    taa_samples: 4
+
   # Overlay annotations configuration.
   annotations:
     # Set-of-mark labels: blue rectangular labels with object names.
@@ -263,6 +274,19 @@ max_critique_rounds: 3
 # designer call.
 auto_score_after_design_attempts: true
 
+# Critic fast path: deterministic hard checks run before expensive VLM scoring.
+# If missing required objects, hard collisions, door blockage, or fallen objects
+# are detected, a synthetic low score and repair hint are saved instead of
+# spending a full VLM score_scene call on a known-invalid candidate.
+critic_fast_path:
+  hard_check_first: true
+  skip_vlm_on_hard_fail: true
+  render_hard_fail_candidate: true
+  direct_scene_state_cache: true
+  use_intermediate_render_profile: true
+  scene_state_max_chars: 16000
+  max_hard_repair_design_changes: 1
+
 # Planner tool output limits. Initial/design-change responses can now include
 # an automatic critique block, so keep enough tail context for score deltas and
 # Safety Controller messages.
@@ -378,25 +402,25 @@ openai:
   # Higher effort = more thorough but slower.
   reasoning_effort:
     # Agent reasoning (for OpenAI Agents SDK planner/designer/critic trio).
-    planner: "low"
+    planner: "none"
     designer: "high"
     critic: "high"
     # VLM direct calls.
-    mesh_analysis: "medium"  # For mesh physics analysis
-    asset_analysis: "medium"  # For asset router request analysis
-    asset_validation: "medium"  # For asset router mesh validation
+    mesh_analysis: "none"  # For mesh physics analysis
+    asset_analysis: "none"  # For asset router request analysis
+    asset_validation: "none"  # For asset router mesh validation
   # How verbose the model's output should be.
   # Options: "low", "medium", "high".
   # Lower verbosity = faster and cheaper but may omit details.
   verbosity:
     # Agent verbosity (for OpenAI Agents SDK planner/designer/critic trio).
-    planner: "medium"  # Plans need clear communication
+    planner: "low"  # Plans should coordinate tools without long deliberation
     designer: "low"  # Just tool calls, concise is fine
     critic: "medium"  # Free-form critique benefits from detail
     # VLM direct calls.
-    mesh_analysis: "medium"
-    asset_analysis: "medium"
-    asset_validation: "medium"
+    mesh_analysis: "low"
+    asset_analysis: "low"
+    asset_validation: "low"
 
 # OpenAI API timeout configuration (seconds).
 api_timeout:

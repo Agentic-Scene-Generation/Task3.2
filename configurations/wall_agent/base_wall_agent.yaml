@@ -38,6 +38,17 @@ rendering:
   side_view_width: 512
   side_view_height: 512
 
+  # Low-cost candidate renders used inside iterative critic loops. Final stage
+  # renders keep the full settings above.
+  intermediate_profile:
+    enabled: true
+    top_view_width: 384
+    top_view_height: 384
+    side_view_count: 0
+    side_view_width: 384
+    side_view_height: 384
+    taa_samples: 4
+
   # Grid overlay for wall coordinate reference.
   grid_divisions: 5
 
@@ -202,6 +213,16 @@ max_turns: 1000
 # Maximum number of critique-and-improve rounds before stopping.
 max_critique_rounds: 1
 
+# Critic fast path: deterministic hard checks run before expensive VLM scoring.
+critic_fast_path:
+  hard_check_first: true
+  skip_vlm_on_hard_fail: true
+  render_hard_fail_candidate: true
+  direct_scene_state_cache: true
+  use_intermediate_render_profile: true
+  scene_state_max_chars: 16000
+  max_hard_repair_design_changes: 1
+
 # Hard context limits for values returned to the planner inside one Runner.run.
 # The full critic/designer outputs are still logged; these limits only bound the
 # text that is fed back into planner context to prevent long wall workflows from
@@ -224,19 +245,19 @@ openai:
   service_tier: ${openai.service_tier}
   vision_detail: "high"
   reasoning_effort:
-    planner: "low"
+    planner: "none"
     designer: "high"
     critic: "high"
-    mesh_analysis: "medium"
-    asset_analysis: "medium"
-    asset_validation: "medium"
+    mesh_analysis: "none"
+    asset_analysis: "none"
+    asset_validation: "none"
   verbosity:
-    planner: "medium"
+    planner: "low"
     designer: "low"
     critic: "medium"
-    mesh_analysis: "medium"
-    asset_analysis: "medium"
-    asset_validation: "medium"
+    mesh_analysis: "low"
+    asset_analysis: "low"
+    asset_validation: "low"
 
 # OpenAI API timeout configuration (seconds).
 api_timeout:

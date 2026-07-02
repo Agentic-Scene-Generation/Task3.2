@@ -516,6 +516,8 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
             blender_server=self.blender_server,
             context_furniture_ids=context_ids,
         )
+        self._critic_vision_tools = vision_tools
+        self._critic_scene_tools = self.manipuland_tools
 
         # Critic gets read-only tools (observe only).
         # Note: check_physics is NOT included since physics_context is already
@@ -645,10 +647,7 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
         # Check if scene changed since last checkpoint to avoid redundant critique.
         current_scene_hash = self.scene.content_hash()
 
-        if (
-            self.checkpoint_scene_hash is not None
-            and current_scene_hash == self.checkpoint_scene_hash
-        ):
+        if self._can_skip_final_critique(current_scene_hash):
             console_logger.info(
                 "Scene unchanged since last critique, skipping final critique"
             )

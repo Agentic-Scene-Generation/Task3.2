@@ -44,6 +44,17 @@ rendering:
   side_view_width: 512
   side_view_height: 512
 
+  # Low-cost candidate renders used inside iterative critic loops. Final stage
+  # renders keep the full settings above.
+  intermediate_profile:
+    enabled: true
+    top_view_width: 768
+    top_view_height: 768
+    side_view_count: 2
+    side_view_width: 384
+    side_view_height: 384
+    taa_samples: 4
+
   background_color: [1.0, 1.0, 1.0]
   blender_server_host: "127.0.0.1"
   blender_server_port_range: [8000, 8250]
@@ -255,29 +266,29 @@ openai:
   # Higher effort = more thorough but slower and more expensive.
   reasoning_effort:
     # Agent reasoning (for OpenAI Agents SDK planner/designer/critic trio).
-    planner: "low"
+    planner: "none"
     designer: "high"
     critic: "high"
     # VLM direct calls.
-    furniture_analysis: "medium"  # Selects furniture for manipuland placement
-    context_selection: "low"  # Selects context furniture (simple decision)
-    mesh_analysis: "medium"  # For mesh physics analysis
-    asset_analysis: "medium"  # For asset router request analysis
-    asset_validation: "medium"  # For asset router mesh validation
+    furniture_analysis: "none"  # Selects furniture for manipuland placement
+    context_selection: "none"  # Selects context furniture (simple decision)
+    mesh_analysis: "none"  # For mesh physics analysis
+    asset_analysis: "none"  # For asset router request analysis
+    asset_validation: "none"  # For asset router mesh validation
   # How verbose the model's output should be.
   # Options: "low", "medium", "high".
   # Lower verbosity = faster and cheaper but may omit details.
   verbosity:
     # Agent verbosity (for OpenAI Agents SDK planner/designer/critic trio).
-    planner: "medium"  # Plans need clear communication
+    planner: "low"  # Plans should coordinate tools without long deliberation
     designer: "low"  # Just tool calls, concise is fine
     critic: "medium"  # Free-form critique benefits from detail
     # VLM direct calls.
-    furniture_analysis: "medium"
+    furniture_analysis: "low"
     context_selection: "low"
-    mesh_analysis: "medium"
-    asset_analysis: "medium"
-    asset_validation: "medium"
+    mesh_analysis: "low"
+    asset_analysis: "low"
+    asset_validation: "low"
   # Max retries for VLM calls that return invalid JSON.
   furniture_analysis_max_retries: 3
   context_selection_max_retries: 2
@@ -311,6 +322,18 @@ loop_detection:
 
 # Maximum number of critique-and-improve rounds before stopping
 max_critique_rounds: 2
+
+# Critic fast path: deterministic hard checks run before expensive VLM scoring.
+# Hard physics failures get a synthetic low score and repair hint, so the
+# planner can fix them without wasting a full VLM score_scene call.
+critic_fast_path:
+  hard_check_first: true
+  skip_vlm_on_hard_fail: true
+  render_hard_fail_candidate: true
+  direct_scene_state_cache: true
+  use_intermediate_render_profile: true
+  scene_state_max_chars: 16000
+  max_hard_repair_design_changes: 1
 
 # Scene reset thresholds for detecting quality degradation
 # Reset is suggested when EITHER threshold is exceeded

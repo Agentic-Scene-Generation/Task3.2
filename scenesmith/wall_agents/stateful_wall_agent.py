@@ -198,6 +198,8 @@ class StatefulWallAgent(BaseStatefulAgent, BaseWallAgent):
             cfg=self.cfg,
             blender_server=self.blender_server,
         )
+        self._critic_vision_tools = vision_tools
+        self._critic_scene_tools = self.wall_tools
 
         # Critic gets read-only tools plus scene state.
         # Note: check_physics is NOT included since physics_context is already
@@ -381,10 +383,7 @@ class StatefulWallAgent(BaseStatefulAgent, BaseWallAgent):
         # Check if scene changed since last checkpoint to avoid redundant critique.
         current_scene_hash = self.scene.content_hash()
 
-        if (
-            self.checkpoint_scene_hash is not None
-            and current_scene_hash == self.checkpoint_scene_hash
-        ):
+        if self._can_skip_final_critique(current_scene_hash):
             console_logger.info(
                 "Scene unchanged since last critique, skipping final critique"
             )

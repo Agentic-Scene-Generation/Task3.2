@@ -96,11 +96,11 @@ openai:
   service_tier: ${openai.service_tier}
   vision_detail: "high"
   reasoning_effort:
-    planner: "low"
+    planner: "none"
     designer: "high"
     critic: "high"
   verbosity:
-    planner: "medium"
+    planner: "low"
     designer: "low"
     critic: "medium"
 

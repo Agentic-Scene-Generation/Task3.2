@@ -4,6 +4,12 @@ from typing import Any
 
 from openai import OpenAI
 
+from scenesmith.agent_utils.thinking import (
+    prepend_text_thinking_directive,
+    responses_api_reasoning_effort,
+    thinking_directive_from_effort,
+)
+
 console_logger = logging.getLogger(__name__)
 
 
@@ -68,7 +74,7 @@ class VLMService:
             kwargs = {
                 "model": model,
                 "input": input_messages,
-                "reasoning": {"effort": reasoning_effort},
+                "reasoning": {"effort": responses_api_reasoning_effort(reasoning_effort)},
                 "text": {"verbosity": verbosity},
             }
             if self.service_tier:
@@ -101,6 +107,10 @@ class VLMService:
             messages = self._add_vision_detail_to_messages(
                 messages=messages, vision_detail=vision_detail
             )
+            messages = self._prepend_thinking_directive(
+                messages=messages,
+                directive=thinking_directive_from_effort(reasoning_effort),
+            )
             kwargs = {"model": model, "messages": messages}
 
             # Add response format if specified.
@@ -124,6 +134,42 @@ class VLMService:
                 )
 
             return content
+
+    def _prepend_thinking_directive(
+        self, messages: list[dict[str, Any]], directive: str
+    ) -> list[dict[str, Any]]:
+        """Attach a Qwen thinking directive to the first user text block."""
+        updated: list[dict[str, Any]] = []
+        applied = False
+        for msg in messages:
+            new_msg = dict(msg)
+            if not applied and new_msg.get("role") == "user":
+                content = new_msg.get("content")
+                if isinstance(content, str):
+                    new_msg["content"] = self._prefix_directive(content, directive)
+                    applied = True
+                elif isinstance(content, list):
+                    new_content: list[Any] = []
+                    for item in content:
+                        if (
+                            not applied
+                            and isinstance(item, dict)
+                            and item.get("type") in ("text", "input_text")
+                        ):
+                            new_item = dict(item)
+                            text = str(new_item.get("text", ""))
+                            new_item["text"] = self._prefix_directive(text, directive)
+                            new_content.append(new_item)
+                            applied = True
+                        else:
+                            new_content.append(item)
+                    new_msg["content"] = new_content
+            updated.append(new_msg)
+        return updated
+
+    @staticmethod
+    def _prefix_directive(text: str, directive: str) -> str:
+        return prepend_text_thinking_directive(text, directive)
 
     def _convert_to_responses_format(
         self, messages: list[dict[str, Any]], vision_detail: str = "auto"

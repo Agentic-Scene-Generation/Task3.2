@@ -46,7 +46,7 @@ _DETERMINISTIC_FAILURE_KEYWORDS = (
     "geometry failure",
 )
 _SYSTEM_PROMPT = """\
-/no_think
+/think
 You are the memory_writer for SceneExpert, a 3D scene generation system.
 Your job is to analyze a completed scene generation trace and extract reusable knowledge
 to update the long-term memory system.

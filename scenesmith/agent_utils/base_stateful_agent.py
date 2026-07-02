@@ -45,7 +45,12 @@ from scenesmith.agent_utils.physics_tools import check_physics_violations
 from scenesmith.agent_utils.placement_noise import PlacementNoiseMode
 from scenesmith.agent_utils.room import AgentType
 from scenesmith.agent_utils.scoring import (
+    CategoryScore,
+    CeilingCritiqueWithScores,
     CritiqueWithScores,
+    FurnitureCritiqueWithScores,
+    ManipulandCritiqueWithScores,
+    WallCritiqueWithScores,
     compute_total_score,
     format_score_deltas_for_planner,
     log_agent_response,
@@ -53,6 +58,10 @@ from scenesmith.agent_utils.scoring import (
     scores_to_dict,
 )
 from scenesmith.agent_utils.stage_working_memory import StageWorkingMemory
+from scenesmith.agent_utils.thinking import (
+    prepend_text_thinking_directive,
+    thinking_directive_from_effort,
+)
 from scenesmith.agent_utils.turn_trimming_session import TurnTrimmingSession
 from scenesmith.prompts import prompt_registry
 from scenesmith.utils.logging import BaseLogger
@@ -200,6 +209,12 @@ class BaseStatefulAgent(ABC):
             stage=self.agent_type.value,
             enabled=working_memory_enabled,
         )
+        self._critic_candidate_cache: dict[str, Any] = {}
+        self._critic_output_type: type[CritiqueWithScores] | None = None
+        self._last_scored_scene_hash: str | None = None
+        self._last_critique_render_profile = "final"
+        self._pending_hard_repair_hint = ""
+        self._hard_repair_design_change_calls = 0
 
     def _record_module_timing(
         self,
@@ -290,6 +305,38 @@ class BaseStatefulAgent(ABC):
         except Exception as e:
             console_logger.warning("Failed to save critic working memory: %s", e)
 
+    def _write_scores_and_memory(
+        self,
+        *,
+        response: CritiqueWithScores,
+        images_dir: Path | None,
+        physics_context: str,
+        event: str = "critique",
+    ) -> None:
+        """Persist scores.yaml and stage working memory for a critiqued render."""
+        if images_dir:
+            scores_dict = scores_to_dict(response)
+            scores_path = images_dir / "scores.yaml"
+            with open(scores_path, "w") as f:
+                yaml.dump(
+                    data=scores_dict,
+                    stream=f,
+                    default_flow_style=False,
+                    sort_keys=False,
+                )
+            console_logger.info(f"Scores saved to: {scores_path}")
+            self._save_critic_working_memory(
+                render_dir=images_dir,
+                event=event,
+                scores=response,
+                critique=response.critique,
+                physics_context=physics_context,
+            )
+        else:
+            console_logger.error(
+                "No render directory available - scores not saved to file"
+            )
+
     def _configure_furniture_safety_for_scene(self, scene_description: str) -> None:
         """Reset furniture safety counters and required-object inference."""
         controller = getattr(self, "furniture_safety_controller", None)
@@ -339,6 +386,272 @@ class BaseStatefulAgent(ABC):
             scene=self.scene,
             physics_context=physics_context,
         )
+
+    def _critic_fast_path_cfg(self) -> Any:
+        return _cfg_get(self.cfg, "critic_fast_path", {})
+
+    def _critic_fast_path_enabled(self, key: str, default: bool = True) -> bool:
+        return bool(_cfg_get(self._critic_fast_path_cfg(), key, default))
+
+    def _hard_repair_design_change_limit(self) -> int:
+        return int(
+            _cfg_get(
+                self._critic_fast_path_cfg(),
+                "max_hard_repair_design_changes",
+                1,
+            )
+        )
+
+    def _hard_repair_allowance_available(self) -> bool:
+        return (
+            bool(self._pending_hard_repair_hint)
+            and self._hard_repair_design_change_calls
+            < self._hard_repair_design_change_limit()
+        )
+
+    def _reset_critic_candidate_cache(self) -> None:
+        self._critic_candidate_cache = {
+            "scene_hash": self.scene.content_hash(),
+        }
+
+    def _cache_valid_for_current_scene(self) -> bool:
+        return self._critic_candidate_cache.get("scene_hash") == self.scene.content_hash()
+
+    def _get_cached_physics_context(self) -> str:
+        if self._cache_valid_for_current_scene() and "physics_context" in self._critic_candidate_cache:
+            return self._critic_candidate_cache["physics_context"]
+
+        current_furniture_id = getattr(self, "current_furniture_id", None)
+        physics_start = time.time()
+        physics_context = check_physics_violations(
+            scene=self.scene,
+            cfg=self.cfg,
+            current_furniture_id=current_furniture_id,
+            agent_type=self.agent_type,
+        )
+        self._record_module_timing("critic", "physics_context", physics_start)
+        self._critic_candidate_cache["physics_context"] = physics_context
+        return physics_context
+
+    def _parse_generic_physics_hard_reasons(self, physics_context: str) -> list[str]:
+        text = str(physics_context or "").lower()
+        if "no physics violations detected" in text:
+            return []
+        hard_reasons: list[str] = []
+        hard_sections = (
+            "collisions (",
+            "thin covering overlaps",
+            "thin covering boundary violations",
+            "door clearance violations",
+            "open connection blocked",
+            "wall height exceeded",
+        )
+        for section in hard_sections:
+            if section in text:
+                hard_reasons.append(f"physics hard violation: {section.rstrip(' (')}")
+        fallen_terms = ("fell off", "fallen", "below floor", "floor penetration")
+        if any(term in text for term in fallen_terms):
+            hard_reasons.append("fallen or below-floor object indicated by physics")
+        return hard_reasons
+
+    def _evaluate_current_hard_state(
+        self, physics_context: str | None = None
+    ) -> HardStateEvaluation | None:
+        """Run deterministic hard checks for the current candidate.
+
+        Furniture uses the richer FurnitureSafetyController. Other placement
+        stages use physics hard sections only, so soft window warnings still go
+        to the VLM critic.
+        """
+        if physics_context is None:
+            physics_context = self._get_cached_physics_context()
+
+        controller = getattr(self, "furniture_safety_controller", None)
+        if controller and controller.enabled:
+            return self._evaluate_current_furniture_hard_state(
+                physics_context=physics_context
+            )
+
+        hard_reasons = self._parse_generic_physics_hard_reasons(physics_context)
+        if not hard_reasons:
+            return HardStateEvaluation(hard_valid=True)
+        return HardStateEvaluation(hard_valid=False, hard_reasons=hard_reasons)
+
+    def _repair_hint_from_hard_state(
+        self, hard_state: HardStateEvaluation | None
+    ) -> str:
+        if hard_state is None or hard_state.hard_valid:
+            return ""
+        reasons = hard_state.hard_reasons or ["unknown deterministic hard failure"]
+        missing = [
+            reason
+            for reason in reasons
+            if reason.lower().startswith("missing required")
+        ]
+        hints: list[str] = []
+        if missing:
+            missing_text = "; ".join(missing)
+            hints.append(
+                "Missing required objects detected. The next designer action must "
+                f"generate/place these objects before any decorative changes: {missing_text}."
+            )
+        if any("collision" in reason.lower() for reason in reasons):
+            hints.append(
+                "Resolve collisions by moving, snapping, or reducing only the involved "
+                "modifiable objects; do not delete required prompt objects."
+            )
+        if any("door" in reason.lower() or "open connection" in reason.lower() for reason in reasons):
+            hints.append(
+                "Clear door/open-connection clearance first; keep a walkable path from "
+                "the doorway into the room."
+            )
+        if any("fallen" in reason.lower() or "below-floor" in reason.lower() for reason in reasons):
+            hints.append(
+                "Restore fallen or below-floor objects onto a valid support surface, "
+                "or remove only optional unstable small objects."
+            )
+        if not hints:
+            hints.append(
+                "Repair the listed hard violations first, then request another critique."
+            )
+        return " ".join(hints)
+
+    def _make_category_score(self, name: str, grade: int, comment: str) -> CategoryScore:
+        return CategoryScore(name=name, grade=max(0, min(10, int(grade))), comment=comment)
+
+    def _make_deterministic_critique_scores(
+        self,
+        *,
+        hard_state: HardStateEvaluation,
+        physics_context: str,
+    ) -> CritiqueWithScores:
+        """Create a low synthetic score when hard checks fail before VLM scoring."""
+        output_type = self._critic_output_type or type(self.previous_scores)
+        reasons = hard_state.hard_reasons or ["deterministic hard-check failure"]
+        reason_text = "; ".join(reasons)
+        repair_hint = self._repair_hint_from_hard_state(hard_state)
+        critique = (
+            "DETERMINISTIC HARD-CHECK FAILED BEFORE VLM SCORING. "
+            f"Hard issues: {reason_text}. {repair_hint} "
+            "Do not finish the stage until these hard issues are repaired."
+        )
+        hard_comment = f"Hard fail: {reason_text}"
+        repair_comment = repair_hint or hard_comment
+
+        if output_type is FurnitureCritiqueWithScores:
+            return FurnitureCritiqueWithScores(
+                critique=critique,
+                realism=self._make_category_score("realism", 3, hard_comment),
+                functionality=self._make_category_score("functionality", 2, repair_comment),
+                layout=self._make_category_score("layout", 3, hard_comment),
+                layout_plausibility=self._make_category_score(
+                    "layout_plausibility", 2, hard_comment
+                ),
+                holistic_completeness=self._make_category_score(
+                    "holistic_completeness", 2, repair_comment
+                ),
+                prompt_following=self._make_category_score(
+                    "prompt_following", 2, repair_comment
+                ),
+                reachability=self._make_category_score("reachability", 2, hard_comment),
+            )
+        if output_type is ManipulandCritiqueWithScores:
+            return ManipulandCritiqueWithScores(
+                critique=critique,
+                realism=self._make_category_score("realism", 3, hard_comment),
+                functionality=self._make_category_score("functionality", 2, repair_comment),
+                layout=self._make_category_score("layout", 3, hard_comment),
+                holistic_completeness=self._make_category_score(
+                    "holistic_completeness", 2, repair_comment
+                ),
+                prompt_following=self._make_category_score(
+                    "prompt_following", 3, repair_comment
+                ),
+            )
+        if output_type is WallCritiqueWithScores:
+            return WallCritiqueWithScores(
+                critique=critique,
+                realism=self._make_category_score("realism", 3, hard_comment),
+                functionality=self._make_category_score("functionality", 2, repair_comment),
+                layout=self._make_category_score("layout", 3, hard_comment),
+                holistic_completeness=self._make_category_score(
+                    "holistic_completeness", 3, repair_comment
+                ),
+                prompt_following=self._make_category_score(
+                    "prompt_following", 3, repair_comment
+                ),
+            )
+        if output_type is CeilingCritiqueWithScores:
+            return CeilingCritiqueWithScores(
+                critique=critique,
+                realism=self._make_category_score("realism", 3, hard_comment),
+                functionality=self._make_category_score("functionality", 2, repair_comment),
+                layout=self._make_category_score("layout", 3, hard_comment),
+                prompt_following=self._make_category_score(
+                    "prompt_following", 3, repair_comment
+                ),
+            )
+        raise TypeError(
+            "Cannot create deterministic critique for output type "
+            f"{getattr(output_type, '__name__', output_type)}"
+        )
+
+    def _critic_render_profile_name(self, update_checkpoint: bool) -> str:
+        if (
+            update_checkpoint
+            and self._critic_fast_path_enabled("use_intermediate_render_profile", True)
+        ):
+            rendering_cfg = getattr(self.cfg, "rendering", None)
+            profile_cfg = getattr(rendering_cfg, "intermediate_profile", None)
+            if profile_cfg is not None and bool(getattr(profile_cfg, "enabled", False)):
+                return "intermediate"
+        return "final"
+
+    def _can_skip_final_critique(self, current_scene_hash: str) -> bool:
+        return (
+            self.checkpoint_scene_hash is not None
+            and current_scene_hash == self.checkpoint_scene_hash
+            and self._last_scored_scene_hash == current_scene_hash
+            and self._last_critique_render_profile == "final"
+        )
+
+    def _get_critic_scene_state_direct(self) -> str | None:
+        if not self._critic_fast_path_enabled("direct_scene_state_cache", True):
+            return None
+        if self._cache_valid_for_current_scene() and "scene_state" in self._critic_candidate_cache:
+            return self._critic_candidate_cache["scene_state"]
+
+        owner = getattr(self, "_critic_scene_tools", None)
+        if owner is None:
+            return None
+        method = getattr(owner, "_get_current_scene_state_impl", None)
+        if method is None:
+            method = getattr(owner, "_get_current_scene_impl", None)
+        if method is None:
+            return None
+        scene_state_start = time.time()
+        scene_state = method()
+        self._record_module_timing(
+            "critic", "get_current_scene_state_direct", scene_state_start
+        )
+        self._critic_candidate_cache["scene_state"] = scene_state
+        return scene_state
+
+    def _observe_scene_for_synthetic_score(self, render_profile: str) -> Path | None:
+        owner = getattr(self, "_critic_vision_tools", None)
+        method = getattr(owner, "_observe_scene_impl", None) if owner is not None else None
+        if method is None:
+            return self.rendering_manager.last_render_dir
+        observe_start = time.time()
+        with self.rendering_manager.use_render_profile(render_profile):
+            method()
+        self._record_module_timing(
+            "critic",
+            "observe_scene_synthetic",
+            observe_start,
+            extra={"render_profile": render_profile},
+        )
+        return self.rendering_manager.last_render_dir
 
     def _begin_furniture_design_transaction(
         self, call_kind: str
@@ -536,6 +849,15 @@ class BaseStatefulAgent(ABC):
 
         return ModelSettings(**kwargs) if kwargs else None
 
+    def _get_agent_instructions(self, prompt_enum: Any, settings_key: str, **kwargs: Any) -> str:
+        """Render prompt instructions and attach the configured thinking mode."""
+        instructions = self.prompt_registry.get_prompt(prompt_enum=prompt_enum, **kwargs)
+        effort = None
+        if hasattr(self.cfg, "openai") and hasattr(self.cfg.openai, "reasoning_effort"):
+            effort = getattr(self.cfg.openai.reasoning_effort, settings_key, None)
+        directive = thinking_directive_from_effort(effort)
+        return prepend_text_thinking_directive(instructions, directive)
+
     def _create_designer_agent(
         self, tools: list[FunctionTool], prompt_enum: Any, **prompt_kwargs: Any
     ) -> Agent:
@@ -557,9 +879,8 @@ class BaseStatefulAgent(ABC):
             name=designer_config.name,
             model=self.cfg.openai.model,
             tools=tools,
-            instructions=self.prompt_registry.get_prompt(
-                prompt_enum=prompt_enum,
-                **prompt_kwargs,
+            instructions=self._get_agent_instructions(
+                prompt_enum=prompt_enum, settings_key="designer", **prompt_kwargs
             ),
             model_settings=self._get_model_settings(settings_key="designer"),
         )
@@ -586,13 +907,13 @@ class BaseStatefulAgent(ABC):
             Configured critic agent with domain-specific CritiqueWithScores type.
         """
         critic_config = self.cfg.agents.critic_agent
+        self._critic_output_type = output_type
         return Agent(
             name=critic_config.name,
             model=self.cfg.openai.model,
             tools=tools,
-            instructions=self.prompt_registry.get_prompt(
-                prompt_enum=prompt_enum,
-                **prompt_kwargs,
+            instructions=self._get_agent_instructions(
+                prompt_enum=prompt_enum, settings_key="critic", **prompt_kwargs
             ),
             output_type=output_type,
             # Force observe_scene tool call first to ensure visual context.
@@ -622,9 +943,8 @@ class BaseStatefulAgent(ABC):
             name=planner_config.name,
             model=self.cfg.openai.model,
             tools=tools,
-            instructions=self.prompt_registry.get_prompt(
-                prompt_enum=prompt_enum,
-                **prompt_kwargs,
+            instructions=self._get_agent_instructions(
+                prompt_enum=prompt_enum, settings_key="planner", **prompt_kwargs
             ),
             # Disable parallel tool calls to prevent race conditions on shared
             # sessions (designer_session, critic_session). When the model returns
@@ -1016,6 +1336,8 @@ class BaseStatefulAgent(ABC):
         self._planner_design_change_tool_calls = 0
         self._planner_budget_exhausted = False
         self._critic_failed = False
+        self._pending_hard_repair_hint = ""
+        self._hard_repair_design_change_calls = 0
 
     def _stop_planner_after_failure(self, reason: str) -> str:
         """Convert a nested agent failure into a deterministic planner stop."""
@@ -1280,19 +1602,29 @@ class BaseStatefulAgent(ABC):
                 self._auto_score_after_design_attempts_enabled()
                 and self._planner_critique_tool_calls
                 >= int(self.cfg.max_critique_rounds)
+                and not self._hard_repair_allowance_available()
             ):
                 return self._planner_budget_stop_message("request_design_change")
 
             if counts_as_critique_cycle and self._planner_design_change_tool_calls >= int(
                 self.cfg.max_critique_rounds
-            ):
+            ) and not self._hard_repair_allowance_available():
                 return self._planner_budget_stop_message("request_design_change")
 
             safety_block = self._record_furniture_design_change_budget()
             if safety_block:
                 return safety_block
 
+            hard_repair_allowance = self._hard_repair_allowance_available()
+            if hard_repair_allowance:
+                instruction = (
+                    f"{instruction}\n\nMANDATORY HARD-CHECK REPAIR: "
+                    f"{self._pending_hard_repair_hint}"
+                )
+
             result = await self._request_design_change_impl(instruction)
+            if hard_repair_allowance:
+                self._hard_repair_design_change_calls += 1
             result += await self._score_design_attempt_if_configured(
                 "design change"
             )
@@ -1323,6 +1655,12 @@ class BaseStatefulAgent(ABC):
                 Confirmation that the planner should return its final answer.
             """
             console_logger.info("Tool called: finish_stage")
+            if self._hard_repair_allowance_available():
+                return (
+                    "FINISH_STAGE_BLOCKED: a deterministic hard-check failure is "
+                    "still pending repair. You must call request_design_change() "
+                    f"first with this repair requirement: {self._pending_hard_repair_hint}"
+                )
             self._planner_budget_exhausted = True
             controller = getattr(self, "furniture_safety_controller", None)
             if controller and getattr(controller, "enabled", False):
@@ -1405,20 +1743,115 @@ class BaseStatefulAgent(ABC):
         """
         console_logger.info("Tool called: request_critique")
         critique_start = time.time()
-
-        # Get current furniture ID for manipuland agents.
-        current_furniture_id = getattr(self, "current_furniture_id", None)
+        self._reset_critic_candidate_cache()
 
         # Get physics violations using the same logic as the check_physics tool.
-        # This ensures the critic sees exactly the same information as the designer.
-        physics_start = time.time()
-        physics_context = check_physics_violations(
-            scene=self.scene,
-            cfg=self.cfg,
-            current_furniture_id=current_furniture_id,
-            agent_type=self.agent_type,
+        # The result is cached per candidate and reused by deterministic checks
+        # and critic prompt construction.
+        physics_context = self._get_cached_physics_context()
+        hard_state = (
+            self._evaluate_current_hard_state(physics_context=physics_context)
+            if self._critic_fast_path_enabled("hard_check_first", True)
+            else None
         )
-        self._record_module_timing("critic", "physics_context", physics_start)
+        render_profile = self._critic_render_profile_name(update_checkpoint)
+
+        if (
+            hard_state is not None
+            and not hard_state.hard_valid
+            and self._critic_fast_path_enabled("skip_vlm_on_hard_fail", True)
+        ):
+            self._pending_hard_repair_hint = self._repair_hint_from_hard_state(
+                hard_state
+            )
+            console_logger.info(
+                "[CRITIC harness] Deterministic hard-check failed; skipping VLM "
+                "score_scene and returning repair-first critique: %s",
+                "; ".join(hard_state.hard_reasons),
+            )
+            images_dir = None
+            if self._critic_fast_path_enabled("render_hard_fail_candidate", True):
+                images_dir = self._observe_scene_for_synthetic_score(render_profile)
+
+            response = self._make_deterministic_critique_scores(
+                hard_state=hard_state,
+                physics_context=physics_context,
+            )
+            log_agent_response(response=response.critique, agent_name="CRITIC")
+            log_critique_scores(response, title="DETERMINISTIC CRITIQUE SCORES")
+            self._write_scores_and_memory(
+                response=response,
+                images_dir=images_dir,
+                physics_context=physics_context,
+                event="deterministic_hard_fail",
+            )
+
+            score_change_msg = ""
+            if self.previous_scores is not None:
+                score_change_msg = format_score_deltas_for_planner(
+                    current_scores=response,
+                    previous_scores=self.previous_scores,
+                    format_style="detailed",
+                )
+
+            controller = getattr(self, "furniture_safety_controller", None)
+            if controller and controller.enabled:
+                (
+                    safety_msg,
+                    checkpoint_scores,
+                    checkpoint_render_dir,
+                    checkpoint_accepted,
+                ) = self._apply_furniture_safety_after_critique(
+                    scores=response,
+                    images_dir=images_dir,
+                    physics_context=physics_context,
+                )
+            else:
+                safety_msg = (
+                    "\n\n**Hard Check:** "
+                    + self._repair_hint_from_hard_state(hard_state)
+                )
+                checkpoint_scores = None
+                checkpoint_render_dir = None
+                checkpoint_accepted = False
+
+            if update_checkpoint and checkpoint_accepted:
+                self.previous_scene_checkpoint = self.scene_checkpoint
+                self.previous_checkpoint_scores = self.checkpoint_scores
+                self.previous_checkpoint_render_dir = self.checkpoint_render_dir
+                self.scene_checkpoint = copy.deepcopy(self.scene.to_state_dict())
+                self.checkpoint_scores = checkpoint_scores
+                self.checkpoint_render_dir = checkpoint_render_dir
+                self.checkpoint_scene_hash = self.scene.content_hash()
+            elif update_checkpoint:
+                console_logger.info(
+                    "Skipping checkpoint update because deterministic hard-check "
+                    "failed."
+                )
+
+            self.previous_scores = response
+            self.final_render_dir = checkpoint_render_dir or images_dir
+            self._last_scored_scene_hash = self.scene.content_hash()
+            self._last_critique_render_profile = render_profile
+            self._record_module_timing(
+                "critic",
+                "request_critique_total",
+                critique_start,
+                extra={
+                    "update_checkpoint": update_checkpoint,
+                    "hard_check_short_circuit": True,
+                    "render_profile": render_profile,
+                },
+            )
+            return response.critique + score_change_msg + safety_msg
+
+        if hard_state is not None and not hard_state.hard_valid:
+            self._pending_hard_repair_hint = self._repair_hint_from_hard_state(
+                hard_state
+            )
+        else:
+            self._pending_hard_repair_hint = ""
+            self._hard_repair_design_change_calls = 0
 
         prompt_enum = self._get_critique_prompt_enum()
         extra_kwargs = self._get_extra_critique_kwargs()
@@ -1476,28 +1909,48 @@ class BaseStatefulAgent(ABC):
         # Step 1: force observe_scene; stop_on_first_tool returns immediately.
         console_logger.info("[CRITIC harness] Step 1: observe_scene")
         observe_start = time.time()
-        result_observe = await Runner.run(
-            starting_agent=critic_observe,
-            input=critique_instruction,
-            session=self.critic_session,
-            run_config=run_config,
-        )
+        with self.rendering_manager.use_render_profile(render_profile):
+            result_observe = await Runner.run(
+                starting_agent=critic_observe,
+                input=critique_instruction,
+                session=self.critic_session,
+                run_config=run_config,
+            )
         self._record_module_timing("critic", "observe_scene", observe_start)
         log_agent_usage(result=result_observe, agent_name="CRITIC (observe)")
 
         # Step 2: force get_current_scene_state; session carries Step 1 history.
-        console_logger.info("[CRITIC harness] Step 2: get_current_scene_state")
-        scene_state_start = time.time()
-        result_scene = await Runner.run(
-            starting_agent=critic_scene_state,
-            input="Now retrieve exact object data with get_current_scene_state.",
-            session=self.critic_session,
-            run_config=run_config,
-        )
-        self._record_module_timing(
-            "critic", "get_current_scene_state", scene_state_start
-        )
-        log_agent_usage(result=result_scene, agent_name="CRITIC (scene_state)")
+        direct_scene_state = self._get_critic_scene_state_direct()
+        scene_state_block = ""
+        if direct_scene_state:
+            max_scene_state_chars = int(
+                _cfg_get(self._critic_fast_path_cfg(), "scene_state_max_chars", 16000)
+            )
+            if len(direct_scene_state) > max_scene_state_chars:
+                direct_scene_state = (
+                    direct_scene_state[:max_scene_state_chars]
+                    + "\n...[scene state truncated for critic fast path]..."
+                )
+            scene_state_block = (
+                "\n\nExact get_current_scene_state output for this candidate:\n"
+                f"{direct_scene_state}"
+            )
+            console_logger.info(
+                "[CRITIC harness] Step 2: get_current_scene_state direct cache"
+            )
+        else:
+            console_logger.info("[CRITIC harness] Step 2: get_current_scene_state")
+            scene_state_start = time.time()
+            result_scene = await Runner.run(
+                starting_agent=critic_scene_state,
+                input="Now retrieve exact object data with get_current_scene_state.",
+                session=self.critic_session,
+                run_config=run_config,
+            )
+            self._record_module_timing(
+                "critic", "get_current_scene_state", scene_state_start
+            )
+            log_agent_usage(result=result_scene, agent_name="CRITIC (scene_state)")
 
         # Step 3: free evaluation with structured output. The critic now has
         # the observation images and the scene-state JSON in its session
@@ -1512,6 +1965,7 @@ class BaseStatefulAgent(ABC):
                 "STEPS 3-6 (physics review, placement evaluation, "
                 "lighting/coverage analysis, synthesis) and return your final "
                 "critique with scores."
+                f"{scene_state_block}"
             ),
             session=self.critic_session,
             max_turns=self.cfg.agents.critic_agent.max_turns,
@@ -1534,28 +1988,11 @@ class BaseStatefulAgent(ABC):
 
         # Save scores to YAML next to scene renders (from observe_scene call).
         images_dir = self.rendering_manager.last_render_dir
-        if images_dir:
-            scores_dict = scores_to_dict(response)
-            scores_path = images_dir / "scores.yaml"
-            with open(scores_path, "w") as f:
-                yaml.dump(
-                    data=scores_dict,
-                    stream=f,
-                    default_flow_style=False,
-                    sort_keys=False,
-                )
-            console_logger.info(f"Scores saved to: {scores_path}")
-            self._save_critic_working_memory(
-                render_dir=images_dir,
-                event="critique",
-                scores=response,
-                critique=response.critique,
-                physics_context=physics_context,
-            )
-        else:
-            console_logger.error(
-                "No render directory available - scores not saved to file"
-            )
+        self._write_scores_and_memory(
+            response=response,
+            images_dir=images_dir,
+            physics_context=physics_context,
+        )
 
         # Compute score deltas and format for planner if we have previous scores.
         score_change_msg = ""
@@ -1603,13 +2040,19 @@ class BaseStatefulAgent(ABC):
         # This is needed because final critique uses update_checkpoint=False, but we
         # still need to know the actual last render dir for copying to final output.
         self.final_render_dir = checkpoint_render_dir or images_dir
+        self._last_scored_scene_hash = self.scene.content_hash()
+        self._last_critique_render_profile = render_profile
 
         # Return natural language critique with score deltas for planner.
         self._record_module_timing(
             "critic",
             "request_critique_total",
             critique_start,
-            extra={"update_checkpoint": update_checkpoint},
+            extra={
+                "update_checkpoint": update_checkpoint,
+                "hard_check_short_circuit": False,
+                "render_profile": render_profile,
+            },
         )
         return response.critique + score_change_msg + safety_msg
 

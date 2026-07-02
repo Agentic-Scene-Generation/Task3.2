@@ -7,15 +7,15 @@ defaults:
 agents:
   designer_agent:
     name: "designer"
-    max_turns: 2000
+    max_turns: 80
     prompt: MANIPULAND_DESIGNER_AGENT
 
   planner_agent:
     name: "planner"
-    max_turns: 1000
+    max_turns: 28
     prompt: MANIPULAND_PLANNER_AGENT
 
   critic_agent:
     name: "critic"
-    max_turns: 500
+    max_turns: 10
     prompt: MANIPULAND_CRITIC_AGENT
