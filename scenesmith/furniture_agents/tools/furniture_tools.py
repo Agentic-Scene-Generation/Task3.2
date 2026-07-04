@@ -276,6 +276,34 @@ class FurnitureTools:
         world_corners = np.array([transform @ corner for corner in corners])
         return np.min(world_corners, axis=0), np.max(world_corners, axis=0)
 
+    def _ground_transform_to_floor_if_needed(
+        self,
+        scene_obj: SceneObject,
+        transform: RigidTransform,
+    ) -> tuple[RigidTransform, float]:
+        """Lift floor-standing furniture so its full bbox rests on the floor.
+
+        Retrieved assets do not always use the floor contact point as their local
+        origin. A bed whose local bbox has min_z=-0.97 should still be placeable
+        at a floor position; otherwise every valid x/y pose is rejected before
+        the planner has a chance to repair the layout.
+        """
+        world_bounds = self._world_bounds_for_transform(scene_obj, transform)
+        if world_bounds is None:
+            return transform, 0.0
+
+        world_min, _ = world_bounds
+        bottom_z = float(world_min[2])
+        floor_tolerance = self._floor_penetration_tolerance()
+        if bottom_z >= -floor_tolerance:
+            return transform, 0.0
+
+        translation = np.array(transform.translation(), dtype=float)
+        lift = -bottom_z
+        translation[2] += lift
+        grounded_transform = RigidTransform(R=transform.rotation(), p=translation)
+        return grounded_transform, lift
+
     def _check_object_bounds_for_transform(
         self, scene_obj: SceneObject, transform: RigidTransform
     ) -> tuple[bool, str]:
@@ -677,7 +705,18 @@ class FurnitureTools:
                 yaw=math.radians(yaw),
             )
 
-            base_transform = scene_object.transform
+            base_transform, base_lift = self._ground_transform_to_floor_if_needed(
+                scene_obj=scene_object,
+                transform=scene_object.transform,
+            )
+            if base_lift > 0:
+                console_logger.info(
+                    "Auto-grounded furniture asset '%s' by lifting %.3fm before "
+                    "room-bound validation",
+                    original_asset.name,
+                    base_lift,
+                )
+            scene_object.transform = base_transform
 
             # Apply placement noise for realistic variation.
             noisy_transform = apply_placement_noise(
@@ -685,6 +724,16 @@ class FurnitureTools:
                 position_xy_std_meters=self.active_noise_profile.position_xy_std_meters,
                 rotation_yaw_std_degrees=self.active_noise_profile.rotation_yaw_std_degrees,
             )
+            noisy_transform, noisy_lift = self._ground_transform_to_floor_if_needed(
+                scene_obj=scene_object,
+                transform=noisy_transform,
+            )
+            if noisy_lift > 0:
+                console_logger.info(
+                    "Auto-grounded noisy furniture pose for '%s' by lifting %.3fm",
+                    original_asset.name,
+                    noisy_lift,
+                )
             valid_noisy, noisy_error = self._check_object_bounds_for_transform(
                 scene_obj=scene_object,
                 transform=noisy_transform,
@@ -893,12 +942,34 @@ class FurnitureTools:
                 math.radians(roll), math.radians(pitch), math.radians(yaw)
             )
             new_transform = RigidTransform(rpy=new_rpy, p=[x, y, z])
+            new_transform, base_lift = self._ground_transform_to_floor_if_needed(
+                scene_obj=scene_obj,
+                transform=new_transform,
+            )
+            if base_lift > 0:
+                console_logger.info(
+                    "Auto-grounded furniture '%s'/'%s' by lifting %.3fm before "
+                    "move validation",
+                    scene_obj.name,
+                    object_id,
+                    base_lift,
+                )
 
             noisy_transform = apply_placement_noise(
                 transform=new_transform,
                 position_xy_std_meters=self.active_noise_profile.position_xy_std_meters,
                 rotation_yaw_std_degrees=self.active_noise_profile.rotation_yaw_std_degrees,
             )
+            noisy_transform, noisy_lift = self._ground_transform_to_floor_if_needed(
+                scene_obj=scene_obj,
+                transform=noisy_transform,
+            )
+            if noisy_lift > 0:
+                console_logger.info(
+                    "Auto-grounded noisy furniture move for '%s' by lifting %.3fm",
+                    object_id,
+                    noisy_lift,
+                )
             valid_noisy, noisy_error = self._check_object_bounds_for_transform(
                 scene_obj=scene_obj,
                 transform=noisy_transform,

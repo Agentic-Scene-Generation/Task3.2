@@ -1225,6 +1225,27 @@ class BaseStatefulAgent(ABC):
                     f"No render images found in {render_dir_to_copy}"
                 )
 
+        fail_on_hard_constraints = bool(
+            _cfg_get(self.cfg, "fail_stage_on_unresolved_hard_constraints", True)
+        )
+        if (
+            controller
+            and getattr(controller, "enabled", False)
+            and fail_on_hard_constraints
+        ):
+            final_hard_state = self._evaluate_current_hard_state()
+            if final_hard_state is not None and not final_hard_state.hard_valid:
+                reasons = "; ".join(final_hard_state.hard_reasons)
+                console_logger.error(
+                    "Furniture stage failed with unresolved deterministic hard "
+                    "constraints: %s",
+                    reasons,
+                )
+                raise RuntimeError(
+                    "Furniture stage failed with unresolved hard constraints: "
+                    f"{reasons}"
+                )
+
     def _create_reset_checkpoint_tool(self) -> FunctionTool:
         """Create tool for resetting scene to previous checkpoint.
 

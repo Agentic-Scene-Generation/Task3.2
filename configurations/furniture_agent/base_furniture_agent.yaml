@@ -274,6 +274,12 @@ max_critique_rounds: 3
 # designer call.
 auto_score_after_design_attempts: true
 
+# Stop the downstream pipeline if the furniture stage still violates hard
+# deterministic constraints after all configured repair attempts. Keep this on
+# for producing usable scenes; turn it off only when intentionally collecting
+# failed trajectories for analysis.
+fail_stage_on_unresolved_hard_constraints: true
+
 # Critic fast path: deterministic hard checks run before expensive VLM scoring.
 # If missing required objects, hard collisions, door blockage, or fallen objects
 # are detected, a synthetic low score and repair hint are saved instead of
@@ -285,7 +291,7 @@ critic_fast_path:
   direct_scene_state_cache: true
   use_intermediate_render_profile: true
   scene_state_max_chars: 16000
-  max_hard_repair_design_changes: 1
+  max_hard_repair_design_changes: 2
 
 # Planner tool output limits. Initial/design-change responses can now include
 # an automatic critique block, so keep enough tail context for score deltas and
