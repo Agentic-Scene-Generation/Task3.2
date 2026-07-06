@@ -409,6 +409,74 @@ class BaseStatefulAgent(ABC):
             < self._hard_repair_design_change_limit()
         )
 
+    def _deterministic_repair_enabled(self) -> bool:
+        controller_cfg = _cfg_get(self.cfg, "furniture_safety_controller", {})
+        repair_cfg = _cfg_get(controller_cfg, "deterministic_repair", {})
+        return bool(_cfg_get(repair_cfg, "enabled", False))
+
+    def _attempt_deterministic_repair(
+        self, hard_state: HardStateEvaluation
+    ) -> tuple[bool, list[str]]:
+        """Stage-specific hook for code-level hard-fail repair.
+
+        Subclasses can override this to repair deterministic geometry failures
+        before involving the LLM again. The base implementation is deliberately
+        inert so non-furniture stages keep their existing behavior.
+        """
+        return False, []
+
+    def _try_deterministic_repair_for_hard_state(
+        self,
+        hard_state: HardStateEvaluation | None,
+        *,
+        source: str,
+    ) -> tuple[HardStateEvaluation | None, str | None, list[str]]:
+        if hard_state is None or hard_state.hard_valid:
+            return hard_state, None, []
+        if not self._deterministic_repair_enabled():
+            return hard_state, None, []
+
+        repair_start = time.time()
+        repaired, actions = self._attempt_deterministic_repair(hard_state)
+        self._record_module_timing(
+            "deterministic_repair",
+            source,
+            repair_start,
+            extra={"attempted": True, "repaired": bool(repaired), "actions": actions},
+        )
+        if not repaired:
+            return hard_state, None, actions
+
+        console_logger.info(
+            "Deterministic repair attempted from %s: %s",
+            source,
+            "; ".join(actions) if actions else "(no action details)",
+        )
+        self.rendering_manager.clear_cache()
+        self._reset_critic_candidate_cache()
+        physics_context = self._get_cached_physics_context()
+        repaired_hard_state = self._evaluate_current_hard_state(
+            physics_context=physics_context
+        )
+        if repaired_hard_state is not None and repaired_hard_state.hard_valid:
+            console_logger.info(
+                "Deterministic repair resolved hard-check failure from %s",
+                source,
+            )
+        else:
+            remaining = (
+                "; ".join(repaired_hard_state.hard_reasons)
+                if repaired_hard_state and repaired_hard_state.hard_reasons
+                else "unknown remaining hard failure"
+            )
+            console_logger.info(
+                "Deterministic repair did not fully resolve hard-check failure "
+                "from %s: %s",
+                source,
+                remaining,
+            )
+        return repaired_hard_state, physics_context, actions
+
     def _reset_critic_candidate_cache(self) -> None:
         self._critic_candidate_cache = {
             "scene_hash": self.scene.content_hash(),
@@ -1173,6 +1241,27 @@ class BaseStatefulAgent(ABC):
                 # Update final_render_dir to point to restored checkpoint's render.
                 self.final_render_dir = self.checkpoint_render_dir
 
+        fail_on_hard_constraints = bool(
+            _cfg_get(self.cfg, "fail_stage_on_unresolved_hard_constraints", True)
+        )
+        if (
+            controller
+            and getattr(controller, "enabled", False)
+            and fail_on_hard_constraints
+        ):
+            final_hard_state = self._evaluate_current_hard_state()
+            if final_hard_state is not None and not final_hard_state.hard_valid:
+                reasons = "; ".join(final_hard_state.hard_reasons)
+                console_logger.error(
+                    "Furniture stage failed with unresolved deterministic hard "
+                    "constraints: %s",
+                    reasons,
+                )
+                raise RuntimeError(
+                    "Furniture stage failed with unresolved hard constraints: "
+                    f"{reasons}"
+                )
+
         # Copy final scores and renders to per-stage directory.
         # Use final_render_dir (tracks actual last render) instead of checkpoint_render_dir
         # (which may be stale when final critique uses update_checkpoint=False).
@@ -1223,27 +1312,6 @@ class BaseStatefulAgent(ABC):
             else:
                 console_logger.warning(
                     f"No render images found in {render_dir_to_copy}"
-                )
-
-        fail_on_hard_constraints = bool(
-            _cfg_get(self.cfg, "fail_stage_on_unresolved_hard_constraints", True)
-        )
-        if (
-            controller
-            and getattr(controller, "enabled", False)
-            and fail_on_hard_constraints
-        ):
-            final_hard_state = self._evaluate_current_hard_state()
-            if final_hard_state is not None and not final_hard_state.hard_valid:
-                reasons = "; ".join(final_hard_state.hard_reasons)
-                console_logger.error(
-                    "Furniture stage failed with unresolved deterministic hard "
-                    "constraints: %s",
-                    reasons,
-                )
-                raise RuntimeError(
-                    "Furniture stage failed with unresolved hard constraints: "
-                    f"{reasons}"
                 )
 
     def _create_reset_checkpoint_tool(self) -> FunctionTool:
@@ -1776,6 +1844,19 @@ class BaseStatefulAgent(ABC):
             else None
         )
         render_profile = self._critic_render_profile_name(update_checkpoint)
+        hard_state, repaired_physics_context, repair_actions = (
+            self._try_deterministic_repair_for_hard_state(
+                hard_state,
+                source="pre_critique",
+            )
+        )
+        if repaired_physics_context is not None:
+            physics_context = repaired_physics_context
+        if repair_actions:
+            console_logger.info(
+                "[CRITIC harness] Deterministic repair actions before scoring: %s",
+                "; ".join(repair_actions),
+            )
 
         if (
             hard_state is not None

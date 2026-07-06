@@ -1,8 +1,10 @@
 """Code-level safety guardrails for furniture refinement loops.
 
-The controller is intentionally small: it limits repeated tool use, tracks the
-best hard-valid checkpoint, and decides whether a new critique candidate should
-be accepted or rolled back. It does not encode room-specific layout rules.
+The controller keeps repeated tool use bounded, tracks the best hard-valid
+checkpoint, and decides whether a new critique candidate should be accepted or
+rolled back. Bedroom layout checks are deliberately deterministic: prompt-only
+advice was not enough to stop common failure modes such as nightstands embedded
+in the bed footprint or wardrobes blocking openings.
 """
 
 from __future__ import annotations
@@ -201,6 +203,40 @@ class FurnitureSafetyController:
         }
         self.size_bounds = _plain_dict(_cfg_get(cfg, "size_bounds", {}))
         self.bedroom_layout_cfg = _cfg_get(cfg, "bedroom_layout", {})
+        self.window_blocking_is_hard = bool(
+            _cfg_get(self.bedroom_layout_cfg, "window_blocking_is_hard", False)
+        )
+        self.bedroom_hard_plausibility_issues = bool(
+            _cfg_get(self.bedroom_layout_cfg, "hard_plausibility_issues", True)
+        )
+        self.bedroom_hard_issue_terms = [
+            str(term).lower()
+            for term in list(
+                _cfg_get(
+                    self.bedroom_layout_cfg,
+                    "hard_issue_terms",
+                    [
+                        "no bed object",
+                        "bed headboard faces",
+                        "bed headboard is not anchored",
+                        "bed headboard overlaps",
+                        "nightstands are not on opposite bed sides",
+                        "wardrobe is floating away from walls",
+                    ],
+                )
+                or []
+            )
+        ]
+        self.nightstand_bed_overlap_tolerance_m = float(
+            _cfg_get(
+                self.bedroom_layout_cfg,
+                "nightstand_bed_overlap_tolerance_m",
+                0.03,
+            )
+        )
+        self.nightstand_bed_max_gap_m = float(
+            _cfg_get(self.bedroom_layout_cfg, "nightstand_bed_max_gap_m", 0.55)
+        )
         self.required_object_names = [
             str(x).lower()
             for x in list(_cfg_get(cfg, "required_object_names", []) or [])
@@ -789,19 +825,36 @@ class FurnitureSafetyController:
             hard_reasons.extend(hard_from_physics)
             soft_reasons.extend(soft_from_physics)
 
-        plausibility_report = evaluate_bedroom_layout_plausibility(
-            scene=scene,
-            cfg=self.bedroom_layout_cfg,
-        )
-        if plausibility_report.issues:
-            soft_reasons.extend(plausibility_report.issues)
+        plausibility_report = None
+        try:
+            plausibility_report = evaluate_bedroom_layout_plausibility(
+                scene=scene,
+                cfg=self.bedroom_layout_cfg,
+            )
+        except Exception as exc:
+            soft_reasons.append(
+                "bedroom plausibility check failed: " f"{type(exc).__name__}: {exc}"
+            )
+
+        if plausibility_report is not None and plausibility_report.issues:
+            hard_plausibility, soft_plausibility = (
+                self._classify_bedroom_plausibility_issues(plausibility_report.issues)
+            )
+            hard_reasons.extend(hard_plausibility)
+            soft_reasons.extend(soft_plausibility)
+
+        hard_reasons.extend(self._evaluate_bedroom_relation_hard_reasons(scene))
 
         return HardStateEvaluation(
             hard_valid=not hard_reasons,
             hard_reasons=hard_reasons,
             soft_reasons=soft_reasons,
-            weighted_score_penalty=plausibility_report.penalty,
-            plausibility_report=plausibility_report.to_dict(),
+            weighted_score_penalty=(
+                plausibility_report.penalty if plausibility_report is not None else 0.0
+            ),
+            plausibility_report=(
+                plausibility_report.to_dict() if plausibility_report is not None else None
+            ),
         )
 
     def _room_bounds_xy(self, scene: Any) -> tuple[float, float, float, float] | None:
@@ -818,6 +871,110 @@ class FurnitureSafetyController:
         object_type = getattr(obj, "object_type", "")
         value = getattr(object_type, "value", object_type)
         return str(value).lower() == "furniture"
+
+    def _classify_bedroom_plausibility_issues(
+        self, issues: list[str]
+    ) -> tuple[list[str], list[str]]:
+        if not self.bedroom_hard_plausibility_issues:
+            return [], list(issues)
+
+        hard_reasons: list[str] = []
+        soft_reasons: list[str] = []
+        for issue in issues:
+            issue_l = issue.lower()
+            if any(term in issue_l for term in self.bedroom_hard_issue_terms):
+                hard_reasons.append(issue)
+            else:
+                soft_reasons.append(issue)
+        return hard_reasons, soft_reasons
+
+    def _evaluate_bedroom_relation_hard_reasons(self, scene: Any) -> list[str]:
+        """Catch bedroom furniture relation failures using only object bounds."""
+        objects_by_category: dict[str, list[tuple[str, Any]]] = {
+            "bed": [],
+            "nightstand": [],
+            "wardrobe": [],
+        }
+        for object_id, obj in getattr(scene, "objects", {}).items():
+            if getattr(obj, "immutable", False) or not self._is_furniture_object(obj):
+                continue
+            category = self._infer_category(
+                f"{object_id} {getattr(obj, 'name', '')} "
+                f"{getattr(obj, 'description', '')}"
+            )
+            if category in objects_by_category:
+                objects_by_category[category].append((str(object_id), obj))
+
+        beds = objects_by_category["bed"]
+        nightstands = objects_by_category["nightstand"]
+        if not beds or not nightstands:
+            return []
+
+        bed_id, bed = beds[0]
+        bed_bounds = self._safe_world_bounds(bed)
+        if bed_bounds is None:
+            return []
+
+        hard_reasons: list[str] = []
+        for nightstand_id, nightstand in nightstands:
+            nightstand_bounds = self._safe_world_bounds(nightstand)
+            if nightstand_bounds is None:
+                continue
+            overlap_x, overlap_y = self._xy_overlap_depths(bed_bounds, nightstand_bounds)
+            if (
+                overlap_x > self.nightstand_bed_overlap_tolerance_m
+                and overlap_y > self.nightstand_bed_overlap_tolerance_m
+            ):
+                hard_reasons.append(
+                    f"bedroom relation: {nightstand_id} overlaps {bed_id} footprint "
+                    f"by {overlap_x:.2f}m x {overlap_y:.2f}m"
+                )
+                continue
+
+            gap = self._xy_aabb_gap_m(bed_bounds, nightstand_bounds)
+            if gap > self.nightstand_bed_max_gap_m:
+                hard_reasons.append(
+                    f"bedroom relation: {nightstand_id} is {gap:.2f}m from {bed_id}, "
+                    f"above max bedside gap {self.nightstand_bed_max_gap_m:.2f}m"
+                )
+
+        return hard_reasons
+
+    def _safe_world_bounds(
+        self, obj: Any
+    ) -> tuple[tuple[float, float, float], tuple[float, float, float]] | None:
+        try:
+            bounds = obj.compute_world_bounds()
+        except Exception:
+            return None
+        if bounds is None:
+            return None
+        world_min, world_max = bounds
+        if len(world_min) < 2 or len(world_max) < 2:
+            return None
+        return tuple(float(x) for x in world_min), tuple(float(x) for x in world_max)
+
+    def _xy_overlap_depths(
+        self,
+        bounds_a: tuple[tuple[float, ...], tuple[float, ...]],
+        bounds_b: tuple[tuple[float, ...], tuple[float, ...]],
+    ) -> tuple[float, float]:
+        min_a, max_a = bounds_a
+        min_b, max_b = bounds_b
+        overlap_x = min(max_a[0], max_b[0]) - max(min_a[0], min_b[0])
+        overlap_y = min(max_a[1], max_b[1]) - max(min_a[1], min_b[1])
+        return max(0.0, float(overlap_x)), max(0.0, float(overlap_y))
+
+    def _xy_aabb_gap_m(
+        self,
+        bounds_a: tuple[tuple[float, ...], tuple[float, ...]],
+        bounds_b: tuple[tuple[float, ...], tuple[float, ...]],
+    ) -> float:
+        min_a, max_a = bounds_a
+        min_b, max_b = bounds_b
+        dx = max(min_a[0] - max_b[0], min_b[0] - max_a[0], 0.0)
+        dy = max(min_a[1] - max_b[1], min_b[1] - max_a[1], 0.0)
+        return (float(dx) ** 2 + float(dy) ** 2) ** 0.5
 
     def _parse_physics_context(self, physics_context: str) -> tuple[list[str], list[str]]:
         text = physics_context.lower()
@@ -840,7 +997,10 @@ class FurnitureSafetyController:
                 hard_reasons.append(f"physics hard violation: {section.rstrip(' (')}")
 
         if "window access warnings" in text:
-            soft_reasons.append("window access warning")
+            if self.window_blocking_is_hard:
+                hard_reasons.append("window access warning")
+            else:
+                soft_reasons.append("window access warning")
 
         if not hard_reasons and "physics violations detected" in text:
             soft_reasons.append("non-hard physics warning")

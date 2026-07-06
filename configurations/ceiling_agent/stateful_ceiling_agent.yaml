@@ -5,15 +5,15 @@ defaults:
 agents:
   designer_agent:
     name: "designer_agent"
-    max_turns: 50
+    max_turns: 18
     prompt: DESIGNER_AGENT
 
   planner_agent:
     name: "planner_agent"
-    max_turns: 16
+    max_turns: 8
     prompt: STATEFUL_PLANNER_AGENT
 
   critic_agent:
     name: "critic_agent"
-    max_turns: 8
+    max_turns: 4
     prompt: STATEFUL_CRITIC_AGENT

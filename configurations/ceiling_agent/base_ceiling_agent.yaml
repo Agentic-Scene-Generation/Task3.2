@@ -8,18 +8,18 @@ session_memory:
   # turns are kept and the current turn is also kept.
   keep_last_n_turns: 1
   # Summarize older turns via LLM (if false, just strip images).
-  enable_summarization: true
+  enable_summarization: false
   # Model for summarization ("agent" uses cfg.openai.model).
   summarization_model: ${llm.model_id}
   # Thinking effort for summarization ("none", "low", "medium", "high").
-  summarization_thinking: "low"
+  summarization_thinking: "none"
   # Intra-turn observation stripping: strip images from older observe_scene outputs
   # within the current turn while keeping the last N observations with images intact.
   intra_turn_observation_stripping:
     enabled: true
     # Number of recent observe_scene outputs to keep with images.
     # Default 2 allows comparison between current and previous state.
-    keep_last_n_observations: 2
+    keep_last_n_observations: 1
 
 # Scene-local online memory for the current stage. This saves per-render
 # notes/scores and injects compact recent lessons into the next designer call.
@@ -38,7 +38,7 @@ rendering:
   top_view_height: 512
 
   # Side views for additional context.
-  side_view_count: 2
+  side_view_count: 1
   side_view_width: 512
   side_view_height: 512
 
@@ -49,8 +49,8 @@ rendering:
     top_view_width: 384
     top_view_height: 384
     side_view_count: 1
-    side_view_width: 384
-    side_view_height: 384
+    side_view_width: 256
+    side_view_height: 256
     taa_samples: 4
 
   background_color: [1.0, 1.0, 1.0]
@@ -79,17 +79,17 @@ asset_manager:
   backend: "sam3d"
 
   router:
-    enabled: true
+    enabled: false
     parallel_workers: 10
     # Max retries for VLM analysis if parsing fails (e.g., invalid object_type)
-    analysis_max_retries: 3
+    analysis_max_retries: 1
     strategies:
       generated:
         enabled: true
-        max_retries: 2
+        max_retries: 1
       articulated:
         enabled: true
-        max_retries: 3
+        max_retries: 1
         use_lenient_validation: true
       # Thin covering not used for ceiling typically.
       thin_covering:
@@ -148,7 +148,7 @@ asset_manager:
     gemini:
       aspect_ratio: "1:1"
       image_size: "1K"
-  num_side_views_for_physics_analysis: 4
+  num_side_views_for_physics_analysis: 1
   side_view_elevation_degrees: 0.0
   floater_distance_threshold: 0.05
   min_mesh_dimension_meters: 0.001
@@ -156,7 +156,7 @@ asset_manager:
   mesh_relative_dimension_threshold: 0.01
   # EEVEE TAA samples for asset validation renders (mesh analysis, router validation).
   # Higher values = better quality but slower. Default 8 is a good balance.
-  validation_taa_samples: 8
+  validation_taa_samples: 2
 
 # Collision geometry configuration.
 collision_geometry:
@@ -201,7 +201,7 @@ collision_geometry:
     find_best_plane: false
 
 # Maximum number of agent turns before stopping.
-max_turns: 1000
+max_turns: 80
 
 # Maximum number of critique-and-improve rounds before stopping.
 max_critique_rounds: 1
@@ -213,7 +213,7 @@ critic_fast_path:
   render_hard_fail_candidate: true
   direct_scene_state_cache: true
   use_intermediate_render_profile: true
-  scene_state_max_chars: 16000
+  scene_state_max_chars: 8000
   max_hard_repair_design_changes: 1
 
 # Scene reset thresholds for detecting quality degradation.
@@ -227,18 +227,18 @@ early_finish_min_score: 7
 openai:
   model: ${llm.model_id}
   service_tier: ${openai.service_tier}
-  vision_detail: "high"
+  vision_detail: "low"
   reasoning_effort:
     planner: "none"
-    designer: "high"
-    critic: "high"
+    designer: "none"
+    critic: "none"
     mesh_analysis: "none"
     asset_analysis: "none"
     asset_validation: "none"
   verbosity:
     planner: "low"
     designer: "low"
-    critic: "medium"
+    critic: "low"
     mesh_analysis: "low"
     asset_analysis: "low"
     asset_validation: "low"
@@ -246,9 +246,9 @@ openai:
 # OpenAI API timeout configuration (seconds).
 api_timeout:
   connect: 10.0
-  read: 1800
-  write: 1800
-  pool: 1800
+  read: 300
+  write: 300
+  pool: 300
 
 # Loop detection configuration for function tools.
 loop_detection:

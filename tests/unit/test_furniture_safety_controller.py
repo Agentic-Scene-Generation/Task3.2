@@ -64,6 +64,28 @@ def make_scores(
     )
 
 
+class BoundedFurniture:
+    def __init__(
+        self,
+        *,
+        name: str,
+        description: str,
+        world_min: tuple[float, float, float],
+        world_max: tuple[float, float, float],
+    ) -> None:
+        self.name = name
+        self.description = description
+        self.object_type = SimpleNamespace(value="furniture")
+        self.immutable = False
+        self._world_min = world_min
+        self._world_max = world_max
+
+    def compute_world_bounds(
+        self,
+    ) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
+        return self._world_min, self._world_max
+
+
 class FurnitureSafetyControllerTest(unittest.TestCase):
     def test_window_only_issue_is_soft(self) -> None:
         controller = FurnitureSafetyController({"enabled": True})
@@ -130,6 +152,48 @@ class FurnitureSafetyControllerTest(unittest.TestCase):
         evaluation = controller.evaluate_scores(make_scores(functionality=3))
 
         self.assertFalse(evaluation.hard_valid)
+
+    def test_window_access_warning_can_be_configured_as_hard(self) -> None:
+        controller = FurnitureSafetyController(
+            {"enabled": True, "bedroom_layout": {"window_blocking_is_hard": True}}
+        )
+
+        evaluation = controller.evaluate_scene_state(
+            SimpleNamespace(objects={}),
+            physics_context=(
+                "Physics violations detected:\n"
+                "Window access warnings (1): wardrobe_0 blocks window_2"
+            ),
+        )
+
+        self.assertFalse(evaluation.hard_valid)
+        self.assertIn("window access warning", evaluation.hard_reasons)
+
+    def test_nightstand_overlapping_bed_is_hard(self) -> None:
+        controller = FurnitureSafetyController({"enabled": True})
+        scene = SimpleNamespace(
+            objects={
+                "bed_0": BoundedFurniture(
+                    name="bed",
+                    description="compact bed",
+                    world_min=(-1.0, -1.0, 0.0),
+                    world_max=(1.0, 1.0, 0.8),
+                ),
+                "nightstand_0": BoundedFurniture(
+                    name="nightstand",
+                    description="bedside table",
+                    world_min=(0.80, -0.20, 0.0),
+                    world_max=(1.20, 0.40, 0.6),
+                ),
+            }
+        )
+
+        evaluation = controller.evaluate_scene_state(scene)
+
+        self.assertFalse(evaluation.hard_valid)
+        self.assertTrue(
+            any("overlaps bed_0 footprint" in reason for reason in evaluation.hard_reasons)
+        )
 
     def test_required_counts_parse_two_nightstands(self) -> None:
         controller = FurnitureSafetyController({"enabled": True})

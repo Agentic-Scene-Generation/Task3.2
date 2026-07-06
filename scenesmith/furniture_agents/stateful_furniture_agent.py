@@ -6,26 +6,40 @@ SQLiteSession agents that maintain conversation memory across interactions.
 """
 
 import logging
+import math
 
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 from agents import Agent, FunctionTool, Runner, RunResult
 from omegaconf import DictConfig
+from pydrake.all import RigidTransform, RollPitchYaw
 
+from scenesmith.agent_utils.asset_manager import AssetGenerationRequest
 from scenesmith.agent_utils.base_stateful_agent import (
     BaseStatefulAgent,
+    HardStateEvaluation,
     log_agent_usage,
 )
 from scenesmith.agent_utils.furniture_layout_planning import (
+    build_bedroom_anchor_plan,
     format_bedroom_anchor_guidance,
+    is_bedroom_scene,
 )
 from scenesmith.agent_utils.placement_noise import PlacementNoiseMode
 from scenesmith.agent_utils.reachability import (
     compute_reachability,
     format_reachability_for_critic,
 )
-from scenesmith.agent_utils.room import AgentType, RoomScene
+from scenesmith.agent_utils.room import (
+    AgentType,
+    ObjectType,
+    RoomScene,
+    SceneObject,
+    copy_scene_object_with_new_pose,
+)
 from scenesmith.agent_utils.scoring import (
     FurnitureCritiqueWithScores,
     log_agent_response,
@@ -314,6 +328,17 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 response=result.final_output, agent_name="PLANNER (FURNITURE)"
             )
 
+        pre_final_hard_state = self._evaluate_current_hard_state()
+        _, _, pre_final_actions = self._try_deterministic_repair_for_hard_state(
+            pre_final_hard_state,
+            source="post_planner_pre_final_critique",
+        )
+        if pre_final_actions:
+            console_logger.info(
+                "Deterministic furniture repair before final critique: %s",
+                "; ".join(pre_final_actions),
+            )
+
         # Compute final critique and scores for completed scene.
         # Check if scene changed since last checkpoint to avoid redundant critique.
         current_scene_hash = self.scene.content_hash()
@@ -418,6 +443,435 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             mode: Placement noise mode (NATURAL or PERFECT).
         """
         self.furniture_tools.set_noise_profile(mode)
+
+    def _attempt_deterministic_repair(
+        self, hard_state: HardStateEvaluation
+    ) -> tuple[bool, list[str]]:
+        if not self.scene or not is_bedroom_scene(self.scene):
+            return False, []
+
+        actions: list[str] = []
+        reasons = " ".join(hard_state.hard_reasons or []).lower()
+        if "missing required bed" in reasons:
+            if self._ensure_required_furniture_asset("bed"):
+                actions.append("added missing bed from local/HSSD asset bank")
+        if "missing required nightstand" in reasons:
+            added = self._ensure_required_furniture_asset("nightstand")
+            if added:
+                actions.append(f"added {added} missing nightstand asset(s)")
+
+        if self._anchor_existing_bed():
+            actions.append("anchored bed to deterministic bedroom head wall")
+        if self._repair_bedside_nightstands():
+            actions.append("repositioned nightstands to deterministic bedside anchors")
+        if (
+            "window access warning" in reasons
+            or "wardrobe" in reasons
+            or "closet" in reasons
+        ) and self._repair_wardrobe_wall_anchor():
+            actions.append("moved wardrobe to a deterministic wall/corner anchor")
+
+        return bool(actions), actions
+
+    def _repair_cfg_value(self, key: str, default: Any) -> Any:
+        safety_cfg = getattr(self.cfg, "furniture_safety_controller", None)
+        repair_cfg = getattr(safety_cfg, "deterministic_repair", None)
+        if repair_cfg is None:
+            return default
+        try:
+            return repair_cfg.get(key, default)
+        except Exception:
+            return getattr(repair_cfg, key, default)
+
+    def _category_for_object(self, object_id: Any, obj: SceneObject) -> str | None:
+        text = (
+            f"{object_id} {getattr(obj, 'name', '')} "
+            f"{getattr(obj, 'description', '')}"
+        ).lower()
+        if "nightstand" in text or "bedside" in text:
+            return "nightstand"
+        if any(term in text for term in ("wardrobe", "closet", "armoire")):
+            return "wardrobe"
+        if "bed" in text:
+            return "bed"
+        return None
+
+    def _furniture_by_category(self, category: str) -> list[SceneObject]:
+        if self.scene is None:
+            return []
+        result: list[SceneObject] = []
+        for object_id, obj in self.scene.objects.items():
+            if getattr(obj, "immutable", False):
+                continue
+            object_type = getattr(obj, "object_type", None)
+            value = getattr(object_type, "value", object_type)
+            if str(value).lower() != "furniture":
+                continue
+            if self._category_for_object(object_id, obj) == category:
+                result.append(obj)
+        return result
+
+    def _required_count(self, category: str) -> int:
+        controller = getattr(self, "furniture_safety_controller", None)
+        if not controller:
+            return 0
+        return int(getattr(controller, "required_counts", {}).get(category, 0) or 0)
+
+    def _ensure_required_furniture_asset(self, category: str) -> int:
+        required = self._required_count(category)
+        if required <= 0:
+            return 0
+        current = len(self._furniture_by_category(category))
+        missing = max(0, required - current)
+        if missing <= 0:
+            return 0
+
+        added = 0
+        for _ in range(missing):
+            asset = self._get_or_generate_repair_asset(category)
+            if asset is None:
+                console_logger.warning(
+                    "Deterministic repair could not find or generate %s asset",
+                    category,
+                )
+                break
+            if self._place_repair_asset(category, asset):
+                added += 1
+        return added
+
+    def _get_or_generate_repair_asset(self, category: str) -> SceneObject | None:
+        for asset in self.asset_manager.list_available_assets():
+            if self._category_for_object(getattr(asset, "object_id", ""), asset) == category:
+                return asset
+
+        descriptions = {
+            "bed": "Compact standard double bed with headboard, mattress, pillows, and bedding",
+            "nightstand": "Compact bedside nightstand with drawer",
+            "wardrobe": "Compact wardrobe closet with simple doors",
+        }
+        names = {
+            "bed": "bed",
+            "nightstand": "nightstand",
+            "wardrobe": "wardrobe",
+        }
+        dimensions = {
+            "bed": [1.60, 2.05, 0.80],
+            "nightstand": [0.45, 0.42, 0.55],
+            "wardrobe": [0.90, 0.55, 2.00],
+        }
+        if category not in descriptions:
+            return None
+
+        request = AssetGenerationRequest(
+            object_descriptions=[descriptions[category]],
+            short_names=[names[category]],
+            object_type=ObjectType.FURNITURE,
+            desired_dimensions=[dimensions[category]],
+            style_context="deterministic repair asset",
+            scene_id=self.scene.scene_dir.name if self.scene else "deterministic_repair",
+        )
+        result = self.asset_manager.generate_assets(request)
+        if result.successful_assets:
+            return result.successful_assets[0]
+        return None
+
+    def _place_repair_asset(self, category: str, asset: SceneObject) -> bool:
+        if self.scene is None:
+            return False
+        x, y, yaw = self._default_repair_pose(category)
+        try:
+            scene_object = copy_scene_object_with_new_pose(
+                scene=self.scene,
+                original=asset,
+                x=x,
+                y=y,
+                z=0.0,
+                roll=0.0,
+                pitch=0.0,
+                yaw=math.radians(yaw),
+            )
+            transform = self._grounded_transform(scene_object, x=x, y=y, yaw_deg=yaw)
+            transform = self._fit_transform_inside_room(scene_object, transform)
+            scene_object.transform = transform
+            self.scene.add_object(scene_object)
+            console_logger.info(
+                "Deterministic repair placed %s asset %s as %s",
+                category,
+                asset.object_id,
+                scene_object.object_id,
+            )
+            return True
+        except Exception:
+            console_logger.exception("Deterministic repair failed placing %s", category)
+            return False
+
+    def _default_repair_pose(self, category: str) -> tuple[float, float, float]:
+        room_bounds = self._room_bounds_xy()
+        if room_bounds is None:
+            return 0.0, 0.0, 0.0
+        min_x, min_y, max_x, max_y = room_bounds
+        if category == "wardrobe":
+            return max_x - 0.5, max_y - 0.6, 180.0
+        if category == "nightstand":
+            return min_x + 0.8, min_y + 0.8, 0.0
+        plan = build_bedroom_anchor_plan(self.scene, self._bedroom_layout_cfg())
+        wall = plan.bed_head_wall if plan else "north"
+        return 0.0, 0.0, self._yaw_for_head_wall(wall)
+
+    def _anchor_existing_bed(self) -> bool:
+        beds = self._furniture_by_category("bed")
+        if not beds or self.scene is None:
+            return False
+        bed = beds[0]
+        plan = build_bedroom_anchor_plan(self.scene, self._bedroom_layout_cfg())
+        wall = plan.bed_head_wall if plan and plan.bed_head_wall else "north"
+        yaw = self._yaw_for_head_wall(wall)
+        current = np.asarray(bed.transform.translation(), dtype=float)
+        transform = self._grounded_transform(bed, x=float(current[0]), y=float(current[1]), yaw_deg=yaw)
+        transform = self._snap_transform_to_wall(bed, transform, wall)
+        transform = self._fit_transform_inside_room(bed, transform)
+        if self._transform_close(bed.transform, transform):
+            return False
+        self.scene.move_object(bed.object_id, transform)
+        return True
+
+    def _repair_bedside_nightstands(self) -> bool:
+        beds = self._furniture_by_category("bed")
+        if not beds:
+            return False
+        needed = self._required_count("nightstand")
+        if needed > len(self._furniture_by_category("nightstand")):
+            self._ensure_required_furniture_asset("nightstand")
+        nightstands = self._furniture_by_category("nightstand")[:2]
+        if len(nightstands) < 2:
+            return False
+
+        bed = beds[0]
+        bed_dims = self._local_size(bed, [1.60, 2.05, 0.80])
+        bed_center = np.asarray(bed.transform.translation(), dtype=float)
+        rotation = np.asarray(bed.transform.rotation().matrix(), dtype=float)
+        lateral = rotation @ np.array([1.0, 0.0, 0.0])
+        head = rotation @ np.array([0.0, 1.0, 0.0])
+        yaw = math.degrees(RollPitchYaw(bed.transform.rotation()).yaw_angle())
+        gap = float(self._repair_cfg_value("nightstand_gap_m", 0.08))
+
+        changed = False
+        for side, nightstand in zip((-1.0, 1.0), nightstands):
+            ns_dims = self._local_size(nightstand, [0.45, 0.42, 0.55])
+            target = (
+                bed_center
+                + side * lateral * (bed_dims[0] / 2 + ns_dims[0] / 2 + gap)
+                + head * max(0.0, bed_dims[1] / 2 - ns_dims[1] / 2 - 0.10)
+            )
+            transform = self._grounded_transform(
+                nightstand,
+                x=float(target[0]),
+                y=float(target[1]),
+                yaw_deg=yaw,
+            )
+            transform = self._fit_transform_inside_room(nightstand, transform)
+            if not self._transform_close(nightstand.transform, transform):
+                self.scene.move_object(nightstand.object_id, transform)
+                changed = True
+        return changed
+
+    def _repair_wardrobe_wall_anchor(self) -> bool:
+        wardrobes = self._furniture_by_category("wardrobe")
+        if not wardrobes or self.scene is None:
+            return False
+        wardrobe = wardrobes[0]
+        room_bounds = self._room_bounds_xy()
+        if room_bounds is None:
+            return False
+        candidates = self._wardrobe_candidate_transforms(wardrobe)
+        obstacles = self._furniture_by_category("bed") + self._furniture_by_category(
+            "nightstand"
+        )
+        best_transform = None
+        best_score = -1e9
+        for transform, wall_opening_penalty in candidates:
+            bounds = self._bounds_for_transform(wardrobe, transform)
+            if bounds is None:
+                continue
+            overlap_penalty = 0.0
+            for obstacle in obstacles:
+                obstacle_bounds = obstacle.compute_world_bounds()
+                if obstacle_bounds is None:
+                    continue
+                overlap_x, overlap_y = self._xy_overlap_depths(bounds, obstacle_bounds)
+                overlap_penalty += overlap_x * overlap_y * 100.0
+            center = np.asarray(transform.translation(), dtype=float)
+            bed_center = (
+                np.asarray(obstacles[0].transform.translation(), dtype=float)
+                if obstacles
+                else np.zeros(3)
+            )
+            distance_score = float(np.linalg.norm(center[:2] - bed_center[:2]))
+            score = distance_score - overlap_penalty - wall_opening_penalty
+            if score > best_score:
+                best_score = score
+                best_transform = transform
+
+        if best_transform is None or self._transform_close(wardrobe.transform, best_transform):
+            return False
+        self.scene.move_object(wardrobe.object_id, best_transform)
+        return True
+
+    def _wardrobe_candidate_transforms(
+        self, wardrobe: SceneObject
+    ) -> list[tuple[RigidTransform, float]]:
+        room_bounds = self._room_bounds_xy()
+        if room_bounds is None:
+            return []
+        min_x, min_y, max_x, max_y = room_bounds
+        plan = build_bedroom_anchor_plan(self.scene, self._bedroom_layout_cfg())
+        wall_openings = plan.wall_openings if plan else {}
+        margin = 0.08
+        candidates: list[tuple[str, float, float, float]] = []
+        for wall in ("north", "south"):
+            y = max_y - margin if wall == "north" else min_y + margin
+            for x in (min_x + 0.7, 0.0, max_x - 0.7):
+                candidates.append((wall, x, y, self._yaw_for_inward_wall(wall)))
+        for wall in ("east", "west"):
+            x = max_x - margin if wall == "east" else min_x + margin
+            for y in (min_y + 0.7, 0.0, max_y - 0.7):
+                candidates.append((wall, x, y, self._yaw_for_inward_wall(wall)))
+
+        transforms: list[tuple[RigidTransform, float]] = []
+        for wall, x, y, yaw in candidates:
+            transform = self._grounded_transform(wardrobe, x=x, y=y, yaw_deg=yaw)
+            transform = self._snap_transform_to_wall(wardrobe, transform, wall)
+            transform = self._fit_transform_inside_room(wardrobe, transform)
+            opening_penalty = 5.0 if wall_openings.get(wall) else 0.0
+            transforms.append((transform, opening_penalty))
+        return transforms
+
+    def _bedroom_layout_cfg(self) -> Any:
+        safety_cfg = getattr(self.cfg, "furniture_safety_controller", None)
+        return getattr(safety_cfg, "bedroom_layout", None)
+
+    def _room_bounds_xy(self) -> tuple[float, float, float, float] | None:
+        if self.scene is None or self.scene.room_geometry is None:
+            return None
+        length = float(getattr(self.scene.room_geometry, "length", 0.0) or 0.0)
+        width = float(getattr(self.scene.room_geometry, "width", 0.0) or 0.0)
+        if length <= 0 or width <= 0:
+            return None
+        return (-length / 2, -width / 2, length / 2, width / 2)
+
+    def _local_size(self, obj: SceneObject, default: list[float]) -> np.ndarray:
+        if obj.bbox_min is None or obj.bbox_max is None:
+            return np.asarray(default, dtype=float)
+        return np.abs(np.asarray(obj.bbox_max, dtype=float) - np.asarray(obj.bbox_min, dtype=float))
+
+    def _grounded_transform(
+        self, obj: SceneObject, *, x: float, y: float, yaw_deg: float
+    ) -> RigidTransform:
+        transform = RigidTransform(
+            rpy=RollPitchYaw(0.0, 0.0, math.radians(yaw_deg)),
+            p=[x, y, 0.0],
+        )
+        furniture_tools = getattr(self, "furniture_tools", None)
+        if furniture_tools is not None:
+            transform, _ = furniture_tools._ground_transform_to_floor_if_needed(
+                scene_obj=obj,
+                transform=transform,
+            )
+        return transform
+
+    def _bounds_for_transform(
+        self, obj: SceneObject, transform: RigidTransform
+    ) -> tuple[np.ndarray, np.ndarray] | None:
+        furniture_tools = getattr(self, "furniture_tools", None)
+        if furniture_tools is not None:
+            return furniture_tools._world_bounds_for_transform(obj, transform)
+        old_transform = obj.transform
+        obj.transform = transform
+        try:
+            return obj.compute_world_bounds()
+        finally:
+            obj.transform = old_transform
+
+    def _snap_transform_to_wall(
+        self, obj: SceneObject, transform: RigidTransform, wall: str
+    ) -> RigidTransform:
+        room_bounds = self._room_bounds_xy()
+        bounds = self._bounds_for_transform(obj, transform)
+        if room_bounds is None or bounds is None:
+            return transform
+        min_x, min_y, max_x, max_y = room_bounds
+        world_min, world_max = bounds
+        margin = float(self._repair_cfg_value("wall_margin_m", 0.08))
+        translation = np.asarray(transform.translation(), dtype=float)
+        if wall == "north":
+            translation[1] += max_y - margin - float(world_max[1])
+        elif wall == "south":
+            translation[1] += min_y + margin - float(world_min[1])
+        elif wall == "east":
+            translation[0] += max_x - margin - float(world_max[0])
+        elif wall == "west":
+            translation[0] += min_x + margin - float(world_min[0])
+        return RigidTransform(R=transform.rotation(), p=translation)
+
+    def _fit_transform_inside_room(
+        self, obj: SceneObject, transform: RigidTransform
+    ) -> RigidTransform:
+        room_bounds = self._room_bounds_xy()
+        bounds = self._bounds_for_transform(obj, transform)
+        if room_bounds is None or bounds is None:
+            return transform
+        min_x, min_y, max_x, max_y = room_bounds
+        world_min, world_max = bounds
+        margin = 0.03
+        translation = np.asarray(transform.translation(), dtype=float)
+        if world_min[0] < min_x + margin:
+            translation[0] += min_x + margin - float(world_min[0])
+        if world_max[0] > max_x - margin:
+            translation[0] -= float(world_max[0]) - (max_x - margin)
+        if world_min[1] < min_y + margin:
+            translation[1] += min_y + margin - float(world_min[1])
+        if world_max[1] > max_y - margin:
+            translation[1] -= float(world_max[1]) - (max_y - margin)
+        return RigidTransform(R=transform.rotation(), p=translation)
+
+    def _yaw_for_head_wall(self, wall: str) -> float:
+        return {
+            "north": 0.0,
+            "south": 180.0,
+            "east": -90.0,
+            "west": 90.0,
+        }.get(wall, 0.0)
+
+    def _yaw_for_inward_wall(self, wall: str) -> float:
+        return {
+            "north": 180.0,
+            "south": 0.0,
+            "east": 90.0,
+            "west": -90.0,
+        }.get(wall, 0.0)
+
+    def _xy_overlap_depths(
+        self,
+        bounds_a: tuple[np.ndarray, np.ndarray],
+        bounds_b: tuple[np.ndarray, np.ndarray],
+    ) -> tuple[float, float]:
+        min_a, max_a = bounds_a
+        min_b, max_b = bounds_b
+        return (
+            max(0.0, float(min(max_a[0], max_b[0]) - max(min_a[0], min_b[0]))),
+            max(0.0, float(min(max_a[1], max_b[1]) - max(min_a[1], min_b[1]))),
+        )
+
+    def _transform_close(self, a: RigidTransform, b: RigidTransform) -> bool:
+        a_t = np.asarray(a.translation(), dtype=float)
+        b_t = np.asarray(b.translation(), dtype=float)
+        a_yaw = RollPitchYaw(a.rotation()).yaw_angle()
+        b_yaw = RollPitchYaw(b.rotation()).yaw_angle()
+        return bool(
+            np.allclose(a_t, b_t, atol=1e-3)
+            and abs(math.atan2(math.sin(a_yaw - b_yaw), math.cos(a_yaw - b_yaw)))
+            < 1e-3
+        )
 
     def _get_extra_critique_kwargs(self) -> dict[str, Any]:
         """Get extra kwargs for critic prompt (reachability context).
