@@ -862,7 +862,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         min_x, min_y, max_x, max_y = room_bounds
         world_min, world_max = bounds
         margin = float(self._repair_cfg_value("wall_margin_m", 0.08))
-        translation = np.asarray(transform.translation(), dtype=float)
+        translation = np.asarray(transform.translation(), dtype=float).copy()
         if wall == "north":
             translation[1] += max_y - margin - float(world_max[1])
         elif wall == "south":
@@ -883,7 +883,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         min_x, min_y, max_x, max_y = room_bounds
         world_min, world_max = bounds
         margin = 0.03
-        translation = np.asarray(transform.translation(), dtype=float)
+        translation = np.asarray(transform.translation(), dtype=float).copy()
         if world_min[0] < min_x + margin:
             translation[0] += min_x + margin - float(world_min[0])
         if world_max[0] > max_x - margin:

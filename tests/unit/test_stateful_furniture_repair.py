@@ -1,0 +1,77 @@
+import unittest
+from typing import Any
+from types import SimpleNamespace
+
+import numpy as np
+
+try:
+    from pydrake.all import RigidTransform
+    from scenesmith.furniture_agents.stateful_furniture_agent import StatefulFurnitureAgent
+except ModuleNotFoundError as exc:
+    RigidTransform = None
+    StatefulFurnitureAgent = None
+    _IMPORT_ERROR = exc
+else:
+    _IMPORT_ERROR = None
+
+
+class ReadOnlyTranslationTransform:
+    def __init__(self, translation: tuple[float, float, float]) -> None:
+        self._translation = np.asarray(translation, dtype=float)
+        self._translation.setflags(write=False)
+        self._rotation = RigidTransform().rotation()
+
+    def translation(self) -> np.ndarray:
+        return self._translation
+
+    def rotation(self):
+        return self._rotation
+
+
+class StatefulFurnitureRepairTest(unittest.TestCase):
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
+    def test_snap_transform_to_wall_copies_readonly_translation(self) -> None:
+        agent = self._make_agent()
+        agent._bounds_for_transform = lambda _obj, _transform: (
+            np.asarray([-2.7, -0.2, 0.0]),
+            np.asarray([-1.7, 0.2, 1.0]),
+        )
+
+        transform = ReadOnlyTranslationTransform((0.0, 0.0, 0.0))
+
+        snapped = agent._snap_transform_to_wall(SimpleNamespace(), transform, "west")
+
+        self.assertIsInstance(snapped, RigidTransform)
+        self.assertLess(snapped.translation()[0], 0.0)
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
+    def test_fit_transform_inside_room_copies_readonly_translation(self) -> None:
+        agent = self._make_agent()
+        agent._bounds_for_transform = lambda _obj, _transform: (
+            np.asarray([-2.7, -2.2, 0.0]),
+            np.asarray([-1.7, -1.2, 1.0]),
+        )
+
+        transform = ReadOnlyTranslationTransform((0.0, 0.0, 0.0))
+
+        fitted = agent._fit_transform_inside_room(SimpleNamespace(), transform)
+
+        self.assertIsInstance(fitted, RigidTransform)
+        self.assertGreater(fitted.translation()[0], 0.0)
+        self.assertGreater(fitted.translation()[1], 0.0)
+
+    def _make_agent(self) -> Any:
+        agent = object.__new__(StatefulFurnitureAgent)
+        agent._room_bounds_xy = lambda: (-2.5, -2.0, 2.5, 2.0)
+        agent._repair_cfg_value = lambda _name, default: default
+        return agent
+
+
+if __name__ == "__main__":
+    unittest.main()
