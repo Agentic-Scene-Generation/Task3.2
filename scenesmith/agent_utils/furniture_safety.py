@@ -991,10 +991,23 @@ class FurnitureSafetyController:
             "door clearance violations",
             "open connection blocked",
             "wall height exceeded",
+            "geometry construction failed",
+            "drake/qhull geometry construction failed",
         )
         for section in hard_sections:
             if section in text:
                 hard_reasons.append(f"physics hard violation: {section.rstrip(' (')}")
+
+        if "geometry construction failed" in text or "drake/qhull" in text:
+            matched_category = False
+            for category in ("bed", "nightstand", "wardrobe", "closet", "armoire"):
+                if category in text:
+                    hard_reasons.append(
+                        f"geometry construction failed for likely {category} asset"
+                    )
+                    matched_category = True
+            if not matched_category:
+                hard_reasons.append("geometry construction failed for unknown asset")
 
         if "window access warnings" in text:
             if self.window_blocking_is_hard:

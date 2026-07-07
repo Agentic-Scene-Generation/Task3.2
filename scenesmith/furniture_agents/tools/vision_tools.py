@@ -141,11 +141,25 @@ class VisionTools:
         """
         console_logger.info("Tool called: observe_scene")
         # Render current scene state with room bounds for stable grid markers.
-        images_dir = self.rendering_manager.render_scene(
-            self.scene,
-            blender_server=self.blender_server,
-            room_bounds=self._get_room_bounds(),
-        )
+        try:
+            images_dir = self.rendering_manager.render_scene(
+                self.scene,
+                blender_server=self.blender_server,
+                room_bounds=self._get_room_bounds(),
+            )
+        except Exception as exc:
+            console_logger.exception("Scene observation render failed")
+            return [
+                ToolOutputText(
+                    text=(
+                        "Unable to observe scene because rendering failed with a "
+                        f"technical geometry error: {type(exc).__name__}: {exc}. "
+                        "Treat this candidate as hard-invalid; repair/replace the "
+                        "problematic asset or roll back to the last hard-valid "
+                        "checkpoint before continuing."
+                    )
+                )
+            ]
 
         if not images_dir or not images_dir.exists():
             console_logger.error("No renders generated for scene observation")

@@ -452,6 +452,10 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
 
         actions: list[str] = []
         reasons = " ".join(hard_state.hard_reasons or []).lower()
+        if "geometry construction failed" in reasons:
+            replaced = self._replace_geometry_failed_furniture_assets(reasons)
+            if replaced:
+                actions.append(f"replaced {replaced} geometry-failed furniture asset(s)")
         if "missing required bed" in reasons:
             if self._ensure_required_furniture_asset("bed"):
                 actions.append("added missing bed from local/HSSD asset bank")
@@ -472,6 +476,54 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             actions.append("moved wardrobe to a deterministic wall/corner anchor")
 
         return bool(actions), actions
+
+    def _replace_geometry_failed_furniture_assets(self, reasons: str) -> int:
+        """Replace required furniture whose SDF/mesh cannot be loaded by Drake."""
+        if self.scene is None:
+            return 0
+
+        categories: list[str] = []
+        for category in ("bed", "nightstand", "wardrobe"):
+            if category in reasons:
+                categories.append(category)
+        if "closet" in reasons or "armoire" in reasons:
+            categories.append("wardrobe")
+        categories = list(dict.fromkeys(categories))
+        if not categories:
+            return 0
+
+        replaced = 0
+        for category in categories:
+            current_objects = list(self._furniture_by_category(category))
+            if not current_objects:
+                continue
+            for old_obj in current_objects:
+                exclude_paths = {str(old_obj.sdf_path)} if old_obj.sdf_path else set()
+                replacement = self._get_or_generate_repair_asset(
+                    category,
+                    exclude_sdf_paths=exclude_paths,
+                )
+                if replacement is None:
+                    console_logger.warning(
+                        "Deterministic repair could not replace geometry-failed %s %s",
+                        category,
+                        old_obj.object_id,
+                    )
+                    continue
+                old_id = old_obj.object_id
+                self.scene.remove_object(old_id)
+                if self._place_repair_asset(category, replacement):
+                    console_logger.info(
+                        "Deterministic repair replaced geometry-failed %s %s",
+                        category,
+                        old_id,
+                    )
+                    replaced += 1
+                else:
+                    # If placement failed, restore the original object so repair does
+                    # not make the candidate worse.
+                    self.scene.add_object(old_obj)
+        return replaced
 
     def _repair_cfg_value(self, key: str, default: Any) -> Any:
         safety_cfg = getattr(self.cfg, "furniture_safety_controller", None)
@@ -539,8 +591,16 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 added += 1
         return added
 
-    def _get_or_generate_repair_asset(self, category: str) -> SceneObject | None:
+    def _get_or_generate_repair_asset(
+        self,
+        category: str,
+        exclude_sdf_paths: set[str] | None = None,
+    ) -> SceneObject | None:
+        exclude_sdf_paths = exclude_sdf_paths or set()
         for asset in self.asset_manager.list_available_assets():
+            asset_sdf = str(asset.sdf_path) if asset.sdf_path else ""
+            if asset_sdf in exclude_sdf_paths:
+                continue
             if self._category_for_object(getattr(asset, "object_id", ""), asset) == category:
                 return asset
 

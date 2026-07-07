@@ -20,6 +20,18 @@ if TYPE_CHECKING:
 console_logger = logging.getLogger(__name__)
 
 
+def _is_deterministic_geometry_render_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    markers = (
+        "qhull",
+        "initial simplex is flat",
+        "less than 3 dimensional",
+        "could not construct a clearly convex simplex",
+        "geometry construction",
+    )
+    return any(marker in text for marker in markers)
+
+
 class RenderingManager:
     """
     Generates and caches 2D renders of 3D scenes for visual analysis.
@@ -370,9 +382,20 @@ class RenderingManager:
 
             except Exception as e:
                 console_logger.error(f"Rendering attempt {attempt + 1} failed: {e}")
+                if _is_deterministic_geometry_render_error(e):
+                    console_logger.error(
+                        "Deterministic geometry render failure detected; "
+                        "skipping identical render retries for this candidate."
+                    )
+                    raise RuntimeError(
+                        "Scene rendering failed due to deterministic geometry "
+                        f"construction error: {e}"
+                    ) from e
                 if attempt == num_attempts - 1:
                     console_logger.error("All rendering attempts failed, raising error")
-                    raise RuntimeError(f"Scene rendering failed after 3 attempts: {e}")
+                    raise RuntimeError(
+                        f"Scene rendering failed after {num_attempts} attempts: {e}"
+                    ) from e
                 else:
                     base_delay = effective_cfg.retry_delay
                     jitter = random.uniform(0, 2)

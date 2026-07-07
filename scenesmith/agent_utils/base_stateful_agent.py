@@ -513,6 +513,8 @@ class BaseStatefulAgent(ABC):
             "door clearance violations",
             "open connection blocked",
             "wall height exceeded",
+            "geometry construction failed",
+            "drake/qhull geometry construction failed",
         )
         for section in hard_sections:
             if section in text:
@@ -577,6 +579,16 @@ class BaseStatefulAgent(ABC):
             hints.append(
                 "Restore fallen or below-floor objects onto a valid support surface, "
                 "or remove only optional unstable small objects."
+            )
+        if any(
+            "geometry construction" in reason.lower()
+            or "drake/qhull" in reason.lower()
+            for reason in reasons
+        ):
+            hints.append(
+                "A deterministic geometry construction error occurred. Replace or "
+                "repair the problematic asset if it is required; otherwise roll back "
+                "to the last hard-valid checkpoint before continuing."
             )
         if not hints:
             hints.append(
@@ -711,8 +723,14 @@ class BaseStatefulAgent(ABC):
         if method is None:
             return self.rendering_manager.last_render_dir
         observe_start = time.time()
-        with self.rendering_manager.use_render_profile(render_profile):
-            method()
+        try:
+            with self.rendering_manager.use_render_profile(render_profile):
+                method()
+        except Exception as exc:
+            console_logger.warning(
+                "Synthetic hard-fail render failed; preserving previous render dir: %s",
+                exc,
+            )
         self._record_module_timing(
             "critic",
             "observe_scene_synthetic",
@@ -1250,7 +1268,41 @@ class BaseStatefulAgent(ABC):
             and fail_on_hard_constraints
         ):
             final_hard_state = self._evaluate_current_hard_state()
+            final_hard_state, _, final_repair_actions = (
+                self._try_deterministic_repair_for_hard_state(
+                    final_hard_state,
+                    source="finalize",
+                )
+            )
+            if final_repair_actions:
+                console_logger.info(
+                    "Deterministic repair attempted during finalization: %s",
+                    "; ".join(final_repair_actions),
+                )
             if final_hard_state is not None and not final_hard_state.hard_valid:
+                if getattr(controller, "best_scene_state", None) is not None:
+                    self._restore_furniture_scene_state(controller.best_scene_state)
+                    self.scene_checkpoint = copy.deepcopy(controller.best_scene_state)
+                    if controller.best_scores is not None:
+                        self.checkpoint_scores = controller.best_scores
+                    if controller.best_render_dir is not None:
+                        self.checkpoint_render_dir = controller.best_render_dir
+                        self.final_render_dir = controller.best_render_dir
+                    console_logger.info(
+                        "Final hard-check failed after repair; restored best "
+                        "hard-valid checkpoint instead of failing the stage."
+                    )
+                    final_hard_state = self._evaluate_current_hard_state()
+                    if final_hard_state is None or final_hard_state.hard_valid:
+                        reasons = ""
+                    else:
+                        reasons = "; ".join(final_hard_state.hard_reasons)
+                else:
+                    reasons = "; ".join(final_hard_state.hard_reasons)
+            if (
+                final_hard_state is not None
+                and not final_hard_state.hard_valid
+            ):
                 reasons = "; ".join(final_hard_state.hard_reasons)
                 console_logger.error(
                     "Furniture stage failed with unresolved deterministic hard "

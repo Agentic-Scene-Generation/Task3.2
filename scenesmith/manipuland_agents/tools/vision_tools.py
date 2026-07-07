@@ -208,17 +208,31 @@ class ManipulandVisionTools:
             f"{[str(obj_id) for obj_id in include_objects]}, "
             f"{len(support_surfaces)} support surface(s)"
         )
-        images_dir = self.rendering_manager.render_scene(
-            scene=self.scene,
-            blender_server=self.blender_server,
-            include_objects=include_objects,
-            exclude_room_geometry=exclude_room_geometry,
-            rendering_mode="manipuland",
-            support_surfaces=support_surfaces,  # Pass all surfaces.
-            show_support_surface=self.cfg.rendering.annotations.enable_support_surface_debug,
-            articulated_open=is_articulated,
-            context_furniture_ids=self.context_furniture_ids,
-        )
+        try:
+            images_dir = self.rendering_manager.render_scene(
+                scene=self.scene,
+                blender_server=self.blender_server,
+                include_objects=include_objects,
+                exclude_room_geometry=exclude_room_geometry,
+                rendering_mode="manipuland",
+                support_surfaces=support_surfaces,  # Pass all surfaces.
+                show_support_surface=self.cfg.rendering.annotations.enable_support_surface_debug,
+                articulated_open=is_articulated,
+                context_furniture_ids=self.context_furniture_ids,
+            )
+        except Exception as exc:
+            console_logger.exception("Manipuland observation render failed")
+            return [
+                ToolOutputText(
+                    text=(
+                        "Unable to observe focused manipuland scene because rendering "
+                        f"failed with a technical geometry error: "
+                        f"{type(exc).__name__}: {exc}. Treat this candidate as "
+                        "hard-invalid; repair/replace the problematic asset or roll "
+                        "back before continuing."
+                    )
+                )
+            ]
 
         if not images_dir or not images_dir.exists():
             console_logger.error("No renders generated for scene observation")
