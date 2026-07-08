@@ -8,6 +8,7 @@ subclass-defined tools.
 
 import copy
 import logging
+import os
 import shutil
 import time
 
@@ -58,6 +59,7 @@ from scenesmith.agent_utils.scoring import (
     scores_to_dict,
 )
 from scenesmith.agent_utils.stage_working_memory import StageWorkingMemory
+from scenesmith.scene_expert.context_bundle import build_stage_context_bundle
 from scenesmith.agent_utils.thinking import (
     prepend_text_thinking_directive,
     thinking_directive_from_effort,
@@ -258,6 +260,83 @@ class BaseStatefulAgent(ABC):
             )
         return memory_text
 
+    def _stage_context_max_chars(self) -> int:
+        try:
+            return int(os.environ.get("SCENEEXPERT_STAGE_CONTEXT_MAX_CHARS", "2400"))
+        except ValueError:
+            return 2400
+
+    def _stage_context_injection_enabled(self) -> bool:
+        value = os.environ.get("SCENEEXPERT_INJECT_STAGE_CONTEXT_BUNDLE", "1")
+        return value.strip().lower() in ("1", "true", "yes", "y", "on")
+
+    def _prepare_stage_context_for_llm(
+        self,
+        *,
+        agent_role: str,
+        event: str,
+        prompt: Any,
+        last_hard_issues: list[str] | None = None,
+    ) -> str:
+        """Build, save, and optionally return a compact StageContextBundle."""
+        try:
+            bundle = build_stage_context_bundle(
+                stage=self.agent_type.value,
+                agent_role=agent_role,
+                event=event,
+                scene=getattr(self, "scene", None),
+                history_summary=getattr(self, "_pending_hard_repair_hint", ""),
+                last_hard_issues=last_hard_issues
+                or ([self._pending_hard_repair_hint] if self._pending_hard_repair_hint else []),
+                prompt=prompt,
+                metadata={
+                    "scene_expert_stage": getattr(
+                        getattr(self, "scene", None),
+                        "scene_expert_stage",
+                        self.agent_type.value,
+                    ),
+                    "scene_expert_task_spec": getattr(
+                        getattr(self, "scene", None),
+                        "scene_expert_task_spec",
+                        {},
+                    ),
+                    "scene_expert_brief": getattr(
+                        getattr(self, "scene", None),
+                        "scene_expert_brief",
+                        "",
+                    ),
+                },
+            )
+            self.stage_working_memory.save_context_bundle(bundle)
+            if not self._stage_context_injection_enabled():
+                return ""
+            return bundle.to_llm_text(max_chars=self._stage_context_max_chars())
+        except Exception as e:
+            console_logger.warning("Failed to prepare StageContextBundle: %s", e)
+            return ""
+
+    def _record_llm_call_debug(
+        self,
+        *,
+        agent_role: str,
+        event: str,
+        prompt: Any,
+        output: Any = "",
+        result: Any = None,
+        error: str = "",
+    ) -> None:
+        try:
+            self.stage_working_memory.record_llm_call(
+                agent_role=agent_role,
+                event=event,
+                prompt=prompt,
+                output=output,
+                result=result,
+                error=error,
+            )
+        except Exception as e:
+            console_logger.warning("Failed to record LLM call debug: %s", e)
+
     def _save_designer_working_memory(
         self,
         *,
@@ -414,6 +493,11 @@ class BaseStatefulAgent(ABC):
         repair_cfg = _cfg_get(controller_cfg, "deterministic_repair", {})
         return bool(_cfg_get(repair_cfg, "enabled", False))
 
+    def _deterministic_repair_max_attempts(self) -> int:
+        controller_cfg = _cfg_get(self.cfg, "furniture_safety_controller", {})
+        repair_cfg = _cfg_get(controller_cfg, "deterministic_repair", {})
+        return max(1, int(_cfg_get(repair_cfg, "max_attempts", 2)))
+
     def _attempt_deterministic_repair(
         self, hard_state: HardStateEvaluation
     ) -> tuple[bool, list[str]]:
@@ -436,46 +520,76 @@ class BaseStatefulAgent(ABC):
         if not self._deterministic_repair_enabled():
             return hard_state, None, []
 
-        repair_start = time.time()
-        repaired, actions = self._attempt_deterministic_repair(hard_state)
-        self._record_module_timing(
-            "deterministic_repair",
-            source,
-            repair_start,
-            extra={"attempted": True, "repaired": bool(repaired), "actions": actions},
-        )
-        if not repaired:
-            return hard_state, None, actions
+        current_state = hard_state
+        physics_context: str | None = None
+        all_actions: list[str] = []
+        max_attempts = self._deterministic_repair_max_attempts()
+        for attempt in range(1, max_attempts + 1):
+            before_hash = self.scene.content_hash() if self.scene is not None else ""
+            repair_start = time.time()
+            repaired, actions = self._attempt_deterministic_repair(current_state)
+            all_actions.extend(actions)
+            self._record_module_timing(
+                "deterministic_repair",
+                source,
+                repair_start,
+                extra={
+                    "attempt": attempt,
+                    "max_attempts": max_attempts,
+                    "attempted": True,
+                    "repaired": bool(repaired),
+                    "actions": actions,
+                    "hard_reasons": current_state.hard_reasons,
+                },
+            )
+            if not repaired:
+                break
 
+            console_logger.info(
+                "Deterministic repair attempt %d/%d from %s: %s",
+                attempt,
+                max_attempts,
+                source,
+                "; ".join(actions) if actions else "(no action details)",
+            )
+            self.rendering_manager.clear_cache()
+            self._reset_critic_candidate_cache()
+            physics_context = self._get_cached_physics_context()
+            repaired_hard_state = self._evaluate_current_hard_state(
+                physics_context=physics_context
+            )
+            if repaired_hard_state is not None and repaired_hard_state.hard_valid:
+                console_logger.info(
+                    "Deterministic repair resolved hard-check failure from %s "
+                    "after %d attempt(s)",
+                    source,
+                    attempt,
+                )
+                return repaired_hard_state, physics_context, all_actions
+
+            after_hash = self.scene.content_hash() if self.scene is not None else ""
+            current_state = repaired_hard_state or current_state
+            if after_hash == before_hash:
+                console_logger.info(
+                    "Deterministic repair made no scene-state change on attempt "
+                    "%d/%d; stopping repair loop.",
+                    attempt,
+                    max_attempts,
+                )
+                break
+
+        remaining = (
+            "; ".join(current_state.hard_reasons)
+            if current_state and current_state.hard_reasons
+            else "unknown remaining hard failure"
+        )
         console_logger.info(
-            "Deterministic repair attempted from %s: %s",
+            "Deterministic repair did not fully resolve hard-check failure "
+            "from %s: %s",
             source,
-            "; ".join(actions) if actions else "(no action details)",
+            remaining,
         )
-        self.rendering_manager.clear_cache()
-        self._reset_critic_candidate_cache()
-        physics_context = self._get_cached_physics_context()
-        repaired_hard_state = self._evaluate_current_hard_state(
-            physics_context=physics_context
-        )
-        if repaired_hard_state is not None and repaired_hard_state.hard_valid:
-            console_logger.info(
-                "Deterministic repair resolved hard-check failure from %s",
-                source,
-            )
-        else:
-            remaining = (
-                "; ".join(repaired_hard_state.hard_reasons)
-                if repaired_hard_state and repaired_hard_state.hard_reasons
-                else "unknown remaining hard failure"
-            )
-            console_logger.info(
-                "Deterministic repair did not fully resolve hard-check failure "
-                "from %s: %s",
-                source,
-                remaining,
-            )
-        return repaired_hard_state, physics_context, actions
+        return current_state, physics_context, all_actions
 
     def _reset_critic_candidate_cache(self) -> None:
         self._critic_candidate_cache = {
@@ -1931,6 +2045,16 @@ class BaseStatefulAgent(ABC):
                 hard_state=hard_state,
                 physics_context=physics_context,
             )
+            self._record_llm_call_debug(
+                agent_role="critic",
+                event="deterministic_hard_fail_short_circuit",
+                prompt={
+                    "physics_context": physics_context,
+                    "hard_reasons": hard_state.hard_reasons,
+                    "soft_reasons": hard_state.soft_reasons,
+                },
+                output=response.critique,
+            )
             log_agent_response(response=response.critique, agent_name="CRITIC")
             log_critique_scores(response, title="DETERMINISTIC CRITIQUE SCORES")
             self._write_scores_and_memory(
@@ -2016,6 +2140,14 @@ class BaseStatefulAgent(ABC):
             placement_style=self.placement_style,
             **extra_kwargs,
         )
+        context_block = self._prepare_stage_context_for_llm(
+            agent_role="critic",
+            event="request_critique",
+            prompt=critique_instruction,
+            last_hard_issues=hard_state.hard_reasons if hard_state else [],
+        )
+        if context_block:
+            critique_instruction += "\n\n" + context_block
         run_config = self._create_run_config()
 
         # Build three critic variants that differ only in model_settings.
@@ -2072,6 +2204,13 @@ class BaseStatefulAgent(ABC):
             )
         self._record_module_timing("critic", "observe_scene", observe_start)
         log_agent_usage(result=result_observe, agent_name="CRITIC (observe)")
+        self._record_llm_call_debug(
+            agent_role="critic",
+            event="observe_scene",
+            prompt=critique_instruction,
+            output=result_observe.final_output or "",
+            result=result_observe,
+        )
 
         # Step 2: force get_current_scene_state; session carries Step 1 history.
         direct_scene_state = self._get_critic_scene_state_direct()
@@ -2105,28 +2244,50 @@ class BaseStatefulAgent(ABC):
                 "critic", "get_current_scene_state", scene_state_start
             )
             log_agent_usage(result=result_scene, agent_name="CRITIC (scene_state)")
+            self._record_llm_call_debug(
+                agent_role="critic",
+                event="get_current_scene_state",
+                prompt="Now retrieve exact object data with get_current_scene_state.",
+                output=result_scene.final_output or "",
+                result=result_scene,
+            )
+        if direct_scene_state:
+            self._record_llm_call_debug(
+                agent_role="critic",
+                event="get_current_scene_state_direct",
+                prompt="direct scene state cache",
+                output=direct_scene_state,
+            )
 
         # Step 3: free evaluation with structured output. The critic now has
         # the observation images and the scene-state JSON in its session
         # history and can run STEPS 3-6 of the YAML workflow.
         console_logger.info("[CRITIC harness] Step 3: evaluate and score")
         score_start = time.time()
+        score_prompt = (
+            "Steps 1 and 2 of the MANDATORY EVALUATION WORKFLOW are "
+            "complete (scene observed, object data retrieved). Now perform "
+            "STEPS 3-6 (physics review, placement evaluation, "
+            "lighting/coverage analysis, synthesis) and return your final "
+            "critique with scores."
+            f"{scene_state_block}"
+        )
         result = await Runner.run(
             starting_agent=critic_score,
-            input=(
-                "Steps 1 and 2 of the MANDATORY EVALUATION WORKFLOW are "
-                "complete (scene observed, object data retrieved). Now perform "
-                "STEPS 3-6 (physics review, placement evaluation, "
-                "lighting/coverage analysis, synthesis) and return your final "
-                "critique with scores."
-                f"{scene_state_block}"
-            ),
+            input=score_prompt,
             session=self.critic_session,
             max_turns=self.cfg.agents.critic_agent.max_turns,
             run_config=run_config,
         )
         self._record_module_timing("critic", "score_scene", score_start)
         log_agent_usage(result=result, agent_name="CRITIC (score)")
+        self._record_llm_call_debug(
+            agent_role="critic",
+            event="score_scene",
+            prompt=score_prompt,
+            output=result.final_output or "",
+            result=result,
+        )
 
         # Parse structured output.
         response = result.final_output
@@ -2239,6 +2400,13 @@ class BaseStatefulAgent(ABC):
         memory_context = self._retrieve_working_memory_for_designer(instruction)
         if memory_context:
             full_instruction += "\n\n" + memory_context
+        context_block = self._prepare_stage_context_for_llm(
+            agent_role="designer",
+            event="request_design_change",
+            prompt=full_instruction,
+        )
+        if context_block:
+            full_instruction += "\n\n" + context_block
 
         # Designer run with critique-based instruction.
         designer_start = time.time()
@@ -2251,11 +2419,24 @@ class BaseStatefulAgent(ABC):
                 max_turns=self.cfg.agents.designer_agent.max_turns,
                 run_config=self._create_run_config(),
             )
-        except Exception:
+        except Exception as exc:
+            self._record_llm_call_debug(
+                agent_role="designer",
+                event="request_design_change",
+                prompt=full_instruction,
+                error=f"{type(exc).__name__}: {exc}",
+            )
             self._end_furniture_design_transaction(transaction)
             raise
         self._record_module_timing("designer", "request_design_change", designer_start)
         log_agent_usage(result=result, agent_name="DESIGNER (CHANGE)")
+        self._record_llm_call_debug(
+            agent_role="designer",
+            event="request_design_change",
+            prompt=full_instruction,
+            output=result.final_output or "",
+            result=result,
+        )
 
         if result.final_output:
             log_agent_response(
@@ -2349,6 +2530,13 @@ class BaseStatefulAgent(ABC):
         memory_context = self._retrieve_working_memory_for_designer("initial design")
         if memory_context:
             instruction += "\n\n" + memory_context
+        context_block = self._prepare_stage_context_for_llm(
+            agent_role="designer",
+            event="request_initial_design",
+            prompt=instruction,
+        )
+        if context_block:
+            instruction += "\n\n" + context_block
 
         # Build input (may include context image if enabled).
         input_message = self._build_initial_design_input(instruction)
@@ -2364,11 +2552,24 @@ class BaseStatefulAgent(ABC):
                 max_turns=self.cfg.agents.designer_agent.max_turns,
                 run_config=self._create_run_config(),
             )
-        except Exception:
+        except Exception as exc:
+            self._record_llm_call_debug(
+                agent_role="designer",
+                event="request_initial_design",
+                prompt=input_message,
+                error=f"{type(exc).__name__}: {exc}",
+            )
             self._end_furniture_design_transaction(transaction)
             raise
         self._record_module_timing("designer", "request_initial_design", designer_start)
         log_agent_usage(result=result, agent_name="DESIGNER (INITIAL)")
+        self._record_llm_call_debug(
+            agent_role="designer",
+            event="request_initial_design",
+            prompt=input_message,
+            output=result.final_output or "",
+            result=result,
+        )
 
         if result.final_output:
             log_agent_response(

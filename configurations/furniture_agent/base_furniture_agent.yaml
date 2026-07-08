@@ -350,6 +350,7 @@ furniture_safety_controller:
     max_plausibility_penalty: 0.35
   deterministic_repair:
     enabled: true
+    max_attempts: ${oc.env:SCENEEXPERT_DETERMINISTIC_REPAIR_MAX_ATTEMPTS,2}
     wall_margin_m: 0.08
     nightstand_gap_m: 0.08
   required_object_names: []

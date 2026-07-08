@@ -1,6 +1,7 @@
 import unittest
 
 import json
+import os
 import sys
 import types
 
@@ -27,11 +28,18 @@ from scenesmith.scene_expert.memory.schemas import (
 from scenesmith.scene_expert.memory.store import FastMemoryStore
 from scenesmith.scene_expert.memory.text_builder import build_embedding_text
 from scenesmith.scene_expert.memory.writer import MemoryWriter
+from scenesmith.scene_expert.context_bundle import build_stage_context_bundle
+from scenesmith.scene_expert.repair_taxonomy import (
+    FailureCategory,
+    classify_hard_reasons,
+)
 from scenesmith.scene_expert.schemas import (
     FullVerifyReport,
     SceneTaskSpec,
     StageVerifyReport,
 )
+from scenesmith.agent_utils.scoring import CategoryScore, FurnitureCritiqueWithScores
+from scenesmith.agent_utils.stage_working_memory import StageWorkingMemory
 from scenesmith.scene_expert.task_compiler import _fallback_spec_from_prompt
 from scenesmith.scene_expert.verifier import (
     FullVerifier,
@@ -52,6 +60,106 @@ class SceneExpertMemoryTest(unittest.TestCase):
             spec.required_large_objects,
         )
         self.assertIn("sleeping_zone", spec.functional_zones)
+
+    def test_repair_taxonomy_classifies_core_hard_failures(self) -> None:
+        failures = classify_hard_reasons(
+            [
+                "missing required bed",
+                "physics hard violation: door clearance violations",
+                "geometry construction failed for likely wardrobe asset",
+            ]
+        )
+
+        categories = {failure.category for failure in failures}
+
+        self.assertIn(FailureCategory.MISSING_REQUIRED_OBJECT, categories)
+        self.assertIn(FailureCategory.DOOR_OR_OPENING_CLEARANCE, categories)
+        self.assertIn(FailureCategory.ASSET_INVALID, categories)
+
+    def test_stage_context_bundle_formats_compact_llm_text(self) -> None:
+        spec = SceneTaskSpec(
+            room_type="bedroom",
+            style="standard",
+            required_large_objects=["bed", "nightstand", "wardrobe"],
+        )
+
+        bundle = build_stage_context_bundle(
+            stage="furniture",
+            agent_role="designer",
+            event="request_initial_design",
+            task_spec=spec,
+            last_hard_issues=["door clearance violation"],
+            prompt="A bedroom with a bed and wardrobe.",
+        )
+        text = bundle.to_llm_text()
+
+        self.assertIn("StageContextBundle: furniture / designer", text)
+        self.assertIn("door clearance violation", text)
+        self.assertIn("bedroom", text)
+
+    def test_stage_working_memory_commits_public_failure_event(self) -> None:
+        class FakeTransform:
+            def translation(self):
+                return np.array([0.0, 0.0, 0.0])
+
+        class FakeObject:
+            name = "wardrobe"
+            object_type = "furniture"
+            immutable = False
+            metadata = {}
+            transform = FakeTransform()
+
+            def compute_world_bounds(self):
+                return np.array([0.0, 0.0, 0.0]), np.array([0.8, 0.6, 2.0])
+
+        class FakeScene:
+            objects = {"wardrobe_0": FakeObject()}
+
+            def content_hash(self):
+                return "fake-scene"
+
+        scores = FurnitureCritiqueWithScores(
+            critique="DETERMINISTIC HARD-CHECK FAILED: door clearance violation",
+            realism=CategoryScore("realism", 3, "bad"),
+            functionality=CategoryScore("functionality", 2, "blocked"),
+            layout=CategoryScore("layout", 3, "bad"),
+            layout_plausibility=CategoryScore("layout_plausibility", 2, "bad"),
+            holistic_completeness=CategoryScore("holistic_completeness", 2, "bad"),
+            prompt_following=CategoryScore("prompt_following", 2, "missing bed"),
+            reachability=CategoryScore("reachability", 2, "blocked"),
+        )
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            public_dir = root / "scene_expert_memory" / "ablation_test"
+            old_env = os.environ.get("SCENEEXPERT_ACTIVE_MEMORY_BANK_DIR")
+            os.environ["SCENEEXPERT_ACTIVE_MEMORY_BANK_DIR"] = str(public_dir)
+            try:
+                memory = StageWorkingMemory(
+                    root_dir=root / "scene_000" / "room_bedroom",
+                    stage="furniture",
+                    enabled=True,
+                )
+                memory.set_required_counts({"bed": 1})
+                render_dir = root / "renders_001"
+                render_dir.mkdir()
+                memory.save_render_record(
+                    render_dir=render_dir,
+                    role="critic",
+                    event="deterministic_hard_fail",
+                    scene=FakeScene(),
+                    scores=scores,
+                    critique=scores.critique,
+                )
+            finally:
+                if old_env is None:
+                    os.environ.pop("SCENEEXPERT_ACTIVE_MEMORY_BANK_DIR", None)
+                else:
+                    os.environ["SCENEEXPERT_ACTIVE_MEMORY_BANK_DIR"] = old_env
+
+            self.assertTrue((public_dir / "events.jsonl").exists())
+            self.assertTrue((public_dir / "failure_cases.jsonl").exists())
+            self.assertGreater((public_dir / "failure_cases.jsonl").stat().st_size, 0)
 
     def test_furniture_stage_verifier_fails_hard_missing_and_collision(self) -> None:
         with TemporaryDirectory() as tmp:

@@ -10,11 +10,17 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
+import hashlib
 from pathlib import Path
 from typing import Any
 
 from scenesmith.agent_utils.scoring import compute_total_score, scores_to_dict
+from scenesmith.scene_expert.context_bundle import (
+    StageContextBundle,
+    build_llm_call_debug_record,
+)
 
 console_logger = logging.getLogger(__name__)
 
@@ -202,6 +208,17 @@ class StageWorkingMemory:
         self.debug_timing_path = (
             self.scene_root_dir / "scene_expert" / "timing" / "stage_working_timing.jsonl"
         )
+        self.debug_llm_path = (
+            self.scene_root_dir / "scene_expert" / "timing" / "llm_calls.jsonl"
+        )
+        self.debug_context_dir = (
+            self.scene_root_dir / "scene_expert" / "context_bundles" / stage
+        )
+        public_dir = os.environ.get("SCENEEXPERT_ACTIVE_MEMORY_BANK_DIR", "")
+        self.public_memory_dir = Path(public_dir) if public_dir else None
+        self.public_events_path = (
+            self.public_memory_dir / "events.jsonl" if self.public_memory_dir else None
+        )
         self.required_counts: dict[str, int] = {}
         if enabled:
             self.memory_dir.mkdir(parents=True, exist_ok=True)
@@ -211,6 +228,12 @@ class StageWorkingMemory:
             self.debug_memory_path.touch(exist_ok=True)
             self.debug_timing_path.parent.mkdir(parents=True, exist_ok=True)
             self.debug_timing_path.touch(exist_ok=True)
+            self.debug_llm_path.parent.mkdir(parents=True, exist_ok=True)
+            self.debug_llm_path.touch(exist_ok=True)
+            self.debug_context_dir.mkdir(parents=True, exist_ok=True)
+            if self.public_events_path is not None:
+                self.public_events_path.parent.mkdir(parents=True, exist_ok=True)
+                self.public_events_path.touch(exist_ok=True)
 
     def set_required_counts(self, required_counts: dict[str, int] | None) -> None:
         """Set deterministic required-object counts for this stage."""
@@ -270,6 +293,7 @@ class StageWorkingMemory:
         _write_json(render_dir / "render_memory.json", record)
         _append_jsonl(self.memory_path, record)
         _append_jsonl(self.debug_memory_path, record)
+        self._commit_public_stage_event(record)
         console_logger.info(
             "[StageWorkingMemory] saved stage=%s role=%s event=%s render=%s "
             "scores=%s objects=%d",
@@ -281,6 +305,55 @@ class StageWorkingMemory:
             record["object_count"],
         )
         return record
+
+    def save_context_bundle(self, bundle: StageContextBundle) -> None:
+        """Persist the structured context used before an LLM call."""
+        if not self.enabled:
+            return
+        safe_event = "".join(
+            c if c.isalnum() or c in ("-", "_") else "_" for c in bundle.event
+        ) or "context"
+        path = self.debug_context_dir / f"{int(time.time() * 1000)}_{safe_event}.json"
+        try:
+            bundle.save(path)
+        except Exception as e:
+            console_logger.warning("Failed to save StageContextBundle: %s", e)
+
+    def record_llm_call(
+        self,
+        *,
+        agent_role: str,
+        event: str,
+        prompt: Any,
+        output: Any = "",
+        result: Any = None,
+        raw_response: Any = None,
+        error: str = "",
+    ) -> None:
+        """Persist prompt/response metadata for one LLM call."""
+        if not self.enabled:
+            return
+        record = build_llm_call_debug_record(
+            stage=self.stage,
+            agent_role=agent_role,
+            event=event,
+            prompt=prompt,
+            output=output,
+            result=result,
+            raw_response=raw_response,
+            error=error,
+        )
+        payload = record.model_dump()
+        _append_jsonl(self.debug_llm_path, payload)
+        if self.public_events_path is not None:
+            event_payload = {
+                "schema_version": "1.0",
+                "created_at": _now(),
+                "event_type": "llm_call",
+                "stage": self.stage,
+                "payload": payload,
+            }
+            _append_jsonl(self.public_events_path, event_payload)
 
     def retrieve_for_designer(
         self,
@@ -400,6 +473,141 @@ class StageWorkingMemory:
             event,
             elapsed_sec,
         )
+
+    def _commit_public_stage_event(self, record: dict[str, Any]) -> None:
+        """Append a durable stage event and optional memory case to the shared bank."""
+        if self.public_events_path is None or self.public_memory_dir is None:
+            return
+        event_payload = {
+            "schema_version": "1.0",
+            "created_at": _now(),
+            "event_type": "stage_working_memory",
+            "stage": self.stage,
+            "role": record.get("role", ""),
+            "event": record.get("event", ""),
+            "render_dir": record.get("render_dir", ""),
+            "scene_hash": record.get("scene_hash", ""),
+            "payload": record,
+        }
+        _append_jsonl(self.public_events_path, event_payload)
+
+        if record.get("role") != "critic":
+            return
+        try:
+            quality = record.get("deterministic_quality") or {}
+            scores = record.get("scores") or {}
+            hard_valid = bool(quality.get("hard_valid", True))
+            if hard_valid and scores:
+                self._commit_public_success_case(record)
+            elif not hard_valid or record.get("event") == "deterministic_hard_fail":
+                self._commit_public_failure_case(record)
+        except Exception as e:
+            console_logger.warning("Failed to commit public stage memory event: %s", e)
+
+    def _memory_id(self, prefix: str, record: dict[str, Any]) -> str:
+        payload = "|".join(
+            [
+                self.stage,
+                str(record.get("role", "")),
+                str(record.get("event", "")),
+                str(record.get("scene_hash", "")),
+                str(record.get("render_dir", "")),
+                str(record.get("critique", ""))[:300],
+            ]
+        )
+        digest = hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
+        return f"{prefix}_{self.stage}_{digest}"
+
+    def _room_type_from_record(self, record: dict[str, Any]) -> str:
+        text = " ".join(
+            [
+                self.stage,
+                str(record.get("text", "")),
+                str(record.get("critique", "")),
+                " ".join(str(x) for x in record.get("object_names", [])),
+            ]
+        ).lower()
+        if "bedroom" in text or "bed" in text or "nightstand" in text:
+            return "bedroom"
+        return "room"
+
+    def _normalized_quality(self, record: dict[str, Any]) -> float:
+        total = record.get("score_total")
+        scores = record.get("scores") or {}
+        if not isinstance(total, (int, float)) or not scores:
+            return 0.0
+        max_total = 10.0 * max(1, len(scores))
+        return max(0.0, min(1.0, float(total) / max_total))
+
+    def _commit_public_success_case(self, record: dict[str, Any]) -> None:
+        quality_score = self._normalized_quality(record)
+        if quality_score < 0.75:
+            return
+        from scenesmith.scene_expert.memory.schemas import SuccessCase
+        from scenesmith.scene_expert.memory.store import FastMemoryStore
+        from scenesmith.scene_expert.memory.text_builder import build_embedding_text
+
+        case = SuccessCase(
+            case_id=self._memory_id("success", record),
+            room_type=self._room_type_from_record(record),
+            style="",
+            stage=self.stage,
+            task_signature=list(record.get("object_names", []))[:12],
+            required_objects=list((record.get("deterministic_quality") or {}).get("required_counts", {}).keys()),
+            scene_summary=f"Stage {self.stage} critic accepted render {record.get('render_dir', '')}.",
+            successful_pattern=[
+                _compact(record.get("critique", ""), 500)
+                or f"{self.stage} produced a hard-valid scored candidate."
+            ],
+            scores={k: float(v.get("grade", v)) for k, v in (record.get("scores") or {}).items() if isinstance(v, (int, float, dict)) and (not isinstance(v, dict) or isinstance(v.get("grade"), (int, float)))},
+            trace_ref=str(record.get("render_dir", "")),
+            quality_score=quality_score,
+            confidence=0.45,
+            created_at=_now(),
+        )
+        if not case.embedding_text:
+            case = case.model_copy(update={"embedding_text": build_embedding_text(case)})
+        FastMemoryStore(str(self.public_memory_dir)).add_success_case(case)
+
+    def _commit_public_failure_case(self, record: dict[str, Any]) -> None:
+        from scenesmith.scene_expert.memory.schemas import FailureCase
+        from scenesmith.scene_expert.memory.store import FastMemoryStore
+        from scenesmith.scene_expert.memory.text_builder import build_embedding_text
+
+        quality = record.get("deterministic_quality") or {}
+        note = quality.get("deterministic_note") or record.get("critique") or record.get("text") or ""
+        failure_type = "deterministic_hard_fail"
+        lowered = str(note).lower()
+        if "missing required" in lowered:
+            failure_type = "missing_required_object"
+        elif "door" in lowered or "open-connection" in lowered or "opening" in lowered:
+            failure_type = "door_or_opening_clearance"
+        elif "collision" in lowered or "overlap" in lowered:
+            failure_type = "collision_or_overlap"
+        case = FailureCase(
+            failure_id=self._memory_id("failure", record),
+            room_type=self._room_type_from_record(record),
+            stage=self.stage,
+            object="",
+            failure_type=failure_type,
+            bad_pattern=_compact(note, 900),
+            failure_reason=_compact(note, 900),
+            repair_action="Run stage repair loop and re-score before accepting this candidate.",
+            repair_verified=False,
+            required_objects=list((quality.get("required_counts") or {}).keys()),
+            scene_summary=f"Stage {self.stage} hard-failed at render {record.get('render_dir', '')}.",
+            quality_score=max(0.0, self._normalized_quality(record)),
+            confidence=0.6,
+            created_at=_now(),
+            scope="stage",
+            is_deterministic=True,
+            negative_constraint=_compact(note, 700),
+            critic_check="Verify deterministic hard constraints before invoking VLM scoring.",
+            trace_ref=str(record.get("render_dir", "")),
+        )
+        if not case.embedding_text:
+            case = case.model_copy(update={"embedding_text": build_embedding_text(case)})
+        FastMemoryStore(str(self.public_memory_dir)).add_failure_case(case)
 
 
 def save_generic_render_memory(

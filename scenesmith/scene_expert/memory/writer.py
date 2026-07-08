@@ -24,6 +24,7 @@ from scenesmith.scene_expert.memory.schemas import (
     Skill,
     SuccessCase,
 )
+from scenesmith.scene_expert.context_bundle import build_llm_call_debug_record
 from scenesmith.scene_expert.memory.text_builder import build_embedding_text
 from scenesmith.scene_expert.schemas import FullVerifyReport
 
@@ -119,6 +120,45 @@ class MemoryWriter:
             api_key=api_key or os.environ.get("OPENAI_API_KEY", "dummy"),
         )
 
+    def _append_llm_debug(
+        self,
+        *,
+        prompt: str,
+        output: str = "",
+        response: Any = None,
+        error: str = "",
+        label: str = "",
+    ) -> None:
+        path = os.environ.get("SCENEEXPERT_LLM_DEBUG_PATH", "")
+        if not path:
+            return
+        try:
+            record = build_llm_call_debug_record(
+                stage="memory_writer",
+                agent_role="memory_writer",
+                event=label or "write",
+                prompt=prompt,
+                output=output,
+                raw_response=response,
+                error=error,
+            )
+            debug_path = Path(path)
+            debug_path.parent.mkdir(parents=True, exist_ok=True)
+            with debug_path.open("a", encoding="utf-8", newline="\n") as f:
+                f.write(
+                    json.dumps(
+                        record.model_dump(),
+                        ensure_ascii=False,
+                        default=str,
+                    )
+                    + "\n"
+                )
+        except Exception as debug_error:
+            console_logger.warning(
+                "MemoryWriter failed to write LLM debug record: %s",
+                debug_error,
+            )
+
     def write(
         self,
         trace_summary: str,
@@ -155,6 +195,12 @@ class MemoryWriter:
                     use_response_format=use_response_format,
                 )
                 raw = self._extract_response_text(response)
+                self._append_llm_debug(
+                    prompt=user_message,
+                    output=raw or "",
+                    response=response,
+                    label=label,
+                )
                 attempt_log.update(
                     {
                         "finish_reason": self._response_finish_reason(response),
@@ -174,6 +220,11 @@ class MemoryWriter:
                 attempt_logs.append(attempt_log)
                 console_logger.debug("MemoryWriter raw response: %s", raw)
             except Exception as e:
+                self._append_llm_debug(
+                    prompt=user_message,
+                    error=f"{type(e).__name__}: {e}",
+                    label=label,
+                )
                 attempt_log["error"] = f"{type(e).__name__}: {e}"
                 attempt_logs.append(attempt_log)
                 console_logger.warning("MemoryWriter attempt %s failed: %s", label, e)

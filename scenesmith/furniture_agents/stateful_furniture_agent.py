@@ -36,6 +36,10 @@ from scenesmith.agent_utils.reachability import (
     compute_reachability,
     format_reachability_for_critic,
 )
+from scenesmith.scene_expert.repair_taxonomy import (
+    FailureCategory,
+    build_repair_plan,
+)
 from scenesmith.agent_utils.room import (
     AgentType,
     ObjectType,
@@ -456,6 +460,12 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
 
         actions: list[str] = []
         reasons = " ".join(hard_state.hard_reasons or []).lower()
+        repair_plan = build_repair_plan(
+            stage=self.agent_type.value,
+            hard_reasons=hard_state.hard_reasons,
+            max_attempts=1,
+        )
+        console_logger.info("Deterministic furniture %s", repair_plan.to_log_text())
         if "geometry construction failed" in reasons:
             replaced = self._replace_geometry_failed_furniture_assets(reasons)
             if replaced:
@@ -480,9 +490,15 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         if self._repair_bedside_nightstands():
             actions.append("repositioned nightstands to deterministic bedside anchors")
         if (
+            FailureCategory.DOOR_OR_OPENING_CLEARANCE in repair_plan.categories
+            and self._repair_forbidden_zone_conflicts(include_windows=False)
+        ):
+            actions.append("cleared deterministic door/opening forbidden zones")
+        if (
             "window access warning" in reasons
             or "wardrobe" in reasons
             or "closet" in reasons
+            or FailureCategory.WINDOW_OR_WALL_ACCESS in repair_plan.categories
         ) and self._repair_wardrobe_wall_anchor():
             actions.append("moved wardrobe to a deterministic wall/corner anchor")
 
@@ -910,6 +926,240 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             return False
         self.scene.move_object(wardrobe.object_id, best_transform)
         return True
+
+    def _repair_forbidden_zone_conflicts(self, include_windows: bool = False) -> bool:
+        """Move objects out of door/opening clearance zones using generic anchors."""
+        if self.scene is None:
+            return False
+        zones = self._opening_forbidden_zones(include_windows=include_windows)
+        if not zones:
+            return False
+        blockers = self._objects_overlapping_zones(zones)
+        if not blockers:
+            return False
+
+        changed = False
+        # Move less-central storage first. Beds/nightstands get their bedroom
+        # relation repair before this method runs, so they are only moved if they
+        # still block a hard opening zone.
+        category_priority = {"wardrobe": 0, "nightstand": 1, "bed": 2}
+        blockers.sort(
+            key=lambda item: (
+                category_priority.get(self._category_for_object(item[0], item[1]) or "", 9),
+                -item[2],
+            )
+        )
+        for object_id, obj, original_penalty in blockers:
+            transform = self._best_forbidden_zone_repair_transform(obj, zones)
+            if transform is None:
+                continue
+            new_penalty = self._zone_overlap_penalty_for_transform(obj, transform, zones)
+            if new_penalty + 1e-5 >= original_penalty:
+                continue
+            self.scene.move_object(obj.object_id, transform)
+            console_logger.info(
+                "Deterministic forbidden-zone repair moved %s from penalty %.4f to %.4f",
+                object_id,
+                original_penalty,
+                new_penalty,
+            )
+            changed = True
+        return changed
+
+    def _opening_forbidden_zones(
+        self, include_windows: bool = False
+    ) -> list[tuple[str, str, np.ndarray, np.ndarray]]:
+        if self.scene is None or self.scene.room_geometry is None:
+            return []
+        zones: list[tuple[str, str, np.ndarray, np.ndarray]] = []
+        for opening in list(getattr(self.scene.room_geometry, "openings", []) or []):
+            opening_type_raw = getattr(opening, "opening_type", "")
+            opening_type = str(
+                getattr(opening_type_raw, "value", opening_type_raw)
+            ).lower()
+            if opening_type not in ("door", "open") and not (
+                include_windows and opening_type == "window"
+            ):
+                continue
+            bounds = self._opening_clearance_bounds(opening)
+            if bounds is None:
+                continue
+            zone_min, zone_max = bounds
+            zones.append(
+                (
+                    str(getattr(opening, "opening_id", f"{opening_type}_{len(zones)}")),
+                    opening_type,
+                    zone_min,
+                    zone_max,
+                )
+            )
+        return zones
+
+    def _opening_clearance_bounds(
+        self, opening: Any
+    ) -> tuple[np.ndarray, np.ndarray] | None:
+        zone_min = getattr(opening, "clearance_bbox_min", None)
+        zone_max = getattr(opening, "clearance_bbox_max", None)
+        if zone_min is not None and zone_max is not None:
+            return np.asarray(zone_min, dtype=float), np.asarray(zone_max, dtype=float)
+
+            opening_type_raw = getattr(opening, "opening_type", "")
+            opening_type = str(
+                getattr(opening_type_raw, "value", opening_type_raw)
+            ).lower()
+        if opening_type != "open":
+            return None
+        try:
+            wall_direction_raw = getattr(opening, "wall_direction", "")
+            wall_direction = str(
+                getattr(wall_direction_raw, "value", wall_direction_raw)
+            ).lower()
+            center = np.asarray(getattr(opening, "center_world"), dtype=float)
+            width = float(getattr(opening, "width"))
+            clearance_cfg = getattr(self.cfg, "clearance_zones", None)
+            passage = float(getattr(clearance_cfg, "passage_size", 0.8))
+            depth = float(getattr(clearance_cfg, "open_connection_clearance", 1.0))
+            half_width = max(width, passage) / 2.0
+            min_x = max_x = float(center[0])
+            min_y = max_y = float(center[1])
+            if wall_direction in ("north", "south"):
+                min_x = float(center[0]) - half_width
+                max_x = float(center[0]) + half_width
+                if wall_direction == "north":
+                    min_y = float(center[1]) - depth
+                    max_y = float(center[1])
+                else:
+                    min_y = float(center[1])
+                    max_y = float(center[1]) + depth
+            else:
+                min_y = float(center[1]) - half_width
+                max_y = float(center[1]) + half_width
+                if wall_direction == "east":
+                    min_x = float(center[0]) - depth
+                    max_x = float(center[0])
+                else:
+                    min_x = float(center[0])
+                    max_x = float(center[0]) + depth
+            return (
+                np.asarray([min_x, min_y, 0.0], dtype=float),
+                np.asarray([max_x, max_y, 2.5], dtype=float),
+            )
+        except Exception:
+            return None
+
+    def _objects_overlapping_zones(
+        self, zones: list[tuple[str, str, np.ndarray, np.ndarray]]
+    ) -> list[tuple[str, SceneObject, float]]:
+        if self.scene is None:
+            return []
+        blockers: list[tuple[str, SceneObject, float]] = []
+        for object_id, obj in self.scene.objects.items():
+            if getattr(obj, "immutable", False):
+                continue
+            if getattr(obj, "object_type", None) in (ObjectType.WALL, ObjectType.FLOOR):
+                continue
+            if (getattr(obj, "metadata", {}) or {}).get("asset_source") == "thin_covering":
+                continue
+            bounds = obj.compute_world_bounds()
+            if bounds is None:
+                continue
+            penalty = self._zone_overlap_penalty(bounds, zones)
+            if penalty > 1e-6:
+                blockers.append((str(object_id), obj, penalty))
+        return blockers
+
+    def _zone_overlap_penalty(
+        self,
+        bounds: tuple[np.ndarray, np.ndarray],
+        zones: list[tuple[str, str, np.ndarray, np.ndarray]],
+    ) -> float:
+        penalty = 0.0
+        obj_min, obj_max = bounds
+        for _, zone_type, zone_min, zone_max in zones:
+            overlap_x = min(float(obj_max[0]), float(zone_max[0])) - max(
+                float(obj_min[0]), float(zone_min[0])
+            )
+            overlap_y = min(float(obj_max[1]), float(zone_max[1])) - max(
+                float(obj_min[1]), float(zone_min[1])
+            )
+            if overlap_x > 0.0 and overlap_y > 0.0:
+                weight = 1000.0 if zone_type in ("door", "open") else 150.0
+                penalty += overlap_x * overlap_y * weight
+        return penalty
+
+    def _zone_overlap_penalty_for_transform(
+        self,
+        obj: SceneObject,
+        transform: RigidTransform,
+        zones: list[tuple[str, str, np.ndarray, np.ndarray]],
+    ) -> float:
+        bounds = self._bounds_for_transform(obj, transform)
+        if bounds is None:
+            return 1e9
+        return self._zone_overlap_penalty(bounds, zones)
+
+    def _best_forbidden_zone_repair_transform(
+        self,
+        obj: SceneObject,
+        zones: list[tuple[str, str, np.ndarray, np.ndarray]],
+    ) -> RigidTransform | None:
+        candidates = self._generic_wall_candidate_transforms(obj)
+        if not candidates:
+            return None
+        obstacles = [
+            other
+            for other in self._furniture_by_category("bed")
+            + self._furniture_by_category("nightstand")
+            + self._furniture_by_category("wardrobe")
+            if other.object_id != obj.object_id
+        ]
+        best_transform = None
+        best_score = -1e18
+        original_center = np.asarray(obj.transform.translation(), dtype=float)
+        for transform in candidates:
+            bounds = self._bounds_for_transform(obj, transform)
+            if bounds is None:
+                continue
+            zone_penalty = self._zone_overlap_penalty(bounds, zones)
+            overlap_penalty = 0.0
+            for obstacle in obstacles:
+                obstacle_bounds = obstacle.compute_world_bounds()
+                if obstacle_bounds is None:
+                    continue
+                overlap_x, overlap_y = self._xy_overlap_depths(bounds, obstacle_bounds)
+                overlap_penalty += overlap_x * overlap_y * 400.0
+            center = np.asarray(transform.translation(), dtype=float)
+            move_penalty = float(np.linalg.norm(center[:2] - original_center[:2])) * 0.15
+            wall_bonus = 0.25
+            score = wall_bonus - zone_penalty - overlap_penalty - move_penalty
+            if score > best_score:
+                best_score = score
+                best_transform = transform
+        return best_transform
+
+    def _generic_wall_candidate_transforms(self, obj: SceneObject) -> list[RigidTransform]:
+        room_bounds = self._room_bounds_xy()
+        if room_bounds is None:
+            return []
+        min_x, min_y, max_x, max_y = room_bounds
+        margin = float(self._repair_cfg_value("wall_margin_m", 0.08))
+        candidates: list[tuple[str, float, float, float]] = []
+        for wall in ("north", "south"):
+            y = max_y - margin if wall == "north" else min_y + margin
+            for x in (min_x + 0.65, 0.0, max_x - 0.65):
+                candidates.append((wall, x, y, self._yaw_for_inward_wall(wall)))
+        for wall in ("east", "west"):
+            x = max_x - margin if wall == "east" else min_x + margin
+            for y in (min_y + 0.65, 0.0, max_y - 0.65):
+                candidates.append((wall, x, y, self._yaw_for_inward_wall(wall)))
+
+        transforms: list[RigidTransform] = []
+        for wall, x, y, yaw in candidates:
+            transform = self._grounded_transform(obj, x=x, y=y, yaw_deg=yaw)
+            transform = self._snap_transform_to_wall(obj, transform, wall)
+            transform = self._fit_transform_inside_room(obj, transform)
+            transforms.append(transform)
+        return transforms
 
     def _wardrobe_candidate_transforms(
         self, wardrobe: SceneObject

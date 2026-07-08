@@ -13,9 +13,11 @@ import json
 import logging
 import os
 import re
+from pathlib import Path
 
 from openai import OpenAI
 
+from scenesmith.scene_expert.context_bundle import build_llm_call_debug_record
 from scenesmith.scene_expert.schemas import (
     HarnessContext,
     MemoryPack,
@@ -24,6 +26,19 @@ from scenesmith.scene_expert.schemas import (
 )
 
 console_logger = logging.getLogger(__name__)
+
+
+def _append_llm_debug(record: dict) -> None:
+    path = os.environ.get("SCENEEXPERT_LLM_DEBUG_PATH", "")
+    if not path:
+        return
+    try:
+        debug_path = Path(path)
+        debug_path.parent.mkdir(parents=True, exist_ok=True)
+        with debug_path.open("a", encoding="utf-8", newline="\n") as f:
+            f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+    except Exception as e:
+        console_logger.warning("GlobalPlanner failed to write LLM debug record: %s", e)
 
 _SYSTEM_PROMPT = """\
 /no_think
@@ -184,6 +199,16 @@ class GlobalPlanner:
             if not raw:
                 raw = getattr(response.choices[0].message, "reasoning_content", None)
             console_logger.debug(f"GlobalPlanner raw response: {raw}")
+            _append_llm_debug(
+                build_llm_call_debug_record(
+                    stage=stage,
+                    agent_role="global_planner",
+                    event="generate_stage_brief",
+                    prompt=user_message,
+                    output=raw or "",
+                    raw_response=response,
+                ).model_dump()
+            )
             data = _extract_json_from_text(raw)
             # Ensure stage field is set correctly
             data["stage"] = stage
@@ -194,6 +219,16 @@ class GlobalPlanner:
             )
             return brief
         except Exception as e:
+            _append_llm_debug(
+                build_llm_call_debug_record(
+                    stage=stage,
+                    agent_role="global_planner",
+                    event="generate_stage_brief",
+                    prompt=user_message,
+                    output="",
+                    error=f"{type(e).__name__}: {e}",
+                ).model_dump()
+            )
             console_logger.warning(
                 f"GlobalPlanner failed for stage {stage}, using minimal fallback brief: {e}"
             )

@@ -25,12 +25,16 @@ from pathlib import Path
 from typing import Any
 
 from scenesmith.agent_utils.room import RoomScene
+from scenesmith.scene_expert.context_bundle import build_stage_context_bundle
 from scenesmith.scene_expert.global_planner import GlobalPlanner
 from scenesmith.scene_expert.harness import STAGE_ORDER, Harness
 from scenesmith.scene_expert.memory.retriever import MemoryRetriever
 from scenesmith.scene_expert.memory.store import FastMemoryStore
 from scenesmith.scene_expert.memory.writer import MemoryWriter
+from scenesmith.scene_expert.memory.schemas import FailureCase, SuccessCase
+from scenesmith.scene_expert.memory.text_builder import build_embedding_text
 from scenesmith.scene_expert.repair_controller import RepairController
+from scenesmith.scene_expert.repair_taxonomy import classify_hard_reasons
 from scenesmith.scene_expert.schemas import (
     FullVerifyReport,
     MemoryPack,
@@ -305,6 +309,7 @@ class SceneExpertHookRunner:
         self._retrieval_timing_path = (
             self._scene_debug_dir / "timing" / "memory_retrieval.jsonl"
         )
+        self._context_debug_dir = self._scene_debug_dir / "context_bundles"
 
         self._task_spec = task_spec
         self._harness = harness
@@ -345,6 +350,55 @@ class SceneExpertHookRunner:
         self._original_text_descriptions: dict[str, str] = {}
         self._last_injected_floor_plan_prompt: str = prompt
 
+    def _save_context_bundle(
+        self,
+        *,
+        stage: str,
+        agent_role: str,
+        event: str,
+        scene: RoomScene | None = None,
+        prompt: Any = "",
+        last_hard_issues: list[str] | None = None,
+    ) -> None:
+        """Save a structured pre-LLM context snapshot for audit/debug."""
+        try:
+            bundle = build_stage_context_bundle(
+                stage=stage,
+                agent_role=agent_role,
+                event=event,
+                task_spec=self._task_spec,
+                stage_brief=self._current_stage_brief,
+                scene=scene,
+                memory_pack=self._current_memory_pack,
+                history_summary=self._build_scene_state_summary()
+                if scene is not None
+                else "",
+                last_hard_issues=last_hard_issues or [],
+                prompt=prompt,
+                trace_id=f"trace_{self._scene_id:06d}",
+                scene_id=f"scene_{self._scene_id:03d}",
+                metadata={
+                    "mode": self._mode,
+                    "experiment_name": self._experiment_name,
+                    "config_hash": self._config_hash,
+                },
+            )
+            safe_stage = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in stage)
+            safe_event = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in event)
+            path = (
+                self._context_debug_dir
+                / safe_stage
+                / f"{int(time.time() * 1000)}_{agent_role}_{safe_event}.json"
+            )
+            bundle.save(path)
+        except Exception as e:
+            console_logger.warning(
+                "[SceneExpert] Failed to save StageContextBundle for %s/%s: %s",
+                stage,
+                event,
+                e,
+            )
+
     def _record_memory_retrieval_timing(
         self,
         *,
@@ -382,6 +436,142 @@ class SceneExpertHookRunner:
                 "Failed to record SceneExpert memory retrieval timing: %s",
                 timing_error,
             )
+
+    def _stage_score_quality(self, report: StageVerifyReport) -> float:
+        if not report.scores:
+            return 0.0
+        return max(0.0, min(1.0, sum(report.scores.values()) / len(report.scores)))
+
+    def _commit_stage_memory(
+        self,
+        *,
+        stage: str,
+        verify_report: StageVerifyReport | None,
+        scene_state_path: str,
+        repair_actions: list[RepairResult],
+    ) -> None:
+        """Continuously commit post-stage verifier results to the shared bank."""
+        if (
+            self._memory_store is None
+            or verify_report is None
+            or self._mode not in ("harness_memory", "full")
+        ):
+            return
+        try:
+            quality = self._stage_score_quality(verify_report)
+            event = {
+                "schema_version": "1.0",
+                "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "event_type": "stage_verify",
+                "trace_id": f"trace_{self._scene_id:06d}",
+                "scene_id": f"scene_{self._scene_id:03d}",
+                "stage": stage,
+                "scene_state_path": scene_state_path,
+                "pass_stage": verify_report.pass_stage,
+                "quality_score": quality,
+                "scores": verify_report.scores,
+                "issues": [issue.model_dump() for issue in verify_report.issues],
+                "repair_actions": [
+                    action.model_dump()
+                    if hasattr(action, "model_dump")
+                    else getattr(action, "__dict__", str(action))
+                    for action in repair_actions
+                ],
+                "critique_summary": verify_report.critique_summary[:2000],
+            }
+            self._memory_store.append_event(event)
+
+            digest = hashlib.sha1(
+                json.dumps(event, sort_keys=True, default=str).encode("utf-8")
+            ).hexdigest()[:12]
+            if verify_report.pass_stage and quality >= 0.75:
+                case = SuccessCase(
+                    case_id=f"success_{self._task_spec.room_type}_{stage}_{digest}",
+                    room_type=self._task_spec.room_type,
+                    style=self._task_spec.style,
+                    stage=stage,
+                    task_signature=self._stage_required_objects(stage),
+                    required_objects=self._stage_required_objects(stage),
+                    functional_zones=self._task_spec.functional_zones,
+                    scene_summary=(
+                        f"{stage} passed SceneExpert stage verifier in "
+                        f"trace_{self._scene_id:06d}."
+                    ),
+                    successful_pattern=[
+                        verify_report.critique_summary[:900]
+                        or f"{stage} passed with quality_score={quality:.2f}."
+                    ],
+                    positive_guidance=[
+                        "Use as a weak positive prior; adapt geometry to the "
+                        "current room and re-check hard constraints."
+                    ],
+                    scores=verify_report.scores,
+                    trace_ref=f"trace_{self._scene_id:06d}",
+                    quality_score=quality,
+                    confidence=0.4,
+                    created_at=event["created_at"],
+                )
+                if not case.embedding_text:
+                    case = case.model_copy(
+                        update={"embedding_text": build_embedding_text(case)}
+                    )
+                self._memory_store.add_success_case(case)
+            elif not verify_report.pass_stage and verify_report.issues:
+                reasons = [
+                    issue.description or issue.issue_type for issue in verify_report.issues
+                ]
+                classified = classify_hard_reasons(reasons)
+                case = FailureCase(
+                    failure_id=f"failure_{self._task_spec.room_type}_{stage}_{digest}",
+                    room_type=self._task_spec.room_type,
+                    stage=stage,
+                    object=verify_report.issues[0].object_name,
+                    failure_type=classified[0].category.value,
+                    bad_pattern=verify_report.issues[0].description,
+                    failure_reason="; ".join(reasons)[:900],
+                    repair_action=(
+                        repair_actions[0].repair_action
+                        if repair_actions
+                        else "Run stage repair loop, re-render, and re-score before accepting."
+                    ),
+                    repair_verified=False,
+                    required_objects=self._stage_required_objects(stage),
+                    functional_zones=self._task_spec.functional_zones,
+                    scene_summary=(
+                        f"{stage} failed SceneExpert stage verifier in "
+                        f"trace_{self._scene_id:06d}."
+                    ),
+                    quality_score=quality,
+                    confidence=0.55,
+                    created_at=event["created_at"],
+                    scope="stage",
+                    is_deterministic=all(item.deterministic for item in classified),
+                    negative_constraint="; ".join(reasons)[:700],
+                    critic_check="Verify this failure class before stage acceptance.",
+                    trace_ref=f"trace_{self._scene_id:06d}",
+                )
+                if not case.embedding_text:
+                    case = case.model_copy(
+                        update={"embedding_text": build_embedding_text(case)}
+                    )
+                self._memory_store.add_failure_case(case)
+        except Exception as e:
+            console_logger.warning(
+                "[SceneExpert] Stage-level public memory commit failed for %s: %s",
+                stage,
+                e,
+            )
+
+    def _stage_required_objects(self, stage: str) -> list[str]:
+        if stage in ("floor_plan", "furniture"):
+            return list(self._task_spec.required_large_objects)
+        if stage == "wall_mounted":
+            return list(self._task_spec.required_wall_objects)
+        if stage == "ceiling_mounted":
+            return list(self._task_spec.required_ceiling_objects)
+        if stage == "manipuland":
+            return list(self._task_spec.required_small_objects)
+        return []
 
     # ------------------------------------------------------------------
     # Pre-stage hook: called BEFORE the SceneSmith stage agent runs
@@ -473,6 +663,12 @@ class SceneExpertHookRunner:
         if self._current_memory_pack.placement_reference:
             enhanced += "\n\n" + self._current_memory_pack.placement_reference
         self._last_injected_floor_plan_prompt = enhanced
+        self._save_context_bundle(
+            stage=stage,
+            agent_role="global_planner",
+            event="pre_floor_plan",
+            prompt=enhanced,
+        )
         self._trace_logger.save_stage_context(
             stage=stage,
             memory_pack=self._current_memory_pack,
@@ -534,6 +730,12 @@ class SceneExpertHookRunner:
             console_logger.warning(f"[SceneExpert] Verification failed for {stage}: {e}")
 
         elapsed = time.time() - self._stage_start_time
+        self._commit_stage_memory(
+            stage=stage,
+            verify_report=verify_report,
+            scene_state_path=str(scene_dir),
+            repair_actions=repair_actions,
+        )
         self._trace_logger.log_stage(
             stage=stage,
             memory_pack=self._current_memory_pack,
@@ -680,6 +882,15 @@ class SceneExpertHookRunner:
                 f"[SceneExpert] Injected placement reference for {stage} "
                 f"({placement_ref.count(chr(10))+1} lines)"
             )
+        setattr(scene, "scene_expert_task_spec", self._task_spec.model_dump())
+        setattr(scene, "scene_expert_stage", stage)
+        self._save_context_bundle(
+            stage=stage,
+            agent_role="designer",
+            event="pre_stage",
+            scene=scene,
+            prompt=scene.text_description,
+        )
         self._trace_logger.save_stage_context(
             stage=stage,
             memory_pack=self._current_memory_pack,
@@ -765,6 +976,12 @@ class SceneExpertHookRunner:
 
         # Log stage trace entry
         elapsed = time.time() - self._stage_start_time
+        self._commit_stage_memory(
+            stage=stage,
+            verify_report=verify_report,
+            scene_state_path=str(room_dir),
+            repair_actions=repair_actions,
+        )
         self._trace_logger.log_stage(
             stage=stage,
             memory_pack=self._current_memory_pack,
@@ -1049,6 +1266,12 @@ def build_hook_runner(
         cfg_dict.get("paths", {}).get("memory_dir", "outputs/scene_expert_memory"),
     )
     use_memory = mode in ("harness_memory", "full")
+    scene_debug_dir = output_dir / f"scene_{scene_id:03d}" / "scene_expert"
+    os.environ["SCENEEXPERT_LLM_DEBUG_PATH"] = str(
+        scene_debug_dir / "timing" / "scene_expert_llm_calls.jsonl"
+    )
+    if not use_memory:
+        os.environ.pop("SCENEEXPERT_ACTIVE_MEMORY_BANK_DIR", None)
 
     memory_store: FastMemoryStore | None = None
     retriever: Any | None = None
@@ -1057,8 +1280,8 @@ def build_hook_runner(
     if use_memory:
         ret_cfg = memory_cfg.get("retrieval", {})
         memory_store = FastMemoryStore(memory_dir)
+        os.environ["SCENEEXPERT_ACTIVE_MEMORY_BANK_DIR"] = str(memory_dir)
         retriever_type = memory_cfg.get("retriever_type", "lexical")
-        scene_debug_dir = output_dir / f"scene_{scene_id:03d}" / "scene_expert"
         if retriever_type == "hybrid":
             retriever = _build_hybrid_retriever(
                 memory_store=memory_store,

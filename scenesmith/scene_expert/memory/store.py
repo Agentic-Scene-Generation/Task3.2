@@ -35,7 +35,13 @@ class FastMemoryStore:
         self._success_path = self._dir / "success_cases.jsonl"
         self._failure_path = self._dir / "failure_cases.jsonl"
         self._skills_path = self._dir / "skills.jsonl"
-        for path in (self._success_path, self._failure_path, self._skills_path):
+        self._events_path = self._dir / "events.jsonl"
+        for path in (
+            self._success_path,
+            self._failure_path,
+            self._skills_path,
+            self._events_path,
+        ):
             path.touch(exist_ok=True)
 
         self.success_cases: list[SuccessCase] = self._load(self._success_path, SuccessCase)
@@ -136,6 +142,12 @@ class FastMemoryStore:
         with path.open("w") as f:
             for r in records:
                 f.write(r.model_dump_json() + "\n")
+
+    def append_event(self, event: dict) -> None:
+        """Append a durable debug/event record to the shared memory bank."""
+        with self._file_lock():
+            with self._events_path.open("a", encoding="utf-8", newline="\n") as f:
+                f.write(json.dumps(event, ensure_ascii=False, default=str) + "\n")
 
     # ------------------------------------------------------------------
     # Public write methods

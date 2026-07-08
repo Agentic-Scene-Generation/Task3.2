@@ -10,10 +10,25 @@ import json
 import logging
 import os
 import re
+from pathlib import Path
 
+from scenesmith.scene_expert.context_bundle import build_llm_call_debug_record
 from scenesmith.scene_expert.schemas import SceneTaskSpec
 
 console_logger = logging.getLogger(__name__)
+
+
+def _append_llm_debug(record: dict) -> None:
+    path = os.environ.get("SCENEEXPERT_LLM_DEBUG_PATH", "")
+    if not path:
+        return
+    try:
+        debug_path = Path(path)
+        debug_path.parent.mkdir(parents=True, exist_ok=True)
+        with debug_path.open("a", encoding="utf-8", newline="\n") as f:
+            f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+    except Exception as e:
+        console_logger.warning("TaskCompiler failed to write LLM debug record: %s", e)
 
 _SYSTEM_PROMPT = """\
 /no_think
@@ -260,12 +275,13 @@ class TaskCompiler:
             ValueError: If the model response cannot be parsed.
         """
         console_logger.info(f"TaskCompiler: compiling prompt: {prompt[:100]}...")
+        user_message = f"Extract scene requirements from: {prompt}"
 
         response = self._client.chat.completions.create(
             model=self._model,
             messages=[
                 {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": f"Extract scene requirements from: {prompt}"},
+                {"role": "user", "content": user_message},
             ],
             temperature=self._temperature,
             max_tokens=self._max_tokens,
@@ -281,6 +297,16 @@ class TaskCompiler:
             if isinstance(extra, dict):
                 raw = extra.get("reasoning_content")
         console_logger.debug(f"TaskCompiler raw response: {raw}")
+        _append_llm_debug(
+            build_llm_call_debug_record(
+                stage="task_compiler",
+                agent_role="task_compiler",
+                event="compile",
+                prompt=user_message,
+                output=raw or "",
+                raw_response=response,
+            ).model_dump()
+        )
 
         try:
             data = _extract_json_from_text(raw)
@@ -292,4 +318,3 @@ class TaskCompiler:
             return task_spec
         except Exception as e:
             raise ValueError(f"TaskCompiler failed to parse model response: {e}\nRaw: {raw}") from e
-
