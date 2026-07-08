@@ -75,7 +75,10 @@ def generate_drake_sdf(
     # Apply GLTF scene-graph transforms while loading. The resulting mesh is in
     # the same Z-up working frame used by Drake and convex decomposition.
     visual_mesh = load_mesh_as_trimesh(visual_mesh_path, force_merge=True)
-    collision_meshes = [piece.copy() for piece in collision_pieces]
+    collision_meshes = _filter_full_dimensional_collision_pieces(
+        [piece.copy() for piece in collision_pieces],
+        asset_name=asset_name,
+    )
     _validate_collision_geometry(
         visual_mesh=visual_mesh,
         collision_pieces=collision_meshes,
@@ -261,6 +264,57 @@ def _validate_collision_geometry(
         "This usually indicates a duplicated coordinate-system transform or a "
         "broken convex-decomposition result."
     )
+
+
+def _filter_full_dimensional_collision_pieces(
+    collision_pieces: list[trimesh.Trimesh],
+    asset_name: str,
+) -> list[trimesh.Trimesh]:
+    """Drop degenerate convex pieces before Drake/Qhull sees them.
+
+    VHACD/CoACD can occasionally emit flat or duplicate-vertex pieces. Drake later
+    declares each OBJ as convex and asks Qhull to construct a 3D simplex; a single
+    lower-dimensional piece can then fail the whole scene at physics/render time.
+    Filtering here keeps the failure local to asset preparation.
+    """
+    valid: list[trimesh.Trimesh] = []
+    rejected = 0
+    for piece in collision_pieces:
+        if _is_full_dimensional_mesh(piece):
+            valid.append(piece)
+        else:
+            rejected += 1
+
+    if rejected:
+        console_logger.warning(
+            "Filtered %d degenerate collision piece(s) while generating SDF for '%s'",
+            rejected,
+            asset_name,
+        )
+    if not valid:
+        raise ValueError(
+            "No full-dimensional collision pieces remain for "
+            f"'{asset_name}'. The convex decomposition produced only degenerate "
+            "geometry, which would fail Drake/Qhull during scene validation."
+        )
+    return valid
+
+
+def _is_full_dimensional_mesh(mesh: trimesh.Trimesh) -> bool:
+    vertices = np.asarray(getattr(mesh, "vertices", None), dtype=float)
+    if vertices.ndim != 2 or vertices.shape[1] != 3 or len(vertices) < 4:
+        return False
+    if not np.all(np.isfinite(vertices)):
+        return False
+
+    extents = np.ptp(vertices, axis=0)
+    scale = float(np.max(extents))
+    if scale <= 1e-9:
+        return False
+
+    centered = vertices - vertices.mean(axis=0)
+    tol = max(scale * 1e-7, 1e-9)
+    return bool(np.linalg.matrix_rank(centered, tol=tol) >= 3)
 
 
 def rescale_sdf(sdf_path: Path, scale_factor: float) -> None:

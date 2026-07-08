@@ -473,6 +473,73 @@ class TestGenerateDrakeSDF(unittest.TestCase):
                 output_path=self.temp_path / "bad.sdf",
             )
 
+    def test_degenerate_collision_piece_is_filtered_before_sdf_export(self):
+        """Flat VHACD fragments should not be written as Drake convex meshes."""
+        visual = trimesh.creation.box(extents=[1.0, 1.0, 1.0])
+        visual_path = self.temp_path / "visual_with_flat_piece.gltf"
+        visual.export(visual_path)
+        valid_collision = visual.copy()
+        flat_collision = trimesh.Trimesh(
+            vertices=[
+                [-0.5, -0.5, 0.0],
+                [0.5, -0.5, 0.0],
+                [0.5, 0.5, 0.0],
+                [-0.5, 0.5, 0.0],
+            ],
+            faces=[[0, 1, 2], [0, 2, 3]],
+            process=False,
+        )
+        physics = MeshPhysicsAnalysis(
+            up_axis="+Z",
+            front_axis="+Y",
+            material="wood",
+            mass_kg=10.0,
+            mass_range_kg=(8.0, 12.0),
+        )
+
+        output_path = self.temp_path / "filtered.sdf"
+        generate_drake_sdf(
+            visual_mesh_path=visual_path,
+            collision_pieces=[flat_collision, valid_collision],
+            physics_analysis=physics,
+            output_path=output_path,
+        )
+
+        tree = ET.parse(output_path)
+        collisions = tree.findall(".//collision")
+        self.assertEqual(len(collisions), 1)
+
+    def test_all_degenerate_collision_pieces_fail_fast(self):
+        """Assets with only flat collision pieces should never reach Drake."""
+        visual = trimesh.creation.box(extents=[1.0, 1.0, 1.0])
+        visual_path = self.temp_path / "visual_all_flat.gltf"
+        visual.export(visual_path)
+        flat_collision = trimesh.Trimesh(
+            vertices=[
+                [-0.5, -0.5, 0.0],
+                [0.5, -0.5, 0.0],
+                [0.5, 0.5, 0.0],
+                [-0.5, 0.5, 0.0],
+            ],
+            faces=[[0, 1, 2], [0, 2, 3]],
+            process=False,
+        )
+        physics = MeshPhysicsAnalysis(
+            up_axis="+Z",
+            front_axis="+Y",
+            material="wood",
+            mass_kg=10.0,
+            mass_range_kg=(8.0, 12.0),
+        )
+
+        with self.assertRaisesRegex(ValueError, "No full-dimensional collision pieces"):
+            generate_drake_sdf(
+                visual_mesh_path=visual_path,
+                collision_pieces=[flat_collision],
+                physics_analysis=physics,
+                output_path=self.temp_path / "all_flat.sdf",
+            )
+
 
 class TestAddSelfCollisionFilter(unittest.TestCase):
     """Test self-collision filter injection for articulated SDF files."""

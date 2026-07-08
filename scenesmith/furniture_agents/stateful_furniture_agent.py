@@ -7,11 +7,13 @@ SQLiteSession agents that maintain conversation memory across interactions.
 
 import logging
 import math
+import time
 
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+import trimesh
 
 from agents import Agent, FunctionTool, Runner, RunResult
 from omegaconf import DictConfig
@@ -28,6 +30,7 @@ from scenesmith.agent_utils.furniture_layout_planning import (
     format_bedroom_anchor_guidance,
     is_bedroom_scene,
 )
+from scenesmith.agent_utils.mesh_physics_analyzer import MeshPhysicsAnalysis
 from scenesmith.agent_utils.placement_noise import PlacementNoiseMode
 from scenesmith.agent_utils.reachability import (
     compute_reachability,
@@ -44,6 +47,7 @@ from scenesmith.agent_utils.scoring import (
     FurnitureCritiqueWithScores,
     log_agent_response,
 )
+from scenesmith.agent_utils.sdf_generator import generate_drake_sdf
 from scenesmith.agent_utils.workflow_tools import WorkflowTools
 from scenesmith.furniture_agents.base_furniture_agent import BaseFurnitureAgent
 from scenesmith.furniture_agents.tools.furniture_tools import FurnitureTools
@@ -463,6 +467,13 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             added = self._ensure_required_furniture_asset("nightstand")
             if added:
                 actions.append(f"added {added} missing nightstand asset(s)")
+        if (
+            "missing required wardrobe" in reasons
+            or "missing required closet" in reasons
+        ):
+            added = self._ensure_required_furniture_asset("wardrobe")
+            if added:
+                actions.append("added missing wardrobe from local/HSSD asset bank")
 
         if self._anchor_existing_bed():
             actions.append("anchored bed to deterministic bedroom head wall")
@@ -497,11 +508,13 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             current_objects = list(self._furniture_by_category(category))
             if not current_objects:
                 continue
+            self._remember_geometry_failed_assets(current_objects)
+            failed_signatures = self._geometry_failed_asset_signatures()
+            replacement_signatures: set[str] = set()
             for old_obj in current_objects:
-                exclude_paths = {str(old_obj.sdf_path)} if old_obj.sdf_path else set()
                 replacement = self._get_or_generate_repair_asset(
                     category,
-                    exclude_sdf_paths=exclude_paths,
+                    exclude_asset_signatures=failed_signatures | replacement_signatures,
                 )
                 if replacement is None:
                     console_logger.warning(
@@ -513,6 +526,9 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 old_id = old_obj.object_id
                 self.scene.remove_object(old_id)
                 if self._place_repair_asset(category, replacement):
+                    replacement_signatures.update(
+                        self._asset_signature_values(replacement)
+                    )
                     console_logger.info(
                         "Deterministic repair replaced geometry-failed %s %s",
                         category,
@@ -524,6 +540,42 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                     # not make the candidate worse.
                     self.scene.add_object(old_obj)
         return replaced
+
+    def _geometry_failed_asset_signatures(self) -> set[str]:
+        signatures = getattr(self, "_geometry_failed_repair_asset_signatures", None)
+        if signatures is None:
+            signatures = set()
+            self._geometry_failed_repair_asset_signatures = signatures
+        return signatures
+
+    def _remember_geometry_failed_assets(self, objects: list[SceneObject]) -> None:
+        signatures = self._geometry_failed_asset_signatures()
+        for obj in objects:
+            signatures.update(self._asset_signature_values(obj))
+
+    def _asset_signature_values(self, asset: SceneObject) -> set[str]:
+        signatures: set[str] = set()
+        for attr in ("sdf_path", "geometry_path"):
+            value = getattr(asset, attr, None)
+            if value:
+                signatures.add(f"{attr}:{Path(value)}")
+        metadata = getattr(asset, "metadata", {}) or {}
+        hssd_mesh_id = metadata.get("hssd_mesh_id")
+        if hssd_mesh_id:
+            signatures.add(f"hssd_mesh_id:{hssd_mesh_id}")
+        asset_source = metadata.get("asset_source")
+        if asset_source and hssd_mesh_id:
+            signatures.add(f"source_mesh:{asset_source}:{hssd_mesh_id}")
+        return signatures
+
+    def _asset_matches_excluded_signature(
+        self,
+        asset: SceneObject,
+        excluded: set[str],
+    ) -> bool:
+        if not excluded:
+            return False
+        return bool(self._asset_signature_values(asset) & excluded)
 
     def _repair_cfg_value(self, key: str, default: Any) -> Any:
         safety_cfg = getattr(self.cfg, "furniture_safety_controller", None)
@@ -595,11 +647,15 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         self,
         category: str,
         exclude_sdf_paths: set[str] | None = None,
+        exclude_asset_signatures: set[str] | None = None,
     ) -> SceneObject | None:
         exclude_sdf_paths = exclude_sdf_paths or set()
+        exclude_asset_signatures = set(exclude_asset_signatures or set())
+        exclude_asset_signatures.update(
+            f"sdf_path:{Path(path)}" for path in exclude_sdf_paths
+        )
         for asset in self.asset_manager.list_available_assets():
-            asset_sdf = str(asset.sdf_path) if asset.sdf_path else ""
-            if asset_sdf in exclude_sdf_paths:
+            if self._asset_matches_excluded_signature(asset, exclude_asset_signatures):
                 continue
             if self._category_for_object(getattr(asset, "object_id", ""), asset) == category:
                 return asset
@@ -631,9 +687,87 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             scene_id=self.scene.scene_dir.name if self.scene else "deterministic_repair",
         )
         result = self.asset_manager.generate_assets(request)
-        if result.successful_assets:
-            return result.successful_assets[0]
-        return None
+        for asset in result.successful_assets:
+            if self._asset_matches_excluded_signature(asset, exclude_asset_signatures):
+                console_logger.warning(
+                    "Deterministic repair rejected generated %s asset %s because "
+                    "it matches a known geometry-failed signature",
+                    category,
+                    asset.object_id,
+                )
+                continue
+            return asset
+        return self._create_placeholder_repair_asset(category, dimensions[category])
+
+    def _create_placeholder_repair_asset(
+        self,
+        category: str,
+        dimensions: list[float],
+    ) -> SceneObject | None:
+        if self.scene is None:
+            return None
+        try:
+            repair_root = (
+                self.scene.scene_dir
+                / "generated_assets"
+                / "furniture"
+                / "repair_placeholders"
+                / f"{category}_{int(time.time() * 1000)}"
+            )
+            repair_root.mkdir(parents=True, exist_ok=True)
+            width, depth, height = [float(v) for v in dimensions]
+            mesh = trimesh.creation.box(extents=[width, depth, height])
+            mesh.apply_translation([0.0, 0.0, height / 2.0])
+            gltf_path = repair_root / f"{category}_placeholder.gltf"
+            sdf_path = repair_root / f"{category}_placeholder.sdf"
+            mesh.export(gltf_path)
+            physics = MeshPhysicsAnalysis(
+                up_axis="+Z",
+                front_axis="+Y",
+                material="wood",
+                mass_kg=max(1.0, width * depth * height * 35.0),
+                mass_range_kg=(1.0, max(1.0, width * depth * height * 50.0)),
+            )
+            generate_drake_sdf(
+                visual_mesh_path=gltf_path,
+                collision_pieces=[mesh.copy()],
+                physics_analysis=physics,
+                output_path=sdf_path,
+                asset_name=f"{category}_placeholder",
+            )
+            object_id = self.asset_manager.registry.generate_unique_id(
+                f"{category}_repair_placeholder"
+            )
+            placeholder = SceneObject(
+                object_id=object_id,
+                object_type=ObjectType.FURNITURE,
+                name=category,
+                description=f"deterministic placeholder {category}",
+                transform=RigidTransform(),
+                geometry_path=gltf_path,
+                sdf_path=sdf_path,
+                bbox_min=np.asarray([-width / 2.0, -depth / 2.0, 0.0], dtype=float),
+                bbox_max=np.asarray([width / 2.0, depth / 2.0, height], dtype=float),
+                metadata={
+                    "asset_source": "deterministic_placeholder",
+                    "repair_placeholder": True,
+                    "generation_timestamp": time.time(),
+                },
+            )
+            self.asset_manager.registry.register(placeholder)
+            console_logger.warning(
+                "Deterministic repair created placeholder %s asset %s after "
+                "available assets were missing or geometry-failed",
+                category,
+                placeholder.object_id,
+            )
+            return placeholder
+        except Exception:
+            console_logger.exception(
+                "Deterministic repair failed creating placeholder %s asset",
+                category,
+            )
+            return None
 
     def _place_repair_asset(self, category: str, asset: SceneObject) -> bool:
         if self.scene is None:
