@@ -560,13 +560,19 @@ class AssetManager:
                 # needed. Uses BlenderServer for crash isolation.
                 if server_mesh_path.suffix.lower() == ".glb":
                     # Server exported GLB, convert to GLTF with Y-up coordinates.
+                    # Keep the GLB because duplicate requests may legitimately
+                    # reference the same retrieved mesh in the same batch.
                     gltf_path = server_mesh_path.with_suffix(".gltf")
-                    self.blender_server.convert_glb_to_gltf(
-                        input_path=server_mesh_path,
-                        output_path=gltf_path,
-                        export_yup=True,
-                    )
-                    server_mesh_path.unlink()  # Remove GLB after conversion.
+                    if not gltf_path.exists():
+                        if not server_mesh_path.exists():
+                            raise FileNotFoundError(
+                                f"Retrieved mesh file missing: {server_mesh_path}"
+                            )
+                        self.blender_server.convert_glb_to_gltf(
+                            input_path=server_mesh_path,
+                            output_path=gltf_path,
+                            export_yup=True,
+                        )
                 else:
                     # Already GLTF, use as-is.
                     gltf_path = server_mesh_path
@@ -751,13 +757,19 @@ class AssetManager:
                 # needed. Uses BlenderServer for crash isolation.
                 if server_mesh_path.suffix.lower() == ".glb":
                     # Server exported GLB, convert to GLTF with Y-up coordinates.
+                    # Keep the GLB because duplicate requests may legitimately
+                    # reference the same retrieved mesh in the same batch.
                     gltf_path = server_mesh_path.with_suffix(".gltf")
-                    self.blender_server.convert_glb_to_gltf(
-                        input_path=server_mesh_path,
-                        output_path=gltf_path,
-                        export_yup=True,
-                    )
-                    server_mesh_path.unlink()  # Remove GLB after conversion.
+                    if not gltf_path.exists():
+                        if not server_mesh_path.exists():
+                            raise FileNotFoundError(
+                                f"Retrieved mesh file missing: {server_mesh_path}"
+                            )
+                        self.blender_server.convert_glb_to_gltf(
+                            input_path=server_mesh_path,
+                            output_path=gltf_path,
+                            export_yup=True,
+                        )
                 else:
                     # Already GLTF, use as-is.
                     gltf_path = server_mesh_path
@@ -1607,11 +1619,13 @@ class AssetManager:
             List of AssetPathConfig objects containing asset paths and metadata.
         """
         asset_paths = []
-        for desc, short_name in zip(object_descriptions, short_names):
+        batch_stamp = time.time_ns()
+        for index, (desc, short_name) in enumerate(
+            zip(object_descriptions, short_names)
+        ):
             # Use sanitized short name for file naming.
             safe_name = self._sanitize_filename(short_name)
-            timestamp = int(time.time())
-            base_name = f"{safe_name}_{timestamp}"
+            base_name = f"{safe_name}_{index:03d}_{batch_stamp}"
 
             asset_paths.append(
                 AssetPathConfig(
