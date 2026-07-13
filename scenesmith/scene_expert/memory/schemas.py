@@ -45,9 +45,8 @@ class SuccessCase(BaseModel):
         """Compress into a single retrieval hint string (for GlobalPlanner context)."""
         patterns = "; ".join(self.positive_guidance or self.successful_pattern)
         score_str = ", ".join(f"{k}={v:.2f}" for k, v in self.scores.items())
-        return (
-            f"[Success/{self.stage}] {self.room_type} ({self.style}): {patterns}"
-            + (f" [scores: {score_str}]" if score_str else "")
+        return f"[Success/{self.stage}] {self.room_type} ({self.style}): {patterns}" + (
+            f" [scores: {score_str}]" if score_str else ""
         )
 
     def to_positive_guidance(self) -> str:

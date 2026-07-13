@@ -81,7 +81,9 @@ class TraceLogger:
         stage_time_sec: float | None = None,
     ) -> None:
         """Record a completed stage's data."""
-        elapsed = time.time() - self._start_time if stage_time_sec is None else stage_time_sec
+        elapsed = (
+            time.time() - self._start_time if stage_time_sec is None else stage_time_sec
+        )
         entry = StageTraceEntry(
             stage=stage,
             memory_pack=memory_pack,
@@ -114,7 +116,10 @@ class TraceLogger:
             "memory_pack": memory_pack.model_dump(),
             "stage_brief": stage_brief.model_dump() if stage_brief else None,
         }
-        path = self._stage_debug_dir / f"{len(self._stage_entries):03d}_{stage}_{phase}.json"
+        path = (
+            self._stage_debug_dir
+            / f"{len(self._stage_entries):03d}_{stage}_{phase}.json"
+        )
         self._write_json(path, payload)
         return path
 
@@ -124,9 +129,7 @@ class TraceLogger:
         render_dirs = []
         if root.exists():
             render_dirs = sorted(
-                path
-                for path in root.rglob("renders_*")
-                if path.is_dir()
+                path for path in root.rglob("renders_*") if path.is_dir()
             )
         renders = []
         for render_dir in render_dirs:
@@ -137,17 +140,25 @@ class TraceLogger:
                 {
                     "dir": str(render_dir),
                     "images": pngs,
-                    "scores": str(render_dir / "scores.yaml")
-                    if (render_dir / "scores.yaml").exists()
-                    else "",
-                    "scene_state": str(render_dir / "scene_state.json")
-                    if (render_dir / "scene_state.json").exists()
-                    else "",
-                    "dmd": str(render_dir / "scene.dmd.yaml")
-                    if (render_dir / "scene.dmd.yaml").exists()
-                    else str(render_dir / "floor_plan.dmd.yaml")
-                    if (render_dir / "floor_plan.dmd.yaml").exists()
-                    else "",
+                    "scores": (
+                        str(render_dir / "scores.yaml")
+                        if (render_dir / "scores.yaml").exists()
+                        else ""
+                    ),
+                    "scene_state": (
+                        str(render_dir / "scene_state.json")
+                        if (render_dir / "scene_state.json").exists()
+                        else ""
+                    ),
+                    "dmd": (
+                        str(render_dir / "scene.dmd.yaml")
+                        if (render_dir / "scene.dmd.yaml").exists()
+                        else (
+                            str(render_dir / "floor_plan.dmd.yaml")
+                            if (render_dir / "floor_plan.dmd.yaml").exists()
+                            else ""
+                        )
+                    ),
                 }
             )
 
@@ -238,8 +249,7 @@ class TraceLogger:
             "op_count": len(ops),
             "full_report": full_report.model_dump(),
             "updates": [
-                op.model_dump() if hasattr(op, "model_dump") else op
-                for op in ops
+                op.model_dump() if hasattr(op, "model_dump") else op for op in ops
             ],
         }
         path = self._memory_debug_dir / "memory_update_ops.json"
@@ -285,7 +295,9 @@ class TraceLogger:
                 stage_line += f" objective={entry.stage_brief.stage_objective!r}"
             if entry.verify_report:
                 passed = "PASS" if entry.verify_report.pass_stage else "FAIL"
-                scores = ", ".join(f"{k}={v:.2f}" for k, v in entry.verify_report.scores.items())
+                scores = ", ".join(
+                    f"{k}={v:.2f}" for k, v in entry.verify_report.scores.items()
+                )
                 stage_line += f" verify={passed} scores=({scores})"
                 if entry.verify_report.issues:
                     issue_types = [i.issue_type for i in entry.verify_report.issues]
@@ -296,10 +308,7 @@ class TraceLogger:
             lines.append(stage_line)
 
             # Include critic summary — the most informative per-stage content.
-            if (
-                entry.verify_report
-                and entry.verify_report.critique_summary
-            ):
+            if entry.verify_report and entry.verify_report.critique_summary:
                 # Truncate very long summaries to keep the trace summary manageable.
                 summary_text = entry.verify_report.critique_summary
                 if len(summary_text) > 800:

@@ -203,9 +203,7 @@ class BaseStatefulAgent(ABC):
         self._planner_budget_exhausted = False
         self._critic_failed = False
         working_memory_cfg = _cfg_get(cfg, "stage_working_memory", {})
-        working_memory_enabled = bool(
-            _cfg_get(working_memory_cfg, "enabled", True)
-        )
+        working_memory_enabled = bool(_cfg_get(working_memory_cfg, "enabled", True))
         self.stage_working_memory = StageWorkingMemory(
             root_dir=logger.output_dir,
             stage=self.agent_type.value,
@@ -235,7 +233,9 @@ class BaseStatefulAgent(ABC):
                 extra=extra,
             )
         except Exception as e:
-            console_logger.warning("Failed to record timing %s/%s: %s", module, event, e)
+            console_logger.warning(
+                "Failed to record timing %s/%s: %s", module, event, e
+            )
 
     def _retrieve_working_memory_for_designer(self, query: str) -> str:
         """Fetch compact online memory to inject into the next designer call."""
@@ -287,7 +287,11 @@ class BaseStatefulAgent(ABC):
                 scene=getattr(self, "scene", None),
                 history_summary=getattr(self, "_pending_hard_repair_hint", ""),
                 last_hard_issues=last_hard_issues
-                or ([self._pending_hard_repair_hint] if self._pending_hard_repair_hint else []),
+                or (
+                    [self._pending_hard_repair_hint]
+                    if self._pending_hard_repair_hint
+                    else []
+                ),
                 prompt=prompt,
                 metadata={
                     "scene_expert_stage": getattr(
@@ -597,10 +601,15 @@ class BaseStatefulAgent(ABC):
         }
 
     def _cache_valid_for_current_scene(self) -> bool:
-        return self._critic_candidate_cache.get("scene_hash") == self.scene.content_hash()
+        return (
+            self._critic_candidate_cache.get("scene_hash") == self.scene.content_hash()
+        )
 
     def _get_cached_physics_context(self) -> str:
-        if self._cache_valid_for_current_scene() and "physics_context" in self._critic_candidate_cache:
+        if (
+            self._cache_valid_for_current_scene()
+            and "physics_context" in self._critic_candidate_cache
+        ):
             return self._critic_candidate_cache["physics_context"]
 
         current_furniture_id = getattr(self, "current_furniture_id", None)
@@ -684,19 +693,24 @@ class BaseStatefulAgent(ABC):
                 "Resolve collisions by moving, snapping, or reducing only the involved "
                 "modifiable objects; do not delete required prompt objects."
             )
-        if any("door" in reason.lower() or "open connection" in reason.lower() for reason in reasons):
+        if any(
+            "door" in reason.lower() or "open connection" in reason.lower()
+            for reason in reasons
+        ):
             hints.append(
                 "Clear door/open-connection clearance first; keep a walkable path from "
                 "the doorway into the room."
             )
-        if any("fallen" in reason.lower() or "below-floor" in reason.lower() for reason in reasons):
+        if any(
+            "fallen" in reason.lower() or "below-floor" in reason.lower()
+            for reason in reasons
+        ):
             hints.append(
                 "Restore fallen or below-floor objects onto a valid support surface, "
                 "or remove only optional unstable small objects."
             )
         if any(
-            "geometry construction" in reason.lower()
-            or "drake/qhull" in reason.lower()
+            "geometry construction" in reason.lower() or "drake/qhull" in reason.lower()
             for reason in reasons
         ):
             hints.append(
@@ -710,8 +724,12 @@ class BaseStatefulAgent(ABC):
             )
         return " ".join(hints)
 
-    def _make_category_score(self, name: str, grade: int, comment: str) -> CategoryScore:
-        return CategoryScore(name=name, grade=max(0, min(10, int(grade))), comment=comment)
+    def _make_category_score(
+        self, name: str, grade: int, comment: str
+    ) -> CategoryScore:
+        return CategoryScore(
+            name=name, grade=max(0, min(10, int(grade))), comment=comment
+        )
 
     def _make_deterministic_critique_scores(
         self,
@@ -736,7 +754,9 @@ class BaseStatefulAgent(ABC):
             return FurnitureCritiqueWithScores(
                 critique=critique,
                 realism=self._make_category_score("realism", 3, hard_comment),
-                functionality=self._make_category_score("functionality", 2, repair_comment),
+                functionality=self._make_category_score(
+                    "functionality", 2, repair_comment
+                ),
                 layout=self._make_category_score("layout", 3, hard_comment),
                 layout_plausibility=self._make_category_score(
                     "layout_plausibility", 2, hard_comment
@@ -753,7 +773,9 @@ class BaseStatefulAgent(ABC):
             return ManipulandCritiqueWithScores(
                 critique=critique,
                 realism=self._make_category_score("realism", 3, hard_comment),
-                functionality=self._make_category_score("functionality", 2, repair_comment),
+                functionality=self._make_category_score(
+                    "functionality", 2, repair_comment
+                ),
                 layout=self._make_category_score("layout", 3, hard_comment),
                 holistic_completeness=self._make_category_score(
                     "holistic_completeness", 2, repair_comment
@@ -766,7 +788,9 @@ class BaseStatefulAgent(ABC):
             return WallCritiqueWithScores(
                 critique=critique,
                 realism=self._make_category_score("realism", 3, hard_comment),
-                functionality=self._make_category_score("functionality", 2, repair_comment),
+                functionality=self._make_category_score(
+                    "functionality", 2, repair_comment
+                ),
                 layout=self._make_category_score("layout", 3, hard_comment),
                 holistic_completeness=self._make_category_score(
                     "holistic_completeness", 3, repair_comment
@@ -779,7 +803,9 @@ class BaseStatefulAgent(ABC):
             return CeilingCritiqueWithScores(
                 critique=critique,
                 realism=self._make_category_score("realism", 3, hard_comment),
-                functionality=self._make_category_score("functionality", 2, repair_comment),
+                functionality=self._make_category_score(
+                    "functionality", 2, repair_comment
+                ),
                 layout=self._make_category_score("layout", 3, hard_comment),
                 prompt_following=self._make_category_score(
                     "prompt_following", 3, repair_comment
@@ -791,9 +817,8 @@ class BaseStatefulAgent(ABC):
         )
 
     def _critic_render_profile_name(self, update_checkpoint: bool) -> str:
-        if (
-            update_checkpoint
-            and self._critic_fast_path_enabled("use_intermediate_render_profile", True)
+        if update_checkpoint and self._critic_fast_path_enabled(
+            "use_intermediate_render_profile", True
         ):
             rendering_cfg = getattr(self.cfg, "rendering", None)
             profile_cfg = getattr(rendering_cfg, "intermediate_profile", None)
@@ -812,7 +837,10 @@ class BaseStatefulAgent(ABC):
     def _get_critic_scene_state_direct(self) -> str | None:
         if not self._critic_fast_path_enabled("direct_scene_state_cache", True):
             return None
-        if self._cache_valid_for_current_scene() and "scene_state" in self._critic_candidate_cache:
+        if (
+            self._cache_valid_for_current_scene()
+            and "scene_state" in self._critic_candidate_cache
+        ):
             return self._critic_candidate_cache["scene_state"]
 
         owner = getattr(self, "_critic_scene_tools", None)
@@ -833,7 +861,9 @@ class BaseStatefulAgent(ABC):
 
     def _observe_scene_for_synthetic_score(self, render_profile: str) -> Path | None:
         owner = getattr(self, "_critic_vision_tools", None)
-        method = getattr(owner, "_observe_scene_impl", None) if owner is not None else None
+        method = (
+            getattr(owner, "_observe_scene_impl", None) if owner is not None else None
+        )
         if method is None:
             return self.rendering_manager.last_render_dir
         observe_start = time.time()
@@ -1049,9 +1079,13 @@ class BaseStatefulAgent(ABC):
 
         return ModelSettings(**kwargs) if kwargs else None
 
-    def _get_agent_instructions(self, prompt_enum: Any, settings_key: str, **kwargs: Any) -> str:
+    def _get_agent_instructions(
+        self, prompt_enum: Any, settings_key: str, **kwargs: Any
+    ) -> str:
         """Render prompt instructions and attach the configured thinking mode."""
-        instructions = self.prompt_registry.get_prompt(prompt_enum=prompt_enum, **kwargs)
+        instructions = self.prompt_registry.get_prompt(
+            prompt_enum=prompt_enum, **kwargs
+        )
         effort = None
         if hasattr(self.cfg, "openai") and hasattr(self.cfg.openai, "reasoning_effort"):
             effort = getattr(self.cfg.openai.reasoning_effort, settings_key, None)
@@ -1413,10 +1447,7 @@ class BaseStatefulAgent(ABC):
                         reasons = "; ".join(final_hard_state.hard_reasons)
                 else:
                     reasons = "; ".join(final_hard_state.hard_reasons)
-            if (
-                final_hard_state is not None
-                and not final_hard_state.hard_valid
-            ):
+            if final_hard_state is not None and not final_hard_state.hard_valid:
                 reasons = "; ".join(final_hard_state.hard_reasons)
                 console_logger.error(
                     "Furniture stage failed with unresolved deterministic hard "
@@ -1717,8 +1748,7 @@ class BaseStatefulAgent(ABC):
                 attempt_label,
             )
             return "\n\n" + self._stop_planner_after_failure(
-                "Critic scoring failed with "
-                f"{type(exc).__name__}: {exc}."
+                "Critic scoring failed with " f"{type(exc).__name__}: {exc}."
             )
         self._record_module_timing(
             "planner",
@@ -1775,15 +1805,11 @@ class BaseStatefulAgent(ABC):
                 )
             self._planner_initial_design_tool_calls += 1
             result = await self._request_initial_design_impl()
-            result += await self._score_design_attempt_if_configured(
-                "initial design"
-            )
+            result += await self._score_design_attempt_if_configured("initial design")
             return self._truncate_planner_tool_output(
                 result,
                 label="initial design",
-                max_chars=self._planner_context_limit(
-                    "initial_design_max_chars", 5000
-                ),
+                max_chars=self._planner_context_limit("initial_design_max_chars", 5000),
             )
 
         @function_tool
@@ -1821,8 +1847,7 @@ class BaseStatefulAgent(ABC):
                 self._critic_failed = True
                 console_logger.exception("Planner-requested critic scoring failed")
                 return self._stop_planner_after_failure(
-                    "Critic scoring failed with "
-                    f"{type(exc).__name__}: {exc}."
+                    "Critic scoring failed with " f"{type(exc).__name__}: {exc}."
                 )
             result = self._truncate_planner_tool_output(
                 result,
@@ -1861,9 +1886,12 @@ class BaseStatefulAgent(ABC):
             ):
                 return self._planner_budget_stop_message("request_design_change")
 
-            if counts_as_critique_cycle and self._planner_design_change_tool_calls >= int(
-                self.cfg.max_critique_rounds
-            ) and not self._hard_repair_allowance_available():
+            if (
+                counts_as_critique_cycle
+                and self._planner_design_change_tool_calls
+                >= int(self.cfg.max_critique_rounds)
+                and not self._hard_repair_allowance_available()
+            ):
                 return self._planner_budget_stop_message("request_design_change")
 
             safety_block = self._record_furniture_design_change_budget()
@@ -1880,15 +1908,11 @@ class BaseStatefulAgent(ABC):
             result = await self._request_design_change_impl(instruction)
             if hard_repair_allowance:
                 self._hard_repair_design_change_calls += 1
-            result += await self._score_design_attempt_if_configured(
-                "design change"
-            )
+            result += await self._score_design_attempt_if_configured("design change")
             result = self._truncate_planner_tool_output(
                 result,
                 label="design change",
-                max_chars=self._planner_context_limit(
-                    "design_change_max_chars", 5000
-                ),
+                max_chars=self._planner_context_limit("design_change_max_chars", 5000),
             )
             if counts_as_critique_cycle:
                 self._planner_design_change_tool_calls += 1
@@ -2085,9 +2109,8 @@ class BaseStatefulAgent(ABC):
                     physics_context=physics_context,
                 )
             else:
-                safety_msg = (
-                    "\n\n**Hard Check:** "
-                    + self._repair_hint_from_hard_state(hard_state)
+                safety_msg = "\n\n**Hard Check:** " + self._repair_hint_from_hard_state(
+                    hard_state
                 )
                 checkpoint_scores = None
                 checkpoint_render_dir = None
@@ -2162,9 +2185,7 @@ class BaseStatefulAgent(ABC):
             output_type=None,
             tool_use_behavior="stop_on_first_tool",
             model_settings=base_settings.resolve(
-                ModelSettings(
-                    tool_choice="observe_scene", parallel_tool_calls=False
-                )
+                ModelSettings(tool_choice="observe_scene", parallel_tool_calls=False)
             ),
         )
         critic_scene_state = self.critic.clone(

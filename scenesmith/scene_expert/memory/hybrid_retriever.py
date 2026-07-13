@@ -128,7 +128,11 @@ class HybridMemoryRetriever:
                 if isinstance(record, SuccessCase)
             ],
             failure_hints=[
-                record.to_negative_constraint() if isinstance(record, FailureCase) else ""
+                (
+                    record.to_negative_constraint()
+                    if isinstance(record, FailureCase)
+                    else ""
+                )
                 for _, record in failure
                 if isinstance(record, FailureCase)
             ],
@@ -245,7 +249,10 @@ class HybridMemoryRetriever:
         task_objects = task_required_objects(task_spec, stage)
         if not task_objects:
             return True
-        return object_overlap(record_objects, task_objects) >= self._object_overlap_threshold
+        return (
+            object_overlap(record_objects, task_objects)
+            >= self._object_overlap_threshold
+        )
 
     def _load_index(self, memory_type: str, stage: str) -> NumpyMemoryIndex | None:
         key = (memory_type, stage)
@@ -319,7 +326,9 @@ class HybridMemoryRetriever:
             self._index_cache.clear()
             missing = self._missing_required_indexes()
         if missing:
-            missing_text = ", ".join(f"{memory_type}/{stage}" for memory_type, stage in missing)
+            missing_text = ", ".join(
+                f"{memory_type}/{stage}" for memory_type, stage in missing
+            )
             raise FileNotFoundError(
                 "Hybrid memory index is missing for non-empty memory banks: "
                 + missing_text
@@ -449,8 +458,7 @@ def build_query_text(task_spec: SceneTaskSpec, stage: str) -> str:
         lines.append("functional_zones=" + ", ".join(task_spec.functional_zones))
     if task_spec.interaction_constraints:
         lines.append(
-            "interaction_constraints="
-            + "; ".join(task_spec.interaction_constraints)
+            "interaction_constraints=" + "; ".join(task_spec.interaction_constraints)
         )
     if task_spec.aesthetic_constraints:
         lines.append(

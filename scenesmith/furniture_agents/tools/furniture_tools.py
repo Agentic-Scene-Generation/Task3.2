@@ -160,7 +160,9 @@ class FurnitureTools:
         console_logger.info(message)
         return message
 
-    def _safety_denial_remove(self, object_id: str, scene_obj: SceneObject) -> str | None:
+    def _safety_denial_remove(
+        self, object_id: str, scene_obj: SceneObject
+    ) -> str | None:
         controller = self.safety_controller
         if controller is None or not getattr(controller, "enabled", False):
             return None

@@ -40,6 +40,7 @@ def _append_llm_debug(record: dict) -> None:
     except Exception as e:
         console_logger.warning("GlobalPlanner failed to write LLM debug record: %s", e)
 
+
 _SYSTEM_PROMPT = """\
 /no_think
 You are the global_planner for SceneExpert, a 3D indoor scene generation system.
@@ -160,7 +161,8 @@ class GlobalPlanner:
         self._max_tokens = max_tokens
         self._temperature = temperature
         self._client = OpenAI(
-            base_url=api_base_url or os.environ.get("OPENAI_BASE_URL", "http://localhost:8000/v1"),
+            base_url=api_base_url
+            or os.environ.get("OPENAI_BASE_URL", "http://localhost:8000/v1"),
             api_key=api_key or os.environ.get("OPENAI_API_KEY", "dummy"),
         )
 
@@ -234,7 +236,9 @@ class GlobalPlanner:
             )
             return self._fallback_brief(context)
 
-    def _build_user_message(self, context: HarnessContext, scene_state_summary: str) -> str:
+    def _build_user_message(
+        self, context: HarnessContext, scene_state_summary: str
+    ) -> str:
         stage_desc = _STAGE_DESCRIPTIONS.get(context.stage, "")
         task_spec_text = _format_task_spec(context.task_spec, context.stage)
         memory_text = _format_memory_for_prompt(context.memory_pack)
@@ -248,7 +252,11 @@ class GlobalPlanner:
         ]
 
         if scene_state_summary:
-            parts += ["", "## Current Scene State (already placed objects)", scene_state_summary]
+            parts += [
+                "",
+                "## Current Scene State (already placed objects)",
+                scene_state_summary,
+            ]
 
         parts += [
             "",
@@ -276,7 +284,9 @@ class GlobalPlanner:
 
         constraints = []
         if required:
-            constraints.append(f"Ensure these objects are present: {', '.join(required)}")
+            constraints.append(
+                f"Ensure these objects are present: {', '.join(required)}"
+            )
         constraints.append(f"Follow {context.task_spec.style} aesthetic style")
         constraints.append("Maintain clear walking paths and avoid overcrowding")
 
@@ -285,6 +295,9 @@ class GlobalPlanner:
             stage_objective=f"Complete the {stage} stage for a {context.task_spec.room_type}",
             recommended_skills=[],
             constraints_for_designer=constraints,
-            checks_for_critic=["Verify all required objects are present", "Check for collisions"],
+            checks_for_critic=[
+                "Verify all required objects are present",
+                "Check for collisions",
+            ],
             failure_patterns_to_avoid=[],
         )

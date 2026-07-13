@@ -469,7 +469,9 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         if "geometry construction failed" in reasons:
             replaced = self._replace_geometry_failed_furniture_assets(reasons)
             if replaced:
-                actions.append(f"replaced {replaced} geometry-failed furniture asset(s)")
+                actions.append(
+                    f"replaced {replaced} geometry-failed furniture asset(s)"
+                )
         if "missing required bed" in reasons:
             if self._ensure_required_furniture_asset("bed"):
                 actions.append("added missing bed from local/HSSD asset bank")
@@ -673,7 +675,10 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         for asset in self.asset_manager.list_available_assets():
             if self._asset_matches_excluded_signature(asset, exclude_asset_signatures):
                 continue
-            if self._category_for_object(getattr(asset, "object_id", ""), asset) == category:
+            if (
+                self._category_for_object(getattr(asset, "object_id", ""), asset)
+                == category
+            ):
                 return asset
 
         descriptions = {
@@ -700,7 +705,9 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             object_type=ObjectType.FURNITURE,
             desired_dimensions=[dimensions[category]],
             style_context="deterministic repair asset",
-            scene_id=self.scene.scene_dir.name if self.scene else "deterministic_repair",
+            scene_id=(
+                self.scene.scene_dir.name if self.scene else "deterministic_repair"
+            ),
         )
         result = self.asset_manager.generate_assets(request)
         for asset in result.successful_assets:
@@ -837,7 +844,9 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         wall = plan.bed_head_wall if plan and plan.bed_head_wall else "north"
         yaw = self._yaw_for_head_wall(wall)
         current = np.asarray(bed.transform.translation(), dtype=float)
-        transform = self._grounded_transform(bed, x=float(current[0]), y=float(current[1]), yaw_deg=yaw)
+        transform = self._grounded_transform(
+            bed, x=float(current[0]), y=float(current[1]), yaw_deg=yaw
+        )
         transform = self._snap_transform_to_wall(bed, transform, wall)
         transform = self._fit_transform_inside_room(bed, transform)
         if self._transform_close(bed.transform, transform):
@@ -922,7 +931,9 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 best_score = score
                 best_transform = transform
 
-        if best_transform is None or self._transform_close(wardrobe.transform, best_transform):
+        if best_transform is None or self._transform_close(
+            wardrobe.transform, best_transform
+        ):
             return False
         self.scene.move_object(wardrobe.object_id, best_transform)
         return True
@@ -945,7 +956,9 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         category_priority = {"wardrobe": 0, "nightstand": 1, "bed": 2}
         blockers.sort(
             key=lambda item: (
-                category_priority.get(self._category_for_object(item[0], item[1]) or "", 9),
+                category_priority.get(
+                    self._category_for_object(item[0], item[1]) or "", 9
+                ),
                 -item[2],
             )
         )
@@ -953,7 +966,9 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             transform = self._best_forbidden_zone_repair_transform(obj, zones)
             if transform is None:
                 continue
-            new_penalty = self._zone_overlap_penalty_for_transform(obj, transform, zones)
+            new_penalty = self._zone_overlap_penalty_for_transform(
+                obj, transform, zones
+            )
             if new_penalty + 1e-5 >= original_penalty:
                 continue
             self.scene.move_object(obj.object_id, transform)
@@ -1058,7 +1073,9 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 continue
             if getattr(obj, "object_type", None) in (ObjectType.WALL, ObjectType.FLOOR):
                 continue
-            if (getattr(obj, "metadata", {}) or {}).get("asset_source") == "thin_covering":
+            if (getattr(obj, "metadata", {}) or {}).get(
+                "asset_source"
+            ) == "thin_covering":
                 continue
             bounds = obj.compute_world_bounds()
             if bounds is None:
@@ -1129,7 +1146,9 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 overlap_x, overlap_y = self._xy_overlap_depths(bounds, obstacle_bounds)
                 overlap_penalty += overlap_x * overlap_y * 400.0
             center = np.asarray(transform.translation(), dtype=float)
-            move_penalty = float(np.linalg.norm(center[:2] - original_center[:2])) * 0.15
+            move_penalty = (
+                float(np.linalg.norm(center[:2] - original_center[:2])) * 0.15
+            )
             wall_bonus = 0.25
             score = wall_bonus - zone_penalty - overlap_penalty - move_penalty
             if score > best_score:
@@ -1137,7 +1156,9 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 best_transform = transform
         return best_transform
 
-    def _generic_wall_candidate_transforms(self, obj: SceneObject) -> list[RigidTransform]:
+    def _generic_wall_candidate_transforms(
+        self, obj: SceneObject
+    ) -> list[RigidTransform]:
         room_bounds = self._room_bounds_xy()
         if room_bounds is None:
             return []
@@ -1206,7 +1227,10 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
     def _local_size(self, obj: SceneObject, default: list[float]) -> np.ndarray:
         if obj.bbox_min is None or obj.bbox_max is None:
             return np.asarray(default, dtype=float)
-        return np.abs(np.asarray(obj.bbox_max, dtype=float) - np.asarray(obj.bbox_min, dtype=float))
+        return np.abs(
+            np.asarray(obj.bbox_max, dtype=float)
+            - np.asarray(obj.bbox_min, dtype=float)
+        )
 
     def _grounded_transform(
         self, obj: SceneObject, *, x: float, y: float, yaw_deg: float
@@ -1313,8 +1337,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         b_yaw = RollPitchYaw(b.rotation()).yaw_angle()
         return bool(
             np.allclose(a_t, b_t, atol=1e-3)
-            and abs(math.atan2(math.sin(a_yaw - b_yaw), math.cos(a_yaw - b_yaw)))
-            < 1e-3
+            and abs(math.atan2(math.sin(a_yaw - b_yaw), math.cos(a_yaw - b_yaw))) < 1e-3
         )
 
     def _get_extra_critique_kwargs(self) -> dict[str, Any]:

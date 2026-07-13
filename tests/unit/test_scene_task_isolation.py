@@ -48,8 +48,7 @@ class TestSceneTaskIsolation(unittest.TestCase):
             return {task_id: (True, None)}
 
         with patch(
-            "scenesmith.experiments.indoor_scene_generation."
-            "run_parallel_isolated",
+            "scenesmith.experiments.indoor_scene_generation." "run_parallel_isolated",
             side_effect=fake_run,
         ):
             self.experiment._run_isolated_scene_generation(
@@ -77,8 +76,7 @@ class TestSceneTaskIsolation(unittest.TestCase):
             return {tasks[0][0]: (False, "Invalid start_stage 'bad_stage'")}
 
         with patch(
-            "scenesmith.experiments.indoor_scene_generation."
-            "run_parallel_isolated",
+            "scenesmith.experiments.indoor_scene_generation." "run_parallel_isolated",
             side_effect=fake_run,
         ):
             with self.assertRaisesRegex(RuntimeError, "scene_000"):

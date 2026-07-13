@@ -120,7 +120,9 @@ class StageContextBundle(BaseModel):
             lines.append("Stage brief: " + compact_text(self.stage_brief, 520))
         if self.last_hard_issues:
             lines.append("Unresolved hard issues:")
-            lines.extend(f"  - {compact_text(issue, 180)}" for issue in self.last_hard_issues[:5])
+            lines.extend(
+                f"  - {compact_text(issue, 180)}" for issue in self.last_hard_issues[:5]
+            )
         if self.forbidden_zones:
             lines.append("Forbidden / clearance zones:")
             for zone in self.forbidden_zones[:8]:
@@ -143,9 +145,13 @@ class StageContextBundle(BaseModel):
                     f"type={obj.object_type}{loc}{size}"
                 )
         if self.retrieved_memory:
-            lines.append("Retrieved memory: " + compact_text(self.retrieved_memory, 520))
+            lines.append(
+                "Retrieved memory: " + compact_text(self.retrieved_memory, 520)
+            )
         if self.history_summary:
-            lines.append("Recent stage history: " + compact_text(self.history_summary, 520))
+            lines.append(
+                "Recent stage history: " + compact_text(self.history_summary, 520)
+            )
         lines.append("=== End StageContextBundle ===")
         text = "\n".join(lines)
         return text if len(text) <= max_chars else text[: max_chars - 3] + "..."
@@ -200,7 +206,9 @@ def _object_context(object_id: str, obj: Any) -> ObjectContext:
             size = [round(float(world_max[i] - world_min[i]), 4) for i in range(3)]
     except Exception:
         pass
-    object_type = getattr(getattr(obj, "object_type", ""), "value", getattr(obj, "object_type", ""))
+    object_type = getattr(
+        getattr(obj, "object_type", ""), "value", getattr(obj, "object_type", "")
+    )
     return ObjectContext(
         object_id=str(object_id),
         name=str(getattr(obj, "name", "") or ""),
@@ -275,8 +283,12 @@ def build_stage_context_bundle(
             "failure_hints": len(memory_pack.failure_hints),
             "skills": len(memory_pack.skill_texts),
             "has_placement_reference": bool(memory_pack.placement_reference),
-            "success_excerpt": [compact_text(x, 180) for x in memory_pack.success_hints[:3]],
-            "failure_excerpt": [compact_text(x, 180) for x in memory_pack.failure_hints[:3]],
+            "success_excerpt": [
+                compact_text(x, 180) for x in memory_pack.success_hints[:3]
+            ],
+            "failure_excerpt": [
+                compact_text(x, 180) for x in memory_pack.failure_hints[:3]
+            ],
         }
     prompt_text = _stringify_prompt(prompt)
     return StageContextBundle(
@@ -335,9 +347,11 @@ def build_llm_call_debug_record(
         output_excerpt=compact_text(output_text, 1800),
         finish_reasons=_extract_finish_reasons(result or raw_response),
         token_usage=_extract_token_usage(result),
-        raw_response_excerpt=compact_text(_stringify_prompt(raw_response), 2400)
-        if raw_response is not None
-        else "",
+        raw_response_excerpt=(
+            compact_text(_stringify_prompt(raw_response), 2400)
+            if raw_response is not None
+            else ""
+        ),
         error=error,
     )
 

@@ -192,9 +192,16 @@ class SceneExpertMemoryTest(unittest.TestCase):
                 task_spec=SceneTaskSpec(
                     room_type="bedroom",
                     style="standard",
-                    required_large_objects=["bed", "nightstand", "nightstand", "wardrobe"],
+                    required_large_objects=[
+                        "bed",
+                        "nightstand",
+                        "nightstand",
+                        "wardrobe",
+                    ],
                 ),
-                scene_state_info={"object_names": ["nightstand_0", "nightstand_1", "wardrobe_0"]},
+                scene_state_info={
+                    "object_names": ["nightstand_0", "nightstand_1", "wardrobe_0"]
+                },
             )
 
             self.assertFalse(report.pass_stage)
@@ -691,7 +698,9 @@ class SceneExpertMemoryTest(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             memory_dir = Path(tmp) / "memory"
             memory_dir.mkdir()
-            timing_path = Path(tmp) / "scene_expert" / "timing" / "memory_retrieval.jsonl"
+            timing_path = (
+                Path(tmp) / "scene_expert" / "timing" / "memory_retrieval.jsonl"
+            )
             success = SuccessCase(
                 case_id="success_bedroom_001",
                 room_type="bedroom",

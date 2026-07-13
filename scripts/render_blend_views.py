@@ -47,9 +47,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output",
         type=Path,
-        help=(
-            "Output directory. Defaults to <blend_parent>/<blend_stem>_blend_views."
-        ),
+        help=("Output directory. Defaults to <blend_parent>/<blend_stem>_blend_views."),
     )
     parser.add_argument(
         "--views",
@@ -186,7 +184,9 @@ def look_at(camera: bpy.types.Object, target: Vector) -> None:
 
 def supported_render_engines() -> set[str]:
     scene = bpy.context.scene
-    return {item.identifier for item in scene.render.bl_rna.properties["engine"].enum_items}
+    return {
+        item.identifier for item in scene.render.bl_rna.properties["engine"].enum_items
+    }
 
 
 def set_render_engine(args: argparse.Namespace) -> str:
@@ -201,7 +201,12 @@ def set_render_engine(args: argparse.Namespace) -> str:
     elif args.engine == "workbench":
         candidates = ["BLENDER_WORKBENCH"]
     else:
-        candidates = ["BLENDER_EEVEE_NEXT", "BLENDER_EEVEE", "CYCLES", "BLENDER_WORKBENCH"]
+        candidates = [
+            "BLENDER_EEVEE_NEXT",
+            "BLENDER_EEVEE",
+            "CYCLES",
+            "BLENDER_WORKBENCH",
+        ]
 
     for engine in candidates:
         if engine in supported:
@@ -269,8 +274,12 @@ def projected_ortho_scale(
     bpy.context.view_layer.update()
     inv_camera = camera.matrix_world.inverted()
     camera_points = [inv_camera @ corner for corner in corners]
-    width = max(point.x for point in camera_points) - min(point.x for point in camera_points)
-    height = max(point.y for point in camera_points) - min(point.y for point in camera_points)
+    width = max(point.x for point in camera_points) - min(
+        point.x for point in camera_points
+    )
+    height = max(point.y for point in camera_points) - min(
+        point.y for point in camera_points
+    )
     aspect = scene.render.resolution_x / scene.render.resolution_y
     return max(height, width / aspect, 0.1) * margin
 
@@ -295,7 +304,9 @@ def setup_camera_for_view(
 
     if view_name == "top" or args.projection == "ortho":
         camera.data.type = "ORTHO"
-        camera.data.ortho_scale = projected_ortho_scale(scene, camera, corners, args.margin)
+        camera.data.ortho_scale = projected_ortho_scale(
+            scene, camera, corners, args.margin
+        )
     else:
         camera.data.type = "PERSP"
         camera.data.lens = 35

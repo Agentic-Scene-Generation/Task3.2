@@ -107,8 +107,7 @@ class SceneMemoryEmbedder:
             parameters = {}
 
         accepts_var_kwargs = any(
-            param.kind == inspect.Parameter.VAR_KEYWORD
-            for param in parameters.values()
+            param.kind == inspect.Parameter.VAR_KEYWORD for param in parameters.values()
         )
         if "devices" in parameters or accepts_var_kwargs:
             kwargs["devices"] = [self.device]

@@ -178,7 +178,9 @@ def main() -> None:
     parser.add_argument(
         "--memory-dir",
         default=str(
-            Path(os.environ.get("SCENEEXPERT_MEMORY_DIR", "outputs/scene_expert_memory"))
+            Path(
+                os.environ.get("SCENEEXPERT_MEMORY_DIR", "outputs/scene_expert_memory")
+            )
             / "ablation_4"
         ),
         help="Target memory store directory (default: outputs/scene_expert_memory/ablation_4)",

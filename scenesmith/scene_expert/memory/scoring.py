@@ -22,7 +22,9 @@ class HybridScoreWeights:
     recency_or_verified: float = 0.10
 
 
-def task_required_objects(task_spec: SceneTaskSpec, stage: str | None = None) -> list[str]:
+def task_required_objects(
+    task_spec: SceneTaskSpec, stage: str | None = None
+) -> list[str]:
     """Return required objects, optionally focused on the current stage."""
     by_stage = {
         "floor_plan": task_spec.required_large_objects,
@@ -89,7 +91,9 @@ def record_room_compatible(record: MemoryRecord, task_spec: SceneTaskSpec) -> bo
     return room_compatible(getattr(record, "room_type", ""), task_spec.room_type)
 
 
-def room_stage_match(record: MemoryRecord, task_spec: SceneTaskSpec, stage: str) -> float:
+def room_stage_match(
+    record: MemoryRecord, task_spec: SceneTaskSpec, stage: str
+) -> float:
     score = 0.0
     if record.stage == stage:
         score += 0.6

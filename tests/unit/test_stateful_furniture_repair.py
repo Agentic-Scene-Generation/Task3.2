@@ -6,7 +6,9 @@ import numpy as np
 
 try:
     from pydrake.all import RigidTransform
-    from scenesmith.furniture_agents.stateful_furniture_agent import StatefulFurnitureAgent
+    from scenesmith.furniture_agents.stateful_furniture_agent import (
+        StatefulFurnitureAgent,
+    )
 except ModuleNotFoundError as exc:
     RigidTransform = None
     StatefulFurnitureAgent = None

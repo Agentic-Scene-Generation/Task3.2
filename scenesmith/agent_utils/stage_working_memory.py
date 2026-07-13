@@ -199,14 +199,19 @@ class StageWorkingMemory:
         self.memory_path = self.memory_dir / "memory.jsonl"
         self.timing_path = self.root_dir / "timing_stats.jsonl"
         self.scene_root_dir = (
-            self.root_dir.parent if self.root_dir.name.startswith("room_") else self.root_dir
+            self.root_dir.parent
+            if self.root_dir.name.startswith("room_")
+            else self.root_dir
         )
         self.debug_memory_dir = (
             self.scene_root_dir / "scene_expert" / "working_memory" / stage
         )
         self.debug_memory_path = self.debug_memory_dir / "memory.jsonl"
         self.debug_timing_path = (
-            self.scene_root_dir / "scene_expert" / "timing" / "stage_working_timing.jsonl"
+            self.scene_root_dir
+            / "scene_expert"
+            / "timing"
+            / "stage_working_timing.jsonl"
         )
         self.debug_llm_path = (
             self.scene_root_dir / "scene_expert" / "timing" / "llm_calls.jsonl"
@@ -277,9 +282,11 @@ class StageWorkingMemory:
             "event": event,
             "render_dir": str(render_dir),
             "images": images,
-            "scores_path": str(render_dir / "scores.yaml")
-            if (render_dir / "scores.yaml").exists()
-            else "",
+            "scores_path": (
+                str(render_dir / "scores.yaml")
+                if (render_dir / "scores.yaml").exists()
+                else ""
+            ),
             "scores": score_data,
             "score_total": _score_total(scores),
             "critique": _compact(critique, max_chars=900),
@@ -310,9 +317,10 @@ class StageWorkingMemory:
         """Persist the structured context used before an LLM call."""
         if not self.enabled:
             return
-        safe_event = "".join(
-            c if c.isalnum() or c in ("-", "_") else "_" for c in bundle.event
-        ) or "context"
+        safe_event = (
+            "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in bundle.event)
+            or "context"
+        )
         path = self.debug_context_dir / f"{int(time.time() * 1000)}_{safe_event}.json"
         try:
             bundle.save(path)
@@ -399,12 +407,16 @@ class StageWorkingMemory:
             overlap = sum(1 for token in query_tokens if token and token in text)
             has_scores = 1.0 if record.get("scores") else 0.0
             is_critic = 1.0 if record.get("role") == "critic" else 0.0
-            invalid_penalty = 4.0 if quality.get("critic_inconsistent_with_state") else 0.0
+            invalid_penalty = (
+                4.0 if quality.get("critic_inconsistent_with_state") else 0.0
+            )
             hard_valid_bonus = 0.5 if quality.get("hard_valid", True) else 0.0
             # Invalid records with high hallucinated scores must not outrank
             # deterministic failure notes.
-            score_total = 0.0 if quality.get("critic_inconsistent_with_state") else (
-                record.get("score_total") or 0.0
+            score_total = (
+                0.0
+                if quality.get("critic_inconsistent_with_state")
+                else (record.get("score_total") or 0.0)
             )
             return (
                 overlap + has_scores + is_critic + hard_valid_bonus - invalid_penalty,
@@ -425,7 +437,11 @@ class StageWorkingMemory:
         ]
         for index, record in enumerate(selected, start=1):
             score_total = record.get("score_total")
-            score_text = f", total_score={score_total:.1f}" if isinstance(score_total, (int, float)) else ""
+            score_text = (
+                f", total_score={score_total:.1f}"
+                if isinstance(score_total, (int, float))
+                else ""
+            )
             lines.append(
                 f"{index}. [{record.get('role')}/{record.get('event')}{score_text}] "
                 f"objects={record.get('object_names', [])}"
@@ -435,7 +451,9 @@ class StageWorkingMemory:
                 lines.append(
                     f"   deterministic: {_compact(quality['deterministic_note'], 320)}"
                 )
-            if record.get("critique") and not quality.get("critic_inconsistent_with_state"):
+            if record.get("critique") and not quality.get(
+                "critic_inconsistent_with_state"
+            ):
                 lines.append(f"   critic: {_compact(record['critique'], 260)}")
             elif record.get("text"):
                 lines.append(f"   note: {_compact(record['text'], 260)}")
@@ -553,20 +571,33 @@ class StageWorkingMemory:
             style="",
             stage=self.stage,
             task_signature=list(record.get("object_names", []))[:12],
-            required_objects=list((record.get("deterministic_quality") or {}).get("required_counts", {}).keys()),
+            required_objects=list(
+                (record.get("deterministic_quality") or {})
+                .get("required_counts", {})
+                .keys()
+            ),
             scene_summary=f"Stage {self.stage} critic accepted render {record.get('render_dir', '')}.",
             successful_pattern=[
                 _compact(record.get("critique", ""), 500)
                 or f"{self.stage} produced a hard-valid scored candidate."
             ],
-            scores={k: float(v.get("grade", v)) for k, v in (record.get("scores") or {}).items() if isinstance(v, (int, float, dict)) and (not isinstance(v, dict) or isinstance(v.get("grade"), (int, float)))},
+            scores={
+                k: float(v.get("grade", v))
+                for k, v in (record.get("scores") or {}).items()
+                if isinstance(v, (int, float, dict))
+                and (
+                    not isinstance(v, dict) or isinstance(v.get("grade"), (int, float))
+                )
+            },
             trace_ref=str(record.get("render_dir", "")),
             quality_score=quality_score,
             confidence=0.45,
             created_at=_now(),
         )
         if not case.embedding_text:
-            case = case.model_copy(update={"embedding_text": build_embedding_text(case)})
+            case = case.model_copy(
+                update={"embedding_text": build_embedding_text(case)}
+            )
         FastMemoryStore(str(self.public_memory_dir)).add_success_case(case)
 
     def _commit_public_failure_case(self, record: dict[str, Any]) -> None:
@@ -575,7 +606,12 @@ class StageWorkingMemory:
         from scenesmith.scene_expert.memory.text_builder import build_embedding_text
 
         quality = record.get("deterministic_quality") or {}
-        note = quality.get("deterministic_note") or record.get("critique") or record.get("text") or ""
+        note = (
+            quality.get("deterministic_note")
+            or record.get("critique")
+            or record.get("text")
+            or ""
+        )
         failure_type = "deterministic_hard_fail"
         lowered = str(note).lower()
         if "missing required" in lowered:
@@ -606,7 +642,9 @@ class StageWorkingMemory:
             trace_ref=str(record.get("render_dir", "")),
         )
         if not case.embedding_text:
-            case = case.model_copy(update={"embedding_text": build_embedding_text(case)})
+            case = case.model_copy(
+                update={"embedding_text": build_embedding_text(case)}
+            )
         FastMemoryStore(str(self.public_memory_dir)).add_failure_case(case)
 
 

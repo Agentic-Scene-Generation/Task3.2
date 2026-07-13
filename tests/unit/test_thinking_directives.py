@@ -32,7 +32,10 @@ class ThinkingDirectivesTest(unittest.TestCase):
                 "role": "user",
                 "content": [
                     {"type": "text", "text": "Analyze this mesh."},
-                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,x"}},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "data:image/png;base64,x"},
+                    },
                 ],
             },
         ]
@@ -43,7 +46,9 @@ class ThinkingDirectivesTest(unittest.TestCase):
             "/no_think\nAnalyze this mesh.",
             updated[1]["content"][0]["text"],
         )
-        self.assertEqual("data:image/png;base64,x", updated[1]["content"][1]["image_url"]["url"])
+        self.assertEqual(
+            "data:image/png;base64,x", updated[1]["content"][1]["image_url"]["url"]
+        )
 
 
 if __name__ == "__main__":

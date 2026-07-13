@@ -133,8 +133,7 @@ def _apply_memory_to_stage_brief(
         for hint in memory_pack.success_hints[:3]
     ]
     failure_rules = [
-        _compact_memory_text(hint)
-        for hint in memory_pack.failure_hints[:3]
+        _compact_memory_text(hint) for hint in memory_pack.failure_hints[:3]
     ]
     critic_checks = [
         "Verify retrieved failure is avoided: " + _compact_memory_text(hint)
@@ -207,9 +206,7 @@ def _build_hybrid_retriever(
 ):
     """Construct the optional hybrid retriever from memory config."""
     if not (
-        memory_store.success_cases
-        or memory_store.failure_cases
-        or memory_store.skills
+        memory_store.success_cases or memory_store.failure_cases or memory_store.skills
     ):
         console_logger.info(
             "Hybrid memory requested but memory store is empty; using "
@@ -325,7 +322,9 @@ class SceneExpertHookRunner:
         self._config_hash = config_hash
         self._start_stage = start_stage
         self._stage_order_baseline = self._initial_completed_stages(start_stage)
-        self._room_start_stage = "furniture" if start_stage == "floor_plan" else start_stage
+        self._room_start_stage = (
+            "furniture" if start_stage == "floor_plan" else start_stage
+        )
         self._room_stage_order_baseline = self._initial_completed_stages(
             self._room_start_stage
         )
@@ -370,9 +369,9 @@ class SceneExpertHookRunner:
                 stage_brief=self._current_stage_brief,
                 scene=scene,
                 memory_pack=self._current_memory_pack,
-                history_summary=self._build_scene_state_summary()
-                if scene is not None
-                else "",
+                history_summary=(
+                    self._build_scene_state_summary() if scene is not None else ""
+                ),
                 last_hard_issues=last_hard_issues or [],
                 prompt=prompt,
                 trace_id=f"trace_{self._scene_id:06d}",
@@ -383,8 +382,12 @@ class SceneExpertHookRunner:
                     "config_hash": self._config_hash,
                 },
             )
-            safe_stage = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in stage)
-            safe_event = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in event)
+            safe_stage = "".join(
+                c if c.isalnum() or c in ("-", "_") else "_" for c in stage
+            )
+            safe_event = "".join(
+                c if c.isalnum() or c in ("-", "_") else "_" for c in event
+            )
             path = (
                 self._context_debug_dir
                 / safe_stage
@@ -414,9 +417,11 @@ class SceneExpertHookRunner:
                 "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 "stage": stage,
                 "module": "scene_expert_memory_retrieval",
-                "retriever": type(self._retriever).__name__
-                if self._retriever is not None
-                else "none",
+                "retriever": (
+                    type(self._retriever).__name__
+                    if self._retriever is not None
+                    else "none"
+                ),
                 "elapsed_sec": round(float(elapsed_sec), 6),
                 "success_hints": len(pack.success_hints) if pack else 0,
                 "failure_hints": len(pack.failure_hints) if pack else 0,
@@ -472,9 +477,11 @@ class SceneExpertHookRunner:
                 "scores": verify_report.scores,
                 "issues": [issue.model_dump() for issue in verify_report.issues],
                 "repair_actions": [
-                    action.model_dump()
-                    if hasattr(action, "model_dump")
-                    else getattr(action, "__dict__", str(action))
+                    (
+                        action.model_dump()
+                        if hasattr(action, "model_dump")
+                        else getattr(action, "__dict__", str(action))
+                    )
                     for action in repair_actions
                 ],
                 "critique_summary": verify_report.critique_summary[:2000],
@@ -518,7 +525,8 @@ class SceneExpertHookRunner:
                 self._memory_store.add_success_case(case)
             elif not verify_report.pass_stage and verify_report.issues:
                 reasons = [
-                    issue.description or issue.issue_type for issue in verify_report.issues
+                    issue.description or issue.issue_type
+                    for issue in verify_report.issues
                 ]
                 classified = classify_hard_reasons(reasons)
                 case = FailureCase(
@@ -598,9 +606,8 @@ class SceneExpertHookRunner:
                     self._task_spec, stage
                 )
                 retrieval_elapsed = time.time() - retrieval_start
-                n_hints = (
-                    len(self._current_memory_pack.success_hints)
-                    + len(self._current_memory_pack.failure_hints)
+                n_hints = len(self._current_memory_pack.success_hints) + len(
+                    self._current_memory_pack.failure_hints
                 )
                 self._record_memory_retrieval_timing(
                     stage=stage,
@@ -615,9 +622,11 @@ class SceneExpertHookRunner:
             except Exception as e:
                 self._record_memory_retrieval_timing(
                     stage=stage,
-                    elapsed_sec=time.time() - retrieval_start
-                    if "retrieval_start" in locals()
-                    else 0.0,
+                    elapsed_sec=(
+                        time.time() - retrieval_start
+                        if "retrieval_start" in locals()
+                        else 0.0
+                    ),
                     pack=None,
                     error=str(e),
                 )
@@ -727,7 +736,9 @@ class SceneExpertHookRunner:
             else:
                 console_logger.info(f"[SceneExpert] Stage {stage} PASSED verification")
         except Exception as e:
-            console_logger.warning(f"[SceneExpert] Verification failed for {stage}: {e}")
+            console_logger.warning(
+                f"[SceneExpert] Verification failed for {stage}: {e}"
+            )
 
         elapsed = time.time() - self._stage_start_time
         self._commit_stage_memory(
@@ -786,9 +797,8 @@ class SceneExpertHookRunner:
                     self._task_spec, stage
                 )
                 retrieval_elapsed = time.time() - retrieval_start
-                n_hints = (
-                    len(self._current_memory_pack.success_hints)
-                    + len(self._current_memory_pack.failure_hints)
+                n_hints = len(self._current_memory_pack.success_hints) + len(
+                    self._current_memory_pack.failure_hints
                 )
                 self._record_memory_retrieval_timing(
                     stage=stage,
@@ -803,9 +813,11 @@ class SceneExpertHookRunner:
             except Exception as e:
                 self._record_memory_retrieval_timing(
                     stage=stage,
-                    elapsed_sec=time.time() - retrieval_start
-                    if "retrieval_start" in locals()
-                    else 0.0,
+                    elapsed_sec=(
+                        time.time() - retrieval_start
+                        if "retrieval_start" in locals()
+                        else 0.0
+                    ),
                     pack=None,
                     error=str(e),
                 )
@@ -851,11 +863,7 @@ class SceneExpertHookRunner:
             injection_text = brief_text
             if memory_directives:
                 injection_text += "\n\n" + memory_directives
-            enhanced = (
-                scene.text_description
-                + "\n\n"
-                + injection_text
-            )
+            enhanced = scene.text_description + "\n\n" + injection_text
             scene.text_description = enhanced
             setattr(scene, "scene_expert_brief", injection_text)
             if memory_directives:
@@ -972,7 +980,9 @@ class SceneExpertHookRunner:
                 console_logger.info(f"[SceneExpert] Stage {stage} PASSED verification")
 
         except Exception as e:
-            console_logger.warning(f"[SceneExpert] Verification failed for {stage}: {e}")
+            console_logger.warning(
+                f"[SceneExpert] Verification failed for {stage}: {e}"
+            )
 
         # Log stage trace entry
         elapsed = time.time() - self._stage_start_time
@@ -1019,7 +1029,9 @@ class SceneExpertHookRunner:
         Args:
             final_scene_path: Path to the final scene output directory.
         """
-        console_logger.info(f"[SceneExpert/{self._mode}] finalizing scene {self._scene_id:03d}")
+        console_logger.info(
+            f"[SceneExpert/{self._mode}] finalizing scene {self._scene_id:03d}"
+        )
         finalize_start = time.time()
 
         # Full verifier
@@ -1207,6 +1219,7 @@ class SceneExpertHookRunner:
 # Factory function
 # ------------------------------------------------------------------
 
+
 def build_hook_runner(
     prompt: str,
     scene_id: int,
@@ -1253,9 +1266,13 @@ def build_hook_runner(
     console_logger.info(f"[SceneExpert] Building hook runner (mode={mode})")
 
     # Model / API settings (shared with SceneSmith agents)
-    model = cfg_dict.get("furniture_agent", {}).get("openai", {}).get(
-        "model",
-        cfg_dict.get("llm", {}).get("model_id", "Qwen/Qwen3.5-35B-A3B"),
+    model = (
+        cfg_dict.get("furniture_agent", {})
+        .get("openai", {})
+        .get(
+            "model",
+            cfg_dict.get("llm", {}).get("model_id", "Qwen/Qwen3.5-35B-A3B"),
+        )
     )
     api_base = os.environ.get("OPENAI_BASE_URL", "http://localhost:8000/v1")
     api_key = os.environ.get("OPENAI_API_KEY", "dummy")
@@ -1314,12 +1331,11 @@ def build_hook_runner(
     stage_verifier = StageVerifier(
         pass_threshold=ver_cfg.get("stage_pass_threshold", 0.6)
     )
-    full_verifier = FullVerifier(
-        pass_threshold=ver_cfg.get("full_pass_threshold", 0.7)
-    )
+    full_verifier = FullVerifier(pass_threshold=ver_cfg.get("full_pass_threshold", 0.7))
 
     # Build TaskCompiler and compile the task spec
     from omegaconf import OmegaConf
+
     task_compiler = TaskCompiler(model=model, api_base_url=api_base, api_key=api_key)
     try:
         task_spec = task_compiler.compile(prompt)
@@ -1328,17 +1344,17 @@ def build_hook_runner(
             f"TaskCompiler failed, using fallback task spec from prompt text: {e}"
         )
         from scenesmith.scene_expert.task_compiler import _fallback_spec_from_prompt
+
         task_spec = _fallback_spec_from_prompt(prompt)
 
     # Harness (always active when mode != "disabled")
     from omegaconf import OmegaConf
+
     se_omega = OmegaConf.create(se_cfg)
     harness = Harness(se_omega)
     harness.reset()
 
-    global_planner = GlobalPlanner(
-        model=model, api_base_url=api_base, api_key=api_key
-    )
+    global_planner = GlobalPlanner(model=model, api_base_url=api_base, api_key=api_key)
     repair_controller = RepairController(memory_store=memory_store)
     start_stage = (
         cfg_dict.get("experiment", {})

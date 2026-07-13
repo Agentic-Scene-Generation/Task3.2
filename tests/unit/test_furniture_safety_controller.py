@@ -109,7 +109,9 @@ class FurnitureSafetyControllerTest(unittest.TestCase):
 
     def test_required_object_removal_is_blocked(self) -> None:
         controller = FurnitureSafetyController({"enabled": True})
-        controller.reset_for_scene("A bedroom with a bed, two nightstands, and a wardrobe.")
+        controller.reset_for_scene(
+            "A bedroom with a bed, two nightstands, and a wardrobe."
+        )
 
         allowed, message = controller.record_remove(
             object_id="nightstand_0",
@@ -129,7 +131,9 @@ class FurnitureSafetyControllerTest(unittest.TestCase):
         )
 
         first = controller.consider_candidate(make_scores(layout=7), {"state": 1}, None)
-        second = controller.consider_candidate(make_scores(layout=7), {"state": 2}, None)
+        second = controller.consider_candidate(
+            make_scores(layout=7), {"state": 2}, None
+        )
 
         self.assertTrue(first.accepted)
         self.assertFalse(second.accepted)
@@ -192,12 +196,17 @@ class FurnitureSafetyControllerTest(unittest.TestCase):
 
         self.assertFalse(evaluation.hard_valid)
         self.assertTrue(
-            any("overlaps bed_0 footprint" in reason for reason in evaluation.hard_reasons)
+            any(
+                "overlaps bed_0 footprint" in reason
+                for reason in evaluation.hard_reasons
+            )
         )
 
     def test_required_counts_parse_two_nightstands(self) -> None:
         controller = FurnitureSafetyController({"enabled": True})
-        controller.reset_for_scene("A bedroom with a bed, two nightstands, and a wardrobe.")
+        controller.reset_for_scene(
+            "A bedroom with a bed, two nightstands, and a wardrobe."
+        )
 
         self.assertEqual(controller.required_counts.get("nightstand"), 2)
         self.assertEqual(controller.required_counts.get("bed"), 1)
@@ -205,7 +214,9 @@ class FurnitureSafetyControllerTest(unittest.TestCase):
 
     def test_add_required_object_is_blocked_after_requested_count(self) -> None:
         controller = FurnitureSafetyController({"enabled": True})
-        controller.reset_for_scene("A bedroom with a bed, two nightstands, and a wardrobe.")
+        controller.reset_for_scene(
+            "A bedroom with a bed, two nightstands, and a wardrobe."
+        )
         scene = SimpleNamespace(
             objects={
                 "nightstand_0": SimpleNamespace(
@@ -233,7 +244,9 @@ class FurnitureSafetyControllerTest(unittest.TestCase):
         self,
     ) -> None:
         controller = FurnitureSafetyController({"enabled": True})
-        controller.reset_for_scene("A bedroom with a bed, two nightstands, and a wardrobe.")
+        controller.reset_for_scene(
+            "A bedroom with a bed, two nightstands, and a wardrobe."
+        )
         scene = SimpleNamespace(
             objects={
                 "nightstand_0": SimpleNamespace(

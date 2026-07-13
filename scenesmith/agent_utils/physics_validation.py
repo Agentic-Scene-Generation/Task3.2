@@ -263,9 +263,7 @@ def compute_scene_collisions(
             if penetration_depth <= floor_penetration_tolerance:
                 continue
             non_floor_info = (
-                object_b_info
-                if object_a_info["name"] == "floor"
-                else object_a_info
+                object_b_info if object_a_info["name"] == "floor" else object_a_info
             )
             if _is_implausible_floor_penetration(
                 scene=scene,

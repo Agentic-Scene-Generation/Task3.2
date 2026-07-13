@@ -615,9 +615,7 @@ def main():
     args.output.mkdir(parents=True, exist_ok=True)
 
     # Start convex decomposition server for collision geometry generation.
-    convex_omp_threads = int(
-        os.environ.get("SCENEEXPERT_CONVEX_MAX_OMP_THREADS") or 32
-    )
+    convex_omp_threads = int(os.environ.get("SCENEEXPERT_CONVEX_MAX_OMP_THREADS") or 32)
     convex_ready_timeout = float(
         os.environ.get("SCENEEXPERT_CONVEX_READY_TIMEOUT") or 120
     )

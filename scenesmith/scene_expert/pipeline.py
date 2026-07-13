@@ -105,12 +105,16 @@ def _extract_scene_state_info(scene_dir: Path, stage: str) -> dict:
                     names = []
                     for obj in objects:
                         if isinstance(obj, dict):
-                            name = obj.get("name", obj.get("object_name", obj.get("id", "")))
+                            name = obj.get(
+                                "name", obj.get("object_name", obj.get("id", ""))
+                            )
                             if name:
                                 names.append(str(name))
                     return {"object_names": names}
             except Exception as e:
-                console_logger.debug(f"Could not parse scene state from {candidate}: {e}")
+                console_logger.debug(
+                    f"Could not parse scene state from {candidate}: {e}"
+                )
 
     return {"object_names": []}
 
@@ -241,8 +245,11 @@ class SceneExpertPipeline:
             task_spec = self._task_compiler.compile(prompt)
             qwen_call_count += 1
         except Exception as e:
-            console_logger.warning(f"TaskCompiler failed, continuing without task spec: {e}")
+            console_logger.warning(
+                f"TaskCompiler failed, continuing without task spec: {e}"
+            )
             from scenesmith.scene_expert.schemas import SceneTaskSpec
+
             task_spec = SceneTaskSpec(room_type="room", style="standard")
 
         # Determine stage range from config
@@ -252,7 +259,7 @@ class SceneExpertPipeline:
 
         start_idx = PIPELINE_STAGES.index(start_stage)
         stop_idx = PIPELINE_STAGES.index(stop_stage)
-        stages_to_run = PIPELINE_STAGES[start_idx: stop_idx + 1]
+        stages_to_run = PIPELINE_STAGES[start_idx : stop_idx + 1]
 
         # --- Step 2: Stage-by-stage loop ---
         stage_reports: list[StageVerifyReport] = []
@@ -274,7 +281,9 @@ class SceneExpertPipeline:
 
             # 2c. Generate StageBrief in this legacy path.
             stage_brief: StageBrief | None = None
-            scene_state_summary = self._build_scene_state_summary(scene_dir, completed_stages)
+            scene_state_summary = self._build_scene_state_summary(
+                scene_dir, completed_stages
+            )
 
             if stage != "floor_plan":
                 try:
@@ -318,7 +327,9 @@ class SceneExpertPipeline:
                     cfg_dict=stage_cfg_dict,
                 )
             except Exception as e:
-                console_logger.error(f"[SceneExpert] SceneSmith stage {stage} failed: {e}")
+                console_logger.error(
+                    f"[SceneExpert] SceneSmith stage {stage} failed: {e}"
+                )
                 # Log partial trace and continue to next stage
                 trace_logger.log_stage(
                     stage=stage,
@@ -374,7 +385,8 @@ class SceneExpertPipeline:
                 if decision.strategy == "stage_regeneration":
                     # Re-run this stage with updated prompt incorporating repair action
                     repair_prompt = (
-                        enhanced_prompt + f"\n\n[REPAIR INSTRUCTION]\n{repair_result.repair_action}"
+                        enhanced_prompt
+                        + f"\n\n[REPAIR INSTRUCTION]\n{repair_result.repair_action}"
                     )
                     repair_cfg_dict = self._build_stage_cfg_dict(
                         cfg_dict=cfg_dict,
@@ -394,18 +406,23 @@ class SceneExpertPipeline:
                             stage_output_dir=stage_output_dir,
                             task_spec=task_spec,
                             stage_brief=stage_brief,
-                            scene_state_info=_extract_scene_state_info(scene_dir, stage),
+                            scene_state_info=_extract_scene_state_info(
+                                scene_dir, stage
+                            ),
                         )
                         repair_result.repair_verified = verify_report.pass_stage
                         stage_reports[-1] = verify_report  # update latest
                     except Exception as e:
-                        console_logger.error(f"Stage regeneration failed for {stage}: {e}")
+                        console_logger.error(
+                            f"Stage regeneration failed for {stage}: {e}"
+                        )
 
                 elif decision.strategy == "local_repair":
                     # Local repair: the instruction will be passed in on next designer call
                     # For MVP, we re-run stage with the repair instruction appended
                     repair_prompt = (
-                        enhanced_prompt + f"\n\n[REPAIR INSTRUCTION]\n{repair_result.repair_action}"
+                        enhanced_prompt
+                        + f"\n\n[REPAIR INSTRUCTION]\n{repair_result.repair_action}"
                     )
                     repair_cfg_dict = self._build_stage_cfg_dict(
                         cfg_dict=cfg_dict,
@@ -424,12 +441,16 @@ class SceneExpertPipeline:
                             stage_output_dir=stage_output_dir,
                             task_spec=task_spec,
                             stage_brief=stage_brief,
-                            scene_state_info=_extract_scene_state_info(scene_dir, stage),
+                            scene_state_info=_extract_scene_state_info(
+                                scene_dir, stage
+                            ),
                         )
                         repair_result.repair_verified = verify_report.pass_stage
                         stage_reports[-1] = verify_report
                     except Exception as e:
-                        console_logger.error(f"Local repair execution failed for {stage}: {e}")
+                        console_logger.error(
+                            f"Local repair execution failed for {stage}: {e}"
+                        )
 
                 # Record failure to memory
                 self._repair_controller.record_failure_to_memory(
@@ -514,7 +535,9 @@ class SceneExpertPipeline:
         # Keep resume_from_path as-is (None for normal sequential execution)
         return stage_cfg
 
-    def _build_scene_state_summary(self, scene_dir: Path, completed_stages: list[str]) -> str:
+    def _build_scene_state_summary(
+        self, scene_dir: Path, completed_stages: list[str]
+    ) -> str:
         """Build a text summary of the current scene state from completed stages."""
         if not completed_stages:
             return "Empty scene — no objects placed yet."

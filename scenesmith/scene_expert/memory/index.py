@@ -88,7 +88,9 @@ class NumpyMemoryIndex:
         if not self.vectors_path.exists():
             raise FileNotFoundError(f"Missing numpy index vectors: {self.vectors_path}")
         if not self.metadata_path.exists():
-            raise FileNotFoundError(f"Missing numpy index metadata: {self.metadata_path}")
+            raise FileNotFoundError(
+                f"Missing numpy index metadata: {self.metadata_path}"
+            )
 
         self.vectors = np.load(self.vectors_path).astype(np.float32, copy=False)
         self.metadata = []
@@ -109,7 +111,9 @@ class NumpyMemoryIndex:
         else:
             self.manifest = {}
 
-    def search(self, query_vec: np.ndarray, top_k: int) -> list[tuple[float, dict[str, Any]]]:
+    def search(
+        self, query_vec: np.ndarray, top_k: int
+    ) -> list[tuple[float, dict[str, Any]]]:
         """Search by inner product. Use normalized vectors for cosine similarity."""
         if top_k <= 0:
             return []

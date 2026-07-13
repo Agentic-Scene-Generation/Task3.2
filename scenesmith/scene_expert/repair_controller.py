@@ -28,7 +28,9 @@ from scenesmith.scene_expert.schemas import (
 console_logger = logging.getLogger(__name__)
 
 
-def _issue_to_repair_instruction(issue: VerifyIssue, stage_brief: StageBrief | None) -> str:
+def _issue_to_repair_instruction(
+    issue: VerifyIssue, stage_brief: StageBrief | None
+) -> str:
     """Convert a verifier issue into a concrete designer instruction."""
     base = f"Fix issue: {issue.issue_type}"
     if issue.object_name:
@@ -39,7 +41,8 @@ def _issue_to_repair_instruction(issue: VerifyIssue, stage_brief: StageBrief | N
     # Augment with repair hints from the stage brief's failure patterns
     if stage_brief:
         relevant = [
-            p for p in stage_brief.failure_patterns_to_avoid
+            p
+            for p in stage_brief.failure_patterns_to_avoid
             if issue.object_name.lower() in p.lower() or issue.issue_type in p.lower()
         ]
         if relevant:
@@ -71,13 +74,18 @@ def _build_repair_instruction(
                     case.stage == verify_report.stage
                     and case.failure_type == issue.issue_type
                     and case.repair_action
-                    and (not issue.object_name or case.object.lower() in issue.object_name.lower())
+                    and (
+                        not issue.object_name
+                        or case.object.lower() in issue.object_name.lower()
+                    )
                 ):
                     instructions.append(f"Similar past fix: {case.repair_action}")
                     break
 
     if not instructions:
-        instructions = [f"Review the {verify_report.stage} stage output and fix any quality issues"]
+        instructions = [
+            f"Review the {verify_report.stage} stage output and fix any quality issues"
+        ]
 
     return "\n".join(f"{i+1}. {inst}" for i, inst in enumerate(instructions))
 
@@ -110,7 +118,9 @@ class RepairController:
         Returns:
             RepairResult documenting the repair action taken.
         """
-        console_logger.info(f"RepairController: executing {repair_type} for stage {stage}")
+        console_logger.info(
+            f"RepairController: executing {repair_type} for stage {stage}"
+        )
 
         if repair_type == "local_repair":
             return self._local_repair(stage, verify_report, scene_path, stage_brief)
@@ -120,7 +130,9 @@ class RepairController:
             return self._rollback(stage, scene_path)
         else:
             console_logger.warning(f"Unknown repair type: {repair_type}, skipping")
-            return RepairResult(repair_type="skipped", failure_type="unknown_repair_type")
+            return RepairResult(
+                repair_type="skipped", failure_type="unknown_repair_type"
+            )
 
     def _local_repair(
         self,
@@ -135,7 +147,9 @@ class RepairController:
         The pipeline is responsible for injecting this instruction into the designer.
         """
         failure_types = [issue.issue_type for issue in verify_report.issues]
-        instruction = _build_repair_instruction(verify_report, stage_brief, self._memory_store)
+        instruction = _build_repair_instruction(
+            verify_report, stage_brief, self._memory_store
+        )
 
         console_logger.info(
             f"LocalRepair [{stage}]: {len(verify_report.issues)} issues, "
@@ -185,7 +199,9 @@ class RepairController:
         Note: Full rollback requires SceneSmith's resume_from_path mechanism.
         This method returns the decision; the pipeline executes the actual rollback.
         """
-        console_logger.info(f"Rollback [{stage}]: requesting rollback to previous checkpoint")
+        console_logger.info(
+            f"Rollback [{stage}]: requesting rollback to previous checkpoint"
+        )
         return RepairResult(
             repair_type="rollback",
             failure_type="quality_too_low",

@@ -40,9 +40,10 @@ MEMORY_TYPES = ("success", "failure", "skill")
 
 
 def default_memory_dir() -> Path:
-    return Path(
-        os.environ.get("SCENEEXPERT_MEMORY_DIR", "outputs/scene_expert_memory")
-    ) / "ablation_4"
+    return (
+        Path(os.environ.get("SCENEEXPERT_MEMORY_DIR", "outputs/scene_expert_memory"))
+        / "ablation_4"
+    )
 
 
 def _source_file_info(path: Path) -> dict[str, Any]:

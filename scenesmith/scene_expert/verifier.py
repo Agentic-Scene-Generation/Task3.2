@@ -92,8 +92,11 @@ def _load_scores_yaml(scores_yaml_path: Path) -> tuple[dict[str, float], str]:
                 flat[k] = float(grade)
             else:
                 flat.update(
-                    {f"{k}.{sk}": float(sv) for sk, sv in v.items()
-                     if isinstance(sv, (int, float))}
+                    {
+                        f"{k}.{sk}": float(sv)
+                        for sk, sv in v.items()
+                        if isinstance(sv, (int, float))
+                    }
                 )
     return flat, summary
 
@@ -139,9 +142,11 @@ def _find_scores_yaml(stage_output_dir: str, stage: str = "") -> Path | None:
 
     if stage == "manipuland":
         # Collect all per-object manipuland scores files.
-        candidates = sorted(
-            (root / "scene_states").glob("manipuland_*/scores.yaml")
-        ) if (root / "scene_states").exists() else []
+        candidates = (
+            sorted((root / "scene_states").glob("manipuland_*/scores.yaml"))
+            if (root / "scene_states").exists()
+            else []
+        )
         if candidates:
             # Return the most recent per-object scores file (last manipuland placed).
             return max(candidates, key=lambda p: p.stat().st_mtime)
@@ -231,7 +236,11 @@ def _critique_mentions_missing_required(
 def _add_issue_once(issues: list[VerifyIssue], issue: VerifyIssue) -> None:
     signature = (issue.issue_type, issue.object_name, issue.description)
     for existing in issues:
-        if (existing.issue_type, existing.object_name, existing.description) == signature:
+        if (
+            existing.issue_type,
+            existing.object_name,
+            existing.description,
+        ) == signature:
             return
     issues.append(issue)
 
@@ -372,7 +381,9 @@ class StageVerifier:
 
         # If no scores available, use conservative defaults
         if not mapped_scores:
-            console_logger.warning(f"No scores.yaml found for stage {stage}, using defaults")
+            console_logger.warning(
+                f"No scores.yaml found for stage {stage}, using defaults"
+            )
             mapped_scores = {
                 "semantic": 0.5,
                 "aesthetic": 0.5,
@@ -479,9 +490,7 @@ class StageVerifier:
             plausibility_score is None or plausibility_score >= self._pass_threshold
         )
         pass_stage = (
-            avg_score >= self._pass_threshold
-            and pass_plausibility
-            and len(issues) == 0
+            avg_score >= self._pass_threshold and pass_plausibility and len(issues) == 0
         )
         if not pass_plausibility:
             repair_suggestions.append(
@@ -566,9 +575,7 @@ class FullVerifier:
         )
 
         has_plausibility = "plausibility" in all_scores
-        pass_plausibility = (
-            not has_plausibility or plausibility >= self._pass_threshold
-        )
+        pass_plausibility = not has_plausibility or plausibility >= self._pass_threshold
 
         report = FullVerifyReport(
             semantic_score=semantic,
@@ -576,7 +583,7 @@ class FullVerifier:
             plausibility_score=plausibility,
             style_consistency=aesthetic,  # proxy
             collision_free_rate=physics,
-            stability_score=physics,      # proxy
+            stability_score=physics,  # proxy
             walkable_area_ratio=walkability if walkability > 0 else 0.0,
             reachability_score=interaction,
             support_relation_accuracy=interaction,  # proxy

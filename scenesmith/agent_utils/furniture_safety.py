@@ -121,7 +121,9 @@ def _contains_alias(text: str, alias: str) -> bool:
     normalized = text.lower().replace("_", " ")
     escaped = re.escape(alias.lower())
     if " " in alias:
-        return re.search(rf"(^|[^a-z0-9]){escaped}([^a-z0-9]|$)", normalized) is not None
+        return (
+            re.search(rf"(^|[^a-z0-9]){escaped}([^a-z0-9]|$)", normalized) is not None
+        )
     return re.search(rf"(^|[^a-z0-9]){escaped}([^a-z0-9]|$)", normalized) is not None
 
 
@@ -163,9 +165,7 @@ class FurnitureSafetyController:
         self.max_moves_initial_design = int(
             _cfg_get(cfg, "max_moves_initial_design", 30)
         )
-        self.max_moves_design_change = int(
-            _cfg_get(cfg, "max_moves_design_change", 12)
-        )
+        self.max_moves_design_change = int(_cfg_get(cfg, "max_moves_design_change", 12))
         self.max_moves_per_object_per_call = int(
             _cfg_get(cfg, "max_moves_per_object_per_call", 4)
         )
@@ -598,10 +598,13 @@ class FurnitureSafetyController:
             scene is not None
             and category is not None
             and category in required_counts
-            and self._count_category_in_scene(scene, category) > required_counts[category]
+            and self._count_category_in_scene(scene, category)
+            > required_counts[category]
         ):
             return True, ""
-        if category in required_counts or self.is_required_object(object_id, object_text):
+        if category in required_counts or self.is_required_object(
+            object_id, object_text
+        ):
             return (
                 False,
                 self._record_tool_denial(
@@ -699,7 +702,8 @@ class FurnitureSafetyController:
         if weight_sum == 0:
             all_scores = scores.get_scores()
             weighted_score = (
-                sum(float(score.grade) for score in all_scores) / (10.0 * len(all_scores))
+                sum(float(score.grade) for score in all_scores)
+                / (10.0 * len(all_scores))
                 if all_scores
                 else 0.0
             )
@@ -748,7 +752,9 @@ class FurnitureSafetyController:
             "open connection blocked",
         )
         if any(term in text for term in door_terms):
-            hard_reasons.append("door or open-connection blockage indicated by critique")
+            hard_reasons.append(
+                "door or open-connection blockage indicated by critique"
+            )
 
         if "window" in text and not hard_reasons:
             soft_reasons.append(
@@ -853,7 +859,9 @@ class FurnitureSafetyController:
                 plausibility_report.penalty if plausibility_report is not None else 0.0
             ),
             plausibility_report=(
-                plausibility_report.to_dict() if plausibility_report is not None else None
+                plausibility_report.to_dict()
+                if plausibility_report is not None
+                else None
             ),
         )
 
@@ -920,7 +928,9 @@ class FurnitureSafetyController:
             nightstand_bounds = self._safe_world_bounds(nightstand)
             if nightstand_bounds is None:
                 continue
-            overlap_x, overlap_y = self._xy_overlap_depths(bed_bounds, nightstand_bounds)
+            overlap_x, overlap_y = self._xy_overlap_depths(
+                bed_bounds, nightstand_bounds
+            )
             if (
                 overlap_x > self.nightstand_bed_overlap_tolerance_m
                 and overlap_y > self.nightstand_bed_overlap_tolerance_m
@@ -976,7 +986,9 @@ class FurnitureSafetyController:
         dy = max(min_a[1] - max_b[1], min_b[1] - max_a[1], 0.0)
         return (float(dx) ** 2 + float(dy) ** 2) ** 0.5
 
-    def _parse_physics_context(self, physics_context: str) -> tuple[list[str], list[str]]:
+    def _parse_physics_context(
+        self, physics_context: str
+    ) -> tuple[list[str], list[str]]:
         text = physics_context.lower()
         if "no physics violations detected" in text:
             return [], []

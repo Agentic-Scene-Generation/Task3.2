@@ -99,7 +99,9 @@ class StageWorkingMemoryTest(unittest.TestCase):
             self.assertIn("keep both nightstands beside the bed", retrieved)
             self.assertIn(str(render_dir), retrieved)
 
-    def test_missing_required_object_overrides_hallucinated_success_critique(self) -> None:
+    def test_missing_required_object_overrides_hallucinated_success_critique(
+        self,
+    ) -> None:
         with TemporaryDirectory() as tmp:
             root_dir = Path(tmp)
             render_dir = root_dir / "scene_renders" / "furniture" / "renders_003"

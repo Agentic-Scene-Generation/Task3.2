@@ -767,9 +767,7 @@ def _generate_room(
                         )
 
                     # Get fallen furniture config from physics_validation.
-                    physics_val_cfg = cfg_dict["furniture_agent"][
-                        "physics_validation"
-                    ]
+                    physics_val_cfg = cfg_dict["furniture_agent"]["physics_validation"]
                     scene, projection_success, removed_ids = (
                         apply_physical_feasibility_postprocessing(
                             scene=scene,
@@ -779,9 +777,7 @@ def _generate_room(
                                 "influence_distance"
                             ],
                             projection_solver_name=furniture_cfg["solver_name"],
-                            projection_iteration_limit=furniture_cfg[
-                                "iteration_limit"
-                            ],
+                            projection_iteration_limit=furniture_cfg["iteration_limit"],
                             projection_time_limit_s=furniture_cfg["time_limit_s"],
                             projection_xy_only=furniture_cfg["xy_only"],
                             projection_fix_rotation=furniture_cfg["fix_rotation"],
@@ -1952,6 +1948,7 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                     # Build SceneExpert hook runner before floor_plan so fast
                     # memory and StageBrief can guide the house-level layout too.
                     from scenesmith.scene_expert.hooks import build_hook_runner
+
                     scene_expert_hooks = build_hook_runner(
                         prompt=prompt,
                         scene_id=scene_id,
@@ -2168,9 +2165,7 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
             status="completed",
             attempt=attempt,
         )
-        (scene_dir / _SCENE_SUCCESS_MARKER).write_text(
-            "completed\n", encoding="utf-8"
-        )
+        (scene_dir / _SCENE_SUCCESS_MARKER).write_text("completed\n", encoding="utf-8")
 
     def _run_serial_generation(
         self,
@@ -2280,8 +2275,8 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                     attempt=attempt,
                     error=error[-8000:],
                 )
-                can_retry = (
-                    attempt <= retry_budget and _is_retryable_scene_failure(error)
+                can_retry = attempt <= retry_budget and _is_retryable_scene_failure(
+                    error
                 )
                 if can_retry:
                     archive_path = _archive_failed_scene_attempt(

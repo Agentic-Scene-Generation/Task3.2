@@ -232,8 +232,7 @@ class MemoryWriter:
 
             try:
                 ops = [
-                    MemoryUpdateOp.model_validate(op)
-                    for op in data.get("updates", [])
+                    MemoryUpdateOp.model_validate(op) for op in data.get("updates", [])
                 ]
                 ops = self._gate_and_enrich_ops(ops, full_report)
             except Exception as e:
@@ -314,8 +313,7 @@ class MemoryWriter:
                 "reasoning text, comments, or XML/tool tags."
             )
             prompt = (
-                user_message
-                + "\n\nReturn ONLY this JSON shape now:\n"
+                user_message + "\n\nReturn ONLY this JSON shape now:\n"
                 '{"updates":[{"op":"ADD|UPDATE|NOOP","memory_type":'
                 '"success_case|failure_case|skill","target_id":"","content":{}}]}'
             )

@@ -174,7 +174,9 @@ class MemoryRetriever:
                 continue
             room_bonus = 1.5 if case.room_type == task_spec.room_type else 1.0
             candidate_tokens = _tokenize(
-                " ".join([case.room_type, case.object, case.failure_type, case.bad_pattern])
+                " ".join(
+                    [case.room_type, case.object, case.failure_type, case.bad_pattern]
+                )
             )
             score = _keyword_score(query_tokens, candidate_tokens) * room_bonus
             scored.append((score, case))
@@ -202,4 +204,8 @@ class MemoryRetriever:
             scored.append((score, skill))
 
         scored.sort(key=lambda x: x[0], reverse=True)
-        return [skill.to_procedure_text() for _, skill in scored[: self._max_skills] if _ > 0]
+        return [
+            skill.to_procedure_text()
+            for _, skill in scored[: self._max_skills]
+            if _ > 0
+        ]

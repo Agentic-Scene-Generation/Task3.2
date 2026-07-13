@@ -88,19 +88,13 @@ class BedroomPlausibilityReport:
                     self.anchor_plan.bed_head_wall if self.anchor_plan else None
                 ),
                 "bed_head_wall_reason": (
-                    self.anchor_plan.bed_head_wall_reason
-                    if self.anchor_plan
-                    else None
+                    self.anchor_plan.bed_head_wall_reason if self.anchor_plan else None
                 ),
                 "avoid_head_walls": (
-                    list(self.anchor_plan.avoid_head_walls)
-                    if self.anchor_plan
-                    else []
+                    list(self.anchor_plan.avoid_head_walls) if self.anchor_plan else []
                 ),
                 "wall_openings": (
-                    dict(self.anchor_plan.wall_openings)
-                    if self.anchor_plan
-                    else {}
+                    dict(self.anchor_plan.wall_openings) if self.anchor_plan else {}
                 ),
             },
         }
@@ -212,7 +206,9 @@ def is_bedroom_scene(scene: Any) -> bool:
 
 def scene_text_explicitly_requests_large_bed(scene: Any) -> bool:
     text = _text(getattr(scene, "text_description", ""))
-    return any(term in text for term in ("queen bed", "king bed", "queen-size", "king-size"))
+    return any(
+        term in text for term in ("queen bed", "king bed", "queen-size", "king-size")
+    )
 
 
 def scene_text_explicitly_requests_small_bed(scene: Any) -> bool:
@@ -220,7 +216,9 @@ def scene_text_explicitly_requests_small_bed(scene: Any) -> bool:
     return any(term in text for term in ("twin bed", "single bed", "twin-size"))
 
 
-def build_bedroom_anchor_plan(scene: Any, cfg: Any | None = None) -> BedroomAnchorPlan | None:
+def build_bedroom_anchor_plan(
+    scene: Any, cfg: Any | None = None
+) -> BedroomAnchorPlan | None:
     """Choose a preferred bed-head wall from room openings."""
     if not is_bedroom_scene(scene):
         return None
@@ -340,8 +338,12 @@ def apply_bedroom_asset_size_policy(
     large_bed_max = _cfg_float_list(
         cfg, "explicit_large_bed_max_dimensions", [2.10, 2.30, 1.20]
     )
-    nightstand_min = _cfg_float_list(cfg, "nightstand_min_dimensions", [0.30, 0.30, 0.35])
-    nightstand_max = _cfg_float_list(cfg, "nightstand_max_dimensions", [0.65, 0.55, 0.75])
+    nightstand_min = _cfg_float_list(
+        cfg, "nightstand_min_dimensions", [0.30, 0.30, 0.35]
+    )
+    nightstand_max = _cfg_float_list(
+        cfg, "nightstand_max_dimensions", [0.65, 0.55, 0.75]
+    )
     wardrobe_min = _cfg_float_list(cfg, "wardrobe_min_dimensions", [0.60, 0.35, 1.60])
     wardrobe_max = _cfg_float_list(cfg, "wardrobe_max_dimensions", [1.20, 0.70, 2.35])
 
@@ -389,7 +391,9 @@ def apply_bedroom_asset_size_policy(
         elif category == "wardrobe":
             normalized = _normalize_dimensions(dims, wardrobe_min, wardrobe_max)
             if normalized != dims[:3]:
-                notes.append(f"clamped wardrobe dimensions from {dims[:3]} to {normalized}")
+                notes.append(
+                    f"clamped wardrobe dimensions from {dims[:3]} to {normalized}"
+                )
             dimensions[idx] = normalized
 
     return AssetSizePolicyResult(descriptions, names, dimensions, notes)
@@ -543,7 +547,9 @@ def evaluate_bedroom_layout_plausibility(
         for object_id, obj in getattr(scene, "objects", {}).items()
         if _is_furniture_object(obj)
     ]
-    beds = [(object_id, obj) for object_id, obj, category in objects if category == "bed"]
+    beds = [
+        (object_id, obj) for object_id, obj, category in objects if category == "bed"
+    ]
     nightstands = [
         (object_id, obj)
         for object_id, obj, category in objects
@@ -586,7 +592,9 @@ def evaluate_bedroom_layout_plausibility(
                 )
                 penalty += 0.12
 
-        opening_type = _bed_overlaps_opening_on_wall(scene, bed_bounds, actual_head_wall)
+        opening_type = _bed_overlaps_opening_on_wall(
+            scene, bed_bounds, actual_head_wall
+        )
         if opening_type in ("window", "door", "open"):
             issues.append(
                 "bedroom plausibility: bed headboard overlaps/targets "
@@ -636,7 +644,9 @@ def evaluate_bedroom_layout_plausibility(
                 float(world_min[1]) - min_y,
                 max_y - float(world_max[1]),
             )
-            if nearest_wall_distance > _cfg_float(cfg, "wardrobe_wall_max_distance_m", 0.35):
+            if nearest_wall_distance > _cfg_float(
+                cfg, "wardrobe_wall_max_distance_m", 0.35
+            ):
                 issues.append(
                     "bedroom plausibility: wardrobe is floating away from walls "
                     f"(nearest wall distance {nearest_wall_distance:.2f}m)"

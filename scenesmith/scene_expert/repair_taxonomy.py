@@ -59,7 +59,9 @@ class RepairPlan:
         )
 
 
-def classify_hard_reasons(reasons: list[str] | tuple[str, ...] | None) -> list[ClassifiedFailure]:
+def classify_hard_reasons(
+    reasons: list[str] | tuple[str, ...] | None,
+) -> list[ClassifiedFailure]:
     """Classify deterministic hard-check strings into stable failure classes."""
     failures: list[ClassifiedFailure] = []
     for reason in reasons or []:
@@ -73,7 +75,12 @@ def classify_hard_reasons(reasons: list[str] | tuple[str, ...] | None) -> list[C
             category = FailureCategory.WINDOW_OR_WALL_ACCESS
         elif "collision" in text or "overlap" in text or "penetration" in text:
             category = FailureCategory.COLLISION_OR_OVERLAP
-        elif "support" in text or "surface" in text or "fell off" in text or "fallen" in text:
+        elif (
+            "support" in text
+            or "surface" in text
+            or "fell off" in text
+            or "fallen" in text
+        ):
             category = FailureCategory.SUPPORT_INVALID
         elif "out of bounds" in text or "outside room" in text or "boundary" in text:
             category = FailureCategory.OUT_OF_BOUNDS

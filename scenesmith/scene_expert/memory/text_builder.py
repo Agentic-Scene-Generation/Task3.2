@@ -55,7 +55,9 @@ def _build_success_text(record: SuccessCase) -> str:
         f"room_type={record.room_type}",
     ]
     _append_line(lines, "style", record.style)
-    _append_list(lines, "required_objects", record.required_objects or record.task_signature)
+    _append_list(
+        lines, "required_objects", record.required_objects or record.task_signature
+    )
     _append_list(lines, "functional_zones", record.functional_zones)
     _append_line(lines, "scene_summary", record.scene_summary)
     _append_list(lines, "task_signature", record.task_signature)

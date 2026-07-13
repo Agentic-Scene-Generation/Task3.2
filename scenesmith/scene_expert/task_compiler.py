@@ -30,6 +30,7 @@ def _append_llm_debug(record: dict) -> None:
     except Exception as e:
         console_logger.warning("TaskCompiler failed to write LLM debug record: %s", e)
 
+
 _SYSTEM_PROMPT = """\
 /no_think
 You are the task_compiler for SceneExpert, a 3D indoor scene generation system.
@@ -121,7 +122,11 @@ _OBJECT_ALIASES: dict[str, tuple[str, list[str], str]] = {
     "chair": ("large", ["chair", "chairs"], "chair"),
     "painting": ("wall", ["painting", "paintings", "artwork", "artworks"], "painting"),
     "mirror": ("wall", ["mirror", "mirrors"], "mirror"),
-    "shelf": ("wall", ["shelf", "shelves", "floating shelf", "floating shelves"], "shelf"),
+    "shelf": (
+        "wall",
+        ["shelf", "shelves", "floating shelf", "floating shelves"],
+        "shelf",
+    ),
     "ceiling light": (
         "ceiling",
         ["ceiling light", "ceiling lights", "pendant light", "pendant lights", "lamp"],
@@ -137,8 +142,7 @@ def _extract_count_before_alias(text: str, alias: str) -> int:
     alias_pattern = re.escape(alias.lower()).replace(r"\ ", r"\s+")
     number_pattern = "|".join([r"\d+", *map(re.escape, _NUMBER_WORDS)])
     pattern = (
-        rf"(?:(?P<count>{number_pattern})\s+)?"
-        rf"(?:\w+\s+){{0,2}}{alias_pattern}\b"
+        rf"(?:(?P<count>{number_pattern})\s+)?" rf"(?:\w+\s+){{0,2}}{alias_pattern}\b"
     )
     best = 0
     for match in re.finditer(pattern, text):
@@ -258,7 +262,8 @@ class TaskCompiler:
         self._max_tokens = max_tokens
         self._temperature = temperature
         self._client = OpenAI(
-            base_url=api_base_url or os.environ.get("OPENAI_BASE_URL", "http://localhost:8000/v1"),
+            base_url=api_base_url
+            or os.environ.get("OPENAI_BASE_URL", "http://localhost:8000/v1"),
             api_key=api_key or os.environ.get("OPENAI_API_KEY", "dummy"),
         )
 
@@ -317,4 +322,6 @@ class TaskCompiler:
             )
             return task_spec
         except Exception as e:
-            raise ValueError(f"TaskCompiler failed to parse model response: {e}\nRaw: {raw}") from e
+            raise ValueError(
+                f"TaskCompiler failed to parse model response: {e}\nRaw: {raw}"
+            ) from e

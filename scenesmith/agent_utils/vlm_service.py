@@ -74,7 +74,9 @@ class VLMService:
             kwargs = {
                 "model": model,
                 "input": input_messages,
-                "reasoning": {"effort": responses_api_reasoning_effort(reasoning_effort)},
+                "reasoning": {
+                    "effort": responses_api_reasoning_effort(reasoning_effort)
+                },
                 "text": {"verbosity": verbosity},
             }
             if self.service_tier:

@@ -46,11 +46,7 @@ def _default_local_checkpoint() -> Path | None:
     openclip_dir = os.environ.get(OPENCLIP_DIR_ENV)
     if openclip_dir:
         openclip_root = Path(os.path.expandvars(os.path.expanduser(openclip_dir)))
-        return (
-            openclip_root
-            / "DFN5B-CLIP-ViT-H-14-378"
-            / "open_clip_pytorch_model.bin"
-        )
+        return openclip_root / "DFN5B-CLIP-ViT-H-14-378" / "open_clip_pytorch_model.bin"
 
     data_dir = os.environ.get("SCENEEXPERT_DATA_DIR")
     if not data_dir:
@@ -127,8 +123,10 @@ def _get_clip_model(device: str | None = None):
         _device = target_device
 
         try:
-            _cached_model, _, _cached_preprocess = open_clip.create_model_and_transforms(
-                model_name, pretrained=pretrained, device=_device
+            _cached_model, _, _cached_preprocess = (
+                open_clip.create_model_and_transforms(
+                    model_name, pretrained=pretrained, device=_device
+                )
             )
             _cached_tokenizer = open_clip.get_tokenizer(model_name)
         except Exception as e:

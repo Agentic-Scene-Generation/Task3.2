@@ -129,9 +129,9 @@ class SupportSurfaceExtractionConfig:
             height_tolerance_m=cfg.height.height_tolerance_m,
             # HSSD surface handling.
             recompute_hssd_surfaces=cfg.hssd.recompute_surfaces,
-            hssd_data_dir=Path(str(cfg.hssd.data_dir))
-            if cfg.hssd.get("data_dir")
-            else None,
+            hssd_data_dir=(
+                Path(str(cfg.hssd.data_dir)) if cfg.hssd.get("data_dir") else None
+            ),
         )
 
 
