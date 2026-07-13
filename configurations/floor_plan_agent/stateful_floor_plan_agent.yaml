@@ -7,15 +7,15 @@ defaults:
 agents:
   planner_agent:
     name: "floor_plan_planner"
-    max_turns: 500
+    max_turns: 60
     prompt: PLANNER_AGENT
 
   designer_agent:
     name: "floor_plan_designer"
-    max_turns: 1000
+    max_turns: 120
     prompt: DESIGNER_AGENT
 
   critic_agent:
     name: "floor_plan_critic"
-    max_turns: 500
+    max_turns: 12
     prompt: CRITIC_AGENT

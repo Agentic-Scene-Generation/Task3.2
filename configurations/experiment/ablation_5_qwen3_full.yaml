@@ -30,7 +30,7 @@ scene_expert:
   enabled: true
   mode: "full"   # harness + memory + LoRA (same as harness_memory at runtime; model is the difference)
   memory:
-    dir: "outputs/scene_expert_memory/ablation_5"
+    dir: "${paths.memory_dir}/ablation_5"
     retrieval:
       max_success_cases: 3
       max_failure_cases: 3

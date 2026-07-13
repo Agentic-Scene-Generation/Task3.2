@@ -23,11 +23,17 @@ from scenesmith.scene_expert.schemas import (
 console_logger = logging.getLogger(__name__)
 
 # Fixed stage order matching SceneSmith's pipeline
-STAGE_ORDER = ["floor_plan", "furniture", "wall_mounted", "ceiling_mounted", "manipuland"]
+STAGE_ORDER = [
+    "floor_plan",
+    "furniture",
+    "wall_mounted",
+    "ceiling_mounted",
+    "manipuland",
+]
 
 # Maps SceneSmith internal stage names (for checkpoint loading)
 STAGE_TO_CHECKPOINT = {
-    "floor_plan": None,               # First stage — no prior checkpoint
+    "floor_plan": None,  # First stage — no prior checkpoint
     "furniture": "house_layout.json",
     "wall_mounted": "scene_after_furniture",
     "ceiling_mounted": "scene_after_wall_objects",
@@ -111,7 +117,9 @@ class Harness:
             RepairDecision with strategy and reason.
         """
         if verify_report.pass_stage:
-            return RepairDecision(should_repair=False, strategy="skip", reason="Stage passed")
+            return RepairDecision(
+                should_repair=False, strategy="skip", reason="Stage passed"
+            )
 
         budget = self._get_stage_budget(stage)
         attempt = self._repair_counts.get(stage, 0)
@@ -137,7 +145,9 @@ class Harness:
             f"Attempt {attempt + 1}/{budget.max_repair_steps}: "
             f"issues={[i.issue_type for i in verify_report.issues]}"
         )
-        console_logger.info(f"Harness repair decision for {stage}: {strategy} ({reason})")
+        console_logger.info(
+            f"Harness repair decision for {stage}: {strategy} ({reason})"
+        )
 
         return RepairDecision(should_repair=True, strategy=strategy, reason=reason)
 
@@ -151,7 +161,9 @@ class Harness:
         stage_override = getattr(stage_cfg, stage, None)
         if stage_override is not None:
             return StageBudget(
-                max_designer_iterations=getattr(stage_override, "max_designer_iterations", 2),
+                max_designer_iterations=getattr(
+                    stage_override, "max_designer_iterations", 2
+                ),
                 max_repair_steps=getattr(stage_override, "max_repair_steps", 1),
             )
 
@@ -165,7 +177,9 @@ class Harness:
 
         return StageBudget()
 
-    def validate_stage_order(self, completed_stages: list[str], next_stage: str) -> bool:
+    def validate_stage_order(
+        self, completed_stages: list[str], next_stage: str
+    ) -> bool:
         """Assert stage execution follows the fixed FSM order.
 
         Args:
@@ -185,7 +199,9 @@ class Harness:
         actual_idx = STAGE_ORDER.index(next_stage)
 
         if actual_idx != expected_idx:
-            expected_stage = STAGE_ORDER[expected_idx] if expected_idx < len(STAGE_ORDER) else "done"
+            expected_stage = (
+                STAGE_ORDER[expected_idx] if expected_idx < len(STAGE_ORDER) else "done"
+            )
             raise ValueError(
                 f"Stage order violation: expected '{expected_stage}' "
                 f"(index {expected_idx}) but got '{next_stage}' (index {actual_idx}). "

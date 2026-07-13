@@ -1697,7 +1697,10 @@ def extract_and_propagate_support_surfaces(
 
         mesh_id = furniture_object.metadata["hssd_mesh_id"]
         surfaces = load_hssd_support_surfaces(
-            mesh_id=mesh_id, config=config, scene=scene
+            mesh_id=mesh_id,
+            config=config,
+            scene=scene,
+            data_dir=config.hssd_data_dir,
         )
         source = "HSSD"
 

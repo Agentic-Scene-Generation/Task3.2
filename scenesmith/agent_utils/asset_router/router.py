@@ -41,6 +41,7 @@ from scenesmith.agent_utils.materials_retrieval_server import (
 from scenesmith.agent_utils.objaverse_retrieval_server.dataclasses import (
     ObjaverseRetrievalServerRequest,
 )
+from scenesmith.agent_utils.retrieval_errors import FatalRetrievalError
 from scenesmith.agent_utils.room import AgentType, ObjectType
 from scenesmith.agent_utils.thin_covering_generator import (
     create_circular_thin_covering_glb,
@@ -1559,6 +1560,8 @@ class AssetRouter:
             )
             return response.results
 
+        except FatalRetrievalError:
+            raise
         except Exception as e:
             console_logger.error(f"HSSD fetch failed for '{item.description}': {e}")
             return None

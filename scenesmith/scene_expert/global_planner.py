@@ -13,9 +13,11 @@ import json
 import logging
 import os
 import re
+from pathlib import Path
 
 from openai import OpenAI
 
+from scenesmith.scene_expert.context_bundle import build_llm_call_debug_record
 from scenesmith.scene_expert.schemas import (
     HarnessContext,
     MemoryPack,
@@ -24,6 +26,20 @@ from scenesmith.scene_expert.schemas import (
 )
 
 console_logger = logging.getLogger(__name__)
+
+
+def _append_llm_debug(record: dict) -> None:
+    path = os.environ.get("SCENEEXPERT_LLM_DEBUG_PATH", "")
+    if not path:
+        return
+    try:
+        debug_path = Path(path)
+        debug_path.parent.mkdir(parents=True, exist_ok=True)
+        with debug_path.open("a", encoding="utf-8", newline="\n") as f:
+            f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+    except Exception as e:
+        console_logger.warning("GlobalPlanner failed to write LLM debug record: %s", e)
+
 
 _SYSTEM_PROMPT = """\
 /no_think
@@ -92,7 +108,7 @@ def _format_task_spec(task_spec: SceneTaskSpec, stage: str) -> str:
     ]
 
     stage_objects = {
-        "floor_plan": [],
+        "floor_plan": task_spec.required_large_objects,
         "furniture": task_spec.required_large_objects,
         "wall_mounted": task_spec.required_wall_objects,
         "ceiling_mounted": task_spec.required_ceiling_objects,
@@ -145,7 +161,8 @@ class GlobalPlanner:
         self._max_tokens = max_tokens
         self._temperature = temperature
         self._client = OpenAI(
-            base_url=api_base_url or os.environ.get("OPENAI_BASE_URL", "http://localhost:8000/v1"),
+            base_url=api_base_url
+            or os.environ.get("OPENAI_BASE_URL", "http://localhost:8000/v1"),
             api_key=api_key or os.environ.get("OPENAI_API_KEY", "dummy"),
         )
 
@@ -181,9 +198,19 @@ class GlobalPlanner:
             )
             raw = response.choices[0].message.content
             # Qwen3 with --reasoning-parser may put output in reasoning_content
-            if raw is None:
+            if not raw:
                 raw = getattr(response.choices[0].message, "reasoning_content", None)
             console_logger.debug(f"GlobalPlanner raw response: {raw}")
+            _append_llm_debug(
+                build_llm_call_debug_record(
+                    stage=stage,
+                    agent_role="global_planner",
+                    event="generate_stage_brief",
+                    prompt=user_message,
+                    output=raw or "",
+                    raw_response=response,
+                ).model_dump()
+            )
             data = _extract_json_from_text(raw)
             # Ensure stage field is set correctly
             data["stage"] = stage
@@ -194,12 +221,24 @@ class GlobalPlanner:
             )
             return brief
         except Exception as e:
+            _append_llm_debug(
+                build_llm_call_debug_record(
+                    stage=stage,
+                    agent_role="global_planner",
+                    event="generate_stage_brief",
+                    prompt=user_message,
+                    output="",
+                    error=f"{type(e).__name__}: {e}",
+                ).model_dump()
+            )
             console_logger.warning(
                 f"GlobalPlanner failed for stage {stage}, using minimal fallback brief: {e}"
             )
             return self._fallback_brief(context)
 
-    def _build_user_message(self, context: HarnessContext, scene_state_summary: str) -> str:
+    def _build_user_message(
+        self, context: HarnessContext, scene_state_summary: str
+    ) -> str:
         stage_desc = _STAGE_DESCRIPTIONS.get(context.stage, "")
         task_spec_text = _format_task_spec(context.task_spec, context.stage)
         memory_text = _format_memory_for_prompt(context.memory_pack)
@@ -213,7 +252,11 @@ class GlobalPlanner:
         ]
 
         if scene_state_summary:
-            parts += ["", "## Current Scene State (already placed objects)", scene_state_summary]
+            parts += [
+                "",
+                "## Current Scene State (already placed objects)",
+                scene_state_summary,
+            ]
 
         parts += [
             "",
@@ -232,6 +275,7 @@ class GlobalPlanner:
         """Minimal safe StageBrief used when the model call fails."""
         stage = context.stage
         required = {
+            "floor_plan": context.task_spec.required_large_objects,
             "furniture": context.task_spec.required_large_objects,
             "wall_mounted": context.task_spec.required_wall_objects,
             "ceiling_mounted": context.task_spec.required_ceiling_objects,
@@ -240,7 +284,9 @@ class GlobalPlanner:
 
         constraints = []
         if required:
-            constraints.append(f"Ensure these objects are present: {', '.join(required)}")
+            constraints.append(
+                f"Ensure these objects are present: {', '.join(required)}"
+            )
         constraints.append(f"Follow {context.task_spec.style} aesthetic style")
         constraints.append("Maintain clear walking paths and avoid overcrowding")
 
@@ -249,6 +295,9 @@ class GlobalPlanner:
             stage_objective=f"Complete the {stage} stage for a {context.task_spec.room_type}",
             recommended_skills=[],
             constraints_for_designer=constraints,
-            checks_for_critic=["Verify all required objects are present", "Check for collisions"],
+            checks_for_critic=[
+                "Verify all required objects are present",
+                "Check for collisions",
+            ],
             failure_patterns_to_avoid=[],
         )

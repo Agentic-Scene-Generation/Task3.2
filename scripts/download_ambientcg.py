@@ -45,6 +45,80 @@ class MaterialDownload:
     size_bytes: int
 
 
+def _iter_dict_items(value) -> list[dict]:
+    """Return dict entries from either a dict, list, or scalar API field."""
+    if isinstance(value, dict):
+        return [value]
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, dict)]
+    return []
+
+
+def _get_named_api_child(value, name: str) -> dict:
+    """Find a named child in AmbientCG fields that may be dicts or lists.
+
+    AmbientCG has returned both mapping-style fields, such as
+    {"zip": {...}}, and list-style fields, such as
+    [{"name": "zip", ...}], for nested download metadata.
+    """
+    if isinstance(value, dict):
+        child = value.get(name)
+        if isinstance(child, dict):
+            return child
+        if child is not None:
+            return {"value": child}
+
+    target = name.lower()
+    for item in _iter_dict_items(value):
+        direct_child = item.get(name)
+        if isinstance(direct_child, dict):
+            return direct_child
+
+        for candidate_key in (
+            "name",
+            "id",
+            "type",
+            "category",
+            "filetype",
+            "fileType",
+            "filetypeCategory",
+            "downloadFiletypeCategory",
+            "folder",
+            "downloadFolder",
+        ):
+            candidate_value = item.get(candidate_key)
+            if isinstance(candidate_value, str) and candidate_value.lower() == target:
+                return item
+
+    return {}
+
+
+def _as_download_list(value) -> list[dict]:
+    """Normalize an AmbientCG downloads field to a list of dicts."""
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, dict)]
+    if isinstance(value, dict):
+        return [item for item in value.values() if isinstance(item, dict)]
+    return []
+
+
+def _collect_downloads(value) -> list[dict]:
+    """Recursively collect download entries from an AmbientCG API subtree."""
+    downloads: list[dict] = []
+
+    if isinstance(value, dict):
+        downloads.extend(_as_download_list(value.get("downloads", [])))
+        for child in value.values():
+            if isinstance(child, (dict, list)):
+                downloads.extend(_collect_downloads(child))
+    elif isinstance(value, list):
+        for child in value:
+            if isinstance(child, (dict, list)):
+                downloads.extend(_collect_downloads(child))
+
+    return downloads
+
+
 def fetch_materials_page(
     offset: int, session: requests.Session
 ) -> tuple[list[dict], int]:
@@ -125,14 +199,20 @@ def filter_downloads(
     downloads = []
 
     for asset in assets:
+        if not isinstance(asset, dict):
+            continue
+
         asset_id = asset.get("assetId", "")
 
         # Navigate the nested download structure.
         download_folders = asset.get("downloadFolders", {})
-        default_folder = download_folders.get("default", {})
+        default_folder = _get_named_api_child(download_folders, "default")
+        folder_data = default_folder or download_folders
         filetype_categories = default_folder.get("downloadFiletypeCategories", {})
-        zip_category = filetype_categories.get("zip", {})
-        download_list = zip_category.get("downloads", [])
+        zip_category = _get_named_api_child(filetype_categories, "zip")
+        download_list = _as_download_list(zip_category.get("downloads", []))
+        if not download_list:
+            download_list = _collect_downloads(folder_data)
 
         # Find matching download.
         for download in download_list:

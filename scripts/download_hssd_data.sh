@@ -11,7 +11,24 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
-DATA_DIR="$PROJECT_ROOT/data"
+ENV_FILE="${SCENEEXPERT_ENV_FILE:-$PROJECT_ROOT/.env}"
+
+source_env_file() {
+    local env_path="$1"
+    local tmp_env
+    tmp_env="$(mktemp)"
+    sed 's/\r$//' "$env_path" > "$tmp_env"
+    # shellcheck disable=SC1090
+    source "$tmp_env"
+    rm -f "$tmp_env"
+}
+
+if [ -f "$ENV_FILE" ]; then
+    source_env_file "$ENV_FILE"
+    echo "Loaded config: $ENV_FILE"
+fi
+
+DATA_DIR="${SCENEEXPERT_HSSD_DATA_DIR:-${SCENEEXPERT_DATA_DIR:-$PROJECT_ROOT/data}}"
 
 PREPROCESSED_DIR="$DATA_DIR/preprocessed"
 HSSD_MODELS_DIR="$DATA_DIR/hssd-models"
@@ -21,6 +38,8 @@ echo "=========================================="
 echo "HSSD Preprocessed Data Download"
 echo "=========================================="
 echo
+echo "HSSD/HSM data directory: $DATA_DIR"
+echo
 
 check_command() {
     if ! command -v "$1" &> /dev/null; then
@@ -29,10 +48,44 @@ check_command() {
     fi
 }
 
+extract_preprocessed() {
+    local zip_path="$1"
+    local tmp_dir
+    tmp_dir="$(mktemp -d)"
+
+    unzip -q "$zip_path" -d "$tmp_dir"
+
+    if [ -d "$tmp_dir/data/preprocessed" ]; then
+        mv "$tmp_dir/data/preprocessed" "$PREPROCESSED_DIR"
+    elif [ -d "$tmp_dir/preprocessed" ]; then
+        mv "$tmp_dir/preprocessed" "$PREPROCESSED_DIR"
+    else
+        echo "Error: could not find preprocessed directory inside $zip_path"
+        echo "Archive contents:"
+        find "$tmp_dir" -maxdepth 3 -type d | sort
+        rm -rf "$tmp_dir"
+        exit 1
+    fi
+
+    rm -rf "$tmp_dir"
+}
+
 check_command wget
 check_command unzip
 
-mkdir -p "$DATA_DIR"
+if ! mkdir -p "$DATA_DIR"; then
+    echo "Error: cannot create HSSD/HSM data directory: $DATA_DIR"
+    echo "Set SCENEEXPERT_HSSD_DATA_DIR to a writable staging path, or ask the data"
+    echo "administrator to prepare this read-only shared directory."
+    exit 1
+fi
+
+if [ ! -w "$DATA_DIR" ]; then
+    echo "Error: HSSD/HSM data directory is not writable: $DATA_DIR"
+    echo "This is expected on read-only cluster shared storage. Run this script on a"
+    echo "writable data-build node/path, then mount/copy the completed directory."
+    exit 1
+fi
 
 echo "Downloading preprocessed data (~60MB)..."
 echo
@@ -57,12 +110,10 @@ if [ -d "$PREPROCESSED_DIR" ]; then
         echo "Skipping extraction."
     else
         rm -rf "$PREPROCESSED_DIR"
-        # Zip contains data/ folder, so extract to project root.
-        unzip -q "$PREPROCESSED_ZIP" -d "$PROJECT_ROOT"
+        extract_preprocessed "$PREPROCESSED_ZIP"
     fi
 else
-    # Zip contains data/ folder, so extract to project root.
-    unzip -q "$PREPROCESSED_ZIP" -d "$PROJECT_ROOT"
+    extract_preprocessed "$PREPROCESSED_ZIP"
 fi
 
 echo
@@ -116,9 +167,9 @@ echo "Next steps:"
 echo "1. Download HSSD models (~72GB):"
 echo "   cd $DATA_DIR"
 echo "   git lfs install"
-echo "   git clone git@hf.co:datasets/hssd/hssd-models"
+echo "   git clone https://huggingface.co/datasets/hssd/hssd-models"
 echo
 echo "2. Enable HSSD in your config:"
-echo "   asset_manager:"
-echo "     strategy: \"hssd\""
+echo "   furniture_agent.asset_manager.general_asset_source=hssd"
+echo "   manipuland_agent.asset_manager.general_asset_source=hssd"
 echo "=========================================="

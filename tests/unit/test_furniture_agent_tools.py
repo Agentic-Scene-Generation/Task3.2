@@ -396,6 +396,41 @@ class TestFurnitureTools(BaseAgentToolsTest):
             str(added_objects[0].object_id), str(added_objects[1].object_id)
         )
 
+    def test_floor_standing_asset_with_negative_local_z_is_auto_grounded(self):
+        """Assets whose local origin is above the floor should still be placeable."""
+        self.mock_scene.room_geometry = Mock()
+        self.mock_scene.room_geometry.length = 10.0
+        self.mock_scene.room_geometry.width = 10.0
+
+        bed_asset = SceneObject(
+            object_id=UniqueID("bed_asset"),
+            object_type=ObjectType.FURNITURE,
+            name="bed",
+            description="Test bed with local bbox below origin",
+            transform=RigidTransform(),
+            geometry_path=Path("/test/bed.glb"),
+            sdf_path=Path("/test/bed.sdf"),
+            bbox_min=np.array([-1.0, -1.0, -0.97]),
+            bbox_max=np.array([1.0, 1.0, 0.30]),
+        )
+        self.mock_asset_manager.get_asset_by_id.return_value = bed_asset
+        self.mock_asset_manager.list_available_assets.return_value = [bed_asset]
+        self.mock_scene.generate_unique_id.return_value = UniqueID("bed_0")
+
+        added_objects = []
+        self.mock_scene.add_object = added_objects.append
+
+        result_str = self.furniture_tools._add_furniture_to_scene_impl(
+            asset_id=str(bed_asset.object_id), x=0.0, y=0.0, z=0.0
+        )
+        result = json.loads(result_str)
+
+        self.assertTrue(result["success"], result)
+        self.assertEqual(len(added_objects), 1)
+        world_min, _ = added_objects[0].compute_world_bounds()
+        self.assertAlmostEqual(float(world_min[2]), 0.0, places=6)
+        self.assertAlmostEqual(result["position"]["z"], 0.97, places=6)
+
     def test_asset_id_not_found_error_handling(self):
         """Test error handling when asset_id doesn't exist in registry."""
         # Mock asset manager to return None (asset not found).

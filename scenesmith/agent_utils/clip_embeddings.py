@@ -5,6 +5,7 @@ ViT-H-14-378-quickgelu model with dfn5b pretrained weights (1024 dimensions).
 """
 
 import logging
+import os
 
 from pathlib import Path
 
@@ -14,13 +15,85 @@ import torch
 
 from PIL import Image
 
+from scenesmith.agent_utils.retrieval_errors import FatalRetrievalError
+
 console_logger = logging.getLogger(__name__)
+
+OPENCLIP_MODEL_NAME = "ViT-H-14-378-quickgelu"
+OPENCLIP_PRETRAINED_TAG = "dfn5b"
+OPENCLIP_DIR_ENV = "SCENEEXPERT_OPENCLIP_DIR"
+OPENCLIP_CHECKPOINT_ENV = "SCENEEXPERT_OPENCLIP_CHECKPOINT"
+OPENCLIP_REQUIRE_LOCAL_ENV = "SCENEEXPERT_REQUIRE_LOCAL_OPENCLIP"
 
 # Cache OpenCLIP model to avoid reloading on every embedding call.
 _cached_model = None
 _cached_tokenizer = None
 _cached_preprocess = None
 _device = None
+
+
+def _as_checkpoint_file(path_value: str) -> Path:
+    """Resolve an env-provided checkpoint path or directory."""
+    expanded = os.path.expandvars(os.path.expanduser(path_value))
+    checkpoint_path = Path(expanded)
+    if checkpoint_path.is_dir() or checkpoint_path.suffix != ".bin":
+        checkpoint_path = checkpoint_path / "open_clip_pytorch_model.bin"
+    return checkpoint_path
+
+
+def _default_local_checkpoint() -> Path | None:
+    """Return the conventional local DFN5B checkpoint path if configured."""
+    openclip_dir = os.environ.get(OPENCLIP_DIR_ENV)
+    if openclip_dir:
+        openclip_root = Path(os.path.expandvars(os.path.expanduser(openclip_dir)))
+        return openclip_root / "DFN5B-CLIP-ViT-H-14-378" / "open_clip_pytorch_model.bin"
+
+    data_dir = os.environ.get("SCENEEXPERT_DATA_DIR")
+    if not data_dir:
+        return None
+
+    data_root = Path(os.path.expandvars(os.path.expanduser(data_dir)))
+    return (
+        data_root
+        / "openclip"
+        / "DFN5B-CLIP-ViT-H-14-378"
+        / "open_clip_pytorch_model.bin"
+    )
+
+
+def _resolve_pretrained_source() -> tuple[str, str]:
+    """Resolve OpenCLIP pretrained source, preferring explicit local files."""
+    checkpoint_value = os.environ.get(OPENCLIP_CHECKPOINT_ENV) or os.environ.get(
+        "OPENCLIP_CHECKPOINT_PATH"
+    )
+    if checkpoint_value:
+        checkpoint_path = _as_checkpoint_file(checkpoint_value)
+        if not checkpoint_path.exists():
+            raise FatalRetrievalError(
+                f"{OPENCLIP_CHECKPOINT_ENV} points to a missing OpenCLIP "
+                f"checkpoint: {checkpoint_path}. Put open_clip_pytorch_model.bin "
+                "there or update the env var."
+            )
+        return str(checkpoint_path), f"local checkpoint {checkpoint_path}"
+
+    default_checkpoint = _default_local_checkpoint()
+    if default_checkpoint and default_checkpoint.exists():
+        return str(default_checkpoint), f"local checkpoint {default_checkpoint}"
+
+    require_local = os.environ.get(OPENCLIP_REQUIRE_LOCAL_ENV, "0") == "1"
+    if require_local:
+        expected = default_checkpoint or (
+            Path("$SCENEEXPERT_OPENCLIP_DIR")
+            / "DFN5B-CLIP-ViT-H-14-378"
+            / "open_clip_pytorch_model.bin"
+        )
+        raise FatalRetrievalError(
+            "Local OpenCLIP checkpoint is required but was not found. Set "
+            f"{OPENCLIP_CHECKPOINT_ENV} to open_clip_pytorch_model.bin. "
+            f"Expected default path: {expected}"
+        )
+
+    return OPENCLIP_PRETRAINED_TAG, f"pretrained tag {OPENCLIP_PRETRAINED_TAG}"
 
 
 def _get_clip_model(device: str | None = None):
@@ -45,20 +118,36 @@ def _get_clip_model(device: str | None = None):
 
     # Load or reload model if needed.
     if _cached_model is None or _device != target_device:
-        model_name = "ViT-H-14-378-quickgelu"
-        pretrained = "dfn5b"
+        model_name = OPENCLIP_MODEL_NAME
+        pretrained, source_description = _resolve_pretrained_source()
         _device = target_device
 
-        _cached_model, _, _cached_preprocess = open_clip.create_model_and_transforms(
-            model_name, pretrained=pretrained, device=_device
-        )
-        _cached_tokenizer = open_clip.get_tokenizer(model_name)
+        try:
+            _cached_model, _, _cached_preprocess = (
+                open_clip.create_model_and_transforms(
+                    model_name, pretrained=pretrained, device=_device
+                )
+            )
+            _cached_tokenizer = open_clip.get_tokenizer(model_name)
+        except Exception as e:
+            raise FatalRetrievalError(
+                "Failed to load OpenCLIP model "
+                f"{model_name} from {source_description}. For offline clusters, "
+                f"set {OPENCLIP_CHECKPOINT_ENV} to a local "
+                f"open_clip_pytorch_model.bin matching apple/DFN5B-CLIP-ViT-H-14-378. "
+                f"Original error: {e}"
+            ) from e
 
         console_logger.info(
-            f"Loaded OpenCLIP model: {model_name} ({pretrained}) on {_device}"
+            f"Loaded OpenCLIP model: {model_name} ({source_description}) on {_device}"
         )
 
     return _cached_model, _cached_tokenizer, _cached_preprocess, _device
+
+
+def warmup_clip_model(device: str | None = None) -> None:
+    """Load OpenCLIP once so missing offline weights fail before generation."""
+    _get_clip_model(device=device)
 
 
 def get_text_embedding(text: str, device: str | None = None) -> np.ndarray:

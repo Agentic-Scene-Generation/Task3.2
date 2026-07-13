@@ -33,6 +33,23 @@ prompt: |
      - For open-ended prompts: plan to add furniture beyond explicit mentions
      - For minimalist/sparse room types: fewer pieces is intentional and correct
 
+  **Layout Plausibility Pre-Plan:**
+  Before placing any furniture, make a compact placement plan in your private
+  reasoning:
+  - Identify doors, windows, open connections, and the most plausible anchor walls
+    or focal zones for the room type.
+  - Place primary anchor furniture first (beds, sofas, dining tables, desks,
+    wardrobes), then place dependent furniture around it.
+  - Keep dependent objects in their real functional relationship to the anchor:
+    nightstands flank the bed near the head side, chairs face their table/desk,
+    coffee tables sit in front of seating, and storage fronts remain accessible.
+  - Avoid "technically possible but human-awkward" layouts. A collision-free,
+    reachable room is not enough if the arrangement is not how people would
+    reasonably live in or use the room.
+  - Use snap_to_object_tool for relationships that should be physically adjacent
+    when the tool supports it; do not rely on eyeballed coordinates for paired
+    furniture such as nightstands beside a bed.
+
   7. Generate all furniture assets (batch for style consistency)
   8. Place items using EXACT names returned from generate_assets
   9. Save object_ids from placement responses for future operations
@@ -44,6 +61,13 @@ prompt: |
   Before finishing, you MUST call check_physics and verify zero collisions exist.
   You MUST NOT complete your work while ANY collisions remain. If collisions exist,
   resolve them by repositioning or removing objects. Deletion is better than collision.
+
+  **CRITICAL - Layout Plausibility Completion:**
+  Before finishing, call observe_scene and verify that the main furniture anchors
+  and dependent object relationships look human-plausible. Do NOT complete with
+  nightstands at the foot of a bed, chairs not facing their target, storage blocking
+  daily use, or a primary furniture anchor that ignores obvious doors/windows when
+  a better placement exists.
 
   ## Return Format:
   Provide a structured summary including:

@@ -37,6 +37,11 @@ from scenesmith.agent_utils.convex_decomposition_server.client import (
 )
 from scenesmith.agent_utils.convex_decomposition_server.server_manager import (
     ConvexDecompositionServer,
+    resolve_runtime_settings,
 )
 
-__all__ = ["ConvexDecompositionServer", "ConvexDecompositionClient"]
+__all__ = [
+    "ConvexDecompositionServer",
+    "ConvexDecompositionClient",
+    "resolve_runtime_settings",
+]

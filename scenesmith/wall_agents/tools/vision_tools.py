@@ -144,17 +144,30 @@ class WallVisionTools:
             wall_furniture_map[str(surface.surface_id)] = nearby_furniture_ids
 
         # Render all views in a single call (context + per-wall orthographic).
-        render_dir = self.rendering_manager.render_scene(
-            scene=self.scene,
-            blender_server=self.blender_server,
-            include_objects=all_furniture_ids + all_wall_object_ids,
-            exclude_room_geometry=False,
-            rendering_mode="wall",
-            wall_surfaces=wall_surfaces_for_render,
-            wall_surfaces_for_labels=wall_surfaces_for_render,
-            annotate_object_types=["wall_mounted"],
-            wall_furniture_map=wall_furniture_map,
-        )
+        try:
+            render_dir = self.rendering_manager.render_scene(
+                scene=self.scene,
+                blender_server=self.blender_server,
+                include_objects=all_furniture_ids + all_wall_object_ids,
+                exclude_room_geometry=False,
+                rendering_mode="wall",
+                wall_surfaces=wall_surfaces_for_render,
+                wall_surfaces_for_labels=wall_surfaces_for_render,
+                annotate_object_types=["wall_mounted"],
+                wall_furniture_map=wall_furniture_map,
+            )
+        except Exception as exc:
+            console_logger.exception("Wall observation render failed")
+            return [
+                ToolOutputText(
+                    text=(
+                        "Unable to observe wall scene because rendering failed with "
+                        f"a technical geometry error: {type(exc).__name__}: {exc}. "
+                        "Treat this candidate as hard-invalid; repair/replace the "
+                        "problematic asset or roll back before continuing."
+                    )
+                )
+            ]
 
         if render_dir and render_dir.exists():
             images = self._collect_images(render_dir)

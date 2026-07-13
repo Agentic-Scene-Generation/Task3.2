@@ -516,6 +516,8 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
             blender_server=self.blender_server,
             context_furniture_ids=context_ids,
         )
+        self._critic_vision_tools = vision_tools
+        self._critic_scene_tools = self.manipuland_tools
 
         # Critic gets read-only tools (observe only).
         # Note: check_physics is NOT included since physics_context is already
@@ -645,10 +647,7 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
         # Check if scene changed since last checkpoint to avoid redundant critique.
         current_scene_hash = self.scene.content_hash()
 
-        if (
-            self.checkpoint_scene_hash is not None
-            and current_scene_hash == self.checkpoint_scene_hash
-        ):
+        if self._can_skip_final_critique(current_scene_hash):
             console_logger.info(
                 "Scene unchanged since last critique, skipping final critique"
             )
@@ -729,6 +728,20 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
         console_logger.info(
             f"Identified {len(furniture_data)} furniture pieces to populate"
         )
+        max_target_furniture = self._get_max_target_furniture()
+        if max_target_furniture > 0 and len(furniture_data) > max_target_furniture:
+            original_count = len(furniture_data)
+            furniture_data = self._select_manipuland_targets(
+                scene=scene,
+                furniture_data=furniture_data,
+                max_target_furniture=max_target_furniture,
+            )
+            console_logger.info(
+                "Limited manipuland targets from %d to %d: %s",
+                original_count,
+                len(furniture_data),
+                [str(selection.furniture_id) for selection in furniture_data],
+            )
 
         # Phase 1b: Select context furniture for each selection.
         if self.cfg.context_furniture.enabled:
@@ -854,6 +867,51 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
                     continue
 
         console_logger.info("Manipuland placement complete")
+
+    def _get_max_target_furniture(self) -> int:
+        try:
+            value = OmegaConf.select(self.cfg, "max_target_furniture")
+        except Exception:
+            value = getattr(self.cfg, "max_target_furniture", 0)
+        try:
+            return max(0, int(value or 0))
+        except Exception:
+            return 0
+
+    def _select_manipuland_targets(
+        self,
+        *,
+        scene: RoomScene,
+        furniture_data: list[FurnitureSelection],
+        max_target_furniture: int,
+    ) -> list[FurnitureSelection]:
+        def priority(selection: FurnitureSelection) -> tuple[int, int, str]:
+            obj = scene.get_object(selection.furniture_id)
+            text = " ".join(
+                [
+                    str(selection.furniture_id),
+                    getattr(obj, "name", "") if obj is not None else "",
+                    getattr(obj, "description", "") if obj is not None else "",
+                    selection.suggested_items or "",
+                    selection.prompt_constraints or "",
+                ]
+            ).lower()
+            required_boost = 0 if "required" in text else 1
+            if "nightstand" in text or "bedside" in text:
+                category_rank = 0
+            elif any(term in text for term in ("desk", "table", "dresser", "cabinet")):
+                category_rank = 1
+            elif any(term in text for term in ("shelf", "bookcase", "bookshelf")):
+                category_rank = 2
+            elif "bed" in text:
+                category_rank = 3
+            elif any(term in text for term in ("wardrobe", "closet", "armoire")):
+                category_rank = 4
+            else:
+                category_rank = 5
+            return (required_boost, category_rank, str(selection.furniture_id))
+
+        return sorted(furniture_data, key=priority)[:max_target_furniture]
 
     async def _analyze_furniture_for_placement(
         self, scene: RoomScene

@@ -1,7 +1,6 @@
 """Tests for fault-tolerant parallel execution utilities."""
 
 import os
-import signal
 import unittest
 
 from scenesmith.utils.parallel import run_parallel_isolated
@@ -24,7 +23,7 @@ def _void_task(value: int) -> None:
 
 def _crashing_task() -> None:
     """Task that crashes the process (simulates OOM/SIGKILL)."""
-    os.kill(os.getpid(), signal.SIGKILL)
+    os._exit(99)
 
 
 class TestRunParallelIsolated(unittest.TestCase):

@@ -32,13 +32,38 @@ class TraceLogger:
     One TraceLogger instance per scene generation run.
     """
 
-    def __init__(self, output_dir: str, scene_index: int, prompt: str) -> None:
+    SCHEMA_VERSION = "1.1"
+
+    def __init__(
+        self,
+        output_dir: str,
+        scene_index: int,
+        prompt: str,
+        experiment_name: str = "",
+        config_hash: str = "",
+    ) -> None:
         self._output_dir = Path(output_dir)
         self._traces_dir = self._output_dir / "traces"
         self._traces_dir.mkdir(parents=True, exist_ok=True)
 
         self._trace_id = f"trace_{scene_index:06d}"
+        self._scene_id = f"scene_{scene_index:03d}"
+        self._scene_debug_dir = self._output_dir / self._scene_id / "scene_expert"
+        self._stage_debug_dir = self._scene_debug_dir / "stages"
+        self._trace_debug_dir = self._scene_debug_dir / "trace"
+        self._memory_debug_dir = self._scene_debug_dir / "memory"
+        self._visual_debug_dir = self._scene_debug_dir / "visuals"
+        for path in (
+            self._stage_debug_dir,
+            self._trace_debug_dir,
+            self._memory_debug_dir,
+            self._visual_debug_dir,
+        ):
+            path.mkdir(parents=True, exist_ok=True)
+
         self._prompt = prompt
+        self._experiment_name = experiment_name
+        self._config_hash = config_hash
         self._stage_entries: list[StageTraceEntry] = []
         self._start_time = time.time()
         self._full_report: FullVerifyReport | None = None
@@ -53,9 +78,12 @@ class TraceLogger:
         verify_report: StageVerifyReport | None,
         repair_actions: list[RepairResult],
         qwen_calls: int = 0,
+        stage_time_sec: float | None = None,
     ) -> None:
         """Record a completed stage's data."""
-        elapsed = time.time() - self._start_time
+        elapsed = (
+            time.time() - self._start_time if stage_time_sec is None else stage_time_sec
+        )
         entry = StageTraceEntry(
             stage=stage,
             memory_pack=memory_pack,
@@ -66,7 +94,86 @@ class TraceLogger:
             cost=StageCost(qwen_calls=qwen_calls, stage_time_sec=round(elapsed, 1)),
         )
         self._stage_entries.append(entry)
+        self._save_stage_entry(entry)
+        self.save_partial(status="running")
         console_logger.debug(f"TraceLogger: logged stage {stage}")
+
+    def save_stage_context(
+        self,
+        stage: str,
+        memory_pack: MemoryPack,
+        stage_brief: StageBrief | None,
+        phase: str = "pre",
+    ) -> Path:
+        """Save pre/post-stage planning context for interrupted runs."""
+        payload = {
+            "schema_version": self.SCHEMA_VERSION,
+            "trace_id": self._trace_id,
+            "scene_id": self._scene_id,
+            "stage": stage,
+            "phase": phase,
+            "time_sec": round(time.time() - self._start_time, 1),
+            "memory_pack": memory_pack.model_dump(),
+            "stage_brief": stage_brief.model_dump() if stage_brief else None,
+        }
+        path = (
+            self._stage_debug_dir
+            / f"{len(self._stage_entries):03d}_{stage}_{phase}.json"
+        )
+        self._write_json(path, payload)
+        return path
+
+    def save_stage_visual_manifest(self, stage: str, output_dir: str) -> Path:
+        """Index existing render/debug artifacts for a stage."""
+        root = Path(output_dir)
+        render_dirs = []
+        if root.exists():
+            render_dirs = sorted(
+                path for path in root.rglob("renders_*") if path.is_dir()
+            )
+        renders = []
+        for render_dir in render_dirs:
+            pngs = sorted(str(path) for path in render_dir.glob("*.png"))
+            if not pngs:
+                continue
+            renders.append(
+                {
+                    "dir": str(render_dir),
+                    "images": pngs,
+                    "scores": (
+                        str(render_dir / "scores.yaml")
+                        if (render_dir / "scores.yaml").exists()
+                        else ""
+                    ),
+                    "scene_state": (
+                        str(render_dir / "scene_state.json")
+                        if (render_dir / "scene_state.json").exists()
+                        else ""
+                    ),
+                    "dmd": (
+                        str(render_dir / "scene.dmd.yaml")
+                        if (render_dir / "scene.dmd.yaml").exists()
+                        else (
+                            str(render_dir / "floor_plan.dmd.yaml")
+                            if (render_dir / "floor_plan.dmd.yaml").exists()
+                            else ""
+                        )
+                    ),
+                }
+            )
+
+        payload = {
+            "schema_version": self.SCHEMA_VERSION,
+            "trace_id": self._trace_id,
+            "scene_id": self._scene_id,
+            "stage": stage,
+            "output_dir": str(root),
+            "render_count": len(renders),
+            "renders": renders,
+        }
+        path = self._visual_debug_dir / f"{stage}_visuals.json"
+        self._write_json(path, payload)
+        return path
 
     def finalize(
         self,
@@ -79,7 +186,12 @@ class TraceLogger:
         self._exports = exports
 
         trace = {
+            "schema_version": self.SCHEMA_VERSION,
             "trace_id": self._trace_id,
+            "scene_id": self._scene_id,
+            "status": "completed",
+            "experiment_name": self._experiment_name,
+            "config_hash": self._config_hash,
             "prompt": self._prompt,
             "model": model,
             "total_time_sec": round(time.time() - self._start_time, 1),
@@ -89,21 +201,86 @@ class TraceLogger:
         }
         return trace
 
+    def save_partial(self, status: str = "partial", error: str = "") -> Path:
+        """Save an inspectable partial trace without requiring finalize()."""
+        trace = {
+            "schema_version": self.SCHEMA_VERSION,
+            "trace_id": self._trace_id,
+            "scene_id": self._scene_id,
+            "status": status,
+            "error": error,
+            "experiment_name": self._experiment_name,
+            "config_hash": self._config_hash,
+            "prompt": self._prompt,
+            "total_time_sec": round(time.time() - self._start_time, 1),
+            "stages": [entry.model_dump() for entry in self._stage_entries],
+        }
+        path = self._trace_debug_dir / f"{self._trace_id}_partial.json"
+        self._write_json(path, trace)
+        return path
+
     def save(self, trace: dict | None = None) -> Path:
         """Save the trace to a JSON file. Returns the file path."""
         if trace is None:
             # Build minimal trace if finalize() was not called
             trace = {
+                "schema_version": self.SCHEMA_VERSION,
                 "trace_id": self._trace_id,
+                "scene_id": self._scene_id,
+                "status": "partial",
+                "experiment_name": self._experiment_name,
+                "config_hash": self._config_hash,
                 "prompt": self._prompt,
                 "stages": [entry.model_dump() for entry in self._stage_entries],
             }
 
         trace_path = self._traces_dir / f"{self._trace_id}.json"
-        with trace_path.open("w") as f:
-            json.dump(trace, f, indent=2, default=str)
+        self._write_json(trace_path, trace)
+        self._write_json(self._trace_debug_dir / f"{self._trace_id}.json", trace)
         console_logger.info(f"TraceLogger: saved trace to {trace_path}")
         return trace_path
+
+    def save_memory_update_ops(self, ops: list, full_report: FullVerifyReport) -> Path:
+        """Mirror final memory-writer ops into the per-scene debug directory."""
+        payload = {
+            "schema_version": self.SCHEMA_VERSION,
+            "trace_id": self._trace_id,
+            "scene_id": self._scene_id,
+            "op_count": len(ops),
+            "full_report": full_report.model_dump(),
+            "updates": [
+                op.model_dump() if hasattr(op, "model_dump") else op for op in ops
+            ],
+        }
+        path = self._memory_debug_dir / "memory_update_ops.json"
+        self._write_json(path, payload)
+
+        jsonl_path = self._memory_debug_dir / "memory_update_ops.jsonl"
+        with jsonl_path.open("w", encoding="utf-8", newline="\n") as f:
+            for op in ops:
+                record = op.model_dump() if hasattr(op, "model_dump") else op
+                f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+        return path
+
+    def _save_stage_entry(self, entry: StageTraceEntry) -> None:
+        stage_index = len(self._stage_entries)
+        payload = {
+            "schema_version": self.SCHEMA_VERSION,
+            "trace_id": self._trace_id,
+            "scene_id": self._scene_id,
+            "stage_index": stage_index,
+            "entry": entry.model_dump(),
+        }
+        stage_path = self._stage_debug_dir / f"{stage_index:03d}_{entry.stage}.json"
+        self._write_json(stage_path, payload)
+        jsonl_path = self._stage_debug_dir / "stage_trace.jsonl"
+        with jsonl_path.open("a", encoding="utf-8", newline="\n") as f:
+            f.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
+
+    def _write_json(self, path: Path, payload: dict) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8", newline="\n") as f:
+            json.dump(payload, f, indent=2, ensure_ascii=False, default=str)
 
     def build_trace_summary(self) -> str:
         """Build a human-readable summary of the trace for the MemoryWriter.
@@ -118,7 +295,9 @@ class TraceLogger:
                 stage_line += f" objective={entry.stage_brief.stage_objective!r}"
             if entry.verify_report:
                 passed = "PASS" if entry.verify_report.pass_stage else "FAIL"
-                scores = ", ".join(f"{k}={v:.2f}" for k, v in entry.verify_report.scores.items())
+                scores = ", ".join(
+                    f"{k}={v:.2f}" for k, v in entry.verify_report.scores.items()
+                )
                 stage_line += f" verify={passed} scores=({scores})"
                 if entry.verify_report.issues:
                     issue_types = [i.issue_type for i in entry.verify_report.issues]
@@ -129,10 +308,7 @@ class TraceLogger:
             lines.append(stage_line)
 
             # Include critic summary — the most informative per-stage content.
-            if (
-                entry.verify_report
-                and entry.verify_report.critique_summary
-            ):
+            if entry.verify_report and entry.verify_report.critique_summary:
                 # Truncate very long summaries to keep the trace summary manageable.
                 summary_text = entry.verify_report.critique_summary
                 if len(summary_text) > 800:
@@ -142,6 +318,7 @@ class TraceLogger:
         if self._full_report:
             lines.append(
                 f"Final: overall={self._full_report.overall_score:.2f} "
+                f"plausibility={self._full_report.plausibility_score:.2f} "
                 f"pass={'YES' if self._full_report.pass_scene else 'NO'}"
             )
         return "\n".join(lines)

@@ -3,6 +3,7 @@ import random
 import shutil
 import time
 
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -10,12 +11,25 @@ from omegaconf import OmegaConf
 
 from scenesmith.agent_utils.rendering import render_scene_for_agent_observation
 from scenesmith.agent_utils.room import RoomScene
+from scenesmith.agent_utils.stage_working_memory import save_generic_render_memory
 from scenesmith.utils.logging import BaseLogger
 
 if TYPE_CHECKING:
     from scenesmith.agent_utils.blender.server_manager import BlenderServer
 
 console_logger = logging.getLogger(__name__)
+
+
+def _is_deterministic_geometry_render_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    markers = (
+        "qhull",
+        "initial simplex is flat",
+        "less than 3 dimensional",
+        "could not construct a clearly convex simplex",
+        "geometry construction",
+    )
+    return any(marker in text for marker in markers)
 
 
 class RenderingManager:
@@ -48,6 +62,58 @@ class RenderingManager:
         self._base_output_dir = self.logger.output_dir
         self._last_render_dir: Path | None = None
         """Most recent render directory. Used by agents to save scores alongside renders."""
+        self._active_render_profile: str | None = None
+
+    @contextmanager
+    def use_render_profile(self, profile_name: str | None):
+        """Temporarily apply a named render profile.
+
+        The default/final profile is the config as-is.  The "intermediate"
+        profile can override image sizes, side-view count, and TAA samples for
+        cheap candidate evaluation without changing final renders.
+        """
+        previous_profile = self._active_render_profile
+        self._active_render_profile = profile_name
+        try:
+            yield
+        finally:
+            self._active_render_profile = previous_profile
+
+    def active_render_profile(self) -> str:
+        """Return the currently effective render profile name."""
+        profile = self._active_render_profile or "final"
+        if profile == "intermediate":
+            intermediate_cfg = getattr(self.cfg, "intermediate_profile", None)
+            if intermediate_cfg is not None and bool(
+                getattr(intermediate_cfg, "enabled", False)
+            ):
+                return "intermediate"
+        return "final"
+
+    def _effective_cfg_for_active_profile(self):
+        profile = self.active_render_profile()
+        if profile != "intermediate":
+            return self.cfg
+
+        intermediate_cfg = getattr(self.cfg, "intermediate_profile", None)
+        if intermediate_cfg is None:
+            return self.cfg
+
+        cfg_copy = OmegaConf.create(OmegaConf.to_container(self.cfg, resolve=True))
+        for key in (
+            "layout",
+            "top_view_width",
+            "top_view_height",
+            "side_view_count",
+            "side_view_width",
+            "side_view_height",
+            "taa_samples",
+        ):
+            if hasattr(intermediate_cfg, key):
+                value = getattr(intermediate_cfg, key)
+                if value is not None:
+                    setattr(cfg_copy, key, value)
+        return cfg_copy
 
     def clear_cache(self) -> None:
         """Clear the render cache to force new renders for all scenes.
@@ -151,11 +217,16 @@ class RenderingManager:
             f"render_scene called with include_objects="
             f"{[str(obj_id) for obj_id in include_objects] if include_objects is not None else 'None'}"
         )
+        effective_cfg = self._effective_cfg_for_active_profile()
+        render_profile = self.active_render_profile()
 
         # Generate cache key from scene content and rendering parameters.
         # Scene content hash includes all objects, transforms, and support surfaces,
         # so we only need to add rendering parameters that affect visual output.
-        cache_key_parts = [f"scene_content_{scene.content_hash()}"]
+        cache_key_parts = [
+            f"scene_content_{scene.content_hash()}",
+            f"profile_{render_profile}",
+        ]
 
         # Include rendering parameters that affect visual output.
         if exclude_room_geometry:
@@ -189,6 +260,16 @@ class RenderingManager:
             cache_key_parts.append(f"ctx_{ctx_hash:08x}")
 
         # Include camera angle parameters in cache key.
+        cache_key_parts.extend(
+            [
+                f"tw_{int(effective_cfg.top_view_width)}",
+                f"th_{int(effective_cfg.top_view_height)}",
+                f"sw_{int(effective_cfg.side_view_width)}",
+                f"sh_{int(effective_cfg.side_view_height)}",
+                f"sc_{int(effective_cfg.side_view_count)}",
+                f"taa_{int(getattr(effective_cfg, 'taa_samples', 16))}",
+            ]
+        )
         if side_view_elevation_degrees is not None:
             cache_key_parts.append(f"elev_{int(side_view_elevation_degrees)}")
         if side_view_start_azimuth_degrees is not None:
@@ -209,15 +290,21 @@ class RenderingManager:
         console_logger.info(f"CACHE MISS - creating new render")
 
         # Try rendering with error handling and retries.
-        num_attempts = self.cfg.retry_count
+        num_attempts = effective_cfg.retry_count
         for attempt in range(num_attempts):
             try:
-                console_logger.info(f"Rendering attempt {attempt + 1}/{num_attempts}")
+                render_start_time = time.time()
+                console_logger.info(
+                    "Rendering attempt %d/%d (profile=%s)",
+                    attempt + 1,
+                    num_attempts,
+                    render_profile,
+                )
 
                 # Render.
                 image_paths = render_scene_for_agent_observation(
                     scene=scene,
-                    cfg=self.cfg,
+                    cfg=effective_cfg,
                     blender_server=blender_server,
                     include_objects=include_objects,
                     exclude_room_geometry=exclude_room_geometry,
@@ -236,6 +323,7 @@ class RenderingManager:
                     side_view_start_azimuth_degrees=side_view_start_azimuth_degrees,
                     include_vertical_views=include_vertical_views,
                     override_side_view_count=override_side_view_count,
+                    taa_samples=int(getattr(effective_cfg, "taa_samples", 16)),
                 )
 
                 # Validate rendering output.
@@ -273,16 +361,43 @@ class RenderingManager:
                 self._render_cache[cache_key] = images_dir
                 self._last_render_dir = images_dir
                 console_logger.info(f"Cached render with key: {cache_key}")
+                try:
+                    save_generic_render_memory(
+                        root_dir=self._base_output_dir,
+                        stage=self._subdirectory or rendering_mode,
+                        render_dir=images_dir,
+                        scene=scene,
+                        rendering_mode=rendering_mode,
+                        render_name=render_name,
+                        elapsed_sec=time.time() - render_start_time,
+                    )
+                except Exception as memory_error:
+                    console_logger.warning(
+                        "Failed to save render working memory for %s: %s",
+                        images_dir,
+                        memory_error,
+                    )
 
                 return images_dir
 
             except Exception as e:
                 console_logger.error(f"Rendering attempt {attempt + 1} failed: {e}")
+                if _is_deterministic_geometry_render_error(e):
+                    console_logger.error(
+                        "Deterministic geometry render failure detected; "
+                        "skipping identical render retries for this candidate."
+                    )
+                    raise RuntimeError(
+                        "Scene rendering failed due to deterministic geometry "
+                        f"construction error: {e}"
+                    ) from e
                 if attempt == num_attempts - 1:
                     console_logger.error("All rendering attempts failed, raising error")
-                    raise RuntimeError(f"Scene rendering failed after 3 attempts: {e}")
+                    raise RuntimeError(
+                        f"Scene rendering failed after {num_attempts} attempts: {e}"
+                    ) from e
                 else:
-                    base_delay = self.cfg.retry_delay
+                    base_delay = effective_cfg.retry_delay
                     jitter = random.uniform(0, 2)
                     retry_delay = base_delay + jitter
                     console_logger.warning(

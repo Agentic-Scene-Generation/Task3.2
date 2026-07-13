@@ -16,11 +16,15 @@ from scenesmith.agent_utils.asset_manager import (
     AssetGenerationResult as DomainAssetGenerationResult,
     AssetManager,
 )
+from scenesmith.agent_utils.furniture_layout_planning import (
+    apply_bedroom_asset_size_policy,
+)
 from scenesmith.agent_utils.loop_detector import LoopDetector
 from scenesmith.agent_utils.placement_noise import (
     PlacementNoiseMode,
     apply_placement_noise,
 )
+from scenesmith.agent_utils.rescale_result import RescaleErrorType, RescaleResult
 from scenesmith.agent_utils.rescale_helpers import rescale_object_common
 from scenesmith.agent_utils.response_datatypes import (
     AssetGenerationResult,
@@ -33,6 +37,7 @@ from scenesmith.agent_utils.room import (
     UniqueID,
     copy_scene_object_with_new_pose,
 )
+from scenesmith.utils.geometry_utils import compute_aabb_corners
 from scenesmith.furniture_agents.tools.response_dataclasses import (
     AssetInfo,
     AvailableAssetsResult,
@@ -62,7 +67,13 @@ class FurnitureTools:
     - remove_furniture_tool: Delete furniture from scene
     """
 
-    def __init__(self, scene: RoomScene, asset_manager: AssetManager, cfg: DictConfig):
+    def __init__(
+        self,
+        scene: RoomScene,
+        asset_manager: AssetManager,
+        cfg: DictConfig,
+        safety_controller: Any | None = None,
+    ):
         """Initialize furniture tools.
 
         Args:
@@ -73,6 +84,7 @@ class FurnitureTools:
         self.scene = scene
         self.asset_manager = asset_manager
         self.cfg = cfg
+        self.safety_controller = safety_controller
 
         # Initialize placement noise configuration.
         # Start with natural profile as default until planner sets it.
@@ -115,6 +127,89 @@ class FurnitureTools:
                 f"Unsupported noise mode {mode}, keeping current profile"
             )
 
+    def _safety_denial_generate_assets(self) -> str | None:
+        controller = self.safety_controller
+        if controller is None or not getattr(controller, "enabled", False):
+            return None
+        allowed, message = controller.record_generate_assets()
+        if allowed:
+            return None
+        console_logger.info(message)
+        return message
+
+    def _safety_denial_move(self, object_id: str) -> str | None:
+        controller = self.safety_controller
+        if controller is None or not getattr(controller, "enabled", False):
+            return None
+        allowed, message = controller.record_move(object_id=object_id)
+        if allowed:
+            return None
+        console_logger.info(message)
+        return message
+
+    def _safety_denial_add(self, asset_text: str) -> str | None:
+        controller = self.safety_controller
+        if controller is None or not getattr(controller, "enabled", False):
+            return None
+        allowed, message = controller.record_add(
+            scene=self.scene,
+            asset_text=asset_text,
+        )
+        if allowed:
+            return None
+        console_logger.info(message)
+        return message
+
+    def _safety_denial_remove(
+        self, object_id: str, scene_obj: SceneObject
+    ) -> str | None:
+        controller = self.safety_controller
+        if controller is None or not getattr(controller, "enabled", False):
+            return None
+        object_text = f"{scene_obj.name} {scene_obj.description}"
+        allowed, message = controller.record_remove(
+            object_id=object_id,
+            object_text=object_text,
+            scene=self.scene,
+        )
+        if allowed:
+            return None
+        console_logger.info(message)
+        return message
+
+    def _safety_denial_rescale(
+        self,
+        object_id: str,
+        scale_factor: float,
+    ) -> str | None:
+        controller = self.safety_controller
+        if controller is None or not getattr(controller, "enabled", False):
+            return None
+
+        scene_obj = self.scene.get_object(UniqueID(object_id))
+        object_text = ""
+        current_dimensions = None
+        if scene_obj is not None:
+            object_text = f"{scene_obj.name} {scene_obj.description}"
+            if scene_obj.bbox_min is not None and scene_obj.bbox_max is not None:
+                size = scene_obj.bbox_max - scene_obj.bbox_min
+                current_dimensions = (
+                    float(size[0]),
+                    float(size[1]),
+                    float(size[2]),
+                )
+
+        allowed, message = controller.record_rescale(
+            object_id=object_id,
+            scale_factor=scale_factor,
+            object_text=object_text,
+            current_dimensions=current_dimensions,
+        )
+        if allowed:
+            return None
+        console_logger.info(message)
+        return message
+
     def _check_floor_bounds(self, x: float, y: float) -> tuple[bool, str]:
         """Check if position (center point) is within floor plan bounds.
 
@@ -141,6 +236,113 @@ class FurnitureTools:
             )
             return False, error_msg
 
+        return True, ""
+
+    def _get_room_bounds_xy(self) -> tuple[float, float, float, float] | None:
+        room_geometry = self.scene.room_geometry
+        if not room_geometry or room_geometry.length <= 0 or room_geometry.width <= 0:
+            return None
+        return (
+            -room_geometry.length / 2,
+            -room_geometry.width / 2,
+            room_geometry.length / 2,
+            room_geometry.width / 2,
+        )
+
+    def _room_bounds_tolerance(self) -> float:
+        safety_cfg = getattr(self.cfg, "furniture_safety_controller", None)
+        if safety_cfg is not None:
+            try:
+                return float(safety_cfg.get("room_bounds_tolerance_m", 0.02))
+            except Exception:
+                return float(getattr(safety_cfg, "room_bounds_tolerance_m", 0.02))
+        return 0.02
+
+    def _floor_penetration_tolerance(self) -> float:
+        physics_cfg = getattr(self.cfg, "physics_validation", None)
+        if physics_cfg is not None:
+            try:
+                return float(physics_cfg.get("floor_penetration_tolerance_m", 0.03))
+            except Exception:
+                return float(
+                    getattr(physics_cfg, "floor_penetration_tolerance_m", 0.03)
+                )
+        return 0.03
+
+    def _world_bounds_for_transform(
+        self, scene_obj: SceneObject, transform: RigidTransform
+    ) -> tuple[np.ndarray, np.ndarray] | None:
+        if scene_obj.bbox_min is None or scene_obj.bbox_max is None:
+            return None
+        corners = compute_aabb_corners(scene_obj.bbox_min, scene_obj.bbox_max)
+        world_corners = np.array([transform @ corner for corner in corners])
+        return np.min(world_corners, axis=0), np.max(world_corners, axis=0)
+
+    def _ground_transform_to_floor_if_needed(
+        self,
+        scene_obj: SceneObject,
+        transform: RigidTransform,
+    ) -> tuple[RigidTransform, float]:
+        """Lift floor-standing furniture so its full bbox rests on the floor.
+
+        Retrieved assets do not always use the floor contact point as their local
+        origin. A bed whose local bbox has min_z=-0.97 should still be placeable
+        at a floor position; otherwise every valid x/y pose is rejected before
+        the planner has a chance to repair the layout.
+        """
+        world_bounds = self._world_bounds_for_transform(scene_obj, transform)
+        if world_bounds is None:
+            return transform, 0.0
+
+        world_min, _ = world_bounds
+        bottom_z = float(world_min[2])
+        floor_tolerance = self._floor_penetration_tolerance()
+        if bottom_z >= -floor_tolerance:
+            return transform, 0.0
+
+        translation = np.array(transform.translation(), dtype=float)
+        lift = -bottom_z
+        translation[2] += lift
+        grounded_transform = RigidTransform(R=transform.rotation(), p=translation)
+        return grounded_transform, lift
+
+    def _check_object_bounds_for_transform(
+        self, scene_obj: SceneObject, transform: RigidTransform
+    ) -> tuple[bool, str]:
+        """Validate the full object AABB, not just its center point."""
+        room_bounds = self._get_room_bounds_xy()
+        world_bounds = self._world_bounds_for_transform(scene_obj, transform)
+        if room_bounds is None or world_bounds is None:
+            return True, ""
+
+        min_x, min_y, max_x, max_y = room_bounds
+        world_min, world_max = world_bounds
+        tolerance = self._room_bounds_tolerance()
+        floor_tolerance = self._floor_penetration_tolerance()
+
+        violations = []
+        if world_min[0] < min_x - tolerance or world_max[0] > max_x + tolerance:
+            violations.append(
+                f"x=[{world_min[0]:.3f}, {world_max[0]:.3f}] outside "
+                f"[{min_x:.3f}, {max_x:.3f}]"
+            )
+        if world_min[1] < min_y - tolerance or world_max[1] > max_y + tolerance:
+            violations.append(
+                f"y=[{world_min[1]:.3f}, {world_max[1]:.3f}] outside "
+                f"[{min_y:.3f}, {max_y:.3f}]"
+            )
+        if world_min[2] < -floor_tolerance:
+            violations.append(
+                f"bottom z={world_min[2]:.3f} below floor tolerance "
+                f"{floor_tolerance:.3f}"
+            )
+
+        if violations:
+            return (
+                False,
+                f"Full bounding box for {scene_obj.name} would leave the room: "
+                + "; ".join(violations),
+            )
         return True, ""
 
     def _create_loop_error_response(
@@ -259,11 +461,30 @@ class FurnitureTools:
                 f"Generating batch of {len(object_descriptions)} assets: "
                 f"{object_descriptions}"
             )
-            request = AssetGenerationRequest(
+            safety_denial = self._safety_denial_generate_assets()
+            if safety_denial:
+                return safety_denial
+
+            safety_cfg = getattr(self.cfg, "furniture_safety_controller", None)
+            bedroom_cfg = getattr(safety_cfg, "bedroom_layout", None)
+            size_policy_result = apply_bedroom_asset_size_policy(
+                scene=self.scene,
                 object_descriptions=object_descriptions,
                 short_names=short_names,
-                object_type=ObjectType.FURNITURE,
                 desired_dimensions=desired_dimensions,
+                cfg=bedroom_cfg,
+            )
+            if size_policy_result.notes:
+                console_logger.info(
+                    "Bedroom asset size policy applied: %s",
+                    "; ".join(size_policy_result.notes),
+                )
+
+            request = AssetGenerationRequest(
+                object_descriptions=size_policy_result.object_descriptions,
+                short_names=size_policy_result.short_names,
+                object_type=ObjectType.FURNITURE,
+                desired_dimensions=size_policy_result.desired_dimensions,
                 style_context=style_context,
                 scene_id=self.scene.scene_dir.name,
             )
@@ -445,6 +666,19 @@ class FurnitureTools:
                     error_type=FurnitureErrorType.ASSET_NOT_FOUND,
                 )
 
+            safety_denial = self._safety_denial_add(
+                asset_text=(
+                    f"{original_asset.name} "
+                    f"{getattr(original_asset, 'description', '')}"
+                )
+            )
+            if safety_denial:
+                return self._create_failure_result(
+                    asset_id=asset_id,
+                    message=safety_denial,
+                    error_type=FurnitureErrorType.INVALID_POSITION,
+                )
+
             console_logger.debug(
                 f"Placing asset {asset_id} ({original_asset.name}) at position "
                 f"({x}, {y}, {z}), rotation "
@@ -473,12 +707,59 @@ class FurnitureTools:
                 yaw=math.radians(yaw),
             )
 
+            base_transform, base_lift = self._ground_transform_to_floor_if_needed(
+                scene_obj=scene_object,
+                transform=scene_object.transform,
+            )
+            if base_lift > 0:
+                console_logger.info(
+                    "Auto-grounded furniture asset '%s' by lifting %.3fm before "
+                    "room-bound validation",
+                    original_asset.name,
+                    base_lift,
+                )
+            scene_object.transform = base_transform
+
             # Apply placement noise for realistic variation.
-            scene_object.transform = apply_placement_noise(
+            noisy_transform = apply_placement_noise(
                 transform=scene_object.transform,
                 position_xy_std_meters=self.active_noise_profile.position_xy_std_meters,
                 rotation_yaw_std_degrees=self.active_noise_profile.rotation_yaw_std_degrees,
             )
+            noisy_transform, noisy_lift = self._ground_transform_to_floor_if_needed(
+                scene_obj=scene_object,
+                transform=noisy_transform,
+            )
+            if noisy_lift > 0:
+                console_logger.info(
+                    "Auto-grounded noisy furniture pose for '%s' by lifting %.3fm",
+                    original_asset.name,
+                    noisy_lift,
+                )
+            valid_noisy, noisy_error = self._check_object_bounds_for_transform(
+                scene_obj=scene_object,
+                transform=noisy_transform,
+            )
+            if valid_noisy:
+                scene_object.transform = noisy_transform
+            else:
+                valid_base, base_error = self._check_object_bounds_for_transform(
+                    scene_obj=scene_object,
+                    transform=base_transform,
+                )
+                if not valid_base:
+                    return self._create_failure_result(
+                        asset_id=asset_id,
+                        message=base_error,
+                        error_type=FurnitureErrorType.POSITION_OUT_OF_BOUNDS,
+                    )
+                console_logger.info(
+                    "Placement noise would violate room bounds for %s; using "
+                    "un-noised transform. Noise error: %s",
+                    scene_object.object_id,
+                    noisy_error,
+                )
+                scene_object.transform = base_transform
 
             # Add to scene.
             self.scene.add_object(scene_object)
@@ -591,6 +872,16 @@ class FurnitureTools:
                     ),
                 ).to_json()
 
+            safety_denial = self._safety_denial_move(object_id=object_id)
+            if safety_denial:
+                return FurnitureOperationResult(
+                    success=False,
+                    message=safety_denial,
+                    object_id=object_id,
+                    error_type=FurnitureErrorType.INVALID_POSITION,
+                    suggested_action="Request a critique or finish with the best checkpoint.",
+                ).to_json()
+
             # Validate position is within floor plan bounds.
             is_valid, error_msg = self._check_floor_bounds(x=x, y=y)
             if not is_valid:
@@ -653,13 +944,58 @@ class FurnitureTools:
                 math.radians(roll), math.radians(pitch), math.radians(yaw)
             )
             new_transform = RigidTransform(rpy=new_rpy, p=[x, y, z])
+            new_transform, base_lift = self._ground_transform_to_floor_if_needed(
+                scene_obj=scene_obj,
+                transform=new_transform,
+            )
+            if base_lift > 0:
+                console_logger.info(
+                    "Auto-grounded furniture '%s'/'%s' by lifting %.3fm before "
+                    "move validation",
+                    scene_obj.name,
+                    object_id,
+                    base_lift,
+                )
 
-            # Apply placement noise for realistic variation.
-            new_transform = apply_placement_noise(
+            noisy_transform = apply_placement_noise(
                 transform=new_transform,
                 position_xy_std_meters=self.active_noise_profile.position_xy_std_meters,
                 rotation_yaw_std_degrees=self.active_noise_profile.rotation_yaw_std_degrees,
             )
+            noisy_transform, noisy_lift = self._ground_transform_to_floor_if_needed(
+                scene_obj=scene_obj,
+                transform=noisy_transform,
+            )
+            if noisy_lift > 0:
+                console_logger.info(
+                    "Auto-grounded noisy furniture move for '%s' by lifting %.3fm",
+                    object_id,
+                    noisy_lift,
+                )
+            valid_noisy, noisy_error = self._check_object_bounds_for_transform(
+                scene_obj=scene_obj,
+                transform=noisy_transform,
+            )
+            if valid_noisy:
+                new_transform = noisy_transform
+            else:
+                valid_base, base_error = self._check_object_bounds_for_transform(
+                    scene_obj=scene_obj,
+                    transform=new_transform,
+                )
+                if not valid_base:
+                    return FurnitureOperationResult(
+                        success=False,
+                        message=base_error,
+                        object_id=object_id,
+                        error_type=FurnitureErrorType.POSITION_OUT_OF_BOUNDS,
+                    ).to_json()
+                console_logger.info(
+                    "Placement noise would violate room bounds for %s; using "
+                    "un-noised transform. Noise error: %s",
+                    object_id,
+                    noisy_error,
+                )
 
             # Update object to new absolute pose.
             self.scene.move_object(object_id=unique_id, new_transform=new_transform)
@@ -751,6 +1087,19 @@ class FurnitureTools:
                     ),
                 ).to_json()
 
+            safety_denial = self._safety_denial_remove(
+                object_id=object_id,
+                scene_obj=scene_obj,
+            )
+            if safety_denial:
+                return FurnitureOperationResult(
+                    success=False,
+                    message=safety_denial,
+                    object_id=object_id,
+                    error_type=FurnitureErrorType.IMMUTABLE_OBJECT,
+                    suggested_action="Move required furniture locally instead of deleting it.",
+                ).to_json()
+
             # Remove from scene.
             removed = self.scene.remove_object(unique_id)
 
@@ -798,6 +1147,18 @@ class FurnitureTools:
         console_logger.info(
             f"Tool called: rescale_furniture (id={object_id}, scale={scale_factor})"
         )
+        safety_denial = self._safety_denial_rescale(
+            object_id=object_id,
+            scale_factor=scale_factor,
+        )
+        if safety_denial:
+            return RescaleResult(
+                success=False,
+                message=safety_denial,
+                object_id=object_id,
+                error_type=RescaleErrorType.INVALID_SCALE_FACTOR,
+            ).to_json()
+
         result = rescale_object_common(
             scene=self.scene,
             object_id=object_id,
@@ -852,10 +1213,21 @@ class FurnitureTools:
             message_parts.append(f"  - {failed.description}: {failed.error_message}")
             failure_details.append(f"- {failed.description}: {failed.error_message}")
 
-        message_parts.append(
-            "\nRECOMMENDATION: Regenerate only the failed assets with adjusted "
-            "prompts if needed."
+        has_fatal_setup_error = any(
+            "Fatal asset retrieval setup error" in failed.error_message
+            for failed in result.failed_assets
         )
+        if has_fatal_setup_error:
+            message_parts.append(
+                "\nRECOMMENDATION: Stop calling generate_assets. This is an "
+                "environment setup error, not a prompt problem. Fix the missing "
+                "retrieval dependency first, then rerun the scene."
+            )
+        else:
+            message_parts.append(
+                "\nRECOMMENDATION: Regenerate only the failed assets with adjusted "
+                "prompts if needed."
+            )
 
         # Add duplicate warning if applicable.
         self._add_duplicate_warning(message_parts)

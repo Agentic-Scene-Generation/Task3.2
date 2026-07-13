@@ -15,13 +15,13 @@ csv_path: null
 #一定要加引号！
 prompts: [
   "A bedroom with a bed, two nightstands, and a wardrobe in the corner of the room.",
-  # "A living room with a two-seater sofa against the wall, a square rug in the middle in front of the sofa, and two large plants on the floor near the sofa.",
-  # "A classroom with six student desks, each with a chair. A teacher's desk sits at the front near the chalkboard, which hangs on the wall."
+  "A living room with a two-seater sofa against the wall, a square rug in the middle in front of the sofa, and two large plants on the floor near the sofa.",
+  "A classroom with six student desks, each with a chair. A teacher's desk sits at the front near the chalkboard, which hangs on the wall.",
 
   #kunming
-  # "A bedroom featuring rustic farmhouse decor with exposed wooden beams."
-  # "A bedroom where a chunky knit throw blanket is casually draped over the foot of the bed."
-  # "A livingroom flooded with natural light from floor-to-ceiling windows."
+  "A bedroom featuring rustic farmhouse decor with exposed wooden beams.",
+  "A bedroom where a chunky knit throw blanket is casually draped over the foot of the bed.",
+  "A livingroom flooded with natural light from floor-to-ceiling windows.",
 
   #大单房间
   # --- 1a. 逼近尺寸上限 + 功能区划分 ---
@@ -69,17 +69,22 @@ prompts: [
 
 ]
 
-# Number of parallel workers; 1 = sequential for debugging
+# Number of complete scene workers; 1 = one isolated task at a time.
 num_workers: 1
 
+# Retry a complete scene in a fresh spawned process after native/transient
+# failures (for example SIGSEGV or a local vLLM API timeout). Deterministic
+# validation failures are not retried. One retry is the production default.
+scene_retry_attempts: 1
+
 # Pipeline stage control
-# Stages run in order: floor_plan → furniture → wall_mounted → manipuland
+# Stages run in order: floor_plan → furniture → wall_mounted → ceiling_mounted → manipuland
 # Set start_stage to resume from a specific stage (loads previous stage's state)
 # Set stop_stage to stop after a specific stage (saves state for later resumption)
 # Set resume_from_path to branch from a previous experiment's output
 pipeline:
-  start_stage: "floor_plan"  # Options: "floor_plan", "furniture", "wall_mounted", "manipuland"
-  stop_stage: "manipuland"  # Options: "floor_plan", "furniture", "wall_mounted", "manipuland"
+  start_stage: "floor_plan"  # Options: "floor_plan", "furniture", "wall_mounted", "ceiling_mounted", "manipuland"
+  stop_stage: "manipuland"  # Options: "floor_plan", "furniture", "wall_mounted", "ceiling_mounted", "manipuland"
   # Path to source experiment dir (e.g., "outputs/2025-12-21/10-30-45")
   resume_from_path: null
   # Parallelize rooms within a house (mutually exclusive with num_workers > 1).
@@ -111,8 +116,8 @@ objaverse_retrieval_server:
 materials_retrieval_server:
   host: "127.0.0.1"
   port: 7008
-  data_path: "data/materials"
-  embeddings_path: "data/materials/embeddings"
+  data_path: "${paths.data_dir}/materials"
+  embeddings_path: "${paths.data_dir}/materials/embeddings"
   use_top_k: 5
 
 # SceneEval export configuration.

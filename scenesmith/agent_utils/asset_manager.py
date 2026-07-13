@@ -56,6 +56,7 @@ from scenesmith.agent_utils.objaverse_retrieval_server import ObjaverseRetrieval
 from scenesmith.agent_utils.objaverse_retrieval_server.dataclasses import (
     ObjaverseRetrievalServerRequest,
 )
+from scenesmith.agent_utils.retrieval_errors import FatalRetrievalError
 from scenesmith.agent_utils.room import AgentType, ObjectType, SceneObject, UniqueID
 from scenesmith.agent_utils.sdf_generator import (
     add_self_collision_filter,
@@ -350,6 +351,7 @@ class AssetManager:
 
         # Track duplicate requests from the last generate_assets call.
         self.last_duplicate_info: dict[str, list[int]] | None = None
+        self._fatal_asset_error: str | None = None
 
     @staticmethod
     def _sanitize_filename(name: str, max_length: int = 50) -> str:
@@ -558,13 +560,19 @@ class AssetManager:
                 # needed. Uses BlenderServer for crash isolation.
                 if server_mesh_path.suffix.lower() == ".glb":
                     # Server exported GLB, convert to GLTF with Y-up coordinates.
+                    # Keep the GLB because duplicate requests may legitimately
+                    # reference the same retrieved mesh in the same batch.
                     gltf_path = server_mesh_path.with_suffix(".gltf")
-                    self.blender_server.convert_glb_to_gltf(
-                        input_path=server_mesh_path,
-                        output_path=gltf_path,
-                        export_yup=True,
-                    )
-                    server_mesh_path.unlink()  # Remove GLB after conversion.
+                    if not gltf_path.exists():
+                        if not server_mesh_path.exists():
+                            raise FileNotFoundError(
+                                f"Retrieved mesh file missing: {server_mesh_path}"
+                            )
+                        self.blender_server.convert_glb_to_gltf(
+                            input_path=server_mesh_path,
+                            output_path=gltf_path,
+                            export_yup=True,
+                        )
                 else:
                     # Already GLTF, use as-is.
                     gltf_path = server_mesh_path
@@ -637,28 +645,8 @@ class AssetManager:
                     asset_name=config.short_name,
                 )
 
-                # Extract bounding box from Y-up GLTF.
-                bounds = mesh.bounds  # In Y-up coordinates (GLTF native format).
-
-                # Transform from Y-up (GLTF) to Z-up (Drake) coordinate system.
-                # Y-up → Z-up transformation: (x, y, z) → (x, -z, y)
-                # Maps: X→X (right), Y→Z (up), Z→-Y (forward with sign flip).
-                bbox_min_yup = bounds[0]
-                bbox_max_yup = bounds[1]
-
-                # Apply coordinate transformation.
-                bbox_min = np.array(
-                    [bbox_min_yup[0], -bbox_min_yup[2], bbox_min_yup[1]]
-                )
-                bbox_max = np.array(
-                    [bbox_max_yup[0], -bbox_max_yup[2], bbox_max_yup[1]]
-                )
-
-                # Ensure min < max after transformation (negation can swap order).
-                bbox_min, bbox_max = (
-                    np.minimum(bbox_min, bbox_max),
-                    np.maximum(bbox_min, bbox_max),
-                )
+                # Scene-graph transforms are already applied by the mesh loader.
+                bbox_min, bbox_max = mesh.bounds
 
                 # Create SceneObject using shared helper.
                 scene_obj = self._create_scene_object(
@@ -769,13 +757,19 @@ class AssetManager:
                 # needed. Uses BlenderServer for crash isolation.
                 if server_mesh_path.suffix.lower() == ".glb":
                     # Server exported GLB, convert to GLTF with Y-up coordinates.
+                    # Keep the GLB because duplicate requests may legitimately
+                    # reference the same retrieved mesh in the same batch.
                     gltf_path = server_mesh_path.with_suffix(".gltf")
-                    self.blender_server.convert_glb_to_gltf(
-                        input_path=server_mesh_path,
-                        output_path=gltf_path,
-                        export_yup=True,
-                    )
-                    server_mesh_path.unlink()  # Remove GLB after conversion.
+                    if not gltf_path.exists():
+                        if not server_mesh_path.exists():
+                            raise FileNotFoundError(
+                                f"Retrieved mesh file missing: {server_mesh_path}"
+                            )
+                        self.blender_server.convert_glb_to_gltf(
+                            input_path=server_mesh_path,
+                            output_path=gltf_path,
+                            export_yup=True,
+                        )
                 else:
                     # Already GLTF, use as-is.
                     gltf_path = server_mesh_path
@@ -842,27 +836,8 @@ class AssetManager:
                     asset_name=config.short_name,
                 )
 
-                # Extract bounding box from Y-up GLTF.
-                bounds = mesh.bounds  # In Y-up coordinates (GLTF native format).
-
-                # Transform from Y-up (GLTF) to Z-up (Drake) coordinate system.
-                # Y-up → Z-up transformation: (x, y, z) → (x, -z, y)
-                bbox_min_yup = bounds[0]
-                bbox_max_yup = bounds[1]
-
-                # Apply coordinate transformation.
-                bbox_min = np.array(
-                    [bbox_min_yup[0], -bbox_min_yup[2], bbox_min_yup[1]]
-                )
-                bbox_max = np.array(
-                    [bbox_max_yup[0], -bbox_max_yup[2], bbox_max_yup[1]]
-                )
-
-                # Ensure min < max after transformation (negation can swap order).
-                bbox_min, bbox_max = (
-                    np.minimum(bbox_min, bbox_max),
-                    np.maximum(bbox_min, bbox_max),
-                )
+                # Scene-graph transforms are already applied by the mesh loader.
+                bbox_min, bbox_max = mesh.bounds
 
                 # Create SceneObject using shared helper.
                 scene_obj = self._create_scene_object(
@@ -1025,20 +1000,50 @@ class AssetManager:
             f"{'enabled' if self.router is not None else 'disabled'}."
         )
 
-        # If router is enabled, analyze and potentially modify the request.
-        if self.router is not None:
-            return self._generate_assets_with_router(request)
+        if self._fatal_asset_error:
+            return self._fatal_generation_result(request, self._fatal_asset_error)
 
-        # Dispatch based on asset source (router disabled).
-        if self.general_asset_source == "hssd":
-            return self._retrieve_hssd_assets(request)
-        elif self.general_asset_source == "objaverse":
-            return self._retrieve_objaverse_assets(request)
-        elif self.general_asset_source == "generated":
-            return self._generate_assets_with_model(request)
-        else:
-            # This should never happen due to __init__ validation.
-            raise ValueError(f"Unknown asset source: {self.general_asset_source}")
+        try:
+            # If router is enabled, analyze and potentially modify the request.
+            if self.router is not None:
+                return self._generate_assets_with_router(request)
+
+            # Dispatch based on asset source (router disabled).
+            if self.general_asset_source == "hssd":
+                return self._retrieve_hssd_assets(request)
+            elif self.general_asset_source == "objaverse":
+                return self._retrieve_objaverse_assets(request)
+            elif self.general_asset_source == "generated":
+                return self._generate_assets_with_model(request)
+            else:
+                # This should never happen due to __init__ validation.
+                raise ValueError(f"Unknown asset source: {self.general_asset_source}")
+        except FatalRetrievalError as e:
+            self._fatal_asset_error = str(e)
+            return self._fatal_generation_result(request, str(e))
+
+    def _fatal_generation_result(
+        self, request: AssetGenerationRequest, error_message: str
+    ) -> AssetGenerationResult:
+        """Return a deterministic failure result without calling the router again."""
+        console_logger.error(
+            "Fatal asset retrieval setup error; skipping asset generation: "
+            f"{error_message}"
+        )
+        return AssetGenerationResult(
+            successful_assets=[],
+            failed_assets=[
+                FailedAsset(
+                    index=index,
+                    description=description,
+                    error_message=(
+                        "Fatal asset retrieval setup error. Stop retrying "
+                        f"generate_assets until the environment is fixed: {error_message}"
+                    ),
+                )
+                for index, description in enumerate(request.object_descriptions)
+            ],
+        )
 
     def _generate_assets_with_router(
         self, request: AssetGenerationRequest
@@ -1267,9 +1272,12 @@ class AssetManager:
                 for idx, (desc, item) in enumerate(items_list)
             }
 
+            reported_indices: set[int] = set()
             for future in as_completed(futures):
                 idx, desc, item = futures[future]
                 try:
+                    if future.cancelled():
+                        continue
                     generated = future.result()
                     if generated is None:
                         console_logger.warning(f"All attempts exhausted for '{desc}'")
@@ -1280,6 +1288,7 @@ class AssetManager:
                                 error_message="All generation/retrieval attempts exhausted",
                             )
                         )
+                        reported_indices.add(idx)
                         continue
 
                     console_logger.info(
@@ -1299,6 +1308,7 @@ class AssetManager:
                                 item=item, generated=generated, request=request
                             )
                         successful_assets.append(scene_obj)
+                        reported_indices.add(idx)
                         console_logger.info(f"Successfully converted asset: '{desc}'")
                     except Exception as e:
                         console_logger.error(
@@ -1309,6 +1319,39 @@ class AssetManager:
                                 index=idx, description=desc, error_message=str(e)
                             )
                         )
+                        reported_indices.add(idx)
+
+                except FatalRetrievalError as e:
+                    fatal_message = str(e)
+                    self._fatal_asset_error = fatal_message
+                    console_logger.error(
+                        "Fatal asset retrieval setup error; cancelling remaining "
+                        f"asset work for this batch: {fatal_message}"
+                    )
+
+                    for pending in futures:
+                        if pending is not future:
+                            pending.cancel()
+
+                    for (
+                        _pending_future,
+                        (pending_idx, pending_desc, _),
+                    ) in futures.items():
+                        if pending_idx in reported_indices:
+                            continue
+                        failed_assets.append(
+                            FailedAsset(
+                                index=pending_idx,
+                                description=pending_desc,
+                                error_message=(
+                                    "Fatal asset retrieval setup error. Stop "
+                                    "retrying generate_assets until the "
+                                    f"environment is fixed: {fatal_message}"
+                                ),
+                            )
+                        )
+                        reported_indices.add(pending_idx)
+                    break
 
                 except Exception as e:
                     console_logger.error(
@@ -1317,6 +1360,7 @@ class AssetManager:
                     failed_assets.append(
                         FailedAsset(index=idx, description=desc, error_message=str(e))
                     )
+                    reported_indices.add(idx)
 
         console_logger.info(
             f"Router generation completed: {len(successful_assets)} success, "
@@ -1575,11 +1619,13 @@ class AssetManager:
             List of AssetPathConfig objects containing asset paths and metadata.
         """
         asset_paths = []
-        for desc, short_name in zip(object_descriptions, short_names):
+        batch_stamp = time.time_ns()
+        for index, (desc, short_name) in enumerate(
+            zip(object_descriptions, short_names)
+        ):
             # Use sanitized short name for file naming.
             safe_name = self._sanitize_filename(short_name)
-            timestamp = int(time.time())
-            base_name = f"{safe_name}_{timestamp}"
+            base_name = f"{safe_name}_{index:03d}_{batch_stamp}"
 
             asset_paths.append(
                 AssetPathConfig(
@@ -1937,23 +1983,8 @@ class AssetManager:
         )
 
         # Extract bounding box from scaled mesh.
-        bounds = mesh.bounds  # In Y-up coordinates (GLTF native format).
-
-        # Transform from Y-up (GLTF) to Z-up (Drake) coordinate system.
-        # Y-up → Z-up transformation: (x, y, z) → (x, -z, y)
-        # Maps: X→X (right), Y→Z (up), Z→-Y (forward with sign flip).
-        bbox_min_yup = bounds[0]
-        bbox_max_yup = bounds[1]
-
-        # Apply coordinate transformation.
-        bbox_min = np.array([bbox_min_yup[0], -bbox_min_yup[2], bbox_min_yup[1]])
-        bbox_max = np.array([bbox_max_yup[0], -bbox_max_yup[2], bbox_max_yup[1]])
-
-        # Ensure min < max after transformation (negation can swap order).
-        bbox_min, bbox_max = (
-            np.minimum(bbox_min, bbox_max),
-            np.maximum(bbox_min, bbox_max),
-        )
+        # Scene-graph transforms are already applied by the mesh loader.
+        bbox_min, bbox_max = mesh.bounds
 
         console_logger.info(
             f"Drake SDF complete: SDF at {sdf_path}, bounds: {bbox_min} to {bbox_max}"
@@ -2016,21 +2047,8 @@ class AssetManager:
 
         # Load mesh for bounding box calculation.
         mesh = load_mesh_as_trimesh(gltf_path, force_merge=True)
-        bounds = mesh.bounds  # In Y-up coordinates (GLTF native format).
-
-        # Transform from Y-up (GLTF) to Z-up (Drake) coordinate system.
-        bbox_min_yup = bounds[0]
-        bbox_max_yup = bounds[1]
-
-        # Apply coordinate transformation: (x, y, z)_Yup → (x, -z, y)_Zup
-        bbox_min = np.array([bbox_min_yup[0], -bbox_min_yup[2], bbox_min_yup[1]])
-        bbox_max = np.array([bbox_max_yup[0], -bbox_max_yup[2], bbox_max_yup[1]])
-
-        # Ensure min < max after transformation.
-        bbox_min, bbox_max = (
-            np.minimum(bbox_min, bbox_max),
-            np.maximum(bbox_min, bbox_max),
-        )
+        # Scene-graph transforms are already applied by the mesh loader.
+        bbox_min, bbox_max = mesh.bounds
 
         console_logger.info(
             f"Thin covering SDF complete: {sdf_path}, bounds: {bbox_min} to {bbox_max}"

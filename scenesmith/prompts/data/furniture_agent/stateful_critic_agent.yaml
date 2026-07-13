@@ -104,12 +104,19 @@ prompt: |
   in images. DO NOT assess orientation from images alone - camera angles create optical
   illusions that make incorrect orientations appear correct.
 
+  Coordinate and rotation values in tool outputs are metric meters and degrees.
+  In particular, yaw values are degrees, not radians. A yaw difference below about
+  2 degrees is a subtle alignment variation, not a 20+ degree rotation error.
+
   # Opening Violations in Physics Context
 
   **CRITICAL (must fix):** Door clearance, open connection blocked, wall height exceeded
   **WARNING (evaluate intent):** Window blocking can be intentional (desk/chair facing
   window for light) or problematic (wardrobe blocking window). Assess whether each warning
   reflects a design choice or an oversight that should be fixed.
+  Window-only blocking is soft/medium priority by default: it must not be described
+  as critical and must not trigger deletion of required furniture or global rearrangement
+  unless it is paired with collision, missing required objects, or door/opening blockage.
 
   Opening labels in renders: `{type}_{id}` (e.g., door_1, window_2, open_living_kitchen)
 
@@ -164,7 +171,8 @@ prompt: |
     rather than "add a storage cabinet").
   - Absence of furniture required by scene prompt (for constrained prompts), or
     absence of essential furniture for room type (for open-ended prompts)
-  - Furniture unnecessarily blocking natural light
+  - Furniture unnecessarily blocking natural light (soft/medium unless paired with
+    collision, missing required objects, or door/opening blockage)
   - Deterioration after previous fixes; if issues worsened, recommend reverting
   - **Scale Mismatch Between Related Furniture** - When furniture pieces that must work
     together have incompatible sizes (e.g., desk too tall for its chair, dining table
@@ -226,6 +234,15 @@ prompt: |
   - Inefficient or wasteful use of space
   - Items placed too close together or too far apart
   - Awkward orientations that reduce function or flow
+  - **Low layout plausibility**: furniture is technically reachable and collision-free,
+    but the placement does not match how people normally arrange that room type.
+    Evaluate door/window/opening relationships, anchor walls, focal points, activity
+    zones, privacy, circulation, and everyday comfort. Do not treat this as a
+    single hard-coded rule; infer the room's natural use pattern. Examples include
+    a bed anchored under a prominent window when a better solid wall is available,
+    seating that ignores the obvious conversation or viewing focus, a desk placed
+    where glare or circulation makes daily use awkward, or storage placed where it
+    dominates the room instead of supporting the activity zone.
 
   ## Design Quality (Lower Priority)
   - Style consistency among furnishings
@@ -389,7 +406,7 @@ prompt: |
   the designer reads - make it thorough and specific.
 
   ## 2. Quality Scores (Supplementary Metrics)
-  Provide numerical ratings (0-10) across six dimensions. Each score
+  Provide numerical ratings (0-10) across seven dimensions. Each score
   includes a grade and a brief one-sentence comment explaining it.
 
   **Score Consistency Requirements:**
@@ -450,6 +467,48 @@ prompt: |
     - 5: Multiple minor issues, cramped or ambiguous flow, minor collisions
     - 3: Major blockages or collisions, big furniture object in wrong part of the room
     - 0: Severe collisions, completely blocked space
+
+  - **Layout Plausibility** (0-10) - Human-likeness and professional arrangement logic
+
+    This metric asks whether the scene looks like a room a person would actually
+    choose to live in or work in, beyond basic object presence, collision-free
+    placement, and reachability.
+
+    **Key Question:** Given the room type, doors, windows, openings, and functional
+    zones, does the furniture use the most natural anchor locations and spatial
+    relationships?
+
+    Evaluate:
+    - Whether major furniture is anchored to plausible walls or focal areas
+    - Whether door/window relationships support comfort, privacy, light, and access
+    - Whether activity zones feel intentional rather than merely feasible
+    - Whether the arrangement follows common room-type conventions without being rigid
+    - Whether a human interior designer would consider the layout acceptable
+
+    **Important distinction from Layout:**
+    - Layout: spacing, orientation, traffic flow, collisions, and local geometry
+    - Layout Plausibility: everyday human arrangement logic and room-use conventions
+
+    **Scoring Anchors:**
+    - 10: The primary furniture choices and anchor walls feel natural for the room
+          type; door/window/opening relationships support daily use.
+    - 8: Plausible overall, with one debatable but acceptable placement choice.
+    - 6: Technically functional but noticeably awkward or amateurish in one major
+          placement decision.
+    - 4: The main furniture is placed in a way that most people would avoid, even
+          though the scene may be reachable and collision-free.
+    - 2: Multiple major placements ignore obvious room-use conventions.
+    - 0: The arrangement is incoherent as a human-used room.
+
+    **Calibration examples, not exhaustive rules:**
+    - In many bedrooms, a bed usually anchors to a solid wall with a comfortable
+      relationship to the door and windows. If a bed is placed under a prominent
+      window while a better solid anchor wall is available, score this low unless
+      the prompt or room constraints justify it.
+    - In living rooms, seating should usually relate to a conversation area, view,
+      fireplace, or media focus rather than simply filling empty space.
+    - In workspaces, desks should consider light, glare, access, and concentration,
+      not just fit inside the room.
 
   - **Holistic Completeness** (0-10) - Room feels complete for its TYPE, independent of prompt
 

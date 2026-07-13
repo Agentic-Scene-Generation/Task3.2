@@ -14,7 +14,9 @@ from threading import Thread
 import flask
 import numpy as np
 
+from scenesmith.agent_utils.clip_embeddings import warmup_clip_model
 from scenesmith.agent_utils.hssd_retrieval.retrieval import HssdRetriever
+from scenesmith.agent_utils.retrieval_errors import FatalRetrievalError
 from scenesmith.agent_utils.scheduler import QueuedRequest, StrictRoundRobinScheduler
 
 from .dataclasses import (
@@ -61,6 +63,7 @@ class HssdRetrievalApp(flask.Flask):
         self._hssd_preprocessed_path = hssd_preprocessed_path
         self._hssd_top_k = hssd_top_k
         self._clip_device = clip_device
+        self._fatal_error: str | None = None
 
         self._scheduler = StrictRoundRobinScheduler()
         self._processing_thread: Thread | None = None
@@ -78,6 +81,7 @@ class HssdRetrievalApp(flask.Flask):
             console_logger.info("Preloading HSSD retriever and CLIP model...")
             start_time = time.time()
             self._get_retriever()
+            warmup_clip_model(device=self._clip_device)
             load_time = time.time() - start_time
             console_logger.info(
                 f"HSSD retriever preloaded in {load_time:.2f}s " "(includes CLIP model)"
@@ -182,6 +186,9 @@ class HssdRetrievalApp(flask.Flask):
     def _process_round_robin_request(self, queued_request: QueuedRequest) -> None:
         """Process a single retrieval request."""
         try:
+            if self._fatal_error:
+                raise FatalRetrievalError(self._fatal_error)
+
             self._current_processing = (
                 f"{queued_request.client_id}[{queued_request.request_index}]: "
                 f"{queued_request.request.object_description}"
@@ -205,6 +212,8 @@ class HssdRetrievalApp(flask.Flask):
                 self._request_times.pop(0)
 
         except Exception as e:
+            if isinstance(e, FatalRetrievalError):
+                self._fatal_error = str(e)
             console_logger.error(
                 f"Request from {queued_request.client_id} "
                 f"[{queued_request.request_index}] failed: {e}"
@@ -233,6 +242,8 @@ class HssdRetrievalApp(flask.Flask):
         Raises:
             RuntimeError: If retrieval fails.
         """
+        if self._fatal_error:
+            raise FatalRetrievalError(self._fatal_error)
         retriever = self._get_retriever()
 
         # Convert dimensions tuple to numpy array if provided.
@@ -311,6 +322,7 @@ class HssdRetrievalApp(flask.Flask):
                 "processing_active": self._processing_active,
                 "avg_processing_time_seconds": avg_processing_time,
                 "retriever_loaded": self._retriever is not None,
+                "fatal_error": self._fatal_error,
             }
         )
 

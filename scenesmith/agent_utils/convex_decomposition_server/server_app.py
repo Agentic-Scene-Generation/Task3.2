@@ -124,9 +124,7 @@ class ConvexDecompositionServerApp(flask.Flask):
             console_logger.info(f"Processing mesh: {mesh_path.name} (method={method})")
 
             # Load mesh.
-            mesh = trimesh.load(mesh_path, force="mesh")
-            if isinstance(mesh, trimesh.Scene):
-                mesh = trimesh.util.concatenate(mesh.dump())
+            mesh = self._load_mesh_with_scene_transforms(mesh_path)
 
             # Dispatch to appropriate decomposition method.
             if method == "vhacd":
@@ -166,6 +164,28 @@ class ConvexDecompositionServerApp(flask.Flask):
                 ),
                 500,
             )
+
+    @staticmethod
+    def _load_mesh_with_scene_transforms(mesh_path: Path) -> trimesh.Trimesh:
+        """Load a mesh without dropping GLTF node coordinate transforms."""
+        loaded = trimesh.load(mesh_path)
+        if isinstance(loaded, trimesh.Trimesh):
+            return loaded
+        if not isinstance(loaded, trimesh.Scene):
+            raise ValueError(f"Unsupported mesh type: {type(loaded).__name__}")
+
+        meshes = []
+        for node_name in loaded.graph.nodes_geometry:
+            transform, geometry_name = loaded.graph[node_name]
+            geometry = loaded.geometry[geometry_name]
+            if not isinstance(geometry, trimesh.Trimesh) or not len(geometry.vertices):
+                continue
+            transformed = geometry.copy()
+            transformed.apply_transform(transform)
+            meshes.append(transformed)
+        if not meshes:
+            raise ValueError(f"No mesh geometry found in {mesh_path}")
+        return trimesh.util.concatenate(meshes)
 
     def _run_coacd(
         self, mesh: trimesh.Trimesh, data: dict

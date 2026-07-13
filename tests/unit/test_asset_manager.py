@@ -169,6 +169,23 @@ class TestAssetManager(unittest.TestCase):
         self.assertEqual(self.asset_manager.output_dir, self.output_dir)
         self.assertEqual(self.asset_manager.logger, self.mock_logger)
 
+    def test_create_asset_paths_disambiguates_duplicate_short_names(self):
+        """Duplicate requested objects must not share intermediate asset paths."""
+        paths = self.asset_manager._create_asset_paths(
+            object_descriptions=[
+                "modern wooden nightstand with drawer",
+                "modern wooden nightstand with drawer",
+            ],
+            short_names=["nightstand", "nightstand"],
+        )
+
+        self.assertEqual(len(paths), 2)
+        self.assertNotEqual(paths[0].sdf_dir, paths[1].sdf_dir)
+        self.assertNotEqual(paths[0].geometry_path, paths[1].geometry_path)
+        self.assertNotEqual(paths[0].image_path, paths[1].image_path)
+        self.assertIn("nightstand_000_", paths[0].sdf_dir.name)
+        self.assertIn("nightstand_001_", paths[1].sdf_dir.name)
+
     @patch("scenesmith.agent_utils.asset_manager.scale_mesh_uniformly_to_dimensions")
     @patch("pathlib.Path.glob")
     @patch(

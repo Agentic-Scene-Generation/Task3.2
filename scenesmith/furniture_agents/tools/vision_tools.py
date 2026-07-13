@@ -42,6 +42,7 @@ class VisionTools:
         rendering_manager: RenderingManager,
         cfg: DictConfig,
         blender_server: "BlenderServer",
+        safety_controller: Any | None = None,
     ):
         """Initialize vision tools.
 
@@ -57,6 +58,7 @@ class VisionTools:
         self.rendering_manager = rendering_manager
         self.cfg = cfg
         self.blender_server = blender_server
+        self.safety_controller = safety_controller
         self.tools = self._create_tool_closures()
 
     def _get_room_bounds(self) -> tuple[float, float, float, float] | None:
@@ -139,11 +141,25 @@ class VisionTools:
         """
         console_logger.info("Tool called: observe_scene")
         # Render current scene state with room bounds for stable grid markers.
-        images_dir = self.rendering_manager.render_scene(
-            self.scene,
-            blender_server=self.blender_server,
-            room_bounds=self._get_room_bounds(),
-        )
+        try:
+            images_dir = self.rendering_manager.render_scene(
+                self.scene,
+                blender_server=self.blender_server,
+                room_bounds=self._get_room_bounds(),
+            )
+        except Exception as exc:
+            console_logger.exception("Scene observation render failed")
+            return [
+                ToolOutputText(
+                    text=(
+                        "Unable to observe scene because rendering failed with a "
+                        f"technical geometry error: {type(exc).__name__}: {exc}. "
+                        "Treat this candidate as hard-invalid; repair/replace the "
+                        "problematic asset or roll back to the last hard-valid "
+                        "checkpoint before continuing."
+                    )
+                )
+            ]
 
         if not images_dir or not images_dir.exists():
             console_logger.error("No renders generated for scene observation")
@@ -179,6 +195,12 @@ class VisionTools:
             String describing collision status.
         """
         console_logger.info("Tool called: check_physics")
+        controller = self.safety_controller
+        if controller is not None and getattr(controller, "enabled", False):
+            allowed, message = controller.record_physics_check()
+            if not allowed:
+                console_logger.info(message)
+                return message
         return check_physics_violations(
             scene=self.scene, cfg=self.cfg, agent_type=AgentType.FURNITURE
         )

@@ -18,11 +18,41 @@ mode: "disabled"
 # Memory system
 memory:
   # Directory for persistent memory storage (relative to project root)
-  dir: "outputs/scene_expert_memory"
+  dir: "${paths.memory_dir}"
+  retriever_type: "${oc.env:SCENEEXPERT_MEMORY_RETRIEVER_TYPE,lexical}"
   retrieval:
     max_success_cases: 3
     max_failure_cases: 3
     max_skills: 2
+    recall_top_k: ${oc.env:SCENEEXPERT_MEMORY_RECALL_TOP_K,30}
+    sim_threshold: ${oc.env:SCENEEXPERT_MEMORY_SIM_THRESHOLD,0.0}
+    object_overlap_threshold: ${oc.env:SCENEEXPERT_MEMORY_OBJECT_OVERLAP_THRESHOLD,0.15}
+  embedding:
+    model_id: "${oc.env:SCENEEXPERT_MEMORY_EMBEDDING_MODEL_ID,BAAI/bge-m3}"
+    # Actual local loading path. Keep BGE-M3 directly under models_dir/bge-m3.
+    model_dir: "${oc.env:SCENEEXPERT_MEMORY_EMBEDDING_MODEL_DIR,${paths.models_dir}/bge-m3}"
+    # Online retrieval should default to CPU to avoid competing with vLLM/OpenCLIP.
+    device: "${oc.env:SCENEEXPERT_MEMORY_EMBEDDING_DEVICE,cpu}"
+    # Offline index builds may override this to cuda.
+    index_device: "${oc.env:SCENEEXPERT_MEMORY_EMBEDDING_INDEX_DEVICE,cpu}"
+    batch_size: ${oc.env:SCENEEXPERT_MEMORY_EMBEDDING_BATCH_SIZE,8}
+    max_length: ${oc.env:SCENEEXPERT_MEMORY_EMBEDDING_MAX_LENGTH,512}
+    normalize: true
+  index:
+    backend: "${oc.env:SCENEEXPERT_MEMORY_INDEX_BACKEND,numpy}"
+    # Empty means <memory.dir>/indexes. Set env only for a custom shared index dir.
+    dir: "${oc.env:SCENEEXPERT_MEMORY_INDEX_DIR,}"
+    require_ready: ${oc.env:SCENEEXPERT_MEMORY_INDEX_REQUIRE_READY,true}
+    # If true, hybrid/vector memory builds missing numpy indexes in-process
+    # before retrieval starts. This keeps ACP runs robust when JSONL memory
+    # grows between experiments.
+    auto_build_missing: ${oc.env:SCENEEXPERT_MEMORY_INDEX_AUTO_BUILD_MISSING,false}
+  hybrid_weights:
+    embedding_similarity: 0.45
+    object_overlap: 0.20
+    room_stage_match: 0.15
+    memory_quality_score: 0.10
+    recency_or_verified: 0.10
 
 # Per-stage execution budget
 stage_budget:

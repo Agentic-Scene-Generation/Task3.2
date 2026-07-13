@@ -127,18 +127,31 @@ class CeilingVisionTools:
         # Render elevated perspective view.
         # Include wall objects so ceiling agent can see paintings, shelves, mirrors,
         # etc. that might inform light placement decisions.
-        render_dir = self.rendering_manager.render_scene(
-            scene=self.scene,
-            blender_server=self.blender_server,
-            include_objects=all_furniture_ids
-            + all_wall_object_ids
-            + all_ceiling_object_ids,
-            exclude_room_geometry=False,
-            rendering_mode="ceiling_perspective",
-            room_bounds=self.room_bounds,
-            ceiling_height=self.ceiling_height,
-            annotate_object_types=["ceiling_mounted"],
-        )
+        try:
+            render_dir = self.rendering_manager.render_scene(
+                scene=self.scene,
+                blender_server=self.blender_server,
+                include_objects=all_furniture_ids
+                + all_wall_object_ids
+                + all_ceiling_object_ids,
+                exclude_room_geometry=False,
+                rendering_mode="ceiling_perspective",
+                room_bounds=self.room_bounds,
+                ceiling_height=self.ceiling_height,
+                annotate_object_types=["ceiling_mounted"],
+            )
+        except Exception as exc:
+            console_logger.exception("Ceiling observation render failed")
+            return [
+                ToolOutputText(
+                    text=(
+                        "Unable to observe ceiling scene because rendering failed "
+                        f"with a technical geometry error: {type(exc).__name__}: "
+                        f"{exc}. Treat this candidate as hard-invalid; repair or "
+                        "roll back before continuing."
+                    )
+                )
+            ]
 
         if render_dir and render_dir.exists():
             images = self._collect_images(render_dir)

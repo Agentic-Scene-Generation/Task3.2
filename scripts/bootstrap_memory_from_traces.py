@@ -54,6 +54,7 @@ def _trace_to_full_report(trace: dict) -> FullVerifyReport:
     return FullVerifyReport(
         semantic_score=final.get("semantic_score", 0.5),
         aesthetic_score=final.get("aesthetic_score", 0.5),
+        plausibility_score=final.get("plausibility_score", 0.5),
         style_consistency=final.get("style_consistency", 0.5),
         collision_free_rate=final.get("collision_free_rate", 0.5),
         stability_score=final.get("stability_score", 0.5),
@@ -93,8 +94,11 @@ def _trace_to_summary(trace: dict) -> str:
 
     final = trace.get("final_report", {})
     overall = final.get("overall_score", 0.0)
+    plausibility = final.get("plausibility_score", 0.0)
     passed = "YES" if final.get("pass_scene") else "NO"
-    lines.append(f"Final: overall={overall:.2f} pass={passed}")
+    lines.append(
+        f"Final: overall={overall:.2f} plausibility={plausibility:.2f} pass={passed}"
+    )
     return "\n".join(lines)
 
 
@@ -173,12 +177,20 @@ def main() -> None:
     )
     parser.add_argument(
         "--memory-dir",
-        default="outputs/scene_expert_memory/ablation_4",
+        default=str(
+            Path(
+                os.environ.get("SCENEEXPERT_MEMORY_DIR", "outputs/scene_expert_memory")
+            )
+            / "ablation_4"
+        ),
         help="Target memory store directory (default: outputs/scene_expert_memory/ablation_4)",
     )
     parser.add_argument(
         "--model",
-        default=os.environ.get("SCENEEXPERT_MODEL", "Qwen/Qwen3.5-35B-A3B"),
+        default=os.environ.get(
+            "SCENEEXPERT_MODEL_ID",
+            os.environ.get("SCENEEXPERT_MODEL", "Qwen/Qwen3.5-35B-A3B"),
+        ),
         help="Qwen3 model name (default: Qwen/Qwen3.5-35B-A3B)",
     )
     parser.add_argument(

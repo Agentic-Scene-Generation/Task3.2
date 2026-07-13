@@ -262,6 +262,23 @@ def compute_scene_collisions(
             penetration_depth = abs(pair.distance)
             if penetration_depth <= floor_penetration_tolerance:
                 continue
+            non_floor_info = (
+                object_b_info if object_a_info["name"] == "floor" else object_a_info
+            )
+            if _is_implausible_floor_penetration(
+                scene=scene,
+                object_id=str(non_floor_info["id"]),
+                penetration_depth=penetration_depth,
+            ):
+                console_logger.error(
+                    "Ignoring invalid collision proxy for %s[%s]: reported floor "
+                    "penetration %.2fcm is incompatible with the object's visual "
+                    "height. Rebuild this asset's collision geometry.",
+                    non_floor_info["name"],
+                    non_floor_info["id"],
+                    penetration_depth * 100.0,
+                )
+                continue
 
         # Create a unique identifier for this collision pair to avoid duplicates.
         # Sort the IDs to ensure A->B and B->A are treated as the same collision.
@@ -325,6 +342,37 @@ def compute_scene_collisions(
         console_logger.info("=" * 60)
 
     return collisions
+
+
+def _is_implausible_floor_penetration(
+    scene: RoomScene,
+    object_id: str,
+    penetration_depth: float,
+) -> bool:
+    """Detect meter-scale floor contacts caused by a rotated collision proxy."""
+    scene_object = next(
+        (
+            obj
+            for candidate_id, obj in scene.objects.items()
+            if str(candidate_id) == object_id
+        ),
+        None,
+    )
+    if scene_object is None:
+        return False
+    bbox_min = getattr(scene_object, "bbox_min", None)
+    bbox_max = getattr(scene_object, "bbox_max", None)
+    if bbox_min is None or bbox_max is None:
+        return False
+    visual_height = float(bbox_max[2] - bbox_min[2])
+    if visual_height <= 0:
+        return False
+
+    # Furniture placement tools keep floor objects at z=0. A penetration larger
+    # than 35% of the visual height cannot be ordinary contact or placement
+    # noise; it indicates that a horizontal proxy axis was mapped to Z.
+    invalid_threshold = max(0.25, visual_height * 0.35)
+    return penetration_depth > invalid_threshold
 
 
 def _should_skip_collision_pair(

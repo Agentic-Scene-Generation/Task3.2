@@ -13,11 +13,13 @@ Usage:
         --scene-states-dir outputs/2026-06-03/12-28-58/scene_000/room_bedroom/scene_states \
         [--top-n 5] [--dry-run]
 """
+
 from __future__ import annotations
 
 import argparse
 import json
 import math
+import os
 import re
 import sys
 import uuid
@@ -33,18 +35,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # Maps stage name -> scene_states subdirectory that holds the final checkpoint
 _STAGE_CHECKPOINT_DIR = {
-    'furniture':       'scene_after_furniture',
-    'wall_mounted':    'scene_after_wall_objects',
-    'ceiling_mounted': 'scene_after_ceiling_objects',
-    'manipuland':      'final_scene',
+    "furniture": "scene_after_furniture",
+    "wall_mounted": "scene_after_wall_objects",
+    "ceiling_mounted": "scene_after_ceiling_objects",
+    "manipuland": "final_scene",
 }
 
 # Object types to include per stage
 _STAGE_OBJECT_TYPES = {
-    'furniture':       {'furniture'},
-    'wall_mounted':    {'wall_mounted'},
-    'ceiling_mounted': {'ceiling_mounted'},
-    'manipuland':      {'manipuland'},
+    "furniture": {"furniture"},
+    "wall_mounted": {"wall_mounted"},
+    "ceiling_mounted": {"ceiling_mounted"},
+    "manipuland": {"manipuland"},
 }
 
 
@@ -57,45 +59,43 @@ def _wxyz_to_yaw_deg(w: float, x: float, y: float, z: float) -> float:
 
 def _format_placement(obj_id: str, obj: dict) -> str:
     """Format one object's placement as a compact human-readable string."""
-    t = obj.get('transform', {})
-    tr = t.get('translation', [0.0, 0.0, 0.0])
-    rot = t.get('rotation_wxyz', [1.0, 0.0, 0.0, 0.0])
+    t = obj.get("transform", {})
+    tr = t.get("translation", [0.0, 0.0, 0.0])
+    rot = t.get("rotation_wxyz", [1.0, 0.0, 0.0, 0.0])
     yaw = _wxyz_to_yaw_deg(*rot)
 
-    bmin = obj.get('bbox_min', [])
-    bmax = obj.get('bbox_max', [])
+    bmin = obj.get("bbox_min", [])
+    bmax = obj.get("bbox_max", [])
     size_str = ""
     if bmin and bmax and len(bmin) == 3:
         sx, sy, sz = [round(bmax[i] - bmin[i], 3) for i in range(3)]
         size_str = f", size={sx}×{sy}×{sz}m"
 
-    pinfo = obj.get('placement_info') or {}
-    surface = pinfo.get('parent_surface_id', '')
-    pos2d = pinfo.get('position_2d', [])
+    pinfo = obj.get("placement_info") or {}
+    surface = pinfo.get("parent_surface_id", "")
+    pos2d = pinfo.get("position_2d", [])
 
-    name = obj.get('name', obj_id)
-    otype = obj.get('object_type', '')
+    name = obj.get("name", obj_id)
+    otype = obj.get("object_type", "")
 
-    if otype == 'furniture':
-        return (
-            f"{obj_id} ({name}): x={tr[0]:.3f}, y={tr[1]:.3f}, yaw={yaw}°{size_str}"
-        )
-    elif otype == 'wall_mounted':
-        wall = pinfo.get('parent_surface_id', '?')
-        px = round(pos2d[0], 3) if pos2d else '?'
-        pz = round(pos2d[1], 3) if pos2d else '?'
+    if otype == "furniture":
+        return f"{obj_id} ({name}): x={tr[0]:.3f}, y={tr[1]:.3f}, yaw={yaw}°{size_str}"
+    elif otype == "wall_mounted":
+        wall = pinfo.get("parent_surface_id", "?")
+        px = round(pos2d[0], 3) if pos2d else "?"
+        pz = round(pos2d[1], 3) if pos2d else "?"
         return (
             f"{obj_id} ({name}): wall={wall}, pos2d=({px}, {pz}), "
             f"z={tr[2]:.2f}m{size_str}"
         )
-    elif otype == 'ceiling_mounted':
+    elif otype == "ceiling_mounted":
         return (
             f"{obj_id} ({name}): x={tr[0]:.3f}, y={tr[1]:.3f}, "
             f"z={tr[2]:.2f}m (ceiling){size_str}"
         )
-    elif otype == 'manipuland':
-        px = round(pos2d[0], 3) if pos2d else '?'
-        py = round(pos2d[1], 3) if pos2d else '?'
+    elif otype == "manipuland":
+        px = round(pos2d[0], 3) if pos2d else "?"
+        py = round(pos2d[1], 3) if pos2d else "?"
         return (
             f"{obj_id} ({name}): surface={surface}, "
             f"pos2d=({px}, {py}), yaw={yaw}°{size_str}"
@@ -122,8 +122,8 @@ def load_stage_placements(scene_states_dir: Path, stage: str) -> list[str]:
 
     target_types = _STAGE_OBJECT_TYPES.get(stage, set())
     lines = []
-    for obj_id, obj in state.get('objects', {}).items():
-        if obj.get('object_type') in target_types:
+    for obj_id, obj in state.get("objects", {}).items():
+        if obj.get("object_type") in target_types:
             lines.append(_format_placement(obj_id, obj))
 
     return lines
@@ -136,29 +136,55 @@ def load_stage_placements(scene_states_dir: Path, stage: str) -> list[str]:
 # Maps log markers to canonical stage names
 _STAGE_MARKERS = [
     # explicit stage agent markers
-    (re.compile(r'request_initial_design.*furniture|furniture.*request_initial_design|'
-                r'add_furniture|PLANNER \(FURNITURE\)', re.I), 'furniture'),
-    (re.compile(r'PLANNER \(WALL\)|wall.*request_initial_design|'
-                r'place_wall_object|request_initial_design.*wall', re.I), 'wall_mounted'),
-    (re.compile(r'PLANNER \(CEILING\)|ceiling.*request_initial_design|'
-                r'place_ceiling_object', re.I), 'ceiling_mounted'),
-    (re.compile(r'PLANNER \(MANIPULAND\)|manipuland.*request_initial_design|'
-                r'place_manipuland', re.I), 'manipuland'),
+    (
+        re.compile(
+            r"request_initial_design.*furniture|furniture.*request_initial_design|"
+            r"add_furniture|PLANNER \(FURNITURE\)",
+            re.I,
+        ),
+        "furniture",
+    ),
+    (
+        re.compile(
+            r"PLANNER \(WALL\)|wall.*request_initial_design|"
+            r"place_wall_object|request_initial_design.*wall",
+            re.I,
+        ),
+        "wall_mounted",
+    ),
+    (
+        re.compile(
+            r"PLANNER \(CEILING\)|ceiling.*request_initial_design|"
+            r"place_ceiling_object",
+            re.I,
+        ),
+        "ceiling_mounted",
+    ),
+    (
+        re.compile(
+            r"PLANNER \(MANIPULAND\)|manipuland.*request_initial_design|"
+            r"place_manipuland",
+            re.I,
+        ),
+        "manipuland",
+    ),
 ]
 
-_FINAL_SAVE_RE = re.compile(r'Saved final scores to .*/scene_states/(\w+)/scores\.yaml')
-_VERDICT_RE = re.compile(r'Stage (\w+) (PASSED|FAILED)')
-_INIT_DESIGN_RE = re.compile(r'Tool called: request_initial_design')
-_SCORE_LINE_RE = re.compile(r'^([\w\s]+):\s*(\d+)/10$')
-_CRITIQUE_HEADER_RE = re.compile(r'CRITIQUE SCORES')
-_RESET_RE = re.compile(r'Scene reset to checkpoint\. Reason: (.+)')
-_DESIGN_CHANGE_RE = re.compile(r'Tool called: request_design_change')
-_TIMESTAMP_RE = re.compile(r'^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}),\d+ - [\w\.]+ - \w+ - (.*)')
+_FINAL_SAVE_RE = re.compile(r"Saved final scores to .*/scene_states/(\w+)/scores\.yaml")
+_VERDICT_RE = re.compile(r"Stage (\w+) (PASSED|FAILED)")
+_INIT_DESIGN_RE = re.compile(r"Tool called: request_initial_design")
+_SCORE_LINE_RE = re.compile(r"^([\w\s]+):\s*(\d+)/10$")
+_CRITIQUE_HEADER_RE = re.compile(r"CRITIQUE SCORES")
+_RESET_RE = re.compile(r"Scene reset to checkpoint\. Reason: (.+)")
+_DESIGN_CHANGE_RE = re.compile(r"Tool called: request_design_change")
+_TIMESTAMP_RE = re.compile(
+    r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}),\d+ - [\w\.]+ - \w+ - (.*)"
+)
 _STAGE_DIR_MAP = {
-    'furniture': 'furniture',
-    'wall': 'wall_mounted',
-    'ceiling': 'ceiling_mounted',
-    'manipuland_furniture': 'manipuland',
+    "furniture": "furniture",
+    "wall": "wall_mounted",
+    "ceiling": "ceiling_mounted",
+    "manipuland_furniture": "manipuland",
 }
 
 
@@ -175,6 +201,7 @@ def _get_timestamp(line: str) -> str:
 # ---------------------------------------------------------------------------
 # Parse log into per-stage critique records
 # ---------------------------------------------------------------------------
+
 
 def parse_log(log_path: Path) -> dict[str, list[dict]]:
     """Parse log and group critique iterations by stage.
@@ -193,14 +220,14 @@ def parse_log(log_path: Path) -> dict[str, list[dict]]:
         if m:
             dir_name = m.group(1)
             # Map dir_name to stage
-            if dir_name == 'furniture':
-                stage_boundaries.append((i, 'furniture'))
-            elif dir_name == 'wall':
-                stage_boundaries.append((i, 'wall_mounted'))
-            elif dir_name == 'ceiling':
-                stage_boundaries.append((i, 'ceiling_mounted'))
-            elif dir_name.startswith('manipuland'):
-                stage_boundaries.append((i, 'manipuland'))
+            if dir_name == "furniture":
+                stage_boundaries.append((i, "furniture"))
+            elif dir_name == "wall":
+                stage_boundaries.append((i, "wall_mounted"))
+            elif dir_name == "ceiling":
+                stage_boundaries.append((i, "ceiling_mounted"))
+            elif dir_name.startswith("manipuland"):
+                stage_boundaries.append((i, "manipuland"))
 
     # Build stage line ranges
     stage_ranges: list[tuple[str, int, int]] = []  # (stage, start, end)
@@ -223,7 +250,7 @@ def parse_log(log_path: Path) -> dict[str, list[dict]]:
         i = start
         while i <= end:
             content = _strip_prefix(lines[i])
-            if _CRITIQUE_HEADER_RE.search(content) and '=====' not in content:
+            if _CRITIQUE_HEADER_RE.search(content) and "=====" not in content:
                 # Found a CRITIQUE SCORES block
                 scores: dict[str, int] = {}
                 comments: dict[str, str] = {}
@@ -237,24 +264,32 @@ def parse_log(log_path: Path) -> dict[str, list[dict]]:
                         grade = int(m.group(2))
                         scores[cat] = grade
                         last_cat = cat
-                    elif last_cat and c and not c.startswith('=') and 'INFO' not in c and 'WARNING' not in c:
+                    elif (
+                        last_cat
+                        and c
+                        and not c.startswith("=")
+                        and "INFO" not in c
+                        and "WARNING" not in c
+                    ):
                         # Line immediately after a score is the comment
                         comments[last_cat] = c
                         last_cat = None
-                    if '=====' in c and j > i + 2:
+                    if "=====" in c and j > i + 2:
                         break
                     j += 1
 
                 if scores:
                     total = sum(scores.values())
-                    critiques.append({
-                        'line': i + 1,
-                        'timestamp': _get_timestamp(lines[i]),
-                        'total': total,
-                        'max_possible': len(scores) * 10,
-                        'scores': scores,
-                        'comments': comments,
-                    })
+                    critiques.append(
+                        {
+                            "line": i + 1,
+                            "timestamp": _get_timestamp(lines[i]),
+                            "total": total,
+                            "max_possible": len(scores) * 10,
+                            "scores": scores,
+                            "comments": comments,
+                        }
+                    )
             i += 1
         return critiques
 
@@ -275,9 +310,9 @@ def parse_log(log_path: Path) -> dict[str, list[dict]]:
     # Sort by total score desc
     result = {}
     for stage, crits in stage_critiques.items():
-        crits.sort(key=lambda x: x['total'], reverse=True)
+        crits.sort(key=lambda x: x["total"], reverse=True)
         result[stage] = crits
-    result['_resets'] = stage_resets
+    result["_resets"] = stage_resets
     return result
 
 
@@ -285,66 +320,75 @@ def parse_log(log_path: Path) -> dict[str, list[dict]]:
 # Build SuccessCase records from top-N critiques
 # ---------------------------------------------------------------------------
 
-def _build_success_case(stage: str, critique: dict, room_type: str, style: str,
-                        task_signature: list[str], trace_ref: str,
-                        placement_lines: list[str] | None = None) -> dict:
+
+def _build_success_case(
+    stage: str,
+    critique: dict,
+    room_type: str,
+    style: str,
+    task_signature: list[str],
+    trace_ref: str,
+    placement_lines: list[str] | None = None,
+) -> dict:
     """Convert a high-scoring critique iteration into a SuccessCase dict."""
-    scores_normalized = {
-        k: round(v / 10.0, 2) for k, v in critique['scores'].items()
-    }
+    scores_normalized = {k: round(v / 10.0, 2) for k, v in critique["scores"].items()}
 
     # Build successful_pattern from per-category comments (text only, no coords)
     patterns = []
-    for cat, comment in critique['comments'].items():
+    for cat, comment in critique["comments"].items():
         if comment and len(comment) > 10:
             patterns.append(f"{cat}: {comment}")
 
     if not patterns:
-        top = sorted(critique['scores'].items(), key=lambda x: x[1], reverse=True)
+        top = sorted(critique["scores"].items(), key=lambda x: x[1], reverse=True)
         patterns = [f"{k} scored {v}/10" for k, v in top[:3]]
 
     return {
-        'case_id': f"{stage}_{str(uuid.uuid4())[:8]}",
-        'room_type': room_type,
-        'style': style,
-        'stage': stage,
-        'task_signature': task_signature,
-        'successful_pattern': patterns,
-        'placement_reference': placement_lines or [],  # dedicated field, not mixed into patterns
-        'scores': scores_normalized,
-        'trace_ref': trace_ref,
+        "case_id": f"{stage}_{str(uuid.uuid4())[:8]}",
+        "room_type": room_type,
+        "style": style,
+        "stage": stage,
+        "task_signature": task_signature,
+        "successful_pattern": patterns,
+        "placement_reference": placement_lines
+        or [],  # dedicated field, not mixed into patterns
+        "scores": scores_normalized,
+        "trace_ref": trace_ref,
     }
 
 
 def _build_failure_case(stage: str, reset_reason: str, room_type: str) -> dict:
     """Convert a reset reason into a FailureCase dict."""
     # Extract failure type keywords
-    failure_type = 'degradation'
-    if 'collision' in reset_reason.lower() or 'collides' in reset_reason.lower():
-        failure_type = 'collision'
-    elif 'missing' in reset_reason.lower():
-        failure_type = 'missing_object'
-    elif 'imbalance' in reset_reason.lower() or 'overcrowded' in reset_reason.lower():
-        failure_type = 'layout_imbalance'
-    elif 'unrealistic' in reset_reason.lower() or 'wrong direction' in reset_reason.lower():
-        failure_type = 'placement_error'
+    failure_type = "degradation"
+    if "collision" in reset_reason.lower() or "collides" in reset_reason.lower():
+        failure_type = "collision"
+    elif "missing" in reset_reason.lower():
+        failure_type = "missing_object"
+    elif "imbalance" in reset_reason.lower() or "overcrowded" in reset_reason.lower():
+        failure_type = "layout_imbalance"
+    elif (
+        "unrealistic" in reset_reason.lower()
+        or "wrong direction" in reset_reason.lower()
+    ):
+        failure_type = "placement_error"
 
     # Extract the fix advice (usually after "Need to reset and")
     repair_action = ""
-    m = re.search(r'Need to (?:reset and )?(.{20,200})', reset_reason)
+    m = re.search(r"Need to (?:reset and )?(.{20,200})", reset_reason)
     if m:
-        repair_action = m.group(1).rstrip('.')
+        repair_action = m.group(1).rstrip(".")
 
     return {
-        'failure_id': f"fail_{stage}_{str(uuid.uuid4())[:8]}",
-        'room_type': room_type,
-        'stage': stage,
-        'object': '',
-        'failure_type': failure_type,
-        'bad_pattern': reset_reason[:200],
-        'failure_reason': reset_reason[:300],
-        'repair_action': repair_action[:200],
-        'repair_verified': False,
+        "failure_id": f"fail_{stage}_{str(uuid.uuid4())[:8]}",
+        "room_type": room_type,
+        "stage": stage,
+        "object": "",
+        "failure_type": failure_type,
+        "bad_pattern": reset_reason[:200],
+        "failure_reason": reset_reason[:300],
+        "repair_action": repair_action[:200],
+        "repair_verified": False,
     }
 
 
@@ -352,12 +396,19 @@ def _build_failure_case(stage: str, reset_reason: str, room_type: str) -> dict:
 # Main
 # ---------------------------------------------------------------------------
 
-def run(log_path: Path, memory_dir: str, top_n: int, dry_run: bool,
-        room_type: str, style: str,
-        scene_states_dir: Path | None = None) -> None:
+
+def run(
+    log_path: Path,
+    memory_dir: str,
+    top_n: int,
+    dry_run: bool,
+    room_type: str,
+    style: str,
+    scene_states_dir: Path | None = None,
+) -> None:
     print(f"Parsing {log_path} ...")
     data = parse_log(log_path)
-    resets = data.pop('_resets', {})
+    resets = data.pop("_resets", {})
 
     success_cases = []
     failure_cases = []
@@ -366,16 +417,18 @@ def run(log_path: Path, memory_dir: str, top_n: int, dry_run: bool,
 
     # Task signatures per stage (from the bedroom prompt)
     task_signatures = {
-        'furniture': ['bed', 'nightstand', 'wardrobe', 'bedroom'],
-        'wall_mounted': ['mirror', 'shelf', 'print', 'artwork', 'bedroom'],
-        'ceiling_mounted': ['ceiling light', 'pendant', 'bedroom'],
-        'manipuland': ['book', 'lamp', 'alarm clock', 'glasses', 'plant', 'bedroom'],
+        "furniture": ["bed", "nightstand", "wardrobe", "bedroom"],
+        "wall_mounted": ["mirror", "shelf", "print", "artwork", "bedroom"],
+        "ceiling_mounted": ["ceiling light", "pendant", "bedroom"],
+        "manipuland": ["book", "lamp", "alarm clock", "glasses", "plant", "bedroom"],
     }
 
     for stage, critiques in data.items():
         top = critiques[:top_n]
-        print(f"\n[{stage}] total critique rounds: {len(critiques)}, "
-              f"selecting top {len(top)} (scores: {[c['total'] for c in top]})")
+        print(
+            f"\n[{stage}] total critique rounds: {len(critiques)}, "
+            f"selecting top {len(top)} (scores: {[c['total'] for c in top]})"
+        )
 
         for rank, c in enumerate(top):
             # Only enrich the best case (rank 0) with actual placement data
@@ -383,7 +436,9 @@ def run(log_path: Path, memory_dir: str, top_n: int, dry_run: bool,
             if rank == 0 and scene_states_dir:
                 placement_lines = load_stage_placements(scene_states_dir, stage)
                 if placement_lines:
-                    print(f"  Enriched top case with {len(placement_lines)} object placements")
+                    print(
+                        f"  Enriched top case with {len(placement_lines)} object placements"
+                    )
 
             sc = _build_success_case(
                 stage=stage,
@@ -397,7 +452,9 @@ def run(log_path: Path, memory_dir: str, top_n: int, dry_run: bool,
             success_cases.append(sc)
             if dry_run:
                 prefix = "★" if rank == 0 else " "
-                print(f"  {prefix}SUCCESS [{stage}] total={c['total']} patterns={sc['successful_pattern'][:1]}")
+                print(
+                    f"  {prefix}SUCCESS [{stage}] total={c['total']} patterns={sc['successful_pattern'][:1]}"
+                )
                 if placement_lines and rank == 0:
                     for pl in placement_lines[:3]:
                         print(f"    placement: {pl}")
@@ -405,14 +462,20 @@ def run(log_path: Path, memory_dir: str, top_n: int, dry_run: bool,
         # Top-3 failure cases per stage
         stage_resets = resets.get(stage, [])
         for reason in stage_resets[:3]:
-            fc = _build_failure_case(stage=stage, reset_reason=reason, room_type=room_type)
+            fc = _build_failure_case(
+                stage=stage, reset_reason=reason, room_type=room_type
+            )
             failure_cases.append(fc)
             if dry_run:
-                print(f"  FAILURE [{stage}] type={fc['failure_type']} repair={fc['repair_action'][:80]}")
+                print(
+                    f"  FAILURE [{stage}] type={fc['failure_type']} repair={fc['repair_action'][:80]}"
+                )
 
     if dry_run:
-        print(f"\nDry-run: would write {len(success_cases)} success cases, "
-              f"{len(failure_cases)} failure cases to {memory_dir}")
+        print(
+            f"\nDry-run: would write {len(success_cases)} success cases, "
+            f"{len(failure_cases)} failure cases to {memory_dir}"
+        )
         return
 
     out_dir = Path(memory_dir)
@@ -421,19 +484,20 @@ def run(log_path: Path, memory_dir: str, top_n: int, dry_run: bool,
     success_path = out_dir / "success_cases.jsonl"
     failure_path = out_dir / "failure_cases.jsonl"
 
-    with success_path.open('w') as f:
+    with success_path.open("w") as f:
         for sc in success_cases:
-            f.write(json.dumps(sc, ensure_ascii=False) + '\n')
+            f.write(json.dumps(sc, ensure_ascii=False) + "\n")
     print(f"\nWrote {len(success_cases)} success cases → {success_path}")
 
-    with failure_path.open('w') as f:
+    with failure_path.open("w") as f:
         for fc in failure_cases:
-            f.write(json.dumps(fc, ensure_ascii=False) + '\n')
+            f.write(json.dumps(fc, ensure_ascii=False) + "\n")
     print(f"Wrote {len(failure_cases)} failure cases → {failure_path}")
 
     # Verify loadable
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from scenesmith.scene_expert.memory.store import FastMemoryStore
+
     store = FastMemoryStore(memory_dir)
     print(f"\nVerification — FastMemoryStore loaded:")
     print(f"  success_cases: {len(store.success_cases)}")
@@ -443,17 +507,30 @@ def run(log_path: Path, memory_dir: str, top_n: int, dry_run: bool,
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--log', required=True, help='Path to experiment.log')
-    parser.add_argument('--memory-dir', default='outputs/scene_expert_memory/ablation_4')
-    parser.add_argument('--scene-states-dir', default=None,
-                        help='Path to room_bedroom/scene_states/ directory. '
-                             'When provided, the top-1 success case per stage is '
-                             'enriched with actual object placements from the '
-                             'corresponding checkpoint scene_state.json.')
-    parser.add_argument('--top-n', type=int, default=5, help='Top-N success cases per stage')
-    parser.add_argument('--room-type', default='bedroom')
-    parser.add_argument('--style', default='modern')
-    parser.add_argument('--dry-run', action='store_true')
+    parser.add_argument("--log", required=True, help="Path to experiment.log")
+    parser.add_argument(
+        "--memory-dir",
+        default=str(
+            Path(
+                os.environ.get("SCENEEXPERT_MEMORY_DIR", "outputs/scene_expert_memory")
+            )
+            / "ablation_4"
+        ),
+    )
+    parser.add_argument(
+        "--scene-states-dir",
+        default=None,
+        help="Path to room_bedroom/scene_states/ directory. "
+        "When provided, the top-1 success case per stage is "
+        "enriched with actual object placements from the "
+        "corresponding checkpoint scene_state.json.",
+    )
+    parser.add_argument(
+        "--top-n", type=int, default=5, help="Top-N success cases per stage"
+    )
+    parser.add_argument("--room-type", default="bedroom")
+    parser.add_argument("--style", default="modern")
+    parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
     scene_states_dir = Path(args.scene_states_dir) if args.scene_states_dir else None
@@ -469,5 +546,5 @@ def main() -> None:
     )
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

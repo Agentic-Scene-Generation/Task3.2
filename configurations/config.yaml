@@ -9,6 +9,27 @@ openai:
   #   "priority" - Lower latency, premium pricing
   service_tier: null
 
+# LLM settings shared by all agents. The served model name must match the
+# vLLM --served-model-name value.
+llm:
+  model_id: ${oc.env:SCENEEXPERT_MODEL_ID,Qwen/Qwen3.5-35B-A3B}
+
+# User-customizable filesystem roots.
+paths:
+  # Writable SceneExpert data root for optional/local datasets such as
+  # materials, ArtVIP, PartNet-Mobility, and Objaverse.
+  data_dir: ${oc.env:SCENEEXPERT_DATA_DIR,data}
+  # Read-only HSSD/HSM root. Defaults to data_dir for backward compatibility.
+  hssd_data_dir: ${oc.env:SCENEEXPERT_HSSD_DATA_DIR,${paths.data_dir}}
+  models_dir: ${oc.env:SCENEEXPERT_MODELS_DIR,models}
+  checkpoints_dir: ${oc.env:SCENEEXPERT_CHECKPOINTS_DIR,external/checkpoints}
+  output_dir: ${oc.env:SCENEEXPERT_OUTPUT_DIR,outputs}
+  memory_dir: ${oc.env:SCENEEXPERT_MEMORY_DIR,outputs/scene_expert_memory}
+
+hydra:
+  run:
+    dir: ${paths.output_dir}/${now:%Y-%m-%d}/${now:%H-%M-%S}
+
 defaults:
   - experiment: indoor_scene_generation # Experiment yaml file name in configurations/experiment folder
   - floor_plan_agent: stateful_floor_plan_agent # Floor plan agent config in configurations/floor_plan_agent folder
@@ -16,3 +37,4 @@ defaults:
   - wall_agent: stateful_wall_agent # Wall agent yaml file name in configurations/wall_agent folder
   - ceiling_agent: stateful_ceiling_agent # Ceiling agent yaml file name in configurations/ceiling_agent folder
   - manipuland_agent: stateful_manipuland_agent # Manipuland agent yaml file name in configurations/manipuland_agent folder
+  - scene_expert: base_scene_expert # Root fallback; ablation configs set experiment.scene_expert

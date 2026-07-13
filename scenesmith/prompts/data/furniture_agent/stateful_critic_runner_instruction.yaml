@@ -55,8 +55,10 @@ prompt: |
      currently functional?
 
   Remember: A room that "works" can still be significantly improved. Consider traffic
-  flow optimization, conversation area enhancement, spatial efficiency, and overall
-  comfort.
+  flow optimization, conversation area enhancement, spatial efficiency, layout
+  plausibility, and overall comfort. In particular, evaluate whether the main
+  furniture anchors make sense for the room type, doors, windows, openings, and
+  daily human use, not just whether every item is reachable and collision-free.
 
   ## Physics Validation:
   {% if physics_context %}

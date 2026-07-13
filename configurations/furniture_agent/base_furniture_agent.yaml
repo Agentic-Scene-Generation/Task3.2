@@ -8,18 +8,25 @@ session_memory:
   # turns are kept and the current turn is also kept.
   keep_last_n_turns: 1
   # Summarize older turns via LLM (if false, just strip images).
-  enable_summarization: true
+  enable_summarization: false
   # Model for summarization ("agent" uses cfg.openai.model).
-  summarization_model: "Qwen/Qwen3.5-35B-A3B"
+  summarization_model: ${llm.model_id}
   # Thinking effort for summarization ("none", "low", "medium", "high").
-  summarization_thinking: "low"
+  summarization_thinking: "none"
   # Intra-turn observation stripping: strip images from older observe_scene outputs
   # within the current turn while keeping the last N observations with images intact.
   intra_turn_observation_stripping:
     enabled: true
     # Number of recent observe_scene outputs to keep with images.
     # Default 2 allows comparison between current and previous state.
-    keep_last_n_observations: 2
+    keep_last_n_observations: 1
+
+# Scene-local online memory for the current stage. This is not the long-term
+# SceneExpert JSONL memory; it saves per-render notes/scores and injects compact
+# recent lessons into the next designer call.
+stage_working_memory:
+  enabled: true
+  max_retrieved_items: 3
 
 # Rendering configuration
 rendering:
@@ -29,14 +36,14 @@ rendering:
   layout: "top_plus_sides"
 
   # Top-down view dimensions.
-  top_view_width: 1024
-  top_view_height: 1024
+  top_view_width: 768
+  top_view_height: 768
 
   # Side views configuration (only used when layout includes sides).
   # Set side_view_count to 0 to disable side views.
-  side_view_count: 4
-  side_view_width: 512
-  side_view_height: 512
+  side_view_count: 2
+  side_view_width: 384
+  side_view_height: 384
 
   background_color: [1.0, 1.0, 1.0]
   blender_server_host: "127.0.0.1"
@@ -50,7 +57,18 @@ rendering:
 
   # EEVEE TAA (temporal anti-aliasing) samples for render quality.
   # Higher values = better quality but slower. Default 8 is a good balance.
-  taa_samples: 8
+  taa_samples: 4
+
+  # Low-cost candidate renders used inside iterative critic loops. Final stage
+  # renders keep the full settings above.
+  intermediate_profile:
+    enabled: true
+    top_view_width: 512
+    top_view_height: 512
+    side_view_count: 1
+    side_view_width: 256
+    side_view_height: 256
+    taa_samples: 2
 
   # Overlay annotations configuration.
   annotations:
@@ -81,25 +99,25 @@ asset_manager:
   # (either via text-to-3D generation or HSSD retrieval).
   router:
     # Enable LLM-based request analysis and validation
-    enabled: true
+    enabled: false
     # Number of concurrent item generation threads (overlaps I/O-bound work)
     parallel_workers: 10
     # Max retries for VLM analysis if parsing fails (e.g., invalid object_type)
-    analysis_max_retries: 3
+    analysis_max_retries: 1
     strategies:
       # Standard asset acquisition - fulfilled by top-level "strategy" setting
       generated:
         enabled: true
-        max_retries: 2  # Retry with same prompt (randomness gives different results)
+        max_retries: 1  # Retry with same prompt (randomness gives different results)
       # Articulated objects
       articulated:
         enabled: true
-        max_retries: 3
+        max_retries: 1
         use_lenient_validation: true  # Lenient validation for dataset objects
       # Thin covering: flat floor surfaces (rugs, yoga mats, runners).
       thin_covering:
         enabled: true
-        max_retries: 3 # Retry with different materials if validation fails
+        max_retries: 1 # Retry with different materials if validation fails
         thickness_m: 0.003  # 3mm default thickness
         texture_scale: 0.5  # Meters per tile for retrieved library textures (tileable)
         # AI material generation fallback (when library retrieval fails)
@@ -113,9 +131,9 @@ asset_manager:
   # SAM3D backend configuration (only used when backend="sam3d")
   sam3d:
     # Path to SAM3 model checkpoint
-    sam3_checkpoint: "external/checkpoints/sam3.pt"
+    sam3_checkpoint: "${paths.checkpoints_dir}/sam3.pt"
     # Path to SAM 3D Objects pipeline config
-    sam3d_checkpoint: "external/checkpoints/pipeline.yaml"
+    sam3d_checkpoint: "${paths.checkpoints_dir}/pipeline.yaml"
     # Segmentation mode: "foreground" or "object_description"
     # - foreground: automatic foreground detection (best for uniform backgrounds)
     # - object_description: uses the asset description for semantic segmentation
@@ -125,8 +143,8 @@ asset_manager:
 
   # HSSD retrieval configuration (only used when general_asset_source="hssd")
   hssd:
-    data_path: "data/hssd-models"
-    preprocessed_path: "data/preprocessed"
+    data_path: "${paths.hssd_data_dir}/hssd-models"
+    preprocessed_path: "${paths.hssd_data_dir}/preprocessed"
     use_top_k: 5  # Number of top CLIP candidates before size ranking
     use_lenient_validation: true  # Use lenient validation for retrieved assets
     object_type_mapping:
@@ -137,8 +155,8 @@ asset_manager:
 
   # Objaverse (ObjectThor) retrieval configuration (only used when general_asset_source="objaverse")
   objaverse:
-    data_path: "data/objathor-assets"
-    preprocessed_path: "data/objathor-assets/preprocessed"
+    data_path: "${paths.data_dir}/objathor-assets"
+    preprocessed_path: "${paths.data_dir}/objathor-assets/preprocessed"
     use_top_k: 5  # Number of top CLIP candidates before size ranking
     use_lenient_validation: true  # Use lenient validation for retrieved assets
     object_type_mapping:
@@ -155,12 +173,12 @@ asset_manager:
     sources:
       partnet_mobility:
         enabled: false
-        data_path: "data/partnet_mobility_sdf"
-        embeddings_path: "data/partnet_mobility_sdf/embeddings"
+        data_path: "${paths.data_dir}/partnet_mobility_sdf"
+        embeddings_path: "${paths.data_dir}/partnet_mobility_sdf/embeddings"
       artvip:
         enabled: true
-        data_path: "data/artvip_sdf"
-        embeddings_path: "data/artvip_sdf/embeddings"
+        data_path: "${paths.data_dir}/artvip_sdf"
+        embeddings_path: "${paths.data_dir}/artvip_sdf/embeddings"
 
   # Image generation configuration
   image_generation:
@@ -177,7 +195,7 @@ asset_manager:
       image_size: "1K"  # "1K", "2K", "4K"
   # Number of side views to render for mesh physics analysis (mass, orientation, material)
   # Recommended: 4 for axis-aligned views, 8 for axis-aligned + diagonals
-  num_side_views_for_physics_analysis: 4
+  num_side_views_for_physics_analysis: 2
   # Elevation angle (degrees) for side view cameras. Cameras look down at objects from this angle.
   # Higher values capture more of the top surface; 0 = ground level (horizontal).
   side_view_elevation_degrees: 20.0
@@ -196,7 +214,7 @@ asset_manager:
   mesh_relative_dimension_threshold: 0.02
   # EEVEE TAA samples for asset validation renders (mesh analysis, router validation).
   # Higher values = better quality but slower. Default 8 is a good balance.
-  validation_taa_samples: 8
+  validation_taa_samples: 2
 
 # Collision geometry configuration.
 collision_geometry:
@@ -205,6 +223,10 @@ collision_geometry:
 
   # Port range for convex decomposition server (each worker gets its own port).
   server_port_range: [7100, 7450]
+  # ACP/FUSE nodes can be slow to spawn Python + native geometry libraries.
+  server_ready_timeout: 120.0
+  # Do not let a single server consume all visible CPU cores on large nodes.
+  max_omp_threads: 32
 
   # CoACD parameters (used when method="coacd")
   coacd:
@@ -238,62 +260,194 @@ collision_geometry:
     find_best_plane: false        # Find best plane
 
 # Maximum number of agent turns before stopping (applies to all agent interactions)
-max_turns: 1000
+max_turns: 120
 
-# Maximum number of critique-and-improve rounds before stopping
-max_critique_rounds: 3
+# Maximum number of critique-and-improve rounds before stopping.
+# When auto_score_after_design_attempts=true, this is the maximum number of
+# scored candidate layouts, including the initial design.
+max_critique_rounds: 2
+
+# Score each planner-level candidate layout automatically after the designer
+# finishes an initial design or design-change call. This keeps every accepted
+# candidate in the comparison pool tied to a scores.yaml, while avoiding an
+# expensive critic call for every transient observe_scene render inside a
+# designer call.
+auto_score_after_design_attempts: true
+
+# Stop the downstream pipeline if the furniture stage still violates hard
+# deterministic constraints after all configured repair attempts. Keep this on
+# for producing usable scenes; turn it off only when intentionally collecting
+# failed trajectories for analysis.
+fail_stage_on_unresolved_hard_constraints: true
+
+# Critic fast path: deterministic hard checks run before expensive VLM scoring.
+# If missing required objects, hard collisions, door blockage, or fallen objects
+# are detected, a synthetic low score and repair hint are saved instead of
+# spending a full VLM score_scene call on a known-invalid candidate.
+critic_fast_path:
+  hard_check_first: true
+  skip_vlm_on_hard_fail: true
+  render_hard_fail_candidate: true
+  direct_scene_state_cache: true
+  use_intermediate_render_profile: true
+  scene_state_max_chars: 8000
+  max_hard_repair_design_changes: 1
+
+# Planner tool output limits. Initial/design-change responses can now include
+# an automatic critique block, so keep enough tail context for score deltas and
+# Safety Controller messages.
+planner_context_limits:
+  initial_design_max_chars: 5000
+  critique_max_chars: 4000
+  design_change_max_chars: 5000
+
+# Code-level guardrails for furniture refinement. This is separate from planner
+# prompting: even if the LLM asks for more changes, these limits are enforced in
+# tools and checkpoint handling.
+furniture_safety_controller:
+  enabled: true
+  max_critique_design_cycles: 2
+  max_move_calls: 36
+  max_moves_initial_design: 18
+  max_moves_design_change: 8
+  max_moves_per_object_per_call: 2
+  max_physics_checks_per_designer_call: 2
+  max_blocked_tool_calls_per_designer_call: 2
+  max_rescales_per_object: 1
+  max_generate_assets_calls_after_initial: 0
+  min_accept_delta: 0.05
+  accept_score_threshold: 0.75
+  rescale_min_factor: 0.8
+  rescale_max_factor: 1.25
+  room_bounds_tolerance_m: 0.02
+  score_thresholds_are_hard: false
+  prompt_following_hard_min: 8
+  functionality_hard_min: 4
+  reachability_hard_min: 5
+  bedroom_layout:
+    enabled: true
+    anchor_planning: true
+    asset_size_gating: true
+    plausibility_verifier: true
+    # Treat compact bedrooms conservatively unless the prompt explicitly asks for
+    # queen/king furniture. The current bedroom benchmark is around 18m2.
+    small_room_area_m2: 20.0
+    unqualified_bed_default_dimensions: [1.60, 2.05, 0.80]
+    unqualified_bed_max_dimensions: [1.75, 2.20, 1.20]
+    explicit_large_bed_max_dimensions: [2.10, 2.30, 1.20]
+    unqualified_bed_max_footprint: [1.75, 2.20]
+    bed_min_dimensions: [1.20, 1.80, 0.35]
+    nightstand_min_dimensions: [0.30, 0.30, 0.35]
+    nightstand_max_dimensions: [0.65, 0.55, 0.75]
+    wardrobe_min_dimensions: [0.60, 0.35, 1.60]
+    wardrobe_max_dimensions: [1.20, 0.70, 2.35]
+    bed_wall_anchor_max_distance_m: 0.25
+    wardrobe_wall_max_distance_m: 0.35
+    hard_plausibility_issues: true
+    window_blocking_is_hard: true
+    nightstand_bed_overlap_tolerance_m: 0.03
+    nightstand_bed_max_gap_m: 0.55
+    max_plausibility_penalty: 0.35
+  deterministic_repair:
+    enabled: true
+    max_attempts: ${oc.env:SCENEEXPERT_DETERMINISTIC_REPAIR_MAX_ATTEMPTS,2}
+    wall_margin_m: 0.08
+    nightstand_gap_m: 0.08
+  required_object_names: []
+  score_weights:
+    prompt_following: 0.25
+    functionality: 0.20
+    layout_plausibility: 0.20
+    layout: 0.15
+    realism: 0.10
+    reachability: 0.05
+    holistic_completeness: 0.05
+  size_bounds:
+    bed:
+      min: [1.20, 1.60, 0.25]
+      max: [2.40, 2.40, 1.30]
+    twin_bed:
+      min: [0.80, 1.60, 0.25]
+      max: [1.40, 2.30, 1.30]
+    nightstand:
+      min: [0.25, 0.25, 0.30]
+      max: [0.85, 0.85, 0.95]
+    wardrobe:
+      min: [0.45, 0.30, 1.20]
+      max: [2.40, 0.95, 2.50]
+    dresser:
+      min: [0.50, 0.30, 0.55]
+      max: [2.20, 0.90, 1.40]
+    desk:
+      min: [0.70, 0.40, 0.55]
+      max: [2.20, 1.20, 1.10]
+    chair:
+      min: [0.30, 0.30, 0.55]
+      max: [1.10, 1.10, 1.30]
+    sofa:
+      min: [1.10, 0.55, 0.55]
+      max: [3.50, 1.30, 1.30]
+    table:
+      min: [0.35, 0.35, 0.25]
+      max: [3.00, 1.60, 1.20]
+    cabinet:
+      min: [0.35, 0.25, 0.45]
+      max: [2.50, 0.95, 2.50]
+    bookshelf:
+      min: [0.35, 0.20, 0.80]
+      max: [2.50, 0.80, 2.70]
 
 # Scene reset thresholds for detecting quality degradation
 # Reset is suggested when EITHER threshold is exceeded
 reset_single_category_threshold: 2  # Max drop in any single score category (0-10 scale)
-reset_total_sum_threshold: 1  # Max drop in sum of all 6 categories (0-60 scale)
+reset_total_sum_threshold: 1  # Max drop in sum of all 7 categories (0-70 scale)
 
 # Early finish threshold - stop if ALL categories score >= this value (0-10 scale)
 early_finish_min_score: 9
 
 # OpenAI model and reasoning configuration
 openai:
-  model: "Qwen/Qwen3.5-35B-A3B"
+  model: ${llm.model_id}
   service_tier: ${openai.service_tier}
   # Vision detail level for image processing
   # Options: "low" (512x512, 65 tokens), "high" (detailed processing), "auto" (default)
-  vision_detail: "high"
+  vision_detail: "low"
   # How much computational effort to spend on reasoning for different tasks.
   # Options: "minimal", "low", "medium", "high", "xhigh".
   # Higher effort = more thorough but slower.
   reasoning_effort:
     # Agent reasoning (for OpenAI Agents SDK planner/designer/critic trio).
-    planner: "low"
-    designer: "high"
-    critic: "high"
+    planner: "none"
+    designer: "low"
+    critic: "low"
     # VLM direct calls.
-    mesh_analysis: "medium"  # For mesh physics analysis
-    asset_analysis: "medium"  # For asset router request analysis
-    asset_validation: "medium"  # For asset router mesh validation
+    mesh_analysis: "none"  # For mesh physics analysis
+    asset_analysis: "none"  # For asset router request analysis
+    asset_validation: "none"  # For asset router mesh validation
   # How verbose the model's output should be.
   # Options: "low", "medium", "high".
   # Lower verbosity = faster and cheaper but may omit details.
   verbosity:
     # Agent verbosity (for OpenAI Agents SDK planner/designer/critic trio).
-    planner: "medium"  # Plans need clear communication
+    planner: "low"  # Plans should coordinate tools without long deliberation
     designer: "low"  # Just tool calls, concise is fine
-    critic: "medium"  # Free-form critique benefits from detail
+    critic: "low"  # Keep critique concise; hard checks carry safety.
     # VLM direct calls.
-    mesh_analysis: "medium"
-    asset_analysis: "medium"
-    asset_validation: "medium"
+    mesh_analysis: "low"
+    asset_analysis: "low"
+    asset_validation: "low"
 
 # OpenAI API timeout configuration (seconds).
 api_timeout:
   connect: 10.0  # Connection establishment
-  read: 1800  # 30 minutes
-  write: 1800  # 30 minutes
-  pool: 1800  # 30 minutes
+  read: 300  # 5 minutes
+  write: 300  # 5 minutes
+  pool: 300  # 5 minutes
 
 # Loop detection configuration for function tools
 loop_detection:
   enabled: true
-  max_repeated_attempts: 25  # Block after 2 identical attempts
+  max_repeated_attempts: 3
   tracking_window: 30  # Track last 30 calls
 
 # Physics validation configuration

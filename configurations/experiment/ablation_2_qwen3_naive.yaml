@@ -13,7 +13,7 @@ scene_expert:
   enabled: false
   mode: "disabled"
   memory:
-    dir: "outputs/scene_expert_memory/ablation_2"
+    dir: "${paths.memory_dir}/ablation_2"
   stage_budget:
     default:
       max_designer_iterations: 2

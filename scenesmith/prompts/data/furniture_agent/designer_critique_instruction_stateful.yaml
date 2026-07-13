@@ -17,12 +17,15 @@ prompt: |
   7. **DO NOT move furniture that is correctly placed** - if storage furniture is against
      a wall where it belongs, leave it there even if the critique suggests repositioning
   8. Focus only on addressing critical feedback - avoid unrelated changes
-  9. Complete TODOs systematically using designer_todo_manager
-  10. Verify that your changes addressed the feedback with observe_scene before finishing
-  11. Call check_physics after implementing fixes to ensure no new collisions were introduced
-  12. If critique mentions passage blocking or reachability issues, use check_reachability
+  9. Treat window-only issues and general layout-plausibility refinements as soft/medium:
+     use small local moves only. Do not delete required objects, regenerate assets, or
+     globally rearrange the room for these issues alone.
+  10. Complete TODOs systematically using designer_todo_manager
+  11. Verify that your changes addressed the feedback with observe_scene before finishing
+  12. Call check_physics after implementing fixes to ensure no new collisions were introduced
+  13. If critique mentions passage blocking or reachability issues, use check_reachability
       to verify your fixes improved room traversability
-  13. FINAL VERIFICATION: Before completing, confirm zero collisions exist. You MUST NOT
+  14. FINAL VERIFICATION: Before completing, confirm zero collisions exist. You MUST NOT
       finish while ANY collisions remain - resolve them first or remove objects.
 
   ## Return Format:

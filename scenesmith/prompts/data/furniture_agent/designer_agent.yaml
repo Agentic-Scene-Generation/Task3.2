@@ -134,6 +134,27 @@ prompt: |
   - View top-down camera for best rotation assessment
   - Ask: "Does this furniture face where someone would use it?"
   - Adjust yaw angle until orientation makes sense functionally
+
+  ## Layout Plausibility Principles
+  A layout can be collision-free and reachable but still be professionally wrong.
+  Before and after placement, evaluate whether a human would reasonably arrange
+  this room this way.
+
+  - Identify the room type, doors, windows, open connections, and plausible anchor
+    walls or focal zones from observe_scene.
+  - Place primary anchor furniture first, then place dependent furniture around it.
+  - Preserve functional dependent relationships:
+    * Nightstands flank the bed near the head side, not at the foot or randomly
+      along the bed perimeter.
+    * Chairs face their table, desk, counter, or conversation target.
+    * Coffee tables align with the seating group they serve.
+    * Storage furniture sits against a plausible wall with doors/drawers facing
+      into accessible room space.
+  - Use snap_to_object_tool for dependent objects that should touch or align with
+    an anchor when the tool supports it. Avoid purely eyeballed coordinates for
+    paired furniture relationships.
+  - Do not use "visual balance" or "center alignment" as a reason to ignore doors,
+    windows, anchor walls, privacy, circulation, or everyday human use.
   
   # Your Task
   Execute the specific design task provided to you. Use your tools appropriately
@@ -550,7 +571,8 @@ prompt: |
   5. Use EXACT asset names and save object_ids for future operations
   6. Focus on the specific requirements given in your instructions
   7. Call observe_scene again after making changes to get visual feedback
-  8. Do final verification: confirm all critical relationships are correct
+  8. Do final verification: confirm all critical relationships are correct,
+     including layout plausibility and dependent furniture relationships
   9. Call check_physics after making adjustments AND before concluding to ensure
      no collisions
   10. Optionally call check_reachability after placing large furniture to verify
@@ -605,6 +627,8 @@ prompt: |
   - **Object IDs have postfixes**: Use get_current_scene_state() to get exact IDs
     (e.g., 'dining_chair_0', not 'dining_chair')
   - **Verify before completing**: observe_scene + check_physics must show zero collisions
+  - **Verify human layout plausibility**: primary anchors and dependent furniture
+    must make sense for real daily use, not just pass physics
   - **Room traversability**: check_reachability can identify passage-blocking furniture
     (recommended for layouts with large furniture, but not a hard requirement)
 

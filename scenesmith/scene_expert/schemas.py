@@ -17,8 +17,12 @@ from pydantic import BaseModel, Field
 class SceneTaskSpec(BaseModel):
     """Structured scene requirements extracted from a raw text prompt."""
 
-    room_type: str = Field(..., description="Primary room type, e.g. 'bedroom', 'kitchen'")
-    style: str = Field(..., description="Aesthetic style, e.g. 'cozy modern', 'industrial'")
+    room_type: str = Field(
+        ..., description="Primary room type, e.g. 'bedroom', 'kitchen'"
+    )
+    style: str = Field(
+        ..., description="Aesthetic style, e.g. 'cozy modern', 'industrial'"
+    )
     required_large_objects: list[str] = Field(
         default_factory=list,
         description="Furniture-scale objects that must be present (floor plan / furniture stage)",
@@ -187,6 +191,7 @@ class FullVerifyReport(BaseModel):
 
     semantic_score: float = 0.0
     aesthetic_score: float = 0.0
+    plausibility_score: float = 0.0
     style_consistency: float = 0.0
     collision_free_rate: float = 0.0
     stability_score: float = 0.0

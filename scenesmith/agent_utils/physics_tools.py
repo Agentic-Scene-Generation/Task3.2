@@ -32,6 +32,90 @@ from scenesmith.agent_utils.room import AgentType, RoomScene, UniqueID
 console_logger = logging.getLogger(__name__)
 
 
+def _is_geometry_construction_error(exc: Exception) -> bool:
+    """Return True for deterministic Drake/Qhull geometry construction failures."""
+    text = str(exc).lower()
+    markers = (
+        "qhull",
+        "initial simplex is flat",
+        "less than 3 dimensional",
+        "could not construct a clearly convex simplex",
+        "geometry construction",
+        "drake",
+    )
+    return any(marker in text for marker in markers)
+
+
+def _summarize_geometry_error(exc: Exception, max_chars: int = 900) -> str:
+    text = " ".join(str(exc).split())
+    if len(text) > max_chars:
+        return text[:max_chars] + "..."
+    return text
+
+
+def _diagnose_geometry_construction_failures(scene: RoomScene) -> list[str]:
+    """Best-effort object-level isolation for scene construction failures.
+
+    When the full Drake scene fails to build, try loading each mutable object
+    individually with the room. This is only used after a deterministic failure,
+    so the extra work is acceptable and gives actionable logs.
+    """
+    from pydrake.all import DiagramBuilder
+
+    from scenesmith.agent_utils.drake_utils import (
+        create_drake_plant_and_scene_graph_from_scene,
+    )
+
+    failures: list[str] = []
+    for object_id, obj in getattr(scene, "objects", {}).items():
+        if getattr(obj, "immutable", False):
+            continue
+        if getattr(obj, "sdf_path", None) is None:
+            continue
+        try:
+            builder = DiagramBuilder()
+            create_drake_plant_and_scene_graph_from_scene(
+                scene=scene,
+                builder=builder,
+                include_objects=[object_id],
+                weld_furniture=False,
+                free_mounted_objects_for_collision=True,
+            )
+        except Exception as obj_exc:
+            if _is_geometry_construction_error(obj_exc):
+                failures.append(
+                    f"{object_id} ({getattr(obj, 'name', 'unknown')}): "
+                    f"{_summarize_geometry_error(obj_exc, max_chars=240)}"
+                )
+            else:
+                failures.append(
+                    f"{object_id} ({getattr(obj, 'name', 'unknown')}): "
+                    f"{type(obj_exc).__name__}: "
+                    f"{_summarize_geometry_error(obj_exc, max_chars=240)}"
+                )
+    return failures
+
+
+def _format_geometry_construction_violation(
+    exc: Exception, object_failures: list[str]
+) -> str:
+    detail = _summarize_geometry_error(exc)
+    messages = [
+        "Physics violations detected (1 issue(s)):",
+        "Geometry construction failed:",
+        f"- Drake/Qhull geometry construction failed: {detail}",
+    ]
+    if object_failures:
+        messages.append("Likely problematic object(s):")
+        for failure in object_failures[:5]:
+            messages.append(f"- {failure}")
+    messages.append(
+        "\nThis candidate cannot be trusted for scoring. Repair or replace the "
+        "problematic asset/placement, or roll back to the last hard-valid checkpoint."
+    )
+    return "\n".join(messages)
+
+
 def _format_violations(violations: list, header: str, log_header: str) -> list[str]:
     """Format a list of violations into message lines with logging.
 
@@ -180,14 +264,31 @@ def check_physics_violations(
     console_logger.info("Checking physics violations")
     cfg_physics = cfg.physics_validation
 
-    # Compute all violation types upfront.
-    collisions = compute_scene_collisions(
-        scene=scene,
-        penetration_threshold=cfg_physics.object_penetration_threshold_m,
-        floor_penetration_tolerance=cfg_physics.floor_penetration_tolerance_m,
-        current_furniture_id=current_furniture_id,
-        manipuland_furniture_tolerance_m=cfg_physics.manipuland_furniture_tolerance_m,
-    )
+    # Compute all violation types upfront.  Geometry construction failures are
+    # candidate-level hard failures, not Python-level fatal errors: the harness can
+    # repair or roll back once they are represented as physics context.
+    try:
+        collisions = compute_scene_collisions(
+            scene=scene,
+            penetration_threshold=cfg_physics.object_penetration_threshold_m,
+            floor_penetration_tolerance=cfg_physics.floor_penetration_tolerance_m,
+            current_furniture_id=current_furniture_id,
+            manipuland_furniture_tolerance_m=cfg_physics.manipuland_furniture_tolerance_m,
+        )
+    except Exception as exc:
+        if not _is_geometry_construction_error(exc):
+            raise
+        console_logger.exception(
+            "Drake geometry construction failed during physics validation"
+        )
+        object_failures = _diagnose_geometry_construction_failures(scene)
+        if object_failures:
+            console_logger.error(
+                "Likely problematic object(s) for geometry construction: %s",
+                "; ".join(object_failures),
+            )
+        return _format_geometry_construction_violation(exc, object_failures)
+
     thin_covering_overlaps = compute_thin_covering_overlaps(scene)
     thin_covering_boundary_violations = compute_thin_covering_boundary_violations(
         scene=scene, wall_thickness=cfg_physics.wall_thickness

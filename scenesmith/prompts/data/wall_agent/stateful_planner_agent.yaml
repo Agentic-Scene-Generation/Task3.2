@@ -123,6 +123,8 @@ prompt: |
      High scores mean the decoration is excellent; further changes risk regression.
   2. **Max cycles reached**: {{ max_critique_rounds }} complete cycles
   3. **Diminishing returns**: Same issues persist after 2+ fix attempts
+  4. **Tool budget stop**: If any tool response begins with "STOP:" or contains
+     "[Planner budget]", do not call more tools. Return the final workflow summary.
 
   If the critic says changes made the decoration worse, tell the designer to revert
   and try again.

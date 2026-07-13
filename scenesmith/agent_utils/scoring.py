@@ -80,7 +80,7 @@ class FloorPlanCritiqueWithScores(CritiqueWithScores):
 class FurnitureCritiqueWithScores(CritiqueWithScores):
     """Furniture agent critique with standard categories.
 
-    Categories evaluate furniture placement quality (6 categories, 0-60 total).
+    Categories evaluate furniture placement quality (7 categories, 0-70 total).
     """
 
     realism: CategoryScore
@@ -89,6 +89,8 @@ class FurnitureCritiqueWithScores(CritiqueWithScores):
     """How well items support intended activities."""
     layout: CategoryScore
     """Whether items are arranged logically."""
+    layout_plausibility: CategoryScore
+    """Whether the arrangement matches human, real-world room-use conventions."""
     holistic_completeness: CategoryScore
     """How complete and appropriately populated the arrangement is."""
     prompt_following: CategoryScore
@@ -102,6 +104,7 @@ class FurnitureCritiqueWithScores(CritiqueWithScores):
             self.realism,
             self.functionality,
             self.layout,
+            self.layout_plausibility,
             self.holistic_completeness,
             self.prompt_following,
             self.reachability,

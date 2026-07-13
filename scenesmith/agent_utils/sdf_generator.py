@@ -18,6 +18,7 @@ import numpy as np
 import trimesh
 
 from scenesmith.agent_utils.materials import get_friction
+from scenesmith.agent_utils.mesh_utils import load_mesh_as_trimesh
 from scenesmith.agent_utils.mesh_physics_analyzer import MeshPhysicsAnalysis
 from scenesmith.utils.inertia_utils import fix_sdf_file_inertia
 from scenesmith.utils.sdf_utils import (
@@ -30,13 +31,6 @@ from scenesmith.utils.sdf_utils import (
 )
 
 console_logger = logging.getLogger(__name__)
-
-
-# Y-up to Z-up coordinate transformation (90° rotation around X-axis).
-# Drake auto-converts Y-up GLTF visual meshes to Z-up on load.
-YUP_TO_ZUP_TRANSFORM = np.array(
-    [[1, 0, 0, 0], [0, 0, -1, 0], [0, 1, 0, 0], [0, 0, 0, 1]]
-)
 
 
 def generate_drake_sdf(
@@ -78,22 +72,18 @@ def generate_drake_sdf(
         f"collision pieces"
     )
 
-    # Load visual mesh to compute inertia.
-    visual_mesh = trimesh.load(visual_mesh_path, force="mesh")
-
-    # Handle Scene objects.
-    if isinstance(visual_mesh, trimesh.Scene):
-        meshes = [
-            geom
-            for geom in visual_mesh.geometry.values()
-            if isinstance(geom, trimesh.Trimesh)
-        ]
-        visual_mesh = trimesh.util.concatenate(meshes) if meshes else trimesh.Trimesh()
-
-    # Transform visual mesh from Y-up to Z-up for inertia computation.
-    # Drake auto-converts Y-up GLTF visual meshes to Z-up on load, so inertial
-    # properties must also be in Z-up to match.
-    visual_mesh.apply_transform(YUP_TO_ZUP_TRANSFORM)
+    # Apply GLTF scene-graph transforms while loading. The resulting mesh is in
+    # the same Z-up working frame used by Drake and convex decomposition.
+    visual_mesh = load_mesh_as_trimesh(visual_mesh_path, force_merge=True)
+    collision_meshes = _filter_full_dimensional_collision_pieces(
+        [piece.copy() for piece in collision_pieces],
+        asset_name=asset_name,
+    )
+    _validate_collision_geometry(
+        visual_mesh=visual_mesh,
+        collision_pieces=collision_meshes,
+        asset_name=asset_name,
+    )
 
     # Calculate inertial properties.
     mass = physics_analysis.mass_kg
@@ -188,7 +178,7 @@ def generate_drake_sdf(
     visual_uri.text = mesh_filename
 
     # Collision geometry (convex pieces).
-    for i, piece in enumerate(collision_pieces):
+    for i, piece in enumerate(collision_meshes):
         collision = ET.SubElement(link, "collision", name=f"collision_{i}")
 
         # Add friction properties.
@@ -207,12 +197,6 @@ def generate_drake_sdf(
         # Save collision piece as separate OBJ file.
         collision_mesh_filename = f"{asset_name}_collision_{i}.obj"
         collision_mesh_path = output_path.parent / collision_mesh_filename
-
-        # Transform collision piece from Y-up to Z-up before exporting.
-        # Drake automatically converts Y-up GLTF visual meshes to Z-up on load,
-        # but does NOT convert OBJ collision meshes. We must export OBJ in Z-up
-        # to match the visual mesh coordinate system.
-        piece.apply_transform(YUP_TO_ZUP_TRANSFORM)
 
         # Export collision piece.
         piece.export(collision_mesh_path)
@@ -246,6 +230,91 @@ def generate_drake_sdf(
     console_logger.info(f"Generated Drake SDF: {output_path}")
 
     return output_path
+
+
+def _validate_collision_geometry(
+    visual_mesh: trimesh.Trimesh,
+    collision_pieces: list[trimesh.Trimesh],
+    asset_name: str,
+) -> None:
+    """Reject collision proxies whose coordinate frame or scale is inconsistent."""
+    collision_mesh = trimesh.util.concatenate(collision_pieces)
+    visual_extents = np.asarray(visual_mesh.extents, dtype=float)
+    collision_extents = np.asarray(collision_mesh.extents, dtype=float)
+    visual_center = np.asarray(visual_mesh.bounds, dtype=float).mean(axis=0)
+    collision_center = np.asarray(collision_mesh.bounds, dtype=float).mean(axis=0)
+
+    extent_tolerance = np.maximum(0.05, visual_extents * 0.15)
+    center_tolerance = max(0.05, float(np.linalg.norm(visual_extents)) * 0.10)
+    extents_match = np.all(
+        np.abs(collision_extents - visual_extents) <= extent_tolerance
+    )
+    centers_match = (
+        float(np.linalg.norm(collision_center - visual_center)) <= center_tolerance
+    )
+    if extents_match and centers_match:
+        return
+
+    raise ValueError(
+        "Collision geometry does not match visual geometry for "
+        f"'{asset_name}'. visual_extents={visual_extents.tolist()}, "
+        f"collision_extents={collision_extents.tolist()}, "
+        f"visual_center={visual_center.tolist()}, "
+        f"collision_center={collision_center.tolist()}. "
+        "This usually indicates a duplicated coordinate-system transform or a "
+        "broken convex-decomposition result."
+    )
+
+
+def _filter_full_dimensional_collision_pieces(
+    collision_pieces: list[trimesh.Trimesh],
+    asset_name: str,
+) -> list[trimesh.Trimesh]:
+    """Drop degenerate convex pieces before Drake/Qhull sees them.
+
+    VHACD/CoACD can occasionally emit flat or duplicate-vertex pieces. Drake later
+    declares each OBJ as convex and asks Qhull to construct a 3D simplex; a single
+    lower-dimensional piece can then fail the whole scene at physics/render time.
+    Filtering here keeps the failure local to asset preparation.
+    """
+    valid: list[trimesh.Trimesh] = []
+    rejected = 0
+    for piece in collision_pieces:
+        if _is_full_dimensional_mesh(piece):
+            valid.append(piece)
+        else:
+            rejected += 1
+
+    if rejected:
+        console_logger.warning(
+            "Filtered %d degenerate collision piece(s) while generating SDF for '%s'",
+            rejected,
+            asset_name,
+        )
+    if not valid:
+        raise ValueError(
+            "No full-dimensional collision pieces remain for "
+            f"'{asset_name}'. The convex decomposition produced only degenerate "
+            "geometry, which would fail Drake/Qhull during scene validation."
+        )
+    return valid
+
+
+def _is_full_dimensional_mesh(mesh: trimesh.Trimesh) -> bool:
+    vertices = np.asarray(getattr(mesh, "vertices", None), dtype=float)
+    if vertices.ndim != 2 or vertices.shape[1] != 3 or len(vertices) < 4:
+        return False
+    if not np.all(np.isfinite(vertices)):
+        return False
+
+    extents = np.ptp(vertices, axis=0)
+    scale = float(np.max(extents))
+    if scale <= 1e-9:
+        return False
+
+    centered = vertices - vertices.mean(axis=0)
+    tol = max(scale * 1e-7, 1e-9)
+    return bool(np.linalg.matrix_rank(centered, tol=tol) >= 3)
 
 
 def rescale_sdf(sdf_path: Path, scale_factor: float) -> None:

@@ -77,6 +77,75 @@ STAGE_ASSET_DIRS = {
     "manipuland": ["furniture", "wall_mounted", "ceiling_mounted"],
 }
 
+_SCENE_STATUS_FILENAME = "scene_status.json"
+_SCENE_SUCCESS_MARKER = "_SUCCESS"
+
+
+def _write_scene_status(
+    output_dir: Path,
+    scene_id: int,
+    prompt: str,
+    status: str,
+    attempt: int,
+    error: str | None = None,
+) -> None:
+    """Atomically persist the lifecycle state of one scene task."""
+    scene_dir = output_dir / f"scene_{scene_id:03d}"
+    scene_dir.mkdir(parents=True, exist_ok=True)
+    status_path = scene_dir / _SCENE_STATUS_FILENAME
+    payload = {
+        "scene_id": scene_id,
+        "prompt": prompt,
+        "status": status,
+        "attempt": attempt,
+        "pid": os.getpid(),
+        "updated_at": datetime.now().astimezone().isoformat(),
+    }
+    if error:
+        payload["error"] = error
+    temporary_path = status_path.with_suffix(".json.tmp")
+    temporary_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    temporary_path.replace(status_path)
+
+
+def _archive_failed_scene_attempt(
+    output_dir: Path,
+    scene_id: int,
+    attempt: int,
+) -> Path | None:
+    """Move a failed partial scene aside before a clean-process retry."""
+    scene_dir = output_dir / f"scene_{scene_id:03d}"
+    if not scene_dir.exists():
+        return None
+
+    archive_root = output_dir / "failed_attempts"
+    archive_root.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    archive_path = archive_root / (
+        f"scene_{scene_id:03d}_attempt_{attempt:02d}_{timestamp}"
+    )
+    shutil.move(str(scene_dir), str(archive_path))
+    return archive_path
+
+
+def _is_retryable_scene_failure(error: str) -> bool:
+    """Return whether a fresh process can plausibly recover this failure."""
+    normalized = error.lower()
+    transient_markers = (
+        "process crashed",
+        "sigsegv",
+        "sigabrt",
+        "exitcode=-11",
+        "exitcode=-6",
+        "apitimeouterror",
+        "request timed out",
+        "connection reset",
+        "connection refused",
+    )
+    return any(marker in normalized for marker in transient_markers)
+
 
 def _get_retrieval_gpu_device() -> str | None:
     """Get GPU device for retrieval servers.
@@ -103,6 +172,14 @@ def _get_retrieval_gpu_device() -> str | None:
     except ImportError:
         pass
     return None
+
+
+def _get_config_bool(cfg: DictConfig, key: str, default: bool = False) -> bool:
+    """Read a nested OmegaConf bool without assuming every node exists."""
+    value = OmegaConf.select(cfg, key, default=default)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
 
 
 class RenderGPUAllocator:
@@ -280,6 +357,76 @@ def _export_scene_blend_file(
         )
     except Exception as e:
         console_logger.error(f"Failed to export .blend file: {e}")
+
+
+async def _rescore_furniture_after_postprocessing(
+    furniture_agent: StatefulFurnitureAgent,
+    scene: RoomScene,
+) -> None:
+    """Re-score the canonical furniture state after projection/simulation.
+
+    The furniture agent writes its normal scores during add_furniture(), before
+    the experiment-level physical feasibility post-processing runs.  That
+    post-processing can move or remove objects, and the wall stage receives this
+    updated in-memory scene.  Re-scoring here keeps scene_renders/furniture,
+    scene_states/furniture, and the scene handed to wall_mounted aligned.
+    """
+    console_logger.info(
+        "Furniture post-processing changed the scene; re-scoring canonical "
+        "post-processed furniture layout"
+    )
+    furniture_agent.scene = scene
+    critic_tools = furniture_agent._create_critic_tools()
+    furniture_agent.critic = furniture_agent._create_critic_agent(
+        scene=scene,
+        tools=critic_tools,
+    )
+    try:
+        furniture_agent.rendering_manager.clear_cache()
+    except Exception:
+        console_logger.debug("Could not clear furniture render cache", exc_info=True)
+
+    await furniture_agent._request_critique_impl(update_checkpoint=False)
+    await furniture_agent._finalize_scene_and_scores()
+
+
+def _sync_scene_room_geometry_from_layout(
+    scene: RoomScene,
+    house_layout: HouseLayout,
+    room_id: str,
+) -> None:
+    """Ensure a RoomScene uses the latest geometry/material assets from layout."""
+    latest_geometry = house_layout.get_room_geometry(room_id)
+    if latest_geometry is None:
+        return
+
+    current_geometry = scene.room_geometry
+    try:
+        if (
+            current_geometry is not None
+            and current_geometry.content_hash() == latest_geometry.content_hash()
+        ):
+            return
+    except Exception:
+        console_logger.debug(
+            "Could not compare room geometry hashes; synchronizing from layout",
+            exc_info=True,
+        )
+
+    # Replace architectural wall objects so wall extraction/rendering sees the
+    # same materialized room geometry that floor_plan saved in house_layout.json.
+    for object_id, obj in list(scene.objects.items()):
+        if obj.object_type == ObjectType.WALL:
+            del scene.objects[object_id]
+    scene.room_geometry = latest_geometry
+    for wall in latest_geometry.walls:
+        scene.add_object(wall)
+
+    console_logger.info(
+        "Synchronized room geometry for room %s from house_layout before "
+        "downstream stage execution",
+        room_id,
+    )
 
 
 def _fix_paths_in_json_file(
@@ -589,74 +736,99 @@ def _generate_room(
             )
             try:
                 asyncio.run(furniture_agent.add_furniture(scene=scene))
+                end_time = time.time()
+                console_logger.info(
+                    f"Furniture added to room {room_id} in "
+                    f"{timedelta(seconds=end_time - start_time)}"
+                )
+
+                pre_postprocess_hash = scene.content_hash()
+
+                # Furniture post-processing (projection + simulation).
+                if projection_cfg["enabled"] and projection_cfg["furniture"]["enabled"]:
+                    furniture_cfg = projection_cfg["furniture"]
+                    sim_cfg = projection_cfg["simulation"]
+
+                    # Log pre-projection state for debugging.
+                    logger.log_scene(scene=scene, name="furniture_only_pre_projection")
+
+                    console_logger.info(
+                        "Running furniture post-processing (projection + simulation)"
+                    )
+                    postprocess_start_time = time.time()
+
+                    # Determine HTML output path for simulation.
+                    furniture_sim_html_path = None
+                    if sim_cfg.get("save_html", False):
+                        furniture_sim_html_path = (
+                            logger.output_dir
+                            / "simulation"
+                            / "furniture_simulation.html"
+                        )
+
+                    # Get fallen furniture config from physics_validation.
+                    physics_val_cfg = cfg_dict["furniture_agent"]["physics_validation"]
+                    scene, projection_success, removed_ids = (
+                        apply_physical_feasibility_postprocessing(
+                            scene=scene,
+                            weld_furniture=False,
+                            projection_enabled=True,
+                            projection_influence_distance=furniture_cfg[
+                                "influence_distance"
+                            ],
+                            projection_solver_name=furniture_cfg["solver_name"],
+                            projection_iteration_limit=furniture_cfg["iteration_limit"],
+                            projection_time_limit_s=furniture_cfg["time_limit_s"],
+                            projection_xy_only=furniture_cfg["xy_only"],
+                            projection_fix_rotation=furniture_cfg["fix_rotation"],
+                            simulation_enabled=sim_cfg["enabled"],
+                            simulation_time_s=sim_cfg["simulation_time_s"],
+                            simulation_time_step_s=sim_cfg["time_step_s"],
+                            simulation_timeout_s=sim_cfg["timeout_s"],
+                            simulation_html_path=furniture_sim_html_path,
+                            remove_fallen_furniture=physics_val_cfg[
+                                "remove_fallen_furniture"
+                            ],
+                            fallen_tilt_threshold_degrees=physics_val_cfg[
+                                "fallen_tilt_threshold_degrees"
+                            ],
+                        )
+                    )
+                    postprocess_end_time = time.time()
+                    if removed_ids:
+                        console_logger.info(
+                            f"Removed {len(removed_ids)} fallen furniture item(s) "
+                            f"during simulation: {removed_ids}"
+                        )
+                    if not projection_success:
+                        console_logger.error(
+                            "Furniture projection failed, keeping original positions"
+                        )
+                    else:
+                        console_logger.info(
+                            f"Furniture post-processing completed for room {room_id} "
+                            f"in {postprocess_end_time - postprocess_start_time:.2f} "
+                            "seconds"
+                        )
+
+                if scene.content_hash() != pre_postprocess_hash:
+                    try:
+                        asyncio.run(
+                            _rescore_furniture_after_postprocessing(
+                                furniture_agent=furniture_agent,
+                                scene=scene,
+                            )
+                        )
+                    except Exception as e:
+                        console_logger.error(
+                            "Failed to re-score post-processed furniture layout: %s",
+                            e,
+                            exc_info=True,
+                        )
             finally:
-                # Always cleanup server subprocesses.
+                # Always cleanup server subprocesses after all furniture-stage
+                # scoring/rendering that depends on the agent's Blender server.
                 furniture_agent.cleanup()
-            end_time = time.time()
-            console_logger.info(
-                f"Furniture added to room {room_id} in "
-                f"{timedelta(seconds=end_time - start_time)}"
-            )
-
-        # Furniture post-processing (projection + simulation).
-        if projection_cfg["enabled"] and projection_cfg["furniture"]["enabled"]:
-            furniture_cfg = projection_cfg["furniture"]
-            sim_cfg = projection_cfg["simulation"]
-
-            # Log pre-projection state for debugging.
-            logger.log_scene(scene=scene, name="furniture_only_pre_projection")
-
-            console_logger.info(
-                "Running furniture post-processing (projection + simulation)"
-            )
-            start_time = time.time()
-
-            # Determine HTML output path for simulation.
-            furniture_sim_html_path = None
-            if sim_cfg.get("save_html", False):
-                furniture_sim_html_path = (
-                    logger.output_dir / "simulation" / "furniture_simulation.html"
-                )
-
-            # Get fallen furniture config from physics_validation.
-            physics_val_cfg = cfg_dict["furniture_agent"]["physics_validation"]
-            scene, projection_success, removed_ids = (
-                apply_physical_feasibility_postprocessing(
-                    scene=scene,
-                    weld_furniture=False,
-                    projection_enabled=True,
-                    projection_influence_distance=furniture_cfg["influence_distance"],
-                    projection_solver_name=furniture_cfg["solver_name"],
-                    projection_iteration_limit=furniture_cfg["iteration_limit"],
-                    projection_time_limit_s=furniture_cfg["time_limit_s"],
-                    projection_xy_only=furniture_cfg["xy_only"],
-                    projection_fix_rotation=furniture_cfg["fix_rotation"],
-                    simulation_enabled=sim_cfg["enabled"],
-                    simulation_time_s=sim_cfg["simulation_time_s"],
-                    simulation_time_step_s=sim_cfg["time_step_s"],
-                    simulation_timeout_s=sim_cfg["timeout_s"],
-                    simulation_html_path=furniture_sim_html_path,
-                    remove_fallen_furniture=physics_val_cfg["remove_fallen_furniture"],
-                    fallen_tilt_threshold_degrees=physics_val_cfg[
-                        "fallen_tilt_threshold_degrees"
-                    ],
-                )
-            )
-            end_time = time.time()
-            if removed_ids:
-                console_logger.info(
-                    f"Removed {len(removed_ids)} fallen furniture item(s) during "
-                    f"simulation: {removed_ids}"
-                )
-            if not projection_success:
-                console_logger.error(
-                    "Furniture projection failed, keeping original positions"
-                )
-            else:
-                console_logger.info(
-                    f"Furniture post-processing completed for room {room_id} in "
-                    f"{end_time - start_time:.2f} seconds"
-                )
 
         # Always save state after furniture stage (unconditional for resumability).
         logger.log_scene(scene=scene, name="scene_after_furniture")
@@ -711,6 +883,11 @@ def _generate_room(
             house_layout = HouseLayout.from_dict(
                 house_layout_dict, house_dir=room_dir.parent
             )
+            _sync_scene_room_geometry_from_layout(
+                scene=scene,
+                house_layout=house_layout,
+                room_id=room_id,
+            )
 
             if scene_expert_hooks:
                 scene_expert_hooks.pre_stage("wall_mounted", scene)
@@ -719,8 +896,8 @@ def _generate_room(
                 compatible_agents=IndoorSceneGenerationExperiment.compatible_wall_agents,
                 logger=logger,
                 house_layout=house_layout,
-                ceiling_height=room_geometry.wall_height,
-                wall_thickness=room_geometry.wall_thickness,
+                ceiling_height=scene.room_geometry.wall_height,
+                wall_thickness=scene.room_geometry.wall_thickness,
                 render_gpu_id=render_gpu_id,
             )
             try:
@@ -1596,6 +1773,21 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
 
     def _start_materials_server(self) -> None:
         """Start materials retrieval server."""
+        materials_enabled_paths = (
+            "floor_plan_agent.materials.use_retrieval_server",
+            "furniture_agent.asset_manager.router.strategies.thin_covering.enabled",
+            "manipuland_agent.asset_manager.router.strategies.thin_covering.enabled",
+            "wall_agent.asset_manager.router.strategies.thin_covering.enabled",
+            "ceiling_agent.asset_manager.router.strategies.thin_covering.enabled",
+        )
+        if not any(
+            _get_config_bool(self.cfg, path) for path in materials_enabled_paths
+        ):
+            console_logger.info(
+                "Materials retrieval disabled by config; skipping materials server"
+            )
+            return
+
         # Get server configuration from experiment config.
         server_config = self.cfg.experiment.materials_retrieval_server
 
@@ -1636,6 +1828,7 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
         capture_logs: bool = False,
         experiment_run_id: str | None = None,
         render_gpu_id: int | None = None,
+        attempt: int = 1,
     ) -> None:
         """Generate a single scene (static method for parallel execution).
 
@@ -1652,6 +1845,7 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
             experiment_run_id: Unique ID for this experiment run.
             render_gpu_id: GPU device ID for Blender rendering. When set, uses
                 bubblewrap to isolate the BlenderServer to this GPU.
+            attempt: One-based clean-process attempt number for this scene.
         """
         # Reset any SDK state inherited via fork (defense in depth).
         _reset_inherited_sdk_state()
@@ -1663,6 +1857,14 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
         # Create scene directory.
         scene_dir = output_dir / f"scene_{scene_id:03d}"
         scene_dir.mkdir(parents=True, exist_ok=True)
+        (scene_dir / _SCENE_SUCCESS_MARKER).unlink(missing_ok=True)
+        _write_scene_status(
+            output_dir=output_dir,
+            scene_id=scene_id,
+            prompt=prompt,
+            status="running",
+            attempt=attempt,
+        )
 
         # Always create log file.
         log_path = scene_dir / "scene.log"
@@ -1680,6 +1882,7 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
 
         # Create a logger for this scene.
         logger = ConsoleLogger(output_dir=scene_dir)
+        scene_expert_hooks = None
 
         # Get pipeline stage configuration.
         pipeline_cfg = cfg_dict["experiment"]["pipeline"]
@@ -1742,6 +1945,20 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                     workflow_name=f"scene_{scene_id:03d}_generation",
                     metadata=trace_metadata,
                 ):
+                    # Build SceneExpert hook runner before floor_plan so fast
+                    # memory and StageBrief can guide the house-level layout too.
+                    from scenesmith.scene_expert.hooks import build_hook_runner
+
+                    scene_expert_hooks = build_hook_runner(
+                        prompt=prompt,
+                        scene_id=scene_id,
+                        output_dir=output_dir,
+                        cfg_dict=cfg_dict,
+                    )
+                    floor_plan_prompt = prompt
+                    if scene_expert_hooks and start_stage == "floor_plan":
+                        floor_plan_prompt = scene_expert_hooks.pre_floor_plan()
+
                     # Stage 1: Floor plan generation (or load from saved state).
                     if start_stage == "floor_plan":
                         # Run floor plan in subprocess to isolate fork-unsafe SDK
@@ -1760,7 +1977,7 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                                     "floor_plan",
                                     _generate_floor_plan_worker,
                                     {
-                                        "prompt": prompt,
+                                        "prompt": floor_plan_prompt,
                                         "scene_dir": str(scene_dir),
                                         "cfg_dict": cfg_dict,
                                         "experiment_run_id": experiment_run_id,
@@ -1789,6 +2006,8 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                             f"House layout generated in "
                             f"{timedelta(seconds=layout_end_time - layout_start_time)}"
                         )
+                        if scene_expert_hooks:
+                            scene_expert_hooks.post_floor_plan(scene_dir)
                     else:
                         # Load house layout from saved state.
                         house_layout_path = scene_dir / "house_layout.json"
@@ -1812,9 +2031,21 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                         console_logger.info(
                             "Stopping after floor_plan stage as configured"
                         )
+                        if scene_expert_hooks:
+                            scene_expert_hooks.finalize(final_scene_path=str(scene_dir))
                         console_logger.info(
                             "Scene generation completed successfully in "
                             f"{timedelta(seconds=time.time() - scene_generation_start_time)}"
+                        )
+                        _write_scene_status(
+                            output_dir=output_dir,
+                            scene_id=scene_id,
+                            prompt=prompt,
+                            status="completed",
+                            attempt=attempt,
+                        )
+                        (scene_dir / _SCENE_SUCCESS_MARKER).write_text(
+                            "completed\n", encoding="utf-8"
                         )
                         return
 
@@ -1825,15 +2056,6 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                     )
                     room_stop_stage = stop_stage
 
-                    # Build SceneExpert hook runner (None when mode="disabled").
-                    from scenesmith.scene_expert.hooks import build_hook_runner
-                    scene_expert_hooks = build_hook_runner(
-                        prompt=prompt,
-                        scene_id=scene_id,
-                        output_dir=output_dir,
-                        cfg_dict=cfg_dict,
-                    )
-
                     # Generate rooms (parallel or sequential based on config).
                     parallel_rooms = pipeline_cfg["parallel_rooms"]
                     max_parallel_rooms = pipeline_cfg["max_parallel_rooms"]
@@ -1843,6 +2065,13 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                     use_parallel = (
                         parallel_rooms and max_parallel_rooms > 1 and num_rooms > 1
                     )
+                    if scene_expert_hooks and use_parallel:
+                        console_logger.warning(
+                            "SceneExpert hooks are per-scene and not thread-safe for "
+                            "parallel room generation; disabling parallel_rooms for "
+                            "this scene."
+                        )
+                        use_parallel = False
 
                     if use_parallel:
                         rooms = _run_parallel_room_generation(
@@ -1916,8 +2145,27 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                     )
 
             except Exception as e:
+                if scene_expert_hooks:
+                    scene_expert_hooks.save_partial_trace(error=str(e))
+                _write_scene_status(
+                    output_dir=output_dir,
+                    scene_id=scene_id,
+                    prompt=prompt,
+                    status="failed",
+                    attempt=attempt,
+                    error=str(e),
+                )
                 console_logger.error(f"Scene generation failed: {e}")
                 raise
+
+        _write_scene_status(
+            output_dir=output_dir,
+            scene_id=scene_id,
+            prompt=prompt,
+            status="completed",
+            attempt=attempt,
+        )
+        (scene_dir / _SCENE_SUCCESS_MARKER).write_text("completed\n", encoding="utf-8")
 
     def _run_serial_generation(
         self,
@@ -1925,35 +2173,17 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
         cfg_dict: dict,
         experiment_run_id: str,
     ) -> None:
-        """Run scene generation in serial."""
-        console_logger.info("Running scene generation serially in main thread")
-
-        # GPU distribution is useful for parallel rooms within each scene.
-        gpu_allocator = RenderGPUAllocator()
-
-        failed_scenes: list[tuple[int, str]] = []
-        for scene_id, prompt in prompts_with_ids:
-            render_gpu_id = gpu_allocator.allocate()
-            try:
-                self._generate_single_scene(
-                    prompt=prompt,
-                    scene_id=scene_id,
-                    output_dir=self.output_dir,
-                    cfg_dict=cfg_dict,
-                    capture_logs=False,
-                    experiment_run_id=experiment_run_id,
-                    render_gpu_id=render_gpu_id,
-                )
-                console_logger.info(f"Completed scene {scene_id:03d}")
-            except Exception as e:
-                console_logger.error(f"Scene {scene_id:03d} failed, continuing: {e}")
-                failed_scenes.append((scene_id, str(e)))
-
-        if failed_scenes:
-            details = "\n".join(f"  scene_{sid:03d}: {err}" for sid, err in failed_scenes)
-            raise RuntimeError(
-                f"{len(failed_scenes)} scene(s) failed:\n{details}"
-            )
+        """Run scenes one at a time, each in a fresh spawned process."""
+        console_logger.info(
+            "Running scene generation serially with per-scene process isolation"
+        )
+        self._run_isolated_scene_generation(
+            prompts_with_ids=prompts_with_ids,
+            cfg_dict=cfg_dict,
+            experiment_run_id=experiment_run_id,
+            num_workers=1,
+            capture_logs=False,
+        )
 
     def _run_parallel_generation(
         self,
@@ -1971,41 +2201,107 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
         Raises:
             RuntimeError: If any scene generation fails.
         """
-        console_logger.info(f"Running in parallel with {num_workers} workers")
+        console_logger.info(
+            f"Running scene generation with {num_workers} isolated workers"
+        )
+        self._run_isolated_scene_generation(
+            prompts_with_ids=prompts_with_ids,
+            cfg_dict=cfg_dict,
+            experiment_run_id=experiment_run_id,
+            num_workers=num_workers,
+            capture_logs=True,
+        )
 
-        # Create GPU allocator for distributing Blender rendering.
+    def _run_isolated_scene_generation(
+        self,
+        prompts_with_ids: list[tuple[int, str]],
+        cfg_dict: dict,
+        experiment_run_id: str,
+        num_workers: int,
+        capture_logs: bool,
+    ) -> None:
+        """Run complete scene tasks with clean-process retry semantics."""
+        retry_budget = max(
+            0, int(cfg_dict["experiment"].get("scene_retry_attempts", 1))
+        )
+
         gpu_allocator = RenderGPUAllocator()
-
-        # Build task list.
-        tasks: list[tuple[str, Callable, dict]] = []
+        pending: dict[str, tuple[int, str, int]] = {}
         for scene_id, prompt in prompts_with_ids:
             render_gpu_id = gpu_allocator.allocate()
             task_id = f"scene_{scene_id:03d}"
-            kwargs = {
-                "prompt": prompt,
-                "scene_id": scene_id,
-                "output_dir": self.output_dir,
-                "cfg_dict": cfg_dict,
-                "capture_logs": True,
-                "experiment_run_id": experiment_run_id,
-                "render_gpu_id": render_gpu_id,
-            }
-            tasks.append(
-                (
-                    task_id,
-                    IndoorSceneGenerationExperiment._generate_single_scene,
-                    kwargs,
-                )
-            )
+            pending[task_id] = (scene_id, prompt, render_gpu_id)
             console_logger.info(f"Queued {task_id} (GPU {render_gpu_id}): {prompt}")
 
-        # Run with fault tolerance - one crash doesn't affect others.
-        results = run_parallel_isolated(tasks=tasks, max_workers=num_workers)
+        final_results: dict[str, tuple[bool, str | None]] = {}
+        attempt = 1
+        while pending:
+            tasks: list[tuple[str, Callable, dict]] = []
+            for task_id, (scene_id, prompt, render_gpu_id) in pending.items():
+                kwargs = {
+                    "prompt": prompt,
+                    "scene_id": scene_id,
+                    "output_dir": self.output_dir,
+                    "cfg_dict": cfg_dict,
+                    "capture_logs": capture_logs,
+                    "experiment_run_id": experiment_run_id,
+                    "render_gpu_id": render_gpu_id,
+                    "attempt": attempt,
+                }
+                tasks.append(
+                    (
+                        task_id,
+                        IndoorSceneGenerationExperiment._generate_single_scene,
+                        kwargs,
+                    )
+                )
 
-        # Report failures.
+            results = run_parallel_isolated(tasks=tasks, max_workers=num_workers)
+            retry_pending: dict[str, tuple[int, str, int]] = {}
+            for task_id, metadata in pending.items():
+                scene_id, prompt, _ = metadata
+                success, result_or_error = results[task_id]
+                if success:
+                    final_results[task_id] = (True, None)
+                    console_logger.info(f"Completed {task_id} on attempt {attempt}")
+                    continue
+
+                error = str(result_or_error)
+                _write_scene_status(
+                    output_dir=self.output_dir,
+                    scene_id=scene_id,
+                    prompt=prompt,
+                    status="failed",
+                    attempt=attempt,
+                    error=error[-8000:],
+                )
+                can_retry = attempt <= retry_budget and _is_retryable_scene_failure(
+                    error
+                )
+                if can_retry:
+                    archive_path = _archive_failed_scene_attempt(
+                        output_dir=self.output_dir,
+                        scene_id=scene_id,
+                        attempt=attempt,
+                    )
+                    console_logger.warning(
+                        f"{task_id} failed with a transient/native error; "
+                        f"retrying in a fresh process ({attempt}/{retry_budget}). "
+                        f"Partial output archived at {archive_path}"
+                    )
+                    retry_pending[task_id] = metadata
+                else:
+                    final_results[task_id] = (False, error)
+                    console_logger.error(
+                        f"{task_id} failed permanently after attempt {attempt}: {error}"
+                    )
+
+            pending = retry_pending
+            attempt += 1
+
         failed_scenes = [
             (task_id, error)
-            for task_id, (success, error) in results.items()
+            for task_id, (success, error) in final_results.items()
             if not success
         ]
         if failed_scenes:
@@ -2013,7 +2309,8 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                 f"  - {task_id}: {error}" for task_id, error in failed_scenes
             )
             raise RuntimeError(
-                f"{len(failed_scenes)}/{len(tasks)} scene(s) failed:\n{failure_details}"
+                f"{len(failed_scenes)}/{len(prompts_with_ids)} scene(s) failed:\n"
+                f"{failure_details}"
             )
 
     def generate_scenes(self) -> None:
@@ -2030,6 +2327,21 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
             prompts_with_ids = list(enumerate(prompts))
 
         num_workers = min(self.cfg.experiment.num_workers, len(prompts_with_ids))
+
+        # Online memory banks and their numpy indexes are shared across scenes.
+        # Until writes use per-scene deltas followed by a parent-side merge,
+        # concurrent harness_memory/full scenes can interleave JSONL updates or
+        # retrieve a stale index. Preserve correctness by serializing those
+        # modes; disabled/harness_only experiments remain scene-parallel.
+        scene_expert_mode = OmegaConf.select(
+            self.cfg, "scene_expert.mode", default="disabled"
+        )
+        if num_workers > 1 and scene_expert_mode in {"harness_memory", "full"}:
+            console_logger.warning(
+                f"scene_expert.mode={scene_expert_mode!r} uses a shared online "
+                "memory bank; forcing experiment.num_workers=1"
+            )
+            num_workers = 1
 
         # Get pipeline stage configuration.
         pipeline_cfg = self.cfg.experiment.pipeline
