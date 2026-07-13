@@ -25,7 +25,6 @@ from pydrake.all import (
 )
 
 from scenesmith.agent_utils.blender import BlenderServer
-from scenesmith.agent_utils.blender.surface_utils import generate_angled_drawer_view
 from scenesmith.agent_utils.drake_utils import (
     create_drake_plant_and_scene_graph_from_scene,
     create_plant_from_dmd,
@@ -44,6 +43,7 @@ from scenesmith.agent_utils.room import (
     SupportSurface,
     extract_base_link_name_from_sdf,
 )
+from scenesmith.agent_utils.render_view_utils import generate_angled_drawer_view
 from scenesmith.utils.geometry_utils import compute_aabb_corners
 
 console_logger = logging.getLogger(__name__)

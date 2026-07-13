@@ -108,7 +108,7 @@ fi
 if [ "${SCENEEXPERT_SKIP_PYTHON_PREFLIGHT:-0}" != "1" ]; then
     echo "  Running Python import preflight..."
     PYTHONDONTWRITEBYTECODE=1 python -c \
-        "from scenesmith.experiments import build_experiment; from scenesmith.agent_utils.stage_working_memory import StageWorkingMemory; print('  Python preflight passed')"
+        "import sys; from scenesmith.experiments import build_experiment; from scenesmith.experiments.indoor_scene_generation import IndoorSceneGenerationExperiment; from scenesmith.agent_utils.stage_working_memory import StageWorkingMemory; forbidden=[name for name in ('bpy', 'scenesmith.agent_utils.blender.renderer', 'scenesmith.agent_utils.blender.server_app') if name in sys.modules]; assert not forbidden, f'scene worker import unexpectedly loaded Blender runtime modules: {forbidden}'; print('  Python preflight passed (scene worker is bpy-free)')"
 fi
 
 NUM_GPUS=$(python -c "import torch; print(torch.cuda.device_count())" 2>/dev/null || echo 1)

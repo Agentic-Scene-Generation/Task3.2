@@ -27,6 +27,10 @@ from scenesmith.agent_utils.blender.camera_utils import (
     configure_metric_camera,
     look_at_target,
 )
+from scenesmith.agent_utils.blender.constants import (
+    ARTICULATED_LIGHT_ENERGY,
+    MATERIAL_VALIDATION_LIGHT_ENERGY,
+)
 from scenesmith.agent_utils.blender.coordinate_frame import (
     add_coordinate_frame_top_view,
     add_coordinate_frame_wall_view,
@@ -86,11 +90,6 @@ EEVEE_ASSET_VALIDATION_SAMPLES = 8
 # CYCLES samples for offline CLIP embedding renders (higher quality, slower).
 CYCLES_CLIP_SAMPLES = 20
 VLM_ANALYSIS_LIGHT_ENERGY = 2000
-# Lower light energy for articulated objects (more reflective materials).
-ARTICULATED_LIGHT_ENERGY = 500
-# Lower light energy for material/texture validation (avoid washing out colors).
-MATERIAL_VALIDATION_LIGHT_ENERGY = 300
-
 # Camera constants.
 DEFAULT_CAMERA_LENS_MM = 50
 DEFAULT_CAMERA_SENSOR_WIDTH_MM = 36

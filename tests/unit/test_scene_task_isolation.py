@@ -91,6 +91,30 @@ class TestSceneTaskIsolation(unittest.TestCase):
         self.assertEqual(call_count, 1)
         self.assertFalse((self.output_dir / "failed_attempts").exists())
 
+    def test_worker_bootstrap_exit_one_is_not_retried(self) -> None:
+        call_count = 0
+
+        def fake_run(tasks, max_workers, return_values=False):
+            nonlocal call_count
+            call_count += 1
+            return {tasks[0][0]: (False, "Process crashed (exitcode=1)")}
+
+        with patch(
+            "scenesmith.experiments.indoor_scene_generation." "run_parallel_isolated",
+            side_effect=fake_run,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "exitcode=1"):
+                self.experiment._run_isolated_scene_generation(
+                    prompts_with_ids=[(0, "A bedroom")],
+                    cfg_dict=self.cfg_dict,
+                    experiment_run_id="test-run",
+                    num_workers=1,
+                    capture_logs=False,
+                )
+
+        self.assertEqual(call_count, 1)
+        self.assertFalse((self.output_dir / "failed_attempts").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -98,6 +98,10 @@ ACP_SCENE_WORKERS=1
 # process. The failed partial output is retained under failed_attempts/.
 ACP_SCENE_RETRY_ATTEMPTS=1
 
+# TODO: Linux ACP must use forkserver. Plain fork inherits CUDA/SQLite native
+# state; spawn re-executes main.py and can fail to import Blender's _bpy module.
+ACP_MP_START_METHOD="forkserver"
+
 # TODO: Multi-GPU should normally keep this at 0. If 2 GPUs still fail while
 # loading the model, try 10. Single-GPU fallback may need 20.
 ACP_CPU_OFFLOAD_GB=0
@@ -217,6 +221,7 @@ export SCENEEXPERT_CONVEX_MAX_OMP_THREADS=$ACP_CONVEX_MAX_OMP_THREADS
 export SCENEEXPERT_MEMORY_EMBEDDING_DEVICE="$ACP_MEMORY_EMBEDDING_DEVICE"
 export SCENEEXPERT_MEMORY_EMBEDDING_INDEX_DEVICE="$ACP_MEMORY_INDEX_DEVICE"
 export SCENEEXPERT_MEMORY_INDEX_AUTO_BUILD_MISSING=$ACP_MEMORY_INDEX_AUTO_BUILD
+export SCENEEXPERT_MP_START_METHOD="$ACP_MP_START_METHOD"
 export SCENEEXPERT_VLLM_LOG="$LOG_DIR/vllm_server.log"
 EOF
 
@@ -251,6 +256,7 @@ echo "disable articulated retrieval: ${ACP_DISABLE_ARTICULATED}"
 echo "disable materials retrieval: ${ACP_DISABLE_MATERIALS}"
 echo "scene workers: ${ACP_SCENE_WORKERS}"
 echo "scene retry attempts: ${ACP_SCENE_RETRY_ATTEMPTS}"
+echo "multiprocessing start method: ${ACP_MP_START_METHOD}"
 echo "convex ready timeout: ${ACP_CONVEX_READY_TIMEOUT}s"
 echo "convex max OMP threads: ${ACP_CONVEX_MAX_OMP_THREADS}"
 echo "memory embedding device: ${ACP_MEMORY_EMBEDDING_DEVICE}"

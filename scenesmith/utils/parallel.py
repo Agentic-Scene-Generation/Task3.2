@@ -7,6 +7,7 @@ where ProcessPoolExecutor's "broken pool" behavior is problematic.
 
 import logging
 import multiprocessing
+import os
 import queue
 import signal
 import traceback
@@ -15,6 +16,34 @@ from multiprocessing.connection import wait
 from typing import Any, Callable
 
 console_logger = logging.getLogger(__name__)
+
+
+def _get_isolated_process_context() -> multiprocessing.context.BaseContext:
+    """Select a clean process context without re-importing the ACP entrypoint."""
+    available_methods = multiprocessing.get_all_start_methods()
+    requested_method = os.environ.get("SCENEEXPERT_MP_START_METHOD", "").strip()
+
+    if requested_method:
+        if requested_method not in available_methods:
+            raise RuntimeError(
+                f"Unsupported SCENEEXPERT_MP_START_METHOD={requested_method!r}; "
+                f"available methods: {available_methods}"
+            )
+        method = requested_method
+    elif "forkserver" in available_methods:
+        method = "forkserver"
+    else:
+        method = "spawn"
+
+    if method == "forkserver":
+        # Python preloads __main__ into forkserver by default. In this project
+        # that executes main.py and imports bpy, which fails with missing _bpy
+        # during ACP child bootstrap. An empty preload list keeps the server
+        # clean; each worker imports only the pickled target module it needs.
+        multiprocessing.set_forkserver_preload([])
+
+    console_logger.info(f"Using multiprocessing start method: {method}")
+    return multiprocessing.get_context(method)
 
 
 def _get_signal_name(exit_code: int) -> str:
@@ -106,13 +135,10 @@ def run_parallel_isolated(
     if max_workers < 1:
         raise ValueError("max_workers must be at least 1")
 
-    # Never fork a process that has already initialized CUDA, Drake, Blender,
-    # OpenMP, SQLite, httpx, or Agents SDK tracing.  The first task may appear
-    # healthy after fork while later tasks crash in native code because locks,
-    # file descriptors, and allocator state were copied from a dirty parent.
-    # A dedicated spawn context gives every task a fresh Python interpreter
-    # without changing the process policy of unrelated server infrastructure.
-    mp_context = multiprocessing.get_context("spawn")
+    # Never use a plain fork from a process that has initialized CUDA, Drake,
+    # OpenMP, SQLite, httpx, or Agents SDK tracing. Linux uses a clean
+    # forkserver; platforms without it fall back to spawn.
+    mp_context = _get_isolated_process_context()
     result_queue = mp_context.Queue()
     pending = list(tasks)
     active: dict[int, tuple[multiprocessing.Process, str]] = {}

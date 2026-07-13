@@ -15,8 +15,13 @@ from omegaconf import DictConfig, OmegaConf
 from omegaconf.omegaconf import open_dict
 
 # isort: off
-# Need to import bpy first to avoid potential symbol loading issues.
-import bpy  # noqa: F401
+# The original process imports bpy before the SceneSmith dependency graph to
+# avoid native symbol-order issues. multiprocessing spawn re-executes this file
+# as ``__mp_main__``; importing bpy there fails in the cluster environment
+# because the child bootstrap cannot resolve Blender's private ``_bpy`` module.
+# Scene workers use the external BlenderServer and do not need bpy in-process.
+if __name__ != "__mp_main__":
+    import bpy  # noqa: F401
 
 # isort: on
 

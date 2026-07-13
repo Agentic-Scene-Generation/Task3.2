@@ -134,11 +134,13 @@ def _is_retryable_scene_failure(error: str) -> bool:
     """Return whether a fresh process can plausibly recover this failure."""
     normalized = error.lower()
     transient_markers = (
-        "process crashed",
         "sigsegv",
         "sigabrt",
+        "sigkill",
         "exitcode=-11",
         "exitcode=-6",
+        "exitcode=-9",
+        "exitcode=137",
         "apitimeouterror",
         "request timed out",
         "connection reset",
@@ -2173,17 +2175,35 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
         cfg_dict: dict,
         experiment_run_id: str,
     ) -> None:
-        """Run scenes one at a time, each in a fresh spawned process."""
+        """Run scenes in YAML order, each in a fresh isolated process."""
         console_logger.info(
             "Running scene generation serially with per-scene process isolation"
         )
-        self._run_isolated_scene_generation(
-            prompts_with_ids=prompts_with_ids,
-            cfg_dict=cfg_dict,
-            experiment_run_id=experiment_run_id,
-            num_workers=1,
-            capture_logs=False,
-        )
+        failed_scenes: list[tuple[int, str]] = []
+        for scene_id, prompt in prompts_with_ids:
+            try:
+                self._run_isolated_scene_generation(
+                    prompts_with_ids=[(scene_id, prompt)],
+                    cfg_dict=cfg_dict,
+                    experiment_run_id=experiment_run_id,
+                    num_workers=1,
+                    capture_logs=False,
+                )
+            except RuntimeError as error:
+                console_logger.error(
+                    f"Scene {scene_id:03d} failed; continuing serial batch: {error}"
+                )
+                failed_scenes.append((scene_id, str(error)))
+
+        if failed_scenes:
+            failure_details = "\n".join(
+                f"  - scene_{scene_id:03d}: {error}"
+                for scene_id, error in failed_scenes
+            )
+            raise RuntimeError(
+                f"{len(failed_scenes)}/{len(prompts_with_ids)} scene(s) failed:\n"
+                f"{failure_details}"
+            )
 
     def _run_parallel_generation(
         self,
