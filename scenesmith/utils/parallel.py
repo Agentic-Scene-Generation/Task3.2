@@ -103,7 +103,17 @@ def run_parallel_isolated(
         return_values=True) or None (if return_values=False).
         For failed tasks: result_or_error is the error message string.
     """
-    result_queue: multiprocessing.Queue = multiprocessing.Queue()
+    if max_workers < 1:
+        raise ValueError("max_workers must be at least 1")
+
+    # Never fork a process that has already initialized CUDA, Drake, Blender,
+    # OpenMP, SQLite, httpx, or Agents SDK tracing.  The first task may appear
+    # healthy after fork while later tasks crash in native code because locks,
+    # file descriptors, and allocator state were copied from a dirty parent.
+    # A dedicated spawn context gives every task a fresh Python interpreter
+    # without changing the process policy of unrelated server infrastructure.
+    mp_context = multiprocessing.get_context("spawn")
+    result_queue = mp_context.Queue()
     pending = list(tasks)
     active: dict[int, tuple[multiprocessing.Process, str]] = {}
     results: dict[str, tuple[bool, Any]] = {}
@@ -112,7 +122,7 @@ def run_parallel_isolated(
         # Spawn processes up to max_workers.
         while len(active) < max_workers and pending:
             task_id, target, kwargs = pending.pop(0)
-            p = multiprocessing.Process(
+            p = mp_context.Process(
                 target=_worker_wrapper,
                 args=(target, kwargs, task_id, result_queue, return_values),
             )
@@ -125,8 +135,8 @@ def run_parallel_isolated(
             sentinels = [proc.sentinel for proc, _ in active.values()]
             wait(sentinels, timeout=1.0)
 
-        # Drain all available results from queue first. This avoids race
-        # conditions when multiple processes finish simultaneously.
+        # Drain before join() so a large return value cannot fill the pipe and
+        # block the worker's queue feeder thread during process shutdown.
         while True:
             try:
                 result_task_id, success, result_or_error = result_queue.get_nowait()
@@ -136,21 +146,40 @@ def run_parallel_isolated(
             except queue.Empty:
                 break
 
-        # Collect finished processes. Any that didn't report results crashed.
+        # Join finished processes before the second drain. This guarantees the
+        # feeder thread has flushed small, late-arriving result messages.
+        finished: list[tuple[multiprocessing.Process, str]] = []
         for pid, (proc, task_id) in list(active.items()):
             if not proc.is_alive():
                 proc.join()
                 del active[pid]
+                finished.append((proc, task_id))
 
-                # If task didn't report via queue, it crashed (e.g., SIGKILL, OOM).
-                if task_id not in results:
-                    signal_name = _get_signal_name(proc.exitcode)
-                    results[task_id] = (
-                        False,
-                        f"Process crashed (exitcode={proc.exitcode}{signal_name})",
-                    )
-                    console_logger.error(
-                        f"{task_id} crashed (exitcode={proc.exitcode}{signal_name})"
-                    )
+        # Drain again after process shutdown. This second pass removes the race
+        # where a process exits between the first get_nowait() and join().
+        while True:
+            try:
+                result_task_id, success, result_or_error = result_queue.get_nowait()
+                results[result_task_id] = (success, result_or_error)
+                status = "completed" if success else f"failed: {result_or_error}"
+                console_logger.info(f"{result_task_id} {status}")
+            except queue.Empty:
+                break
+
+        # Any finished process that did not report a result crashed before the
+        # Python wrapper could catch an exception (for example SIGSEGV/OOM).
+        for proc, task_id in finished:
+            if task_id not in results:
+                signal_name = _get_signal_name(proc.exitcode)
+                results[task_id] = (
+                    False,
+                    f"Process crashed (exitcode={proc.exitcode}{signal_name})",
+                )
+                console_logger.error(
+                    f"{task_id} crashed (exitcode={proc.exitcode}{signal_name})"
+                )
+
+    result_queue.close()
+    result_queue.join_thread()
 
     return results

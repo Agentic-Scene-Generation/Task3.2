@@ -77,6 +77,75 @@ STAGE_ASSET_DIRS = {
     "manipuland": ["furniture", "wall_mounted", "ceiling_mounted"],
 }
 
+_SCENE_STATUS_FILENAME = "scene_status.json"
+_SCENE_SUCCESS_MARKER = "_SUCCESS"
+
+
+def _write_scene_status(
+    output_dir: Path,
+    scene_id: int,
+    prompt: str,
+    status: str,
+    attempt: int,
+    error: str | None = None,
+) -> None:
+    """Atomically persist the lifecycle state of one scene task."""
+    scene_dir = output_dir / f"scene_{scene_id:03d}"
+    scene_dir.mkdir(parents=True, exist_ok=True)
+    status_path = scene_dir / _SCENE_STATUS_FILENAME
+    payload = {
+        "scene_id": scene_id,
+        "prompt": prompt,
+        "status": status,
+        "attempt": attempt,
+        "pid": os.getpid(),
+        "updated_at": datetime.now().astimezone().isoformat(),
+    }
+    if error:
+        payload["error"] = error
+    temporary_path = status_path.with_suffix(".json.tmp")
+    temporary_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    temporary_path.replace(status_path)
+
+
+def _archive_failed_scene_attempt(
+    output_dir: Path,
+    scene_id: int,
+    attempt: int,
+) -> Path | None:
+    """Move a failed partial scene aside before a clean-process retry."""
+    scene_dir = output_dir / f"scene_{scene_id:03d}"
+    if not scene_dir.exists():
+        return None
+
+    archive_root = output_dir / "failed_attempts"
+    archive_root.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    archive_path = archive_root / (
+        f"scene_{scene_id:03d}_attempt_{attempt:02d}_{timestamp}"
+    )
+    shutil.move(str(scene_dir), str(archive_path))
+    return archive_path
+
+
+def _is_retryable_scene_failure(error: str) -> bool:
+    """Return whether a fresh process can plausibly recover this failure."""
+    normalized = error.lower()
+    transient_markers = (
+        "process crashed",
+        "sigsegv",
+        "sigabrt",
+        "exitcode=-11",
+        "exitcode=-6",
+        "apitimeouterror",
+        "request timed out",
+        "connection reset",
+        "connection refused",
+    )
+    return any(marker in normalized for marker in transient_markers)
+
 
 def _get_retrieval_gpu_device() -> str | None:
     """Get GPU device for retrieval servers.
@@ -1763,6 +1832,7 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
         capture_logs: bool = False,
         experiment_run_id: str | None = None,
         render_gpu_id: int | None = None,
+        attempt: int = 1,
     ) -> None:
         """Generate a single scene (static method for parallel execution).
 
@@ -1779,6 +1849,7 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
             experiment_run_id: Unique ID for this experiment run.
             render_gpu_id: GPU device ID for Blender rendering. When set, uses
                 bubblewrap to isolate the BlenderServer to this GPU.
+            attempt: One-based clean-process attempt number for this scene.
         """
         # Reset any SDK state inherited via fork (defense in depth).
         _reset_inherited_sdk_state()
@@ -1790,6 +1861,14 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
         # Create scene directory.
         scene_dir = output_dir / f"scene_{scene_id:03d}"
         scene_dir.mkdir(parents=True, exist_ok=True)
+        (scene_dir / _SCENE_SUCCESS_MARKER).unlink(missing_ok=True)
+        _write_scene_status(
+            output_dir=output_dir,
+            scene_id=scene_id,
+            prompt=prompt,
+            status="running",
+            attempt=attempt,
+        )
 
         # Always create log file.
         log_path = scene_dir / "scene.log"
@@ -1961,6 +2040,16 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                             "Scene generation completed successfully in "
                             f"{timedelta(seconds=time.time() - scene_generation_start_time)}"
                         )
+                        _write_scene_status(
+                            output_dir=output_dir,
+                            scene_id=scene_id,
+                            prompt=prompt,
+                            status="completed",
+                            attempt=attempt,
+                        )
+                        (scene_dir / _SCENE_SUCCESS_MARKER).write_text(
+                            "completed\n", encoding="utf-8"
+                        )
                         return
 
                     # Stages 2-4: Furniture, wall objects, and manipulands (per-room).
@@ -2061,8 +2150,27 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
             except Exception as e:
                 if scene_expert_hooks:
                     scene_expert_hooks.save_partial_trace(error=str(e))
+                _write_scene_status(
+                    output_dir=output_dir,
+                    scene_id=scene_id,
+                    prompt=prompt,
+                    status="failed",
+                    attempt=attempt,
+                    error=str(e),
+                )
                 console_logger.error(f"Scene generation failed: {e}")
                 raise
+
+        _write_scene_status(
+            output_dir=output_dir,
+            scene_id=scene_id,
+            prompt=prompt,
+            status="completed",
+            attempt=attempt,
+        )
+        (scene_dir / _SCENE_SUCCESS_MARKER).write_text(
+            "completed\n", encoding="utf-8"
+        )
 
     def _run_serial_generation(
         self,
@@ -2070,35 +2178,17 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
         cfg_dict: dict,
         experiment_run_id: str,
     ) -> None:
-        """Run scene generation in serial."""
-        console_logger.info("Running scene generation serially in main thread")
-
-        # GPU distribution is useful for parallel rooms within each scene.
-        gpu_allocator = RenderGPUAllocator()
-
-        failed_scenes: list[tuple[int, str]] = []
-        for scene_id, prompt in prompts_with_ids:
-            render_gpu_id = gpu_allocator.allocate()
-            try:
-                self._generate_single_scene(
-                    prompt=prompt,
-                    scene_id=scene_id,
-                    output_dir=self.output_dir,
-                    cfg_dict=cfg_dict,
-                    capture_logs=False,
-                    experiment_run_id=experiment_run_id,
-                    render_gpu_id=render_gpu_id,
-                )
-                console_logger.info(f"Completed scene {scene_id:03d}")
-            except Exception as e:
-                console_logger.error(f"Scene {scene_id:03d} failed, continuing: {e}")
-                failed_scenes.append((scene_id, str(e)))
-
-        if failed_scenes:
-            details = "\n".join(f"  scene_{sid:03d}: {err}" for sid, err in failed_scenes)
-            raise RuntimeError(
-                f"{len(failed_scenes)} scene(s) failed:\n{details}"
-            )
+        """Run scenes one at a time, each in a fresh spawned process."""
+        console_logger.info(
+            "Running scene generation serially with per-scene process isolation"
+        )
+        self._run_isolated_scene_generation(
+            prompts_with_ids=prompts_with_ids,
+            cfg_dict=cfg_dict,
+            experiment_run_id=experiment_run_id,
+            num_workers=1,
+            capture_logs=False,
+        )
 
     def _run_parallel_generation(
         self,
@@ -2116,41 +2206,107 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
         Raises:
             RuntimeError: If any scene generation fails.
         """
-        console_logger.info(f"Running in parallel with {num_workers} workers")
+        console_logger.info(
+            f"Running scene generation with {num_workers} isolated workers"
+        )
+        self._run_isolated_scene_generation(
+            prompts_with_ids=prompts_with_ids,
+            cfg_dict=cfg_dict,
+            experiment_run_id=experiment_run_id,
+            num_workers=num_workers,
+            capture_logs=True,
+        )
 
-        # Create GPU allocator for distributing Blender rendering.
+    def _run_isolated_scene_generation(
+        self,
+        prompts_with_ids: list[tuple[int, str]],
+        cfg_dict: dict,
+        experiment_run_id: str,
+        num_workers: int,
+        capture_logs: bool,
+    ) -> None:
+        """Run complete scene tasks with clean-process retry semantics."""
+        retry_budget = max(
+            0, int(cfg_dict["experiment"].get("scene_retry_attempts", 1))
+        )
+
         gpu_allocator = RenderGPUAllocator()
-
-        # Build task list.
-        tasks: list[tuple[str, Callable, dict]] = []
+        pending: dict[str, tuple[int, str, int]] = {}
         for scene_id, prompt in prompts_with_ids:
             render_gpu_id = gpu_allocator.allocate()
             task_id = f"scene_{scene_id:03d}"
-            kwargs = {
-                "prompt": prompt,
-                "scene_id": scene_id,
-                "output_dir": self.output_dir,
-                "cfg_dict": cfg_dict,
-                "capture_logs": True,
-                "experiment_run_id": experiment_run_id,
-                "render_gpu_id": render_gpu_id,
-            }
-            tasks.append(
-                (
-                    task_id,
-                    IndoorSceneGenerationExperiment._generate_single_scene,
-                    kwargs,
-                )
-            )
+            pending[task_id] = (scene_id, prompt, render_gpu_id)
             console_logger.info(f"Queued {task_id} (GPU {render_gpu_id}): {prompt}")
 
-        # Run with fault tolerance - one crash doesn't affect others.
-        results = run_parallel_isolated(tasks=tasks, max_workers=num_workers)
+        final_results: dict[str, tuple[bool, str | None]] = {}
+        attempt = 1
+        while pending:
+            tasks: list[tuple[str, Callable, dict]] = []
+            for task_id, (scene_id, prompt, render_gpu_id) in pending.items():
+                kwargs = {
+                    "prompt": prompt,
+                    "scene_id": scene_id,
+                    "output_dir": self.output_dir,
+                    "cfg_dict": cfg_dict,
+                    "capture_logs": capture_logs,
+                    "experiment_run_id": experiment_run_id,
+                    "render_gpu_id": render_gpu_id,
+                    "attempt": attempt,
+                }
+                tasks.append(
+                    (
+                        task_id,
+                        IndoorSceneGenerationExperiment._generate_single_scene,
+                        kwargs,
+                    )
+                )
 
-        # Report failures.
+            results = run_parallel_isolated(tasks=tasks, max_workers=num_workers)
+            retry_pending: dict[str, tuple[int, str, int]] = {}
+            for task_id, metadata in pending.items():
+                scene_id, prompt, _ = metadata
+                success, result_or_error = results[task_id]
+                if success:
+                    final_results[task_id] = (True, None)
+                    console_logger.info(f"Completed {task_id} on attempt {attempt}")
+                    continue
+
+                error = str(result_or_error)
+                _write_scene_status(
+                    output_dir=self.output_dir,
+                    scene_id=scene_id,
+                    prompt=prompt,
+                    status="failed",
+                    attempt=attempt,
+                    error=error[-8000:],
+                )
+                can_retry = (
+                    attempt <= retry_budget and _is_retryable_scene_failure(error)
+                )
+                if can_retry:
+                    archive_path = _archive_failed_scene_attempt(
+                        output_dir=self.output_dir,
+                        scene_id=scene_id,
+                        attempt=attempt,
+                    )
+                    console_logger.warning(
+                        f"{task_id} failed with a transient/native error; "
+                        f"retrying in a fresh process ({attempt}/{retry_budget}). "
+                        f"Partial output archived at {archive_path}"
+                    )
+                    retry_pending[task_id] = metadata
+                else:
+                    final_results[task_id] = (False, error)
+                    console_logger.error(
+                        f"{task_id} failed permanently after attempt {attempt}: {error}"
+                    )
+
+            pending = retry_pending
+            attempt += 1
+
         failed_scenes = [
             (task_id, error)
-            for task_id, (success, error) in results.items()
+            for task_id, (success, error) in final_results.items()
             if not success
         ]
         if failed_scenes:
@@ -2158,7 +2314,8 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                 f"  - {task_id}: {error}" for task_id, error in failed_scenes
             )
             raise RuntimeError(
-                f"{len(failed_scenes)}/{len(tasks)} scene(s) failed:\n{failure_details}"
+                f"{len(failed_scenes)}/{len(prompts_with_ids)} scene(s) failed:\n"
+                f"{failure_details}"
             )
 
     def generate_scenes(self) -> None:
@@ -2175,6 +2332,21 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
             prompts_with_ids = list(enumerate(prompts))
 
         num_workers = min(self.cfg.experiment.num_workers, len(prompts_with_ids))
+
+        # Online memory banks and their numpy indexes are shared across scenes.
+        # Until writes use per-scene deltas followed by a parent-side merge,
+        # concurrent harness_memory/full scenes can interleave JSONL updates or
+        # retrieve a stale index. Preserve correctness by serializing those
+        # modes; disabled/harness_only experiments remain scene-parallel.
+        scene_expert_mode = OmegaConf.select(
+            self.cfg, "scene_expert.mode", default="disabled"
+        )
+        if num_workers > 1 and scene_expert_mode in {"harness_memory", "full"}:
+            console_logger.warning(
+                f"scene_expert.mode={scene_expert_mode!r} uses a shared online "
+                "memory bank; forcing experiment.num_workers=1"
+            )
+            num_workers = 1
 
         # Get pipeline stage configuration.
         pipeline_cfg = self.cfg.experiment.pipeline

@@ -88,6 +88,16 @@ ACP_CUDA_VISIBLE_DEVICES=""
 ACP_MAX_MODEL_LEN=65536
 ACP_GPU_MEMORY_UTILIZATION=0.90
 
+# TODO: Number of complete scene tasks submitted concurrently to the shared
+# vLLM endpoint. Keep 1 for ablation_4b/4c because those experiments append to
+# a shared online memory bank. After validating ablation_2/3, 2 is the advised
+# first parallel setting; TP=4 already uses all four GPUs for one Qwen replica.
+ACP_SCENE_WORKERS=1
+
+# TODO: Retry only native/transient failures once in a brand-new spawned
+# process. The failed partial output is retained under failed_attempts/.
+ACP_SCENE_RETRY_ATTEMPTS=1
+
 # TODO: Multi-GPU should normally keep this at 0. If 2 GPUs still fail while
 # loading the model, try 10. Single-GPU fallback may need 20.
 ACP_CPU_OFFLOAD_GB=0
@@ -131,8 +141,8 @@ ACP_CONVEX_MAX_OMP_THREADS=32
 # TODO: Leave empty to use SCENEEXPERT_OUTPUT_DIR from .env.
 ACP_OUTPUT_DIR=""
 
-# TODO: Keep memory experiments sequential by default.
-ACP_HYDRA_OVERRIDES="experiment.num_workers=1"
+# Scene scheduling lives here so users do not need ad-hoc terminal overrides.
+ACP_HYDRA_OVERRIDES="experiment.num_workers=${ACP_SCENE_WORKERS} experiment.scene_retry_attempts=${ACP_SCENE_RETRY_ATTEMPTS}"
 
 # TODO: Online SceneExpert memory retrieval must stay CPU-only. BGE-M3 on CUDA
 # can make FlagEmbedding spawn subprocesses that re-import main.py outside
@@ -239,6 +249,8 @@ printf 'DeepGEMM: use=%s, moe_use=%s, warmup=%s\n' \
 echo "enforce eager: ${ACP_VLLM_ENFORCE_EAGER}"
 echo "disable articulated retrieval: ${ACP_DISABLE_ARTICULATED}"
 echo "disable materials retrieval: ${ACP_DISABLE_MATERIALS}"
+echo "scene workers: ${ACP_SCENE_WORKERS}"
+echo "scene retry attempts: ${ACP_SCENE_RETRY_ATTEMPTS}"
 echo "convex ready timeout: ${ACP_CONVEX_READY_TIMEOUT}s"
 echo "convex max OMP threads: ${ACP_CONVEX_MAX_OMP_THREADS}"
 echo "memory embedding device: ${ACP_MEMORY_EMBEDDING_DEVICE}"

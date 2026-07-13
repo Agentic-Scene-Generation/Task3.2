@@ -854,7 +854,8 @@ ACP_DISABLE_ARTICULATED=1
 ACP_DISABLE_MATERIALS=1
 ACP_CONVEX_READY_TIMEOUT=180
 ACP_CONVEX_MAX_OMP_THREADS=32
-ACP_HYDRA_OVERRIDES="experiment.num_workers=1"
+ACP_SCENE_WORKERS=1
+ACP_SCENE_RETRY_ATTEMPTS=1
 ```
 
 如果 ACP 申请 4 张 H100 80GB，可以把脚本 TODO 区改成：
@@ -875,11 +876,15 @@ ACP_DISABLE_ARTICULATED=1
 ACP_DISABLE_MATERIALS=1
 ACP_CONVEX_READY_TIMEOUT=180
 ACP_CONVEX_MAX_OMP_THREADS=32
+ACP_GPU_MEMORY_UTILIZATION=0.90
+ACP_SCENE_WORKERS=1
+ACP_SCENE_RETRY_ATTEMPTS=1
 ```
 
 参数原则：
 
 - `ACP_GPUS` 要和 ACP 申请的 GPU 数一致。调度器管理的 ACP 作业里推荐保持 `ACP_CUDA_VISIBLE_DEVICES=""`，不要手动写 `0,1` 或 `0,1,2,3`，否则可能绕过调度器分配，误用到已有进程的物理 GPU。
+- H100 80GB 上 `ACP_GPU_MEMORY_UTILIZATION=0.90` 表示 vLLM 每卡目标占用约 72GB、预留约 8GB；当前 ACP 默认保持该值。
 - 2 卡优先用 `max_model_len=65536` 跑通；需要更长上下文时再升到 `131072`。
 - 4 卡可尝试 `131072`，确认稳定后再尝试 `262144`。
 - 多卡优先不开 CPU offload；如果 2 卡仍在模型加载阶段失败，再把脚本 TODO 区的 `ACP_CPU_OFFLOAD_GB` 改成 `10`。
@@ -891,7 +896,19 @@ ACP_CONVEX_MAX_OMP_THREADS=32
 - 如果当前可写的 `SCENEEXPERT_DATA_DIR` 还没有 `artvip_sdf/` 或 `partnet_mobility_sdf/`，保持 `ACP_DISABLE_ARTICULATED=1`。脚本会自动关闭四个 agent 的 articulated 策略，避免启动 articulated retrieval server 后因没有任何可用 source 失败。
 - 如果当前可写的 `SCENEEXPERT_DATA_DIR` 还没有 `materials/` 或 `materials/embeddings/`，保持 `ACP_DISABLE_MATERIALS=1`。脚本会自动关闭 floor-plan 材料检索和四个 agent 的 `thin_covering` 策略，避免启动 materials retrieval server 后失败。
 - 如果日志出现 `Convex decomposition server did not become ready within 10.0s`，优先保持 `ACP_CONVEX_READY_TIMEOUT=180`、`ACP_CONVEX_MAX_OMP_THREADS=32`。该服务用于生成碰撞几何，不需要额外模型或数据；它依赖 Python 包 `coacd`、`vhacdx`、`trimesh` 和 `flask`，这些已在项目依赖中声明。
-- memory 版本默认用 `experiment.num_workers=1`，避免多个进程同时写 memory；需要批量并行时再显式覆盖。
+- `ACP_SCENE_WORKERS` 控制完整 task 的并发数。Qwen3.5-35B-A3B 的 TP=4 表示一个 vLLM 副本占用四张卡，不等于四个 task 各占一张卡；多个 task 会共享同一个 vLLM endpoint。`ablation_4b/4c` 默认保持 `1`，避免并发写公共 memory bank。`ablation_2/3` 可先试 `2`，验证显存和渲染稳定后再增加。
+- `ACP_SCENE_RETRY_ATTEMPTS=1` 只对 `SIGSEGV`、`SIGABRT`、本地 vLLM timeout、连接中断等故障执行一次整场景重试。每次重试都会使用新的 `spawn` 进程，失败的半成品保留在 `<run>/failed_attempts/`。
+- 即使 `ACP_SCENE_WORKERS=1`，每个 prompt 也会在独立的新进程中执行，不会让第二个 task 继承第一个 task 的 CUDA、Drake、SQLite、OpenMP 或 Agents SDK 状态。
+
+每个场景目录会生成：
+
+```text
+scene_001/
+  scene_status.json   # running / failed / completed、attempt、错误摘要
+  _SUCCESS            # 仅完整跑到配置的 stop_stage 后生成
+```
+
+批量任务结束后，不能只按“目录存在”判断成功；应检查每个 `scene_NNN/_SUCCESS`。如果瞬态崩溃触发了重试，可在 `failed_attempts/scene_NNN_attempt_*/` 查看原始日志和 partial trace。
 
 优先级规则：ACP 脚本会先复制当前 `.env`，再生成本次 job 专用 env 文件，并在文件末尾追加 `SCENEEXPERT_TENSOR_PARALLEL_SIZE`、`SCENEEXPERT_MAX_MODEL_LEN`、`SCENEEXPERT_GPU_MEMORY_UTILIZATION`、`SCENEEXPERT_VLLM_CPU_OFFLOAD_GB` 等多卡覆盖项。因此最终运行时，ACP 脚本生成的覆盖项优先级更高；`.env` 只保留模型目录、数据目录、输出目录、端口等服务器固定配置。
 
