@@ -43,6 +43,8 @@ class VLMService:
         verbosity: str,
         response_format: dict[str, str] | None = None,
         vision_detail: str = "auto",
+        timeout_seconds: float | None = None,
+        max_retries: int | None = None,
     ) -> str:
         """Create completion using appropriate API based on model type.
 
@@ -56,10 +58,21 @@ class VLMService:
             verbosity: Output verbosity level ("low", "medium", "high").
             response_format: Optional response format (e.g., {"type": "json_object"}).
             vision_detail: Image resolution detail ("low", "high", "auto").
+            timeout_seconds: Optional request timeout override.
+            max_retries: Optional OpenAI client retry override.
 
         Returns:
             Response content as string.
         """
+        client = self.client
+        client_options: dict[str, Any] = {}
+        if timeout_seconds is not None:
+            client_options["timeout"] = float(timeout_seconds)
+        if max_retries is not None:
+            client_options["max_retries"] = max(0, int(max_retries))
+        if client_options:
+            client = client.with_options(**client_options)
+
         # Check if model supports reasoning.
         if model in self._reasoning_models:
             # Use Responses API with reasoning for reasoning-capable models.
@@ -81,7 +94,7 @@ class VLMService:
             }
             if self.service_tier:
                 kwargs["service_tier"] = self.service_tier
-            response = self.client.responses.create(**kwargs)
+            response = client.responses.create(**kwargs)
 
             # Raise with diagnostic details if output_text is empty.
             if not response.output_text:
@@ -123,7 +136,7 @@ class VLMService:
             if self.service_tier:
                 kwargs["service_tier"] = self.service_tier
 
-            response = self.client.chat.completions.create(**kwargs)
+            response = client.chat.completions.create(**kwargs)
             content = response.choices[0].message.content
 
             # Validate response content.

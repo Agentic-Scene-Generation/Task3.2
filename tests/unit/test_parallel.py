@@ -1,9 +1,15 @@
 """Tests for fault-tolerant parallel execution utilities."""
 
+import multiprocessing
 import os
 import unittest
 
-from scenesmith.utils.parallel import run_parallel_isolated
+from unittest.mock import patch
+
+from scenesmith.utils.parallel import (
+    _get_isolated_process_context,
+    run_parallel_isolated,
+)
 
 
 def _successful_task(value: int, name: str) -> dict:
@@ -154,6 +160,28 @@ class TestRunParallelIsolated(unittest.TestCase):
         results = run_parallel_isolated(tasks=[], max_workers=2)
 
         self.assertEqual(len(results), 0)
+
+    def test_default_context_prefers_forkserver_when_available(self):
+        """Linux uses forkserver while other platforms safely use spawn."""
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("SCENEEXPERT_MP_START_METHOD", None)
+            context = _get_isolated_process_context()
+
+        expected = (
+            "forkserver"
+            if "forkserver" in multiprocessing.get_all_start_methods()
+            else "spawn"
+        )
+        self.assertEqual(context.get_start_method(), expected)
+
+    def test_invalid_explicit_context_fails_fast(self):
+        """An invalid ACP process method produces an actionable error."""
+        with patch.dict(
+            os.environ,
+            {"SCENEEXPERT_MP_START_METHOD": "not-a-real-method"},
+        ):
+            with self.assertRaisesRegex(RuntimeError, "available methods"):
+                _get_isolated_process_context()
 
 
 if __name__ == "__main__":

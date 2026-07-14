@@ -232,7 +232,8 @@ class MemoryWriter:
 
             try:
                 ops = [
-                    MemoryUpdateOp.model_validate(op) for op in data.get("updates", [])
+                    MemoryUpdateOp.model_validate(self._normalize_update_op(op))
+                    for op in data.get("updates", [])
                 ]
                 ops = self._gate_and_enrich_ops(ops, full_report)
             except Exception as e:
@@ -445,6 +446,18 @@ class MemoryWriter:
 
     def _has_mutating_ops(self, ops: list[MemoryUpdateOp]) -> bool:
         return any(op.op in ("ADD", "UPDATE") for op in ops)
+
+    @staticmethod
+    def _normalize_update_op(raw_op: Any) -> dict[str, Any]:
+        """Normalize common local-model JSON nulls before schema validation."""
+        if not isinstance(raw_op, dict):
+            raise TypeError(f"Memory update must be an object, got {type(raw_op).__name__}")
+        op = dict(raw_op)
+        if op.get("content") is None:
+            op["content"] = {}
+        if op.get("target_id") is None:
+            op["target_id"] = ""
+        return op
 
     def _should_build_fallback(self, full_report: FullVerifyReport) -> bool:
         return (

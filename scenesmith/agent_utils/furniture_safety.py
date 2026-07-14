@@ -19,6 +19,7 @@ from typing import Any
 
 from scenesmith.agent_utils.furniture_layout_planning import (
     evaluate_bedroom_layout_plausibility,
+    is_bedroom_scene,
 )
 from scenesmith.agent_utils.scoring import CritiqueWithScores
 
@@ -47,6 +48,8 @@ DEFAULT_ALIASES = {
     "table": ["table", "tables"],
     "cabinet": ["cabinet", "cabinets"],
     "bookshelf": ["bookshelf", "bookshelves", "bookcase", "bookcases"],
+    "plant": ["plant", "plants", "potted plant", "potted plants"],
+    "rug": ["rug", "rugs", "area rug", "area rugs"],
 }
 
 NUMBER_WORDS = {
@@ -268,6 +271,11 @@ class FurnitureSafetyController:
         self.scene_description = scene_description or ""
         self.required_terms = self._infer_required_terms(self.scene_description)
         self.required_counts = self._infer_required_counts(self.scene_description)
+        # A style-only bedroom prompt still semantically requires a bed.  Do
+        # not infer the rest of a bedroom set unless the task requests it.
+        if "bedroom" in self.scene_description.lower():
+            self.required_terms.add("bed")
+            self.required_counts.setdefault("bed", 1)
         if self.required_object_names:
             self.required_terms.update(self.required_object_names)
             for name in self.required_object_names:
@@ -330,13 +338,44 @@ class FurnitureSafetyController:
                 counts[canonical] = best_count
         if "twin_bed" in counts:
             counts.pop("bed", None)
+        self._propagate_each_relation_counts(text, counts)
         return counts
+
+    def _propagate_each_relation_counts(
+        self, text: str, counts: dict[str, int]
+    ) -> None:
+        """Handle requirements such as ``six desks, each with a chair``."""
+        for source, source_count in list(counts.items()):
+            if source_count <= 1:
+                continue
+            source_aliases = DEFAULT_ALIASES.get(source, [source])
+            for target, target_aliases in DEFAULT_ALIASES.items():
+                if source == target:
+                    continue
+                found = False
+                for source_alias in source_aliases:
+                    for target_alias in target_aliases:
+                        pattern = (
+                            rf"{re.escape(source_alias)}\s*,?\s*each\s+"
+                            rf"(?:with|having)\s+(?:(?:a|an|one)\s+)?"
+                            rf"(?:\w+\s+){{0,2}}{re.escape(target_alias)}"
+                        )
+                        if re.search(pattern, text):
+                            counts[target] = max(counts.get(target, 0), source_count)
+                            found = True
+                            break
+                    if found:
+                        break
 
     def _infer_category(self, text: str) -> str | None:
         for canonical, aliases in DEFAULT_ALIASES.items():
             if any(_contains_alias(text, alias) for alias in [canonical, *aliases]):
                 return canonical
         return None
+
+    def infer_object_category(self, text: str) -> str | None:
+        """Return the canonical configured furniture category for object text."""
+        return self._infer_category(text)
 
     def is_required_object(self, object_id: str, object_text: str = "") -> bool:
         """Return whether the object appears to satisfy a prompt-required term."""
@@ -824,32 +863,40 @@ class FurnitureSafetyController:
                         f"[{min_y:.3f}, {max_y:.3f}]"
                     )
 
+        bedroom_scene = is_bedroom_scene(scene)
         if physics_context:
             hard_from_physics, soft_from_physics = self._parse_physics_context(
-                physics_context
+                physics_context,
+                window_blocking_is_hard=(
+                    self.window_blocking_is_hard and bedroom_scene
+                ),
             )
             hard_reasons.extend(hard_from_physics)
             soft_reasons.extend(soft_from_physics)
 
         plausibility_report = None
-        try:
-            plausibility_report = evaluate_bedroom_layout_plausibility(
-                scene=scene,
-                cfg=self.bedroom_layout_cfg,
-            )
-        except Exception as exc:
-            soft_reasons.append(
-                "bedroom plausibility check failed: " f"{type(exc).__name__}: {exc}"
-            )
+        if bedroom_scene:
+            try:
+                plausibility_report = evaluate_bedroom_layout_plausibility(
+                    scene=scene,
+                    cfg=self.bedroom_layout_cfg,
+                )
+            except Exception as exc:
+                soft_reasons.append(
+                    "bedroom plausibility check failed: "
+                    f"{type(exc).__name__}: {exc}"
+                )
 
-        if plausibility_report is not None and plausibility_report.issues:
-            hard_plausibility, soft_plausibility = (
-                self._classify_bedroom_plausibility_issues(plausibility_report.issues)
-            )
-            hard_reasons.extend(hard_plausibility)
-            soft_reasons.extend(soft_plausibility)
+            if plausibility_report is not None and plausibility_report.issues:
+                hard_plausibility, soft_plausibility = (
+                    self._classify_bedroom_plausibility_issues(
+                        plausibility_report.issues
+                    )
+                )
+                hard_reasons.extend(hard_plausibility)
+                soft_reasons.extend(soft_plausibility)
 
-        hard_reasons.extend(self._evaluate_bedroom_relation_hard_reasons(scene))
+            hard_reasons.extend(self._evaluate_bedroom_relation_hard_reasons(scene))
 
         return HardStateEvaluation(
             hard_valid=not hard_reasons,
@@ -987,7 +1034,10 @@ class FurnitureSafetyController:
         return (float(dx) ** 2 + float(dy) ** 2) ** 0.5
 
     def _parse_physics_context(
-        self, physics_context: str
+        self,
+        physics_context: str,
+        *,
+        window_blocking_is_hard: bool | None = None,
     ) -> tuple[list[str], list[str]]:
         text = physics_context.lower()
         if "no physics violations detected" in text:
@@ -1022,7 +1072,11 @@ class FurnitureSafetyController:
                 hard_reasons.append("geometry construction failed for unknown asset")
 
         if "window access warnings" in text:
-            if self.window_blocking_is_hard:
+            if (
+                self.window_blocking_is_hard
+                if window_blocking_is_hard is None
+                else window_blocking_is_hard
+            ):
                 hard_reasons.append("window access warning")
             else:
                 soft_reasons.append("window access warning")

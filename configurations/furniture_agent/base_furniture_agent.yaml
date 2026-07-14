@@ -89,6 +89,11 @@ rendering:
 asset_manager:
   # Asset source: "generated" (Hunyuan3D/SAM3D) or "hssd" (HSSD retrieval)
   general_asset_source: "hssd"
+  # HSSD meshes are already Z-up. Preserve the asset with conservative physics
+  # metadata when the optional local VLM material/orientation request times out.
+  hssd_vlm_fallback_on_transient_error: true
+  hssd_vlm_timeout_seconds: 90
+  hssd_vlm_max_retries: 0
 
   # 3D generation backend (only used when general_asset_source="generated")
   backend: "sam3d"
@@ -344,7 +349,9 @@ furniture_safety_controller:
     bed_wall_anchor_max_distance_m: 0.25
     wardrobe_wall_max_distance_m: 0.35
     hard_plausibility_issues: true
-    window_blocking_is_hard: true
+    # Window obstruction is soft/medium by itself. Bed-head/window conflicts
+    # remain hard through the bedroom plausibility relation checks below.
+    window_blocking_is_hard: false
     nightstand_bed_overlap_tolerance_m: 0.03
     nightstand_bed_max_gap_m: 0.55
     max_plausibility_penalty: 0.35

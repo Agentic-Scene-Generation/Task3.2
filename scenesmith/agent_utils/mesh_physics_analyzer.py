@@ -53,6 +53,50 @@ class MeshPhysicsAnalysis:
     """Confidence range for mass (min, max) in kilograms."""
 
 
+def _is_transient_vlm_error(error: Exception) -> bool:
+    """Return whether a local OpenAI-compatible request failed in transport."""
+    transient_names = {
+        "APITimeoutError",
+        "APIConnectionError",
+        "ReadTimeout",
+        "ConnectTimeout",
+        "ConnectError",
+        "TimeoutError",
+    }
+    current: BaseException | None = error
+    while current is not None:
+        if type(current).__name__ in transient_names:
+            return True
+        current = current.__cause__ or current.__context__
+    message = str(error).lower()
+    return "timed out" in message or "timeout" in message
+
+
+def _fallback_hssd_physics(mesh_path: Path) -> MeshPhysicsAnalysis:
+    """Conservative metadata for already-upright HSSD assets on VLM timeout."""
+    name = mesh_path.stem.lower()
+    material = "wood"
+    mass_kg = 12.0
+    if any(term in name for term in ("painting", "artwork", "poster", "clock")):
+        mass_kg = 3.0
+    elif "mirror" in name:
+        material = "glass"
+        mass_kg = 8.0
+    elif any(term in name for term in ("chair", "stool")):
+        mass_kg = 7.0
+    elif any(term in name for term in ("sofa", "couch", "bed")):
+        mass_kg = 40.0
+    elif any(term in name for term in ("wardrobe", "cabinet", "bookshelf")):
+        mass_kg = 45.0
+    return MeshPhysicsAnalysis(
+        up_axis="+Z",
+        front_axis="+Y",
+        material=material,
+        mass_kg=mass_kg,
+        mass_range_kg=(max(0.5, mass_kg * 0.5), mass_kg * 2.0),
+    )
+
+
 def get_view_direction_from_image_number(
     image_number: int,
     num_side_views: int = 4,
@@ -272,6 +316,15 @@ def analyze_mesh_orientation_and_material(
         reasoning_effort = openai_config.reasoning_effort.mesh_analysis
         verbosity = openai_config.verbosity.mesh_analysis
         vision_detail = openai_config.vision_detail
+        hssd_timeout_seconds = None
+        hssd_max_retries = None
+        if prompt_type == "hssd":
+            hssd_timeout_seconds = float(
+                getattr(cfg.asset_manager, "hssd_vlm_timeout_seconds", 90.0)
+            )
+            hssd_max_retries = int(
+                getattr(cfg.asset_manager, "hssd_vlm_max_retries", 0)
+            )
 
         response_text = vlm_service.create_completion(
             model=model,
@@ -280,6 +333,8 @@ def analyze_mesh_orientation_and_material(
             verbosity=verbosity,
             response_format={"type": "json_object"},
             vision_detail=vision_detail,
+            timeout_seconds=hssd_timeout_seconds,
+            max_retries=hssd_max_retries,
         )
 
         try:
@@ -296,6 +351,28 @@ def analyze_mesh_orientation_and_material(
         )
 
     except Exception as e:
+        fallback_enabled = bool(
+            getattr(
+                cfg.asset_manager,
+                "hssd_vlm_fallback_on_transient_error",
+                True,
+            )
+        )
+        if prompt_type == "hssd" and fallback_enabled and _is_transient_vlm_error(e):
+            fallback = _fallback_hssd_physics(mesh_path)
+            console_logger.warning(
+                "HSSD VLM physics analysis failed transiently for %s; "
+                "using canonical HSSD fallback (up=%s, front=%s, material=%s, "
+                "mass=%.1fkg): %s: %s",
+                mesh_path.stem,
+                fallback.up_axis,
+                fallback.front_axis,
+                fallback.material,
+                fallback.mass_kg,
+                type(e).__name__,
+                e,
+            )
+            return fallback
         raise RuntimeError(f"VLM analysis failed: {e}") from e
 
     # Parse VLM response.

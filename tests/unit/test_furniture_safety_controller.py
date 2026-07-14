@@ -163,7 +163,12 @@ class FurnitureSafetyControllerTest(unittest.TestCase):
         )
 
         evaluation = controller.evaluate_scene_state(
-            SimpleNamespace(objects={}),
+            SimpleNamespace(
+                room_type="bedroom",
+                text_description="A bedroom.",
+                objects={},
+                room_geometry=None,
+            ),
             physics_context=(
                 "Physics violations detected:\n"
                 "Window access warnings (1): wardrobe_0 blocks window_2"
@@ -173,9 +178,32 @@ class FurnitureSafetyControllerTest(unittest.TestCase):
         self.assertFalse(evaluation.hard_valid)
         self.assertIn("window access warning", evaluation.hard_reasons)
 
+    def test_window_access_warning_is_soft_outside_bedroom(self) -> None:
+        controller = FurnitureSafetyController(
+            {"enabled": True, "bedroom_layout": {"window_blocking_is_hard": True}}
+        )
+
+        evaluation = controller.evaluate_scene_state(
+            SimpleNamespace(
+                room_type="living_room",
+                text_description="A living room.",
+                objects={},
+                room_geometry=None,
+            ),
+            physics_context=(
+                "Physics violations detected:\n"
+                "Window access warnings (1): sofa_0 blocks window_2"
+            ),
+        )
+
+        self.assertTrue(evaluation.hard_valid)
+        self.assertIn("window access warning", evaluation.soft_reasons)
+
     def test_nightstand_overlapping_bed_is_hard(self) -> None:
         controller = FurnitureSafetyController({"enabled": True})
         scene = SimpleNamespace(
+            room_type="bedroom",
+            text_description="A bedroom with a bed and nightstand.",
             objects={
                 "bed_0": BoundedFurniture(
                     name="bed",
@@ -211,6 +239,65 @@ class FurnitureSafetyControllerTest(unittest.TestCase):
         self.assertEqual(controller.required_counts.get("nightstand"), 2)
         self.assertEqual(controller.required_counts.get("bed"), 1)
         self.assertEqual(controller.required_counts.get("wardrobe"), 1)
+
+    def test_style_only_bedroom_still_requires_a_bed(self) -> None:
+        controller = FurnitureSafetyController({"enabled": True})
+
+        controller.reset_for_scene(
+            "A bedroom featuring rustic farmhouse decor with exposed beams."
+        )
+
+        self.assertEqual(controller.required_counts, {"bed": 1})
+
+    def test_each_relation_propagates_required_count(self) -> None:
+        controller = FurnitureSafetyController({"enabled": True})
+
+        controller.reset_for_scene(
+            "A classroom with six student desks, each with a chair. "
+            "A teacher's desk sits at the front near the chalkboard."
+        )
+
+        self.assertEqual(controller.required_counts.get("desk"), 6)
+        self.assertEqual(controller.required_counts.get("chair"), 6)
+        self.assertNotIn("table", controller.required_counts)
+
+    def test_living_room_prompt_tracks_rug_and_plant_counts(self) -> None:
+        controller = FurnitureSafetyController({"enabled": True})
+
+        controller.reset_for_scene(
+            "A living room with a two-seater sofa, a square rug, and two "
+            "large plants near the sofa."
+        )
+
+        self.assertEqual(controller.required_counts.get("sofa"), 1)
+        self.assertEqual(controller.required_counts.get("rug"), 1)
+        self.assertEqual(controller.required_counts.get("plant"), 2)
+
+    def test_scene_expert_injection_does_not_activate_bedroom_checks(self) -> None:
+        controller = FurnitureSafetyController({"enabled": True})
+        controller.reset_for_scene("A living room with a two-seater sofa.")
+        scene = SimpleNamespace(
+            room_type="living_room",
+            scene_expert_original_description=(
+                "A living room with a two-seater sofa."
+            ),
+            text_description=(
+                "A living room with a two-seater sofa.\n\n"
+                "Retrieved failure memory: a bed and wardrobe blocked a window."
+            ),
+            objects={},
+            room_geometry=None,
+        )
+
+        evaluation = controller.evaluate_scene_state(scene)
+
+        self.assertIn(
+            "missing required sofa: expected 1, found 0",
+            evaluation.hard_reasons,
+        )
+        self.assertFalse(
+            any("bedroom plausibility" in reason for reason in evaluation.hard_reasons)
+        )
 
     def test_add_required_object_is_blocked_after_requested_count(self) -> None:
         controller = FurnitureSafetyController({"enabled": True})

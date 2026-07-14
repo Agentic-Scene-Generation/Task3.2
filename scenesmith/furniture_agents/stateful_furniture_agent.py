@@ -63,6 +63,26 @@ from scenesmith.utils.logging import BaseLogger
 console_logger = logging.getLogger(__name__)
 
 
+REPAIR_ASSET_SPECS: dict[str, tuple[str, list[float]]] = {
+    "bed": (
+        "Compact standard double bed with headboard, mattress, pillows, and bedding",
+        [1.60, 2.05, 0.80],
+    ),
+    "twin_bed": ("Compact single twin bed with mattress and headboard", [1.0, 2.0, 0.75]),
+    "nightstand": ("Compact bedside nightstand with drawer", [0.45, 0.42, 0.55]),
+    "wardrobe": ("Compact wardrobe closet with simple doors", [0.90, 0.55, 2.00]),
+    "dresser": ("Low dresser chest with storage drawers", [1.10, 0.48, 0.85]),
+    "desk": ("Practical rectangular work desk", [1.10, 0.60, 0.75]),
+    "chair": ("Simple upright task chair", [0.50, 0.50, 0.90]),
+    "sofa": ("Compact upholstered two-seat sofa", [1.70, 0.85, 0.90]),
+    "table": ("Practical rectangular table", [1.20, 0.80, 0.75]),
+    "cabinet": ("Compact freestanding storage cabinet", [0.90, 0.45, 1.10]),
+    "bookshelf": ("Compact freestanding bookshelf", [0.90, 0.35, 1.80]),
+    "plant": ("Large indoor potted floor plant", [0.60, 0.60, 1.20]),
+    "rug": ("Square low-pile area rug", [1.80, 1.80, 0.03]),
+}
+
+
 class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
     """Natural conversation between persistent agents with proper image injection."""
 
@@ -297,7 +317,12 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         """
         # Store everything as instance variables for closure access.
         self.scene = scene
-        self._configure_furniture_safety_for_scene(scene.text_description)
+        safety_description = getattr(
+            scene,
+            "scene_expert_original_description",
+            scene.text_description,
+        )
+        self._configure_furniture_safety_for_scene(safety_description)
 
         # Generate context image if configured. If generation fails, continue without it.
         if self.cfg.context_image_generation.enabled:
@@ -455,7 +480,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
     def _attempt_deterministic_repair(
         self, hard_state: HardStateEvaluation
     ) -> tuple[bool, list[str]]:
-        if not self.scene or not is_bedroom_scene(self.scene):
+        if not self.scene:
             return False, []
 
         actions: list[str] = []
@@ -466,36 +491,37 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             max_attempts=1,
         )
         console_logger.info("Deterministic furniture %s", repair_plan.to_log_text())
+
+        controller = getattr(self, "furniture_safety_controller", None)
+        required_counts = getattr(controller, "required_counts", {}) or {}
+        for category in required_counts:
+            if f"missing required {category}" not in reasons:
+                continue
+            added = self._ensure_required_furniture_asset(category)
+            if added:
+                actions.append(
+                    f"added {added} missing {category} asset(s) from local/HSSD bank"
+                )
+
         if "geometry construction failed" in reasons:
             replaced = self._replace_geometry_failed_furniture_assets(reasons)
             if replaced:
                 actions.append(
                     f"replaced {replaced} geometry-failed furniture asset(s)"
                 )
-        if "missing required bed" in reasons:
-            if self._ensure_required_furniture_asset("bed"):
-                actions.append("added missing bed from local/HSSD asset bank")
-        if "missing required nightstand" in reasons:
-            added = self._ensure_required_furniture_asset("nightstand")
-            if added:
-                actions.append(f"added {added} missing nightstand asset(s)")
-        if (
-            "missing required wardrobe" in reasons
-            or "missing required closet" in reasons
-        ):
-            added = self._ensure_required_furniture_asset("wardrobe")
-            if added:
-                actions.append("added missing wardrobe from local/HSSD asset bank")
-
-        if self._anchor_existing_bed():
-            actions.append("anchored bed to deterministic bedroom head wall")
-        if self._repair_bedside_nightstands():
-            actions.append("repositioned nightstands to deterministic bedside anchors")
         if (
             FailureCategory.DOOR_OR_OPENING_CLEARANCE in repair_plan.categories
             and self._repair_forbidden_zone_conflicts(include_windows=False)
         ):
             actions.append("cleared deterministic door/opening forbidden zones")
+
+        if not is_bedroom_scene(self.scene):
+            return bool(actions), actions
+
+        if self._anchor_existing_bed():
+            actions.append("anchored bed to deterministic bedroom head wall")
+        if self._repair_bedside_nightstands():
+            actions.append("repositioned nightstands to deterministic bedside anchors")
         if (
             "window access warning" in reasons
             or "wardrobe" in reasons
@@ -511,8 +537,12 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         if self.scene is None:
             return 0
 
+        controller = getattr(self, "furniture_safety_controller", None)
+        configured_categories = list(
+            (getattr(controller, "required_counts", {}) or {}).keys()
+        )
         categories: list[str] = []
-        for category in ("bed", "nightstand", "wardrobe"):
+        for category in configured_categories:
             if category in reasons:
                 categories.append(category)
         if "closet" in reasons or "armoire" in reasons:
@@ -610,6 +640,11 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             f"{object_id} {getattr(obj, 'name', '')} "
             f"{getattr(obj, 'description', '')}"
         ).lower()
+        controller = getattr(self, "furniture_safety_controller", None)
+        if controller is not None:
+            category = controller.infer_object_category(text)
+            if category:
+                return category
         if "nightstand" in text or "bedside" in text:
             return "nightstand"
         if any(term in text for term in ("wardrobe", "closet", "armoire")):
@@ -681,29 +716,16 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             ):
                 return asset
 
-        descriptions = {
-            "bed": "Compact standard double bed with headboard, mattress, pillows, and bedding",
-            "nightstand": "Compact bedside nightstand with drawer",
-            "wardrobe": "Compact wardrobe closet with simple doors",
-        }
-        names = {
-            "bed": "bed",
-            "nightstand": "nightstand",
-            "wardrobe": "wardrobe",
-        }
-        dimensions = {
-            "bed": [1.60, 2.05, 0.80],
-            "nightstand": [0.45, 0.42, 0.55],
-            "wardrobe": [0.90, 0.55, 2.00],
-        }
-        if category not in descriptions:
+        spec = REPAIR_ASSET_SPECS.get(category)
+        if spec is None:
             return None
+        description, dimensions = spec
 
         request = AssetGenerationRequest(
-            object_descriptions=[descriptions[category]],
-            short_names=[names[category]],
+            object_descriptions=[description],
+            short_names=[category],
             object_type=ObjectType.FURNITURE,
-            desired_dimensions=[dimensions[category]],
+            desired_dimensions=[dimensions],
             style_context="deterministic repair asset",
             scene_id=(
                 self.scene.scene_dir.name if self.scene else "deterministic_repair"
@@ -720,7 +742,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 )
                 continue
             return asset
-        return self._create_placeholder_repair_asset(category, dimensions[category])
+        return self._create_placeholder_repair_asset(category, dimensions)
 
     def _create_placeholder_repair_asset(
         self,
@@ -809,6 +831,11 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             )
             transform = self._grounded_transform(scene_object, x=x, y=y, yaw_deg=yaw)
             transform = self._fit_transform_inside_room(scene_object, transform)
+            if category not in ("bed", "nightstand", "wardrobe", "twin_bed"):
+                transform = self._best_generic_repair_transform(
+                    scene_object,
+                    fallback=transform,
+                )
             scene_object.transform = transform
             self.scene.add_object(scene_object)
             console_logger.info(
@@ -821,6 +848,63 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         except Exception:
             console_logger.exception("Deterministic repair failed placing %s", category)
             return False
+
+    def _best_generic_repair_transform(
+        self,
+        obj: SceneObject,
+        *,
+        fallback: RigidTransform,
+    ) -> RigidTransform:
+        """Choose a low-overlap in-bounds pose for non-bedroom repair assets."""
+        room_bounds = self._room_bounds_xy()
+        if room_bounds is None or self.scene is None:
+            return fallback
+        min_x, min_y, max_x, max_y = room_bounds
+        fractions = (0.12, 0.30, 0.50, 0.70, 0.88)
+        zones = self._opening_forbidden_zones(include_windows=False)
+        best = fallback
+        best_penalty = float("inf")
+        for fx in fractions:
+            for fy in fractions:
+                x = min_x + (max_x - min_x) * fx
+                y = min_y + (max_y - min_y) * fy
+                for yaw in (0.0, 90.0):
+                    candidate = self._grounded_transform(obj, x=x, y=y, yaw_deg=yaw)
+                    candidate = self._fit_transform_inside_room(obj, candidate)
+                    bounds = self._bounds_for_transform(obj, candidate)
+                    if bounds is None:
+                        continue
+                    penalty = self._zone_overlap_penalty(bounds, zones)
+                    for existing in self.scene.objects.values():
+                        if getattr(existing, "immutable", False):
+                            continue
+                        existing_type = getattr(existing, "object_type", None)
+                        existing_value = getattr(existing_type, "value", existing_type)
+                        if str(existing_value).lower() != "furniture":
+                            continue
+                        try:
+                            existing_bounds = existing.compute_world_bounds()
+                        except Exception as exc:
+                            console_logger.warning(
+                                "Skipping invalid obstacle %s while placing %s: %s",
+                                getattr(existing, "object_id", "unknown"),
+                                getattr(obj, "object_id", "repair_asset"),
+                                exc,
+                            )
+                            continue
+                        if existing_bounds is None:
+                            continue
+                        overlap_x, overlap_y = self._xy_overlap_depths(
+                            bounds,
+                            existing_bounds,
+                        )
+                        penalty += overlap_x * overlap_y * 1000.0
+                    if penalty < best_penalty:
+                        best = candidate
+                        best_penalty = penalty
+                    if penalty <= 1e-6:
+                        return candidate
+        return best
 
     def _default_repair_pose(self, category: str) -> tuple[float, float, float]:
         room_bounds = self._room_bounds_xy()

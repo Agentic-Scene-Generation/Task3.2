@@ -24,7 +24,10 @@ from scenesmith.agent_utils.asset_router.dataclasses import (
     GeneratedGeometry,
     ValidationResult,
 )
-from scenesmith.agent_utils.blender.renderer import MATERIAL_VALIDATION_LIGHT_ENERGY
+from scenesmith.agent_utils.blender.constants import (
+    ARTICULATED_LIGHT_ENERGY,
+    MATERIAL_VALIDATION_LIGHT_ENERGY,
+)
 from scenesmith.agent_utils.geometry_generation_server.dataclasses import (
     GeometryGenerationError,
 )
@@ -792,9 +795,6 @@ class AssetRouter:
         Returns:
             List of paths to rendered images.
         """
-        # Use lower light energy for articulated objects (more reflective materials).
-        from scenesmith.agent_utils.blender.renderer import ARTICULATED_LIGHT_ENERGY
-
         # BlenderServer is REQUIRED - forked workers cannot safely use embedded bpy
         # due to GPU/OpenGL state corruption from fork.
         # Disable coordinate frame for cleaner validation renders.

@@ -856,6 +856,7 @@ ACP_CONVEX_READY_TIMEOUT=180
 ACP_CONVEX_MAX_OMP_THREADS=32
 ACP_SCENE_WORKERS=1
 ACP_SCENE_RETRY_ATTEMPTS=1
+ACP_MP_START_METHOD="forkserver"
 ```
 
 如果 ACP 申请 4 张 H100 80GB，可以把脚本 TODO 区改成：
@@ -879,6 +880,7 @@ ACP_CONVEX_MAX_OMP_THREADS=32
 ACP_GPU_MEMORY_UTILIZATION=0.90
 ACP_SCENE_WORKERS=1
 ACP_SCENE_RETRY_ATTEMPTS=1
+ACP_MP_START_METHOD="forkserver"
 ```
 
 参数原则：
@@ -897,8 +899,10 @@ ACP_SCENE_RETRY_ATTEMPTS=1
 - 如果当前可写的 `SCENEEXPERT_DATA_DIR` 还没有 `materials/` 或 `materials/embeddings/`，保持 `ACP_DISABLE_MATERIALS=1`。脚本会自动关闭 floor-plan 材料检索和四个 agent 的 `thin_covering` 策略，避免启动 materials retrieval server 后失败。
 - 如果日志出现 `Convex decomposition server did not become ready within 10.0s`，优先保持 `ACP_CONVEX_READY_TIMEOUT=180`、`ACP_CONVEX_MAX_OMP_THREADS=32`。该服务用于生成碰撞几何，不需要额外模型或数据；它依赖 Python 包 `coacd`、`vhacdx`、`trimesh` 和 `flask`，这些已在项目依赖中声明。
 - `ACP_SCENE_WORKERS` 控制完整 task 的并发数。Qwen3.5-35B-A3B 的 TP=4 表示一个 vLLM 副本占用四张卡，不等于四个 task 各占一张卡；多个 task 会共享同一个 vLLM endpoint。`ablation_4b/4c` 默认保持 `1`，避免并发写公共 memory bank。`ablation_2/3` 可先试 `2`，验证显存和渲染稳定后再增加。
-- `ACP_SCENE_RETRY_ATTEMPTS=1` 只对 `SIGSEGV`、`SIGABRT`、本地 vLLM timeout、连接中断等故障执行一次整场景重试。每次重试都会使用新的 `spawn` 进程，失败的半成品保留在 `<run>/failed_attempts/`。
+- `ACP_SCENE_RETRY_ATTEMPTS=1` 只对 `SIGSEGV`、`SIGABRT`、本地 vLLM timeout、连接中断等故障执行一次整场景重试。每次重试都会使用新的干净 worker 进程，失败的半成品保留在 `<run>/failed_attempts/`。
+- Linux ACP 保持 `ACP_MP_START_METHOD="forkserver"`。普通 `fork` 会继承 CUDA/Drake/SQLite 的原生状态；`spawn` 会重新执行 `main.py`，并可能因 Blender 私有模块 `_bpy` 无法在子进程启动阶段加载而失败。项目使用不预加载 `__main__` 的干净 forkserver。
 - 即使 `ACP_SCENE_WORKERS=1`，每个 prompt 也会在独立的新进程中执行，不会让第二个 task 继承第一个 task 的 CUDA、Drake、SQLite、OpenMP 或 Agents SDK 状态。
+- ACP 在启动 vLLM 前会执行 bpy-free worker import 检查。日志必须出现 `Python preflight passed (scene worker is bpy-free)`；如果普通 scene worker 意外导入了 `bpy`、`BlenderRenderer` 或 `BlenderRenderApp`，脚本会立即停止，避免等待大模型加载完成后才失败。
 
 每个场景目录会生成：
 
