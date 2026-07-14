@@ -142,7 +142,22 @@ class HybridMemoryRetriever:
                 if isinstance(record, Skill)
             ],
             placement_reference=placement_reference,
-        )
+            success_case_ids=[
+                record.case_id
+                for _, record in success
+                if isinstance(record, SuccessCase)
+            ],
+            failure_case_ids=[
+                record.failure_id
+                for _, record in failure
+                if isinstance(record, FailureCase)
+            ],
+            skill_names=[
+                record.skill_name
+                for _, record in skills
+                if isinstance(record, Skill)
+            ],
+        ).deduplicated()
 
     def _retrieve_bank(
         self,

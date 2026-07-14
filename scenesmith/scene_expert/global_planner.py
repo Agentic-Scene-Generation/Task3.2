@@ -9,37 +9,20 @@ a structured text brief for the SceneSmith designer agent.
 
 from __future__ import annotations
 
-import json
 import logging
-import os
-import re
-from pathlib import Path
 
-from openai import OpenAI
-
-from scenesmith.scene_expert.context_bundle import build_llm_call_debug_record
 from scenesmith.scene_expert.schemas import (
     HarnessContext,
     MemoryPack,
     SceneTaskSpec,
     StageBrief,
 )
+from scenesmith.scene_expert.structured_llm import (
+    SceneExpertStructuredLLMClient,
+    StructuredLLMProfile,
+)
 
 console_logger = logging.getLogger(__name__)
-
-
-def _append_llm_debug(record: dict) -> None:
-    path = os.environ.get("SCENEEXPERT_LLM_DEBUG_PATH", "")
-    if not path:
-        return
-    try:
-        debug_path = Path(path)
-        debug_path.parent.mkdir(parents=True, exist_ok=True)
-        with debug_path.open("a", encoding="utf-8", newline="\n") as f:
-            f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
-    except Exception as e:
-        console_logger.warning("GlobalPlanner failed to write LLM debug record: %s", e)
-
 
 _SYSTEM_PROMPT = """\
 /no_think
@@ -86,6 +69,7 @@ _STAGE_DESCRIPTIONS = {
 
 def _format_memory_for_prompt(memory_pack: MemoryPack) -> str:
     """Format memory pack into a compact text block."""
+    memory_pack = memory_pack.deduplicated()
     parts: list[str] = []
     if memory_pack.success_hints:
         parts.append("Success patterns from similar scenes:")
@@ -108,14 +92,19 @@ def _format_task_spec(task_spec: SceneTaskSpec, stage: str) -> str:
     ]
 
     stage_objects = {
-        "floor_plan": task_spec.required_large_objects,
         "furniture": task_spec.required_large_objects,
         "wall_mounted": task_spec.required_wall_objects,
         "ceiling_mounted": task_spec.required_ceiling_objects,
         "manipuland": task_spec.required_small_objects,
     }
     required = stage_objects.get(stage, [])
-    if required:
+    if stage == "floor_plan" and task_spec.required_large_objects:
+        lines.append(
+            "Downstream furniture capacity requirements (plan space only; do not "
+            "place these objects in floor_plan): "
+            + ", ".join(task_spec.required_large_objects)
+        )
+    elif required:
         lines.append(f"Required objects for this stage: {', '.join(required)}")
 
     if task_spec.functional_zones:
@@ -132,20 +121,6 @@ def _format_task_spec(task_spec: SceneTaskSpec, stage: str) -> str:
     return "\n".join(lines)
 
 
-def _extract_json_from_text(text: str) -> dict:
-    """Extract JSON from model output, handling markdown code fences."""
-    if not text:
-        raise ValueError("Empty response text")
-    text = text.strip()
-    fence_match = re.search(r"```(?:json)?\s*([\s\S]+?)\s*```", text)
-    if fence_match:
-        text = fence_match.group(1)
-    brace_match = re.search(r"\{[\s\S]+\}", text)
-    if brace_match:
-        text = brace_match.group(0)
-    return json.loads(text)
-
-
 class GlobalPlanner:
     """Generates a StageBrief for each stage using Qwen3."""
 
@@ -156,15 +131,33 @@ class GlobalPlanner:
         api_key: str | None = None,
         max_tokens: int = 2048,
         temperature: float = 0.2,
+        llm_client: SceneExpertStructuredLLMClient | None = None,
     ) -> None:
         self._model = model
         self._max_tokens = max_tokens
         self._temperature = temperature
-        self._client = OpenAI(
-            base_url=api_base_url
-            or os.environ.get("OPENAI_BASE_URL", "http://localhost:8000/v1"),
-            api_key=api_key or os.environ.get("OPENAI_API_KEY", "dummy"),
+        default_profile = StructuredLLMProfile(
+            thinking_mode="none",
+            max_tokens=max_tokens,
+            retry_max_tokens=max(max_tokens, 3072),
+            timeout_seconds=60.0,
+            temperature=temperature,
+            max_attempts=2,
+            response_format="json_schema",
         )
+        self._llm = llm_client or SceneExpertStructuredLLMClient(
+            model=model,
+            api_base_url=api_base_url,
+            api_key=api_key,
+            profiles={"global_planner": default_profile},
+        )
+        self._profile = self._llm.profile_for("global_planner", default_profile)
+        self.last_call_status: dict = {
+            "success": False,
+            "source": "not_called",
+            "degraded": False,
+            "attempt_count": 0,
+        }
 
     def generate_stage_brief(
         self,
@@ -187,50 +180,30 @@ class GlobalPlanner:
         user_message = self._build_user_message(context, scene_state_summary)
 
         try:
-            response = self._client.chat.completions.create(
-                model=self._model,
+            result = self._llm.complete(
+                role="global_planner",
+                stage=stage,
+                event="generate_stage_brief",
                 messages=[
                     {"role": "system", "content": _SYSTEM_PROMPT},
                     {"role": "user", "content": user_message},
                 ],
-                temperature=self._temperature,
-                max_tokens=self._max_tokens,
+                response_model=StageBrief,
+                profile=self._profile,
             )
-            raw = response.choices[0].message.content
-            # Qwen3 with --reasoning-parser may put output in reasoning_content
-            if not raw:
-                raw = getattr(response.choices[0].message, "reasoning_content", None)
-            console_logger.debug(f"GlobalPlanner raw response: {raw}")
-            _append_llm_debug(
-                build_llm_call_debug_record(
-                    stage=stage,
-                    agent_role="global_planner",
-                    event="generate_stage_brief",
-                    prompt=user_message,
-                    output=raw or "",
-                    raw_response=response,
-                ).model_dump()
-            )
-            data = _extract_json_from_text(raw)
-            # Ensure stage field is set correctly
-            data["stage"] = stage
-            brief = StageBrief.model_validate(data)
+            self.last_call_status = result.status_dict()
+            if result.value is None:
+                raise ValueError(
+                    "GlobalPlanner structured call failed after bounded recovery: "
+                    f"{result.final_error_kind}: {result.final_error}"
+                )
+            brief = result.value.model_copy(update={"stage": stage})
             console_logger.info(
                 f"GlobalPlanner: brief for {stage}: {len(brief.constraints_for_designer)} constraints, "
                 f"{len(brief.failure_patterns_to_avoid)} failure patterns"
             )
             return brief
         except Exception as e:
-            _append_llm_debug(
-                build_llm_call_debug_record(
-                    stage=stage,
-                    agent_role="global_planner",
-                    event="generate_stage_brief",
-                    prompt=user_message,
-                    output="",
-                    error=f"{type(e).__name__}: {e}",
-                ).model_dump()
-            )
             console_logger.warning(
                 f"GlobalPlanner failed for stage {stage}, using minimal fallback brief: {e}"
             )
@@ -275,7 +248,7 @@ class GlobalPlanner:
         """Minimal safe StageBrief used when the model call fails."""
         stage = context.stage
         required = {
-            "floor_plan": context.task_spec.required_large_objects,
+            "floor_plan": [],
             "furniture": context.task_spec.required_large_objects,
             "wall_mounted": context.task_spec.required_wall_objects,
             "ceiling_mounted": context.task_spec.required_ceiling_objects,
@@ -283,6 +256,13 @@ class GlobalPlanner:
         }.get(stage, [])
 
         constraints = []
+        if stage == "floor_plan" and context.task_spec.required_large_objects:
+            constraints.append(
+                "Reserve adequate floor area and circulation for downstream "
+                "furniture: "
+                + ", ".join(context.task_spec.required_large_objects)
+                + ". Do not place furniture during floor_plan."
+            )
         if required:
             constraints.append(
                 f"Ensure these objects are present: {', '.join(required)}"

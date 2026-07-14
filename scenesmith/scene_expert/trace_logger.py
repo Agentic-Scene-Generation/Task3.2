@@ -19,6 +19,7 @@ from scenesmith.scene_expert.schemas import (
     RepairResult,
     StageBrief,
     StageCost,
+    StageExecutionEvidence,
     StageTraceEntry,
     StageVerifyReport,
 )
@@ -32,7 +33,7 @@ class TraceLogger:
     One TraceLogger instance per scene generation run.
     """
 
-    SCHEMA_VERSION = "1.1"
+    SCHEMA_VERSION = "1.2"
 
     def __init__(
         self,
@@ -41,6 +42,8 @@ class TraceLogger:
         prompt: str,
         experiment_name: str = "",
         config_hash: str = "",
+        task_spec_status: dict | None = None,
+        task_spec: dict | None = None,
     ) -> None:
         self._output_dir = Path(output_dir)
         self._traces_dir = self._output_dir / "traces"
@@ -64,10 +67,25 @@ class TraceLogger:
         self._prompt = prompt
         self._experiment_name = experiment_name
         self._config_hash = config_hash
+        self._task_spec = dict(task_spec or {})
         self._stage_entries: list[StageTraceEntry] = []
         self._start_time = time.time()
         self._full_report: FullVerifyReport | None = None
         self._exports: dict = {}
+        self._component_status: dict[str, dict] = {
+            "task_compiler": dict(task_spec_status or {})
+        }
+
+    def record_component_status(self, component: str, status: dict) -> None:
+        """Record whether a SceneExpert component used model output or fallback."""
+        self._component_status[component] = dict(status)
+
+    def _degraded_components(self) -> list[str]:
+        return [
+            name
+            for name, status in self._component_status.items()
+            if bool(status.get("degraded", False))
+        ]
 
     def log_stage(
         self,
@@ -79,6 +97,7 @@ class TraceLogger:
         repair_actions: list[RepairResult],
         qwen_calls: int = 0,
         stage_time_sec: float | None = None,
+        execution_evidence: StageExecutionEvidence | None = None,
     ) -> None:
         """Record a completed stage's data."""
         elapsed = (
@@ -92,6 +111,7 @@ class TraceLogger:
             verify_report=verify_report,
             repair_actions=repair_actions,
             cost=StageCost(qwen_calls=qwen_calls, stage_time_sec=round(elapsed, 1)),
+            execution_evidence=execution_evidence or StageExecutionEvidence(),
         )
         self._stage_entries.append(entry)
         self._save_stage_entry(entry)
@@ -104,6 +124,7 @@ class TraceLogger:
         memory_pack: MemoryPack,
         stage_brief: StageBrief | None,
         phase: str = "pre",
+        execution_evidence: StageExecutionEvidence | None = None,
     ) -> Path:
         """Save pre/post-stage planning context for interrupted runs."""
         payload = {
@@ -115,6 +136,9 @@ class TraceLogger:
             "time_sec": round(time.time() - self._start_time, 1),
             "memory_pack": memory_pack.model_dump(),
             "stage_brief": stage_brief.model_dump() if stage_brief else None,
+            "execution_evidence": (
+                execution_evidence.model_dump() if execution_evidence else None
+            ),
         }
         path = (
             self._stage_debug_dir
@@ -190,9 +214,13 @@ class TraceLogger:
             "trace_id": self._trace_id,
             "scene_id": self._scene_id,
             "status": "completed",
+            "degraded": bool(self._degraded_components()),
+            "degraded_components": self._degraded_components(),
+            "component_status": self._component_status,
             "experiment_name": self._experiment_name,
             "config_hash": self._config_hash,
             "prompt": self._prompt,
+            "task_spec": self._task_spec,
             "model": model,
             "total_time_sec": round(time.time() - self._start_time, 1),
             "stages": [entry.model_dump() for entry in self._stage_entries],
@@ -208,10 +236,14 @@ class TraceLogger:
             "trace_id": self._trace_id,
             "scene_id": self._scene_id,
             "status": status,
+            "degraded": bool(self._degraded_components()),
+            "degraded_components": self._degraded_components(),
+            "component_status": self._component_status,
             "error": error,
             "experiment_name": self._experiment_name,
             "config_hash": self._config_hash,
             "prompt": self._prompt,
+            "task_spec": self._task_spec,
             "total_time_sec": round(time.time() - self._start_time, 1),
             "stages": [entry.model_dump() for entry in self._stage_entries],
         }
@@ -228,9 +260,13 @@ class TraceLogger:
                 "trace_id": self._trace_id,
                 "scene_id": self._scene_id,
                 "status": "partial",
+                "degraded": bool(self._degraded_components()),
+                "degraded_components": self._degraded_components(),
+                "component_status": self._component_status,
                 "experiment_name": self._experiment_name,
                 "config_hash": self._config_hash,
                 "prompt": self._prompt,
+                "task_spec": self._task_spec,
                 "stages": [entry.model_dump() for entry in self._stage_entries],
             }
 

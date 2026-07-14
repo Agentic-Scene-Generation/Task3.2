@@ -18,15 +18,20 @@ import time
 from pathlib import Path
 from typing import Any
 
+from pydantic import BaseModel, Field
+
 from scenesmith.scene_expert.memory.schemas import (
     FailureCase,
     MemoryUpdateOp,
     Skill,
     SuccessCase,
 )
-from scenesmith.scene_expert.context_bundle import build_llm_call_debug_record
 from scenesmith.scene_expert.memory.text_builder import build_embedding_text
 from scenesmith.scene_expert.schemas import FullVerifyReport
+from scenesmith.scene_expert.structured_llm import (
+    SceneExpertStructuredLLMClient,
+    StructuredLLMProfile,
+)
 
 console_logger = logging.getLogger(__name__)
 SUCCESS_MEMORY_MIN_OVERALL_SCORE = 0.75
@@ -93,6 +98,10 @@ Rules:
 """
 
 
+class _MemoryUpdateEnvelope(BaseModel):
+    updates: list[dict[str, Any]] = Field(default_factory=list)
+
+
 class MemoryWriter:
     """Calls Qwen3 to generate memory update operations from a completed trace."""
 
@@ -104,9 +113,8 @@ class MemoryWriter:
         max_tokens: int = 3072,
         temperature: float = 0.1,
         debug_dir: str | Path | None = None,
+        llm_client: SceneExpertStructuredLLMClient | None = None,
     ) -> None:
-        from openai import OpenAI
-
         self._model = model
         self._max_tokens = int(
             os.environ.get("SCENEEXPERT_MEMORY_WRITER_MAX_TOKENS", max_tokens)
@@ -114,50 +122,28 @@ class MemoryWriter:
         self._temperature = temperature
         debug_dir = debug_dir or os.environ.get("SCENEEXPERT_MEMORY_WRITER_DEBUG_DIR")
         self._debug_dir = Path(debug_dir) if debug_dir else None
-        self._client = OpenAI(
-            base_url=api_base_url
-            or os.environ.get("OPENAI_BASE_URL", "http://localhost:8000/v1"),
-            api_key=api_key or os.environ.get("OPENAI_API_KEY", "dummy"),
+        default_profile = StructuredLLMProfile(
+            thinking_mode="low",
+            max_tokens=self._max_tokens,
+            retry_max_tokens=self._max_tokens,
+            timeout_seconds=90.0,
+            temperature=temperature,
+            max_attempts=2,
+            response_format="json_schema",
         )
-
-    def _append_llm_debug(
-        self,
-        *,
-        prompt: str,
-        output: str = "",
-        response: Any = None,
-        error: str = "",
-        label: str = "",
-    ) -> None:
-        path = os.environ.get("SCENEEXPERT_LLM_DEBUG_PATH", "")
-        if not path:
-            return
-        try:
-            record = build_llm_call_debug_record(
-                stage="memory_writer",
-                agent_role="memory_writer",
-                event=label or "write",
-                prompt=prompt,
-                output=output,
-                raw_response=response,
-                error=error,
-            )
-            debug_path = Path(path)
-            debug_path.parent.mkdir(parents=True, exist_ok=True)
-            with debug_path.open("a", encoding="utf-8", newline="\n") as f:
-                f.write(
-                    json.dumps(
-                        record.model_dump(),
-                        ensure_ascii=False,
-                        default=str,
-                    )
-                    + "\n"
-                )
-        except Exception as debug_error:
-            console_logger.warning(
-                "MemoryWriter failed to write LLM debug record: %s",
-                debug_error,
-            )
+        self._llm = llm_client or SceneExpertStructuredLLMClient(
+            model=model,
+            api_base_url=api_base_url,
+            api_key=api_key,
+            profiles={"memory_writer": default_profile},
+        )
+        self._profile = self._llm.profile_for("memory_writer", default_profile)
+        self.last_call_status: dict = {
+            "success": False,
+            "source": "not_called",
+            "degraded": False,
+            "attempt_count": 0,
+        }
 
     def write(
         self,
@@ -179,105 +165,79 @@ class MemoryWriter:
             trace_summary, full_report, related_old_memory
         )
 
-        attempt_logs: list[dict[str, Any]] = []
-        attempts = (
-            ("json_mode", True),
-            ("plain_json_retry", False),
+        outcome = self._llm.complete(
+            role="memory_writer",
+            stage="memory_writer",
+            event="write",
+            messages=[
+                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "user", "content": user_message},
+            ],
+            response_model=_MemoryUpdateEnvelope,
+            profile=self._profile,
         )
-        for label, use_response_format in attempts:
-            attempt_log = {
-                "label": label,
-                "use_response_format": use_response_format,
-            }
-            try:
-                response = self._request_completion(
-                    user_message=user_message,
-                    use_response_format=use_response_format,
-                )
-                raw = self._extract_response_text(response)
-                self._append_llm_debug(
-                    prompt=user_message,
-                    output=raw or "",
-                    response=response,
-                    label=label,
-                )
-                attempt_log.update(
-                    {
-                        "finish_reason": self._response_finish_reason(response),
-                        "raw_present": bool(raw),
-                        "raw_excerpt": self._compact_text(raw, 2000),
-                        "response_snapshot": self._response_snapshot(response),
-                    }
-                )
-                if not raw:
-                    raise ValueError(
-                        "Qwen/vLLM returned an empty assistant message content. "
-                        f"finish_reason={attempt_log['finish_reason']!r}"
-                    )
+        self.last_call_status = outcome.status_dict()
+        attempt_logs = [attempt.model_dump() for attempt in outcome.attempts]
 
-                data = self._parse_json_payload(raw)
-                attempt_log["parsed_keys"] = sorted(data.keys())
-                attempt_logs.append(attempt_log)
-                console_logger.debug("MemoryWriter raw response: %s", raw)
-            except Exception as e:
-                self._append_llm_debug(
-                    prompt=user_message,
-                    error=f"{type(e).__name__}: {e}",
-                    label=label,
-                )
-                attempt_log["error"] = f"{type(e).__name__}: {e}"
-                attempt_logs.append(attempt_log)
-                console_logger.warning("MemoryWriter attempt %s failed: %s", label, e)
-                continue
-
+        if outcome.value is not None:
             try:
                 ops = [
                     MemoryUpdateOp.model_validate(self._normalize_update_op(op))
-                    for op in data.get("updates", [])
+                    for op in outcome.value.updates
                 ]
                 ops = self._gate_and_enrich_ops(ops, full_report)
             except Exception as e:
-                attempt_log["error"] = f"{type(e).__name__}: {e}"
-                console_logger.warning(
-                    "MemoryWriter attempt %s returned invalid update ops: %s",
-                    label,
-                    e,
+                self.last_call_status.update(
+                    {
+                        "success": False,
+                        "source": "fallback",
+                        "degraded": True,
+                        "final_error_kind": "memory_op_validation",
+                        "final_error": f"{type(e).__name__}: {e}",
+                    }
                 )
-                continue
+                console_logger.warning(
+                    "MemoryWriter returned invalid update ops: %s", e
+                )
+            else:
+                if self._has_mutating_ops(ops) or not self._should_build_fallback(
+                    full_report
+                ):
+                    console_logger.info(
+                        "MemoryWriter: %d update ops generated via structured client",
+                        len(ops),
+                    )
+                    return ops
 
-            if self._has_mutating_ops(ops) or not self._should_build_fallback(
-                full_report
-            ):
+                fallback_ops = self._fallback_success_ops(trace_summary, full_report)
+                fallback_ops = self._gate_and_enrich_ops(fallback_ops, full_report)
+                if self._has_mutating_ops(fallback_ops):
+                    self.last_call_status.update(
+                        {
+                            "success": False,
+                            "source": "fallback",
+                            "degraded": True,
+                            "final_error_kind": "empty_mutating_ops",
+                        }
+                    )
+                    self._save_debug_payload(
+                        status="fallback_after_empty_ops",
+                        attempts=attempt_logs,
+                        trace_summary=trace_summary,
+                        full_report=full_report,
+                        fallback_ops=fallback_ops,
+                    )
+                    console_logger.warning(
+                        "MemoryWriter produced no mutating ops for a passed scene; "
+                        "using %d conservative fallback success ops.",
+                        len(fallback_ops),
+                    )
+                    return fallback_ops
+
                 console_logger.info(
-                    "MemoryWriter: %d update ops generated via %s",
-                    len(ops),
-                    label,
+                    "MemoryWriter: %d non-mutating update ops generated", len(ops)
                 )
                 return ops
-
-            fallback_ops = self._fallback_success_ops(trace_summary, full_report)
-            fallback_ops = self._gate_and_enrich_ops(fallback_ops, full_report)
-            if self._has_mutating_ops(fallback_ops):
-                self._save_debug_payload(
-                    status="fallback_after_empty_ops",
-                    attempts=attempt_logs,
-                    trace_summary=trace_summary,
-                    full_report=full_report,
-                    fallback_ops=fallback_ops,
-                )
-                console_logger.warning(
-                    "MemoryWriter produced no mutating ops for a passed scene; "
-                    "using %d conservative fallback success ops.",
-                    len(fallback_ops),
-                )
-                return fallback_ops
-
-            console_logger.info(
-                "MemoryWriter: %d non-mutating update ops generated via %s",
-                len(ops),
-                label,
-            )
-            return ops
 
         fallback_ops = self._fallback_success_ops(trace_summary, full_report)
         fallback_ops = self._gate_and_enrich_ops(fallback_ops, full_report)
@@ -301,148 +261,6 @@ class MemoryWriter:
             "skipping memory update."
         )
         return []
-
-    def _request_completion(self, user_message: str, use_response_format: bool):
-        """Call the OpenAI-compatible server with a Qwen-tolerant retry mode."""
-        if use_response_format:
-            system_prompt = _SYSTEM_PROMPT
-            prompt = user_message
-        else:
-            system_prompt = (
-                _SYSTEM_PROMPT
-                + "\nReturn ONLY one JSON object. Do not include markdown fences, "
-                "reasoning text, comments, or XML/tool tags."
-            )
-            prompt = (
-                user_message + "\n\nReturn ONLY this JSON shape now:\n"
-                '{"updates":[{"op":"ADD|UPDATE|NOOP","memory_type":'
-                '"success_case|failure_case|skill","target_id":"","content":{}}]}'
-            )
-
-        kwargs: dict[str, Any] = {
-            "model": self._model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": prompt},
-            ],
-            "temperature": self._temperature,
-            "max_tokens": self._max_tokens,
-        }
-        if use_response_format:
-            kwargs["response_format"] = {"type": "json_object"}
-        return self._client.chat.completions.create(**kwargs)
-
-    def _extract_response_text(self, response: Any) -> str:
-        """Extract content from OpenAI/vLLM/Qwen response variants."""
-        choices = getattr(response, "choices", None) or []
-        if not choices:
-            return ""
-
-        message = getattr(choices[0], "message", None)
-        candidates: list[Any] = []
-        if message is not None:
-            candidates.extend(
-                [
-                    getattr(message, "content", None),
-                    getattr(message, "reasoning_content", None),
-                    getattr(message, "text", None),
-                    getattr(message, "refusal", None),
-                ]
-            )
-            dump = self._model_dump(message)
-            if isinstance(dump, dict):
-                candidates.extend(
-                    [
-                        dump.get("content"),
-                        dump.get("reasoning_content"),
-                        dump.get("text"),
-                        dump.get("refusal"),
-                    ]
-                )
-                extra = dump.get("model_extra")
-                if isinstance(extra, dict):
-                    candidates.extend(
-                        [
-                            extra.get("content"),
-                            extra.get("reasoning_content"),
-                            extra.get("text"),
-                        ]
-                    )
-
-        for candidate in candidates:
-            text = self._stringify_content(candidate)
-            if text:
-                return text
-        return ""
-
-    def _stringify_content(self, value: Any) -> str:
-        if value is None:
-            return ""
-        if isinstance(value, str):
-            return value.strip()
-        if isinstance(value, list):
-            parts: list[str] = []
-            for item in value:
-                if isinstance(item, dict):
-                    text = item.get("text") or item.get("content")
-                    if text:
-                        parts.append(str(text))
-                elif item is not None:
-                    parts.append(str(item))
-            return "\n".join(part for part in parts if part).strip()
-        if isinstance(value, dict):
-            for key in ("text", "content", "reasoning_content"):
-                if value.get(key):
-                    return str(value[key]).strip()
-        return str(value).strip()
-
-    def _parse_json_payload(self, raw: str) -> dict:
-        """Parse JSON even when a local model wraps it in prose or fences."""
-        text = raw.strip()
-        if text.startswith("```"):
-            text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
-            text = re.sub(r"\s*```$", "", text)
-
-        try:
-            parsed = json.loads(text)
-        except json.JSONDecodeError:
-            parsed = json.loads(self._extract_first_json_object(text))
-
-        if not isinstance(parsed, dict):
-            raise ValueError(f"MemoryWriter expected JSON object, got {type(parsed)}")
-        if "updates" not in parsed:
-            raise ValueError("MemoryWriter JSON object is missing 'updates'")
-        if not isinstance(parsed["updates"], list):
-            raise ValueError("MemoryWriter JSON 'updates' must be a list")
-        return parsed
-
-    def _extract_first_json_object(self, text: str) -> str:
-        start = text.find("{")
-        if start < 0:
-            raise ValueError("No JSON object start found in model output")
-
-        depth = 0
-        in_string = False
-        escape = False
-        for index in range(start, len(text)):
-            char = text[index]
-            if in_string:
-                if escape:
-                    escape = False
-                elif char == "\\":
-                    escape = True
-                elif char == '"':
-                    in_string = False
-                continue
-            if char == '"':
-                in_string = True
-            elif char == "{":
-                depth += 1
-            elif char == "}":
-                depth -= 1
-                if depth == 0:
-                    return text[start : index + 1]
-        raise ValueError("No complete JSON object found in model output")
 
     def _has_mutating_ops(self, ops: list[MemoryUpdateOp]) -> bool:
         return any(op.op in ("ADD", "UPDATE") for op in ops)
@@ -632,31 +450,6 @@ class MemoryWriter:
         jsonl_path = self._debug_dir / "memory_writer_debug.jsonl"
         with jsonl_path.open("a", encoding="utf-8", newline="\n") as f:
             f.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
-
-    def _response_finish_reason(self, response: Any) -> str:
-        choices = getattr(response, "choices", None) or []
-        if not choices:
-            return ""
-        return str(getattr(choices[0], "finish_reason", "") or "")
-
-    def _response_snapshot(self, response: Any) -> dict[str, Any]:
-        dumped = self._model_dump(response)
-        if isinstance(dumped, dict):
-            return dumped
-        return {"repr": self._compact_text(repr(response), 4000)}
-
-    def _model_dump(self, value: Any) -> Any:
-        if hasattr(value, "model_dump"):
-            try:
-                return value.model_dump()
-            except Exception:
-                return None
-        if hasattr(value, "dict"):
-            try:
-                return value.dict()
-            except Exception:
-                return None
-        return None
 
     def _compact_text(self, text: Any, max_chars: int) -> str:
         value = "" if text is None else str(text)

@@ -15,6 +15,35 @@ enabled: false   # Default: off. Set true in ablation_3/4/5 experiment configs.
 #   "full"           → harness_memory + LoRA model (model ID differs, behavior same)
 mode: "disabled"
 
+# Direct structured calls made by SceneExpert itself. These roles share one
+# local OpenAI-compatible client, but each role has an explicit bounded budget.
+structured_llm:
+  roles:
+    task_compiler:
+      thinking_mode: "none"
+      max_tokens: 768
+      retry_max_tokens: 1536
+      timeout_seconds: 45
+      temperature: 0.1
+      max_attempts: 2
+      response_format: "json_schema"
+    global_planner:
+      thinking_mode: "none"
+      max_tokens: 1024
+      retry_max_tokens: 2048
+      timeout_seconds: 60
+      temperature: 0.1
+      max_attempts: 2
+      response_format: "json_schema"
+    memory_writer:
+      thinking_mode: "low"
+      max_tokens: ${oc.env:SCENEEXPERT_MEMORY_WRITER_MAX_TOKENS,2048}
+      retry_max_tokens: ${oc.env:SCENEEXPERT_MEMORY_WRITER_MAX_TOKENS,2048}
+      timeout_seconds: 90
+      temperature: 0.1
+      max_attempts: 2
+      response_format: "json_schema"
+
 # Memory system
 memory:
   # Directory for persistent memory storage (relative to project root)

@@ -80,6 +80,34 @@ class MemoryPack(BaseModel):
             "Injected directly into the designer prompt, bypassing GlobalPlanner."
         ),
     )
+    success_case_ids: list[str] = Field(default_factory=list)
+    failure_case_ids: list[str] = Field(default_factory=list)
+    skill_names: list[str] = Field(default_factory=list)
+
+    def deduplicated(self) -> "MemoryPack":
+        """Return an order-preserving copy without repeated prompt content."""
+
+        def unique_text(values: list[str]) -> list[str]:
+            seen: set[str] = set()
+            result: list[str] = []
+            for value in values:
+                text = " ".join(str(value or "").split())
+                key = text.casefold()
+                if text and key not in seen:
+                    result.append(text)
+                    seen.add(key)
+            return result
+
+        return self.model_copy(
+            update={
+                "success_hints": unique_text(self.success_hints),
+                "failure_hints": unique_text(self.failure_hints),
+                "skill_texts": unique_text(self.skill_texts),
+                "success_case_ids": unique_text(self.success_case_ids),
+                "failure_case_ids": unique_text(self.failure_case_ids),
+                "skill_names": unique_text(self.skill_names),
+            }
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -227,6 +255,19 @@ class StageCost(BaseModel):
     stage_time_sec: float = 0.0
 
 
+class StageExecutionEvidence(BaseModel):
+    """Auditable proof that SceneExpert inputs reached a stage agent."""
+
+    task_spec_source: str = "unknown"
+    stage_brief_source: str = "unknown"
+    retrieved_memory_ids: list[str] = Field(default_factory=list)
+    context_bundle_hash: str = ""
+    injected_brief_hash: str = ""
+    designer_prompt_hash: str = ""
+    designer_prompt_contains_brief: bool = False
+    degraded: bool = False
+
+
 class StageTraceEntry(BaseModel):
     stage: str
     memory_pack: MemoryPack
@@ -235,3 +276,6 @@ class StageTraceEntry(BaseModel):
     verify_report: StageVerifyReport | None = None
     repair_actions: list[RepairResult] = Field(default_factory=list)
     cost: StageCost = Field(default_factory=StageCost)
+    execution_evidence: StageExecutionEvidence = Field(
+        default_factory=StageExecutionEvidence
+    )

@@ -72,6 +72,7 @@ fi
 REQUIRE_LOCAL_OPENCLIP="${SCENEEXPERT_REQUIRE_LOCAL_OPENCLIP:-0}"
 ACTIVATE_VENV="${SCENEEXPERT_ACTIVATE_VENV:-1}"
 VENV_PATH="${SCENEEXPERT_VENV_PATH:-$PROJECT_DIR/.venv}"
+STRUCTURED_LLM_SMOKE_TEST="${SCENEEXPERT_STRUCTURED_LLM_SMOKE_TEST:-1}"
 
 cd "$PROJECT_DIR"
 
@@ -433,6 +434,20 @@ fi
 
 # ── 4. 运行实验 ──────────────────────────────────────────────
 echo "[$(date)] 运行实验: $EXPERIMENT"
+# Validate SceneExpert's actual Qwen thinking/JSON contract before starting an
+# expensive five-stage run. Naive/disabled ablations intentionally skip it.
+case "$EXPERIMENT" in
+    ablation_3_*|ablation_4*|ablation_5_*)
+        if [ "$STRUCTURED_LLM_SMOKE_TEST" = "1" ]; then
+            echo "[$(date)] Running SceneExpert structured LLM smoke test..."
+            python scripts/smoke_test_sceneexpert_llm.py \
+                --model "$MODEL_ID" \
+                --base-url "${OPENAI_BASE_URL:-http://localhost:${VLLM_PORT}/v1}" \
+                --api-key "${OPENAI_API_KEY:-dummy}"
+        fi
+        ;;
+esac
+
 python main.py experiment="$EXPERIMENT" +name="$RUN_NAME" "${EXTRA_HYDRA_OVERRIDES[@]}" "$@"
 # python main.py +name=branch_2 \
 #   experiment.pipeline.start_stage=ceiling_mounted \

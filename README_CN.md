@@ -1593,3 +1593,55 @@ bash scripts/run_experiment.sh ablation_4_qwen3_harness_memory
 SCENEEXPERT_ENV_FILE=/share/configs/sceneexpert_qwen36.env \
   bash scripts/run_experiment.sh ablation_4_qwen3_harness_memory
 ```
+
+## 13. SceneExpert 结构化调用自检与降级审计
+
+`TaskCompiler`、`GlobalPlanner`、`MemoryWriter` 现在共用同一个本地
+Qwen/vLLM 结构化调用客户端。角色级预算在
+`configurations/scene_expert/base_scene_expert.yaml` 的
+`structured_llm.roles` 中配置，默认最多尝试 2 次，并显式设置 thinking、
+timeout、最大输出 token 和 JSON response format。OpenAI Python SDK 在这里
+只是访问本地 `OPENAI_BASE_URL` 的客户端，不会访问 OpenAI 云服务。
+
+运行 `ablation_3/4/5` 时，`scripts/run_experiment.sh` 会在 vLLM health check
+通过后自动执行一次结构化 smoke test：
+
+```bash
+python scripts/smoke_test_sceneexpert_llm.py \
+  --model "$SCENEEXPERT_MODEL_ID" \
+  --base-url "$OPENAI_BASE_URL"
+```
+
+该测试同时验证：served model 名称可用、`enable_thinking=false` 生效、模型能在
+预算内返回 schema-valid JSON。失败时会在正式五阶段生成前直接退出，避免运行数小时
+后才发现 SceneExpert 自定义角色没有生效。仅在临时排查时可关闭：
+
+```bash
+export SCENEEXPERT_STRUCTURED_LLM_SMOKE_TEST=0
+```
+
+正式生成中的单次结构化调用失败不会直接终止整条场景链路。客户端只做一次有针对性的
+恢复，例如 `length/reasoning_only` 会切换为 no-think，JSON schema 不兼容会降级为
+JSON object；仍失败时角色使用 deterministic fallback，并在 trace 中标记
+`degraded=true`，而不是静默伪装成模型输出。
+
+主要审计文件：
+
+```text
+scene_<id>/scene_expert/timing/scene_expert_llm_calls.jsonl
+scene_<id>/scene_expert/stages/*_pre.json
+scene_<id>/scene_expert/trace/trace_<id>.json
+traces/trace_<id>.json
+```
+
+最终 trace 的 `component_status` 会记录每个角色的 attempt、error kind、finish
+reason、token 和 fallback 状态；每个 stage 的 `execution_evidence` 会记录检索到的
+memory ID、上下文哈希、注入文本哈希，以及 designer 输入是否确实包含 SceneExpert
+brief。判断 SceneExpert 是否真正落地时，不应只看是否生成了 trace 文件，还应检查：
+
+```text
+degraded == false
+component_status.task_compiler.source == "llm"
+component_status.global_planner.<stage>.source == "llm"
+stages[*].execution_evidence.designer_prompt_contains_brief == true
+```

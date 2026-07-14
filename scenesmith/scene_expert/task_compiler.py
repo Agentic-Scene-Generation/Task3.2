@@ -6,30 +6,16 @@ with smaller open models.
 
 from __future__ import annotations
 
-import json
 import logging
-import os
 import re
-from pathlib import Path
 
-from scenesmith.scene_expert.context_bundle import build_llm_call_debug_record
 from scenesmith.scene_expert.schemas import SceneTaskSpec
+from scenesmith.scene_expert.structured_llm import (
+    SceneExpertStructuredLLMClient,
+    StructuredLLMProfile,
+)
 
 console_logger = logging.getLogger(__name__)
-
-
-def _append_llm_debug(record: dict) -> None:
-    path = os.environ.get("SCENEEXPERT_LLM_DEBUG_PATH", "")
-    if not path:
-        return
-    try:
-        debug_path = Path(path)
-        debug_path.parent.mkdir(parents=True, exist_ok=True)
-        with debug_path.open("a", encoding="utf-8", newline="\n") as f:
-            f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
-    except Exception as e:
-        console_logger.warning("TaskCompiler failed to write LLM debug record: %s", e)
-
 
 _SYSTEM_PROMPT = """\
 /no_think
@@ -174,22 +160,6 @@ def _extract_required_objects_from_prompt(prompt_lower: str) -> dict[str, list[s
     return required
 
 
-def _extract_json_from_text(text: str) -> dict:
-    """Extract JSON from model output, handling markdown code fences."""
-    if not text:
-        raise ValueError("Empty response text")
-    # Strip markdown code fences if present
-    text = text.strip()
-    fence_match = re.search(r"```(?:json)?\s*([\s\S]+?)\s*```", text)
-    if fence_match:
-        text = fence_match.group(1)
-    # Find first { ... } block
-    brace_match = re.search(r"\{[\s\S]+\}", text)
-    if brace_match:
-        text = brace_match.group(0)
-    return json.loads(text)
-
-
 def _fallback_spec_from_prompt(prompt: str) -> SceneTaskSpec:
     """Parse room_type and style from prompt text when model call fails."""
     prompt_lower = prompt.lower()
@@ -255,17 +225,33 @@ class TaskCompiler:
         api_key: str | None = None,
         max_tokens: int = 1024,
         temperature: float = 0.1,
+        llm_client: SceneExpertStructuredLLMClient | None = None,
     ) -> None:
-        from openai import OpenAI
-
         self._model = model
         self._max_tokens = max_tokens
         self._temperature = temperature
-        self._client = OpenAI(
-            base_url=api_base_url
-            or os.environ.get("OPENAI_BASE_URL", "http://localhost:8000/v1"),
-            api_key=api_key or os.environ.get("OPENAI_API_KEY", "dummy"),
+        default_profile = StructuredLLMProfile(
+            thinking_mode="none",
+            max_tokens=max_tokens,
+            retry_max_tokens=max(max_tokens, 1536),
+            timeout_seconds=45.0,
+            temperature=temperature,
+            max_attempts=2,
+            response_format="json_schema",
         )
+        self._llm = llm_client or SceneExpertStructuredLLMClient(
+            model=model,
+            api_base_url=api_base_url,
+            api_key=api_key,
+            profiles={"task_compiler": default_profile},
+        )
+        self._profile = self._llm.profile_for("task_compiler", default_profile)
+        self.last_call_status: dict = {
+            "success": False,
+            "source": "not_called",
+            "degraded": False,
+            "attempt_count": 0,
+        }
 
     def compile(self, prompt: str) -> SceneTaskSpec:
         """Parse a raw text prompt into a SceneTaskSpec.
@@ -282,46 +268,26 @@ class TaskCompiler:
         console_logger.info(f"TaskCompiler: compiling prompt: {prompt[:100]}...")
         user_message = f"Extract scene requirements from: {prompt}"
 
-        response = self._client.chat.completions.create(
-            model=self._model,
+        result = self._llm.complete(
+            role="task_compiler",
+            stage="task_compiler",
+            event="compile",
             messages=[
                 {"role": "system", "content": _SYSTEM_PROMPT},
                 {"role": "user", "content": user_message},
             ],
-            temperature=self._temperature,
-            max_tokens=self._max_tokens,
+            response_model=SceneTaskSpec,
+            profile=self._profile,
         )
-
-        message = response.choices[0].message
-        raw = message.content
-        # Qwen3 with --reasoning-parser may put output in reasoning_content.
-        if not raw:
-            raw = getattr(message, "reasoning_content", None)
-        if not raw:
-            extra = getattr(message, "model_extra", None)
-            if isinstance(extra, dict):
-                raw = extra.get("reasoning_content")
-        console_logger.debug(f"TaskCompiler raw response: {raw}")
-        _append_llm_debug(
-            build_llm_call_debug_record(
-                stage="task_compiler",
-                agent_role="task_compiler",
-                event="compile",
-                prompt=user_message,
-                output=raw or "",
-                raw_response=response,
-            ).model_dump()
-        )
-
-        try:
-            data = _extract_json_from_text(raw)
-            task_spec = SceneTaskSpec.model_validate(data)
-            console_logger.info(
-                f"TaskCompiler: room_type={task_spec.room_type}, style={task_spec.style}, "
-                f"large_objects={task_spec.required_large_objects}"
-            )
-            return task_spec
-        except Exception as e:
+        self.last_call_status = result.status_dict()
+        if result.value is None:
             raise ValueError(
-                f"TaskCompiler failed to parse model response: {e}\nRaw: {raw}"
-            ) from e
+                "TaskCompiler structured call failed after bounded recovery: "
+                f"{result.final_error_kind}: {result.final_error}"
+            )
+        task_spec = result.value
+        console_logger.info(
+            f"TaskCompiler: room_type={task_spec.room_type}, style={task_spec.style}, "
+            f"large_objects={task_spec.required_large_objects}"
+        )
+        return task_spec

@@ -86,6 +86,19 @@ class LLMCallDebugRecord(BaseModel):
     token_usage: dict[str, int] = Field(default_factory=dict)
     raw_response_excerpt: str = ""
     error: str = ""
+    request_id: str = ""
+    attempt: int = 0
+    status: str = ""
+    error_kind: str = ""
+    retry_strategy: str = ""
+    thinking_mode: str = ""
+    response_format: str = ""
+    elapsed_sec: float = 0.0
+    timeout_sec: float = 0.0
+    reasoning_chars: int = 0
+    queue_wait_sec: float | None = None
+    ttft_sec: float | None = None
+    decode_sec: float | None = None
 
 
 class StageContextBundle(BaseModel):
@@ -278,6 +291,7 @@ def build_stage_context_bundle(
 
     retrieved_memory = {}
     if memory_pack is not None:
+        memory_pack = memory_pack.deduplicated()
         retrieved_memory = {
             "success_hints": len(memory_pack.success_hints),
             "failure_hints": len(memory_pack.failure_hints),
@@ -289,6 +303,9 @@ def build_stage_context_bundle(
             "failure_excerpt": [
                 compact_text(x, 180) for x in memory_pack.failure_hints[:3]
             ],
+            "success_case_ids": memory_pack.success_case_ids,
+            "failure_case_ids": memory_pack.failure_case_ids,
+            "skill_names": memory_pack.skill_names,
         }
     prompt_text = _stringify_prompt(prompt)
     return StageContextBundle(
@@ -359,13 +376,22 @@ def build_llm_call_debug_record(
 def _extract_token_usage(result: Any) -> dict[str, int]:
     usage = getattr(getattr(result, "context_wrapper", None), "usage", None)
     if usage is None:
+        usage = getattr(result, "usage", None)
+    if usage is None:
         return {}
     fields = {
-        "input_tokens": getattr(usage, "input_tokens", None),
-        "output_tokens": getattr(usage, "output_tokens", None),
+        "input_tokens": getattr(usage, "input_tokens", None)
+        or getattr(usage, "prompt_tokens", None),
+        "output_tokens": getattr(usage, "output_tokens", None)
+        or getattr(usage, "completion_tokens", None),
         "total_tokens": getattr(usage, "total_tokens", None),
         "requests": getattr(usage, "requests", None),
     }
+    details = getattr(usage, "output_tokens_details", None) or getattr(
+        usage, "completion_tokens_details", None
+    )
+    if details is not None:
+        fields["reasoning_tokens"] = getattr(details, "reasoning_tokens", None)
     return {k: int(v) for k, v in fields.items() if isinstance(v, int)}
 
 

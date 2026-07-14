@@ -117,23 +117,30 @@ class MemoryRetriever:
         """Retrieve and format memory for injection into a StageBrief."""
         query_tokens = _build_query_tokens(task_spec, stage)
 
-        success_hints, placement_reference = self._retrieve_success(
+        success_hints, placement_reference, success_ids = self._retrieve_success(
             task_spec, stage, query_tokens
         )
-        failure_hints = self._retrieve_failure(task_spec, stage, query_tokens)
-        skill_texts = self._retrieve_skills(task_spec, stage, query_tokens)
+        failure_hints, failure_ids = self._retrieve_failure(
+            task_spec, stage, query_tokens
+        )
+        skill_texts, skill_names = self._retrieve_skills(
+            task_spec, stage, query_tokens
+        )
 
         return MemoryPack(
             success_hints=success_hints,
             failure_hints=failure_hints,
             skill_texts=skill_texts,
             placement_reference=placement_reference,
-        )
+            success_case_ids=success_ids,
+            failure_case_ids=failure_ids,
+            skill_names=skill_names,
+        ).deduplicated()
 
     def _retrieve_success(
         self, task_spec: SceneTaskSpec, stage: str, query_tokens: set[str]
-    ) -> tuple[list[str], str]:
-        """Return (hint_strings, placement_reference_text).
+    ) -> tuple[list[str], str, list[str]]:
+        """Return hints, placement reference, and source case IDs.
 
         hint_strings: compressed one-liners for GlobalPlanner context.
         placement_reference_text: full placement block from the top case,
@@ -163,11 +170,11 @@ class MemoryRetriever:
                 placement_reference = ref
                 break
 
-        return hints, placement_reference
+        return hints, placement_reference, [case.case_id for _, case in top]
 
     def _retrieve_failure(
         self, task_spec: SceneTaskSpec, stage: str, query_tokens: set[str]
-    ) -> list[str]:
+    ) -> tuple[list[str], list[str]]:
         scored: list[tuple[float, FailureCase]] = []
         for case in self._store.failure_cases:
             if case.stage != stage:
@@ -182,11 +189,19 @@ class MemoryRetriever:
             scored.append((score, case))
 
         scored.sort(key=lambda x: x[0], reverse=True)
-        return [case.to_hint_text() for _, case in scored[: self._max_failure] if _ > 0]
+        top = [
+            (score, case)
+            for score, case in scored[: self._max_failure]
+            if score > 0
+        ]
+        return (
+            [case.to_hint_text() for _, case in top],
+            [case.failure_id for _, case in top],
+        )
 
     def _retrieve_skills(
         self, task_spec: SceneTaskSpec, stage: str, query_tokens: set[str]
-    ) -> list[str]:
+    ) -> tuple[list[str], list[str]]:
         scored: list[tuple[float, Skill]] = []
         for skill in self._store.skills:
             if skill.stage != stage:
@@ -204,8 +219,12 @@ class MemoryRetriever:
             scored.append((score, skill))
 
         scored.sort(key=lambda x: x[0], reverse=True)
-        return [
-            skill.to_procedure_text()
-            for _, skill in scored[: self._max_skills]
-            if _ > 0
+        top = [
+            (score, skill)
+            for score, skill in scored[: self._max_skills]
+            if score > 0
         ]
+        return (
+            [skill.to_procedure_text() for _, skill in top],
+            [skill.skill_name for _, skill in top],
+        )
