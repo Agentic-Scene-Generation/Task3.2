@@ -80,7 +80,7 @@ ACP_EXPERIMENT="ablation_4c_qwen3_hybrid_memory"
 # TODO: Match ACP requested GPU count. Leave ACP_CUDA_VISIBLE_DEVICES empty on
 # scheduler-managed ACP jobs so the platform-provided CUDA_VISIBLE_DEVICES is
 # preserved. Fill it only for manual debugging on a known-clean node.
-ACP_GPUS=4
+ACP_GPUS=8
 ACP_CUDA_VISIBLE_DEVICES=""
 
 # TODO: 2xH100: 65536 is the stable default. For a faster smoke test, use 32768.

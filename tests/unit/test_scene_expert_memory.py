@@ -49,6 +49,21 @@ from scenesmith.scene_expert.verifier import (
 
 
 class SceneExpertMemoryTest(unittest.TestCase):
+    def test_memory_writer_normalizes_null_noop_fields(self) -> None:
+        normalized = MemoryWriter._normalize_update_op(
+            {
+                "op": "NOOP",
+                "memory_type": "success_case",
+                "target_id": None,
+                "content": None,
+            }
+        )
+
+        op = MemoryUpdateOp.model_validate(normalized)
+
+        self.assertEqual(op.target_id, "")
+        self.assertEqual(op.content, {})
+
     def test_task_compiler_fallback_preserves_required_bedroom_objects(self) -> None:
         spec = _fallback_spec_from_prompt(
             "A bedroom with a bed, two nightstands, and a wardrobe in the corner."

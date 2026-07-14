@@ -232,6 +232,49 @@ class TestVLMResponseParsing(unittest.TestCase):
     """Test VLM response parsing logic."""
 
     @patch("scenesmith.agent_utils.mesh_physics_analyzer.VLMService")
+    def test_hssd_timeout_uses_canonical_fallback(self, mock_vlm_service):
+        mock_vlm_instance = MagicMock()
+        mock_vlm_instance.create_completion.side_effect = TimeoutError(
+            "local vLLM request timed out"
+        )
+
+        temp_dir = tempfile.mkdtemp()
+        temp_path = Path(temp_dir)
+        image_paths = [temp_path / f"view_{i}.png" for i in range(4)]
+        for img_path in image_paths:
+            Image.new("RGB", (10, 10), color="black").save(img_path)
+
+        mock_blender_server = MagicMock()
+        mock_blender_server.is_running.return_value = True
+        mock_blender_server.render_multiview_for_analysis.return_value = image_paths
+
+        with tempfile.NamedTemporaryFile(
+            prefix="painting_", suffix=".glb", delete=False
+        ) as file:
+            mesh_path = Path(file.name)
+            trimesh.creation.box(extents=[1.0, 0.05, 0.7]).export(mesh_path)
+
+        try:
+            result = analyze_mesh_orientation_and_material(
+                mesh_path=mesh_path,
+                vlm_service=mock_vlm_instance,
+                cfg=create_mock_cfg(),
+                elevation_degrees=20.0,
+                blender_server=mock_blender_server,
+                prompt_type="hssd",
+                include_vertical_views=False,
+            )
+
+            self.assertEqual(result.up_axis, "+Z")
+            self.assertEqual(result.front_axis, "+Y")
+            self.assertGreater(result.mass_kg, 0.0)
+        finally:
+            if mesh_path.exists():
+                mesh_path.unlink()
+            if temp_path.exists():
+                shutil.rmtree(temp_path)
+
+    @patch("scenesmith.agent_utils.mesh_physics_analyzer.VLMService")
     def test_parse_vlm_response_valid_json(self, mock_vlm_service):
         """Test VLM response parsing with valid JSON."""
         # Mock VLM response.

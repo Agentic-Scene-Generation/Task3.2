@@ -788,6 +788,11 @@ class SceneExpertHookRunner:
 
         # Save original text_description for restoration after stage
         self._original_text_descriptions[stage] = scene.text_description
+        # Keep an explicit immutable task-facing description on the scene.
+        # Stage agents use this for deterministic requirement inference and
+        # room-type dispatch; SceneExpert's injected brief/memory remains
+        # available separately for LLM prompting.
+        setattr(scene, "scene_expert_original_description", scene.text_description)
 
         # --- Step 1: Memory retrieval (skip in harness_only mode) ---
         if self._retriever is not None and self._mode in ("harness_memory", "full"):

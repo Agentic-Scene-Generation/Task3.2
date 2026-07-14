@@ -816,6 +816,104 @@ class BaseStatefulAgent(ABC):
             f"{getattr(output_type, '__name__', output_type)}"
         )
 
+    def _make_transient_critic_fallback_scores(
+        self,
+        *,
+        error: Exception,
+    ) -> CritiqueWithScores:
+        """Create conservative persisted scores when local vLLM times out.
+
+        The hard-check-first path has already verified required objects and
+        deterministic geometry before this fallback is reached.  These scores
+        therefore record completion without pretending that visual quality was
+        evaluated successfully.
+        """
+        output_type = self._critic_output_type or type(self.previous_scores)
+        detail = f"Visual critic unavailable: {type(error).__name__}: {error}"
+        critique = (
+            "TRANSIENT LOCAL VLM TIMEOUT DURING VISUAL CRITIC SCORING. "
+            "Deterministic hard checks passed, but visual quality remains "
+            f"unverified. {detail}"
+        )
+        neutral = "Conservative fallback; visual critic did not complete."
+        if output_type is FurnitureCritiqueWithScores:
+            return FurnitureCritiqueWithScores(
+                critique=critique,
+                realism=self._make_category_score("realism", 5, neutral),
+                functionality=self._make_category_score("functionality", 5, neutral),
+                layout=self._make_category_score("layout", 5, neutral),
+                layout_plausibility=self._make_category_score(
+                    "layout_plausibility", 5, neutral
+                ),
+                holistic_completeness=self._make_category_score(
+                    "holistic_completeness", 5, neutral
+                ),
+                prompt_following=self._make_category_score(
+                    "prompt_following",
+                    8,
+                    "Required-object deterministic checks passed; visual review timed out.",
+                ),
+                reachability=self._make_category_score("reachability", 5, neutral),
+            )
+        if output_type is ManipulandCritiqueWithScores:
+            return ManipulandCritiqueWithScores(
+                critique=critique,
+                realism=self._make_category_score("realism", 5, neutral),
+                functionality=self._make_category_score("functionality", 5, neutral),
+                layout=self._make_category_score("layout", 5, neutral),
+                holistic_completeness=self._make_category_score(
+                    "holistic_completeness", 5, neutral
+                ),
+                prompt_following=self._make_category_score(
+                    "prompt_following", 6, neutral
+                ),
+            )
+        if output_type is WallCritiqueWithScores:
+            return WallCritiqueWithScores(
+                critique=critique,
+                realism=self._make_category_score("realism", 5, neutral),
+                functionality=self._make_category_score("functionality", 5, neutral),
+                layout=self._make_category_score("layout", 5, neutral),
+                holistic_completeness=self._make_category_score(
+                    "holistic_completeness", 5, neutral
+                ),
+                prompt_following=self._make_category_score(
+                    "prompt_following", 6, neutral
+                ),
+            )
+        if output_type is CeilingCritiqueWithScores:
+            return CeilingCritiqueWithScores(
+                critique=critique,
+                realism=self._make_category_score("realism", 5, neutral),
+                functionality=self._make_category_score("functionality", 5, neutral),
+                layout=self._make_category_score("layout", 5, neutral),
+                prompt_following=self._make_category_score(
+                    "prompt_following", 6, neutral
+                ),
+            )
+        raise TypeError(
+            "Cannot create transient critic fallback for output type "
+            f"{getattr(output_type, '__name__', output_type)}"
+        )
+
+    @staticmethod
+    def _is_transient_model_error(error: Exception) -> bool:
+        transient_names = {
+            "APITimeoutError",
+            "APIConnectionError",
+            "ReadTimeout",
+            "ConnectTimeout",
+            "ConnectError",
+            "TimeoutError",
+        }
+        current: BaseException | None = error
+        while current is not None:
+            if type(current).__name__ in transient_names:
+                return True
+            current = current.__cause__ or current.__context__
+        text = str(error).lower()
+        return "timed out" in text or "timeout" in text
+
     def _critic_render_profile_name(self, update_checkpoint: bool) -> str:
         if update_checkpoint and self._critic_fast_path_enabled(
             "use_intermediate_render_profile", True
@@ -2293,25 +2391,49 @@ class BaseStatefulAgent(ABC):
             "critique with scores."
             f"{scene_state_block}"
         )
-        result = await Runner.run(
-            starting_agent=critic_score,
-            input=score_prompt,
-            session=self.critic_session,
-            max_turns=self.cfg.agents.critic_agent.max_turns,
-            run_config=run_config,
-        )
-        self._record_module_timing("critic", "score_scene", score_start)
-        log_agent_usage(result=result, agent_name="CRITIC (score)")
-        self._record_llm_call_debug(
-            agent_role="critic",
-            event="score_scene",
-            prompt=score_prompt,
-            output=result.final_output or "",
-            result=result,
-        )
+        try:
+            result = await Runner.run(
+                starting_agent=critic_score,
+                input=score_prompt,
+                session=self.critic_session,
+                max_turns=self.cfg.agents.critic_agent.max_turns,
+                run_config=run_config,
+            )
+            self._record_module_timing("critic", "score_scene", score_start)
+            log_agent_usage(result=result, agent_name="CRITIC (score)")
+            self._record_llm_call_debug(
+                agent_role="critic",
+                event="score_scene",
+                prompt=score_prompt,
+                output=result.final_output or "",
+                result=result,
+            )
+            response = result.final_output
+        except Exception as exc:
+            if not self._is_transient_model_error(exc):
+                raise
+            self._record_module_timing(
+                "critic",
+                "score_scene",
+                score_start,
+                extra={"fallback": "transient_model_error", "error": str(exc)},
+            )
+            console_logger.warning(
+                "Local VLM critic scoring failed transiently; persisting "
+                "conservative deterministic fallback scores: %s: %s",
+                type(exc).__name__,
+                exc,
+            )
+            response = self._make_transient_critic_fallback_scores(error=exc)
+            self._record_llm_call_debug(
+                agent_role="critic",
+                event="score_scene_transient_fallback",
+                prompt=score_prompt,
+                output=response.critique,
+                error=f"{type(exc).__name__}: {exc}",
+            )
 
-        # Parse structured output.
-        response = result.final_output
+        # Parse structured output or the conservative transport fallback.
         if not isinstance(response, CritiqueWithScores):
             raise TypeError(
                 "Critic returned an unexpected final output type: "

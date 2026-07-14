@@ -35,6 +35,37 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         StatefulFurnitureAgent is None,
         f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
     )
+    def test_non_bedroom_missing_required_asset_uses_generic_repair(self) -> None:
+        agent = object.__new__(StatefulFurnitureAgent)
+        agent.scene = SimpleNamespace(
+            room_type="living_room",
+            text_description="A living room with a sofa.",
+            scene_expert_original_description="A living room with a sofa.",
+        )
+        agent.furniture_safety_controller = SimpleNamespace(
+            required_counts={"sofa": 1}
+        )
+        repaired_categories: list[str] = []
+        agent._ensure_required_furniture_asset = lambda category: (
+            repaired_categories.append(category) or 1
+        )
+        agent._repair_forbidden_zone_conflicts = lambda include_windows=False: False
+
+        repaired, actions = agent._attempt_deterministic_repair(
+            SimpleNamespace(
+                hard_valid=False,
+                hard_reasons=["missing required sofa: expected 1, found 0"],
+            )
+        )
+
+        self.assertTrue(repaired)
+        self.assertEqual(repaired_categories, ["sofa"])
+        self.assertTrue(any("missing sofa" in action for action in actions))
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
     def test_snap_transform_to_wall_copies_readonly_translation(self) -> None:
         agent = self._make_agent()
         agent._bounds_for_transform = lambda _obj, _transform: (

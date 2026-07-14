@@ -191,15 +191,22 @@ def _wall_opening_types(scene: Any) -> dict[str, list[str]]:
 
 def is_bedroom_scene(scene: Any) -> bool:
     """Return whether this room should receive bedroom-specific checks."""
+    # SceneExpert temporarily appends StageBrief and retrieved-memory text to
+    # ``text_description``.  Those hints can mention beds or wardrobes while
+    # describing a failure from another room type, so they must never change
+    # which room-specific verifier is active.
+    original_description = getattr(
+        scene,
+        "scene_expert_original_description",
+        getattr(scene, "text_description", ""),
+    )
     text = (
         f"{_text(getattr(scene, 'room_type', ''))} "
-        f"{_text(getattr(scene, 'text_description', ''))}"
+        f"{_text(original_description)}"
     )
     return (
         "bedroom" in text
         or "nightstand" in text
-        or "wardrobe" in text
-        or "closet" in text
         or any(term in text.split() for term in ("bed", "beds"))
     )
 

@@ -76,6 +76,9 @@ rendering:
 # Asset manager configuration
 asset_manager:
   general_asset_source: "hssd"
+  hssd_vlm_fallback_on_transient_error: true
+  hssd_vlm_timeout_seconds: 90
+  hssd_vlm_max_retries: 0
   backend: "sam3d"
 
   router:

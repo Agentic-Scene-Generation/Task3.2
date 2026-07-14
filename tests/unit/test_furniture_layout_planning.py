@@ -10,6 +10,7 @@ from scenesmith.agent_utils.furniture_layout_planning import (
     apply_bedroom_asset_size_policy,
     build_bedroom_anchor_plan,
     evaluate_bedroom_layout_plausibility,
+    is_bedroom_scene,
 )
 
 
@@ -91,6 +92,16 @@ def make_bedroom_scene() -> DummyScene:
 
 
 class FurnitureLayoutPlanningTest(unittest.TestCase):
+    def test_injected_memory_cannot_turn_living_room_into_bedroom(self) -> None:
+        scene = DummyScene(
+            room_geometry=DummyRoomGeometry(),
+            room_type="living_room",
+            text_description="A living room. Retrieved memory mentions a bed.",
+        )
+        scene.scene_expert_original_description = "A living room with a sofa."
+
+        self.assertFalse(is_bedroom_scene(scene))
+
     def test_anchor_plan_prefers_solid_wall_without_openings(self) -> None:
         scene = make_bedroom_scene()
 
