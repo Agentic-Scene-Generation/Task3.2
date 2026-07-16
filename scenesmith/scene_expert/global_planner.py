@@ -215,6 +215,14 @@ class GlobalPlanner:
         stage_desc = _STAGE_DESCRIPTIONS.get(context.stage, "")
         task_spec_text = _format_task_spec(context.task_spec, context.stage)
         memory_text = _format_memory_for_prompt(context.memory_pack)
+        budget_text = (
+            "## Budget: "
+            f"max_designer_iterations={context.stage_budget.max_designer_iterations}, "
+            f"max_repair_steps={context.stage_budget.max_repair_steps}, "
+            f"wall_clock_seconds={context.stage_budget.max_wall_clock_seconds:g}, "
+            "optional_object_families="
+            f"{context.stage_budget.max_optional_object_families}"
+        )
 
         parts = [
             f"## Current Stage: {context.stage}",
@@ -236,8 +244,7 @@ class GlobalPlanner:
             "## Retrieved Memory",
             memory_text,
             "",
-            f"## Budget: max_designer_iterations={context.stage_budget.max_designer_iterations}, "
-            f"max_repair_steps={context.stage_budget.max_repair_steps}",
+            budget_text,
             "",
             "Generate the StageBrief JSON for the designer agent.",
         ]

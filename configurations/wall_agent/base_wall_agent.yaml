@@ -78,6 +78,7 @@ rendering:
 
 # Asset manager configuration
 asset_manager:
+  hssd_physics_analysis_mode: deterministic  # deterministic | vlm
   general_asset_source: "hssd"
   hssd_vlm_fallback_on_transient_error: true
   hssd_vlm_timeout_seconds: 90

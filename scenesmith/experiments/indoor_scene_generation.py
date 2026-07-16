@@ -149,6 +149,69 @@ def _is_retryable_scene_failure(error: str) -> bool:
     return any(marker in normalized for marker in transient_markers)
 
 
+def _root_error_summary(error: str, max_chars: int = 700) -> str:
+    """Return one actionable root-cause line without replaying nested tracebacks."""
+    lines = [line.strip() for line in str(error or "").splitlines() if line.strip()]
+    if not lines:
+        return "Unknown scene failure"
+    root_line = lines[-1]
+    if root_line.startswith("^") or root_line.startswith("File "):
+        root_line = lines[0]
+    if len(root_line) > max_chars:
+        root_line = root_line[: max_chars - 3] + "..."
+    return root_line
+
+
+def _write_batch_summary(
+    *,
+    output_dir: Path,
+    experiment_run_id: str,
+    prompts_with_ids: list[tuple[int, str]],
+    results: dict[str, tuple[bool, str | None]],
+) -> None:
+    summary_path = output_dir / "batch_summary.json"
+    existing_scenes: dict[str, dict] = {}
+    if summary_path.exists():
+        try:
+            existing = json.loads(summary_path.read_text(encoding="utf-8"))
+            if existing.get("experiment_run_id") == experiment_run_id:
+                existing_scenes = {
+                    str(item.get("scene_id")): item
+                    for item in existing.get("scenes", [])
+                }
+        except (OSError, ValueError, TypeError):
+            existing_scenes = {}
+
+    prompt_map = {scene_id: prompt for scene_id, prompt in prompts_with_ids}
+    for scene_id, prompt in prompts_with_ids:
+        task_id = f"scene_{scene_id:03d}"
+        success, error = results.get(task_id, (False, "Missing worker result"))
+        existing_scenes[task_id] = {
+            "scene_id": task_id,
+            "prompt": prompt_map[scene_id],
+            "status": "completed" if success else "failed",
+            "root_error": "" if success else _root_error_summary(str(error)),
+            "scene_status_path": str(output_dir / task_id / _SCENE_STATUS_FILENAME),
+        }
+
+    scenes = [existing_scenes[key] for key in sorted(existing_scenes)]
+    payload = {
+        "experiment_run_id": experiment_run_id,
+        "updated_at": datetime.now().astimezone().isoformat(),
+        "total_scenes": len(scenes),
+        "completed_scenes": sum(
+            1 for item in scenes if item["status"] == "completed"
+        ),
+        "failed_scenes": sum(1 for item in scenes if item["status"] == "failed"),
+        "scenes": scenes,
+    }
+    temporary_path = summary_path.with_suffix(".json.tmp")
+    temporary_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    temporary_path.replace(summary_path)
+
+
 def _get_retrieval_gpu_device() -> str | None:
     """Get GPU device for retrieval servers.
 
@@ -2313,11 +2376,19 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                 else:
                     final_results[task_id] = (False, error)
                     console_logger.error(
-                        f"{task_id} failed permanently after attempt {attempt}: {error}"
+                        f"{task_id} failed permanently after attempt {attempt}: "
+                        f"{_root_error_summary(error)}"
                     )
 
             pending = retry_pending
             attempt += 1
+
+        _write_batch_summary(
+            output_dir=self.output_dir,
+            experiment_run_id=experiment_run_id,
+            prompts_with_ids=prompts_with_ids,
+            results=final_results,
+        )
 
         failed_scenes = [
             (task_id, error)
@@ -2326,7 +2397,8 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
         ]
         if failed_scenes:
             failure_details = "\n".join(
-                f"  - {task_id}: {error}" for task_id, error in failed_scenes
+                f"  - {task_id}: {_root_error_summary(str(error))}"
+                for task_id, error in failed_scenes
             )
             raise RuntimeError(
                 f"{len(failed_scenes)}/{len(prompts_with_ids)} scene(s) failed:\n"

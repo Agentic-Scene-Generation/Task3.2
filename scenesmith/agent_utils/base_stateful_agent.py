@@ -6,6 +6,7 @@ while allowing domain-specific customization through abstract methods and
 subclass-defined tools.
 """
 
+import asyncio
 import copy
 import logging
 import os
@@ -17,8 +18,6 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-
-import os
 
 from agents import (
     Agent,
@@ -59,13 +58,14 @@ from scenesmith.agent_utils.scoring import (
     scores_to_dict,
 )
 from scenesmith.agent_utils.stage_working_memory import StageWorkingMemory
-from scenesmith.scene_expert.context_bundle import build_stage_context_bundle
 from scenesmith.agent_utils.thinking import (
     prepend_text_thinking_directive,
     thinking_directive_from_effort,
 )
 from scenesmith.agent_utils.turn_trimming_session import TurnTrimmingSession
 from scenesmith.prompts import prompt_registry
+from scenesmith.scene_expert.context_bundle import build_stage_context_bundle
+from scenesmith.scene_expert.exceptions import StageValidationError
 from scenesmith.utils.logging import BaseLogger
 from scenesmith.utils.openai import encode_image_to_base64
 
@@ -215,6 +215,170 @@ class BaseStatefulAgent(ABC):
         self._last_critique_render_profile = "final"
         self._pending_hard_repair_hint = ""
         self._hard_repair_design_change_calls = 0
+        self._stage_runtime_budget: dict[str, Any] = {}
+        self._stage_runtime_started_at: float | None = None
+        self._stage_runtime_exhausted = False
+
+    def _configure_stage_runtime(self, scene: Any) -> None:
+        """Bind SceneExpert's advisory budget to this stage's real execution."""
+        raw_budget = getattr(scene, "scene_expert_stage_budget", {}) or {}
+        try:
+            self._stage_runtime_budget = dict(raw_budget)
+        except (TypeError, ValueError):
+            self._stage_runtime_budget = {}
+        self._stage_runtime_started_at = time.monotonic()
+        self._stage_runtime_exhausted = False
+
+        asset_manager = getattr(self, "asset_manager", None)
+        configure_asset_budget = getattr(
+            asset_manager, "configure_runtime_budget", None
+        )
+        if callable(configure_asset_budget):
+            configure_asset_budget(
+                stage=str(
+                    getattr(scene, "scene_expert_stage", self.agent_type.value)
+                ),
+                budget=self._stage_runtime_budget,
+                required_objects=list(
+                    getattr(scene, "scene_expert_required_objects", []) or []
+                ),
+            )
+
+    def _stage_budget_value(self, key: str, default: Any) -> Any:
+        return self._stage_runtime_budget.get(key, default)
+
+    def _effective_critique_round_limit(self) -> int:
+        configured = max(0, int(_cfg_get(self.cfg, "max_critique_rounds", 0)))
+        if not self._stage_runtime_budget:
+            return configured
+        stage_limit = max(
+            0,
+            int(
+                self._stage_budget_value(
+                    "max_designer_iterations",
+                    configured,
+                )
+            ),
+        )
+        return min(configured, stage_limit)
+
+    def _remaining_stage_seconds(self) -> float | None:
+        wall_clock_limit = float(
+            self._stage_budget_value("max_wall_clock_seconds", 0.0) or 0.0
+        )
+        if wall_clock_limit <= 0 or self._stage_runtime_started_at is None:
+            return None
+        return wall_clock_limit - (time.monotonic() - self._stage_runtime_started_at)
+
+    @staticmethod
+    def _is_agent_budget_error(error: BaseException) -> bool:
+        current: BaseException | None = error
+        while current is not None:
+            if type(current).__name__ in {
+                "MaxTurnsExceeded",
+                "ModelBehaviorError",
+            } and (
+                type(current).__name__ == "MaxTurnsExceeded"
+                or "max turns" in str(current).lower()
+            ):
+                return True
+            current = current.__cause__ or current.__context__
+        return "max turns" in str(error).lower()
+
+    async def _run_agent_with_stage_sla(
+        self,
+        *,
+        starting_agent: Agent,
+        input: Any,
+        role: str,
+        event: str,
+        configured_max_turns: int | None = None,
+        session: Session | None = None,
+        run_config: RunConfig | None = None,
+    ) -> RunResult | None:
+        """Run one Agents SDK call under the stage turn and wall-clock SLA.
+
+        Budget exhaustion is an execution outcome, not a process failure. The
+        caller keeps the current candidate and proceeds to deterministic
+        validation, repair, and best-checkpoint selection.
+        """
+        role_turn_key = {
+            "planner": "max_planner_turns",
+            "designer": "max_designer_turns",
+            "critic": "max_critic_turns",
+        }.get(role, "")
+        max_turns = configured_max_turns
+        if role_turn_key and self._stage_runtime_budget:
+            stage_turns = int(self._stage_budget_value(role_turn_key, 0) or 0)
+            if stage_turns > 0:
+                max_turns = (
+                    min(int(max_turns), stage_turns)
+                    if max_turns is not None
+                    else stage_turns
+                )
+
+        remaining = self._remaining_stage_seconds()
+        if remaining is not None and remaining <= 0:
+            self._stage_runtime_exhausted = True
+            self._planner_budget_exhausted = True
+            console_logger.warning(
+                "Stage SLA exhausted before %s/%s; preserving current candidate",
+                role,
+                event,
+            )
+            return None
+
+        start_time = time.time()
+        try:
+            run_kwargs: dict[str, Any] = {
+                "starting_agent": starting_agent,
+                "input": input,
+            }
+            if max_turns is not None:
+                run_kwargs["max_turns"] = max(1, int(max_turns))
+            if session is not None:
+                run_kwargs["session"] = session
+            if run_config is not None:
+                run_kwargs["run_config"] = run_config
+            if remaining is None:
+                return await Runner.run(**run_kwargs)
+            async with asyncio.timeout(max(0.1, remaining)):
+                return await Runner.run(**run_kwargs)
+        except Exception as exc:
+            budget_error = isinstance(exc, TimeoutError) or self._is_agent_budget_error(
+                exc
+            )
+            if not budget_error:
+                raise
+            self._stage_runtime_exhausted = isinstance(exc, TimeoutError)
+            if role in {"planner", "designer"}:
+                self._planner_budget_exhausted = True
+            self._record_module_timing(
+                role,
+                f"{event}_budget_exhausted",
+                start_time,
+                extra={
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                    "max_turns": max_turns,
+                    "remaining_stage_seconds": remaining,
+                },
+            )
+            self._record_llm_call_debug(
+                agent_role=role,
+                event=f"{event}_budget_exhausted",
+                prompt=input,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            console_logger.warning(
+                "%s/%s reached its execution budget (%s: %s); preserving the "
+                "current candidate for deterministic validation",
+                role,
+                event,
+                type(exc).__name__,
+                exc,
+            )
+            return None
 
     def _record_module_timing(
         self,
@@ -529,7 +693,18 @@ class BaseStatefulAgent(ABC):
         all_actions: list[str] = []
         max_attempts = self._deterministic_repair_max_attempts()
         for attempt in range(1, max_attempts + 1):
+            before_hard_state = current_state
             before_hash = self.scene.content_hash() if self.scene is not None else ""
+            before_scene_state = (
+                copy.deepcopy(self.scene.to_state_dict())
+                if self.scene is not None
+                else None
+            )
+            before_penetration = sum(
+                float(getattr(issue, "penetration_depth_m", 0.0) or 0.0)
+                for issue in getattr(current_state, "issues", [])
+            )
+            before_objective = (len(current_state.hard_reasons), before_penetration)
             repair_start = time.time()
             repaired, actions = self._attempt_deterministic_repair(current_state)
             all_actions.extend(actions)
@@ -562,6 +737,30 @@ class BaseStatefulAgent(ABC):
             repaired_hard_state = self._evaluate_current_hard_state(
                 physics_context=physics_context
             )
+            if repaired_hard_state is not None:
+                after_penetration = sum(
+                    float(getattr(issue, "penetration_depth_m", 0.0) or 0.0)
+                    for issue in getattr(repaired_hard_state, "issues", [])
+                )
+                after_objective = (
+                    len(repaired_hard_state.hard_reasons),
+                    after_penetration,
+                )
+                if after_objective > before_objective and before_scene_state is not None:
+                    self.scene.restore_from_state_dict(before_scene_state)
+                    self.rendering_manager.clear_cache()
+                    self._reset_critic_candidate_cache()
+                    current_state = before_hard_state
+                    physics_context = None
+                    console_logger.warning(
+                        "Rolled back deterministic repair from %s because hard-state "
+                        "objective worsened from %s to %s",
+                        source,
+                        before_objective,
+                        after_objective,
+                    )
+                    all_actions.append("rolled back repair that worsened hard constraints")
+                    break
             if repaired_hard_state is not None and repaired_hard_state.hard_valid:
                 console_logger.info(
                     "Deterministic repair resolved hard-check failure from %s "
@@ -1552,9 +1751,9 @@ class BaseStatefulAgent(ABC):
                     "constraints: %s",
                     reasons,
                 )
-                raise RuntimeError(
-                    "Furniture stage failed with unresolved hard constraints: "
-                    f"{reasons}"
+                raise StageValidationError(
+                    stage=self.agent_type.value,
+                    reasons=final_hard_state.hard_reasons,
                 )
 
         # Copy final scores and renders to per-stage directory.
@@ -1772,7 +1971,7 @@ class BaseStatefulAgent(ABC):
             controller.should_finish = True
         return (
             f"STOP: {tool_name} is blocked because the configured "
-            f"max_critique_rounds={self.cfg.max_critique_rounds} budget has "
+            f"max_critique_rounds={self._effective_critique_round_limit()} budget has "
             "been reached. Do not call request_critique(), "
             "request_design_change(), or reset_scene_to_checkpoint() again. "
             "Return your final concise workflow summary now. The framework will "
@@ -1780,7 +1979,7 @@ class BaseStatefulAgent(ABC):
         )
 
     def _planner_budget_hint_after_critique(self) -> str:
-        if self._planner_critique_tool_calls < int(self.cfg.max_critique_rounds):
+        if self._planner_critique_tool_calls < self._effective_critique_round_limit():
             return ""
         return (
             "\n\n[Planner budget] This is the last allowed planner critique. "
@@ -1790,7 +1989,7 @@ class BaseStatefulAgent(ABC):
         )
 
     def _planner_budget_hint_after_design_change(self) -> str:
-        if self._planner_design_change_tool_calls < int(self.cfg.max_critique_rounds):
+        if self._planner_design_change_tool_calls < self._effective_critique_round_limit():
             return ""
         self._planner_budget_exhausted = True
         return (
@@ -1812,11 +2011,17 @@ class BaseStatefulAgent(ABC):
         observe_scene step saves scores.yaml next to the render for the current
         final candidate state.
         """
+        if self._planner_budget_exhausted or self._stage_runtime_exhausted:
+            return (
+                "\n\n[Auto scoring] Stage execution budget is exhausted; "
+                "skipped the extra critic call and kept the current candidate "
+                "for deterministic validation."
+            )
         if not self._auto_score_after_design_attempts_enabled():
             return ""
-        if self.cfg.max_critique_rounds <= 0:
+        if self._effective_critique_round_limit() <= 0:
             return ""
-        if self._planner_critique_tool_calls >= int(self.cfg.max_critique_rounds):
+        if self._planner_critique_tool_calls >= self._effective_critique_round_limit():
             self._planner_budget_exhausted = True
             return "\n\n" + self._planner_budget_stop_message(
                 f"auto_score_after_{attempt_label.replace(' ', '_')}"
@@ -1854,7 +2059,7 @@ class BaseStatefulAgent(ABC):
             score_start,
         )
         budget_hint = ""
-        if self._planner_critique_tool_calls >= int(self.cfg.max_critique_rounds):
+        if self._planner_critique_tool_calls >= self._effective_critique_round_limit():
             self._planner_budget_exhausted = True
             budget_hint = (
                 "\n\n[Planner budget] The configured scored-candidate budget "
@@ -1935,7 +2140,7 @@ class BaseStatefulAgent(ABC):
                     "of re-scoring an unchanged layout."
                 )
 
-            if self._planner_critique_tool_calls >= int(self.cfg.max_critique_rounds):
+            if self._planner_critique_tool_calls >= self._effective_critique_round_limit():
                 return self._planner_budget_stop_message("request_critique")
 
             self._planner_critique_tool_calls += 1
@@ -1979,7 +2184,7 @@ class BaseStatefulAgent(ABC):
             if (
                 self._auto_score_after_design_attempts_enabled()
                 and self._planner_critique_tool_calls
-                >= int(self.cfg.max_critique_rounds)
+                >= self._effective_critique_round_limit()
                 and not self._hard_repair_allowance_available()
             ):
                 return self._planner_budget_stop_message("request_design_change")
@@ -1987,7 +2192,7 @@ class BaseStatefulAgent(ABC):
             if (
                 counts_as_critique_cycle
                 and self._planner_design_change_tool_calls
-                >= int(self.cfg.max_critique_rounds)
+                >= self._effective_critique_round_limit()
                 and not self._hard_repair_allowance_available()
             ):
                 return self._planner_budget_stop_message("request_design_change")
@@ -2057,7 +2262,7 @@ class BaseStatefulAgent(ABC):
         # Only add critique-related tools if critique rounds are enabled.
         # This prevents the planner from accidentally calling critique tools
         # when max_critique_rounds is 0.
-        if self.cfg.max_critique_rounds > 0:
+        if self._effective_critique_round_limit() > 0:
             reset_scene_to_checkpoint = self._create_reset_checkpoint_tool()
             tools.extend(
                 [request_critique, request_design_change, reset_scene_to_checkpoint]
@@ -2315,19 +2520,23 @@ class BaseStatefulAgent(ABC):
         console_logger.info("[CRITIC harness] Step 1: observe_scene")
         observe_start = time.time()
         with self.rendering_manager.use_render_profile(render_profile):
-            result_observe = await Runner.run(
+            result_observe = await self._run_agent_with_stage_sla(
                 starting_agent=critic_observe,
                 input=critique_instruction,
+                role="critic",
+                event="observe_scene",
                 session=self.critic_session,
+                configured_max_turns=self.cfg.agents.critic_agent.max_turns,
                 run_config=run_config,
             )
         self._record_module_timing("critic", "observe_scene", observe_start)
-        log_agent_usage(result=result_observe, agent_name="CRITIC (observe)")
+        if result_observe is not None:
+            log_agent_usage(result=result_observe, agent_name="CRITIC (observe)")
         self._record_llm_call_debug(
             agent_role="critic",
             event="observe_scene",
             prompt=critique_instruction,
-            output=result_observe.final_output or "",
+            output=(result_observe.final_output or "") if result_observe else "",
             result=result_observe,
         )
 
@@ -2353,21 +2562,25 @@ class BaseStatefulAgent(ABC):
         else:
             console_logger.info("[CRITIC harness] Step 2: get_current_scene_state")
             scene_state_start = time.time()
-            result_scene = await Runner.run(
+            result_scene = await self._run_agent_with_stage_sla(
                 starting_agent=critic_scene_state,
                 input="Now retrieve exact object data with get_current_scene_state.",
+                role="critic",
+                event="get_current_scene_state",
                 session=self.critic_session,
+                configured_max_turns=self.cfg.agents.critic_agent.max_turns,
                 run_config=run_config,
             )
             self._record_module_timing(
                 "critic", "get_current_scene_state", scene_state_start
             )
-            log_agent_usage(result=result_scene, agent_name="CRITIC (scene_state)")
+            if result_scene is not None:
+                log_agent_usage(result=result_scene, agent_name="CRITIC (scene_state)")
             self._record_llm_call_debug(
                 agent_role="critic",
                 event="get_current_scene_state",
                 prompt="Now retrieve exact object data with get_current_scene_state.",
-                output=result_scene.final_output or "",
+                output=(result_scene.final_output or "") if result_scene else "",
                 result=result_scene,
             )
         if direct_scene_state:
@@ -2392,23 +2605,30 @@ class BaseStatefulAgent(ABC):
             f"{scene_state_block}"
         )
         try:
-            result = await Runner.run(
+            result = await self._run_agent_with_stage_sla(
                 starting_agent=critic_score,
                 input=score_prompt,
+                role="critic",
+                event="score_scene",
                 session=self.critic_session,
-                max_turns=self.cfg.agents.critic_agent.max_turns,
+                configured_max_turns=self.cfg.agents.critic_agent.max_turns,
                 run_config=run_config,
             )
             self._record_module_timing("critic", "score_scene", score_start)
-            log_agent_usage(result=result, agent_name="CRITIC (score)")
-            self._record_llm_call_debug(
-                agent_role="critic",
-                event="score_scene",
-                prompt=score_prompt,
-                output=result.final_output or "",
-                result=result,
-            )
-            response = result.final_output
+            if result is None:
+                response = self._make_transient_critic_fallback_scores(
+                    error=TimeoutError("critic stage execution budget exhausted")
+                )
+            else:
+                log_agent_usage(result=result, agent_name="CRITIC (score)")
+                self._record_llm_call_debug(
+                    agent_role="critic",
+                    event="score_scene",
+                    prompt=score_prompt,
+                    output=result.final_output or "",
+                    result=result,
+                )
+                response = result.final_output
         except Exception as exc:
             if not self._is_transient_model_error(exc):
                 raise
@@ -2555,11 +2775,13 @@ class BaseStatefulAgent(ABC):
         designer_start = time.time()
         render_dir_before = self.rendering_manager.last_render_dir
         try:
-            result = await Runner.run(
+            result = await self._run_agent_with_stage_sla(
                 starting_agent=self.designer,
                 input=full_instruction,
+                role="designer",
+                event="request_design_change",
                 session=self.designer_session,
-                max_turns=self.cfg.agents.designer_agent.max_turns,
+                configured_max_turns=self.cfg.agents.designer_agent.max_turns,
                 run_config=self._create_run_config(),
             )
         except Exception as exc:
@@ -2572,6 +2794,13 @@ class BaseStatefulAgent(ABC):
             self._end_furniture_design_transaction(transaction)
             raise
         self._record_module_timing("designer", "request_design_change", designer_start)
+        if result is None:
+            safety_msg = self._end_furniture_design_transaction(transaction)
+            return (
+                "Designer execution budget was exhausted. Preserve the current "
+                "candidate and continue to deterministic validation."
+                + safety_msg
+            )
         log_agent_usage(result=result, agent_name="DESIGNER (CHANGE)")
         self._record_llm_call_debug(
             agent_role="designer",
@@ -2688,11 +2917,13 @@ class BaseStatefulAgent(ABC):
         designer_start = time.time()
         render_dir_before = self.rendering_manager.last_render_dir
         try:
-            result = await Runner.run(
+            result = await self._run_agent_with_stage_sla(
                 starting_agent=self.designer,
                 input=input_message,
+                role="designer",
+                event="request_initial_design",
                 session=self.designer_session,
-                max_turns=self.cfg.agents.designer_agent.max_turns,
+                configured_max_turns=self.cfg.agents.designer_agent.max_turns,
                 run_config=self._create_run_config(),
             )
         except Exception as exc:
@@ -2705,6 +2936,13 @@ class BaseStatefulAgent(ABC):
             self._end_furniture_design_transaction(transaction)
             raise
         self._record_module_timing("designer", "request_initial_design", designer_start)
+        if result is None:
+            safety_msg = self._end_furniture_design_transaction(transaction)
+            return (
+                "Designer execution budget was exhausted. Preserve all objects "
+                "already created and continue to deterministic validation."
+                + safety_msg
+            )
         log_agent_usage(result=result, agent_name="DESIGNER (INITIAL)")
         self._record_llm_call_debug(
             agent_role="designer",

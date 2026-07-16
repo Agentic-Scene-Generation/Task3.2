@@ -1,6 +1,7 @@
 import logging
 import re
 import shutil
+import threading
 import time
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -25,6 +26,7 @@ from scenesmith.agent_utils.asset_router.dataclasses import (
     GeneratedGeometry,
     ModificationInfo,
 )
+from scenesmith.agent_utils.asset_runtime import AssetRuntimeGate, semantic_asset_family
 from scenesmith.agent_utils.convex_decomposition_server import ConvexDecompositionClient
 from scenesmith.agent_utils.geometry_generation_server.client import (
     GeometryGenerationClient,
@@ -46,6 +48,7 @@ from scenesmith.agent_utils.mesh_canonicalization import canonicalize_mesh
 from scenesmith.agent_utils.mesh_physics_analyzer import (
     MeshPhysicsAnalysis,
     analyze_mesh_orientation_and_material,
+    build_deterministic_hssd_physics,
 )
 from scenesmith.agent_utils.mesh_utils import (
     load_mesh_as_trimesh,
@@ -352,6 +355,33 @@ class AssetManager:
         # Track duplicate requests from the last generate_assets call.
         self.last_duplicate_info: dict[str, list[int]] | None = None
         self._fatal_asset_error: str | None = None
+        self._runtime_gate = AssetRuntimeGate()
+        self._collision_geometry_cache: dict[str, list[trimesh.Trimesh]] = {}
+        self._collision_cache_lock = threading.Lock()
+
+    def configure_runtime_budget(
+        self,
+        *,
+        stage: str,
+        budget: dict,
+        required_objects: list[str],
+    ) -> None:
+        """Configure per-stage acquisition limits supplied by SceneExpert."""
+        self._runtime_gate.configure(
+            stage=stage,
+            budget=budget,
+            required_objects=required_objects,
+        )
+        console_logger.info(
+            "Asset runtime budget configured for %s: required=%s, requests=%d, "
+            "optional_families=%d, assets_per_request=%d, retries_per_family=%d",
+            stage,
+            sorted(self._runtime_gate.required_families),
+            self._runtime_gate.max_asset_requests,
+            self._runtime_gate.max_optional_families,
+            self._runtime_gate.max_assets_per_request,
+            self._runtime_gate.max_retries_per_family,
+        )
 
     @staticmethod
     def _sanitize_filename(name: str, max_length: int = 50) -> str:
@@ -390,9 +420,34 @@ class AssetManager:
                 "Collision client not available. Cannot generate collision geometry."
             )
 
+        stat = mesh_path.stat()
+        method_cfg = (
+            self.collision_coacd_cfg
+            if self.collision_method == "coacd"
+            else self.collision_vhacd_cfg
+        )
+        cache_key = "|".join(
+            (
+                str(mesh_path.resolve()),
+                str(stat.st_size),
+                str(stat.st_mtime_ns),
+                str(self.collision_method),
+                repr(method_cfg),
+            )
+        )
+        with self._collision_cache_lock:
+            cached = self._collision_geometry_cache.get(cache_key)
+        if cached is not None:
+            console_logger.info(
+                "Collision geometry cache hit for %s (%d piece(s))",
+                mesh_path.name,
+                len(cached),
+            )
+            return [piece.copy() for piece in cached]
+
         # Build parameter dict based on method.
         if self.collision_method == "coacd":
-            return self.collision_client.generate_collision_geometry(
+            pieces = self.collision_client.generate_collision_geometry(
                 mesh_path=mesh_path,
                 method="coacd",
                 threshold=self.collision_coacd_cfg.threshold,
@@ -414,7 +469,7 @@ class AssetManager:
             )
         else:
             # V-HACD method.
-            return self.collision_client.generate_collision_geometry(
+            pieces = self.collision_client.generate_collision_geometry(
                 mesh_path=mesh_path,
                 method="vhacd",
                 max_convex_hulls=self.collision_vhacd_cfg.max_convex_hulls,
@@ -427,6 +482,15 @@ class AssetManager:
                 min_edge_length=self.collision_vhacd_cfg.min_edge_length,
                 find_best_plane=self.collision_vhacd_cfg.find_best_plane,
             )
+        with self._collision_cache_lock:
+            self._collision_geometry_cache[cache_key] = [
+                piece.copy() for piece in pieces
+            ]
+            while len(self._collision_geometry_cache) > 64:
+                self._collision_geometry_cache.pop(
+                    next(iter(self._collision_geometry_cache))
+                )
+        return pieces
 
     def _validate_sam3d_config(self) -> None:
         """Validate SAM3D configuration at startup.
@@ -483,6 +547,47 @@ class AssetManager:
         console_logger.info(
             f"SAM3D configuration validated successfully (mode={mode}, "
             f"threshold={threshold})"
+        )
+
+    def _analyze_mesh_physics(
+        self,
+        *,
+        mesh_path: Path,
+        asset_source: str,
+        object_name: str,
+        debug_output_dir: Path,
+    ) -> MeshPhysicsAnalysis:
+        """Use deterministic HSSD metadata unless explicitly configured for VLM."""
+        is_hssd = asset_source == "hssd"
+        hssd_mode = str(
+            getattr(
+                self.cfg.asset_manager,
+                "hssd_physics_analysis_mode",
+                "deterministic",
+            )
+        ).lower()
+        if is_hssd and hssd_mode == "deterministic":
+            physics = build_deterministic_hssd_physics(
+                mesh_path, object_name=object_name
+            )
+            console_logger.info(
+                "Using deterministic HSSD physics for %s: material=%s, mass=%.1fkg",
+                object_name,
+                physics.material,
+                physics.mass_kg,
+            )
+            return physics
+
+        return analyze_mesh_orientation_and_material(
+            mesh_path=mesh_path,
+            vlm_service=self.vlm_service,
+            cfg=self.cfg,
+            elevation_degrees=self.side_view_elevation_degrees,
+            blender_server=self.blender_server,
+            num_side_views=self.num_side_views_for_physics_analysis,
+            prompt_type="hssd" if is_hssd else "generated",
+            include_vertical_views=not is_hssd,
+            debug_output_dir=debug_output_dir,
         )
 
     def _retrieve_hssd_assets(
@@ -577,7 +682,7 @@ class AssetManager:
                     # Already GLTF, use as-is.
                     gltf_path = server_mesh_path
 
-                # Run VLM analysis for material and mass estimation.
+                # Resolve material and mass from the configured HSSD physics mode.
                 # Use HSSD-specific prompts and only side views to constrain
                 # rotation to Z-axis. Orientation (Z-up) is correct from HSSD
                 # transformation pipeline.
@@ -585,26 +690,26 @@ class AssetManager:
                 debug_dir = self.debug_dir / short_name
 
                 console_logger.info(
-                    f"Running VLM analysis for HSSD material/mass: {short_name}"
+                    "Resolving HSSD physics metadata for %s (mode=%s)",
+                    short_name,
+                    getattr(
+                        self.cfg.asset_manager,
+                        "hssd_physics_analysis_mode",
+                        "deterministic",
+                    ),
                 )
-                vlm_physics = analyze_mesh_orientation_and_material(
+                vlm_physics = self._analyze_mesh_physics(
                     mesh_path=gltf_path,
-                    vlm_service=self.vlm_service,
-                    cfg=self.cfg,
-                    elevation_degrees=self.side_view_elevation_degrees,
-                    blender_server=self.blender_server,
-                    num_side_views=self.num_side_views_for_physics_analysis,
-                    prompt_type="hssd",
-                    include_vertical_views=False,
+                    asset_source="hssd",
+                    object_name=short_name,
                     debug_output_dir=debug_dir,
                 )
                 console_logger.info(
-                    f"VLM analysis complete: material={vlm_physics.material}, "
+                    f"HSSD physics metadata complete: material={vlm_physics.material}, "
                     f"mass={vlm_physics.mass_kg}kg, front={vlm_physics.front_axis}"
                 )
 
-                # Use VLM's material, mass, and front axis determination.
-                # up_axis is always Z for HSSD (validated by VLM).
+                # Use the selected physics metadata. HSSD is always Z-up.
                 physics_analysis = MeshPhysicsAnalysis(
                     up_axis=vlm_physics.up_axis,
                     front_axis=vlm_physics.front_axis,
@@ -1003,24 +1108,116 @@ class AssetManager:
         if self._fatal_asset_error:
             return self._fatal_generation_result(request, self._fatal_asset_error)
 
+        original_request = request
+        gate_plan = None
+        prefetched_assets: list[SceneObject] = []
+        gate_failures: list[FailedAsset] = []
+        original_indices: list[int] = list(range(len(request.object_descriptions)))
+        if self._runtime_gate.enabled and (
+            len(request.object_descriptions)
+            == len(request.short_names)
+            == len(request.desired_dimensions)
+        ):
+            gate_plan = self._runtime_gate.plan(
+                request.object_descriptions,
+                request.short_names,
+            )
+            prefetched_assets = list(gate_plan.cached_assets)
+            gate_failures = [
+                FailedAsset(
+                    index=failure.index,
+                    description=failure.description,
+                    error_message=failure.reason,
+                )
+                for failure in gate_plan.failures
+            ]
+            original_indices = gate_plan.allowed_indices
+            if not original_indices:
+                console_logger.info(
+                    "Asset runtime gate served %d cached asset(s) and blocked/deferred "
+                    "%d request item(s); no acquisition call needed",
+                    len(prefetched_assets),
+                    len(gate_failures),
+                )
+                return AssetGenerationResult(
+                    successful_assets=prefetched_assets,
+                    failed_assets=gate_failures,
+                )
+            request = AssetGenerationRequest(
+                object_descriptions=[
+                    original_request.object_descriptions[index]
+                    for index in original_indices
+                ],
+                short_names=[
+                    original_request.short_names[index] for index in original_indices
+                ],
+                object_type=original_request.object_type,
+                desired_dimensions=[
+                    original_request.desired_dimensions[index]
+                    for index in original_indices
+                ],
+                style_context=original_request.style_context,
+                operation_type=original_request.operation_type,
+                scene_id=original_request.scene_id,
+            )
+
         try:
             # If router is enabled, analyze and potentially modify the request.
             if self.router is not None:
-                return self._generate_assets_with_router(request)
+                result = self._generate_assets_with_router(request)
 
             # Dispatch based on asset source (router disabled).
-            if self.general_asset_source == "hssd":
-                return self._retrieve_hssd_assets(request)
+            elif self.general_asset_source == "hssd":
+                result = self._retrieve_hssd_assets(request)
             elif self.general_asset_source == "objaverse":
-                return self._retrieve_objaverse_assets(request)
+                result = self._retrieve_objaverse_assets(request)
             elif self.general_asset_source == "generated":
-                return self._generate_assets_with_model(request)
+                result = self._generate_assets_with_model(request)
             else:
                 # This should never happen due to __init__ validation.
                 raise ValueError(f"Unknown asset source: {self.general_asset_source}")
         except FatalRetrievalError as e:
             self._fatal_asset_error = str(e)
-            return self._fatal_generation_result(request, str(e))
+            result = self._fatal_generation_result(request, str(e))
+
+        if gate_plan is None:
+            return result
+
+        allowed_families = [
+            gate_plan.families_by_index[index] for index in original_indices
+        ]
+        allowed_family_set = set(allowed_families)
+        for result_index, asset in enumerate(result.successful_assets):
+            inferred_family = semantic_asset_family(
+                str(getattr(asset, "description", "")),
+                str(getattr(asset, "name", "")),
+            )
+            if inferred_family not in allowed_family_set:
+                inferred_family = allowed_families[
+                    min(result_index, len(allowed_families) - 1)
+                ]
+            self._runtime_gate.remember_success(inferred_family, asset)
+
+        remapped_failures = []
+        for failure in result.failed_assets:
+            relative_index = int(failure.index)
+            original_index = (
+                original_indices[relative_index]
+                if 0 <= relative_index < len(original_indices)
+                else relative_index
+            )
+            remapped_failures.append(
+                FailedAsset(
+                    index=original_index,
+                    description=failure.description,
+                    error_message=failure.error_message,
+                )
+            )
+        return AssetGenerationResult(
+            successful_assets=prefetched_assets + result.successful_assets,
+            failed_assets=gate_failures + remapped_failures,
+            modification_info=result.modification_info,
+        )
 
     def _fatal_generation_result(
         self, request: AssetGenerationRequest, error_message: str
@@ -1893,8 +2090,9 @@ class AssetManager:
             distance_threshold=self.cfg.asset_manager.floater_distance_threshold,
         )
 
-        # VLM analysis for orientation, material, mass.
-        # Create debug directory for saving multi-view physics analysis images.
+        # Resolve orientation, material, and mass. Generated assets use the VLM;
+        # HSSD assets use deterministic metadata unless explicitly overridden.
+        # Keep a debug directory available for the VLM path.
         # Use geometry_path stem to match asset naming pattern (e.g., "desk_A_1234567890").
         debug_dir = self.debug_dir / config.geometry_path.stem
 
@@ -1902,26 +2100,21 @@ class AssetManager:
         # already upright (Z-up). Generated assets need full orientation analysis.
         is_hssd = asset_source == "hssd"
         prompt_type = "hssd" if is_hssd else "generated"
-        include_vertical_views = not is_hssd
 
         console_logger.info(
-            f"Running VLM analysis for mesh physics "
-            f"(asset_source={asset_source}, prompt_type={prompt_type})"
+            "Resolving mesh physics (asset_source=%s, prompt_type=%s)",
+            asset_source,
+            prompt_type,
         )
-        physics_analysis = analyze_mesh_orientation_and_material(
+        physics_analysis = self._analyze_mesh_physics(
             mesh_path=gltf_path,
-            vlm_service=self.vlm_service,
-            cfg=self.cfg,
-            elevation_degrees=self.side_view_elevation_degrees,
-            blender_server=self.blender_server,
-            num_side_views=self.num_side_views_for_physics_analysis,
+            asset_source=asset_source,
+            object_name=config.short_name,
             debug_output_dir=debug_dir,
-            prompt_type=prompt_type,
-            include_vertical_views=include_vertical_views,
         )
 
         console_logger.info(
-            f"VLM analysis complete: up={physics_analysis.up_axis}, "
+            f"Mesh physics complete: up={physics_analysis.up_axis}, "
             f"front={physics_analysis.front_axis}, material={physics_analysis.material}, "
             f"mass={physics_analysis.mass_kg}kg"
         )
@@ -2207,3 +2400,4 @@ class AssetManager:
     def clear_asset_registry(self) -> None:
         """Clear the asset registry."""
         self.registry.clear()
+        self._runtime_gate.clear_success_cache()

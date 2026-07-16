@@ -87,6 +87,24 @@ class BoundedFurniture:
 
 
 class FurnitureSafetyControllerTest(unittest.TestCase):
+    def test_physics_collision_keeps_structured_object_pair(self) -> None:
+        controller = FurnitureSafetyController({"enabled": True})
+        scene = SimpleNamespace(objects={}, room_geometry=None, text_description="office")
+        evaluation = controller.evaluate_scene_state(
+            scene,
+            physics_context=(
+                "Physics violations detected (1 issue(s)):\n"
+                "Collisions (1):\n"
+                "- chair_0 collides with desk_0 (3.2cm penetration)"
+            ),
+        )
+
+        self.assertFalse(evaluation.hard_valid)
+        self.assertEqual(len(evaluation.issues), 1)
+        self.assertEqual(evaluation.issues[0].object_a_id, "chair_0")
+        self.assertEqual(evaluation.issues[0].object_b_id, "desk_0")
+        self.assertAlmostEqual(evaluation.issues[0].penetration_depth_m, 0.032)
+
     def test_window_only_issue_is_soft(self) -> None:
         controller = FurnitureSafetyController({"enabled": True})
         evaluation = controller.evaluate_scores(make_scores())

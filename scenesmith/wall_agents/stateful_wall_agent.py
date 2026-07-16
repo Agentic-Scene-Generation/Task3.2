@@ -14,8 +14,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from agents import Agent, FunctionTool, Runner
-from agents.run import RunResult
+from agents import Agent, FunctionTool
 from agents.tracing import custom_span
 from omegaconf import DictConfig
 
@@ -366,15 +365,18 @@ class StatefulWallAgent(BaseStatefulAgent, BaseWallAgent):
             prompt_enum=planner_runner_prompt,
         )
 
-        result: RunResult = await Runner.run(
+        result = await self._run_agent_with_stage_sla(
             starting_agent=self.planner,
             input=runner_instruction,
-            max_turns=self.cfg.agents.planner_agent.max_turns,
+            role="planner",
+            event="planner_workflow",
+            configured_max_turns=self.cfg.agents.planner_agent.max_turns,
             run_config=self._create_run_config(),
         )
-        log_agent_usage(result=result, agent_name="PLANNER (WALL)")
+        if result is not None:
+            log_agent_usage(result=result, agent_name="PLANNER (WALL)")
 
-        if result.final_output:
+        if result is not None and result.final_output:
             log_agent_response(
                 response=result.final_output, agent_name="PLANNER (WALL)"
             )
@@ -421,6 +423,7 @@ class StatefulWallAgent(BaseStatefulAgent, BaseWallAgent):
         """
         console_logger.info("Starting wall decoration")
         self.scene = scene
+        self._configure_stage_runtime(scene)
 
         # Extract wall surfaces for the room.
         room_id = scene.room_id

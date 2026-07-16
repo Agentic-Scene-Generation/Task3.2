@@ -1054,6 +1054,18 @@ class SceneExpertHookRunner:
             )
         setattr(scene, "scene_expert_task_spec", self._task_spec.model_dump())
         setattr(scene, "scene_expert_stage", stage)
+        setattr(scene, "scene_expert_stage_budget", context.stage_budget.model_dump())
+        required_by_stage = {
+            "furniture": self._task_spec.required_large_objects,
+            "wall_mounted": self._task_spec.required_wall_objects,
+            "ceiling_mounted": self._task_spec.required_ceiling_objects,
+            "manipuland": self._task_spec.required_small_objects,
+        }
+        setattr(
+            scene,
+            "scene_expert_required_objects",
+            list(required_by_stage.get(stage, [])),
+        )
         injection_text = "\n\n".join(injection_parts)
         self._current_execution_evidence = self._build_execution_evidence(
             stage=stage,

@@ -18,6 +18,12 @@ from typing import Any, Callable
 console_logger = logging.getLogger(__name__)
 
 
+def _compact_failure(error: Any, max_chars: int = 500) -> str:
+    lines = [line.strip() for line in str(error or "").splitlines() if line.strip()]
+    summary = lines[-1] if lines else "unknown failure"
+    return summary if len(summary) <= max_chars else summary[: max_chars - 3] + "..."
+
+
 def _get_isolated_process_context() -> multiprocessing.context.BaseContext:
     """Select a clean process context without re-importing the ACP entrypoint."""
     available_methods = multiprocessing.get_all_start_methods()
@@ -167,7 +173,11 @@ def run_parallel_isolated(
             try:
                 result_task_id, success, result_or_error = result_queue.get_nowait()
                 results[result_task_id] = (success, result_or_error)
-                status = "completed" if success else f"failed: {result_or_error}"
+                status = (
+                    "completed"
+                    if success
+                    else f"failed: {_compact_failure(result_or_error)}"
+                )
                 console_logger.info(f"{result_task_id} {status}")
             except queue.Empty:
                 break
@@ -187,7 +197,11 @@ def run_parallel_isolated(
             try:
                 result_task_id, success, result_or_error = result_queue.get_nowait()
                 results[result_task_id] = (success, result_or_error)
-                status = "completed" if success else f"failed: {result_or_error}"
+                status = (
+                    "completed"
+                    if success
+                    else f"failed: {_compact_failure(result_or_error)}"
+                )
                 console_logger.info(f"{result_task_id} {status}")
             except queue.Empty:
                 break

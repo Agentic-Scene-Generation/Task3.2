@@ -75,6 +75,17 @@ class SafetyEvaluation:
 
 
 @dataclass
+class HardIssue:
+    """Structured deterministic issue used by code-level repair operators."""
+
+    issue_type: str
+    object_a_id: str = ""
+    object_b_id: str = ""
+    penetration_depth_m: float = 0.0
+    details: str = ""
+
+
+@dataclass
 class HardStateEvaluation:
     """Deterministic hard-check result independent of critic scoring."""
 
@@ -83,6 +94,7 @@ class HardStateEvaluation:
     soft_reasons: list[str] = field(default_factory=list)
     weighted_score_penalty: float = 0.0
     plausibility_report: dict[str, Any] | None = None
+    issues: list[HardIssue] = field(default_factory=list)
 
 
 @dataclass
@@ -814,6 +826,7 @@ class FurnitureSafetyController:
         """Run deterministic hard checks that do not depend on critic judgment."""
         hard_reasons: list[str] = []
         soft_reasons: list[str] = []
+        hard_issues: list[HardIssue] = []
 
         required_counts = self.required_counts or {
             term: 1 for term in self.required_terms
@@ -831,9 +844,17 @@ class FurnitureSafetyController:
                     observed_counts[category] += 1
             for term, required_count in required_counts.items():
                 if observed_counts.get(term, 0) < required_count:
-                    hard_reasons.append(
+                    reason = (
                         f"missing required {term}: expected {required_count}, "
                         f"found {observed_counts.get(term, 0)}"
+                    )
+                    hard_reasons.append(reason)
+                    hard_issues.append(
+                        HardIssue(
+                            issue_type="missing_required_object",
+                            object_a_id=term,
+                            details=reason,
+                        )
                     )
 
         room_bounds = self._room_bounds_xy(scene)
@@ -855,12 +876,20 @@ class FurnitureSafetyController:
                     or world_min[1] < min_y - tol
                     or world_max[1] > max_y + tol
                 ):
-                    hard_reasons.append(
+                    reason = (
                         f"{object_id} full bounding box exceeds room bounds: "
                         f"x=[{world_min[0]:.3f}, {world_max[0]:.3f}] vs "
                         f"[{min_x:.3f}, {max_x:.3f}], "
                         f"y=[{world_min[1]:.3f}, {world_max[1]:.3f}] vs "
                         f"[{min_y:.3f}, {max_y:.3f}]"
+                    )
+                    hard_reasons.append(reason)
+                    hard_issues.append(
+                        HardIssue(
+                            issue_type="out_of_bounds",
+                            object_a_id=str(object_id),
+                            details=reason,
+                        )
                     )
 
         bedroom_scene = is_bedroom_scene(scene)
@@ -873,6 +902,7 @@ class FurnitureSafetyController:
             )
             hard_reasons.extend(hard_from_physics)
             soft_reasons.extend(soft_from_physics)
+            hard_issues.extend(self._parse_hard_issues(physics_context))
 
         plausibility_report = None
         if bedroom_scene:
@@ -910,6 +940,7 @@ class FurnitureSafetyController:
                 if plausibility_report is not None
                 else None
             ),
+            issues=hard_issues,
         )
 
     def _room_bounds_xy(self, scene: Any) -> tuple[float, float, float, float] | None:
@@ -1085,6 +1116,50 @@ class FurnitureSafetyController:
             soft_reasons.append("non-hard physics warning")
 
         return hard_reasons, soft_reasons
+
+    def _parse_hard_issues(self, physics_context: str) -> list[HardIssue]:
+        """Preserve collision object IDs that were previously flattened to text."""
+        issues: list[HardIssue] = []
+        collision_pattern = re.compile(
+            r"^\s*-\s+(?P<a>\S+)\s+collides\s+with\s+(?P<b>\S+)\s+"
+            r"\((?:(?P<depth>[0-9.]+)cm penetration|touching)\)\s*$",
+            flags=re.IGNORECASE | re.MULTILINE,
+        )
+        seen_pairs: set[tuple[str, str]] = set()
+        for match in collision_pattern.finditer(str(physics_context or "")):
+            object_a = match.group("a")
+            object_b = match.group("b")
+            pair = tuple(sorted((object_a, object_b)))
+            if pair in seen_pairs:
+                continue
+            seen_pairs.add(pair)
+            depth_cm = float(match.group("depth") or 0.0)
+            issues.append(
+                HardIssue(
+                    issue_type="collision_or_overlap",
+                    object_a_id=object_a,
+                    object_b_id=object_b,
+                    penetration_depth_m=depth_cm / 100.0,
+                    details=match.group(0).strip(" -"),
+                )
+            )
+
+        text = str(physics_context or "").lower()
+        if "door clearance violations" in text or "open connection blocked" in text:
+            issues.append(
+                HardIssue(
+                    issue_type="door_or_opening_clearance",
+                    details="Door or open-connection clearance violation",
+                )
+            )
+        if "geometry construction failed" in text or "drake/qhull" in text:
+            issues.append(
+                HardIssue(
+                    issue_type="asset_invalid",
+                    details="Geometry construction failed",
+                )
+            )
+        return issues
 
     def remember_hard_valid_scene_state(
         self,

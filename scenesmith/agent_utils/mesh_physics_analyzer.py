@@ -72,9 +72,11 @@ def _is_transient_vlm_error(error: Exception) -> bool:
     return "timed out" in message or "timeout" in message
 
 
-def _fallback_hssd_physics(mesh_path: Path) -> MeshPhysicsAnalysis:
-    """Conservative metadata for already-upright HSSD assets on VLM timeout."""
-    name = mesh_path.stem.lower()
+def build_deterministic_hssd_physics(
+    mesh_path: Path, object_name: str | None = None
+) -> MeshPhysicsAnalysis:
+    """Return conservative metadata for already-upright HSSD assets."""
+    name = (object_name or mesh_path.stem).lower()
     material = "wood"
     mass_kg = 12.0
     if any(term in name for term in ("painting", "artwork", "poster", "clock")):
@@ -359,7 +361,7 @@ def analyze_mesh_orientation_and_material(
             )
         )
         if prompt_type == "hssd" and fallback_enabled and _is_transient_vlm_error(e):
-            fallback = _fallback_hssd_physics(mesh_path)
+            fallback = build_deterministic_hssd_physics(mesh_path)
             console_logger.warning(
                 "HSSD VLM physics analysis failed transiently for %s; "
                 "using canonical HSSD fallback (up=%s, front=%s, material=%s, "

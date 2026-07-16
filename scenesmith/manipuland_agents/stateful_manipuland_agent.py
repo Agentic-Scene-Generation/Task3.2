@@ -11,7 +11,7 @@ import math
 from pathlib import Path
 from typing import Any
 
-from agents import Agent, FunctionTool, Runner, RunResult, custom_span
+from agents import Agent, FunctionTool, custom_span
 from omegaconf import DictConfig
 
 from scenesmith.agent_utils.base_stateful_agent import (
@@ -630,15 +630,18 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
             prompt_enum=planner_runner_prompt,
         )
 
-        result: RunResult = await Runner.run(
+        result = await self._run_agent_with_stage_sla(
             starting_agent=self.planner,
             input=runner_instruction,
-            max_turns=self.cfg.agents.planner_agent.max_turns,
+            role="planner",
+            event="planner_workflow",
+            configured_max_turns=self.cfg.agents.planner_agent.max_turns,
             run_config=self._create_run_config(),
         )
-        log_agent_usage(result=result, agent_name="PLANNER (MANIPULAND)")
+        if result is not None:
+            log_agent_usage(result=result, agent_name="PLANNER (MANIPULAND)")
 
-        if result.final_output:
+        if result is not None and result.final_output:
             log_agent_response(
                 response=result.final_output, agent_name="PLANNER (MANIPULAND)"
             )
@@ -712,6 +715,8 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
                 not halt processing of remaining furniture.
         """
         console_logger.info("Starting manipuland placement")
+        self.scene = scene
+        self._configure_stage_runtime(scene)
         self.scene = scene
 
         # Clear render cache to ensure fresh renders for manipulands.

@@ -15,7 +15,7 @@ from typing import Any
 import numpy as np
 import trimesh
 
-from agents import Agent, FunctionTool, Runner, RunResult
+from agents import Agent, FunctionTool
 from omegaconf import DictConfig
 from pydrake.all import RigidTransform, RollPitchYaw
 
@@ -317,6 +317,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         """
         # Store everything as instance variables for closure access.
         self.scene = scene
+        self._configure_stage_runtime(scene)
         safety_description = getattr(
             scene,
             "scene_expert_original_description",
@@ -348,15 +349,18 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         )
 
         # Run the furniture placement workflow.
-        result: RunResult = await Runner.run(
+        result = await self._run_agent_with_stage_sla(
             starting_agent=self.planner,
             input=runner_instruction,
-            max_turns=self.cfg.agents.planner_agent.max_turns,
+            role="planner",
+            event="planner_workflow",
+            configured_max_turns=self.cfg.agents.planner_agent.max_turns,
             run_config=self._create_run_config(),
         )
-        log_agent_usage(result=result, agent_name="PLANNER (FURNITURE)")
+        if result is not None:
+            log_agent_usage(result=result, agent_name="PLANNER (FURNITURE)")
 
-        if result.final_output:
+        if result is not None and result.final_output:
             log_agent_response(
                 response=result.final_output, agent_name="PLANNER (FURNITURE)"
             )
@@ -515,22 +519,158 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         ):
             actions.append("cleared deterministic door/opening forbidden zones")
 
-        if not is_bedroom_scene(self.scene):
-            return bool(actions), actions
+        relation_changed = False
+        if is_bedroom_scene(self.scene):
+            if self._anchor_existing_bed():
+                actions.append("anchored bed to deterministic bedroom head wall")
+                relation_changed = True
+            if self._repair_bedside_nightstands():
+                actions.append(
+                    "repositioned nightstands to deterministic bedside anchors"
+                )
+                relation_changed = True
+            if (
+                "window access warning" in reasons
+                or "wardrobe" in reasons
+                or "closet" in reasons
+                or FailureCategory.WINDOW_OR_WALL_ACCESS in repair_plan.categories
+            ) and self._repair_wardrobe_wall_anchor():
+                actions.append("moved wardrobe to a deterministic wall/corner anchor")
+                relation_changed = True
 
-        if self._anchor_existing_bed():
-            actions.append("anchored bed to deterministic bedroom head wall")
-        if self._repair_bedside_nightstands():
-            actions.append("repositioned nightstands to deterministic bedside anchors")
-        if (
-            "window access warning" in reasons
-            or "wardrobe" in reasons
-            or "closet" in reasons
-            or FailureCategory.WINDOW_OR_WALL_ACCESS in repair_plan.categories
-        ) and self._repair_wardrobe_wall_anchor():
-            actions.append("moved wardrobe to a deterministic wall/corner anchor")
+        # Structured collision pairs survive the verifier boundary. If a
+        # bedroom relation operator already moved objects, defer collision
+        # handling until the next re-evaluation so stale pairs are not applied.
+        if not relation_changed:
+            repaired_collisions = self._repair_structured_collisions(hard_state)
+            if repaired_collisions:
+                actions.append(
+                    f"separated {repaired_collisions} structured collision pair(s)"
+                )
 
         return bool(actions), actions
+
+    def _repair_structured_collisions(self, hard_state: HardStateEvaluation) -> int:
+        if self.scene is None:
+            return 0
+        collision_issues = [
+            issue
+            for issue in getattr(hard_state, "issues", [])
+            if getattr(issue, "issue_type", "") == "collision_or_overlap"
+        ]
+        repaired = 0
+        moved_ids: set[str] = set()
+        for issue in collision_issues:
+            object_a = self._scene_object_by_string_id(issue.object_a_id)
+            object_b = self._scene_object_by_string_id(issue.object_b_id)
+            movable = [
+                obj
+                for obj in (object_a, object_b)
+                if obj is not None
+                and not getattr(obj, "immutable", False)
+                and str(getattr(obj.object_type, "value", obj.object_type)).lower()
+                == "furniture"
+            ]
+            if not movable:
+                continue
+
+            def move_priority(obj: SceneObject) -> tuple[int, float]:
+                category = self._category_for_object(obj.object_id, obj)
+                required = bool(category and self._required_count(category) > 0)
+                bounds = obj.compute_world_bounds()
+                if bounds is None:
+                    footprint = float("inf")
+                else:
+                    bounds_min = np.asarray(bounds[0], dtype=float)
+                    bounds_max = np.asarray(bounds[1], dtype=float)
+                    footprint = float(
+                        np.prod(np.maximum(0.0, bounds_max[:2] - bounds_min[:2]))
+                    )
+                return (1 if required else 0, footprint)
+
+            movable.sort(key=move_priority)
+            obj = movable[0]
+            if str(obj.object_id) in moved_ids:
+                continue
+            other = object_b if obj is object_a else object_a
+            transform = self._best_collision_separation_transform(obj, other)
+            if transform is None or self._transform_close(obj.transform, transform):
+                continue
+            old_penalty = self._furniture_placement_penalty(
+                obj, obj.transform, exclude_object_id=str(obj.object_id)
+            )
+            new_penalty = self._furniture_placement_penalty(
+                obj, transform, exclude_object_id=str(obj.object_id)
+            )
+            if new_penalty + 1e-5 >= old_penalty:
+                continue
+            self.scene.move_object(obj.object_id, transform)
+            moved_ids.add(str(obj.object_id))
+            repaired += 1
+            console_logger.info(
+                "Deterministic collision repair moved %s away from %s "
+                "(penalty %.4f -> %.4f)",
+                obj.object_id,
+                getattr(other, "object_id", "unknown"),
+                old_penalty,
+                new_penalty,
+            )
+        return repaired
+
+    def _scene_object_by_string_id(self, object_id: str) -> SceneObject | None:
+        if self.scene is None:
+            return None
+        for candidate_id, obj in self.scene.objects.items():
+            if str(candidate_id) == str(object_id):
+                return obj
+        return None
+
+    def _best_collision_separation_transform(
+        self,
+        obj: SceneObject,
+        other: SceneObject | None,
+    ) -> RigidTransform | None:
+        if other is None:
+            return self._best_generic_repair_transform(
+                obj,
+                fallback=obj.transform,
+                exclude_object_id=str(obj.object_id),
+            )
+        obj_bounds = obj.compute_world_bounds()
+        other_bounds = other.compute_world_bounds()
+        if obj_bounds is None or other_bounds is None:
+            return None
+        obj_min = np.asarray(obj_bounds[0], dtype=float)
+        obj_max = np.asarray(obj_bounds[1], dtype=float)
+        other_min = np.asarray(other_bounds[0], dtype=float)
+        other_max = np.asarray(other_bounds[1], dtype=float)
+        obj_center = (obj_min + obj_max) / 2.0
+        current_translation = np.asarray(obj.transform.translation(), dtype=float)
+        origin_offset = current_translation[:2] - obj_center[:2]
+        half_size = (obj_max[:2] - obj_min[:2]) / 2.0
+        gap = float(self._repair_cfg_value("collision_separation_gap_m", 0.08))
+        candidate_centers = (
+            np.asarray([other_min[0] - half_size[0] - gap, obj_center[1]]),
+            np.asarray([other_max[0] + half_size[0] + gap, obj_center[1]]),
+            np.asarray([obj_center[0], other_min[1] - half_size[1] - gap]),
+            np.asarray([obj_center[0], other_max[1] + half_size[1] + gap]),
+        )
+        yaw = math.degrees(RollPitchYaw(obj.transform.rotation()).yaw_angle())
+        best: RigidTransform | None = None
+        best_penalty = float("inf")
+        for center in candidate_centers:
+            xy = center + origin_offset
+            candidate = self._grounded_transform(
+                obj, x=float(xy[0]), y=float(xy[1]), yaw_deg=yaw
+            )
+            candidate = self._fit_transform_inside_room(obj, candidate)
+            penalty = self._furniture_placement_penalty(
+                obj, candidate, exclude_object_id=str(obj.object_id)
+            )
+            if penalty < best_penalty:
+                best = candidate
+                best_penalty = penalty
+        return best
 
     def _replace_geometry_failed_furniture_assets(self, reasons: str) -> int:
         """Replace required furniture whose SDF/mesh cannot be loaded by Drake."""
@@ -854,6 +994,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         obj: SceneObject,
         *,
         fallback: RigidTransform,
+        exclude_object_id: str = "",
     ) -> RigidTransform:
         """Choose a low-overlap in-bounds pose for non-bedroom repair assets."""
         room_bounds = self._room_bounds_xy()
@@ -874,37 +1015,58 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                     bounds = self._bounds_for_transform(obj, candidate)
                     if bounds is None:
                         continue
-                    penalty = self._zone_overlap_penalty(bounds, zones)
-                    for existing in self.scene.objects.values():
-                        if getattr(existing, "immutable", False):
-                            continue
-                        existing_type = getattr(existing, "object_type", None)
-                        existing_value = getattr(existing_type, "value", existing_type)
-                        if str(existing_value).lower() != "furniture":
-                            continue
-                        try:
-                            existing_bounds = existing.compute_world_bounds()
-                        except Exception as exc:
-                            console_logger.warning(
-                                "Skipping invalid obstacle %s while placing %s: %s",
-                                getattr(existing, "object_id", "unknown"),
-                                getattr(obj, "object_id", "repair_asset"),
-                                exc,
-                            )
-                            continue
-                        if existing_bounds is None:
-                            continue
-                        overlap_x, overlap_y = self._xy_overlap_depths(
-                            bounds,
-                            existing_bounds,
-                        )
-                        penalty += overlap_x * overlap_y * 1000.0
+                    penalty = self._furniture_placement_penalty(
+                        obj,
+                        candidate,
+                        exclude_object_id=exclude_object_id,
+                    )
                     if penalty < best_penalty:
                         best = candidate
                         best_penalty = penalty
                     if penalty <= 1e-6:
                         return candidate
         return best
+
+    def _furniture_placement_penalty(
+        self,
+        obj: SceneObject,
+        transform: RigidTransform,
+        *,
+        exclude_object_id: str = "",
+    ) -> float:
+        if self.scene is None:
+            return float("inf")
+        bounds = self._bounds_for_transform(obj, transform)
+        if bounds is None:
+            return float("inf")
+        penalty = self._zone_overlap_penalty(
+            bounds,
+            self._opening_forbidden_zones(include_windows=False),
+        )
+        for existing_id, existing in self.scene.objects.items():
+            if str(existing_id) == exclude_object_id:
+                continue
+            if getattr(existing, "immutable", False):
+                continue
+            existing_type = getattr(existing, "object_type", None)
+            existing_value = getattr(existing_type, "value", existing_type)
+            if str(existing_value).lower() != "furniture":
+                continue
+            try:
+                existing_bounds = existing.compute_world_bounds()
+            except Exception as exc:
+                console_logger.warning(
+                    "Skipping invalid obstacle %s while placing %s: %s",
+                    getattr(existing, "object_id", "unknown"),
+                    getattr(obj, "object_id", "repair_asset"),
+                    exc,
+                )
+                continue
+            if existing_bounds is None:
+                continue
+            overlap_x, overlap_y = self._xy_overlap_depths(bounds, existing_bounds)
+            penalty += overlap_x * overlap_y * 1000.0
+        return penalty
 
     def _default_repair_pose(self, category: str) -> tuple[float, float, float]:
         room_bounds = self._room_bounds_xy()
@@ -1102,10 +1264,10 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         if zone_min is not None and zone_max is not None:
             return np.asarray(zone_min, dtype=float), np.asarray(zone_max, dtype=float)
 
-            opening_type_raw = getattr(opening, "opening_type", "")
-            opening_type = str(
-                getattr(opening_type_raw, "value", opening_type_raw)
-            ).lower()
+        opening_type_raw = getattr(opening, "opening_type", "")
+        opening_type = str(
+            getattr(opening_type_raw, "value", opening_type_raw)
+        ).lower()
         if opening_type != "open":
             return None
         try:

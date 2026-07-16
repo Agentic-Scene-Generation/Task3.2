@@ -87,6 +87,9 @@ rendering:
 
 # Asset manager configuration
 asset_manager:
+  # HSSD meshes are already upright and canonicalized. Avoid one VLM call per
+  # retrieved asset; set to "vlm" only for physics-label research runs.
+  hssd_physics_analysis_mode: deterministic  # deterministic | vlm
   # Asset source: "generated" (Hunyuan3D/SAM3D) or "hssd" (HSSD retrieval)
   general_asset_source: "hssd"
   # HSSD meshes are already Z-up. Preserve the asset with conservative physics

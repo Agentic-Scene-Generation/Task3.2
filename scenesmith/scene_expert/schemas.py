@@ -120,6 +120,14 @@ class StageBudget(BaseModel):
 
     max_designer_iterations: int = 2
     max_repair_steps: int = 1
+    max_planner_turns: int = 4
+    max_designer_turns: int = 12
+    max_critic_turns: int = 6
+    max_wall_clock_seconds: float = 0.0
+    max_asset_requests: int = 0
+    max_optional_object_families: int = 0
+    max_assets_per_request: int = 0
+    max_semantic_retries_per_family: int = 2
 
 
 class HarnessContext(BaseModel):
