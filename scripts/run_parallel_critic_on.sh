@@ -323,9 +323,60 @@ run_batches() {
 
     mkdir -p "$OUTPUT_ROOT/$run_kind"
 
+    kill_process_tree() {
+        local pid="$1"
+        local child
+        if ! [[ "$pid" =~ ^[0-9]+$ ]]; then
+            return 0
+        fi
+        for child in $(pgrep -P "$pid" 2>/dev/null || true); do
+            kill_process_tree "$child"
+        done
+        kill -TERM "$pid" 2>/dev/null || true
+    }
+
+    cleanup_active_batches() {
+        local pid
+        for pid in "${active_pids[@]}"; do
+            kill_process_tree "$pid"
+        done
+    }
+
+    on_batch_signal() {
+        cleanup_active_batches
+        exit "$1"
+    }
+
+    # A signal must not leave the background batch shells, Python workers, or
+    # their Blender children behind. The EXIT trap is deliberately local to
+    # this function so completed batches do not affect the next run kind.
+    trap 'cleanup_active_batches' EXIT
+    trap 'on_batch_signal 130' INT
+    trap 'on_batch_signal 143' TERM
+    trap 'on_batch_signal 129' HUP
+
     wait_one() {
-        local finished_pid rc label i
-        if wait -n -p finished_pid "${active_pids[@]}"; then rc=0; else rc=$?; fi
+        local finished_pid="" rc=0 label i pid state
+
+        # Do not rely on wait -n -p here. If a child has already been reaped
+        # by the shell, wait -n can return without a PID that matches our
+        # bookkeeping array, leaving the outer wait loop stuck forever.
+        # Polling also lets us recognize zombie children and reap them.
+        while [ -z "$finished_pid" ]; do
+            for i in "${!active_pids[@]}"; do
+                pid="${active_pids[$i]}"
+                state="$(ps -o stat= -p "$pid" 2>/dev/null | awk '{print $1}' || true)"
+                if ! kill -0 "$pid" 2>/dev/null || [[ "$state" == Z* ]]; then
+                    finished_pid="$pid"
+                    if wait "$pid" 2>/dev/null; then rc=0; else rc=$?; fi
+                    break
+                fi
+            done
+            if [ -z "$finished_pid" ]; then
+                sleep 1
+            fi
+        done
+
         label="pid_${finished_pid}"
         for i in "${!active_pids[@]}"; do
             if [ "${active_pids[$i]}" = "$finished_pid" ]; then
@@ -369,6 +420,7 @@ run_batches() {
     done
     if [ "${#batch_entries[@]}" -gt 0 ]; then batch_index=$((batch_index + 1)); launch; fi
     while [ "${#active_pids[@]}" -gt 0 ]; do wait_one; done
+    trap - EXIT INT TERM HUP
     if [ "$batch_failure" -ne 0 ]; then
         return 1
     fi
