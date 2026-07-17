@@ -10,7 +10,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 cd "$PROJECT_ROOT"
 
-EXPERIMENT="${SCENEEXPERT_EXPERIMENT:-ablation_3_qwen3_harness}"
+EXPERIMENT="${SCENEEXPERT_EXPERIMENT:-ablation_4c_qwen3_hybrid_memory}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 MODEL_NAME="${MODEL_NAME:-${SCENEEXPERT_MODEL_ID:-Qwen3.6-27B-Q8_0}}"
 RUN_ID="${RUN_ID:-critic_on_$(date +%Y-%m-%d_%H-%M-%S)}"
@@ -31,11 +31,21 @@ GENERATE_SHARED_BASE="${GENERATE_SHARED_BASE:-false}"
 MAX_CASES="${MAX_CASES:-0}"
 CASE_FILTER="${CASE_FILTER:-}"
 DRY_RUN="${DRY_RUN:-false}"
+DISABLE_ARTICULATED="${SCENEEXPERT_DISABLE_ARTICULATED:-false}"
+DISABLE_MATERIALS="${SCENEEXPERT_DISABLE_MATERIALS:-false}"
+DISABLE_BWRAP="${SCENEEXPERT_DISABLE_BWRAP:-false}"
 
 export OPENAI_API_KEY="${OPENAI_API_KEY:-sk-123}"
 export OPENAI_BASE_URL="${OPENAI_BASE_URL:-http://127.0.0.1:8002/v1}"
 export OPENAI_USE_RESPONSES="false"
 export SCENEEXPERT_MODEL_ID="$MODEL_NAME"
+
+# Match the ACP hybrid-memory job environment while keeping one worker per
+# shell process for forkserver-safe parallel scene runs.
+export SCENEEXPERT_MEMORY_EMBEDDING_DEVICE="cpu"
+export SCENEEXPERT_MEMORY_EMBEDDING_INDEX_DEVICE="cpu"
+export SCENEEXPERT_MEMORY_INDEX_AUTO_BUILD_MISSING="1"
+export SCENEEXPERT_MP_START_METHOD="forkserver"
 
 normalize_bool() {
     case "${1,,}" in
@@ -96,6 +106,26 @@ if ! DRY_RUN="$(normalize_bool "$DRY_RUN")"; then
     echo "ERROR: DRY_RUN must be true or false" >&2
     exit 1
 fi
+if ! DISABLE_ARTICULATED="$(normalize_bool "$DISABLE_ARTICULATED")"; then
+    echo "ERROR: SCENEEXPERT_DISABLE_ARTICULATED must be true or false" >&2
+    exit 1
+fi
+if ! DISABLE_MATERIALS="$(normalize_bool "$DISABLE_MATERIALS")"; then
+    echo "ERROR: SCENEEXPERT_DISABLE_MATERIALS must be true or false" >&2
+    exit 1
+fi
+if ! DISABLE_BWRAP="$(normalize_bool "$DISABLE_BWRAP")"; then
+    echo "ERROR: SCENEEXPERT_DISABLE_BWRAP must be true or false" >&2
+    exit 1
+fi
+
+# Some containers expose /usr/bin/bwrap but forbid unprivileged namespaces.
+# Keep the active Python directory available while hiding only bwrap from
+# BlenderServer's capability check; the server then runs without GPU namespace
+# isolation and still uses its configured port ranges.
+if [ "$DISABLE_BWRAP" = "true" ]; then
+    PYTHON_EXEC_DIR="$(dirname "$(readlink -f "$(command -v "$PYTHON_BIN")")")"
+fi
 
 if [ "$SCENE_WORKERS_PER_PROCESS" -ne 1 ]; then
     echo "ERROR: use one worker per process to avoid fork-after-bpy-import." >&2
@@ -148,14 +178,15 @@ echo "==============================================="
 # case_id|critic goal|prompt. Override only selection/count with CASE_FILTER
 # and MAX_CASES; this keeps batch indices stable for reusable shared bases.
 CASES=(
-    "living_room_media_bottleneck|sofa-table-TV relation and circulation|A living room with a sofa against the back wall facing a TV stand and television on the opposite wall, a coffee table centered between the sofa and TV stand, two armchairs flanking the coffee table near each end of the sofa, and a floor lamp beside one armchair."
-    "study_desk_access_crunch|desk-chair-monitor relation and accessibility|A study with a desk centered against the back wall, an office chair tucked under the desk, a computer monitor on the desk, two guest chairs against the side wall facing the desk, and a bookshelf on the adjacent wall."
-    "bedroom_bedside_blockage|bedside grouping and wardrobe access|A bedroom with a bed centered on the main wall, a nightstand with a table lamp on each side of the bed, a dresser against the opposite wall directly facing the bed, and a wardrobe placed next to the dresser."
-    "dining_room_service_squeeze|dining seating and place-setting relations|A dining room with a dining table in the center, four dining chairs arranged around it with one on each side, a sideboard against the wall behind the chairs on one side, and table settings for four including plates, cutlery, and glasses."
+    "default_bedroom|ACP default scene 0|A bedroom with a bed, two nightstands, and a wardrobe in the corner of the room."
+    "default_living_room|ACP default scene 1|A living room with a two-seater sofa against the wall, a square rug in the middle in front of the sofa, and two large plants on the floor near the sofa."
+    "default_classroom|ACP default scene 2|A classroom with six student desks, each with a chair. A teacher's desk sits at the front near the chalkboard, which hangs on the wall."
+    "default_rustic_bedroom|ACP default scene 3|A bedroom featuring rustic farmhouse decor with exposed wooden beams."
 )
 
 COMMON_ARGS=(
     "experiment.num_workers=${SCENE_WORKERS_PER_PROCESS}"
+    "experiment.scene_retry_attempts=1"
     "experiment.pipeline.parallel_rooms=false"
     "experiment.pipeline.max_parallel_rooms=1"
     "experiment.scenebenchmark_critic.enabled=true"
@@ -163,6 +194,36 @@ COMMON_ARGS=(
     "experiment.scenebenchmark_critic.fd_relation_proposer_mode=template"
     "experiment.scenebenchmark_critic.max_fd_relation_proposals=8"
 )
+
+if [ "$DISABLE_ARTICULATED" = "true" ]; then
+    COMMON_ARGS+=(
+        "furniture_agent.asset_manager.router.strategies.articulated.enabled=false"
+        "manipuland_agent.asset_manager.router.strategies.articulated.enabled=false"
+        "wall_agent.asset_manager.router.strategies.articulated.enabled=false"
+        "ceiling_agent.asset_manager.router.strategies.articulated.enabled=false"
+        "furniture_agent.asset_manager.articulated.sources.partnet_mobility.enabled=false"
+        "furniture_agent.asset_manager.articulated.sources.artvip.enabled=false"
+        "manipuland_agent.asset_manager.articulated.sources.partnet_mobility.enabled=false"
+        "manipuland_agent.asset_manager.articulated.sources.artvip.enabled=false"
+        "wall_agent.asset_manager.articulated.sources.partnet_mobility.enabled=false"
+        "wall_agent.asset_manager.articulated.sources.artvip.enabled=false"
+        "ceiling_agent.asset_manager.articulated.sources.partnet_mobility.enabled=false"
+        "ceiling_agent.asset_manager.articulated.sources.artvip.enabled=false"
+    )
+fi
+if [ "$DISABLE_MATERIALS" = "true" ]; then
+    COMMON_ARGS+=(
+        "floor_plan_agent.materials.use_retrieval_server=false"
+        "furniture_agent.asset_manager.router.strategies.thin_covering.enabled=false"
+        "furniture_agent.asset_manager.router.strategies.thin_covering.generator.enabled=false"
+        "manipuland_agent.asset_manager.router.strategies.thin_covering.enabled=false"
+        "manipuland_agent.asset_manager.router.strategies.thin_covering.generator.enabled=false"
+        "wall_agent.asset_manager.router.strategies.thin_covering.enabled=false"
+        "wall_agent.asset_manager.router.strategies.thin_covering.generator.enabled=false"
+        "ceiling_agent.asset_manager.router.strategies.thin_covering.enabled=false"
+        "ceiling_agent.asset_manager.router.strategies.thin_covering.generator.enabled=false"
+    )
+fi
 
 port_args=()
 build_port_args() {
@@ -231,7 +292,9 @@ run_batch() {
         "experiment.tasks=[generate_scenes]"
         "experiment.pipeline.stop_stage=${stop_stage}"
         "experiment.scenebenchmark_critic.enabled=${critic_enabled}"
-        "hydra.run.dir=${run_root}"
+        # main.py maintains a latest-run symlink two parents above the Hydra
+        # output. Keep that parent unique per batch to avoid symlink races.
+        "hydra.run.dir=${run_root}/hydra"
         "experiment.csv_path=${batch_csv}"
     )
     if [ -n "$start_stage" ]; then
@@ -242,7 +305,11 @@ run_batch() {
     if [ "$DRY_RUN" = "true" ]; then
         return 0
     fi
-    "${cmd[@]}"
+    if [ "$DISABLE_BWRAP" = "true" ]; then
+        PATH="$PYTHON_EXEC_DIR:/usr/local/sbin:/usr/local/bin" "${cmd[@]}"
+    else
+        "${cmd[@]}"
+    fi
 }
 
 run_batches() {
@@ -252,6 +319,7 @@ run_batches() {
     local batch_index=0
     local selected=0
     local batch_entries=()
+    local batch_failure=0
 
     mkdir -p "$OUTPUT_ROOT/$run_kind"
 
@@ -270,9 +338,10 @@ run_batches() {
         done
         if [ "$rc" -ne 0 ]; then
             echo "ERROR: $run_kind/$label failed with exit code $rc" >&2
-            exit "$rc"
+            batch_failure=1
+        else
+            echo "completed: $run_kind/$label"
         fi
-        echo "completed: $run_kind/$label"
     }
 
     launch() {
@@ -300,6 +369,9 @@ run_batches() {
     done
     if [ "${#batch_entries[@]}" -gt 0 ]; then batch_index=$((batch_index + 1)); launch; fi
     while [ "${#active_pids[@]}" -gt 0 ]; do wait_one; done
+    if [ "$batch_failure" -ne 0 ]; then
+        return 1
+    fi
 }
 
 if [ "$GENERATE_SHARED_BASE" = "true" ]; then
