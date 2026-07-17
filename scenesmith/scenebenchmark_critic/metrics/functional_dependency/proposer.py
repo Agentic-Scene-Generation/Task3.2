@@ -1,16 +1,8 @@
 from __future__ import annotations
 
-import json
 import re
 
 from typing import Any, Callable
-
-try:
-    from scenesmith.scenebenchmark_critic.core.vlm import (
-        build_structured_agent,
-    )
-except Exception:
-    build_structured_agent = None
 from scenesmith.scenebenchmark_critic.core.geometry import (
     GeometryStore,
     bbox_gap_xy,
@@ -21,7 +13,6 @@ from scenesmith.scenebenchmark_critic.core.geometry import (
 )
 from scenesmith.scenebenchmark_critic.core.models import (
     FunctionalDependencyProposal,
-    FunctionalDependencyProposalSet,
 )
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.constants import *
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.orientation_contracts import (
@@ -131,9 +122,9 @@ def propose_dependency_relations(
     )
     vlm_proposals: list[FunctionalDependencyProposal] = []
     if proposer_mode in {"vlm", "hybrid", "auto"}:
-        proposer = vlm_proposer or _propose_via_vlm
-        vlm_proposals = proposer(
-            case_pack, store, config, max_proposals=max_proposals, progress=progress
+        progress(
+            "VLM relation proposal is excluded from this critic-only migration; "
+            "using deterministic templates"
         )
     else:
         progress(
@@ -197,22 +188,9 @@ def _propose_via_vlm(
     max_proposals: int,
     progress,
 ) -> list[FunctionalDependencyProposal]:
-    try:
-        agent = build_structured_agent(
-            config,
-            output_type=FunctionalDependencyProposalSet,
-            system_prompt=_fd_proposer_system_prompt(),
-            name="scenebenchmark_fd_relation_proposer",
-        )
-        payload = _build_fd_proposer_payload(
-            case_pack, store, max_proposals=max_proposals
-        )
-        progress(f"Running FD relation proposer for up to {max_proposals} proposals")
-        result = agent.run_sync(json.dumps(payload, ensure_ascii=False))
-        return list(result.output.proposals)
-    except BaseException as exc:
-        progress(f"FD relation proposer unavailable; using template fallback: {exc}")
-        return []
+    del case_pack, store, config, max_proposals
+    progress("VLM relation proposal is not available; using deterministic templates")
+    return []
 
 
 def _fd_proposer_system_prompt() -> str:
