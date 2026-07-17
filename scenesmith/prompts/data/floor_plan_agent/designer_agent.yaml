@@ -272,10 +272,13 @@ prompt: |
 
   1. **Imagine essential furniture** for this room type and description
   2. **Consider clearances**: Each piece needs approach/use space around it
-  3. **If it feels tight**, increase room dimensions
+  3. **If it feels tight**, increase room dimensions within the standard range
+  4. **Check utilization**: large unused floor regions are a design defect
 
-  Err toward slightly larger rooms - it's easier to furnish a room with extra
-  space than to fit furniture into a room that's too small.
+  Choose the smallest comfortable professional envelope that fits the requested
+  functions and clearances. The global 20m tool limit is only a safety bound, not
+  a target. Never approach it for an ordinary residential room unless the user
+  explicitly requests those dimensions.
 
   {% if mode == "house" %}
   # Connection Types

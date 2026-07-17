@@ -17,6 +17,7 @@ from pathlib import Path
 
 import yaml
 
+from scenesmith.agent_utils.room_size_policy import normalize_room_dimensions
 from scenesmith.scene_expert.schemas import (
     FullVerifyReport,
     SceneTaskSpec,
@@ -292,7 +293,7 @@ def _check_required_objects(
 
 
 def _check_floor_plan_layout(scene_state_info: dict) -> list[VerifyIssue]:
-    """Check minimal structural validity of the generated floor plan."""
+    """Check structural validity and professional single-room proportions."""
     issues: list[VerifyIssue] = []
     if not scene_state_info.get("layout_exists", True):
         issues.append(
@@ -313,17 +314,40 @@ def _check_floor_plan_layout(scene_state_info: dict) -> list[VerifyIssue]:
         )
 
     invalid_rooms: list[str] = []
+    single_room = room_count == 1
     for room in scene_state_info.get("rooms", []):
         if not isinstance(room, dict):
             continue
         room_id = str(room.get("room_id") or room.get("id") or room.get("name") or "")
-        width = room.get("width") or room.get("width_m")
-        depth = room.get("depth") or room.get("depth_m")
+        width = _first_not_none(room, "length", "depth", "length_m", "depth_m")
+        depth = _first_not_none(room, "width", "width_m")
         try:
             if width is not None and float(width) <= 0:
                 invalid_rooms.append(room_id or "<unknown>")
             if depth is not None and float(depth) <= 0:
                 invalid_rooms.append(room_id or "<unknown>")
+
+            if single_room and width is not None and depth is not None:
+                adjustment = normalize_room_dimensions(
+                    room_type=str(room.get("type") or room.get("room_type") or "room"),
+                    width=float(width),
+                    depth=float(depth),
+                    prompt=str(room.get("prompt") or ""),
+                    mode="room",
+                )
+                if adjustment.changed:
+                    issues.append(
+                        VerifyIssue(
+                            issue_type="implausible_room_scale",
+                            object_name=room_id,
+                            description=(
+                                f"Room '{room_id or '<unknown>'}' is {float(width):g}m x "
+                                f"{float(depth):g}m, outside its professional scale envelope; "
+                                f"use approximately {adjustment.width:g}m x "
+                                f"{adjustment.depth:g}m or explicitly request a larger room"
+                            ),
+                        )
+                    )
         except (TypeError, ValueError):
             invalid_rooms.append(room_id or "<unknown>")
 
@@ -338,6 +362,15 @@ def _check_floor_plan_layout(scene_state_info: dict) -> list[VerifyIssue]:
             )
         )
     return issues
+
+
+def _first_not_none(mapping: dict, *keys: str) -> object | None:
+    """Return the first present non-None value, preserving invalid zeroes."""
+
+    for key in keys:
+        if key in mapping and mapping[key] is not None:
+            return mapping[key]
+    return None
 
 
 class StageVerifier:
@@ -399,7 +432,8 @@ class StageVerifier:
                 issues.extend(layout_issues)
                 if layout_issues:
                     repair_suggestions.append(
-                        "Regenerate the floor plan with at least one valid room and positive dimensions"
+                        "Regenerate the floor plan with valid dimensions inside the "
+                        "room-type professional size envelope"
                     )
             object_issues = _check_required_objects(task_spec, stage, scene_state_info)
             issues.extend(object_issues)
@@ -407,6 +441,29 @@ class StageVerifier:
                 for issue in object_issues:
                     repair_suggestions.append(
                         f"Add missing object '{issue.object_name}' to the scene"
+                    )
+
+            if stage == "furniture":
+                placeholder_names = sorted(
+                    {
+                        str(name)
+                        for name in scene_state_info.get("placeholder_names", [])
+                        if name
+                    }
+                )
+                if placeholder_names:
+                    issues.append(
+                        VerifyIssue(
+                            issue_type="placeholder_asset",
+                            description=(
+                                "Furniture asset generation degraded to primitive "
+                                "placeholders: " + ", ".join(placeholder_names)
+                            ),
+                        )
+                    )
+                    repair_suggestions.append(
+                        "Regenerate placeholder furniture with canonicalized HSSD "
+                        "assets before accepting the stage"
                     )
 
         # --- 2b. Hard critique/score checks for stages where averages are unsafe ---

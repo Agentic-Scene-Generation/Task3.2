@@ -189,6 +189,7 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
             wall_height_max=self.cfg.wall_height.max,
             room_dim_min=self.cfg.min_floor_plan_dim_m,
             room_dim_max=self.cfg.max_floor_plan_dim_m,
+            room_size_policy=self.cfg.get("room_size_policy"),
         )
 
         vision_tools = self._get_vision_tools()
@@ -227,6 +228,7 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
             wall_height_max=self.cfg.wall_height.max,
             room_dim_min=self.cfg.min_floor_plan_dim_m,
             room_dim_max=self.cfg.max_floor_plan_dim_m,
+            room_size_policy=self.cfg.get("room_size_policy"),
         )
         self._critic_floor_plan_tools = floor_plan_tools
 

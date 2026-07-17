@@ -9,6 +9,8 @@ import logging
 
 from pathlib import Path
 
+from scenesmith.agent_utils.mesh_cleanup import merge_duplicate_vertices
+
 console_logger = logging.getLogger(__name__)
 
 
@@ -230,20 +232,13 @@ def canonicalize_mesh_impl(
     root_obj.location = mathutils.Vector((loc_x, loc_y, loc_z))
     bpy.ops.object.transform_apply(location=True, rotation=False, scale=False)
 
-    # Merge duplicate vertices to reduce file size (~80% reduction).
-    # Select all mesh objects and merge vertices by distance.
-    bpy.ops.object.select_all(action="DESELECT")
-    for obj in bpy.context.scene.objects:
-        if obj.type == "MESH":
-            obj.select_set(True)
-            bpy.context.view_layer.objects.active = obj
-
-    if bpy.context.selected_objects:
-        bpy.ops.object.mode_set(mode="EDIT")
-        bpy.ops.mesh.select_all(action="SELECT")
-        bpy.ops.mesh.remove_doubles(threshold=0.0001)
-        bpy.ops.object.mode_set(mode="OBJECT")
-        console_logger.debug("Merged duplicate vertices in mesh")
+    # Merge duplicate vertices to reduce file size (~80% reduction). Use the
+    # context-free bmesh API because imported GLTF files can contain hidden mesh
+    # nodes that Blender refuses to activate in Edit Mode.
+    processed_meshes = merge_duplicate_vertices(bpy.context.scene.objects)
+    console_logger.debug(
+        "Merged duplicate vertices in %d mesh datablock(s)", processed_meshes
+    )
 
     # Ensure output directory exists.
     output_path.parent.mkdir(parents=True, exist_ok=True)

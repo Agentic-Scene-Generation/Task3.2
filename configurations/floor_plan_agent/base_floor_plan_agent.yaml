@@ -42,6 +42,55 @@ materials:
 min_floor_plan_dim_m: 1.5
 max_floor_plan_dim_m: 20
 
+# Professional room-size envelope. The global 20m limit is a safety bound, not a
+# target. Preserve explicit user dimensions and constrain only unqualified
+# single-room prompts by default, avoiding changes to multi-room adjacency.
+room_size_policy:
+  enabled: true
+  apply_in_house_mode: false
+  preserve_explicit_dimensions: true
+  default:
+    min_side_m: 2.0
+    min_area_m2: 9.0
+    max_area_m2: 48.0
+    max_side_m: 8.0
+  rooms:
+    bedroom:
+      min_side_m: 2.8
+      min_area_m2: 9.0
+      max_area_m2: 24.0
+      max_side_m: 5.5
+    living_room:
+      min_side_m: 3.0
+      min_area_m2: 16.0
+      max_area_m2: 40.0
+      max_side_m: 7.0
+    kitchen:
+      min_side_m: 2.4
+      min_area_m2: 7.0
+      max_area_m2: 25.0
+      max_side_m: 6.0
+    bathroom:
+      min_side_m: 1.8
+      min_area_m2: 4.0
+      max_area_m2: 12.0
+      max_side_m: 4.0
+    dining_room:
+      min_side_m: 2.5
+      min_area_m2: 10.0
+      max_area_m2: 32.0
+      max_side_m: 7.0
+    office:
+      min_side_m: 2.4
+      min_area_m2: 8.0
+      max_area_m2: 30.0
+      max_side_m: 7.0
+    classroom:
+      min_side_m: 4.0
+      min_area_m2: 30.0
+      max_area_m2: 100.0
+      max_side_m: 12.0
+
 # Wall height constraints
 wall_height:
   min: 2.0  # meters

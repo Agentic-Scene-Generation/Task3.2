@@ -1399,16 +1399,24 @@ class SceneExpertHookRunner:
         return "\n".join(lines[:24])
 
     def _extract_scene_state_info_from_scene(self, scene: RoomScene) -> dict:
-        """Extract object names from the live RoomScene for rule-based checks."""
+        """Extract object names and degraded assets for rule-based checks."""
         try:
             names = [
                 obj.name
                 for obj in scene.objects.values()
                 if hasattr(obj, "name") and obj.name
             ]
-            return {"object_names": names}
+            placeholder_names = [
+                obj.name
+                for obj in scene.objects.values()
+                if (getattr(obj, "metadata", {}) or {}).get("repair_placeholder")
+            ]
+            return {
+                "object_names": names,
+                "placeholder_names": placeholder_names,
+            }
         except Exception:
-            return {"object_names": []}
+            return {"object_names": [], "placeholder_names": []}
 
 
 # ------------------------------------------------------------------
