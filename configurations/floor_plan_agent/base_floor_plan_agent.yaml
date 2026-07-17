@@ -97,8 +97,14 @@ openai:
   vision_detail: "high"
   reasoning_effort:
     planner: "none"
-    designer: "high"
-    critic: "high"
+    designer: "none"
+    critic: "none"
+  # Bound every local-Qwen response. The floor-plan agents are tool orchestrators;
+  # unbounded prose consumes stage time without improving tool arguments.
+  max_output_tokens:
+    planner: 1024
+    designer: 2048
+    critic: 2048
   verbosity:
     planner: "low"
     designer: "low"

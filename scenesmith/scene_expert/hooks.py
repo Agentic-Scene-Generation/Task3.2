@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from scenesmith.agent_utils.room import RoomScene
+from scenesmith.scene_expert.config_utils import resolve_scene_expert_config
 from scenesmith.scene_expert.context_bundle import (
     build_stage_context_bundle,
     stable_hash,
@@ -69,17 +70,6 @@ def _stable_config_hash(cfg_dict: dict) -> str:
     except TypeError:
         payload = repr(cfg_dict)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
-
-
-def _deep_merge_dicts(base: dict, override: dict) -> dict:
-    """Merge nested dicts without mutating either input."""
-    merged = dict(base)
-    for key, value in override.items():
-        if isinstance(value, dict) and isinstance(merged.get(key), dict):
-            merged[key] = _deep_merge_dicts(merged[key], value)
-        else:
-            merged[key] = value
-    return merged
 
 
 def _cfg_bool(value: Any, default: bool = False) -> bool:
@@ -1446,21 +1436,13 @@ def build_hook_runner(
     Returns:
         Configured SceneExpertHookRunner, or None if disabled.
     """
-    # Ablation configs set experiment.scene_expert. The root scene_expert block is
-    # a disabled default and also carries memory sub-config defaults.
-    root_se_cfg = cfg_dict.get("scene_expert", {})
-    exp_se_cfg = cfg_dict.get("experiment", {}).get("scene_expert")
-    se_cfg = exp_se_cfg or root_se_cfg
+    # Ablation configs set experiment.scene_expert. The root block carries the
+    # complete defaults, so merge the experiment's partial overrides on top.
+    se_cfg = resolve_scene_expert_config(cfg_dict)
     if not se_cfg:
         return None
-    memory_cfg = _deep_merge_dicts(
-        root_se_cfg.get("memory", {}),
-        se_cfg.get("memory", {}),
-    )
-    structured_llm_cfg = _deep_merge_dicts(
-        root_se_cfg.get("structured_llm", {}),
-        se_cfg.get("structured_llm", {}),
-    )
+    memory_cfg = se_cfg.get("memory", {})
+    structured_llm_cfg = se_cfg.get("structured_llm", {})
 
     mode = se_cfg.get("mode", "disabled")
     if mode == "disabled" or not se_cfg.get("enabled", False):

@@ -41,6 +41,7 @@ from scenesmith.furniture_agents.stateful_furniture_agent import StatefulFurnitu
 from scenesmith.manipuland_agents.stateful_manipuland_agent import (
     StatefulManipulandAgent,
 )
+from scenesmith.scene_expert.config_utils import resolve_scene_expert_stage_budget
 from scenesmith.utils.logging import ConsoleLogger, FileLoggingContext
 from scenesmith.utils.parallel import run_parallel_isolated
 from scenesmith.utils.print_utils import bold_green, yellow
@@ -1298,6 +1299,13 @@ def _generate_floor_plan_worker(
                     logger=logger,
                     render_gpu_id=render_gpu_id,
                 )
+                configure_runtime_budget = getattr(
+                    floor_plan_agent, "configure_stage_runtime_budget", None
+                )
+                if callable(configure_runtime_budget):
+                    configure_runtime_budget(
+                        resolve_scene_expert_stage_budget(cfg_dict, "floor_plan")
+                    )
                 try:
                     house_layout = asyncio.run(
                         floor_plan_agent.generate_house_layout(

@@ -6,6 +6,7 @@ output for iterative design improvement.
 """
 
 import logging
+import re
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -74,6 +75,67 @@ class FloorPlanCritiqueWithScores(CritiqueWithScores):
             self.material_consistency,
             self.prompt_following,
         ]
+
+
+_FLOOR_PLAN_SCORE_LABELS = {
+    "room_proportions": "Room Proportions",
+    "spatial_flow": "Spatial Flow",
+    "natural_lighting": "Natural Lighting",
+    "material_consistency": "Material Consistency",
+    "prompt_following": "Prompt Following",
+}
+
+
+def parse_floor_plan_critique_text(
+    text: str,
+) -> FloorPlanCritiqueWithScores | None:
+    """Recover floor-plan scores from a non-JSON critic response.
+
+    Some OpenAI-compatible backends may ignore the structured-output contract
+    and return the legacy Markdown score card.  Returning ``None`` unless all
+    five categories are present prevents a partial parse from being treated as
+    a complete verification result.
+    """
+    if not text:
+        return None
+
+    raw_critique = text
+    error_prefix = "Invalid JSON when parsing"
+    if error_prefix in raw_critique:
+        raw_critique = raw_critique.split(error_prefix, 1)[1]
+    if " for TypeAdapter(" in raw_critique:
+        raw_critique = raw_critique.rsplit(" for TypeAdapter(", 1)[0]
+    raw_critique = raw_critique.strip()
+
+    parsed: dict[str, CategoryScore] = {}
+    for field_name, label in _FLOOR_PLAN_SCORE_LABELS.items():
+        pattern = re.compile(
+            rf"^\s*[-*]?\s*(?:\*\*)?{re.escape(label)}\s*:"
+            rf"(?:\*\*)?\s*(?P<grade>\d{{1,2}}(?:\.\d+)?)\s*/\s*10"
+            rf"\s*(?:[-\u2013\u2014:]\s*)?(?P<comment>.*)$",
+            flags=re.IGNORECASE | re.MULTILINE,
+        )
+        match = pattern.search(raw_critique)
+        if match is None:
+            return None
+        grade = max(0, min(10, int(round(float(match.group("grade"))))))
+        comment = match.group("comment").strip() or (
+            "Recovered from a non-JSON floor-plan critic response."
+        )
+        parsed[field_name] = CategoryScore(
+            name=field_name,
+            grade=grade,
+            comment=comment,
+        )
+
+    return FloorPlanCritiqueWithScores(
+        critique=raw_critique,
+        room_proportions=parsed["room_proportions"],
+        spatial_flow=parsed["spatial_flow"],
+        natural_lighting=parsed["natural_lighting"],
+        material_consistency=parsed["material_consistency"],
+        prompt_following=parsed["prompt_following"],
+    )
 
 
 @dataclass

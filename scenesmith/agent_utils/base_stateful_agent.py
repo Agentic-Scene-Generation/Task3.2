@@ -222,12 +222,7 @@ class BaseStatefulAgent(ABC):
     def _configure_stage_runtime(self, scene: Any) -> None:
         """Bind SceneExpert's advisory budget to this stage's real execution."""
         raw_budget = getattr(scene, "scene_expert_stage_budget", {}) or {}
-        try:
-            self._stage_runtime_budget = dict(raw_budget)
-        except (TypeError, ValueError):
-            self._stage_runtime_budget = {}
-        self._stage_runtime_started_at = time.monotonic()
-        self._stage_runtime_exhausted = False
+        self.configure_stage_runtime_budget(raw_budget)
 
         asset_manager = getattr(self, "asset_manager", None)
         configure_asset_budget = getattr(
@@ -243,6 +238,21 @@ class BaseStatefulAgent(ABC):
                     getattr(scene, "scene_expert_required_objects", []) or []
                 ),
             )
+
+    def configure_stage_runtime_budget(self, raw_budget: Any) -> None:
+        """Bind an execution budget when no ``RoomScene`` object is available.
+
+        Floor-plan generation runs in an isolated house-level subprocess, so it
+        cannot receive the ``RoomScene`` attributes used by placement stages.
+        This public entry point gives that worker the same turn and wall-clock
+        enforcement without reaching into private runtime state.
+        """
+        try:
+            self._stage_runtime_budget = dict(raw_budget)
+        except (TypeError, ValueError):
+            self._stage_runtime_budget = {}
+        self._stage_runtime_started_at = time.monotonic()
+        self._stage_runtime_exhausted = False
 
     def _stage_budget_value(self, key: str, default: Any) -> Any:
         return self._stage_runtime_budget.get(key, default)
@@ -1365,6 +1375,15 @@ class BaseStatefulAgent(ABC):
 
         # Note: reasoning_effort and verbosity are OpenAI Responses API specific
         # parameters and are not supported by open-source model APIs (e.g., vLLM).
+
+        # Bound local-model completions explicitly. Tool-rich agents otherwise
+        # inherit the backend's large default and a single malformed response can
+        # occupy the floor-plan worker for tens of minutes.
+        output_limits = getattr(self.cfg.openai, "max_output_tokens", None)
+        if settings_key and output_limits is not None:
+            max_tokens = _cfg_get(output_limits, settings_key, None)
+            if max_tokens is not None and int(max_tokens) > 0:
+                kwargs["max_tokens"] = int(max_tokens)
 
         # Add tool_choice to force specific tool call first.
         if tool_choice:

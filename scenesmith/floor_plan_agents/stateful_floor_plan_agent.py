@@ -17,7 +17,7 @@ import numpy as np
 import trimesh
 import yaml
 
-from agents import Agent, FunctionTool, Runner, RunResult
+from agents import Agent, FunctionTool, ModelSettings, RunResult
 from omegaconf import DictConfig
 from pydrake.all import RigidTransform
 
@@ -47,6 +47,7 @@ from scenesmith.agent_utils.scoring import (
     format_score_deltas_for_planner,
     log_agent_response,
     log_critique_scores,
+    parse_floor_plan_critique_text,
     scores_to_dict,
 )
 from scenesmith.agent_utils.workflow_tools import WorkflowTools
@@ -130,6 +131,7 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
 
         # Vision tools for floor plan rendering (lazy initialized).
         self._vision_tools: FloorPlanVisionTools | None = None
+        self._critic_floor_plan_tools: FloorPlanTools | None = None
 
         # Geometry cache for reusing unchanged room geometry across iterations.
         self._geometry_cache: GeometryCache | None = None
@@ -226,6 +228,7 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
             room_dim_min=self.cfg.min_floor_plan_dim_m,
             room_dim_max=self.cfg.max_floor_plan_dim_m,
         )
+        self._critic_floor_plan_tools = floor_plan_tools
 
         return list(vision_tools.tools.values()) + [floor_plan_tools.tools["validate"]]
 
@@ -330,6 +333,53 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
         """
         # Floor plan doesn't use placement noise.
 
+    def _make_floor_plan_critic_fallback_scores(
+        self,
+        *,
+        error: BaseException,
+        validation_layout: str,
+        validation_connectivity: str,
+    ) -> FloorPlanCritiqueWithScores:
+        """Create conservative scores without discarding a usable layout."""
+        validation_ok = (
+            validation_layout == "ok" and validation_connectivity == "ok"
+        )
+        detail = f"{type(error).__name__}: {error}"
+        critique = (
+            "FLOOR-PLAN VISUAL CRITIC DEGRADED. The current layout was retained "
+            "because structured visual scoring did not complete. "
+            f"layout={validation_layout}; connectivity={validation_connectivity}; "
+            f"critic_error={detail}"
+        )
+        neutral = "Conservative fallback; visual quality was not fully verified."
+        flow_grade = 5 if validation_ok else 2
+        flow_comment = (
+            "Deterministic floor-plan validation passed."
+            if validation_ok
+            else (
+                "Deterministic validation failed: "
+                f"layout={validation_layout}; connectivity={validation_connectivity}."
+            )
+        )
+        return FloorPlanCritiqueWithScores(
+            critique=critique,
+            room_proportions=self._make_category_score(
+                "room_proportions", 5, neutral
+            ),
+            spatial_flow=self._make_category_score(
+                "spatial_flow", flow_grade, flow_comment
+            ),
+            natural_lighting=self._make_category_score(
+                "natural_lighting", 5, neutral
+            ),
+            material_consistency=self._make_category_score(
+                "material_consistency", 5, neutral
+            ),
+            prompt_following=self._make_category_score(
+                "prompt_following", 5, neutral
+            ),
+        )
+
     async def _request_critique_impl(self, update_checkpoint: bool = True) -> str:
         """Implementation for critique request.
 
@@ -349,21 +399,142 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
         critique_instruction = self.prompt_registry.get_prompt(
             prompt_enum=FloorPlanAgentPrompts.CRITIC_RUNNER_INSTRUCTION,
         )
-
-        # Run critic.
-        # Critic will call observe_scene, render_ascii, and validate tools.
-        result = await Runner.run(
-            starting_agent=self.critic,
-            input=critique_instruction,
-            session=self.critic_session,
-            max_turns=self.cfg.agents.critic_agent.max_turns,
-            run_config=self._create_run_config(),
-        )
-        log_agent_usage(result=result, agent_name="CRITIC (FLOOR PLAN)")
         vision_tools = self._get_vision_tools()
+        validation_tools = self._critic_floor_plan_tools
+        if validation_tools is None:
+            raise RuntimeError("Floor-plan validation tools were not initialized")
 
-        # Parse structured output.
-        response = result.final_output_as(FloorPlanCritiqueWithScores)
+        # Collect deterministic text evidence directly. This removes two LLM
+        # orchestration turns and guarantees that validation is available even
+        # when the local model fails to call the requested tools.
+        ascii_layout = vision_tools._render_ascii_impl()
+        validation = validation_tools._validate_impl()
+        validation_text = (
+            f"layout={validation.layout}; connectivity={validation.connectivity}"
+        )
+        run_config = self._create_run_config()
+        base_settings = self.critic.model_settings or ModelSettings()
+
+        # Keep the visual observation as a forced single-tool turn so its images
+        # persist in the critic session, then score in a tool-free JSON-only turn.
+        critic_observe = self.critic.clone(
+            output_type=None,
+            tool_use_behavior="stop_on_first_tool",
+            model_settings=base_settings.resolve(
+                ModelSettings(tool_choice="observe_scene", parallel_tool_calls=False)
+            ),
+        )
+        critic_score = self.critic.clone(
+            tools=[],
+            model_settings=base_settings.resolve(
+                ModelSettings(tool_choice="none", parallel_tool_calls=False)
+            ),
+        )
+
+        result_observe: RunResult | None = None
+        try:
+            result_observe = await self._run_agent_with_stage_sla(
+                starting_agent=critic_observe,
+                input=critique_instruction,
+                role="critic",
+                event="floor_plan_observe_scene",
+                session=self.critic_session,
+                configured_max_turns=self.cfg.agents.critic_agent.max_turns,
+                run_config=run_config,
+            )
+        except Exception as exc:
+            if not self._is_transient_model_error(exc):
+                raise
+            console_logger.warning(
+                "Floor-plan visual observation request failed transiently; "
+                "falling back to a direct deterministic render: %s: %s",
+                type(exc).__name__,
+                exc,
+            )
+        if result_observe is not None:
+            log_agent_usage(
+                result=result_observe, agent_name="CRITIC (FLOOR PLAN OBSERVE)"
+            )
+        if vision_tools.last_render_dir is None:
+            try:
+                vision_tools._observe_scene_impl()
+            except Exception as exc:
+                console_logger.warning(
+                    "Direct floor-plan render fallback failed; continuing with "
+                    "ASCII and validation evidence: %s: %s",
+                    type(exc).__name__,
+                    exc,
+                )
+
+        score_prompt = (
+            "/no_think\n"
+            "The mandatory observation, ASCII-layout, and validation steps are "
+            "complete. Evaluate the current floor plan and return only the "
+            "structured JSON object required by your output schema. Do not use "
+            "Markdown or code fences.\n\n"
+            f"VALIDATION RESULT:\n{validation_text}\n\n"
+            f"ASCII FLOOR PLAN:\n{ascii_layout}"
+        )
+        response: FloorPlanCritiqueWithScores
+        try:
+            result = await self._run_agent_with_stage_sla(
+                starting_agent=critic_score,
+                input=score_prompt,
+                role="critic",
+                event="floor_plan_score",
+                session=self.critic_session,
+                configured_max_turns=self.cfg.agents.critic_agent.max_turns,
+                run_config=run_config,
+            )
+            if result is None:
+                response = self._make_floor_plan_critic_fallback_scores(
+                    error=TimeoutError("floor-plan critic budget exhausted"),
+                    validation_layout=validation.layout,
+                    validation_connectivity=validation.connectivity,
+                )
+            elif isinstance(result.final_output, FloorPlanCritiqueWithScores):
+                log_agent_usage(result=result, agent_name="CRITIC (FLOOR PLAN SCORE)")
+                response = result.final_output
+            else:
+                recovered = parse_floor_plan_critique_text(
+                    str(result.final_output or "")
+                )
+                response = recovered or self._make_floor_plan_critic_fallback_scores(
+                    error=TypeError(
+                        "critic returned "
+                        f"{type(result.final_output).__name__}, not structured scores"
+                    ),
+                    validation_layout=validation.layout,
+                    validation_connectivity=validation.connectivity,
+                )
+        except Exception as exc:
+            recovered = (
+                parse_floor_plan_critique_text(str(exc))
+                if type(exc).__name__ == "ModelBehaviorError"
+                else None
+            )
+            if recovered is not None:
+                console_logger.warning(
+                    "Recovered all five floor-plan scores from a non-JSON critic "
+                    "response; the layout will not be discarded"
+                )
+                response = recovered
+            elif self._is_transient_model_error(exc) or type(exc).__name__ == (
+                "ModelBehaviorError"
+            ):
+                console_logger.warning(
+                    "Floor-plan critic scoring degraded; persisting conservative "
+                    "scores and retaining the usable layout: %s: %s",
+                    type(exc).__name__,
+                    exc,
+                )
+                response = self._make_floor_plan_critic_fallback_scores(
+                    error=exc,
+                    validation_layout=validation.layout,
+                    validation_connectivity=validation.connectivity,
+                )
+            else:
+                raise
 
         # Log critique.
         log_agent_response(response=response.critique, agent_name="CRITIC")
@@ -581,14 +752,21 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
             prompt_enum=FloorPlanAgentPrompts.DESIGNER_INITIAL_INSTRUCTION,
         )
 
-        # Run designer.
-        result = await Runner.run(
+        # Run designer under the same SceneExpert stage SLA as its planner.
+        result = await self._run_agent_with_stage_sla(
             starting_agent=self.designer,
             input=instruction,
+            role="designer",
+            event="floor_plan_initial_design",
             session=self.designer_session,
-            max_turns=self.cfg.agents.designer_agent.max_turns,
+            configured_max_turns=self.cfg.agents.designer_agent.max_turns,
             run_config=self._create_run_config(),
         )
+        if result is None:
+            return (
+                "Designer execution budget exhausted; preserve the current "
+                "floor-plan candidate and finish the workflow."
+            )
         log_agent_usage(result=result, agent_name="DESIGNER (INITIAL FLOOR PLAN)")
 
         if result.final_output:
@@ -615,14 +793,21 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
             instruction=instruction,
         )
 
-        # Run designer.
-        result = await Runner.run(
+        # Run designer under the same SceneExpert stage SLA as its planner.
+        result = await self._run_agent_with_stage_sla(
             starting_agent=self.designer,
             input=full_instruction,
+            role="designer",
+            event="floor_plan_design_change",
             session=self.designer_session,
-            max_turns=self.cfg.agents.designer_agent.max_turns,
+            configured_max_turns=self.cfg.agents.designer_agent.max_turns,
             run_config=self._create_run_config(),
         )
+        if result is None:
+            return (
+                "Designer execution budget exhausted; preserve the current "
+                "floor-plan candidate and finish the workflow."
+            )
         log_agent_usage(result=result, agent_name="DESIGNER (CHANGE FLOOR PLAN)")
 
         if result.final_output:
@@ -671,17 +856,45 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
         )
 
         # Run the floor plan design workflow.
-        result: RunResult = await Runner.run(
-            starting_agent=self.planner,
-            input=runner_instruction,
-            max_turns=self.cfg.agents.planner_agent.max_turns,
-            run_config=self._create_run_config(),
-        )
-        log_agent_usage(result=result, agent_name="PLANNER (FLOOR PLAN)")
+        result: RunResult | None = None
+        try:
+            result = await self._run_agent_with_stage_sla(
+                starting_agent=self.planner,
+                input=runner_instruction,
+                role="planner",
+                event="floor_plan_workflow",
+                configured_max_turns=self.cfg.agents.planner_agent.max_turns,
+                run_config=self._create_run_config(),
+            )
+        except Exception as exc:
+            if not self._is_transient_model_error(exc):
+                raise
+            console_logger.warning(
+                "Floor-plan planner failed transiently; checking whether its "
+                "current candidate can be finalized: %s: %s",
+                type(exc).__name__,
+                exc,
+            )
 
-        if result.final_output:
+        if result is not None:
+            log_agent_usage(result=result, agent_name="PLANNER (FLOOR PLAN)")
+
+        if result is not None and result.final_output:
             log_agent_response(
                 response=result.final_output, agent_name="PLANNER (FLOOR PLAN)"
+            )
+
+        # A timeout commonly occurs after the designer has already produced a
+        # valid candidate. Preserve that work; fail only when there is genuinely
+        # no geometry-capable layout to continue with.
+        if not self.layout.placed_rooms or not self.layout.placement_valid:
+            raise RuntimeError(
+                "Floor-plan workflow ended without a valid placed-room candidate"
+            )
+        if result is None:
+            console_logger.warning(
+                "Continuing from the current valid floor-plan candidate after "
+                "planner budget exhaustion or a transient transport failure"
             )
 
         # Final critique.
