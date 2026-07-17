@@ -1,6 +1,5 @@
 """Asset router for LLM-advised asset generation."""
 
-import json
 import logging
 import tempfile
 import time
@@ -53,6 +52,7 @@ from scenesmith.agent_utils.thin_covering_generator import (
 )
 from scenesmith.agent_utils.vlm_service import VLMService
 from scenesmith.prompts import AssetRouterPrompts, prompt_manager
+from scenesmith.utils.llm_json import parse_llm_json_object
 from scenesmith.utils.openai import encode_image_to_base64
 
 if TYPE_CHECKING:
@@ -174,7 +174,7 @@ class AssetRouter:
                     response_format={"type": "json_object"},
                 )
                 elapsed = time.time() - start_time
-                response_json = json.loads(response_text)
+                response_json = parse_llm_json_object(response_text)
                 console_logger.info(
                     f"Router analysis completed in {elapsed:.1f}s:\n{response_json}"
                 )
@@ -361,7 +361,7 @@ class AssetRouter:
                 vision_detail=vision_detail,
             )
             elapsed = time.time() - start_time
-            response_json = json.loads(response_text)
+            response_json = parse_llm_json_object(response_text)
             console_logger.info(
                 f"Router validation completed in {elapsed:.1f}s for "
                 f"'{description}':\n{response_json}"
@@ -763,7 +763,7 @@ class AssetRouter:
                 vision_detail=vision_detail,
             )
             elapsed = time.time() - start_time
-            response_json = json.loads(response_text)
+            response_json = parse_llm_json_object(response_text)
             console_logger.info(
                 f"Articulated validation completed in {elapsed:.1f}s for "
                 f"'{description}':\n{response_json}"
@@ -1274,7 +1274,7 @@ class AssetRouter:
                 vision_detail=vision_detail,
             )
             elapsed = time.time() - start_time
-            response_json = json.loads(response_text)
+            response_json = parse_llm_json_object(response_text)
             console_logger.info(
                 f"Thin covering validation completed in {elapsed:.1f}s for "
                 f"'{description}':\n{response_json}"

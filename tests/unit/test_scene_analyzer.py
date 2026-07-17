@@ -7,8 +7,9 @@ from unittest.mock import Mock
 
 from omegaconf import OmegaConf
 
-from scenesmith.agent_utils.room import RoomScene
+from scenesmith.agent_utils.room import ObjectType, RoomScene, UniqueID
 from scenesmith.agent_utils.scene_analyzer import SceneAnalyzer
+from scenesmith.utils.llm_json import parse_llm_json, parse_llm_json_object
 
 
 class TestSceneAnalyzer(unittest.TestCase):
@@ -34,8 +35,16 @@ class TestSceneAnalyzer(unittest.TestCase):
             "openai": {
                 "model": self.TEST_MODEL,
                 "vision_detail": "low",
-                "reasoning_effort": {"scene_critique": self.TEST_REASONING_EFFORT},
-                "verbosity": {"scene_critique": "low"},
+                "furniture_analysis_max_retries": 2,
+                "context_selection_max_retries": 2,
+                "reasoning_effort": {
+                    "scene_critique": self.TEST_REASONING_EFFORT,
+                    "furniture_analysis": self.TEST_REASONING_EFFORT,
+                },
+                "verbosity": {
+                    "scene_critique": "low",
+                    "furniture_analysis": "low",
+                },
             },
         }
         # Convert to OmegaConf to match expected structure.
@@ -70,6 +79,70 @@ class TestSceneAnalyzer(unittest.TestCase):
             self.scene_analyzer.cfg["openai"]["reasoning_effort"]["scene_critique"],
             self.TEST_REASONING_EFFORT,
         )
+
+    def test_parse_llm_json_strips_markdown_fences(self):
+        """Fenced JSON from local/open models should still parse."""
+        payload = """```json
+        {
+          "furniture_selections": [{"furniture_id": "desk_0"}]
+        }
+        ```"""
+
+        parsed = parse_llm_json(payload)
+
+        self.assertEqual(parsed["furniture_selections"][0]["furniture_id"], "desk_0")
+
+    def test_parse_llm_json_repairs_trailing_comma(self):
+        """Lightly malformed JSON should be repaired for local-model output."""
+        payload = '{"furniture_selections": [{"furniture_id": "desk_0",}]}'
+
+        parsed = parse_llm_json(payload)
+
+        self.assertEqual(parsed["furniture_selections"][0]["furniture_id"], "desk_0")
+
+    def test_parse_llm_json_object_rejects_non_object_payloads(self):
+        """A scalar response should be retried instead of treated as a schema."""
+        with self.assertRaisesRegex(
+            ValueError, "Expected top-level JSON object but got str"
+        ):
+            parse_llm_json_object('"not enough visual context"')
+
+    def test_analyze_furniture_accepts_fenced_json(self):
+        """Furniture analysis should accept fenced output from local models."""
+        furniture = Mock()
+        furniture.object_id = UniqueID("desk_0")
+        furniture.name = "desk"
+        furniture.description = "wood desk"
+        furniture.object_type = ObjectType.FURNITURE
+        furniture.immutable = False
+        furniture.bbox_min = [0, 0, 0]
+        furniture.bbox_max = [1, 1, 1]
+
+        self.mock_scene.objects = {"desk_0": furniture}
+        self.mock_scene.room_geometry = None
+        self.mock_scene.text_description = "A simple study."
+        self.scene_analyzer.analyze_scene = Mock(
+            return_value='''```json
+            {
+              "furniture_selections": [
+                {
+                  "furniture_id": "desk_0",
+                  "suggested_items": "Optional: lamp",
+                  "prompt_constraints": "No specific requirements",
+                  "style_notes": "minimal"
+                }
+              ]
+            }
+            ```'''
+        )
+
+        selections = self.scene_analyzer.analyze_furniture_for_manipulands(
+            scene=self.mock_scene,
+            prompt_enum=Mock(),
+        )
+
+        self.assertEqual(len(selections), 1)
+        self.assertEqual(selections[0].furniture_id, UniqueID("desk_0"))
 
 
 if __name__ == "__main__":
