@@ -1,0 +1,309 @@
+#!/usr/bin/env bash
+# Run SceneExpert critic-on probes in isolated processes with non-overlapping
+# service ports. This script intentionally has no critic-off, embedding, or VLM
+# annotation path: SceneBenchmark feedback is injected only into existing LLM
+# critic prompts.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+cd "$PROJECT_ROOT"
+
+EXPERIMENT="${SCENEEXPERT_EXPERIMENT:-ablation_3_qwen3_harness}"
+PYTHON_BIN="${PYTHON_BIN:-python}"
+MODEL_NAME="${MODEL_NAME:-${SCENEEXPERT_MODEL_ID:-Qwen3.6-27B-Q8_0}}"
+RUN_ID="${RUN_ID:-critic_on_$(date +%Y-%m-%d_%H-%M-%S)}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-$PROJECT_ROOT/outputs/critic_probe/$RUN_ID}"
+
+SCENE_BATCH_SIZE="${SCENE_BATCH_SIZE:-1}"
+SCENE_WORKERS_PER_PROCESS="${SCENE_WORKERS_PER_PROCESS:-1}"
+CRITIC_PROBE_PARALLEL="${CRITIC_PROBE_PARALLEL:-true}"
+CRITIC_PROBE_INNER_PARALLELISM="${CRITIC_PROBE_INNER_PARALLELISM:-2}"
+CRITIC_PROBE_PORT_BASE="${CRITIC_PROBE_PORT_BASE:-9000}"
+CRITIC_PROBE_PORT_BLOCK_SIZE="${CRITIC_PROBE_PORT_BLOCK_SIZE:-400}"
+
+PIPELINE_STOP_STAGE="${PIPELINE_STOP_STAGE:-manipuland}"
+BRANCH_FROM_SHARED_BASE="${BRANCH_FROM_SHARED_BASE:-false}"
+SHARED_BASE_STOP_STAGE="${SHARED_BASE_STOP_STAGE:-floor_plan}"
+SHARED_BASE_ROOT="${SHARED_BASE_ROOT:-}"
+GENERATE_SHARED_BASE="${GENERATE_SHARED_BASE:-false}"
+MAX_CASES="${MAX_CASES:-0}"
+CASE_FILTER="${CASE_FILTER:-}"
+DRY_RUN="${DRY_RUN:-false}"
+
+export OPENAI_API_KEY="${OPENAI_API_KEY:-sk-123}"
+export OPENAI_BASE_URL="${OPENAI_BASE_URL:-http://127.0.0.1:8002/v1}"
+export OPENAI_USE_RESPONSES="false"
+export SCENEEXPERT_MODEL_ID="$MODEL_NAME"
+
+normalize_bool() {
+    case "${1,,}" in
+        1|true|yes|y|on) printf 'true' ;;
+        0|false|no|n|off|'') printf 'false' ;;
+        *) return 1 ;;
+    esac
+}
+
+require_positive_integer() {
+    local name="$1"
+    local value="$2"
+    if [[ ! "$value" =~ ^[0-9]+$ ]] || [ "$value" -lt 1 ]; then
+        echo "ERROR: $name must be a positive integer, got '$value'" >&2
+        exit 1
+    fi
+}
+
+next_stage_after() {
+    case "$1" in
+        floor_plan) printf 'furniture' ;;
+        furniture) printf 'wall_mounted' ;;
+        wall_mounted) printf 'ceiling_mounted' ;;
+        ceiling_mounted) printf 'manipuland' ;;
+        *) return 1 ;;
+    esac
+}
+
+csv_quote() {
+    local value="$1"
+    value=${value//\"/\"\"}
+    printf '"%s"' "$value"
+}
+
+require_positive_integer SCENE_BATCH_SIZE "$SCENE_BATCH_SIZE"
+require_positive_integer SCENE_WORKERS_PER_PROCESS "$SCENE_WORKERS_PER_PROCESS"
+require_positive_integer CRITIC_PROBE_INNER_PARALLELISM "$CRITIC_PROBE_INNER_PARALLELISM"
+require_positive_integer CRITIC_PROBE_PORT_BASE "$CRITIC_PROBE_PORT_BASE"
+require_positive_integer CRITIC_PROBE_PORT_BLOCK_SIZE "$CRITIC_PROBE_PORT_BLOCK_SIZE"
+
+if [ "$CRITIC_PROBE_PORT_BLOCK_SIZE" -lt 375 ]; then
+    echo "ERROR: CRITIC_PROBE_PORT_BLOCK_SIZE must be at least 375" >&2
+    exit 1
+fi
+if ! CRITIC_PROBE_PARALLEL="$(normalize_bool "$CRITIC_PROBE_PARALLEL")"; then
+    echo "ERROR: CRITIC_PROBE_PARALLEL must be true or false" >&2
+    exit 1
+fi
+if ! BRANCH_FROM_SHARED_BASE="$(normalize_bool "$BRANCH_FROM_SHARED_BASE")"; then
+    echo "ERROR: BRANCH_FROM_SHARED_BASE must be true or false" >&2
+    exit 1
+fi
+if ! GENERATE_SHARED_BASE="$(normalize_bool "$GENERATE_SHARED_BASE")"; then
+    echo "ERROR: GENERATE_SHARED_BASE must be true or false" >&2
+    exit 1
+fi
+if ! DRY_RUN="$(normalize_bool "$DRY_RUN")"; then
+    echo "ERROR: DRY_RUN must be true or false" >&2
+    exit 1
+fi
+
+if [ "$SCENE_WORKERS_PER_PROCESS" -ne 1 ]; then
+    echo "ERROR: use one worker per process to avoid fork-after-bpy-import." >&2
+    exit 1
+fi
+
+case "$PIPELINE_STOP_STAGE" in
+    furniture|wall_mounted|ceiling_mounted|manipuland) ;;
+    *)
+        echo "ERROR: PIPELINE_STOP_STAGE must be furniture, wall_mounted, ceiling_mounted, or manipuland" >&2
+        exit 1
+        ;;
+esac
+
+BRANCH_START_STAGE=""
+if [ "$BRANCH_FROM_SHARED_BASE" = "true" ] || [ "$GENERATE_SHARED_BASE" = "true" ]; then
+    BRANCH_FROM_SHARED_BASE="true"
+    case "$SHARED_BASE_STOP_STAGE" in
+        floor_plan|furniture|wall_mounted|ceiling_mounted) ;;
+        *)
+            echo "ERROR: SHARED_BASE_STOP_STAGE must precede the target stage" >&2
+            exit 1
+            ;;
+    esac
+    BRANCH_START_STAGE="$(next_stage_after "$SHARED_BASE_STOP_STAGE")"
+    if [ -z "$SHARED_BASE_ROOT" ]; then
+        SHARED_BASE_ROOT="$OUTPUT_ROOT/shared_base"
+    fi
+    if [ "$GENERATE_SHARED_BASE" = "false" ] && [ ! -d "$SHARED_BASE_ROOT" ]; then
+        echo "ERROR: SHARED_BASE_ROOT does not exist: $SHARED_BASE_ROOT" >&2
+        exit 1
+    fi
+fi
+
+mkdir -p "$OUTPUT_ROOT"
+
+echo "========== PARALLEL CRITIC-ON PROBE =========="
+echo "project: $PROJECT_ROOT"
+echo "experiment: $EXPERIMENT"
+echo "run id: $RUN_ID"
+echo "output root: $OUTPUT_ROOT"
+echo "model: $MODEL_NAME"
+echo "OpenAI base URL: $OPENAI_BASE_URL"
+echo "batch size: $SCENE_BATCH_SIZE"
+echo "parallel batches: $CRITIC_PROBE_PARALLEL ($CRITIC_PROBE_INNER_PARALLELISM)"
+echo "port allocation: base=$CRITIC_PROBE_PORT_BASE block=$CRITIC_PROBE_PORT_BLOCK_SIZE"
+echo "shared base: $BRANCH_FROM_SHARED_BASE (generate=$GENERATE_SHARED_BASE)"
+echo "==============================================="
+
+# case_id|critic goal|prompt. Override only selection/count with CASE_FILTER
+# and MAX_CASES; this keeps batch indices stable for reusable shared bases.
+CASES=(
+    "living_room_media_bottleneck|sofa-table-TV relation and circulation|A living room with a sofa against the back wall facing a TV stand and television on the opposite wall, a coffee table centered between the sofa and TV stand, two armchairs flanking the coffee table near each end of the sofa, and a floor lamp beside one armchair."
+    "study_desk_access_crunch|desk-chair-monitor relation and accessibility|A study with a desk centered against the back wall, an office chair tucked under the desk, a computer monitor on the desk, two guest chairs against the side wall facing the desk, and a bookshelf on the adjacent wall."
+    "bedroom_bedside_blockage|bedside grouping and wardrobe access|A bedroom with a bed centered on the main wall, a nightstand with a table lamp on each side of the bed, a dresser against the opposite wall directly facing the bed, and a wardrobe placed next to the dresser."
+    "dining_room_service_squeeze|dining seating and place-setting relations|A dining room with a dining table in the center, four dining chairs arranged around it with one on each side, a sideboard against the wall behind the chairs on one side, and table settings for four including plates, cutlery, and glasses."
+)
+
+COMMON_ARGS=(
+    "experiment.num_workers=${SCENE_WORKERS_PER_PROCESS}"
+    "experiment.pipeline.parallel_rooms=false"
+    "experiment.pipeline.max_parallel_rooms=1"
+    "experiment.scenebenchmark_critic.enabled=true"
+    "experiment.scenebenchmark_critic.inject_into_llm_critic=true"
+    "experiment.scenebenchmark_critic.fd_relation_proposer_mode=template"
+    "experiment.scenebenchmark_critic.max_fd_relation_proposals=8"
+)
+
+port_args=()
+build_port_args() {
+    local batch_index="$1"
+    local block_base=$((CRITIC_PROBE_PORT_BASE + (batch_index - 1) * CRITIC_PROBE_PORT_BLOCK_SIZE))
+    if [ $((block_base + 374)) -gt 65535 ]; then
+        echo "ERROR: batch $batch_index port block exceeds 65535" >&2
+        exit 1
+    fi
+    port_args=(
+        "experiment.geometry_generation_server.port=$((block_base + 5))"
+        "experiment.hssd_retrieval_server.port=$((block_base + 6))"
+        "experiment.articulated_retrieval_server.port=$((block_base + 7))"
+        "experiment.materials_retrieval_server.port=$((block_base + 8))"
+        "experiment.objaverse_retrieval_server.port=$((block_base + 9))"
+        "floor_plan_agent.rendering.blender_server_port_range=[$((block_base + 100)),$((block_base + 124))]"
+        "furniture_agent.rendering.blender_server_port_range=[$((block_base + 125)),$((block_base + 199))]"
+        "wall_agent.rendering.blender_server_port_range=[$((block_base + 200)),$((block_base + 224))]"
+        "ceiling_agent.rendering.blender_server_port_range=[$((block_base + 225)),$((block_base + 249))]"
+        "manipuland_agent.rendering.blender_server_port_range=[$((block_base + 200)),$((block_base + 249))]"
+        "furniture_agent.collision_geometry.server_port_range=[$((block_base + 250)),$((block_base + 324))]"
+        "wall_agent.collision_geometry.server_port_range=[$((block_base + 325)),$((block_base + 349))]"
+        "ceiling_agent.collision_geometry.server_port_range=[$((block_base + 350)),$((block_base + 374))]"
+        "manipuland_agent.collision_geometry.server_port_range=[$((block_base + 325)),$((block_base + 374))]"
+    )
+}
+
+run_batch() {
+    local run_kind="$1"
+    local batch_index="$2"
+    shift 2
+    local batch_entries=("$@")
+    local batch_label
+    batch_label=$(printf 'batch_%03d' "$batch_index")
+    local run_root="$OUTPUT_ROOT/$run_kind/$batch_label"
+    local batch_csv="$run_root/batch_cases.csv"
+    local stop_stage="$PIPELINE_STOP_STAGE"
+    local critic_enabled=true
+    local start_stage=""
+    local resume_from=""
+
+    build_port_args "$batch_index"
+    mkdir -p "$run_root"
+    printf 'scene_index,prompt,case_id,critic_goal\n' > "$batch_csv"
+    for entry in "${batch_entries[@]}"; do
+        IFS='|' read -r scene_index case_id critic_goal prompt <<< "$entry"
+        printf '%s,%s,%s,%s\n' "$scene_index" "$(csv_quote "$prompt")" "$(csv_quote "$case_id")" "$(csv_quote "$critic_goal")" >> "$batch_csv"
+    done
+
+    if [ "$run_kind" = "shared_base" ]; then
+        stop_stage="$SHARED_BASE_STOP_STAGE"
+        critic_enabled=false
+    elif [ "$BRANCH_FROM_SHARED_BASE" = "true" ]; then
+        start_stage="$BRANCH_START_STAGE"
+        resume_from="$SHARED_BASE_ROOT/$batch_label"
+        if [ ! -d "$resume_from" ]; then
+            echo "ERROR: missing reusable shared-base batch: $resume_from" >&2
+            exit 1
+        fi
+    fi
+
+    local cmd=(
+        "$PYTHON_BIN" main.py "experiment=$EXPERIMENT"
+        "+name=critic_on_${batch_label}"
+        "${COMMON_ARGS[@]}" "${port_args[@]}"
+        "experiment.tasks=[generate_scenes]"
+        "experiment.pipeline.stop_stage=${stop_stage}"
+        "experiment.scenebenchmark_critic.enabled=${critic_enabled}"
+        "hydra.run.dir=${run_root}"
+        "experiment.csv_path=${batch_csv}"
+    )
+    if [ -n "$start_stage" ]; then
+        cmd+=("experiment.pipeline.start_stage=${start_stage}" "experiment.pipeline.resume_from_path=${resume_from}")
+    fi
+
+    echo "[$run_kind/$batch_label] ${cmd[*]}"
+    if [ "$DRY_RUN" = "true" ]; then
+        return 0
+    fi
+    "${cmd[@]}"
+}
+
+run_batches() {
+    local run_kind="$1"
+    local active_pids=()
+    local active_labels=()
+    local batch_index=0
+    local selected=0
+    local batch_entries=()
+
+    mkdir -p "$OUTPUT_ROOT/$run_kind"
+
+    wait_one() {
+        local finished_pid rc label i
+        if wait -n -p finished_pid "${active_pids[@]}"; then rc=0; else rc=$?; fi
+        label="pid_${finished_pid}"
+        for i in "${!active_pids[@]}"; do
+            if [ "${active_pids[$i]}" = "$finished_pid" ]; then
+                label="${active_labels[$i]}"
+                unset 'active_pids[i]' 'active_labels[i]'
+                active_pids=("${active_pids[@]}")
+                active_labels=("${active_labels[@]}")
+                break
+            fi
+        done
+        if [ "$rc" -ne 0 ]; then
+            echo "ERROR: $run_kind/$label failed with exit code $rc" >&2
+            exit "$rc"
+        fi
+        echo "completed: $run_kind/$label"
+    }
+
+    launch() {
+        local label
+        label=$(printf 'batch_%03d' "$batch_index")
+        if [ "$CRITIC_PROBE_PARALLEL" = "true" ]; then
+            run_batch "$run_kind" "$batch_index" "${batch_entries[@]}" > "$OUTPUT_ROOT/$run_kind/${label}.log" 2>&1 &
+            active_pids+=("$!")
+            active_labels+=("$label")
+            while [ "${#active_pids[@]}" -ge "$CRITIC_PROBE_INNER_PARALLELISM" ]; do wait_one; done
+        else
+            run_batch "$run_kind" "$batch_index" "${batch_entries[@]}"
+        fi
+    }
+
+    for index in "${!CASES[@]}"; do
+        IFS='|' read -r case_id critic_goal prompt <<< "${CASES[$index]}"
+        if [ -n "$CASE_FILTER" ] && [[ "$case_id" != *"$CASE_FILTER"* ]]; then continue; fi
+        if [ "$MAX_CASES" -gt 0 ] && [ "$selected" -ge "$MAX_CASES" ]; then break; fi
+        batch_entries+=("$index|$case_id|$critic_goal|$prompt")
+        selected=$((selected + 1))
+        if [ "${#batch_entries[@]}" -eq "$SCENE_BATCH_SIZE" ]; then
+            batch_index=$((batch_index + 1)); launch; batch_entries=()
+        fi
+    done
+    if [ "${#batch_entries[@]}" -gt 0 ]; then batch_index=$((batch_index + 1)); launch; fi
+    while [ "${#active_pids[@]}" -gt 0 ]; do wait_one; done
+}
+
+if [ "$GENERATE_SHARED_BASE" = "true" ]; then
+    run_batches shared_base
+fi
+run_batches critic_on
+echo "critic-on probe complete: $OUTPUT_ROOT"
