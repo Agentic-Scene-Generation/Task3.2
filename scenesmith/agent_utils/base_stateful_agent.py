@@ -66,6 +66,9 @@ from scenesmith.agent_utils.thinking import (
 )
 from scenesmith.agent_utils.turn_trimming_session import TurnTrimmingSession
 from scenesmith.prompts import prompt_registry
+from scenesmith.scenebenchmark_critic import evaluate_room_scene
+from scenesmith.scenebenchmark_critic.config import critic_config_from_any
+from scenesmith.scenebenchmark_critic.prompt_context import format_agent_prompt_context
 from scenesmith.utils.logging import BaseLogger
 from scenesmith.utils.openai import encode_image_to_base64
 
@@ -2126,6 +2129,13 @@ class BaseStatefulAgent(ABC):
         # The result is cached per candidate and reused by deterministic checks
         # and critic prompt construction.
         physics_context = self._get_cached_physics_context()
+        benchmark_context = self._build_scenebenchmark_critic_context()
+        if benchmark_context:
+            physics_context = (
+                f"{physics_context}\n\n"
+                "Additional SceneBenchmark geometry critic context:\n"
+                f"{benchmark_context}"
+            )
         hard_state = (
             self._evaluate_current_hard_state(physics_context=physics_context)
             if self._critic_fast_path_enabled("hard_check_first", True)
@@ -2513,6 +2523,53 @@ class BaseStatefulAgent(ABC):
             },
         )
         return response.critique + score_change_msg + safety_msg
+
+    def _build_scenebenchmark_critic_context(self) -> str | None:
+        """Build deterministic geometry-rule feedback for the LLM critic prompt.
+
+        The embedded critic is deliberately limited to the existing furniture and
+        manipuland critic turns.  It does not alter generation, retrieval, asset
+        annotation, or VLM selection; it only supplies actionable rule failures
+        to the critic that is already evaluating the current scene.
+        """
+        critic_config = critic_config_from_any(self.cfg)
+        if not critic_config.enabled or not critic_config.inject_into_llm_critic:
+            return None
+        if self.agent_type not in {AgentType.FURNITURE, AgentType.MANIPULAND}:
+            return None
+
+        scene = getattr(self, "scene", None)
+        if scene is None:
+            return None
+
+        payload = evaluate_room_scene(
+            scene,
+            config=self.cfg,
+            stage=f"llm_critic_{self.agent_type.value}",
+        )
+        if critic_config.agent_prompt_context_filter_enabled:
+            debug_dir = None
+            if critic_config.agent_prompt_context_debug_write:
+                scene_dir = getattr(scene, "scene_dir", None)
+                if scene_dir:
+                    debug_dir = (
+                        Path(scene_dir)
+                        / "scenebenchmark_prompt_context"
+                        / self.agent_type.value
+                    )
+            return format_agent_prompt_context(
+                payload,
+                scene=scene,
+                agent_type=self.agent_type,
+                current_furniture_id=getattr(self, "current_furniture_id", None),
+                max_issues=critic_config.max_issues_for_prompt,
+                debug_output_dir=debug_dir,
+            )
+        from scenesmith.scenebenchmark_critic import format_prompt_context
+
+        return format_prompt_context(
+            payload, max_issues=critic_config.max_issues_for_prompt
+        )
 
     @abstractmethod
     def _get_design_change_prompt_enum(self) -> Any:
