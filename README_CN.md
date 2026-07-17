@@ -246,9 +246,20 @@ python -m pip install uv -i https://pypi.tuna.tsinghua.edu.cn/simple
 uv sync --frozen --no-dev
 python -m pip install modelscope vllm -i https://pypi.tuna.tsinghua.edu.cn/simple
 python -m pip install "numpy>=1.26,<2.0" -i https://pypi.tuna.tsinghua.edu.cn/simple
+python scripts/check_runtime_compatibility.py
 ```
 
 注意：`vllm` 和 `modelscope` 是运行脚本需要的依赖，不在 `pyproject.toml` 主依赖里，需要单独装。`vllm` 安装过程可能把 NumPy 升级到 2.x，但 `bpy==4.5.4` / Blender 扩展通常按 NumPy 1.x ABI 编译；如果日志出现 `A module that was compiled using NumPy 1.x cannot be run in NumPy 2.x`，必须重新执行上面的 NumPy pin 命令。`scripts/run_experiment.sh` 已加入预检查，发现 NumPy 2.x 会在启动 vLLM 前直接停止，避免浪费 30 分钟模型启动时间。
+
+当前 ACP 运行环境必须保持 `openai==2.44.0` 与 `openai-agents==0.6.4`。`openai` 太旧（例如 `2.11.0`）缺少 vLLM 0.22.x 导入的 `NamespaceTool`；直接升级到 `2.45.0` 又会让 Agents SDK 在构造 `Usage()` 时因 `cache_write_tokens` 必填而失败。`pyproject.toml` 和 `uv.lock` 已固定这组兼容版本。若已有环境被 `pip install vllm` 改写，可修复后立即自检：
+
+```bash
+python -m pip install --upgrade "openai==2.44.0" "openai-agents==0.6.4" \
+  -i https://pypi.tuna.tsinghua.edu.cn/simple
+python scripts/check_runtime_compatibility.py
+```
+
+ACP 入口也会在加载 Qwen 权重前自动运行同一检查；检查失败时会直接退出并打印修复命令。
 
 如果要运行向量 / hybrid memory 版本，还需要安装可选 memory 依赖。`requirements-memory.txt` 不是可执行脚本，而是 pip 的依赖清单；在项目根目录执行：
 

@@ -94,6 +94,8 @@ fi
 if [ "${SCENEEXPERT_SKIP_PYTHON_PREFLIGHT:-0}" != "1" ]; then
     echo "  Running Python syntax preflight..."
     python -m compileall -q main.py scenesmith
+    echo "  Running runtime dependency compatibility preflight..."
+    PYTHONDONTWRITEBYTECODE=1 python scripts/check_runtime_compatibility.py
 fi
 
 NUMPY_VERSION="$(python -c 'import numpy as np; print(np.__version__)' 2>/dev/null || echo missing)"
