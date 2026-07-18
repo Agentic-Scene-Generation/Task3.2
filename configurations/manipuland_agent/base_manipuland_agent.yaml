@@ -85,6 +85,7 @@ asset_manager:
   # Asset source: "generated" (Hunyuan3D/SAM3D) or "hssd" (HSSD retrieval)
   general_asset_source: "hssd"
   hssd_vlm_fallback_on_transient_error: true
+  hssd_physics_analysis_mode: deterministic
   hssd_vlm_timeout_seconds: 90
   hssd_vlm_max_retries: 0
 

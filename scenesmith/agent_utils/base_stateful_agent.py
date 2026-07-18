@@ -2546,6 +2546,10 @@ class BaseStatefulAgent(ABC):
             scene,
             config=self.cfg,
             stage=f"llm_critic_{self.agent_type.value}",
+            # Reuse the live renderer when the evaluator needs visual evidence.
+            # Agent configs are isolated subtrees, so this is the only reliable
+            # way to preserve the renderer dependency during critic injection.
+            blender_server=getattr(self, "blender_server", None),
         )
         if critic_config.agent_prompt_context_filter_enabled:
             debug_dir = None

@@ -79,6 +79,7 @@ def canonicalize_mesh_impl(
         FileNotFoundError: If input GLTF file doesn't exist.
         RuntimeError: If Blender processing fails.
     """
+    import bmesh
     import bpy
     import mathutils
 
@@ -90,12 +91,25 @@ def canonicalize_mesh_impl(
         f"(up={up_axis}, front={front_axis}, type={object_type})"
     )
 
-    # Clear scene.
-    bpy.ops.object.select_all(action="SELECT")
-    bpy.ops.object.delete()
+    # Clear scene, including objects hidden by a previous render request.
+    # Hidden objects cannot be selected by the context-dependent delete operator.
+    if bpy.context.object is not None and bpy.context.object.mode != "OBJECT":
+        bpy.ops.object.mode_set(mode="OBJECT")
+    for obj in list(bpy.data.objects):
+        obj.hide_set(False)
+        obj.hide_viewport = False
+        obj.hide_render = False
+        bpy.data.objects.remove(obj, do_unlink=True)
 
     # Import GLTF (Blender converts Y-up → Z-up automatically).
     bpy.ops.import_scene.gltf(filepath=str(input_path))
+
+    # Imported objects can inherit a hidden view-layer state from the previous
+    # overlay render. Restore visibility before any context-sensitive operation.
+    for obj in bpy.context.scene.objects:
+        obj.hide_set(False)
+        obj.hide_viewport = False
+        obj.hide_render = False
 
     # Find root object(s).
     top_level_objects = [obj for obj in bpy.context.scene.objects if obj.parent is None]
@@ -230,20 +244,20 @@ def canonicalize_mesh_impl(
     root_obj.location = mathutils.Vector((loc_x, loc_y, loc_z))
     bpy.ops.object.transform_apply(location=True, rotation=False, scale=False)
 
-    # Merge duplicate vertices to reduce file size (~80% reduction).
-    # Select all mesh objects and merge vertices by distance.
-    bpy.ops.object.select_all(action="DESELECT")
+    # Merge duplicate vertices without bpy.ops.object.mode_set(). The latter is
+    # context-sensitive and fails when a previous render left an object hidden.
     for obj in bpy.context.scene.objects:
-        if obj.type == "MESH":
-            obj.select_set(True)
-            bpy.context.view_layer.objects.active = obj
-
-    if bpy.context.selected_objects:
-        bpy.ops.object.mode_set(mode="EDIT")
-        bpy.ops.mesh.select_all(action="SELECT")
-        bpy.ops.mesh.remove_doubles(threshold=0.0001)
-        bpy.ops.object.mode_set(mode="OBJECT")
-        console_logger.debug("Merged duplicate vertices in mesh")
+        if obj.type != "MESH" or obj.data is None:
+            continue
+        mesh = bmesh.new()
+        try:
+            mesh.from_mesh(obj.data)
+            bmesh.ops.remove_doubles(mesh, verts=list(mesh.verts), dist=0.0001)
+            mesh.to_mesh(obj.data)
+            obj.data.update()
+        finally:
+            mesh.free()
+    console_logger.debug("Merged duplicate vertices in mesh data")
 
     # Ensure output directory exists.
     output_path.parent.mkdir(parents=True, exist_ok=True)

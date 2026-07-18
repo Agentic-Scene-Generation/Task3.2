@@ -43,9 +43,15 @@ from scenesmith.agent_utils.image_generation import (
 )
 from scenesmith.agent_utils.materials_retrieval_server import MaterialsRetrievalClient
 from scenesmith.agent_utils.mesh_canonicalization import canonicalize_mesh
+from scenesmith.agent_utils.mesh_frame import (
+    gltf_y_up_bounds_to_scene_z_up,
+    scene_dimensions_to_gltf_y_up,
+    validate_uniform_dimension_fit,
+)
 from scenesmith.agent_utils.mesh_physics_analyzer import (
     MeshPhysicsAnalysis,
     analyze_mesh_orientation_and_material,
+    build_deterministic_hssd_physics,
 )
 from scenesmith.agent_utils.mesh_utils import (
     load_mesh_as_trimesh,
@@ -353,6 +359,65 @@ class AssetManager:
         self.last_duplicate_info: dict[str, list[int]] | None = None
         self._fatal_asset_error: str | None = None
 
+    def _analyze_mesh_physics(
+        self,
+        *,
+        mesh_path: Path,
+        asset_source: str,
+        object_name: str,
+        debug_output_dir: Path,
+    ) -> MeshPhysicsAnalysis:
+        """Resolve asset physics without making HSSD depend on VLM indexing."""
+        if asset_source == "hssd" and str(
+            getattr(self.cfg.asset_manager, "hssd_physics_analysis_mode", "deterministic")
+        ).lower() == "deterministic":
+            physics = build_deterministic_hssd_physics(
+                mesh_path, object_name=object_name
+            )
+            console_logger.info(
+                "Using deterministic HSSD physics for %s: material=%s, mass=%.1fkg",
+                object_name,
+                physics.material,
+                physics.mass_kg,
+            )
+            return physics
+        return analyze_mesh_orientation_and_material(
+            mesh_path=mesh_path,
+            vlm_service=self.vlm_service,
+            cfg=self.cfg,
+            elevation_degrees=self.side_view_elevation_degrees,
+            blender_server=self.blender_server,
+            num_side_views=self.num_side_views_for_physics_analysis,
+            prompt_type="hssd" if asset_source == "hssd" else "generated",
+            include_vertical_views=asset_source != "hssd",
+            debug_output_dir=debug_output_dir,
+        )
+
+    def _scale_and_measure_canonical_mesh(
+        self,
+        *,
+        canonical_path: Path,
+        final_path: Path,
+        desired_dimensions: list[float] | tuple[float, ...] | None,
+    ) -> tuple[Path, np.ndarray, np.ndarray, float]:
+        """Scale canonical Y-up glTF and expose SceneSmith-frame bounds."""
+        applied_scale = 1.0
+        if desired_dimensions is not None:
+            final_path, applied_scale = scale_mesh_uniformly_to_dimensions(
+                mesh_path=canonical_path,
+                desired_dimensions=scene_dimensions_to_gltf_y_up(desired_dimensions),
+                output_path=final_path,
+                min_dimension_meters=self.min_mesh_dimension_meters,
+                relative_threshold=self.mesh_relative_dimension_threshold,
+            )
+        else:
+            canonical_path.replace(final_path)
+        mesh = load_mesh_as_trimesh(final_path, force_merge=True)
+        bbox_min, bbox_max = gltf_y_up_bounds_to_scene_z_up(mesh.bounds)
+        if desired_dimensions is not None:
+            validate_uniform_dimension_fit(bbox_max - bbox_min, desired_dimensions)
+        return final_path, bbox_min, bbox_max, applied_scale
+
     @staticmethod
     def _sanitize_filename(name: str, max_length: int = 50) -> str:
         """Sanitize a name for use as a filename.
@@ -585,17 +650,14 @@ class AssetManager:
                 debug_dir = self.debug_dir / short_name
 
                 console_logger.info(
-                    f"Running VLM analysis for HSSD material/mass: {short_name}"
+                    "Resolving HSSD physics metadata for %s (mode=%s)",
+                    short_name,
+                    getattr(self.cfg.asset_manager, "hssd_physics_analysis_mode", "deterministic"),
                 )
-                vlm_physics = analyze_mesh_orientation_and_material(
+                vlm_physics = self._analyze_mesh_physics(
                     mesh_path=gltf_path,
-                    vlm_service=self.vlm_service,
-                    cfg=self.cfg,
-                    elevation_degrees=self.side_view_elevation_degrees,
-                    blender_server=self.blender_server,
-                    num_side_views=self.num_side_views_for_physics_analysis,
-                    prompt_type="hssd",
-                    include_vertical_views=False,
+                    asset_source="hssd",
+                    object_name=short_name,
                     debug_output_dir=debug_dir,
                 )
                 console_logger.info(
@@ -620,21 +682,26 @@ class AssetManager:
                     f"Canonicalizing HSSD mesh: up={vlm_physics.up_axis}, "
                     f"front={vlm_physics.front_axis} → +Y"
                 )
-                final_gltf_path = config.sdf_dir / f"{config.short_name}.gltf"
+                canonical_path = config.sdf_dir / f"{config.short_name}_canonical.gltf"
                 canonicalize_mesh(
                     gltf_path=gltf_path,
-                    output_path=final_gltf_path,
+                    output_path=canonical_path,
                     up_axis=vlm_physics.up_axis,
                     front_axis=vlm_physics.front_axis,
                     blender_server=self.blender_server,
                     object_type=request.object_type,
                 )
 
+                final_gltf_path, bbox_min, bbox_max, _ = (
+                    self._scale_and_measure_canonical_mesh(
+                        canonical_path=canonical_path,
+                        final_path=config.sdf_dir / f"{config.short_name}.gltf",
+                        desired_dimensions=request.desired_dimensions[index],
+                    )
+                )
+
                 # Generate collision geometry via convex decomposition server.
                 collision_pieces = self._generate_collision_geometry(final_gltf_path)
-
-                # Load mesh for bounding box calculation.
-                mesh = load_mesh_as_trimesh(final_gltf_path, force_merge=True)
 
                 sdf_path = config.sdf_dir / f"{config.short_name}.sdf"
                 generate_drake_sdf(
@@ -644,9 +711,6 @@ class AssetManager:
                     output_path=sdf_path,
                     asset_name=config.short_name,
                 )
-
-                # Scene-graph transforms are already applied by the mesh loader.
-                bbox_min, bbox_max = mesh.bounds
 
                 # Create SceneObject using shared helper.
                 scene_obj = self._create_scene_object(
@@ -1908,16 +1972,11 @@ class AssetManager:
             f"Running VLM analysis for mesh physics "
             f"(asset_source={asset_source}, prompt_type={prompt_type})"
         )
-        physics_analysis = analyze_mesh_orientation_and_material(
+        physics_analysis = self._analyze_mesh_physics(
             mesh_path=gltf_path,
-            vlm_service=self.vlm_service,
-            cfg=self.cfg,
-            elevation_degrees=self.side_view_elevation_degrees,
-            blender_server=self.blender_server,
-            num_side_views=self.num_side_views_for_physics_analysis,
+            asset_source=asset_source,
+            object_name=config.short_name,
             debug_output_dir=debug_dir,
-            prompt_type=prompt_type,
-            include_vertical_views=include_vertical_views,
         )
 
         console_logger.info(
@@ -1938,39 +1997,22 @@ class AssetManager:
             object_type=object_type,
         )
 
-        # Scale mesh to desired dimensions (if provided).
+        # Scale mesh to desired dimensions while keeping glTF Y-up explicit.
         # For generated assets: scale_factor=1.0 because support surface extraction runs
         # on the already-scaled mesh, so surfaces are at correct dimensions.
         # For HSSD assets: scale_factor=applied_scale because pre-computed surfaces
         # are at original HSSD dimensions and need scaling.
-        final_gltf_path = canonical_path
-        initial_scale = 1.0
-        if desired_dimensions is not None:
-            console_logger.info(
-                f"Scaling mesh to desired dimensions: {desired_dimensions}"
-            )
-            final_gltf_path = config.sdf_dir / f"{config.short_name}.gltf"
-            final_gltf_path, applied_scale = scale_mesh_uniformly_to_dimensions(
-                mesh_path=canonical_path,
+        final_gltf_path, bbox_min, bbox_max, applied_scale = (
+            self._scale_and_measure_canonical_mesh(
+                canonical_path=canonical_path,
+                final_path=config.sdf_dir / f"{config.short_name}.gltf",
                 desired_dimensions=desired_dimensions,
-                output_path=final_gltf_path,
-                min_dimension_meters=self.min_mesh_dimension_meters,
-                relative_threshold=self.mesh_relative_dimension_threshold,
             )
-            # HSSD pre-computed surfaces are at original mesh dimensions.
-            # They need scale_factor to match the physical scaling applied above.
-            if is_hssd:
-                initial_scale = applied_scale
-        else:
-            # Rename canonical to final name if no scaling needed.
-            final_gltf_path = config.sdf_dir / f"{config.short_name}.gltf"
-            canonical_path.rename(final_gltf_path)
+        )
+        initial_scale = applied_scale if is_hssd else 1.0
 
         # Generate collision geometry via convex decomposition server.
         collision_pieces = self._generate_collision_geometry(final_gltf_path)
-
-        # Load mesh for bounding box calculation.
-        mesh = load_mesh_as_trimesh(final_gltf_path, force_merge=True)
 
         # Generate Drake SDF.
         sdf_path = config.sdf_dir / f"{config.short_name}.sdf"
@@ -1981,10 +2023,6 @@ class AssetManager:
             output_path=sdf_path,
             asset_name=config.short_name,
         )
-
-        # Extract bounding box from scaled mesh.
-        # Scene-graph transforms are already applied by the mesh loader.
-        bbox_min, bbox_max = mesh.bounds
 
         console_logger.info(
             f"Drake SDF complete: SDF at {sdf_path}, bounds: {bbox_min} to {bbox_max}"
@@ -2047,8 +2085,7 @@ class AssetManager:
 
         # Load mesh for bounding box calculation.
         mesh = load_mesh_as_trimesh(gltf_path, force_merge=True)
-        # Scene-graph transforms are already applied by the mesh loader.
-        bbox_min, bbox_max = mesh.bounds
+        bbox_min, bbox_max = gltf_y_up_bounds_to_scene_z_up(mesh.bounds)
 
         console_logger.info(
             f"Thin covering SDF complete: {sdf_path}, bounds: {bbox_min} to {bbox_max}"
@@ -2195,8 +2232,7 @@ class AssetManager:
 
         # Extract bounds.
         bounds = mesh.bounds  # [[xmin, ymin, zmin], [xmax, ymax, zmax]]
-        bbox_min = bounds[0]
-        bbox_max = bounds[1]
+        bbox_min, bbox_max = gltf_y_up_bounds_to_scene_z_up(bounds)
 
         console_logger.debug(
             f"Extracted bounds from {gltf_path}: min={bbox_min}, max={bbox_max}"

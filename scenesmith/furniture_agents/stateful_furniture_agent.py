@@ -526,6 +526,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             "window access warning" in reasons
             or "wardrobe" in reasons
             or "closet" in reasons
+            or "collisions" in reasons
             or FailureCategory.WINDOW_OR_WALL_ACCESS in repair_plan.categories
         ) and self._repair_wardrobe_wall_anchor():
             actions.append("moved wardrobe to a deterministic wall/corner anchor")
@@ -761,8 +762,11 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             )
             repair_root.mkdir(parents=True, exist_ok=True)
             width, depth, height = [float(v) for v in dimensions]
-            mesh = trimesh.creation.box(extents=[width, depth, height])
-            mesh.apply_translation([0.0, 0.0, height / 2.0])
+            # generate_drake_sdf expects the visual and collision meshes in
+            # glTF's Y-up frame. Encode the SceneSmith depth/height axes as
+            # glTF Z/Y so the SDF exporter converts them back to X/Y/Z.
+            mesh = trimesh.creation.box(extents=[width, height, depth])
+            mesh.apply_translation([0.0, height / 2.0, 0.0])
             gltf_path = repair_root / f"{category}_placeholder.gltf"
             sdf_path = repair_root / f"{category}_placeholder.sdf"
             mesh.export(gltf_path)
@@ -992,6 +996,8 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         )
         best_transform = None
         best_score = -1e9
+        fallback_transform = None
+        fallback_score = -1e9
         for transform, wall_opening_penalty in candidates:
             bounds = self._bounds_for_transform(wardrobe, transform)
             if bounds is None:
@@ -1011,9 +1017,20 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             )
             distance_score = float(np.linalg.norm(center[:2] - bed_center[:2]))
             score = distance_score - overlap_penalty - wall_opening_penalty
+            if score > fallback_score:
+                fallback_score = score
+                fallback_transform = transform
+            # A hard collision must never win merely because it is farther from
+            # the bed. Keep a fallback only for pathological rooms where every
+            # candidate overlaps an existing object.
+            if overlap_penalty > 1e-5:
+                continue
             if score > best_score:
                 best_score = score
                 best_transform = transform
+
+        if best_transform is None:
+            best_transform = fallback_transform
 
         if best_transform is None or self._transform_close(
             wardrobe.transform, best_transform
@@ -1287,9 +1304,22 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 candidates.append((wall, x, y, self._yaw_for_inward_wall(wall)))
 
         transforms: list[tuple[RigidTransform, float]] = []
+        collision_clearance = float(
+            self._repair_cfg_value("wardrobe_wall_clearance_m", 0.35)
+        )
         for wall, x, y, yaw in candidates:
             transform = self._grounded_transform(wardrobe, x=x, y=y, yaw_deg=yaw)
             transform = self._snap_transform_to_wall(wardrobe, transform, wall)
+            translation = np.asarray(transform.translation(), dtype=float).copy()
+            if wall == "north":
+                translation[1] -= collision_clearance
+            elif wall == "south":
+                translation[1] += collision_clearance
+            elif wall == "east":
+                translation[0] -= collision_clearance
+            else:
+                translation[0] += collision_clearance
+            transform = RigidTransform(R=transform.rotation(), p=translation)
             transform = self._fit_transform_inside_room(wardrobe, transform)
             opening_penalty = 5.0 if wall_openings.get(wall) else 0.0
             transforms.append((transform, opening_penalty))

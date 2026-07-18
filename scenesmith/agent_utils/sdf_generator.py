@@ -32,6 +32,14 @@ from scenesmith.utils.sdf_utils import (
 
 console_logger = logging.getLogger(__name__)
 
+# glTF is Y-up while SceneSmith/Drake scene transforms use Z-up. Drake
+# converts the visual glTF mesh when it loads the SDF, but OBJ collision meshes
+# do not receive that conversion automatically.
+YUP_TO_ZUP_TRANSFORM = np.array(
+    [[1, 0, 0, 0], [0, 0, -1, 0], [0, 1, 0, 0], [0, 0, 0, 1]],
+    dtype=float,
+)
+
 
 def generate_drake_sdf(
     visual_mesh_path: Path,
@@ -72,13 +80,16 @@ def generate_drake_sdf(
         f"collision pieces"
     )
 
-    # Apply GLTF scene-graph transforms while loading. The resulting mesh is in
-    # the same Z-up working frame used by Drake and convex decomposition.
+    # Convert the mesh used for inertial properties and validation to the same
+    # Z-up frame as Drake's loaded visual geometry.
     visual_mesh = load_mesh_as_trimesh(visual_mesh_path, force_merge=True)
+    visual_mesh.apply_transform(YUP_TO_ZUP_TRANSFORM)
     collision_meshes = _filter_full_dimensional_collision_pieces(
         [piece.copy() for piece in collision_pieces],
         asset_name=asset_name,
     )
+    for piece in collision_meshes:
+        piece.apply_transform(YUP_TO_ZUP_TRANSFORM)
     _validate_collision_geometry(
         visual_mesh=visual_mesh,
         collision_pieces=collision_meshes,
