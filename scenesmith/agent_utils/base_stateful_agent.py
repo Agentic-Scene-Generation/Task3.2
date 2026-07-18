@@ -39,6 +39,7 @@ from scenesmith.agent_utils.checkpoint_state import initialize_checkpoint_attrib
 from scenesmith.agent_utils.furniture_safety import (
     FurnitureSafetyController,
     HardStateEvaluation,
+    hard_state_repair_objective,
 )
 from scenesmith.agent_utils.intra_turn_image_filter import IntraTurnImageFilter
 from scenesmith.agent_utils.physics_tools import check_physics_violations
@@ -710,11 +711,7 @@ class BaseStatefulAgent(ABC):
                 if self.scene is not None
                 else None
             )
-            before_penetration = sum(
-                float(getattr(issue, "penetration_depth_m", 0.0) or 0.0)
-                for issue in getattr(current_state, "issues", [])
-            )
-            before_objective = (len(current_state.hard_reasons), before_penetration)
+            before_objective = hard_state_repair_objective(current_state)
             repair_start = time.time()
             repaired, actions = self._attempt_deterministic_repair(current_state)
             all_actions.extend(actions)
@@ -748,15 +745,11 @@ class BaseStatefulAgent(ABC):
                 physics_context=physics_context
             )
             if repaired_hard_state is not None:
-                after_penetration = sum(
-                    float(getattr(issue, "penetration_depth_m", 0.0) or 0.0)
-                    for issue in getattr(repaired_hard_state, "issues", [])
-                )
-                after_objective = (
-                    len(repaired_hard_state.hard_reasons),
-                    after_penetration,
-                )
-                if after_objective > before_objective and before_scene_state is not None:
+                after_objective = hard_state_repair_objective(repaired_hard_state)
+                if (
+                    after_objective > before_objective
+                    and before_scene_state is not None
+                ):
                     self.scene.restore_from_state_dict(before_scene_state)
                     self.rendering_manager.clear_cache()
                     self._reset_critic_candidate_cache()
@@ -769,7 +762,9 @@ class BaseStatefulAgent(ABC):
                         before_objective,
                         after_objective,
                     )
-                    all_actions.append("rolled back repair that worsened hard constraints")
+                    all_actions.append(
+                        "rolled back repair that worsened hard constraints"
+                    )
                     break
             if repaired_hard_state is not None and repaired_hard_state.hard_valid:
                 console_logger.info(

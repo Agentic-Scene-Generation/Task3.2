@@ -494,8 +494,8 @@ class TestAssetManager(unittest.TestCase):
             sdf_path
         )
 
-        np.testing.assert_array_equal(bbox_min, [0.0, 0.0, 0.0])
-        np.testing.assert_array_equal(bbox_max, [1.0, 2.0, 0.5])
+        np.testing.assert_array_equal(bbox_min, [0.0, -0.5, 0.0])
+        np.testing.assert_array_equal(bbox_max, [1.0, 0.0, 2.0])
 
     @patch("scenesmith.agent_utils.asset_manager.scale_mesh_uniformly_to_dimensions")
     @patch("pathlib.Path.glob")
@@ -1110,7 +1110,7 @@ class TestAssetManagerDimensionControl(unittest.TestCase):
         # Verify scale_mesh_uniformly_to_dimensions was called.
         mock_scale_mesh.assert_called_once()
         call_args = mock_scale_mesh.call_args
-        self.assertEqual(call_args[1]["desired_dimensions"], [1.8, 0.9, 0.75])
+        self.assertEqual(call_args[1]["desired_dimensions"], [1.8, 0.75, 0.9])
 
 
 if __name__ == "__main__":

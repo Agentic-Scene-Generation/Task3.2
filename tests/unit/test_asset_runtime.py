@@ -9,6 +9,11 @@ from scenesmith.agent_utils.asset_runtime import (
 
 
 class AssetRuntimeGateTest(unittest.TestCase):
+    def test_floor_covering_variants_share_the_rug_family(self) -> None:
+        for description in ("square rug", "hallway runner", "woven floor mat"):
+            with self.subTest(description=description):
+                self.assertEqual(semantic_asset_family(description), "rug")
+
     def test_semantic_variants_share_one_family(self) -> None:
         self.assertEqual(
             semantic_asset_family("metal-framed circular mirror"),

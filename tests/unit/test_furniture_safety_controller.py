@@ -3,7 +3,12 @@ import unittest
 from dataclasses import dataclass
 from types import SimpleNamespace
 
-from scenesmith.agent_utils.furniture_safety import FurnitureSafetyController
+from scenesmith.agent_utils.furniture_safety import (
+    FurnitureSafetyController,
+    HardIssue,
+    HardStateEvaluation,
+    hard_state_repair_objective,
+)
 from scenesmith.agent_utils.scoring import CategoryScore, CritiqueWithScores
 
 
@@ -87,6 +92,61 @@ class BoundedFurniture:
 
 
 class FurnitureSafetyControllerTest(unittest.TestCase):
+    def test_repair_objective_keeps_newly_completed_required_content(self) -> None:
+        missing = HardStateEvaluation(
+            hard_valid=False,
+            hard_reasons=[
+                "missing required bed: expected 1, found 0",
+                "missing required nightstand: expected 2, found 0",
+                "missing required wardrobe: expected 1, found 0",
+                "bedroom plausibility: no bed object found",
+            ],
+            issues=[
+                HardIssue(issue_type="missing_required_object", object_a_id="bed"),
+                HardIssue(
+                    issue_type="missing_required_object", object_a_id="nightstand"
+                ),
+                HardIssue(issue_type="missing_required_object", object_a_id="wardrobe"),
+            ],
+        )
+        completed_with_collisions = HardStateEvaluation(
+            hard_valid=False,
+            hard_reasons=["physics hard violation: collisions"],
+            issues=[
+                HardIssue(
+                    issue_type="collision_or_overlap",
+                    penetration_depth_m=0.54,
+                )
+            ],
+        )
+
+        self.assertLess(
+            hard_state_repair_objective(completed_with_collisions),
+            hard_state_repair_objective(missing),
+        )
+
+    def test_repair_objective_rejects_collision_fix_moved_outside_room(self) -> None:
+        collision = HardStateEvaluation(
+            hard_valid=False,
+            hard_reasons=["physics hard violation: collisions"],
+            issues=[
+                HardIssue(
+                    issue_type="collision_or_overlap",
+                    penetration_depth_m=0.08,
+                )
+            ],
+        )
+        outside = HardStateEvaluation(
+            hard_valid=False,
+            hard_reasons=["chair full bounding box exceeds room bounds"],
+            issues=[HardIssue(issue_type="out_of_bounds", object_a_id="chair")],
+        )
+
+        self.assertGreater(
+            hard_state_repair_objective(outside),
+            hard_state_repair_objective(collision),
+        )
+
     def test_physics_collision_keeps_structured_object_pair(self) -> None:
         controller = FurnitureSafetyController({"enabled": True})
         scene = SimpleNamespace(objects={}, room_geometry=None, text_description="office")

@@ -45,6 +45,11 @@ from scenesmith.agent_utils.image_generation import (
 )
 from scenesmith.agent_utils.materials_retrieval_server import MaterialsRetrievalClient
 from scenesmith.agent_utils.mesh_canonicalization import canonicalize_mesh
+from scenesmith.agent_utils.mesh_frame import (
+    gltf_y_up_bounds_to_scene_z_up,
+    scene_dimensions_to_gltf_y_up,
+    validate_uniform_dimension_fit,
+)
 from scenesmith.agent_utils.mesh_physics_analyzer import (
     MeshPhysicsAnalysis,
     analyze_mesh_orientation_and_material,
@@ -351,6 +356,18 @@ class AssetManager:
                 cfg=cfg,
                 blender_server=blender_server,
             )
+        self._thin_covering_router = self.router
+        if (
+            thin_covering_enabled
+            and self._thin_covering_router is None
+            and agent_type == AgentType.FURNITURE
+        ):
+            self._thin_covering_router = AssetRouter(
+                agent_type=agent_type,
+                vlm_service=vlm_service,
+                cfg=cfg,
+                blender_server=blender_server,
+            )
 
         # Track duplicate requests from the last generate_assets call.
         self.last_duplicate_info: dict[str, list[int]] | None = None
@@ -590,6 +607,83 @@ class AssetManager:
             debug_output_dir=debug_output_dir,
         )
 
+    def _is_deterministic_floor_covering(
+        self, description: str, short_name: str, object_type: ObjectType
+    ) -> bool:
+        """Return whether a non-router furniture request should bypass HSSD."""
+        return (
+            self.agent_type == AgentType.FURNITURE
+            and object_type == ObjectType.FURNITURE
+            and self._thin_covering_router is not None
+            and semantic_asset_family(description, short_name) == "rug"
+        )
+
+    def _generate_deterministic_floor_covering(
+        self, request: AssetGenerationRequest, index: int
+    ) -> SceneObject:
+        """Generate a correctly sized rug without router analysis or VLM validation."""
+        if self._thin_covering_router is None:
+            raise RuntimeError("Thin-covering strategy is not available")
+        item = AssetItem(
+            description=request.object_descriptions[index],
+            short_name=request.short_names[index],
+            dimensions=list(request.desired_dimensions[index]),
+            object_type=request.object_type,
+            strategies=["thin_covering"],
+            thin_covering_type="tileable",
+        )
+        generated = (
+            self._thin_covering_router.generate_thin_covering_without_validation(
+                item,
+                materials_client=self.materials_client,
+                image_generator=self.image_generator,
+                geometry_dir=self.geometry_dir,
+                debug_dir=self.debug_dir,
+                scene_id=request.scene_id,
+            )
+        )
+        if generated is None:
+            raise RuntimeError(
+                f"No procedural material available for floor covering '{item.description}'"
+            )
+        return self._convert_generated_to_scene_object(
+            item=item, generated=generated, request=request
+        )
+
+    def _scale_and_measure_canonical_mesh(
+        self,
+        *,
+        canonical_path: Path,
+        final_path: Path,
+        desired_dimensions: list[float] | tuple[float, ...] | None,
+    ) -> tuple[Path, np.ndarray, np.ndarray, float]:
+        """Scale a Y-up canonical mesh and expose its SceneSmith Z-up bounds."""
+        applied_scale = 1.0
+        if desired_dimensions is not None:
+            gltf_dimensions = scene_dimensions_to_gltf_y_up(desired_dimensions)
+            final_path, applied_scale = scale_mesh_uniformly_to_dimensions(
+                mesh_path=canonical_path,
+                desired_dimensions=gltf_dimensions,
+                output_path=final_path,
+                min_dimension_meters=self.min_mesh_dimension_meters,
+                relative_threshold=self.mesh_relative_dimension_threshold,
+            )
+        else:
+            canonical_path.replace(final_path)
+
+        mesh = load_mesh_as_trimesh(final_path, force_merge=True)
+        bbox_min, bbox_max = gltf_y_up_bounds_to_scene_z_up(mesh.bounds)
+        if desired_dimensions is not None:
+            actual_dimensions = bbox_max - bbox_min
+            validate_uniform_dimension_fit(actual_dimensions, desired_dimensions)
+            console_logger.info(
+                "Canonical asset dimensions: requested=%s, actual=%s, scale=%.3f",
+                list(desired_dimensions),
+                actual_dimensions.round(4).tolist(),
+                applied_scale,
+            )
+        return final_path, bbox_min, bbox_max, applied_scale
+
     def _retrieve_hssd_assets(
         self, request: AssetGenerationRequest
     ) -> AssetGenerationResult:
@@ -622,27 +716,52 @@ class AssetManager:
         for config in asset_path_configs:
             config.sdf_dir.mkdir(parents=True, exist_ok=True)
 
+        # Rugs and carpets are 2D coverings, not freestanding HSSD furniture.
+        # Route these obvious cases deterministically even when the LLM router is
+        # disabled, avoiding both semantic mismatches and an extra model call.
+        floor_covering_indices = [
+            index
+            for index, (description, short_name) in enumerate(
+                zip(request.object_descriptions, request.short_names)
+            )
+            if self._is_deterministic_floor_covering(
+                description, short_name, request.object_type
+            )
+        ]
+        floor_covering_index_set = set(floor_covering_indices)
+        hssd_indices = [
+            index
+            for index in range(len(request.object_descriptions))
+            if index not in floor_covering_index_set
+        ]
+
         # Create batch requests for HSSD server with client-specified output dirs.
         retrieval_requests = [
             HssdRetrievalServerRequest(
-                object_description=desc,
+                object_description=request.object_descriptions[index],
                 object_type=request.object_type.value,
-                desired_dimensions=tuple(dims) if dims else None,
-                output_dir=str(config.sdf_dir),
+                desired_dimensions=(
+                    tuple(request.desired_dimensions[index])
+                    if request.desired_dimensions[index]
+                    else None
+                ),
+                output_dir=str(asset_path_configs[index].sdf_dir),
                 scene_id=request.scene_id,
             )
-            for desc, dims, config in zip(
-                request.object_descriptions,
-                request.desired_dimensions,
-                asset_path_configs,
-            )
+            for index in hssd_indices
         ]
 
         successful_objects: list[SceneObject] = []
         failed_assets: list[FailedAsset] = []
 
         # Submit batch to server and process streaming responses.
-        for index, response in self.hssd_client.retrieve_objects(retrieval_requests):
+        retrieval_responses = (
+            self.hssd_client.retrieve_objects(retrieval_requests)
+            if retrieval_requests
+            else []
+        )
+        for retrieval_index, response in retrieval_responses:
+            index = hssd_indices[retrieval_index]
             desc = request.object_descriptions[index]
             short_name = request.short_names[index]
             config = asset_path_configs[index]
@@ -725,21 +844,26 @@ class AssetManager:
                     f"Canonicalizing HSSD mesh: up={vlm_physics.up_axis}, "
                     f"front={vlm_physics.front_axis} → +Y"
                 )
-                final_gltf_path = config.sdf_dir / f"{config.short_name}.gltf"
+                canonical_path = config.sdf_dir / f"{config.short_name}_canonical.gltf"
                 canonicalize_mesh(
                     gltf_path=gltf_path,
-                    output_path=final_gltf_path,
+                    output_path=canonical_path,
                     up_axis=vlm_physics.up_axis,
                     front_axis=vlm_physics.front_axis,
                     blender_server=self.blender_server,
                     object_type=request.object_type,
                 )
 
+                final_gltf_path, bbox_min, bbox_max, applied_scale = (
+                    self._scale_and_measure_canonical_mesh(
+                        canonical_path=canonical_path,
+                        final_path=config.sdf_dir / f"{config.short_name}.gltf",
+                        desired_dimensions=request.desired_dimensions[index],
+                    )
+                )
+
                 # Generate collision geometry via convex decomposition server.
                 collision_pieces = self._generate_collision_geometry(final_gltf_path)
-
-                # Load mesh for bounding box calculation.
-                mesh = load_mesh_as_trimesh(final_gltf_path, force_merge=True)
 
                 sdf_path = config.sdf_dir / f"{config.short_name}.sdf"
                 generate_drake_sdf(
@@ -749,9 +873,6 @@ class AssetManager:
                     output_path=sdf_path,
                     asset_name=config.short_name,
                 )
-
-                # Scene-graph transforms are already applied by the mesh loader.
-                bbox_min, bbox_max = mesh.bounds
 
                 # Create SceneObject using shared helper.
                 scene_obj = self._create_scene_object(
@@ -764,7 +885,10 @@ class AssetManager:
                     additional_metadata={
                         "asset_source": "hssd",
                         "hssd_mesh_id": mesh_id,
+                        "requested_dimensions": list(request.desired_dimensions[index]),
+                        "actual_dimensions": (bbox_max - bbox_min).tolist(),
                     },
+                    scale_factor=applied_scale,
                 )
 
                 successful_objects.append(scene_obj)
@@ -776,6 +900,24 @@ class AssetManager:
             except Exception as e:
                 console_logger.error(
                     f"Failed to process HSSD asset '{desc}': {e}", exc_info=True
+                )
+                failed_assets.append(
+                    FailedAsset(index=index, description=desc, error_message=str(e))
+                )
+
+        for index in floor_covering_indices:
+            desc = request.object_descriptions[index]
+            try:
+                successful_objects.append(
+                    self._generate_deterministic_floor_covering(request, index)
+                )
+                console_logger.info(
+                    "Generated deterministic floor covering: %s",
+                    request.short_names[index],
+                )
+            except Exception as e:
+                console_logger.error(
+                    "Failed to generate floor covering '%s': %s", desc, e, exc_info=True
                 )
                 failed_assets.append(
                     FailedAsset(index=index, description=desc, error_message=str(e))
@@ -916,21 +1058,26 @@ class AssetManager:
                     f"Canonicalizing Objaverse mesh: up={vlm_physics.up_axis}, "
                     f"front={vlm_physics.front_axis} → +Y"
                 )
-                final_gltf_path = config.sdf_dir / f"{config.short_name}.gltf"
+                canonical_path = config.sdf_dir / f"{config.short_name}_canonical.gltf"
                 canonicalize_mesh(
                     gltf_path=gltf_path,
-                    output_path=final_gltf_path,
+                    output_path=canonical_path,
                     up_axis=vlm_physics.up_axis,
                     front_axis=vlm_physics.front_axis,
                     blender_server=self.blender_server,
                     object_type=request.object_type,
                 )
 
+                final_gltf_path, bbox_min, bbox_max, _ = (
+                    self._scale_and_measure_canonical_mesh(
+                        canonical_path=canonical_path,
+                        final_path=config.sdf_dir / f"{config.short_name}.gltf",
+                        desired_dimensions=request.desired_dimensions[index],
+                    )
+                )
+
                 # Generate collision geometry via collision server.
                 collision_pieces = self._generate_collision_geometry(final_gltf_path)
-
-                # Load mesh for bounding box calculation.
-                mesh = load_mesh_as_trimesh(final_gltf_path, force_merge=True)
 
                 sdf_path = config.sdf_dir / f"{config.short_name}.sdf"
                 generate_drake_sdf(
@@ -940,9 +1087,6 @@ class AssetManager:
                     output_path=sdf_path,
                     asset_name=config.short_name,
                 )
-
-                # Scene-graph transforms are already applied by the mesh loader.
-                bbox_min, bbox_max = mesh.bounds
 
                 # Create SceneObject using shared helper.
                 scene_obj = self._create_scene_object(
@@ -955,6 +1099,8 @@ class AssetManager:
                     additional_metadata={
                         "asset_source": "objaverse",
                         "objaverse_mesh_id": mesh_id,
+                        "requested_dimensions": list(request.desired_dimensions[index]),
+                        "actual_dimensions": (bbox_max - bbox_min).tolist(),
                     },
                 )
 
@@ -2119,8 +2265,8 @@ class AssetManager:
             f"mass={physics_analysis.mass_kg}kg"
         )
 
-        # Canonicalize mesh in Blender (rotate to canonical orientation + placement).
-        # Input: Y-up GLTF, Output: Z-up GLTF for Drake.
+        # Canonicalize mesh in Blender. The file remains standard glTF Y-up;
+        # SceneSmith conversion happens only at the dimensions/bounds boundary.
         canonical_path = config.sdf_dir / f"{config.short_name}_canonical.gltf"
         canonicalize_mesh(
             gltf_path=gltf_path,
@@ -2136,34 +2282,17 @@ class AssetManager:
         # on the already-scaled mesh, so surfaces are at correct dimensions.
         # For HSSD assets: scale_factor=applied_scale because pre-computed surfaces
         # are at original HSSD dimensions and need scaling.
-        final_gltf_path = canonical_path
-        initial_scale = 1.0
-        if desired_dimensions is not None:
-            console_logger.info(
-                f"Scaling mesh to desired dimensions: {desired_dimensions}"
-            )
-            final_gltf_path = config.sdf_dir / f"{config.short_name}.gltf"
-            final_gltf_path, applied_scale = scale_mesh_uniformly_to_dimensions(
-                mesh_path=canonical_path,
+        final_gltf_path, bbox_min, bbox_max, applied_scale = (
+            self._scale_and_measure_canonical_mesh(
+                canonical_path=canonical_path,
+                final_path=config.sdf_dir / f"{config.short_name}.gltf",
                 desired_dimensions=desired_dimensions,
-                output_path=final_gltf_path,
-                min_dimension_meters=self.min_mesh_dimension_meters,
-                relative_threshold=self.mesh_relative_dimension_threshold,
             )
-            # HSSD pre-computed surfaces are at original mesh dimensions.
-            # They need scale_factor to match the physical scaling applied above.
-            if is_hssd:
-                initial_scale = applied_scale
-        else:
-            # Rename canonical to final name if no scaling needed.
-            final_gltf_path = config.sdf_dir / f"{config.short_name}.gltf"
-            canonical_path.rename(final_gltf_path)
+        )
+        initial_scale = applied_scale if is_hssd else 1.0
 
         # Generate collision geometry via convex decomposition server.
         collision_pieces = self._generate_collision_geometry(final_gltf_path)
-
-        # Load mesh for bounding box calculation.
-        mesh = load_mesh_as_trimesh(final_gltf_path, force_merge=True)
 
         # Generate Drake SDF.
         sdf_path = config.sdf_dir / f"{config.short_name}.sdf"
@@ -2174,10 +2303,6 @@ class AssetManager:
             output_path=sdf_path,
             asset_name=config.short_name,
         )
-
-        # Extract bounding box from scaled mesh.
-        # Scene-graph transforms are already applied by the mesh loader.
-        bbox_min, bbox_max = mesh.bounds
 
         console_logger.info(
             f"Drake SDF complete: SDF at {sdf_path}, bounds: {bbox_min} to {bbox_max}"
@@ -2240,8 +2365,8 @@ class AssetManager:
 
         # Load mesh for bounding box calculation.
         mesh = load_mesh_as_trimesh(gltf_path, force_merge=True)
-        # Scene-graph transforms are already applied by the mesh loader.
-        bbox_min, bbox_max = mesh.bounds
+        # Trimesh exposes standard glTF coordinates. Scene placement is Z-up.
+        bbox_min, bbox_max = gltf_y_up_bounds_to_scene_z_up(mesh.bounds)
 
         console_logger.info(
             f"Thin covering SDF complete: {sdf_path}, bounds: {bbox_min} to {bbox_max}"
@@ -2388,8 +2513,7 @@ class AssetManager:
 
         # Extract bounds.
         bounds = mesh.bounds  # [[xmin, ymin, zmin], [xmax, ymax, zmax]]
-        bbox_min = bounds[0]
-        bbox_max = bounds[1]
+        bbox_min, bbox_max = gltf_y_up_bounds_to_scene_z_up(bounds)
 
         console_logger.debug(
             f"Extracted bounds from {gltf_path}: min={bbox_min}, max={bbox_max}"

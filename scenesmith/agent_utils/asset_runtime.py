@@ -30,7 +30,15 @@ _FAMILY_ALIASES: dict[str, tuple[str, ...]] = {
     "chair": ("chair", "stool", "椅子", "凳子"),
     "cabinet": ("cabinet", "cupboard", "柜子"),
     "dresser": ("dresser", "chest of drawers", "斗柜"),
-    "rug": ("rug", "carpet", "地毯"),
+    "rug": (
+        "rug",
+        "carpet",
+        "runner",
+        "floor mat",
+        "doormat",
+        "yoga mat",
+        "地毯",
+    ),
     "plant": ("plant", "potted plant", "绿植", "植物"),
 }
 

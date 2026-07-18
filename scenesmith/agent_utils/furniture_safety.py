@@ -97,6 +97,69 @@ class HardStateEvaluation:
     issues: list[HardIssue] = field(default_factory=list)
 
 
+def hard_state_repair_objective(
+    evaluation: HardStateEvaluation,
+) -> tuple[int, int, int, int, int, float, int, int]:
+    """Return a lexicographic objective for deterministic repair transactions.
+
+    Completing required content must outrank temporary layout conflicts.  This
+    lets a first repair add missing furniture and a subsequent repair separate
+    the new objects instead of rolling the complete candidate back to an empty
+    room merely because its collision count initially increased.
+    """
+    reasons = [str(reason).lower() for reason in evaluation.hard_reasons]
+    issue_types = [
+        str(getattr(issue, "issue_type", "")).lower() for issue in evaluation.issues
+    ]
+
+    def count_reasons(*terms: str) -> int:
+        return sum(any(term in reason for term in terms) for reason in reasons)
+
+    missing = max(
+        issue_types.count("missing_required_object"),
+        count_reasons("missing required", "no bed object found"),
+    )
+    invalid_assets = max(
+        issue_types.count("asset_invalid"),
+        count_reasons("geometry construction failed", "drake/qhull"),
+    )
+    out_of_bounds = max(
+        issue_types.count("out_of_bounds"),
+        count_reasons("exceeds room bounds", "outside room bounds"),
+    )
+    wall_height = count_reasons("wall height exceeded")
+    opening_clearance = max(
+        issue_types.count("door_or_opening_clearance"),
+        count_reasons("door clearance", "open connection blocked"),
+    )
+    collision_issues = [
+        issue
+        for issue in evaluation.issues
+        if str(getattr(issue, "issue_type", "")).lower() == "collision_or_overlap"
+    ]
+    penetration = round(
+        sum(
+            float(getattr(issue, "penetration_depth_m", 0.0) or 0.0)
+            for issue in collision_issues
+        ),
+        9,
+    )
+    collision_count = max(
+        len(collision_issues),
+        count_reasons("physics hard violation: collisions"),
+    )
+    return (
+        missing,
+        invalid_assets,
+        out_of_bounds,
+        wall_height,
+        opening_clearance,
+        penetration,
+        collision_count,
+        len(reasons),
+    )
+
+
 @dataclass
 class CandidateDecision:
     """Decision after evaluating a newly critiqued scene state."""

@@ -1005,6 +1005,27 @@ class AssetRouter:
             shape=shape,
         )
 
+    def generate_thin_covering_without_validation(
+        self,
+        item: AssetItem,
+        *,
+        materials_client: "MaterialsRetrievalClient | None",
+        image_generator: "BaseImageGenerator | None",
+        geometry_dir: Path,
+        debug_dir: Path,
+        scene_id: str | None = None,
+    ) -> GeneratedGeometry | None:
+        """Generate a procedural covering from the top material without a VLM call."""
+        return self._try_thin_covering_strategy(
+            item=item,
+            max_retries=0,
+            materials_client=materials_client,
+            image_generator=image_generator,
+            geometry_dir=geometry_dir,
+            debug_dir=debug_dir,
+            scene_id=scene_id,
+        )
+
     def _try_generated_thin_covering(
         self,
         item: AssetItem,
