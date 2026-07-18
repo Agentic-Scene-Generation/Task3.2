@@ -22,6 +22,7 @@ CRITIC_PROBE_PARALLEL="${CRITIC_PROBE_PARALLEL:-true}"
 CRITIC_PROBE_INNER_PARALLELISM="${CRITIC_PROBE_INNER_PARALLELISM:-2}"
 CRITIC_PROBE_PORT_BASE="${CRITIC_PROBE_PORT_BASE:-9000}"
 CRITIC_PROBE_PORT_BLOCK_SIZE="${CRITIC_PROBE_PORT_BLOCK_SIZE:-400}"
+CRITIC_PROBE_SHUTDOWN_GRACE_SECONDS="${CRITIC_PROBE_SHUTDOWN_GRACE_SECONDS:-30}"
 
 PIPELINE_STOP_STAGE="${PIPELINE_STOP_STAGE:-manipuland}"
 BRANCH_FROM_SHARED_BASE="${BRANCH_FROM_SHARED_BASE:-false}"
@@ -85,6 +86,7 @@ require_positive_integer SCENE_WORKERS_PER_PROCESS "$SCENE_WORKERS_PER_PROCESS"
 require_positive_integer CRITIC_PROBE_INNER_PARALLELISM "$CRITIC_PROBE_INNER_PARALLELISM"
 require_positive_integer CRITIC_PROBE_PORT_BASE "$CRITIC_PROBE_PORT_BASE"
 require_positive_integer CRITIC_PROBE_PORT_BLOCK_SIZE "$CRITIC_PROBE_PORT_BLOCK_SIZE"
+require_positive_integer CRITIC_PROBE_SHUTDOWN_GRACE_SECONDS "$CRITIC_PROBE_SHUTDOWN_GRACE_SECONDS"
 
 if [ "$CRITIC_PROBE_PORT_BLOCK_SIZE" -lt 375 ]; then
     echo "ERROR: CRITIC_PROBE_PORT_BLOCK_SIZE must be at least 375" >&2
@@ -131,6 +133,10 @@ if [ "$SCENE_WORKERS_PER_PROCESS" -ne 1 ]; then
     echo "ERROR: use one worker per process to avoid fork-after-bpy-import." >&2
     exit 1
 fi
+if [ "$CRITIC_PROBE_PARALLEL" = "true" ] && ! command -v setsid >/dev/null 2>&1; then
+    echo "ERROR: setsid is required for isolated parallel batch cleanup" >&2
+    exit 1
+fi
 
 case "$PIPELINE_STOP_STAGE" in
     furniture|wall_mounted|ceiling_mounted|manipuland) ;;
@@ -159,6 +165,21 @@ if [ "$BRANCH_FROM_SHARED_BASE" = "true" ] || [ "$GENERATE_SHARED_BASE" = "true"
         exit 1
     fi
 fi
+
+# Parallel batches re-enter this script in a new session. Export every value
+# that may have been normalized or defaulted above so the child uses exactly
+# the same run configuration as the parent.
+export SCENEEXPERT_EXPERIMENT="$EXPERIMENT"
+export PYTHON_BIN MODEL_NAME RUN_ID OUTPUT_ROOT
+export SCENE_BATCH_SIZE SCENE_WORKERS_PER_PROCESS
+export CRITIC_PROBE_PARALLEL CRITIC_PROBE_INNER_PARALLELISM
+export CRITIC_PROBE_PORT_BASE CRITIC_PROBE_PORT_BLOCK_SIZE
+export CRITIC_PROBE_SHUTDOWN_GRACE_SECONDS
+export PIPELINE_STOP_STAGE BRANCH_FROM_SHARED_BASE SHARED_BASE_STOP_STAGE
+export SHARED_BASE_ROOT GENERATE_SHARED_BASE MAX_CASES CASE_FILTER DRY_RUN
+export SCENEEXPERT_DISABLE_ARTICULATED="$DISABLE_ARTICULATED"
+export SCENEEXPERT_DISABLE_MATERIALS="$DISABLE_MATERIALS"
+export SCENEEXPERT_DISABLE_BWRAP="$DISABLE_BWRAP"
 
 mkdir -p "$OUTPUT_ROOT"
 
@@ -320,26 +341,53 @@ run_batches() {
     local selected=0
     local batch_entries=()
     local batch_failure=0
+    local cleanup_started=false
 
     mkdir -p "$OUTPUT_ROOT/$run_kind"
 
-    kill_process_tree() {
-        local pid="$1"
-        local child
-        if ! [[ "$pid" =~ ^[0-9]+$ ]]; then
-            return 0
-        fi
-        for child in $(pgrep -P "$pid" 2>/dev/null || true); do
-            kill_process_tree "$child"
-        done
-        kill -TERM "$pid" 2>/dev/null || true
+    process_group_alive() {
+        ps -eo pgid=,stat= | awk -v pgid="$1" \
+            '$1 == pgid && $2 !~ /^Z/ { found = 1 } END { exit !found }'
     }
 
     cleanup_active_batches() {
-        local pid
+        local pid deadline any_alive
+        if [ "$cleanup_started" = "true" ]; then
+            return 0
+        fi
+        cleanup_started=true
+
+        # Every parallel batch is started in its own session/process group.
+        # Signal the whole group so Python, Blender, and retrieval-server
+        # descendants cannot outlive the batch shell.
         for pid in "${active_pids[@]}"; do
-            kill_process_tree "$pid"
+            kill -TERM -- "-$pid" 2>/dev/null || true
         done
+
+        deadline=$((SECONDS + CRITIC_PROBE_SHUTDOWN_GRACE_SECONDS))
+        while [ "$SECONDS" -lt "$deadline" ]; do
+            any_alive=false
+            for pid in "${active_pids[@]}"; do
+                if process_group_alive "$pid"; then
+                    any_alive=true
+                    break
+                fi
+            done
+            if [ "$any_alive" = "false" ]; then
+                break
+            fi
+            sleep 1
+        done
+
+        for pid in "${active_pids[@]}"; do
+            if process_group_alive "$pid"; then
+                echo "WARNING: force-killing batch process group $pid" >&2
+                kill -KILL -- "-$pid" 2>/dev/null || true
+            fi
+            wait "$pid" 2>/dev/null || true
+        done
+        active_pids=()
+        active_labels=()
     }
 
     on_batch_signal() {
@@ -389,7 +437,16 @@ run_batches() {
         done
         if [ "$rc" -ne 0 ]; then
             echo "ERROR: $run_kind/$label failed with exit code $rc" >&2
-            batch_failure=1
+            batch_failure="$rc"
+            # The batch leader may have exited while native descendants remain
+            # in its process group. Keep that group in cleanup's input.
+            active_pids+=("$finished_pid")
+            active_labels+=("$label")
+            # Fail fast. Waiting for unrelated scenes after one batch crashes
+            # can keep an ACP allocation alive indefinitely if one of them is
+            # also stuck in native or server shutdown code.
+            cleanup_active_batches
+            return "$rc"
         else
             echo "completed: $run_kind/$label"
         fi
@@ -399,7 +456,10 @@ run_batches() {
         local label
         label=$(printf 'batch_%03d' "$batch_index")
         if [ "$CRITIC_PROBE_PARALLEL" = "true" ]; then
-            run_batch "$run_kind" "$batch_index" "${batch_entries[@]}" > "$OUTPUT_ROOT/$run_kind/${label}.log" 2>&1 &
+            # A distinct process group makes cleanup include all descendants.
+            # Re-entering this script avoids exporting shell functions/arrays.
+            setsid bash "$0" --internal-run-batch "$run_kind" "$batch_index" "${batch_entries[@]}" \
+                > "$OUTPUT_ROOT/$run_kind/${label}.log" 2>&1 &
             active_pids+=("$!")
             active_labels+=("$label")
             while [ "${#active_pids[@]}" -ge "$CRITIC_PROBE_INNER_PARALLELISM" ]; do wait_one; done
@@ -422,9 +482,15 @@ run_batches() {
     while [ "${#active_pids[@]}" -gt 0 ]; do wait_one; done
     trap - EXIT INT TERM HUP
     if [ "$batch_failure" -ne 0 ]; then
-        return 1
+        return "$batch_failure"
     fi
 }
+
+if [ "${1:-}" = "--internal-run-batch" ]; then
+    shift
+    run_batch "$@"
+    exit $?
+fi
 
 if [ "$GENERATE_SHARED_BASE" = "true" ]; then
     run_batches shared_base
