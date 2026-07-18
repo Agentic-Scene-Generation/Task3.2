@@ -10,7 +10,10 @@ agents:
 
   planner_agent:
     name: "planner_agent"
-    max_turns: 8
+    # Wall planning needs room for initial design, critique, one repair, and
+    # the final summary. Eight turns can be exhausted before the planner exits
+    # when tool calls and deterministic critic feedback are interleaved.
+    max_turns: 20
     prompt: STATEFUL_PLANNER_AGENT
 
   critic_agent:
