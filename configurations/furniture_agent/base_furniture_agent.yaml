@@ -159,7 +159,10 @@ asset_manager:
     # few silhouette-critical families so a wall/frame cannot be accepted as a bed.
     semantic_validation:
       enabled: true
-      families: [bed, sofa, wardrobe]
+      # Validate each unique high-impact family once, then reuse that asset for
+      # repeated instances. Classroom roles stay separate so a low work table or
+      # student desk cannot silently stand in for the teacher desk.
+      families: [bed, sofa, wardrobe, desk, student_desk, teacher_desk, chair]
       max_candidates: 2
       use_lenient: false
     object_type_mapping:
@@ -366,6 +369,26 @@ furniture_safety_controller:
     nightstand_bed_overlap_tolerance_m: 0.03
     nightstand_bed_max_gap_m: 0.55
     max_plausibility_penalty: 0.35
+  functional_layout:
+    enabled: true
+    # These relations are direct prompt requirements and have deterministic
+    # geometry repairs, so gross violations should trigger repair before VLM scoring.
+    hard_relations: true
+    living_room:
+      sofa_wall_max_gap_m: 0.30
+      sofa_inward_min_dot: 0.70
+      rug_min_front_distance_m: 0.35
+      rug_max_center_distance_m: 2.20
+      rug_max_lateral_offset_m: 0.75
+      plant_max_sofa_distance_m: 1.80
+      plant_max_forward_offset_m: 1.00
+      plant_min_flank_offset_m: 0.20
+    classroom:
+      preferred_columns: 3
+      orientation_tolerance_degrees: 15.0
+      desk_chair_center_distance_m: 0.68
+      desk_chair_pair_error_m: 0.48
+      teacher_front_min_lead_m: 0.55
   deterministic_repair:
     enabled: true
     max_attempts: ${oc.env:SCENEEXPERT_DETERMINISTIC_REPAIR_MAX_ATTEMPTS,2}
@@ -401,6 +424,12 @@ furniture_safety_controller:
     desk:
       min: [0.70, 0.40, 0.55]
       max: [2.20, 1.20, 1.10]
+    student_desk:
+      min: [0.50, 0.40, 0.62]
+      max: [1.10, 0.85, 0.95]
+    teacher_desk:
+      min: [1.00, 0.50, 0.62]
+      max: [2.20, 1.00, 1.05]
     chair:
       min: [0.30, 0.30, 0.55]
       max: [1.10, 1.10, 1.30]

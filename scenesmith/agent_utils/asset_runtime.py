@@ -25,6 +25,16 @@ _FAMILY_ALIASES: dict[str, tuple[str, ...]] = {
     "wall_clock": ("wall clock", "clock", "挂钟"),
     "bed": ("bed", "床"),
     "sofa": ("sofa", "couch", "沙发"),
+    # Classroom roles must not share one cache entry: a cached student desk is
+    # not a valid substitute for the teacher desk at the front of the room.
+    "student_desk": ("student desk", "pupil desk"),
+    "teacher_desk": (
+        "teacher's desk",
+        "teacher desk",
+        "instructor desk",
+        "lectern",
+        "podium",
+    ),
     "desk": ("desk", "writing table", "书桌"),
     "table": ("table", "桌子"),
     "chair": ("chair", "stool", "椅子", "凳子"),

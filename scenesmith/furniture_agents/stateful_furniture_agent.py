@@ -25,6 +25,11 @@ from scenesmith.agent_utils.base_stateful_agent import (
     HardStateEvaluation,
     log_agent_usage,
 )
+from scenesmith.agent_utils.furniture_functional_layout import (
+    choose_functional_anchor_wall,
+    format_functional_layout_guidance,
+    functional_layout_family,
+)
 from scenesmith.agent_utils.furniture_layout_planning import (
     build_bedroom_anchor_plan,
     format_bedroom_anchor_guidance,
@@ -73,7 +78,18 @@ REPAIR_ASSET_SPECS: dict[str, tuple[str, list[float]]] = {
     "wardrobe": ("Compact wardrobe closet with simple doors", [0.90, 0.55, 2.00]),
     "dresser": ("Low dresser chest with storage drawers", [1.10, 0.48, 0.85]),
     "desk": ("Practical rectangular work desk", [1.10, 0.60, 0.75]),
-    "chair": ("Simple upright task chair", [0.50, 0.50, 0.90]),
+    "student_desk": (
+        "Standard individual classroom student desk with writing surface and storage",
+        [0.70, 0.55, 0.75],
+    ),
+    "teacher_desk": (
+        "Full-size classroom teacher desk with enclosed front and drawers",
+        [1.40, 0.70, 0.75],
+    ),
+    "chair": (
+        "Standard upright classroom student chair with seat and backrest",
+        [0.48, 0.50, 0.85],
+    ),
     "sofa": ("Compact upholstered two-seat sofa", [1.70, 0.85, 0.90]),
     "table": ("Practical rectangular table", [1.20, 0.80, 0.75]),
     "cabinet": ("Compact freestanding storage cabinet", [0.90, 0.45, 1.10]),
@@ -442,13 +458,20 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         }
 
     def _build_initial_design_input(self, instruction: str) -> str | list[dict]:
-        """Add deterministic room-aware bedroom guidance to the initial design."""
+        """Add deterministic room-aware functional guidance to initial design."""
         safety_cfg = getattr(self.cfg, "furniture_safety_controller", None)
         bedroom_cfg = getattr(safety_cfg, "bedroom_layout", None)
-        guidance = format_bedroom_anchor_guidance(
+        guidance_blocks = [format_bedroom_anchor_guidance(
             scene=self.scene,
             cfg=bedroom_cfg,
+        )]
+        guidance_blocks.append(
+            format_functional_layout_guidance(
+                scene=self.scene,
+                cfg=getattr(safety_cfg, "functional_layout", None),
+            )
         )
+        guidance = "\n\n".join(block for block in guidance_blocks if block)
         if guidance:
             instruction = (
                 f"{instruction}\n\n"
@@ -513,6 +536,11 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 actions.append(
                     f"replaced {replaced} geometry-failed furniture asset(s)"
                 )
+        replaced_invalid = self._replace_invalid_furniture_assets(hard_state)
+        if replaced_invalid:
+            actions.append(
+                f"replaced {replaced_invalid} invalid furniture asset(s)"
+            )
         if (
             FailureCategory.DOOR_OR_OPENING_CLEARANCE in repair_plan.categories
             and self._repair_forbidden_zone_conflicts(include_windows=False)
@@ -538,6 +566,11 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 actions.append("moved wardrobe to a deterministic wall/corner anchor")
                 relation_changed = True
 
+        functional_action = self._repair_functional_layout()
+        if functional_action:
+            actions.append(functional_action)
+            relation_changed = True
+
         # Structured collision pairs survive the verifier boundary. If a
         # bedroom relation operator already moved objects, defer collision
         # handling until the next re-evaluation so stale pairs are not applied.
@@ -549,6 +582,257 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 )
 
         return bool(actions), actions
+
+    def _replace_invalid_furniture_assets(
+        self, hard_state: HardStateEvaluation
+    ) -> int:
+        """Replace placeholder or dimension-invalid required furniture assets."""
+        if self.scene is None:
+            return 0
+        invalid_ids = {
+            str(issue.object_a_id)
+            for issue in getattr(hard_state, "issues", [])
+            if getattr(issue, "issue_type", "") == "asset_invalid"
+            and getattr(issue, "object_a_id", "")
+        }
+        if not invalid_ids:
+            return 0
+        invalid_objects = [
+            obj
+            for object_id, obj in self.scene.objects.items()
+            if str(object_id) in invalid_ids
+        ]
+        if not invalid_objects:
+            return 0
+
+        excluded: set[str] = set()
+        for obj in invalid_objects:
+            excluded.update(self._asset_signature_values(obj))
+
+        replaced = 0
+        for old_obj in invalid_objects:
+            category = self._category_for_object(old_obj.object_id, old_obj)
+            if not category or self._required_count(category) <= 0:
+                continue
+            replacement = self._get_or_generate_repair_asset(
+                category,
+                exclude_asset_signatures=excluded,
+            )
+            if replacement is None:
+                continue
+            old_id = old_obj.object_id
+            self.scene.remove_object(old_id)
+            if self._place_repair_asset(category, replacement):
+                replaced += 1
+            else:
+                self.scene.add_object(old_obj)
+        return replaced
+
+    def _repair_functional_layout(self) -> str:
+        if self.scene is None or not hasattr(self.scene, "objects"):
+            return ""
+        family = functional_layout_family(self.scene)
+        if family == "living_room" and self._repair_living_room_layout():
+            return "normalized sofa, rug, and plants into one conversation zone"
+        if family == "classroom" and self._repair_classroom_layout():
+            return "normalized classroom desk-chair pairs and front teaching zone"
+        return ""
+
+    def _repair_living_room_layout(self) -> bool:
+        if self.scene is None:
+            return False
+        sofas = self._furniture_by_category("sofa")
+        if not sofas:
+            return False
+        wall = choose_functional_anchor_wall(self.scene, "living_room")
+        if wall is None:
+            return False
+        sofa = sofas[0]
+        yaw = self._yaw_for_inward_wall(wall)
+        transform = self._grounded_transform(sofa, x=0.0, y=0.0, yaw_deg=yaw)
+        transform = self._snap_transform_to_wall(sofa, transform, wall)
+        transform = self._fit_transform_inside_room(sofa, transform)
+        changed = False
+        if not self._transform_close(sofa.transform, transform):
+            self.scene.move_object(sofa.object_id, transform)
+            changed = True
+
+        sofa_center = np.asarray(transform.translation(), dtype=float)
+        rotation = np.asarray(transform.rotation().matrix(), dtype=float)
+        lateral = rotation @ np.asarray([1.0, 0.0, 0.0])
+        forward = rotation @ np.asarray([0.0, 1.0, 0.0])
+        sofa_dims = self._local_size(sofa, [1.70, 0.85, 0.90])
+
+        rugs = self._furniture_by_category("rug")
+        if rugs:
+            rug = rugs[0]
+            rug_dims = self._local_size(rug, [1.80, 1.80, 0.03])
+            distance = max(
+                0.75,
+                sofa_dims[1] / 2.0 + rug_dims[1] / 2.0 - 0.20,
+            )
+            target = sofa_center + forward * distance
+            rug_transform = self._grounded_transform(
+                rug,
+                x=float(target[0]),
+                y=float(target[1]),
+                yaw_deg=yaw,
+            )
+            rug_transform = self._fit_transform_inside_room(rug, rug_transform)
+            if not self._transform_close(rug.transform, rug_transform):
+                self.scene.move_object(rug.object_id, rug_transform)
+                changed = True
+
+        plants = self._furniture_by_category("plant")[:2]
+        if len(plants) == 2:
+            for side, plant in zip((-1.0, 1.0), plants):
+                plant_dims = self._local_size(plant, [0.60, 0.60, 1.20])
+                target = (
+                    sofa_center
+                    + lateral
+                    * side
+                    * (sofa_dims[0] / 2.0 + plant_dims[0] / 2.0 + 0.15)
+                    + forward * 0.05
+                )
+                plant_transform = self._grounded_transform(
+                    plant,
+                    x=float(target[0]),
+                    y=float(target[1]),
+                    yaw_deg=yaw,
+                )
+                plant_transform = self._fit_transform_inside_room(
+                    plant, plant_transform
+                )
+                if not self._transform_close(plant.transform, plant_transform):
+                    self.scene.move_object(plant.object_id, plant_transform)
+                    changed = True
+        return changed
+
+    def _repair_classroom_layout(self) -> bool:
+        if self.scene is None:
+            return False
+        desks = sorted(
+            self._furniture_by_category("student_desk"),
+            key=lambda obj: str(obj.object_id),
+        )
+        chairs = sorted(
+            self._furniture_by_category("chair"),
+            key=lambda obj: str(obj.object_id),
+        )
+        teacher_desks = self._furniture_by_category("teacher_desk")
+        if not desks:
+            return False
+        wall = choose_functional_anchor_wall(self.scene, "classroom")
+        room_bounds = self._room_bounds_xy()
+        if wall is None or room_bounds is None:
+            return False
+
+        inward_xy = {
+            "north": np.asarray([0.0, -1.0]),
+            "south": np.asarray([0.0, 1.0]),
+            "east": np.asarray([-1.0, 0.0]),
+            "west": np.asarray([1.0, 0.0]),
+        }[wall]
+        lateral_xy = np.asarray([inward_xy[1], -inward_xy[0]])
+        min_x, min_y, max_x, max_y = room_bounds
+        wall_center = {
+            "north": np.asarray([0.0, max_y]),
+            "south": np.asarray([0.0, min_y]),
+            "east": np.asarray([max_x, 0.0]),
+            "west": np.asarray([min_x, 0.0]),
+        }[wall]
+        student_yaw = self._yaw_for_head_wall(wall)
+        teacher_yaw = self._yaw_for_inward_wall(wall)
+        changed = False
+
+        teacher_depth = 0.70
+        if teacher_desks:
+            teacher = teacher_desks[0]
+            teacher_depth = float(
+                self._local_size(teacher, [1.40, 0.70, 0.75])[1]
+            )
+            teacher_transform = self._grounded_transform(
+                teacher,
+                x=float(wall_center[0]),
+                y=float(wall_center[1]),
+                yaw_deg=teacher_yaw,
+            )
+            teacher_transform = self._snap_transform_to_wall(
+                teacher, teacher_transform, wall
+            )
+            teacher_transform = self._fit_transform_inside_room(
+                teacher, teacher_transform
+            )
+            if not self._transform_close(teacher.transform, teacher_transform):
+                self.scene.move_object(teacher.object_id, teacher_transform)
+                changed = True
+            metadata = dict(getattr(teacher, "metadata", {}) or {})
+            metadata.update(
+                {"functional_zone": "classroom_front", "front_wall": wall}
+            )
+            teacher.metadata = metadata
+
+        safety_cfg = getattr(self.cfg, "furniture_safety_controller", None)
+        functional_cfg = getattr(safety_cfg, "functional_layout", None)
+        classroom_cfg = getattr(functional_cfg, "classroom", None)
+        columns = max(
+            1,
+            min(
+                len(desks),
+                int(getattr(classroom_cfg, "preferred_columns", 3) or 3),
+            ),
+        )
+        sample_dims = self._local_size(desks[0], [0.70, 0.55, 0.75])
+        lateral_room_span = (max_x - min_x) if wall in ("north", "south") else (
+            max_y - min_y
+        )
+        column_spacing = min(
+            max(float(sample_dims[0]) + 0.45, 1.15),
+            max(0.85, (lateral_room_span - 0.8) / max(1, columns)),
+        )
+        row_spacing = max(float(sample_dims[1]) + 0.95, 1.45)
+        first_row_distance = teacher_depth / 2.0 + 1.35
+
+        for index, desk in enumerate(desks):
+            row = index // columns
+            column = index % columns
+            lateral_offset = (column - (columns - 1) / 2.0) * column_spacing
+            desk_xy = (
+                wall_center
+                + inward_xy * (first_row_distance + row * row_spacing)
+                + lateral_xy * lateral_offset
+            )
+            desk_transform = self._grounded_transform(
+                desk,
+                x=float(desk_xy[0]),
+                y=float(desk_xy[1]),
+                yaw_deg=student_yaw,
+            )
+            desk_transform = self._fit_transform_inside_room(desk, desk_transform)
+            if not self._transform_close(desk.transform, desk_transform):
+                self.scene.move_object(desk.object_id, desk_transform)
+                changed = True
+
+            if index >= len(chairs):
+                continue
+            chair = chairs[index]
+            desk_depth = float(self._local_size(desk, [0.70, 0.55, 0.75])[1])
+            chair_depth = float(self._local_size(chair, [0.48, 0.50, 0.85])[1])
+            chair_distance = desk_depth / 2.0 + chair_depth / 2.0 + 0.12
+            chair_xy = desk_xy + inward_xy * chair_distance
+            chair_transform = self._grounded_transform(
+                chair,
+                x=float(chair_xy[0]),
+                y=float(chair_xy[1]),
+                yaw_deg=student_yaw,
+            )
+            chair_transform = self._fit_transform_inside_room(
+                chair, chair_transform
+            )
+            if not self._transform_close(chair.transform, chair_transform):
+                self.scene.move_object(chair.object_id, chair_transform)
+                changed = True
+        return changed
 
     def _repair_structured_collisions(self, hard_state: HardStateEvaluation) -> int:
         if self.scene is None:

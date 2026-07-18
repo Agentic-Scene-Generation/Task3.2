@@ -368,9 +368,63 @@ class FurnitureSafetyControllerTest(unittest.TestCase):
             "A teacher's desk sits at the front near the chalkboard."
         )
 
-        self.assertEqual(controller.required_counts.get("desk"), 6)
+        self.assertEqual(controller.required_counts.get("student_desk"), 6)
+        self.assertEqual(controller.required_counts.get("teacher_desk"), 1)
         self.assertEqual(controller.required_counts.get("chair"), 6)
+        self.assertNotIn("desk", controller.required_counts)
         self.assertNotIn("table", controller.required_counts)
+        self.assertEqual(
+            controller.infer_object_category(
+                "desk_0 Practical rectangular work desk"
+            ),
+            "student_desk",
+        )
+        self.assertEqual(
+            controller.infer_object_category(
+                "teacher_desk_0 Full-size classroom teacher desk"
+            ),
+            "teacher_desk",
+        )
+
+    def test_required_classroom_asset_below_usable_height_is_hard(self) -> None:
+        controller = FurnitureSafetyController(
+            {
+                "enabled": True,
+                "size_bounds": {
+                    "student_desk": {
+                        "min": [0.5, 0.4, 0.62],
+                        "max": [1.1, 0.85, 0.95],
+                    }
+                },
+            }
+        )
+        controller.reset_for_scene("A classroom with one student desk.")
+        desk = BoundedFurniture(
+            name="student_desk",
+            description="student desk",
+            world_min=(-0.35, -0.25, 0.0),
+            world_max=(0.35, 0.25, 0.41),
+        )
+        desk.bbox_min = (-0.35, -0.25, 0.0)
+        desk.bbox_max = (0.35, 0.25, 0.41)
+        desk.metadata = {}
+
+        evaluation = controller.evaluate_scene_state(
+            SimpleNamespace(
+                room_type="classroom",
+                text_description="A classroom with one student desk.",
+                objects={"student_desk_0": desk},
+                room_geometry=None,
+            )
+        )
+
+        self.assertFalse(evaluation.hard_valid)
+        self.assertTrue(
+            any("unusable dimensions" in reason for reason in evaluation.hard_reasons)
+        )
+        self.assertTrue(
+            any(issue.issue_type == "asset_invalid" for issue in evaluation.issues)
+        )
 
     def test_living_room_prompt_tracks_rug_and_plant_counts(self) -> None:
         controller = FurnitureSafetyController({"enabled": True})

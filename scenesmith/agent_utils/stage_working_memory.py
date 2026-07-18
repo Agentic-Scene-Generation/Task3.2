@@ -28,6 +28,21 @@ _OBJECT_ALIASES: dict[str, tuple[str, ...]] = {
     "bed": ("bed", "beds"),
     "nightstand": ("nightstand", "nightstands", "bedside table", "bedside_table"),
     "wardrobe": ("wardrobe", "wardrobes", "closet", "closets", "corner_wardrobe"),
+    "student_desk": ("student desk", "student desks", "student_desk"),
+    "teacher_desk": (
+        "teacher's desk",
+        "teacher desk",
+        "teacher_desk",
+        "instructor desk",
+        "podium",
+        "lectern",
+    ),
+    "desk": ("desk", "desks"),
+    "chair": ("chair", "chairs"),
+    "sofa": ("sofa", "sofas", "couch", "couches"),
+    "plant": ("plant", "plants", "potted plant"),
+    "rug": ("rug", "rugs", "area rug"),
+    "dresser": ("dresser", "dressers", "chest of drawers"),
 }
 
 
@@ -51,6 +66,18 @@ def _object_names(scene: Any) -> list[str]:
         ]
     except Exception:
         return []
+
+
+def _invalid_asset_names(scene: Any) -> list[str]:
+    invalid: list[str] = []
+    try:
+        for object_id, obj in scene.objects.items():
+            metadata = getattr(obj, "metadata", {}) or {}
+            if metadata.get("repair_placeholder", False):
+                invalid.append(str(object_id))
+    except Exception:
+        return []
+    return invalid
 
 
 def _infer_category(text: str) -> str | None:
@@ -90,6 +117,7 @@ def _deterministic_quality(
     required_counts: dict[str, int],
     scores: dict[str, Any],
     critique: str,
+    invalid_assets: list[str] | None = None,
 ) -> dict[str, Any]:
     required_counts = {
         str(key).lower(): int(value)
@@ -118,7 +146,9 @@ def _deterministic_quality(
     inconsistent = bool(missing) and (
         claims_complete or (prompt_following is not None and prompt_following >= 8)
     )
-    hard_valid = not missing
+    invalid_assets = list(invalid_assets or [])
+    deterministic_hard_fail = "deterministic hard-check failed" in critique_lower
+    hard_valid = not missing and not invalid_assets and not deterministic_hard_fail
     note = ""
     if missing:
         note = (
@@ -128,12 +158,23 @@ def _deterministic_quality(
         )
         if inconsistent:
             note += " Ignore contradictory critic/designer text that claims completion."
+    if invalid_assets:
+        invalid_note = (
+            "Deterministic state check: invalid placeholder furniture "
+            + ", ".join(invalid_assets)
+            + "."
+        )
+        note = f"{note} {invalid_note}".strip()
+    if deterministic_hard_fail and not note:
+        note = "Deterministic hard-check failed before VLM critic scoring."
 
     return {
         "required_counts": required_counts,
         "observed_counts": observed_counts,
         "missing_required_objects": missing,
+        "invalid_asset_objects": invalid_assets,
         "hard_valid": hard_valid,
+        "deterministic_hard_fail": deterministic_hard_fail,
         "critic_inconsistent_with_state": inconsistent,
         "deterministic_note": note,
     }
@@ -273,7 +314,13 @@ class StageWorkingMemory:
             required_counts=self.required_counts,
             scores=score_data,
             critique=critique or text,
+            invalid_assets=_invalid_asset_names(scene),
         )
+        score_source = "none"
+        if event == "deterministic_hard_fail":
+            score_source = "deterministic_hard_check"
+        elif score_data and role == "critic":
+            score_source = "vlm_critic"
         record = {
             "schema_version": "1.0",
             "created_at": _now(),
@@ -289,6 +336,7 @@ class StageWorkingMemory:
             ),
             "scores": score_data,
             "score_total": _score_total(scores),
+            "score_source": score_source,
             "critique": _compact(critique, max_chars=900),
             "text": _compact(text, max_chars=900),
             "scene_hash": _scene_hash(scene),
@@ -661,6 +709,30 @@ def save_generic_render_memory(
     """Save a render-only record from RenderingManager."""
     stage = _canonical_stage(stage)
     memory = StageWorkingMemory(root_dir=root_dir, stage=stage, enabled=True)
+    if stage in ("furniture", "furniture_selection"):
+        # Generic renders (notably the manipuland-stage furniture_selection
+        # overview) instantiate a fresh working-memory object. Reconstruct the
+        # same prompt requirements so a placeholder-filled scene cannot appear
+        # hard-valid merely because this render has no live furniture agent.
+        try:
+            from scenesmith.agent_utils.furniture_safety import (
+                FurnitureSafetyController,
+            )
+
+            controller = FurnitureSafetyController({"enabled": True})
+            controller.reset_for_scene(
+                getattr(
+                    scene,
+                    "scene_expert_original_description",
+                    getattr(scene, "text_description", ""),
+                )
+            )
+            memory.set_required_counts(controller.required_counts)
+        except Exception as exc:
+            console_logger.warning(
+                "Could not infer furniture requirements for generic render memory: %s",
+                exc,
+            )
     memory.save_render_record(
         render_dir=render_dir,
         role="render",

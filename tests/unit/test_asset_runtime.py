@@ -21,6 +21,17 @@ class AssetRuntimeGateTest(unittest.TestCase):
         )
         self.assertEqual(semantic_asset_family("卧室床头柜"), "nightstand")
 
+    def test_classroom_desk_roles_do_not_share_cache_family(self) -> None:
+        self.assertEqual(
+            semantic_asset_family("individual student desk"),
+            "student_desk",
+        )
+        self.assertEqual(
+            semantic_asset_family("teacher's desk with drawers"),
+            "teacher_desk",
+        )
+        self.assertEqual(semantic_asset_family("writing desk"), "desk")
+
     def test_required_family_survives_optional_budget(self) -> None:
         gate = AssetRuntimeGate()
         gate.configure(

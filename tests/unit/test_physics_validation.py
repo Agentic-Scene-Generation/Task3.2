@@ -22,6 +22,7 @@ from scenesmith.agent_utils.physics_validation import (
     ThinCoveringBoundaryViolation,
     ThinCoveringOverlap,
     _get_furniture_id_for_manipuland,
+    _get_object_info_from_geometry_id,
     _is_grounded_visual_floor_contact,
     _is_implausible_floor_penetration,
     compute_scene_collisions,
@@ -109,6 +110,28 @@ class TestCollisionPair(unittest.TestCase):
 
         expected = "chair_12345678 collides with table_87654321 (touching)"
         self.assertEqual(collision.to_description(), expected)
+
+    def test_unnamed_room_geometry_collision_is_floor(self):
+        """RoomGeometry names walls explicitly; its unnamed slab is the floor."""
+        geometry_id = object()
+        frame_id = object()
+        inspector = MagicMock()
+        inspector.GetFrameId.return_value = frame_id
+        inspector.GetName.side_effect = lambda identifier: (
+            "room_geometry::base_link"
+            if identifier is frame_id
+            else "collision_0"
+        )
+        query = MagicMock()
+        query.inspector.return_value = inspector
+
+        result = _get_object_info_from_geometry_id(
+            geometry_id=geometry_id,
+            scene=MagicMock(objects={}),
+            query_object=query,
+        )
+
+        self.assertEqual(result, {"name": "floor", "id": "room_geometry"})
 
 
 class TestComputeSceneCollisions(unittest.TestCase):

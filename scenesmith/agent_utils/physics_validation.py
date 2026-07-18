@@ -729,8 +729,12 @@ def _get_object_info_from_geometry_id(
                 # Floor or ground element.
                 return {"name": "floor", "id": "room_geometry"}
             else:
-                # Generic room geometry element (fallback).
-                return {"name": "wall", "id": "room_geometry"}
+                # Wall collision geometries are explicitly named above. The only
+                # unnamed collision element emitted by RoomGeometry is the floor
+                # slab, so treating this fallback as a wall bypasses the grounded
+                # visual-contact filter and creates impossible 10-25cm "room_geometry"
+                # collision loops for otherwise well-grounded beds and sofas.
+                return {"name": "floor", "id": "room_geometry"}
 
         # Extract object ID from frame name for regular scene objects.
         for object_id, scene_object in scene.objects.items():

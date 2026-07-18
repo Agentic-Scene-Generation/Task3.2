@@ -17,6 +17,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from scenesmith.agent_utils.furniture_functional_layout import (
+    evaluate_functional_layout,
+)
 from scenesmith.agent_utils.furniture_layout_planning import (
     evaluate_bedroom_layout_plausibility,
     is_bedroom_scene,
@@ -42,6 +45,16 @@ DEFAULT_ALIASES = {
     "nightstand": ["nightstand", "nightstands", "bedside table", "bedside tables"],
     "wardrobe": ["wardrobe", "wardrobes", "closet", "closets"],
     "dresser": ["dresser", "dressers", "chest of drawers"],
+    # Keep classroom roles ahead of generic ``desk`` so six student desks and
+    # one teacher desk remain distinct requirements and asset-cache families.
+    "student_desk": ["student desk", "student desks", "pupil desk", "pupil desks"],
+    "teacher_desk": [
+        "teacher's desk",
+        "teacher desk",
+        "instructor desk",
+        "lectern",
+        "podium",
+    ],
     "desk": ["desk", "desks"],
     "chair": ["chair", "chairs"],
     "sofa": ["sofa", "sofas", "couch", "couches"],
@@ -284,6 +297,10 @@ class FurnitureSafetyController:
         }
         self.size_bounds = _plain_dict(_cfg_get(cfg, "size_bounds", {}))
         self.bedroom_layout_cfg = _cfg_get(cfg, "bedroom_layout", {})
+        self.functional_layout_cfg = _cfg_get(cfg, "functional_layout", {})
+        self.functional_layout_hard = bool(
+            _cfg_get(self.functional_layout_cfg, "hard_relations", True)
+        )
         self.window_blocking_is_hard = bool(
             _cfg_get(self.bedroom_layout_cfg, "window_blocking_is_hard", False)
         )
@@ -349,6 +366,11 @@ class FurnitureSafetyController:
         self.scene_description = scene_description or ""
         self.required_terms = self._infer_required_terms(self.scene_description)
         self.required_counts = self._infer_required_counts(self.scene_description)
+        if "student_desk" in self.required_counts:
+            # The generic desk alias also matches the noun in "student desks".
+            # It must not create a second, ambiguous requirement.
+            self.required_counts.pop("desk", None)
+            self.required_terms.discard("desk")
         # A style-only bedroom prompt still semantically requires a bed.  Do
         # not infer the rest of a bedroom set unless the task requests it.
         if "bedroom" in self.scene_description.lower():
@@ -404,6 +426,24 @@ class FurnitureSafetyController:
                 )
                 for match in re.finditer(pattern, text):
                     count_text = match.groupdict().get("count")
+                    if not count_text:
+                        # The optional adjective window can begin at an earlier
+                        # word ("with six student desks") and greedily consume the
+                        # numeric token. Recover the nearest number before the
+                        # matched alias instead of silently collapsing six to one.
+                        matched_text = match.group(0).lower()
+                        alias_offset = matched_text.rfind(alias.lower())
+                        before_alias = (
+                            matched_text[:alias_offset]
+                            if alias_offset >= 0
+                            else matched_text
+                        )
+                        number_matches = re.findall(
+                            rf"(?<![a-z0-9])({number_pattern})(?![a-z0-9])",
+                            before_alias,
+                        )
+                        if number_matches:
+                            count_text = number_matches[-1]
                     count = 1
                     if count_text:
                         count = (
@@ -448,6 +488,13 @@ class FurnitureSafetyController:
     def _infer_category(self, text: str) -> str | None:
         for canonical, aliases in DEFAULT_ALIASES.items():
             if any(_contains_alias(text, alias) for alias in [canonical, *aliases]):
+                if canonical == "desk" and "student_desk" in self.required_counts:
+                    # Designers and legacy checkpoints frequently use ``desk_0``
+                    # for classroom student desks. The explicit teacher aliases
+                    # are matched first, so a remaining generic desk is safely a
+                    # student desk in this prompt context rather than an extra,
+                    # untracked furniture family.
+                    return "student_desk"
                 return canonical
         return None
 
@@ -941,6 +988,10 @@ class FurnitureSafetyController:
                     )
                 )
 
+        size_reasons, size_issues = self._evaluate_required_asset_sizes(scene)
+        hard_reasons.extend(size_reasons)
+        hard_issues.extend(size_issues)
+
         room_bounds = self._room_bounds_xy(scene)
         if room_bounds is not None:
             min_x, min_y, max_x, max_y = room_bounds
@@ -1012,6 +1063,41 @@ class FurnitureSafetyController:
 
             hard_reasons.extend(self._evaluate_bedroom_relation_hard_reasons(scene))
 
+        functional_report = None
+        try:
+            functional_report = evaluate_functional_layout(
+                scene=scene,
+                category_resolver=self._infer_category,
+                cfg=self.functional_layout_cfg,
+            )
+        except Exception as exc:
+            soft_reasons.append(
+                "functional layout check failed: "
+                f"{type(exc).__name__}: {exc}"
+            )
+        if functional_report is not None and functional_report.issues:
+            if self.functional_layout_hard:
+                hard_reasons.extend(functional_report.issues)
+                hard_issues.extend(
+                    HardIssue(
+                        issue_type="functional_relation",
+                        details=reason,
+                    )
+                    for reason in functional_report.issues
+                )
+            else:
+                soft_reasons.extend(functional_report.issues)
+
+        report_dict = (
+            plausibility_report.to_dict()
+            if plausibility_report is not None
+            else None
+        )
+        if functional_report is not None:
+            if report_dict is None:
+                report_dict = {}
+            report_dict["functional_layout"] = functional_report.to_dict()
+
         return HardStateEvaluation(
             hard_valid=not hard_reasons,
             hard_reasons=hard_reasons,
@@ -1019,13 +1105,73 @@ class FurnitureSafetyController:
             weighted_score_penalty=(
                 plausibility_report.penalty if plausibility_report is not None else 0.0
             ),
-            plausibility_report=(
-                plausibility_report.to_dict()
-                if plausibility_report is not None
-                else None
-            ),
+            plausibility_report=report_dict,
             issues=hard_issues,
         )
+
+    def _evaluate_required_asset_sizes(
+        self, scene: Any
+    ) -> tuple[list[str], list[HardIssue]]:
+        """Reject required furniture whose final mesh dimensions are unusable."""
+        if not self.size_bounds:
+            return [], []
+        required = set((self.required_counts or {}).keys())
+        reasons: list[str] = []
+        issues: list[HardIssue] = []
+        for object_id, obj in getattr(scene, "objects", {}).items():
+            if getattr(obj, "immutable", False) or not self._is_furniture_object(obj):
+                continue
+            category = self._infer_category(
+                f"{object_id} {getattr(obj, 'name', '')} "
+                f"{getattr(obj, 'description', '')}"
+            )
+            if category not in required:
+                continue
+            bounds_cfg = self.size_bounds.get(category)
+            if bounds_cfg is None and category in ("student_desk", "teacher_desk"):
+                bounds_cfg = self.size_bounds.get("desk")
+            if bounds_cfg is None:
+                continue
+            bounds_cfg = _plain_dict(bounds_cfg)
+            min_dims = list(bounds_cfg.get("min", []) or [])
+            max_dims = list(bounds_cfg.get("max", []) or [])
+            bbox_min = getattr(obj, "bbox_min", None)
+            bbox_max = getattr(obj, "bbox_max", None)
+            if bbox_min is None or bbox_max is None:
+                continue
+            try:
+                dims = [
+                    abs(float(upper) - float(lower))
+                    for lower, upper in zip(bbox_min, bbox_max)
+                ]
+            except (TypeError, ValueError):
+                continue
+            if len(dims) != 3:
+                continue
+            below = len(min_dims) == 3 and any(
+                value + 1e-3 < float(limit)
+                for value, limit in zip(dims, min_dims)
+            )
+            above = len(max_dims) == 3 and any(
+                value - 1e-3 > float(limit)
+                for value, limit in zip(dims, max_dims)
+            )
+            if not below and not above:
+                continue
+            reason = (
+                f"required {category} asset {object_id} has unusable dimensions "
+                f"{[round(value, 3) for value in dims]}; expected within "
+                f"min={min_dims or 'unset'}, max={max_dims or 'unset'}"
+            )
+            reasons.append(reason)
+            issues.append(
+                HardIssue(
+                    issue_type="asset_invalid",
+                    object_a_id=str(object_id),
+                    details=reason,
+                )
+            )
+        return reasons, issues
 
     def _room_bounds_xy(self, scene: Any) -> tuple[float, float, float, float] | None:
         room_geometry = getattr(scene, "room_geometry", None)
