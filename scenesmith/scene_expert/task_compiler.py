@@ -14,6 +14,7 @@ from pathlib import Path
 
 from scenesmith.scene_expert.context_bundle import build_llm_call_debug_record
 from scenesmith.scene_expert.schemas import SceneTaskSpec
+from scenesmith.agent_utils.thinking import chat_template_kwargs_from_effort
 
 console_logger = logging.getLogger(__name__)
 
@@ -290,6 +291,7 @@ class TaskCompiler:
             ],
             temperature=self._temperature,
             max_tokens=self._max_tokens,
+            extra_body=chat_template_kwargs_from_effort("none"),
         )
 
         message = response.choices[0].message

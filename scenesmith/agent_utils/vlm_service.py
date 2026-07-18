@@ -5,6 +5,7 @@ from typing import Any
 from openai import OpenAI
 
 from scenesmith.agent_utils.thinking import (
+    chat_template_kwargs_from_effort,
     prepend_text_thinking_directive,
     responses_api_reasoning_effort,
     thinking_directive_from_effort,
@@ -126,7 +127,11 @@ class VLMService:
                 messages=messages,
                 directive=thinking_directive_from_effort(reasoning_effort),
             )
-            kwargs = {"model": model, "messages": messages}
+            kwargs = {
+                "model": model,
+                "messages": messages,
+                "extra_body": chat_template_kwargs_from_effort(reasoning_effort),
+            }
 
             # Add response format if specified.
             if response_format:

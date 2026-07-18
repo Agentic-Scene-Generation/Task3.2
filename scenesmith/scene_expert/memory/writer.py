@@ -27,6 +27,7 @@ from scenesmith.scene_expert.memory.schemas import (
 from scenesmith.scene_expert.context_bundle import build_llm_call_debug_record
 from scenesmith.scene_expert.memory.text_builder import build_embedding_text
 from scenesmith.scene_expert.schemas import FullVerifyReport
+from scenesmith.agent_utils.thinking import chat_template_kwargs_from_effort
 
 console_logger = logging.getLogger(__name__)
 SUCCESS_MEMORY_MIN_OVERALL_SCORE = 0.75
@@ -327,6 +328,7 @@ class MemoryWriter:
             ],
             "temperature": self._temperature,
             "max_tokens": self._max_tokens,
+            "extra_body": chat_template_kwargs_from_effort("high"),
         }
         if use_response_format:
             kwargs["response_format"] = {"type": "json_object"}

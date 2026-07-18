@@ -6,6 +6,7 @@ import types
 sys.modules.setdefault("openai", types.SimpleNamespace(OpenAI=object))
 
 from scenesmith.agent_utils.thinking import (
+    chat_template_kwargs_from_effort,
     prepend_text_thinking_directive,
     thinking_directive_from_effort,
 )
@@ -17,6 +18,16 @@ class ThinkingDirectivesTest(unittest.TestCase):
         self.assertEqual("/no_think", thinking_directive_from_effort("none"))
         self.assertEqual("/no_think", thinking_directive_from_effort("minimal"))
         self.assertEqual("/think", thinking_directive_from_effort("high"))
+
+    def test_chat_template_kwargs_follow_effort(self) -> None:
+        self.assertEqual(
+            {"chat_template_kwargs": {"enable_thinking": False}},
+            chat_template_kwargs_from_effort("none"),
+        )
+        self.assertEqual(
+            {"chat_template_kwargs": {"enable_thinking": True}},
+            chat_template_kwargs_from_effort("low"),
+        )
 
     def test_agent_instruction_directive_replaces_existing_prefix(self) -> None:
         self.assertEqual(
