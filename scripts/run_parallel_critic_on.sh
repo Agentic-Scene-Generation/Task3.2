@@ -23,8 +23,15 @@ CRITIC_PROBE_INNER_PARALLELISM="${CRITIC_PROBE_INNER_PARALLELISM:-2}"
 CRITIC_PROBE_PORT_BASE="${CRITIC_PROBE_PORT_BASE:-9000}"
 CRITIC_PROBE_PORT_BLOCK_SIZE="${CRITIC_PROBE_PORT_BLOCK_SIZE:-400}"
 CRITIC_PROBE_SHUTDOWN_GRACE_SECONDS="${CRITIC_PROBE_SHUTDOWN_GRACE_SECONDS:-30}"
+# Continue other batches after one batch fails; the script still exits nonzero
+# after all batches finish if any batch failed. Set false for fail-fast mode.
+CRITIC_PROBE_CONTINUE_ON_BATCH_FAILURE="${CRITIC_PROBE_CONTINUE_ON_BATCH_FAILURE:-true}"
 
 PIPELINE_STOP_STAGE="${PIPELINE_STOP_STAGE:-manipuland}"
+# Keep strict furniture-stage validation by default. Set this to false only
+# when intentionally allowing unresolved furniture hard constraints through.
+# Example: FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS=false bash scripts/run_parallel_critic_on.sh
+FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS="${FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS:-true}"
 BRANCH_FROM_SHARED_BASE="${BRANCH_FROM_SHARED_BASE:-false}"
 SHARED_BASE_STOP_STAGE="${SHARED_BASE_STOP_STAGE:-floor_plan}"
 SHARED_BASE_ROOT="${SHARED_BASE_ROOT:-}"
@@ -108,6 +115,10 @@ if ! DRY_RUN="$(normalize_bool "$DRY_RUN")"; then
     echo "ERROR: DRY_RUN must be true or false" >&2
     exit 1
 fi
+if ! CRITIC_PROBE_CONTINUE_ON_BATCH_FAILURE="$(normalize_bool "$CRITIC_PROBE_CONTINUE_ON_BATCH_FAILURE")"; then
+    echo "ERROR: CRITIC_PROBE_CONTINUE_ON_BATCH_FAILURE must be true or false" >&2
+    exit 1
+fi
 if ! DISABLE_ARTICULATED="$(normalize_bool "$DISABLE_ARTICULATED")"; then
     echo "ERROR: SCENEEXPERT_DISABLE_ARTICULATED must be true or false" >&2
     exit 1
@@ -118,6 +129,10 @@ if ! DISABLE_MATERIALS="$(normalize_bool "$DISABLE_MATERIALS")"; then
 fi
 if ! DISABLE_BWRAP="$(normalize_bool "$DISABLE_BWRAP")"; then
     echo "ERROR: SCENEEXPERT_DISABLE_BWRAP must be true or false" >&2
+    exit 1
+fi
+if ! FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS="$(normalize_bool "$FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS")"; then
+    echo "ERROR: FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS must be true or false" >&2
     exit 1
 fi
 
@@ -175,11 +190,13 @@ export SCENE_BATCH_SIZE SCENE_WORKERS_PER_PROCESS
 export CRITIC_PROBE_PARALLEL CRITIC_PROBE_INNER_PARALLELISM
 export CRITIC_PROBE_PORT_BASE CRITIC_PROBE_PORT_BLOCK_SIZE
 export CRITIC_PROBE_SHUTDOWN_GRACE_SECONDS
+export CRITIC_PROBE_CONTINUE_ON_BATCH_FAILURE
 export PIPELINE_STOP_STAGE BRANCH_FROM_SHARED_BASE SHARED_BASE_STOP_STAGE
 export SHARED_BASE_ROOT GENERATE_SHARED_BASE MAX_CASES CASE_FILTER DRY_RUN
 export SCENEEXPERT_DISABLE_ARTICULATED="$DISABLE_ARTICULATED"
 export SCENEEXPERT_DISABLE_MATERIALS="$DISABLE_MATERIALS"
 export SCENEEXPERT_DISABLE_BWRAP="$DISABLE_BWRAP"
+export FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS
 
 mkdir -p "$OUTPUT_ROOT"
 
@@ -193,6 +210,8 @@ echo "OpenAI base URL: $OPENAI_BASE_URL"
 echo "batch size: $SCENE_BATCH_SIZE"
 echo "parallel batches: $CRITIC_PROBE_PARALLEL ($CRITIC_PROBE_INNER_PARALLELISM)"
 echo "port allocation: base=$CRITIC_PROBE_PORT_BASE block=$CRITIC_PROBE_PORT_BLOCK_SIZE"
+echo "continue after batch failure: $CRITIC_PROBE_CONTINUE_ON_BATCH_FAILURE"
+echo "fail unresolved furniture hard constraints: $FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS"
 echo "shared base: $BRANCH_FROM_SHARED_BASE (generate=$GENERATE_SHARED_BASE)"
 echo "==============================================="
 
@@ -208,6 +227,7 @@ CASES=(
 COMMON_ARGS=(
     "experiment.num_workers=${SCENE_WORKERS_PER_PROCESS}"
     "experiment.scene_retry_attempts=1"
+    "furniture_agent.fail_stage_on_unresolved_hard_constraints=${FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS}"
     "experiment.pipeline.parallel_rooms=false"
     "experiment.pipeline.max_parallel_rooms=1"
     "experiment.scenebenchmark_critic.enabled=true"
@@ -337,6 +357,7 @@ run_batches() {
     local run_kind="$1"
     local active_pids=()
     local active_labels=()
+    local failed_group_pids=()
     local batch_index=0
     local selected=0
     local batch_entries=()
@@ -352,6 +373,7 @@ run_batches() {
 
     cleanup_active_batches() {
         local pid deadline any_alive
+        local cleanup_pids=("${active_pids[@]}" "${failed_group_pids[@]}")
         if [ "$cleanup_started" = "true" ]; then
             return 0
         fi
@@ -360,14 +382,14 @@ run_batches() {
         # Every parallel batch is started in its own session/process group.
         # Signal the whole group so Python, Blender, and retrieval-server
         # descendants cannot outlive the batch shell.
-        for pid in "${active_pids[@]}"; do
+        for pid in "${cleanup_pids[@]}"; do
             kill -TERM -- "-$pid" 2>/dev/null || true
         done
 
         deadline=$((SECONDS + CRITIC_PROBE_SHUTDOWN_GRACE_SECONDS))
         while [ "$SECONDS" -lt "$deadline" ]; do
             any_alive=false
-            for pid in "${active_pids[@]}"; do
+            for pid in "${cleanup_pids[@]}"; do
                 if process_group_alive "$pid"; then
                     any_alive=true
                     break
@@ -379,7 +401,7 @@ run_batches() {
             sleep 1
         done
 
-        for pid in "${active_pids[@]}"; do
+        for pid in "${cleanup_pids[@]}"; do
             if process_group_alive "$pid"; then
                 echo "WARNING: force-killing batch process group $pid" >&2
                 kill -KILL -- "-$pid" 2>/dev/null || true
@@ -388,6 +410,7 @@ run_batches() {
         done
         active_pids=()
         active_labels=()
+        failed_group_pids=()
     }
 
     on_batch_signal() {
@@ -438,6 +461,15 @@ run_batches() {
         if [ "$rc" -ne 0 ]; then
             echo "ERROR: $run_kind/$label failed with exit code $rc" >&2
             batch_failure="$rc"
+            if [ "$CRITIC_PROBE_CONTINUE_ON_BATCH_FAILURE" = "true" ]; then
+                # The batch leader may have exited while native descendants
+                # remain in its process group. Keep that group for cleanup
+                # after all other batches have finished.
+                failed_group_pids+=("$finished_pid")
+                echo "WARNING: continuing remaining $run_kind batches after $run_kind/$label failure; final exit will report failure" >&2
+                return 0
+            fi
+            # Preserve the original fail-fast behavior when explicitly disabled.
             # The batch leader may have exited while native descendants remain
             # in its process group. Keep that group in cleanup's input.
             active_pids+=("$finished_pid")
@@ -464,7 +496,19 @@ run_batches() {
             active_labels+=("$label")
             while [ "${#active_pids[@]}" -ge "$CRITIC_PROBE_INNER_PARALLELISM" ]; do wait_one; done
         else
-            run_batch "$run_kind" "$batch_index" "${batch_entries[@]}"
+            local rc=0
+            if run_batch "$run_kind" "$batch_index" "${batch_entries[@]}"; then
+                :
+            else
+                rc=$?
+                echo "ERROR: $run_kind/batch_$(printf '%03d' "$batch_index") failed with exit code $rc" >&2
+                batch_failure="$rc"
+                if [ "$CRITIC_PROBE_CONTINUE_ON_BATCH_FAILURE" = "true" ]; then
+                    echo "WARNING: continuing remaining $run_kind batches after $run_kind/batch_$(printf '%03d' "$batch_index") failure; final exit will report failure" >&2
+                else
+                    return "$rc"
+                fi
+            fi
         fi
     }
 
@@ -480,6 +524,11 @@ run_batches() {
     done
     if [ "${#batch_entries[@]}" -gt 0 ]; then batch_index=$((batch_index + 1)); launch; fi
     while [ "${#active_pids[@]}" -gt 0 ]; do wait_one; done
+    # A failed parallel batch can leave native descendants behind even though
+    # its shell leader has exited. Reap those groups after other batches finish.
+    if [ "${#failed_group_pids[@]}" -gt 0 ]; then
+        cleanup_active_batches
+    fi
     trap - EXIT INT TERM HUP
     if [ "$batch_failure" -ne 0 ]; then
         return "$batch_failure"
