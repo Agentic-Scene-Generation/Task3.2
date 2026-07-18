@@ -43,6 +43,21 @@ DISABLE_ARTICULATED="${SCENEEXPERT_DISABLE_ARTICULATED:-false}"
 DISABLE_MATERIALS="${SCENEEXPERT_DISABLE_MATERIALS:-false}"
 DISABLE_BWRAP="${SCENEEXPERT_DISABLE_BWRAP:-false}"
 
+# Match the classmate's vLLM run. The agent code maps these values to Qwen
+# directives: none/minimal -> /no_think, all other values -> /think.
+# Keep them as environment overrides so an ablation can change one stage
+# without editing this script.
+FLOOR_PLAN_DESIGNER_THINKING="${FLOOR_PLAN_DESIGNER_THINKING:-high}"
+FLOOR_PLAN_CRITIC_THINKING="${FLOOR_PLAN_CRITIC_THINKING:-high}"
+FURNITURE_DESIGNER_THINKING="${FURNITURE_DESIGNER_THINKING:-low}"
+FURNITURE_CRITIC_THINKING="${FURNITURE_CRITIC_THINKING:-low}"
+WALL_DESIGNER_THINKING="${WALL_DESIGNER_THINKING:-none}"
+WALL_CRITIC_THINKING="${WALL_CRITIC_THINKING:-none}"
+CEILING_DESIGNER_THINKING="${CEILING_DESIGNER_THINKING:-none}"
+CEILING_CRITIC_THINKING="${CEILING_CRITIC_THINKING:-none}"
+MANIPULAND_DESIGNER_THINKING="${MANIPULAND_DESIGNER_THINKING:-none}"
+MANIPULAND_CRITIC_THINKING="${MANIPULAND_CRITIC_THINKING:-none}"
+
 export OPENAI_API_KEY="${OPENAI_API_KEY:-sk-123}"
 export OPENAI_BASE_URL="${OPENAI_BASE_URL:-http://127.0.0.1:8002/v1}"
 export OPENAI_USE_RESPONSES="false"
@@ -197,6 +212,11 @@ export SCENEEXPERT_DISABLE_ARTICULATED="$DISABLE_ARTICULATED"
 export SCENEEXPERT_DISABLE_MATERIALS="$DISABLE_MATERIALS"
 export SCENEEXPERT_DISABLE_BWRAP="$DISABLE_BWRAP"
 export FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS
+export FLOOR_PLAN_DESIGNER_THINKING FLOOR_PLAN_CRITIC_THINKING
+export FURNITURE_DESIGNER_THINKING FURNITURE_CRITIC_THINKING
+export WALL_DESIGNER_THINKING WALL_CRITIC_THINKING
+export CEILING_DESIGNER_THINKING CEILING_CRITIC_THINKING
+export MANIPULAND_DESIGNER_THINKING MANIPULAND_CRITIC_THINKING
 
 mkdir -p "$OUTPUT_ROOT"
 
@@ -212,6 +232,7 @@ echo "parallel batches: $CRITIC_PROBE_PARALLEL ($CRITIC_PROBE_INNER_PARALLELISM)
 echo "port allocation: base=$CRITIC_PROBE_PORT_BASE block=$CRITIC_PROBE_PORT_BLOCK_SIZE"
 echo "continue after batch failure: $CRITIC_PROBE_CONTINUE_ON_BATCH_FAILURE"
 echo "fail unresolved furniture hard constraints: $FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS"
+echo "thinking profile: floor_plan=${FLOOR_PLAN_DESIGNER_THINKING}/${FLOOR_PLAN_CRITIC_THINKING}, furniture=${FURNITURE_DESIGNER_THINKING}/${FURNITURE_CRITIC_THINKING}, wall=${WALL_DESIGNER_THINKING}/${WALL_CRITIC_THINKING}, ceiling=${CEILING_DESIGNER_THINKING}/${CEILING_CRITIC_THINKING}, manipuland=${MANIPULAND_DESIGNER_THINKING}/${MANIPULAND_CRITIC_THINKING}"
 echo "shared base: $BRANCH_FROM_SHARED_BASE (generate=$GENERATE_SHARED_BASE)"
 echo "==============================================="
 
@@ -234,6 +255,16 @@ COMMON_ARGS=(
     "experiment.scenebenchmark_critic.inject_into_llm_critic=true"
     "experiment.scenebenchmark_critic.fd_relation_proposer_mode=template"
     "experiment.scenebenchmark_critic.max_fd_relation_proposals=8"
+    "floor_plan_agent.openai.reasoning_effort.designer=${FLOOR_PLAN_DESIGNER_THINKING}"
+    "floor_plan_agent.openai.reasoning_effort.critic=${FLOOR_PLAN_CRITIC_THINKING}"
+    "furniture_agent.openai.reasoning_effort.designer=${FURNITURE_DESIGNER_THINKING}"
+    "furniture_agent.openai.reasoning_effort.critic=${FURNITURE_CRITIC_THINKING}"
+    "wall_agent.openai.reasoning_effort.designer=${WALL_DESIGNER_THINKING}"
+    "wall_agent.openai.reasoning_effort.critic=${WALL_CRITIC_THINKING}"
+    "ceiling_agent.openai.reasoning_effort.designer=${CEILING_DESIGNER_THINKING}"
+    "ceiling_agent.openai.reasoning_effort.critic=${CEILING_CRITIC_THINKING}"
+    "manipuland_agent.openai.reasoning_effort.designer=${MANIPULAND_DESIGNER_THINKING}"
+    "manipuland_agent.openai.reasoning_effort.critic=${MANIPULAND_CRITIC_THINKING}"
 )
 
 if [ "$DISABLE_ARTICULATED" = "true" ]; then
