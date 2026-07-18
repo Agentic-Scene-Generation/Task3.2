@@ -16,6 +16,7 @@ from scenesmith.agent_utils.asset_manager import (
     AssetManager,
     AssetPathConfig,
     FailedAsset,
+    _normalize_hssd_annotation_front_axis,
 )
 from scenesmith.agent_utils.geometry_generation_server.dataclasses import (
     GeometryGenerationServerResponse,
@@ -43,6 +44,11 @@ def create_mock_cfg():
 
     # Define test overrides for fast testing.
     test_overrides = {
+        "paths": {
+            # The SAM3D config uses ${paths.checkpoints_dir}; keep the unit
+            # fixture self-contained instead of relying on the Hydra root.
+            "checkpoints_dir": str(Path(tempfile.gettempdir()) / "checkpoints"),
+        },
         "openai": {
             "model": "gpt-4o-mini",  # Cheaper model for testing
         },
@@ -121,6 +127,7 @@ class TestAssetManager(unittest.TestCase):
 
         if self.temp_dir.exists():
             shutil.rmtree(self.temp_dir)
+
 
     def test_asset_generation_request_creation(self):
         """Test creating AssetGenerationRequest instances."""
@@ -494,8 +501,10 @@ class TestAssetManager(unittest.TestCase):
             sdf_path
         )
 
-        np.testing.assert_array_equal(bbox_min, [0.0, 0.0, 0.0])
-        np.testing.assert_array_equal(bbox_max, [1.0, 2.0, 0.5])
+        # GLTF uses X-right/Y-up/Z-forward; the asset manager exposes
+        # SceneSmith's X-right/Y-forward/Z-up bounds.
+        np.testing.assert_array_equal(bbox_min, [0.0, -0.5, 0.0])
+        np.testing.assert_array_equal(bbox_max, [1.0, 0.0, 2.0])
 
     @patch("scenesmith.agent_utils.asset_manager.scale_mesh_uniformly_to_dimensions")
     @patch("pathlib.Path.glob")
@@ -1110,7 +1119,53 @@ class TestAssetManagerDimensionControl(unittest.TestCase):
         # Verify scale_mesh_uniformly_to_dimensions was called.
         mock_scale_mesh.assert_called_once()
         call_args = mock_scale_mesh.call_args
-        self.assertEqual(call_args[1]["desired_dimensions"], [1.8, 0.9, 0.75])
+        # Scaling operates on GLTF Y-up dimensions: width, height, depth.
+        self.assertEqual(call_args[1]["desired_dimensions"], [1.8, 0.75, 0.9])
+
+
+class TestHssdFrontAxisOverride(unittest.TestCase):
+    """Tests for SceneBenchmark HSSD front-axis annotation handling."""
+
+    def setUp(self):
+        self.temp_dir = Path(tempfile.mkdtemp())
+        self.mock_logger = create_mock_logger(self.temp_dir)
+
+    def tearDown(self):
+        if self.temp_dir.exists():
+            shutil.rmtree(self.temp_dir)
+
+    def test_hsm_front_vector_maps_to_blender_minus_y(self):
+        """HSM +Z-forward becomes SceneSmith/Blender -Y."""
+        self.assertEqual(_normalize_hssd_annotation_front_axis([0.0, 0.0, 1.0]), "-Y")
+
+    @patch("scenesmith.agent_utils.asset_manager._get_hssd_front_axis_annotation_record")
+    def test_annotation_replaces_only_front_axis(self, mock_annotation_record):
+        """Curated front replaces VLM orientation without changing physics metadata."""
+        mock_annotation_record.return_value = {
+            "canonical_front": {
+                "asset_local_front_axis": [0.0, 0.0, 1.0],
+            }
+        }
+        asset_manager = object.__new__(AssetManager)
+        asset_manager.cfg = create_mock_cfg()
+        physics = MeshPhysicsAnalysis(
+            up_axis="+Z",
+            front_axis="+X",
+            material="wood",
+            mass_kg=10.0,
+            mass_range_kg=(8.0, 12.0),
+        )
+
+        overridden = asset_manager._override_hssd_front_axis_from_annotations(
+            physics_analysis=physics,
+            hssd_id="hssd-chair",
+        )
+
+        self.assertEqual(overridden.front_axis, "-Y")
+        self.assertEqual(overridden.up_axis, physics.up_axis)
+        self.assertEqual(overridden.material, physics.material)
+        self.assertEqual(overridden.mass_kg, physics.mass_kg)
+        mock_annotation_record.assert_called_once_with("hssd-chair", None)
 
 
 if __name__ == "__main__":

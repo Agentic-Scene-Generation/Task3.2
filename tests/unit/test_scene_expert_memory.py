@@ -28,7 +28,10 @@ from scenesmith.scene_expert.memory.schemas import (
 from scenesmith.scene_expert.memory.store import FastMemoryStore
 from scenesmith.scene_expert.memory.text_builder import build_embedding_text
 from scenesmith.scene_expert.memory.writer import MemoryWriter
-from scenesmith.scene_expert.context_bundle import build_stage_context_bundle
+from scenesmith.scene_expert.context_bundle import (
+    build_llm_call_debug_record,
+    build_stage_context_bundle,
+)
 from scenesmith.scene_expert.repair_taxonomy import (
     FailureCategory,
     classify_hard_reasons,
@@ -49,6 +52,20 @@ from scenesmith.scene_expert.verifier import (
 
 
 class SceneExpertMemoryTest(unittest.TestCase):
+    def test_llm_debug_record_marks_scenebenchmark_prompt_context(self) -> None:
+        record = build_llm_call_debug_record(
+            stage="furniture",
+            agent_role="critic",
+            event="observe_scene",
+            prompt=(
+                "long critic prompt\n\n"
+                "Additional SceneBenchmark geometry critic context:\n"
+                "functional_dependency"
+            ),
+        )
+
+        self.assertTrue(record.prompt_contains_scenebenchmark_context)
+
     def test_memory_writer_normalizes_null_noop_fields(self) -> None:
         normalized = MemoryWriter._normalize_update_op(
             {

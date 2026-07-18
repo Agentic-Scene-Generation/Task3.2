@@ -80,6 +80,9 @@ class LLMCallDebugRecord(BaseModel):
     prompt_chars: int = 0
     prompt_hash: str = ""
     prompt_excerpt: str = ""
+    # The full prompt is intentionally truncated in prompt_excerpt. Keep an
+    # explicit marker so long critic prompts remain auditable after a replay.
+    prompt_contains_scenebenchmark_context: bool = False
     output_chars: int = 0
     output_excerpt: str = ""
     finish_reasons: list[str] = Field(default_factory=list)
@@ -343,6 +346,9 @@ def build_llm_call_debug_record(
         prompt_chars=len(prompt_text),
         prompt_hash=stable_hash(prompt_text),
         prompt_excerpt=compact_text(prompt_text, 1800),
+        prompt_contains_scenebenchmark_context=(
+            "Additional SceneBenchmark geometry critic context" in prompt_text
+        ),
         output_chars=len(output_text),
         output_excerpt=compact_text(output_text, 1800),
         finish_reasons=_extract_finish_reasons(result or raw_response),

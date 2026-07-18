@@ -6,7 +6,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import trimesh
@@ -81,6 +81,66 @@ if TYPE_CHECKING:
     from scenesmith.agent_utils.blender import BlenderServer
 
 console_logger = logging.getLogger(__name__)
+
+_HSSD_FRONT_AXIS_SOURCES = {
+    "scenebenchmark_critic",
+    "critic",
+    "annotation",
+    "annotations",
+}
+_VALID_HORIZONTAL_FRONT_AXES = {"+X", "-X", "+Y", "-Y"}
+
+
+def _get_hssd_front_axis_annotation_record(
+    hssd_id: str, lookup_path: str | Path | None = None
+) -> dict[str, Any] | None:
+    """Load one HSSD front-axis record from the SceneBenchmark critic lookup."""
+    if lookup_path:
+        from scenesmith.scenebenchmark_critic.asset_library_annotations import (
+            AssetLibraryAnnotationStore,
+        )
+
+        return AssetLibraryAnnotationStore(lookup_path=lookup_path).get(hssd_id)
+
+    from scenesmith.scenebenchmark_critic.asset_library_annotations import (
+        get_hssd_asset_annotations,
+    )
+
+    return get_hssd_asset_annotations(hssd_id)
+
+
+def _normalize_axis_string(value: Any) -> str | None:
+    text = str(value or "").strip().upper().replace(" ", "")
+    if text in _VALID_HORIZONTAL_FRONT_AXES:
+        return text
+    if len(text) == 1 and text in {"X", "Y"}:
+        return f"+{text}"
+    return None
+
+
+def _hsm_vector_to_blender_front_axis(value: Any) -> str | None:
+    """Convert HSSD/HSM asset-local front vector to a SceneSmith axis."""
+    if not isinstance(value, (list, tuple)) or len(value) != 3:
+        return None
+    try:
+        x_hsm, y_hsm, z_hsm = (float(value[0]), float(value[1]), float(value[2]))
+    except (TypeError, ValueError):
+        return None
+
+    # HSM is X-right/Y-up/Z-forward; SceneSmith is X-right/Y-forward/Z-up.
+    x_blender = x_hsm
+    y_blender = -z_hsm
+    z_blender = y_hsm
+    horizontal = {"X": x_blender, "Y": y_blender}
+    axis_name, axis_value = max(horizontal.items(), key=lambda item: abs(item[1]))
+    if abs(axis_value) < 1e-6 or abs(z_blender) > abs(axis_value):
+        return None
+    return f"{'+' if axis_value >= 0 else '-'}{axis_name}"
+
+
+def _normalize_hssd_annotation_front_axis(value: Any) -> str | None:
+    """Normalize a SceneBenchmark front annotation to +X/-X/+Y/-Y."""
+    return _normalize_axis_string(value) or _hsm_vector_to_blender_front_axis(value)
 
 
 @dataclass
@@ -550,6 +610,90 @@ class AssetManager:
             f"threshold={threshold})"
         )
 
+    def _hssd_front_axis_config(self) -> tuple[str, str | Path | None]:
+        """Return the configured HSSD front-axis source and lookup path."""
+        front_cfg = self.cfg.asset_manager.get("hssd_front_axis", {}) or {}
+        if isinstance(front_cfg, str):
+            return front_cfg.strip().lower(), None
+        source = str(front_cfg.get("source", "vlm") or "vlm").strip().lower()
+        lookup_path = front_cfg.get("annotation_lookup_path")
+        if lookup_path in ("", None):
+            lookup_path = None
+        return source, lookup_path
+
+    def _scenebenchmark_hssd_front_axis(self, hssd_id: str | None) -> str | None:
+        """Return the SceneBenchmark-annotated HSSD front axis when configured."""
+        source, lookup_path = self._hssd_front_axis_config()
+        if source not in _HSSD_FRONT_AXIS_SOURCES:
+            return None
+        if not hssd_id:
+            console_logger.warning(
+                "HSSD front-axis source is scenebenchmark_critic, but no hssd_id "
+                "was available; keeping VLM front axis"
+            )
+            return None
+
+        record = _get_hssd_front_axis_annotation_record(hssd_id, lookup_path)
+        if record is None:
+            console_logger.warning(
+                "No SceneBenchmark HSSD annotation found for %s; keeping VLM front axis",
+                hssd_id,
+            )
+            return None
+
+        canonical_front = record.get("canonical_front") or {}
+        axis_value = canonical_front.get("asset_local_front_axis")
+        if axis_value is None:
+            axis_value = canonical_front.get("canonical_orientation_axis")
+        if axis_value is None:
+            hints = (
+                record.get("scenebenchmark_functional_hints")
+                or (record.get("scenebenchmark_fd_sa") or {}).get("functional_hints")
+                or {}
+            )
+            axis_value = hints.get("asset_local_front_axis")
+
+        front_axis = _normalize_hssd_annotation_front_axis(axis_value)
+        if front_axis is None:
+            console_logger.warning(
+                "SceneBenchmark HSSD front-axis annotation for %s is unusable "
+                "(value=%r); keeping VLM front axis",
+                hssd_id,
+                axis_value,
+            )
+            return None
+        return front_axis
+
+    def _override_hssd_front_axis_from_annotations(
+        self, physics_analysis: MeshPhysicsAnalysis, hssd_id: str | None
+    ) -> MeshPhysicsAnalysis:
+        """Replace only the HSSD VLM front axis with SceneBenchmark annotation."""
+        front_axis = self._scenebenchmark_hssd_front_axis(hssd_id)
+        if front_axis is None:
+            return physics_analysis
+        if front_axis == physics_analysis.front_axis:
+            console_logger.info(
+                "Using SceneBenchmark HSSD front axis: %s (hssd_id=%s)",
+                front_axis,
+                hssd_id,
+            )
+            return physics_analysis
+
+        console_logger.info(
+            "Overriding HSSD front axis from SceneBenchmark annotations: "
+            "%s -> %s (hssd_id=%s)",
+            physics_analysis.front_axis,
+            front_axis,
+            hssd_id,
+        )
+        return MeshPhysicsAnalysis(
+            up_axis=physics_analysis.up_axis,
+            front_axis=front_axis,
+            material=physics_analysis.material,
+            mass_kg=physics_analysis.mass_kg,
+            mass_range_kg=physics_analysis.mass_range_kg,
+        )
+
     def _retrieve_hssd_assets(
         self, request: AssetGenerationRequest
     ) -> AssetGenerationResult:
@@ -663,6 +807,10 @@ class AssetManager:
                 console_logger.info(
                     f"VLM analysis complete: material={vlm_physics.material}, "
                     f"mass={vlm_physics.mass_kg}kg, front={vlm_physics.front_axis}"
+                )
+                vlm_physics = self._override_hssd_front_axis_from_annotations(
+                    physics_analysis=vlm_physics,
+                    hssd_id=mesh_id,
                 )
 
                 # Use VLM's material, mass, and front axis determination.
@@ -1534,6 +1682,7 @@ class AssetManager:
                     object_type=request.object_type,
                     desired_dimensions=item.dimensions,
                     asset_source=generated.asset_source,
+                    hssd_id=generated.hssd_id,
                 )
             )
 
@@ -1898,6 +2047,7 @@ class AssetManager:
         object_type: ObjectType,
         desired_dimensions: list[float] | None = None,
         asset_source: str = "generated",
+        hssd_id: str | None = None,
     ) -> tuple[Path, Path, np.ndarray, np.ndarray, float]:
         """Convert mesh to a simulatable Drake SDF.
 
@@ -1923,6 +2073,7 @@ class AssetManager:
             asset_source: Source of the asset ("generated" or "hssd"). HSSD assets
                 use specialized VLM prompts and skip vertical views since they're
                 already upright.
+            hssd_id: HSSD id used to look up a SceneBenchmark front-axis annotation.
 
         Returns:
             Tuple of (sdf_path, final_gltf_path, bbox_min, bbox_max, scale_factor).
@@ -1978,6 +2129,11 @@ class AssetManager:
             object_name=config.short_name,
             debug_output_dir=debug_dir,
         )
+        if is_hssd:
+            physics_analysis = self._override_hssd_front_axis_from_annotations(
+                physics_analysis=physics_analysis,
+                hssd_id=hssd_id,
+            )
 
         console_logger.info(
             f"VLM analysis complete: up={physics_analysis.up_axis}, "

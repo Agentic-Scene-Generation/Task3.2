@@ -2126,16 +2126,10 @@ class BaseStatefulAgent(ABC):
         self._reset_critic_candidate_cache()
 
         # Get physics violations using the same logic as the check_physics tool.
-        # The result is cached per candidate and reused by deterministic checks
-        # and critic prompt construction.
+        # The result is cached per candidate and reused by deterministic checks.
+        # SceneBenchmark feedback is added only after deterministic repair below,
+        # because a repair can replace this cached context and change the scene.
         physics_context = self._get_cached_physics_context()
-        benchmark_context = self._build_scenebenchmark_critic_context()
-        if benchmark_context:
-            physics_context = (
-                f"{physics_context}\n\n"
-                "Additional SceneBenchmark geometry critic context:\n"
-                f"{benchmark_context}"
-            )
         hard_state = (
             self._evaluate_current_hard_state(physics_context=physics_context)
             if self._critic_fast_path_enabled("hard_check_first", True)
@@ -2150,6 +2144,23 @@ class BaseStatefulAgent(ABC):
         )
         if repaired_physics_context is not None:
             physics_context = repaired_physics_context
+
+        # Build the geometry feedback from the final pre-critique candidate.
+        # Do this after repair so the context cannot be overwritten by the
+        # plain physics string returned from _try_deterministic_repair_for_hard_state.
+        benchmark_context = self._build_scenebenchmark_critic_context()
+        if benchmark_context:
+            physics_context = (
+                f"{physics_context}\n\n"
+                "Additional SceneBenchmark geometry critic context:\n"
+                f"{benchmark_context}"
+            )
+            console_logger.info(
+                "[CRITIC harness] SceneBenchmark context injected into %s critic "
+                "prompt (%d chars)",
+                self.agent_type.value,
+                len(benchmark_context),
+            )
         if repair_actions:
             console_logger.info(
                 "[CRITIC harness] Deterministic repair actions before scoring: %s",
