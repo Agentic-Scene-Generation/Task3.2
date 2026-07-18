@@ -219,6 +219,8 @@ class BaseStatefulAgent(ABC):
         self._stage_runtime_budget: dict[str, Any] = {}
         self._stage_runtime_started_at: float | None = None
         self._stage_runtime_exhausted = False
+        self._allow_degraded_stage_completion = False
+        self._degraded_stage_reasons: list[str] = []
 
     def _configure_stage_runtime(self, scene: Any) -> None:
         """Bind SceneExpert's advisory budget to this stage's real execution."""
@@ -254,6 +256,44 @@ class BaseStatefulAgent(ABC):
             self._stage_runtime_budget = {}
         self._stage_runtime_started_at = time.monotonic()
         self._stage_runtime_exhausted = False
+
+    async def prepare_stage_regeneration(self, reasons: list[str]) -> None:
+        """Reset conversational/checkpoint state before a full stage redesign.
+
+        Generated assets and server processes are intentionally retained, but the
+        designer and critic histories are cleared so the retry is a new layout
+        proposal rather than another incremental edit of the rejected candidate.
+        """
+        for session_name in ("designer_session", "critic_session"):
+            session = getattr(self, session_name, None)
+            clear_session = getattr(session, "clear_session", None)
+            if callable(clear_session):
+                await clear_session()
+        initialize_checkpoint_attributes(self)
+        self._reset_planner_budget_tracking()
+        self._reset_critic_candidate_cache()
+        rendering_manager = getattr(self, "rendering_manager", None)
+        if rendering_manager is not None:
+            rendering_manager.clear_cache()
+        self._allow_degraded_stage_completion = False
+        self._degraded_stage_reasons = []
+        console_logger.warning(
+            "Reset %s designer/critic state for stage regeneration: %s",
+            self.agent_type.value,
+            "; ".join(reasons),
+        )
+
+    async def complete_repair_exhausted_stage(self, reasons: list[str]) -> None:
+        """Persist a diagnosed degraded stage instead of aborting the pipeline."""
+        self._allow_degraded_stage_completion = True
+        self._degraded_stage_reasons = list(reasons)
+        if self.scene is not None:
+            setattr(
+                self.scene,
+                "scene_expert_degraded_stage_reasons",
+                list(reasons),
+            )
+        await self._finalize_scene_and_scores()
 
     def _stage_budget_value(self, key: str, default: Any) -> Any:
         return self._stage_runtime_budget.get(key, default)
@@ -1760,15 +1800,26 @@ class BaseStatefulAgent(ABC):
                     reasons = "; ".join(final_hard_state.hard_reasons)
             if final_hard_state is not None and not final_hard_state.hard_valid:
                 reasons = "; ".join(final_hard_state.hard_reasons)
-                console_logger.error(
-                    "Furniture stage failed with unresolved deterministic hard "
-                    "constraints: %s",
-                    reasons,
-                )
-                raise StageValidationError(
-                    stage=self.agent_type.value,
-                    reasons=final_hard_state.hard_reasons,
-                )
+                if self._allow_degraded_stage_completion:
+                    console_logger.warning(
+                        "Furniture stage exhausted local repair and stage "
+                        "regeneration; preserving the diagnosed candidate so the "
+                        "remaining pipeline and verifier can continue: %s",
+                        reasons,
+                    )
+                    self._degraded_stage_reasons = list(
+                        final_hard_state.hard_reasons
+                    )
+                else:
+                    console_logger.error(
+                        "Furniture stage failed with unresolved deterministic hard "
+                        "constraints: %s",
+                        reasons,
+                    )
+                    raise StageValidationError(
+                        stage=self.agent_type.value,
+                        reasons=final_hard_state.hard_reasons,
+                    )
 
         # Copy final scores and renders to per-stage directory.
         # Use final_render_dir (tracks actual last render) instead of checkpoint_render_dir

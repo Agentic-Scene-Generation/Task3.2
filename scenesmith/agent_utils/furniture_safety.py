@@ -274,6 +274,9 @@ class FurnitureSafetyController:
         self.room_bounds_tolerance_m = float(
             _cfg_get(cfg, "room_bounds_tolerance_m", 0.02)
         )
+        self.placeholder_assets_are_hard = bool(
+            _cfg_get(cfg, "placeholder_assets_are_hard", True)
+        )
 
         self.score_weights = {
             **DEFAULT_SCORE_WEIGHTS,
@@ -919,6 +922,24 @@ class FurnitureSafetyController:
                             details=reason,
                         )
                     )
+
+        if self.placeholder_assets_are_hard:
+            for object_id, obj in getattr(scene, "objects", {}).items():
+                metadata = getattr(obj, "metadata", {}) or {}
+                if not metadata.get("repair_placeholder", False):
+                    continue
+                reason = (
+                    f"placeholder furniture {object_id} is not a valid final asset; "
+                    "regenerate the stage with a semantically valid mesh"
+                )
+                hard_reasons.append(reason)
+                hard_issues.append(
+                    HardIssue(
+                        issue_type="asset_invalid",
+                        object_a_id=str(object_id),
+                        details=reason,
+                    )
+                )
 
         room_bounds = self._room_bounds_xy(scene)
         if room_bounds is not None:

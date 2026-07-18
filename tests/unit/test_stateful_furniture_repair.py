@@ -99,6 +99,28 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         self.assertGreater(fitted.translation()[0], 0.0)
         self.assertGreater(fitted.translation()[1], 0.0)
 
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
+    def test_wall_collision_repair_moves_object_inward_by_penetration(self) -> None:
+        agent = self._make_agent()
+        agent._fit_transform_inside_room = lambda _obj, transform: transform
+        obj = SimpleNamespace(
+            object_id="bed_0",
+            transform=RigidTransform(np.array([0.0, 1.75, 0.0])),
+        )
+
+        repaired = agent._move_away_from_room_boundary_transform(
+            obj,
+            room_boundary_id="room_geometry::north_wall",
+            penetration_depth_m=0.05,
+        )
+
+        self.assertIsNotNone(repaired)
+        self.assertAlmostEqual(repaired.translation()[0], 0.0)
+        self.assertAlmostEqual(repaired.translation()[1], 1.67)
+
     def _make_agent(self) -> Any:
         agent = object.__new__(StatefulFurnitureAgent)
         agent._room_bounds_xy = lambda: (-2.5, -2.0, 2.5, 2.0)

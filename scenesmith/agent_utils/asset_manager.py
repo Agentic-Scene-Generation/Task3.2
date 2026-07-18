@@ -37,6 +37,7 @@ from scenesmith.agent_utils.geometry_generation_server.dataclasses import (
 )
 from scenesmith.agent_utils.hssd_retrieval_server import HssdRetrievalClient
 from scenesmith.agent_utils.hssd_retrieval_server.dataclasses import (
+    HssdRetrievalResult,
     HssdRetrievalServerRequest,
 )
 from scenesmith.agent_utils.image_generation import (
@@ -650,6 +651,128 @@ class AssetManager:
             item=item, generated=generated, request=request
         )
 
+    def _hssd_semantic_validation_settings(
+        self, description: str, short_name: str
+    ) -> tuple[bool, int, bool]:
+        """Resolve targeted direct-HSSD validation without enabling LLM routing."""
+        hssd_cfg = getattr(self.cfg.asset_manager, "hssd", None)
+        validation_cfg = getattr(hssd_cfg, "semantic_validation", None)
+        if validation_cfg is None:
+            return False, 1, False
+        try:
+            enabled = bool(validation_cfg.get("enabled", False))
+            families = {
+                str(value).lower()
+                for value in list(validation_cfg.get("families", []) or [])
+            }
+            max_candidates = max(
+                1, int(validation_cfg.get("max_candidates", 2) or 2)
+            )
+            use_lenient = bool(validation_cfg.get("use_lenient", False))
+        except Exception:
+            enabled = bool(getattr(validation_cfg, "enabled", False))
+            families = {
+                str(value).lower()
+                for value in list(getattr(validation_cfg, "families", []) or [])
+            }
+            max_candidates = max(
+                1, int(getattr(validation_cfg, "max_candidates", 2) or 2)
+            )
+            use_lenient = bool(getattr(validation_cfg, "use_lenient", False))
+
+        family = semantic_asset_family(description, short_name)
+        return enabled and family in families, max_candidates, use_lenient
+
+    def _select_direct_hssd_candidate(
+        self,
+        *,
+        candidates: list[HssdRetrievalResult],
+        description: str,
+        short_name: str,
+    ) -> HssdRetrievalResult:
+        """Select a visually valid candidate for silhouette-critical furniture.
+
+        The non-router path intentionally avoids an LLM request-analysis call, but
+        taking CLIP rank 1 blindly cannot reject a wall frame mislabeled as a bed.
+        For a small configurable set of high-impact furniture families, validate
+        the already retrieved top candidates directly with the existing VLM.
+        """
+        if not candidates:
+            raise ValueError("No results returned from HSSD server")
+
+        enabled, max_candidates, use_lenient = (
+            self._hssd_semantic_validation_settings(description, short_name)
+        )
+        if not enabled:
+            return candidates[0]
+
+        validation_router = self._thin_covering_router
+        if validation_router is None:
+            console_logger.warning(
+                "Direct HSSD semantic validation is enabled for '%s' but no "
+                "validation router is available; using the dimension-ranked candidate",
+                description,
+            )
+            return candidates[0]
+
+        infrastructure_failures = 0
+        considered = candidates[:max_candidates]
+        for candidate_index, candidate in enumerate(considered):
+            mesh_path = Path(candidate.mesh_path)
+            validation_dir = (
+                self.debug_dir
+                / short_name
+                / f"hssd_{candidate_index:02d}_{candidate.hssd_id[:12]}_validation"
+            )
+            validation = validation_router.validate_asset(
+                mesh_path=mesh_path,
+                description=description,
+                output_dir=validation_dir,
+                use_lenient=use_lenient,
+            )
+            if validation.is_acceptable:
+                console_logger.info(
+                    "Direct HSSD semantic validation selected candidate %s for '%s'",
+                    candidate.hssd_id,
+                    description,
+                )
+                return candidate
+
+            reason = str(validation.reason or "")
+            if reason.startswith(("Rendering failed", "Validation call failed")):
+                infrastructure_failures += 1
+            console_logger.warning(
+                "Rejected HSSD candidate %s for '%s': %s",
+                candidate.hssd_id,
+                description,
+                reason,
+            )
+
+        if infrastructure_failures == len(considered):
+            # A temporary VLM/rendering outage must not erase required furniture.
+            # The candidate is still protected by corrected axis-aware size ranking
+            # and the downstream uniform-proportion check.
+            console_logger.warning(
+                "All semantic validation attempts for '%s' failed at the "
+                "infrastructure layer; falling back to the top dimension-ranked HSSD "
+                "candidate",
+                description,
+            )
+            return candidates[0]
+
+        raise ValueError(
+            f"All {len(considered)} HSSD candidates failed visual semantic "
+            f"validation for '{description}'"
+        )
+
+    def _direct_hssd_candidate_count(
+        self, description: str, short_name: str
+    ) -> int:
+        enabled, max_candidates, _ = self._hssd_semantic_validation_settings(
+            description, short_name
+        )
+        return max_candidates if enabled else 1
+
     def _scale_and_measure_canonical_mesh(
         self,
         *,
@@ -747,6 +870,10 @@ class AssetManager:
                 ),
                 output_dir=str(asset_path_configs[index].sdf_dir),
                 scene_id=request.scene_id,
+                num_candidates=self._direct_hssd_candidate_count(
+                    request.object_descriptions[index],
+                    request.short_names[index],
+                ),
             )
             for index in hssd_indices
         ]
@@ -773,10 +900,11 @@ class AssetManager:
                 )
 
                 # Server returns mesh path (already exported to our output_dir).
-                if not response.results:
-                    raise ValueError("No results returned from HSSD server")
-
-                result = response.results[0]  # Get top result.
+                result = self._select_direct_hssd_candidate(
+                    candidates=response.results,
+                    description=desc,
+                    short_name=short_name,
+                )
                 server_mesh_path = Path(result.mesh_path)
                 mesh_id = result.hssd_id
 

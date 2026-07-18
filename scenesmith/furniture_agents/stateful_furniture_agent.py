@@ -593,7 +593,24 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             if str(obj.object_id) in moved_ids:
                 continue
             other = object_b if obj is object_a else object_a
-            transform = self._best_collision_separation_transform(obj, other)
+            room_boundary_id = next(
+                (
+                    str(candidate_id)
+                    for candidate_id in (issue.object_a_id, issue.object_b_id)
+                    if str(candidate_id).startswith("room_geometry::")
+                ),
+                "",
+            )
+            if room_boundary_id:
+                transform = self._move_away_from_room_boundary_transform(
+                    obj,
+                    room_boundary_id=room_boundary_id,
+                    penetration_depth_m=float(
+                        getattr(issue, "penetration_depth_m", 0.0) or 0.0
+                    ),
+                )
+            else:
+                transform = self._best_collision_separation_transform(obj, other)
             if transform is None or self._transform_close(obj.transform, transform):
                 continue
             old_penalty = self._furniture_placement_penalty(
@@ -602,7 +619,10 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             new_penalty = self._furniture_placement_penalty(
                 obj, transform, exclude_object_id=str(obj.object_id)
             )
-            if new_penalty + 1e-5 >= old_penalty:
+            # Boundary motion is driven by Drake's measured wall penetration;
+            # the furniture-only AABB penalty does not include room walls and can
+            # therefore remain numerically unchanged after a valid inward snap.
+            if not room_boundary_id and new_penalty + 1e-5 >= old_penalty:
                 continue
             self.scene.move_object(obj.object_id, transform)
             moved_ids.add(str(obj.object_id))
@@ -616,6 +636,39 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 new_penalty,
             )
         return repaired
+
+    def _move_away_from_room_boundary_transform(
+        self,
+        obj: SceneObject,
+        *,
+        room_boundary_id: str,
+        penetration_depth_m: float,
+    ) -> RigidTransform | None:
+        """Translate furniture inward from the specific wall it penetrates."""
+        boundary = room_boundary_id.lower()
+        inward_xy: tuple[float, float] | None = None
+        if "north" in boundary:
+            inward_xy = (0.0, -1.0)
+        elif "south" in boundary:
+            inward_xy = (0.0, 1.0)
+        elif "east" in boundary:
+            inward_xy = (-1.0, 0.0)
+        elif "west" in boundary:
+            inward_xy = (1.0, 0.0)
+        if inward_xy is None:
+            return self._best_generic_repair_transform(
+                obj,
+                fallback=obj.transform,
+                exclude_object_id=str(obj.object_id),
+            )
+
+        gap = float(self._repair_cfg_value("wall_clearance_gap_m", 0.03))
+        distance = max(0.0, float(penetration_depth_m)) + max(0.0, gap)
+        translation = np.array(obj.transform.translation(), dtype=float, copy=True)
+        translation[0] += inward_xy[0] * distance
+        translation[1] += inward_xy[1] * distance
+        candidate = RigidTransform(R=obj.transform.rotation(), p=translation)
+        return self._fit_transform_inside_room(obj, candidate)
 
     def _scene_object_by_string_id(self, object_id: str) -> SceneObject | None:
         if self.scene is None:

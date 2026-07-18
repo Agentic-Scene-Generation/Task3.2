@@ -265,6 +265,24 @@ def compute_scene_collisions(
             non_floor_info = (
                 object_b_info if object_a_info["name"] == "floor" else object_a_info
             )
+            if _is_grounded_visual_floor_contact(
+                scene=scene,
+                object_id=str(non_floor_info["id"]),
+                floor_tolerance=floor_penetration_tolerance,
+            ):
+                # Convex decomposition is deliberately conservative and can extend
+                # below the visible mesh (beds and sofas are frequent examples).
+                # An XY layout repair cannot resolve that proxy-only contact.  Use
+                # the visible world bounds to distinguish a correctly grounded
+                # object from a genuinely sunken one.
+                console_logger.debug(
+                    "Ignoring collision-proxy floor contact for %s[%s]: Drake "
+                    "reported %.2fcm penetration while the visible mesh is grounded",
+                    non_floor_info["name"],
+                    non_floor_info["id"],
+                    penetration_depth * 100.0,
+                )
+                continue
             if _is_implausible_floor_penetration(
                 scene=scene,
                 object_id=str(non_floor_info["id"]),
@@ -342,6 +360,42 @@ def compute_scene_collisions(
         console_logger.info("=" * 60)
 
     return collisions
+
+
+def _is_grounded_visual_floor_contact(
+    scene: RoomScene,
+    object_id: str,
+    floor_tolerance: float,
+) -> bool:
+    """Return whether a floor collision is only a conservative-proxy contact.
+
+    Furniture is placed from its visible bounding box, whereas Drake evaluates
+    convex-decomposition geometry.  Some library meshes have hulls that extend
+    well below the visible bottom.  If the visible furniture bottom is at the
+    floor, reporting that hull penetration as a layout collision creates an
+    impossible repair loop: moving the object in XY can never remove it.
+
+    Objects whose visible bounds are actually below the floor are deliberately
+    not filtered, and non-furniture contacts retain the existing strict policy.
+    """
+    scene_object = next(
+        (
+            obj
+            for candidate_id, obj in scene.objects.items()
+            if str(candidate_id) == object_id
+        ),
+        None,
+    )
+    if scene_object is None or scene_object.object_type != ObjectType.FURNITURE:
+        return False
+    try:
+        world_bounds = scene_object.compute_world_bounds()
+    except Exception:
+        return False
+    if world_bounds is None:
+        return False
+    visible_bottom_z = float(world_bounds[0][2])
+    return abs(visible_bottom_z) <= max(float(floor_tolerance), 1e-6)
 
 
 def _is_implausible_floor_penetration(

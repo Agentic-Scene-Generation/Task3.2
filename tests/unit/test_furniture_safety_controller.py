@@ -165,6 +165,39 @@ class FurnitureSafetyControllerTest(unittest.TestCase):
         self.assertEqual(evaluation.issues[0].object_b_id, "desk_0")
         self.assertAlmostEqual(evaluation.issues[0].penetration_depth_m, 0.032)
 
+    def test_placeholder_furniture_requires_stage_regeneration(self) -> None:
+        controller = FurnitureSafetyController(
+            {"enabled": True, "placeholder_assets_are_hard": True}
+        )
+        placeholder = BoundedFurniture(
+            name="bed",
+            description="deterministic placeholder bed",
+            world_min=(-0.8, -1.0, 0.0),
+            world_max=(0.8, 1.0, 0.8),
+        )
+        placeholder.metadata = {
+            "repair_placeholder": True,
+            "asset_source": "deterministic_placeholder",
+        }
+
+        evaluation = controller.evaluate_scene_state(
+            SimpleNamespace(
+                room_type="studio",
+                text_description="A studio.",
+                objects={"bed_0": placeholder},
+                room_geometry=None,
+            )
+        )
+
+        self.assertFalse(evaluation.hard_valid)
+        self.assertTrue(
+            any(
+                "not a valid final asset" in reason
+                for reason in evaluation.hard_reasons
+            )
+        )
+        self.assertEqual(evaluation.issues[0].issue_type, "asset_invalid")
+
     def test_window_only_issue_is_soft(self) -> None:
         controller = FurnitureSafetyController({"enabled": True})
         evaluation = controller.evaluate_scores(make_scores())

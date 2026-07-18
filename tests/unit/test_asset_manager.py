@@ -17,8 +17,12 @@ from scenesmith.agent_utils.asset_manager import (
     AssetPathConfig,
     FailedAsset,
 )
+from scenesmith.agent_utils.asset_router.dataclasses import ValidationResult
 from scenesmith.agent_utils.geometry_generation_server.dataclasses import (
     GeometryGenerationServerResponse,
+)
+from scenesmith.agent_utils.hssd_retrieval_server.dataclasses import (
+    HssdRetrievalResult,
 )
 from scenesmith.agent_utils.image_generation import (
     AssetOperationType,
@@ -168,6 +172,94 @@ class TestAssetManager(unittest.TestCase):
         """Test AssetManager initialization."""
         self.assertEqual(self.asset_manager.output_dir, self.output_dir)
         self.assertEqual(self.asset_manager.logger, self.mock_logger)
+
+    def test_direct_hssd_semantic_validation_skips_wall_like_bed(self):
+        manager = object.__new__(AssetManager)
+        manager.cfg = OmegaConf.create(
+            {
+                "asset_manager": {
+                    "hssd": {
+                        "semantic_validation": {
+                            "enabled": True,
+                            "families": ["bed"],
+                            "max_candidates": 2,
+                            "use_lenient": False,
+                        }
+                    }
+                }
+            }
+        )
+        manager.debug_dir = self.temp_dir / "debug"
+        manager._thin_covering_router = MagicMock()
+        manager._thin_covering_router.validate_asset.side_effect = [
+            ValidationResult(False, "Looks like two wall panels"),
+            ValidationResult(True, "Recognizable upholstered bed"),
+        ]
+        candidates = [
+            HssdRetrievalResult(
+                mesh_path=str(self.temp_dir / "wall_like.glb"),
+                hssd_id="wall_like_bed",
+                object_name="bed",
+                similarity_score=0.91,
+                size=(1.6, 0.8, 2.05),
+                category="large_objects",
+            ),
+            HssdRetrievalResult(
+                mesh_path=str(self.temp_dir / "real_bed.glb"),
+                hssd_id="real_bed",
+                object_name="bed",
+                similarity_score=0.89,
+                size=(1.6, 0.8, 2.05),
+                category="large_objects",
+            ),
+        ]
+
+        selected = manager._select_direct_hssd_candidate(
+            candidates=candidates,
+            description="A complete upholstered bed with mattress",
+            short_name="bed",
+        )
+
+        self.assertEqual(selected.hssd_id, "real_bed")
+        self.assertEqual(
+            manager._thin_covering_router.validate_asset.call_count,
+            2,
+        )
+
+    def test_direct_hssd_validation_is_not_spent_on_unconfigured_family(self):
+        manager = object.__new__(AssetManager)
+        manager.cfg = OmegaConf.create(
+            {
+                "asset_manager": {
+                    "hssd": {
+                        "semantic_validation": {
+                            "enabled": True,
+                            "families": ["bed"],
+                            "max_candidates": 2,
+                        }
+                    }
+                }
+            }
+        )
+        manager.debug_dir = self.temp_dir / "debug"
+        manager._thin_covering_router = MagicMock()
+        chair = HssdRetrievalResult(
+            mesh_path=str(self.temp_dir / "chair.glb"),
+            hssd_id="chair",
+            object_name="chair",
+            similarity_score=0.9,
+            size=(0.5, 0.9, 0.5),
+            category="large_objects",
+        )
+
+        selected = manager._select_direct_hssd_candidate(
+            candidates=[chair],
+            description="student chair",
+            short_name="chair",
+        )
+
+        self.assertIs(selected, chair)
+        manager._thin_covering_router.validate_asset.assert_not_called()
 
     def test_create_asset_paths_disambiguates_duplicate_short_names(self):
         """Duplicate requested objects must not share intermediate asset paths."""

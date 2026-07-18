@@ -155,6 +155,13 @@ asset_manager:
     preprocessed_path: "${paths.hssd_data_dir}/preprocessed"
     use_top_k: 5  # Number of top CLIP candidates before size ranking
     use_lenient_validation: true  # Use lenient validation for retrieved assets
+    # Direct mode skips LLM request analysis for speed, but visually verifies a
+    # few silhouette-critical families so a wall/frame cannot be accepted as a bed.
+    semantic_validation:
+      enabled: true
+      families: [bed, sofa, wardrobe]
+      max_candidates: 2
+      use_lenient: false
     object_type_mapping:
       FURNITURE: "large_objects"
       MANIPULAND: "small_objects"
@@ -314,6 +321,7 @@ planner_context_limits:
 # tools and checkpoint handling.
 furniture_safety_controller:
   enabled: true
+  placeholder_assets_are_hard: true
   max_critique_design_cycles: 2
   max_move_calls: 36
   max_moves_initial_design: 18
@@ -362,7 +370,9 @@ furniture_safety_controller:
     enabled: true
     max_attempts: ${oc.env:SCENEEXPERT_DETERMINISTIC_REPAIR_MAX_ATTEMPTS,2}
     wall_margin_m: 0.08
+    wall_clearance_gap_m: 0.03
     nightstand_gap_m: 0.08
+
   required_object_names: []
   score_weights:
     prompt_following: 0.25
@@ -406,6 +416,13 @@ furniture_safety_controller:
     bookshelf:
       min: [0.35, 0.20, 0.80]
       max: [2.50, 0.80, 2.70]
+
+# Recoverable deterministic failures first restart the complete furniture
+# designer/critic stage from the empty-room checkpoint. If both layouts fail,
+# preserve diagnostics and continue downstream instead of aborting the ACP batch.
+hard_constraint_recovery:
+  max_stage_regenerations: 1
+  continue_after_repairable_exhaustion: true
 
 # Scene reset thresholds for detecting quality degradation
 # Reset is suggested when EITHER threshold is exceeded

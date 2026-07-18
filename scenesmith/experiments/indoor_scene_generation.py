@@ -42,6 +42,7 @@ from scenesmith.manipuland_agents.stateful_manipuland_agent import (
     StatefulManipulandAgent,
 )
 from scenesmith.scene_expert.config_utils import resolve_scene_expert_stage_budget
+from scenesmith.scene_expert.exceptions import StageValidationError
 from scenesmith.utils.logging import ConsoleLogger, FileLoggingContext
 from scenesmith.utils.parallel import run_parallel_isolated
 from scenesmith.utils.print_utils import bold_green, yellow
@@ -146,8 +147,21 @@ def _is_retryable_scene_failure(error: str) -> bool:
         "request timed out",
         "connection reset",
         "connection refused",
+        "stage failed deterministic validation",
     )
     return any(marker in normalized for marker in transient_markers)
+
+
+def _is_repairable_stage_validation(error: StageValidationError) -> bool:
+    """Classify layout/content failures that should not terminate ACP early."""
+    text = " ".join(error.reasons).lower()
+    terminal_markers = (
+        "fatal asset retrieval setup error",
+        "invalid room geometry",
+        "room geometry is unavailable",
+        "unrecoverable environment",
+    )
+    return not any(marker in text for marker in terminal_markers)
 
 
 def _root_error_summary(error: str, max_chars: int = 700) -> str:
@@ -801,7 +815,70 @@ def _generate_room(
                 render_gpu_id=render_gpu_id,
             )
             try:
-                asyncio.run(furniture_agent.add_furniture(scene=scene))
+                recovery_cfg = cfg_dict["furniture_agent"].get(
+                    "hard_constraint_recovery", {}
+                )
+                max_stage_regenerations = max(
+                    0, int(recovery_cfg.get("max_stage_regenerations", 1) or 0)
+                )
+                continue_after_exhaustion = bool(
+                    recovery_cfg.get(
+                        "continue_after_repairable_exhaustion", True
+                    )
+                )
+                empty_stage_state = scene.to_state_dict()
+                stage_prompt = scene.text_description
+                regeneration_attempt = 0
+                while True:
+                    try:
+                        asyncio.run(furniture_agent.add_furniture(scene=scene))
+                        break
+                    except StageValidationError as exc:
+                        repairable = _is_repairable_stage_validation(exc)
+                        if (
+                            repairable
+                            and regeneration_attempt < max_stage_regenerations
+                        ):
+                            regeneration_attempt += 1
+                            console_logger.warning(
+                                "Furniture layout remained invalid after local repair; "
+                                "restarting the full designer/critic stage from the "
+                                "empty-room checkpoint (%d/%d): %s",
+                                regeneration_attempt,
+                                max_stage_regenerations,
+                                "; ".join(exc.reasons),
+                            )
+                            scene.restore_from_state_dict(empty_stage_state)
+                            scene.text_description = (
+                                f"{stage_prompt}\n\n"
+                                "# Mandatory Stage Regeneration\n"
+                                "The previous furniture layout was rejected by "
+                                "deterministic validation. Design a genuinely new "
+                                "layout from the empty room; do not incrementally "
+                                "recreate the rejected arrangement. Resolve all of: "
+                                + "; ".join(exc.reasons)
+                            )
+                            asyncio.run(
+                                furniture_agent.prepare_stage_regeneration(
+                                    exc.reasons
+                                )
+                            )
+                            continue
+
+                        if repairable and continue_after_exhaustion:
+                            console_logger.warning(
+                                "Furniture repair and stage regeneration were "
+                                "exhausted. Persisting the diagnosed candidate and "
+                                "continuing downstream instead of hard-failing ACP: %s",
+                                "; ".join(exc.reasons),
+                            )
+                            asyncio.run(
+                                furniture_agent.complete_repair_exhausted_stage(
+                                    exc.reasons
+                                )
+                            )
+                            break
+                        raise
                 end_time = time.time()
                 console_logger.info(
                     f"Furniture added to room {room_id} in "

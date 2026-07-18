@@ -22,6 +22,7 @@ from scenesmith.agent_utils.physics_validation import (
     ThinCoveringBoundaryViolation,
     ThinCoveringOverlap,
     _get_furniture_id_for_manipuland,
+    _is_grounded_visual_floor_contact,
     _is_implausible_floor_penetration,
     compute_scene_collisions,
     compute_thin_covering_boundary_violations,
@@ -322,6 +323,39 @@ class TestComputeSceneCollisions(unittest.TestCase):
             0,
             "Should report floor collision with penetration > tolerance",
         )
+
+    def test_grounded_visual_mesh_filters_deep_proxy_floor_contact(self):
+        """A conservative collision hull below a grounded mesh is not layout overlap."""
+        proxy_box = SceneObject(
+            object_id=UniqueID("grounded_proxy"),
+            object_type=ObjectType.FURNITURE,
+            name="Grounded Proxy Bed",
+            description="Visible bed is grounded but its convex hull extends lower",
+            transform=RigidTransform(np.array([0.0, 0.0, 0.15])),
+            sdf_path=self.box_sdf_path,
+            bbox_min=np.array([-0.25, -0.25, -0.15]),
+            bbox_max=np.array([0.25, 0.25, 0.15]),
+        )
+        self.scene.add_object(proxy_box)
+
+        self.assertTrue(
+            _is_grounded_visual_floor_contact(
+                self.scene, "grounded_proxy", floor_tolerance=0.05
+            )
+        )
+        collisions = compute_scene_collisions(
+            self.scene, floor_penetration_tolerance=0.05
+        )
+
+        proxy_floor_collisions = [
+            collision
+            for collision in collisions
+            if "grounded_proxy"
+            in (collision.object_a_id, collision.object_b_id)
+            and "room_geometry"
+            in (collision.object_a_id, collision.object_b_id)
+        ]
+        self.assertEqual(proxy_floor_collisions, [])
 
     def test_ceiling_to_ceiling_collision_detected(self):
         """Test collision detection works for CEILING_MOUNTED objects.
