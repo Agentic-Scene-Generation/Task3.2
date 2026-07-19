@@ -220,6 +220,18 @@ class StageVerifyReport(BaseModel):
         default="",
         description="Full critic summary text from SceneSmith scores.yaml — richest signal for memory",
     )
+    score_source: str = Field(
+        default="unknown",
+        description=(
+            "Origin of numeric scores: vlm_critic, deterministic_hard_check, "
+            "critic_fallback, unavailable, or unknown"
+        ),
+    )
+    vlm_scoring_performed: bool = False
+    hard_check_report: dict = Field(
+        default_factory=dict,
+        description="Deterministic validation provenance kept separate from VLM scores",
+    )
 
 
 class FullVerifyReport(BaseModel):

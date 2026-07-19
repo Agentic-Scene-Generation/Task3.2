@@ -15,7 +15,6 @@ from typing import Any
 import lxml.etree as ET
 import numpy as np
 import trimesh
-import yaml
 
 from agents import Agent, FunctionTool, ModelSettings, RunResult
 from omegaconf import DictConfig
@@ -48,7 +47,6 @@ from scenesmith.agent_utils.scoring import (
     log_agent_response,
     log_critique_scores,
     parse_floor_plan_critique_text,
-    scores_to_dict,
 )
 from scenesmith.agent_utils.workflow_tools import WorkflowTools
 from scenesmith.floor_plan_agents.base_floor_plan_agent import BaseFloorPlanAgent
@@ -543,7 +541,6 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
         log_critique_scores(response, title="FLOOR PLAN CRITIQUE SCORES")
 
         # Save scores to render directory.
-        scores_dict = scores_to_dict(response)
         render_dir = vision_tools.last_render_dir
 
         # Always track the final render directory (separate from checkpoint logic).
@@ -552,10 +549,14 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
         self.final_render_dir = render_dir
 
         if render_dir is not None:
-            scores_path = render_dir / "scores.yaml"
-            with open(scores_path, "w") as f:
-                yaml.dump(scores_dict, f, default_flow_style=False, sort_keys=False)
-            console_logger.info(f"Scores saved to: {scores_path}")
+            self._write_score_artifacts(
+                response=response,
+                images_dir=render_dir,
+                physics_context=(
+                    f"layout={validation.layout}; "
+                    f"connectivity={validation.connectivity}"
+                ),
+            )
         else:
             console_logger.warning(
                 "No render directory available; skipping scores save"
@@ -695,16 +696,10 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
                 # Save scores to the new render directory.
                 # Use checkpoint_scores (N-1) since we reset to that state.
                 if self.checkpoint_scores is not None:
-                    scores_dict = scores_to_dict(self.checkpoint_scores)
-                    scores_path = render_dir / "scores.yaml"
-                    with open(scores_path, "w") as f:
-                        yaml.dump(
-                            scores_dict,
-                            f,
-                            default_flow_style=False,
-                            sort_keys=False,
-                        )
-                    console_logger.info(f"Scores saved to: {scores_path}")
+                    self._write_score_artifacts(
+                        response=self.checkpoint_scores,
+                        images_dir=render_dir,
+                    )
 
                 console_logger.info(f"Final scene restored to checkpoint state.")
 
@@ -716,15 +711,31 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
             final_scene_dir = self._get_final_scores_directory()
             final_scene_dir.mkdir(parents=True, exist_ok=True)
 
-            # Copy scores.
-            scores_source = render_dir_to_copy / "scores.yaml"
-            if scores_source.exists():
-                scores_dest = final_scene_dir / "scores.yaml"
-                shutil.copy(scores_source, scores_dest)
-                console_logger.info(f"Saved final scores to {scores_dest}")
+            score_artifacts = (
+                "scores.yaml",
+                "score_provenance.yaml",
+                "vlm_scores.yaml",
+                "hard_check_decision_scores.yaml",
+                "hard_check_report.yaml",
+                "critic_fallback_scores.yaml",
+            )
+            copied_score_artifacts = []
+            for filename in score_artifacts:
+                source = render_dir_to_copy / filename
+                if not source.exists():
+                    continue
+                shutil.copy(source, final_scene_dir / filename)
+                copied_score_artifacts.append(filename)
+            if copied_score_artifacts:
+                console_logger.info(
+                    "Saved final floor-plan score artifacts to %s: %s",
+                    final_scene_dir,
+                    ", ".join(copied_score_artifacts),
+                )
             else:
                 console_logger.warning(
-                    f"Scores file not found at {scores_source}, cannot copy"
+                    "No score artifacts found at %s, cannot copy",
+                    render_dir_to_copy,
                 )
 
             # Copy render images.

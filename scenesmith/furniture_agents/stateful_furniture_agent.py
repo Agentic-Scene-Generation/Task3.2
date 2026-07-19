@@ -541,13 +541,24 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             actions.append(
                 f"replaced {replaced_invalid} invalid furniture asset(s)"
             )
+        relation_changed = False
         if (
             FailureCategory.DOOR_OR_OPENING_CLEARANCE in repair_plan.categories
             and self._repair_forbidden_zone_conflicts(include_windows=False)
         ):
             actions.append("cleared deterministic door/opening forbidden zones")
+            relation_changed = True
 
-        relation_changed = False
+        window_conflict = (
+            "window access warning" in reasons
+            or FailureCategory.WINDOW_OR_WALL_ACCESS in repair_plan.categories
+        )
+        if window_conflict and self._repair_forbidden_zone_conflicts(
+            include_windows=True
+        ):
+            actions.append("cleared deterministic window forbidden zones")
+            relation_changed = True
+
         if is_bedroom_scene(self.scene):
             if self._anchor_existing_bed():
                 actions.append("anchored bed to deterministic bedroom head wall")
@@ -558,10 +569,9 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 )
                 relation_changed = True
             if (
-                "window access warning" in reasons
+                window_conflict
                 or "wardrobe" in reasons
                 or "closet" in reasons
-                or FailureCategory.WINDOW_OR_WALL_ACCESS in repair_plan.categories
             ) and self._repair_wardrobe_wall_anchor():
                 actions.append("moved wardrobe to a deterministic wall/corner anchor")
                 relation_changed = True
@@ -1489,6 +1499,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         obstacles = self._furniture_by_category("bed") + self._furniture_by_category(
             "nightstand"
         )
+        opening_zones = self._opening_forbidden_zones(include_windows=True)
         best_transform = None
         best_score = -1e9
         for transform, wall_opening_penalty in candidates:
@@ -1509,7 +1520,16 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 else np.zeros(3)
             )
             distance_score = float(np.linalg.norm(center[:2] - bed_center[:2]))
-            score = distance_score - overlap_penalty - wall_opening_penalty
+            exact_opening_penalty = self._zone_overlap_penalty(
+                bounds,
+                opening_zones,
+            )
+            score = (
+                distance_score
+                - overlap_penalty
+                - wall_opening_penalty
+                - exact_opening_penalty
+            )
             if score > best_score:
                 best_score = score
                 best_transform = transform

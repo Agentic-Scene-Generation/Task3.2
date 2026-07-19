@@ -603,6 +603,126 @@ class BaseStatefulAgent(ABC):
         except Exception as e:
             console_logger.warning("Failed to save critic working memory: %s", e)
 
+    def _write_score_artifacts(
+        self,
+        *,
+        response: CritiqueWithScores,
+        images_dir: Path,
+        physics_context: str = "",
+        event: str = "critique",
+    ) -> dict[str, Any]:
+        """Persist decision scores, source-specific scores, and provenance."""
+        scores_dict = scores_to_dict(response)
+        scores_path = images_dir / "scores.yaml"
+        with open(scores_path, "w") as f:
+            yaml.dump(
+                data=scores_dict,
+                stream=f,
+                default_flow_style=False,
+                sort_keys=False,
+            )
+        console_logger.info(f"Scores saved to: {scores_path}")
+
+        # scores.yaml is the score payload used by the existing checkpoint
+        # controller.  It is not always a VLM opinion: deterministic hard
+        # failures and transient critic fallbacks intentionally use synthetic
+        # grades.  Persist explicit provenance and a source-specific copy so
+        # offline evaluation cannot silently interpret repair priorities as
+        # visual-quality ratings.
+        critique_upper = str(response.critique or "").upper()
+        if event == "deterministic_hard_fail":
+            score_source = "deterministic_hard_check"
+            source_filename = "hard_check_decision_scores.yaml"
+            score_semantics = (
+                "Synthetic repair-priority grades; not a VLM quality assessment."
+            )
+        elif any(
+            marker in critique_upper
+            for marker in (
+                "CRITIC DEGRADED",
+                "TRANSIENT LOCAL VLM TIMEOUT",
+                "VISUAL CRITIC UNAVAILABLE",
+            )
+        ):
+            score_source = "critic_fallback"
+            source_filename = "critic_fallback_scores.yaml"
+            score_semantics = (
+                "Conservative transport fallback; no successful VLM assessment."
+            )
+        else:
+            score_source = "vlm_critic"
+            source_filename = "vlm_scores.yaml"
+            score_semantics = "VLM critic quality assessment."
+
+        hard_check_passed: bool | None
+        if score_source == "deterministic_hard_check":
+            hard_check_passed = False
+        elif score_source == "vlm_critic":
+            hard_check_passed = True
+        elif (
+            "DETERMINISTIC HARD CHECKS PASSED" in critique_upper
+            or (
+                "LAYOUT=OK" in critique_upper
+                and "CONNECTIVITY=OK" in critique_upper
+            )
+        ):
+            hard_check_passed = True
+        elif "LAYOUT=" in critique_upper or "CONNECTIVITY=" in critique_upper:
+            hard_check_passed = False
+        else:
+            hard_check_passed = None
+
+        with open(images_dir / source_filename, "w") as f:
+            yaml.dump(
+                data=scores_dict,
+                stream=f,
+                default_flow_style=False,
+                sort_keys=False,
+            )
+        provenance = {
+            "schema_version": "1.0",
+            "score_source": score_source,
+            "vlm_scoring_performed": score_source == "vlm_critic",
+            "hard_check_passed": hard_check_passed,
+            "scores_semantics": score_semantics,
+            "decision_scores_file": "scores.yaml",
+            "source_scores_file": source_filename,
+            "hard_check_evidence": str(physics_context or ""),
+        }
+        with open(images_dir / "score_provenance.yaml", "w") as f:
+            yaml.dump(
+                data=provenance,
+                stream=f,
+                default_flow_style=False,
+                sort_keys=False,
+            )
+        if hard_check_passed is not None:
+            with open(images_dir / "hard_check_report.yaml", "w") as f:
+                yaml.dump(
+                    data={
+                        "schema_version": "1.0",
+                        "passed": hard_check_passed,
+                        "evidence": str(physics_context or response.critique or ""),
+                        "decision_scores_file": (
+                            source_filename
+                            if score_source == "deterministic_hard_check"
+                            else ""
+                        ),
+                        "decision_scores_are_synthetic": (
+                            score_source == "deterministic_hard_check"
+                        ),
+                    },
+                    stream=f,
+                    default_flow_style=False,
+                    sort_keys=False,
+                )
+        console_logger.info(
+            "Score provenance saved to %s (source=%s)",
+            images_dir / "score_provenance.yaml",
+            score_source,
+        )
+        return provenance
+
     def _write_scores_and_memory(
         self,
         *,
@@ -611,18 +731,14 @@ class BaseStatefulAgent(ABC):
         physics_context: str,
         event: str = "critique",
     ) -> None:
-        """Persist scores.yaml and stage working memory for a critiqued render."""
+        """Persist score artifacts and stage working memory for a render."""
         if images_dir:
-            scores_dict = scores_to_dict(response)
-            scores_path = images_dir / "scores.yaml"
-            with open(scores_path, "w") as f:
-                yaml.dump(
-                    data=scores_dict,
-                    stream=f,
-                    default_flow_style=False,
-                    sort_keys=False,
-                )
-            console_logger.info(f"Scores saved to: {scores_path}")
+            self._write_score_artifacts(
+                response=response,
+                images_dir=images_dir,
+                physics_context=physics_context,
+                event=event,
+            )
             self._save_critic_working_memory(
                 render_dir=images_dir,
                 event=event,
@@ -1829,15 +1945,34 @@ class BaseStatefulAgent(ABC):
             final_scene_dir = self._get_final_scores_directory()
             final_scene_dir.mkdir(parents=True, exist_ok=True)
 
-            # Copy scores.
-            scores_source = render_dir_to_copy / "scores.yaml"
-            if scores_source.exists():
-                scores_dest = final_scene_dir / "scores.yaml"
-                shutil.copy(scores_source, scores_dest)
-                console_logger.info(f"Saved final scores to {scores_dest}")
+            # Copy decision scores together with their source-specific payload and
+            # provenance.  Consumers should inspect score_provenance.yaml before
+            # treating numeric grades as VLM quality scores.
+            score_artifacts = (
+                "scores.yaml",
+                "score_provenance.yaml",
+                "vlm_scores.yaml",
+                "hard_check_decision_scores.yaml",
+                "hard_check_report.yaml",
+                "critic_fallback_scores.yaml",
+            )
+            copied_score_artifacts: list[str] = []
+            for filename in score_artifacts:
+                source = render_dir_to_copy / filename
+                if not source.exists():
+                    continue
+                shutil.copy(source, final_scene_dir / filename)
+                copied_score_artifacts.append(filename)
+            if copied_score_artifacts:
+                console_logger.info(
+                    "Saved final score artifacts to %s: %s",
+                    final_scene_dir,
+                    ", ".join(copied_score_artifacts),
+                )
             else:
                 console_logger.warning(
-                    f"Scores file not found at {scores_source}, cannot copy"
+                    "No score artifacts found at %s, cannot copy",
+                    render_dir_to_copy,
                 )
 
             controller = getattr(self, "furniture_safety_controller", None)

@@ -125,6 +125,20 @@ sceneeval_export:
   enabled: true
   asset_id_prefix: "scenesmith"
 
+# Persist clean, whole-room PNG snapshots beside stage checkpoint blend files.
+# These reuse the Blender server already opened for blend export, so their cost is
+# small compared with the designer/critic loop. Snapshot failures are non-fatal.
+stage_visualization:
+  enabled: true
+  checkpoints:
+    - scene_after_furniture
+    - scene_after_wall_objects
+    - scene_after_ceiling_objects
+    - final_scene
+  rendering_mode: furniture
+  clean_annotations: true
+  taa_samples: 4
+
 # Physical feasibility post-processing configuration.
 # Two-stage process: projection (IK-based) → simulation (physics settling).
 projection:

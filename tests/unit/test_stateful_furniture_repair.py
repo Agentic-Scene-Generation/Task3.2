@@ -66,6 +66,41 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         StatefulFurnitureAgent is None,
         f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
     )
+    def test_window_warning_invokes_window_aware_repair(self) -> None:
+        agent = object.__new__(StatefulFurnitureAgent)
+        agent.scene = SimpleNamespace(
+            room_type="bedroom",
+            text_description="A bedroom with a wardrobe.",
+            scene_expert_original_description="A bedroom with a wardrobe.",
+        )
+        agent.furniture_safety_controller = SimpleNamespace(required_counts={})
+        agent._replace_invalid_furniture_assets = lambda _state: 0
+        repair_calls: list[bool] = []
+        agent._repair_forbidden_zone_conflicts = lambda include_windows=False: (
+            repair_calls.append(include_windows) or include_windows
+        )
+        agent._anchor_existing_bed = lambda: False
+        agent._repair_bedside_nightstands = lambda: False
+        agent._repair_wardrobe_wall_anchor = lambda: False
+        agent._repair_functional_layout = lambda: None
+        agent._repair_structured_collisions = lambda _state: 0
+
+        repaired, actions = agent._attempt_deterministic_repair(
+            SimpleNamespace(
+                hard_valid=False,
+                hard_reasons=["window access warning"],
+                issues=[],
+            )
+        )
+
+        self.assertTrue(repaired)
+        self.assertIn(True, repair_calls)
+        self.assertIn("cleared deterministic window forbidden zones", actions)
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
     def test_snap_transform_to_wall_copies_readonly_translation(self) -> None:
         agent = self._make_agent()
         agent._bounds_for_transform = lambda _obj, _transform: (

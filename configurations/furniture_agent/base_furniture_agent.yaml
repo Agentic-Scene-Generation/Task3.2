@@ -363,9 +363,9 @@ furniture_safety_controller:
     bed_wall_anchor_max_distance_m: 0.25
     wardrobe_wall_max_distance_m: 0.35
     hard_plausibility_issues: true
-    # Window obstruction is soft/medium by itself. Bed-head/window conflicts
-    # remain hard through the bedroom plausibility relation checks below.
-    window_blocking_is_hard: false
+    # Full-height storage in front of a bedroom window is objectively unusable
+    # and has a deterministic relocation operator, so repair it before scoring.
+    window_blocking_is_hard: true
     nightstand_bed_overlap_tolerance_m: 0.03
     nightstand_bed_max_gap_m: 0.55
     max_plausibility_penalty: 0.35

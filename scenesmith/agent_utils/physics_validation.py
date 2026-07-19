@@ -253,6 +253,21 @@ def compute_scene_collisions(
             geometry_id=pair.id_B, scene=scene, query_object=query_object
         )
 
+        if _is_collision_proxy_only_wall_contact(
+            scene=scene,
+            object_a_id=str(object_a_info["id"]),
+            object_b_id=str(object_b_info["id"]),
+        ):
+            console_logger.debug(
+                "Ignoring collision-proxy wall contact between %s[%s] and "
+                "%s[%s]: visible world bounds are separated",
+                object_a_info["name"],
+                object_a_info["id"],
+                object_b_info["name"],
+                object_b_info["id"],
+            )
+            continue
+
         # Check if this is a floor collision and apply tolerance.
         is_floor_collision = (
             object_a_info["name"] == "floor" or object_b_info["name"] == "floor"
@@ -360,6 +375,68 @@ def compute_scene_collisions(
         console_logger.info("=" * 60)
 
     return collisions
+
+
+def _is_collision_proxy_only_wall_contact(
+    scene: RoomScene,
+    object_a_id: str,
+    object_b_id: str,
+    visual_tolerance_m: float = 0.005,
+) -> bool:
+    """Return whether a wall collision exists only in conservative proxies.
+
+    HSSD convex decompositions can protrude beyond the visible mesh.  A furniture
+    placement must remain a hard failure when its visible AABB intersects a wall,
+    but moving a visibly separated object cannot repair a proxy-only contact.
+    """
+    room_geometry = getattr(scene, "room_geometry", None)
+    walls = list(getattr(room_geometry, "walls", []) or [])
+    if not walls:
+        return False
+
+    wall_by_id = {}
+    for wall in walls:
+        object_id = str(getattr(wall, "object_id", ""))
+        if not object_id:
+            continue
+        wall_by_id[object_id] = wall
+        wall_by_id[f"room_geometry::{object_id}"] = wall
+    wall_id = ""
+    furniture_id = ""
+    if object_a_id in wall_by_id:
+        wall_id, furniture_id = object_a_id, object_b_id
+    elif object_b_id in wall_by_id:
+        wall_id, furniture_id = object_b_id, object_a_id
+    else:
+        return False
+
+    furniture = next(
+        (
+            obj
+            for candidate_id, obj in scene.objects.items()
+            if str(candidate_id) == furniture_id
+        ),
+        None,
+    )
+    if furniture is None or furniture.object_type != ObjectType.FURNITURE:
+        return False
+
+    try:
+        furniture_bounds = furniture.compute_world_bounds()
+        wall_bounds = wall_by_id[wall_id].compute_world_bounds()
+    except Exception:
+        return False
+    if furniture_bounds is None or wall_bounds is None:
+        return False
+
+    furniture_min, furniture_max = furniture_bounds
+    wall_min, wall_max = wall_bounds
+    tolerance = max(float(visual_tolerance_m), 0.0)
+    return any(
+        float(furniture_max[axis]) < float(wall_min[axis]) - tolerance
+        or float(furniture_min[axis]) > float(wall_max[axis]) + tolerance
+        for axis in range(3)
+    )
 
 
 def _is_grounded_visual_floor_contact(

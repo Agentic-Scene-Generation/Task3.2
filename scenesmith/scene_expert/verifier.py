@@ -102,6 +102,75 @@ def _load_scores_yaml(scores_yaml_path: Path) -> tuple[dict[str, float], str]:
     return flat, summary
 
 
+def _load_score_provenance(
+    scores_yaml_path: Path | None,
+    critique_summary: str,
+    raw_scores: dict[str, float],
+) -> dict:
+    """Load score provenance, with inference for artifacts from older runs."""
+    if scores_yaml_path is not None:
+        provenance_path = scores_yaml_path.parent / "score_provenance.yaml"
+        if provenance_path.exists():
+            try:
+                with provenance_path.open() as f:
+                    payload = yaml.safe_load(f)
+                if isinstance(payload, dict):
+                    return payload
+            except Exception as exc:
+                console_logger.warning(
+                    "Failed to read score provenance at %s: %s",
+                    provenance_path,
+                    exc,
+                )
+
+    summary_upper = str(critique_summary or "").upper()
+    if "DETERMINISTIC HARD-CHECK FAILED BEFORE VLM SCORING" in summary_upper:
+        source = "deterministic_hard_check"
+    elif any(
+        marker in summary_upper
+        for marker in (
+            "CRITIC DEGRADED",
+            "TRANSIENT LOCAL VLM TIMEOUT",
+            "VISUAL CRITIC UNAVAILABLE",
+        )
+    ):
+        source = "critic_fallback"
+    elif raw_scores:
+        source = "vlm_critic"
+    else:
+        source = "unavailable"
+    return {
+        "score_source": source,
+        "vlm_scoring_performed": source == "vlm_critic",
+        "hard_check_passed": False if source == "deterministic_hard_check" else None,
+        "inferred_for_legacy_artifact": True,
+    }
+
+
+def _map_trustworthy_scores(
+    raw_scores: dict[str, float],
+    critique_summary: str,
+    score_source: str,
+) -> dict[str, float]:
+    """Map only score dimensions supported by the recorded evidence source."""
+    if score_source == "vlm_critic":
+        return _map_scenesmith_scores(raw_scores)
+    if score_source != "deterministic_hard_check":
+        return {}
+
+    # Synthetic hard-check grades are deliberately not mapped.  Preserve only
+    # objective failure dimensions explicitly supported by deterministic text.
+    summary = str(critique_summary or "").lower()
+    mapped: dict[str, float] = {}
+    if _critique_has_hard_collision(summary) or "physics hard violation" in summary:
+        mapped["physics"] = 0.0
+    if "missing required" in summary:
+        mapped["semantic"] = 0.0
+    if "window access warning" in summary or "door" in summary:
+        mapped["interaction"] = 0.0
+    return mapped
+
+
 # Maps stage name → subdirectory under scene_states/ that holds the stage scores.yaml.
 _STAGE_SCORES_SUBDIR = {
     "furniture": "furniture",
@@ -208,6 +277,7 @@ def _critique_has_hard_collision(text: str) -> bool:
         "collides with",
         "penetration",
         "physics collision",
+        "physics hard violation: collisions",
         "physically impossible",
         "critical issue: physics collision",
     )
@@ -410,20 +480,36 @@ class StageVerifier:
         raw_scores, critique_summary = (
             _load_scores_yaml(scores_path) if scores_path else ({}, "")
         )
-        mapped_scores = _map_scenesmith_scores(raw_scores)
+        provenance = _load_score_provenance(
+            scores_path,
+            critique_summary,
+            raw_scores,
+        )
+        score_source = str(provenance.get("score_source", "unknown"))
+        vlm_scoring_performed = bool(
+            provenance.get("vlm_scoring_performed", score_source == "vlm_critic")
+        )
+        verification_evidence = "\n".join(
+            part
+            for part in (
+                critique_summary,
+                str(provenance.get("hard_check_evidence", "")),
+            )
+            if part
+        )
+        mapped_scores = _map_trustworthy_scores(
+            raw_scores,
+            verification_evidence,
+            score_source,
+        )
 
-        # If no scores available, use conservative defaults
         if not mapped_scores:
             console_logger.warning(
-                f"No scores.yaml found for stage {stage}, using defaults"
+                "No trustworthy numeric quality scores for stage %s "
+                "(score_source=%s)",
+                stage,
+                score_source,
             )
-            mapped_scores = {
-                "semantic": 0.5,
-                "aesthetic": 0.5,
-                "plausibility": 0.5,
-                "physics": 0.5,
-                "interaction": 0.5,
-            }
 
         # --- 2. Rule-based checks ---
         if scene_state_info:
@@ -469,24 +555,39 @@ class StageVerifier:
         # --- 2b. Hard critique/score checks for stages where averages are unsafe ---
         # A low average can hide hard failures such as "missing bed" if other
         # dimensions score well. Treat these as blocking issues before pass/fail.
-        if stage == "furniture":
-            if _critique_has_hard_collision(critique_summary):
-                _add_issue_once(
-                    issues,
-                    VerifyIssue(
-                        issue_type="physics_collision",
-                        description=(
-                            "Furniture critique reports a hard collision or "
-                            "wall penetration"
-                        ),
+        if (
+            score_source == "deterministic_hard_check"
+            or provenance.get("hard_check_passed") is False
+        ):
+            _add_issue_once(
+                issues,
+                VerifyIssue(
+                    issue_type="deterministic_hard_fail",
+                    description=(
+                        "Deterministic validation failed before VLM scoring; "
+                        "synthetic repair grades were excluded from visual metrics"
                     ),
-                )
-                repair_suggestions.append(
-                    "Resolve reported furniture collisions before accepting the stage"
-                )
+                ),
+            )
+        if _critique_has_hard_collision(verification_evidence):
+            _add_issue_once(
+                issues,
+                VerifyIssue(
+                    issue_type="physics_collision",
+                    description=(
+                        f"{stage} deterministic evidence reports a hard collision "
+                        "or wall penetration"
+                    ),
+                ),
+            )
+            repair_suggestions.append(
+                f"Resolve reported {stage} collisions before accepting the stage"
+            )
+
+        if stage == "furniture":
 
             missing_from_critique = _critique_mentions_missing_required(
-                critique_summary,
+                verification_evidence,
                 task_spec.required_large_objects,
             )
             for required in missing_from_critique:
@@ -505,7 +606,11 @@ class StageVerifier:
                     f"Add missing required furniture '{required}' and rescore"
                 )
 
-            prompt_following = _score_value(raw_scores, "prompt", "following")
+            prompt_following = (
+                _score_value(raw_scores, "prompt", "following")
+                if score_source == "vlm_critic"
+                else None
+            )
             if prompt_following is not None and prompt_following < 8:
                 _add_issue_once(
                     issues,
@@ -521,7 +626,11 @@ class StageVerifier:
                     "Do not accept furniture stage until prompt-required objects are present"
                 )
 
-            functionality = _score_value(raw_scores, "functionality")
+            functionality = (
+                _score_value(raw_scores, "functionality")
+                if score_source == "vlm_critic"
+                else None
+            )
             if functionality is not None and functionality < 4:
                 _add_issue_once(
                     issues,
@@ -541,14 +650,17 @@ class StageVerifier:
                 repair_suggestions.append(f"Ensure you avoid: {pattern}")
 
         # --- 4. Compute pass/fail ---
-        avg_score = sum(mapped_scores.values()) / max(len(mapped_scores), 1)
+        avg_score = (
+            sum(mapped_scores.values()) / len(mapped_scores)
+            if mapped_scores
+            else None
+        )
         plausibility_score = mapped_scores.get("plausibility")
         pass_plausibility = (
             plausibility_score is None or plausibility_score >= self._pass_threshold
         )
-        pass_stage = (
-            avg_score >= self._pass_threshold and pass_plausibility and len(issues) == 0
-        )
+        pass_score_gate = avg_score is None or avg_score >= self._pass_threshold
+        pass_stage = pass_score_gate and pass_plausibility and len(issues) == 0
         if not pass_plausibility:
             repair_suggestions.append(
                 "Improve layout plausibility: revise major furniture anchors and "
@@ -557,9 +669,12 @@ class StageVerifier:
             )
 
         console_logger.info(
-            f"StageVerifier stage={stage}: avg_score={avg_score:.2f} "
+            "StageVerifier stage=%s: avg_score=%s "
             f"pass={pass_stage} issues={len(issues)} "
-            f"plausibility={plausibility_score if plausibility_score is not None else 'n/a'}"
+            f"plausibility={plausibility_score if plausibility_score is not None else 'n/a'} "
+            f"source={score_source}",
+            stage,
+            f"{avg_score:.2f}" if avg_score is not None else "n/a",
         )
 
         return StageVerifyReport(
@@ -569,6 +684,9 @@ class StageVerifier:
             issues=issues,
             repair_suggestions=repair_suggestions,
             critique_summary=critique_summary,
+            score_source=score_source,
+            vlm_scoring_performed=vlm_scoring_performed,
+            hard_check_report=provenance,
         )
 
 
@@ -645,7 +763,12 @@ class FullVerifier:
             reachability_score=interaction,
             support_relation_accuracy=interaction,  # proxy
             overall_score=overall,
-            pass_scene=overall >= self._pass_threshold and pass_plausibility,
+            pass_scene=(
+                bool(all_scores)
+                and all(stage.pass_stage for stage in stage_reports)
+                and overall >= self._pass_threshold
+                and pass_plausibility
+            ),
         )
 
         console_logger.info(

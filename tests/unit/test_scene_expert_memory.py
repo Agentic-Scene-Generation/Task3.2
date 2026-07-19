@@ -236,6 +236,103 @@ class SceneExpertMemoryTest(unittest.TestCase):
         self.assertAlmostEqual(0.4, mapped["plausibility"])
         self.assertAlmostEqual(0.85, mapped["aesthetic"])
 
+    def test_hard_check_synthetic_grades_are_not_visual_quality_scores(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scores_dir = root / "scene_states" / "furniture"
+            scores_dir.mkdir(parents=True)
+            (scores_dir / "scores.yaml").write_text(
+                "\n".join(
+                    [
+                        "Realism:",
+                        "  grade: 3",
+                        "Functionality:",
+                        "  grade: 2",
+                        "Prompt Following:",
+                        "  grade: 2",
+                        "Summary: 'DETERMINISTIC HARD-CHECK FAILED BEFORE VLM "
+                        "SCORING. Hard issues: physics hard violation: collisions.'",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            (scores_dir / "score_provenance.yaml").write_text(
+                "\n".join(
+                    [
+                        "score_source: deterministic_hard_check",
+                        "vlm_scoring_performed: false",
+                        "hard_check_passed: false",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            report = StageVerifier(pass_threshold=0.6).verify(
+                stage="furniture",
+                stage_output_dir=str(root),
+                task_spec=SceneTaskSpec(room_type="bedroom", style="standard"),
+                scene_state_info={"object_names": ["bed_0"]},
+            )
+
+            self.assertEqual("deterministic_hard_check", report.score_source)
+            self.assertFalse(report.vlm_scoring_performed)
+            self.assertNotIn("aesthetic", report.scores)
+            self.assertNotIn("semantic", report.scores)
+            self.assertEqual(0.0, report.scores["physics"])
+            issue_types = {issue.issue_type for issue in report.issues}
+            self.assertIn("deterministic_hard_fail", issue_types)
+            self.assertNotIn("low_prompt_following", issue_types)
+
+    def test_full_verifier_requires_each_stage_gate(self) -> None:
+        reports = [
+            StageVerifyReport(
+                stage="floor_plan",
+                pass_stage=True,
+                scores={"semantic": 0.9, "aesthetic": 0.9},
+            ),
+            StageVerifyReport(
+                stage="furniture",
+                pass_stage=False,
+                scores={"physics": 0.9, "interaction": 0.9},
+            ),
+        ]
+
+        full_report = FullVerifier(pass_threshold=0.7).verify(reports)
+
+        self.assertAlmostEqual(0.9, full_report.overall_score)
+        self.assertFalse(full_report.pass_scene)
+
+    def test_transient_critic_fallback_is_not_mapped_as_vlm_score(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scores_dir = root / "scene_states" / "furniture"
+            scores_dir.mkdir(parents=True)
+            (scores_dir / "scores.yaml").write_text(
+                "\n".join(
+                    [
+                        "Realism:",
+                        "  grade: 5",
+                        "Prompt Following:",
+                        "  grade: 8",
+                        "Summary: TRANSIENT LOCAL VLM TIMEOUT DURING VISUAL "
+                        "CRITIC SCORING.",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            report = StageVerifier(pass_threshold=0.6).verify(
+                stage="furniture",
+                stage_output_dir=str(root),
+                task_spec=SceneTaskSpec(room_type="bedroom", style="standard"),
+                scene_state_info={"object_names": ["bed_0"]},
+            )
+
+            self.assertEqual("critic_fallback", report.score_source)
+            self.assertFalse(report.vlm_scoring_performed)
+            self.assertEqual({}, report.scores)
+            self.assertTrue(report.pass_stage)
+
     def test_full_verifier_gates_low_plausibility_even_with_high_average(
         self,
     ) -> None:

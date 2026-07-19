@@ -23,6 +23,7 @@ from scenesmith.agent_utils.physics_validation import (
     ThinCoveringOverlap,
     _get_furniture_id_for_manipuland,
     _get_object_info_from_geometry_id,
+    _is_collision_proxy_only_wall_contact,
     _is_grounded_visual_floor_contact,
     _is_implausible_floor_penetration,
     compute_scene_collisions,
@@ -132,6 +133,43 @@ class TestCollisionPair(unittest.TestCase):
         )
 
         self.assertEqual(result, {"name": "floor", "id": "room_geometry"})
+
+    def test_visibly_separated_furniture_wall_contact_is_proxy_only(self):
+        """A protruding collision hull must not force an impossible XY repair."""
+        furniture = MagicMock(object_type=ObjectType.FURNITURE)
+        furniture.compute_world_bounds.return_value = (
+            np.array([-1.72, -0.25, 0.0]),
+            np.array([-1.25, 0.25, 0.55]),
+        )
+        wall = MagicMock(object_id=UniqueID("west_wall"))
+        wall.compute_world_bounds.return_value = (
+            np.array([-2.00, -2.00, 0.0]),
+            np.array([-1.95, 2.00, 2.50]),
+        )
+        scene = MagicMock(
+            objects={UniqueID("nightstand_0"): furniture},
+            room_geometry=MagicMock(walls=[wall]),
+        )
+
+        self.assertTrue(
+            _is_collision_proxy_only_wall_contact(
+                scene,
+                "room_geometry::west_wall",
+                "nightstand_0",
+            )
+        )
+
+        furniture.compute_world_bounds.return_value = (
+            np.array([-1.97, -0.25, 0.0]),
+            np.array([-1.25, 0.25, 0.55]),
+        )
+        self.assertFalse(
+            _is_collision_proxy_only_wall_contact(
+                scene,
+                "room_geometry::west_wall",
+                "nightstand_0",
+            )
+        )
 
 
 class TestComputeSceneCollisions(unittest.TestCase):

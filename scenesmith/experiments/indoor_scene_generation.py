@@ -425,6 +425,40 @@ def _export_scene_blend_file(
     blend_output_path = scene_dir / "scene_states" / name / "scene.blend"
     try:
         rendering_cfg = cfg_dict.get("furniture_agent", {}).get("rendering", {})
+        visualization_cfg = cfg_dict.get("experiment", {}).get(
+            "stage_visualization", {}
+        )
+        snapshot_names = set(
+            visualization_cfg.get(
+                "checkpoints",
+                [
+                    "scene_after_furniture",
+                    "scene_after_wall_objects",
+                    "scene_after_ceiling_objects",
+                    "final_scene",
+                ],
+            )
+        )
+        render_snapshots = bool(visualization_cfg.get("enabled", True)) and (
+            name in snapshot_names
+        )
+        snapshot_rendering_cfg = None
+        if render_snapshots:
+            snapshot_payload = OmegaConf.to_container(
+                OmegaConf.create(rendering_cfg), resolve=True
+            )
+            if bool(visualization_cfg.get("clean_annotations", True)):
+                annotations = snapshot_payload.setdefault("annotations", {})
+                annotations.update(
+                    {
+                        "enable_set_of_mark_labels": False,
+                        "enable_bounding_boxes": False,
+                        "enable_direction_arrows": False,
+                        "enable_support_surface_debug": False,
+                        "enable_convex_hull_debug": False,
+                    }
+                )
+            snapshot_rendering_cfg = OmegaConf.create(snapshot_payload)
         save_scene_as_blend(
             scene=scene,
             output_path=blend_output_path,
@@ -434,6 +468,21 @@ def _export_scene_blend_file(
             ),
             server_startup_delay=rendering_cfg.get("server_startup_delay", 0.1),
             port_cleanup_delay=rendering_cfg.get("port_cleanup_delay", 0.1),
+            render_cfg=snapshot_rendering_cfg,
+            render_output_dir=(
+                scene_dir / "scene_states" / name / "renders"
+                if render_snapshots
+                else None
+            ),
+            rendering_mode=str(
+                visualization_cfg.get("rendering_mode", "furniture")
+            ),
+            render_taa_samples=int(
+                visualization_cfg.get(
+                    "taa_samples",
+                    rendering_cfg.get("taa_samples", 4),
+                )
+            ),
         )
     except Exception as e:
         console_logger.error(f"Failed to export .blend file: {e}")
@@ -886,6 +935,7 @@ def _generate_room(
                 )
 
                 pre_postprocess_hash = scene.content_hash()
+                pre_postprocess_state = scene.to_state_dict()
 
                 # Furniture post-processing (projection + simulation).
                 if projection_cfg["enabled"] and projection_cfg["furniture"]["enabled"]:
@@ -938,16 +988,18 @@ def _generate_room(
                         )
                     )
                     postprocess_end_time = time.time()
-                    if removed_ids:
-                        console_logger.info(
-                            f"Removed {len(removed_ids)} fallen furniture item(s) "
-                            f"during simulation: {removed_ids}"
-                        )
                     if not projection_success:
                         console_logger.error(
-                            "Furniture projection failed, keeping original positions"
+                            "Furniture projection failed; restoring original positions"
                         )
+                        scene.restore_from_state_dict(pre_postprocess_state)
+                        removed_ids = []
                     else:
+                        if removed_ids:
+                            console_logger.info(
+                                f"Removed {len(removed_ids)} fallen furniture item(s) "
+                                f"during simulation: {removed_ids}"
+                            )
                         console_logger.info(
                             f"Furniture post-processing completed for room {room_id} "
                             f"in {postprocess_end_time - postprocess_start_time:.2f} "
@@ -1188,6 +1240,7 @@ def _generate_room(
 
         console_logger.info("Running final post-processing (projection + simulation)")
         start_time = time.time()
+        pre_final_postprocess_state = scene.to_state_dict()
 
         # Determine HTML output path for simulation.
         final_sim_html_path = None
@@ -1232,14 +1285,18 @@ def _generate_room(
             )
         )
         end_time = time.time()
-        if removed_ids:
-            console_logger.info(
-                f"Removed {len(removed_ids)} fallen manipuland(s) during "
-                f"final simulation: {removed_ids}"
-            )
         if not projection_success:
-            console_logger.error("Final projection failed, keeping original positions")
+            console_logger.error(
+                "Final projection failed; restoring original positions"
+            )
+            scene.restore_from_state_dict(pre_final_postprocess_state)
+            removed_ids = []
         else:
+            if removed_ids:
+                console_logger.info(
+                    f"Removed {len(removed_ids)} fallen manipuland(s) during "
+                    f"final simulation: {removed_ids}"
+                )
             console_logger.info(
                 f"Final post-processing completed for room {room_id} in "
                 f"{end_time - start_time:.2f} seconds"
