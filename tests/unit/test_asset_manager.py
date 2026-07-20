@@ -1167,6 +1167,57 @@ class TestHssdFrontAxisOverride(unittest.TestCase):
         self.assertEqual(overridden.mass_kg, physics.mass_kg)
         mock_annotation_record.assert_called_once_with("hssd-chair", None)
 
+    @patch(
+        "scenesmith.agent_utils.asset_manager._get_hssd_front_axis_annotation_record"
+    )
+    def test_unified_annotation_overrides_physics(self, mock_annotation_record):
+        mock_annotation_record.return_value = {
+            "canonical_front": {"asset_local_front_axis": [0.0, 0.0, 1.0]},
+            "asset_physics": {
+                "material": "steel",
+                "mass_kg": 20.0,
+                "mass_range_kg": [12.0, 30.0],
+                "friction_coefficient": 0.73,
+            },
+            "asset_quality": {"overall_score": 0.9, "is_acceptable": True},
+        }
+        asset_manager = object.__new__(AssetManager)
+        asset_manager.cfg = create_mock_cfg()
+        physics = MeshPhysicsAnalysis("+Z", "+X", "wood", 10.0, (8.0, 12.0))
+
+        overridden = asset_manager._override_hssd_asset_annotations(
+            physics, "hssd-chair"
+        )
+
+        self.assertEqual(overridden.front_axis, "-Y")
+        self.assertEqual(overridden.material, "steel")
+        self.assertEqual(overridden.mass_kg, 20.0)
+        self.assertEqual(overridden.mass_range_kg, (12.0, 30.0))
+        self.assertEqual(overridden.friction_coefficient, 0.73)
+        mock_annotation_record.assert_called_once_with("hssd-chair", None)
+
+    @patch(
+        "scenesmith.agent_utils.asset_manager._get_hssd_front_axis_annotation_record"
+    )
+    def test_invalid_physics_fields_fall_back_independently(
+        self, mock_annotation_record
+    ):
+        mock_annotation_record.return_value = {
+            "asset_physics": {
+                "material": "metal",
+                "mass_kg": -2,
+                "mass_range_kg": [5, 1],
+                "friction_coefficient": 3.0,
+            }
+        }
+        asset_manager = object.__new__(AssetManager)
+        asset_manager.cfg = create_mock_cfg()
+        physics = MeshPhysicsAnalysis("+Z", "+X", "wood", 10.0, (8.0, 12.0))
+
+        overridden = asset_manager._override_hssd_asset_annotations(physics, "bad")
+
+        self.assertEqual(overridden, physics)
+
 
 if __name__ == "__main__":
     unittest.main()

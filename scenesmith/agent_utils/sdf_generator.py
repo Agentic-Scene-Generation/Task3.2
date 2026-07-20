@@ -144,7 +144,9 @@ def generate_drake_sdf(
     center_of_mass = visual_mesh.center_mass
 
     # Get friction coefficient for material.
-    friction = get_friction(physics_analysis.material)
+    friction = physics_analysis.friction_coefficient
+    if friction is None:
+        friction = get_friction(physics_analysis.material)
 
     # Create SDF XML structure.
     sdf = ET.Element("sdf", version="1.7")

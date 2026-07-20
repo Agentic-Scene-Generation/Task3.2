@@ -53,6 +53,9 @@ class MeshPhysicsAnalysis:
     mass_range_kg: tuple[float, float]
     """Confidence range for mass (min, max) in kilograms."""
 
+    friction_coefficient: float | None = None
+    """Optional annotated friction; material lookup remains the fallback."""
+
 
 def _is_transient_vlm_error(error: Exception) -> bool:
     """Return whether a local OpenAI-compatible request failed in transport."""

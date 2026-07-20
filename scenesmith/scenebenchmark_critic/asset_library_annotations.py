@@ -697,9 +697,15 @@ class AssetLibraryAnnotationStore:
         return self._records
 
     def _load_clearance_items(self, filename: str) -> dict[str, dict[str, Any]]:
-        with (self.clearance_dir / filename).open("r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data.get("items", {})
+        path = self.clearance_dir / filename
+        if not path.exists():
+            return {}
+        try:
+            with path.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            return {}
+        return data.get("items", {}) if isinstance(data, dict) else {}
 
     def _nonartic(self) -> dict[str, dict[str, Any]]:
         if self._nonartic_clearance is None:

@@ -41,6 +41,7 @@ from scenesmith.agent_utils.image_generation import (
     AssetOperationType,
     create_image_generator,
 )
+from scenesmith.agent_utils.materials import load_materials
 from scenesmith.agent_utils.materials_retrieval_server import MaterialsRetrievalClient
 from scenesmith.agent_utils.mesh_canonicalization import canonicalize_mesh
 from scenesmith.agent_utils.mesh_frame import (
@@ -610,20 +611,27 @@ class AssetManager:
             f"threshold={threshold})"
         )
 
-    def _hssd_front_axis_config(self) -> tuple[str, str | Path | None]:
-        """Return the configured HSSD front-axis source and lookup path."""
-        front_cfg = self.cfg.asset_manager.get("hssd_front_axis", {}) or {}
-        if isinstance(front_cfg, str):
-            return front_cfg.strip().lower(), None
-        source = str(front_cfg.get("source", "vlm") or "vlm").strip().lower()
-        lookup_path = front_cfg.get("annotation_lookup_path")
+    def _hssd_asset_annotation_config(self) -> tuple[str, str | Path | None]:
+        """Return the HSSD annotation source, accepting the legacy front key."""
+        annotation_cfg = self.cfg.asset_manager.get("hssd_asset_annotations")
+        if annotation_cfg is None:
+            annotation_cfg = self.cfg.asset_manager.get("hssd_front_axis", {})
+        annotation_cfg = annotation_cfg or {}
+        if isinstance(annotation_cfg, str):
+            return annotation_cfg.strip().lower(), None
+        source = str(annotation_cfg.get("source", "vlm") or "vlm").strip().lower()
+        lookup_path = annotation_cfg.get("annotation_lookup_path")
         if lookup_path in ("", None):
             lookup_path = None
         return source, lookup_path
 
+    def _hssd_front_axis_config(self) -> tuple[str, str | Path | None]:
+        """Compatibility alias for callers configured before physics annotations."""
+        return self._hssd_asset_annotation_config()
+
     def _scenebenchmark_hssd_front_axis(self, hssd_id: str | None) -> str | None:
         """Return the SceneBenchmark-annotated HSSD front axis when configured."""
-        source, lookup_path = self._hssd_front_axis_config()
+        source, lookup_path = self._hssd_asset_annotation_config()
         if source not in _HSSD_FRONT_AXIS_SOURCES:
             return None
         if not hssd_id:
@@ -664,6 +672,108 @@ class AssetManager:
             return None
         return front_axis
 
+    @staticmethod
+    def _front_axis_from_hssd_record(record: dict[str, Any]) -> str | None:
+        canonical_front = record.get("canonical_front") or {}
+        axis_value = canonical_front.get("asset_local_front_axis")
+        if axis_value is None:
+            axis_value = canonical_front.get("canonical_orientation_axis")
+        if axis_value is None:
+            hints = (
+                record.get("scenebenchmark_functional_hints")
+                or (record.get("scenebenchmark_fd_sa") or {}).get("functional_hints")
+                or {}
+            )
+            axis_value = hints.get("asset_local_front_axis")
+        return _normalize_hssd_annotation_front_axis(axis_value)
+
+    def _override_hssd_asset_annotations(
+        self, physics_analysis: MeshPhysicsAnalysis, hssd_id: str | None
+    ) -> MeshPhysicsAnalysis:
+        """Apply valid HSSD front and physics fields from one lookup operation."""
+        source, lookup_path = self._hssd_front_axis_config()
+        if source not in _HSSD_FRONT_AXIS_SOURCES or not hssd_id:
+            return physics_analysis
+        record = _get_hssd_front_axis_annotation_record(hssd_id, lookup_path)
+        if record is None:
+            console_logger.warning(
+                "No SceneBenchmark HSSD annotation found for %s; keeping analyzed values",
+                hssd_id,
+            )
+            return physics_analysis
+
+        front_axis = (
+            self._front_axis_from_hssd_record(record) or physics_analysis.front_axis
+        )
+        annotated = record.get("asset_physics") or {}
+        material = physics_analysis.material
+        candidate_material = str(annotated.get("material") or "").strip().lower()
+        if candidate_material:
+            if candidate_material in load_materials():
+                material = candidate_material
+            else:
+                console_logger.warning(
+                    "Ignoring invalid HSSD material %r for %s",
+                    candidate_material,
+                    hssd_id,
+                )
+
+        mass_kg = physics_analysis.mass_kg
+        mass_range_kg = physics_analysis.mass_range_kg
+        if "mass_kg" in annotated or "mass_range_kg" in annotated:
+            try:
+                candidate_mass = float(annotated["mass_kg"])
+                candidate_range = tuple(
+                    float(value) for value in annotated["mass_range_kg"]
+                )
+                if (
+                    candidate_mass <= 0
+                    or len(candidate_range) != 2
+                    or candidate_range[0] <= 0
+                    or candidate_range[0] > candidate_mass
+                    or candidate_mass > candidate_range[1]
+                ):
+                    raise ValueError("invalid mass estimate or range")
+                mass_kg = candidate_mass
+                mass_range_kg = candidate_range
+            except (KeyError, TypeError, ValueError):
+                console_logger.warning(
+                    "Ignoring invalid HSSD mass annotation for %s: %r",
+                    hssd_id,
+                    annotated,
+                )
+
+        friction = physics_analysis.friction_coefficient
+        if annotated.get("friction_coefficient") is not None:
+            try:
+                candidate_friction = float(annotated["friction_coefficient"])
+                if not 0.0 <= candidate_friction <= 2.0:
+                    raise ValueError("friction outside [0, 2]")
+                friction = candidate_friction
+            except (TypeError, ValueError):
+                console_logger.warning(
+                    "Ignoring invalid HSSD friction annotation for %s: %r",
+                    hssd_id,
+                    annotated.get("friction_coefficient"),
+                )
+
+        quality = record.get("asset_quality") or {}
+        if quality and not quality.get("is_acceptable", True):
+            console_logger.warning(
+                "HSSD asset %s is marked quality-unacceptable (score=%r); "
+                "metadata is reported but retrieval behavior is unchanged",
+                hssd_id,
+                quality.get("overall_score"),
+            )
+        return MeshPhysicsAnalysis(
+            up_axis=physics_analysis.up_axis,
+            front_axis=front_axis,
+            material=material,
+            mass_kg=mass_kg,
+            mass_range_kg=mass_range_kg,
+            friction_coefficient=friction,
+        )
+
     def _override_hssd_front_axis_from_annotations(
         self, physics_analysis: MeshPhysicsAnalysis, hssd_id: str | None
     ) -> MeshPhysicsAnalysis:
@@ -692,6 +802,7 @@ class AssetManager:
             material=physics_analysis.material,
             mass_kg=physics_analysis.mass_kg,
             mass_range_kg=physics_analysis.mass_range_kg,
+            friction_coefficient=physics_analysis.friction_coefficient,
         )
 
     def _retrieve_hssd_assets(
@@ -808,7 +919,7 @@ class AssetManager:
                     f"VLM analysis complete: material={vlm_physics.material}, "
                     f"mass={vlm_physics.mass_kg}kg, front={vlm_physics.front_axis}"
                 )
-                vlm_physics = self._override_hssd_front_axis_from_annotations(
+                vlm_physics = self._override_hssd_asset_annotations(
                     physics_analysis=vlm_physics,
                     hssd_id=mesh_id,
                 )
@@ -821,6 +932,7 @@ class AssetManager:
                     material=vlm_physics.material,
                     mass_kg=vlm_physics.mass_kg,
                     mass_range_kg=vlm_physics.mass_range_kg,
+                    friction_coefficient=vlm_physics.friction_coefficient,
                 )
 
                 # Canonicalize mesh orientation to align with scenesmith canonical
@@ -2130,7 +2242,7 @@ class AssetManager:
             debug_output_dir=debug_dir,
         )
         if is_hssd:
-            physics_analysis = self._override_hssd_front_axis_from_annotations(
+            physics_analysis = self._override_hssd_asset_annotations(
                 physics_analysis=physics_analysis,
                 hssd_id=hssd_id,
             )

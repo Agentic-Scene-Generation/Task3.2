@@ -153,6 +153,24 @@ class TestGenerateDrakeSDF(unittest.TestCase):
         declare_convex = collision_mesh.find("{drake.mit.edu}declare_convex")
         self.assertIsNotNone(declare_convex)
 
+    def test_annotated_friction_overrides_material_lookup(self):
+        mesh = trimesh.creation.box(extents=[1.0, 1.0, 1.0])
+        visual_path = self.temp_path / "friction_cube.gltf"
+        mesh.export(visual_path)
+        physics = MeshPhysicsAnalysis(
+            up_axis="+Z",
+            front_axis="+Y",
+            material="wood",
+            mass_kg=10.0,
+            mass_range_kg=(8.0, 12.0),
+            friction_coefficient=0.77,
+        )
+        output_path = self.temp_path / "friction_cube.sdf"
+        generate_drake_sdf(visual_path, [mesh], physics, output_path)
+        root = ET.parse(output_path).getroot()
+        values = [float(node.text) for node in root.findall(".//friction/ode/mu")]
+        assert values and all(value == 0.77 for value in values)
+
     def test_generate_drake_sdf_multiple_collision_pieces(self):
         """Test SDF generation with multiple collision pieces."""
         # Create visual mesh.
