@@ -10,13 +10,13 @@
     "ceramic": 993,
     "fabric": 2152,
     "glass": 410,
-    "paper": 1388,
+    "paper": 1249,
     "plastic": 430,
     "rubber": 1,
     "silicone": 91,
     "steel": 1479,
     "stone": 100,
-    "wood": 3898
+    "wood": 4037
   },
   "quality_counts": {
     "acceptable": 10963,
