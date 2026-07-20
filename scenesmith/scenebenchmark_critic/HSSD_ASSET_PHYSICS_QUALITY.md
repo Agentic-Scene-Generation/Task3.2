@@ -27,7 +27,7 @@ changing scene-generation recall.
 
 ## Data provenance and reproduction
 
-- Method: `category-dimension-render-v1-20260719`
+- Method: `category-dimension-render-v2-20260720`
 - Render evidence: `/data/task3_2/share_data/scenesmith/hssd_rendered_assets/`
 - Physics vocabulary: Task3.2 `materials.yaml` at baseline commit above
 - Generator and standalone API: `K-Chronofox/hssd-annotations`
@@ -43,3 +43,22 @@ python scripts/enrich_hssd_asset_physics_quality.py \
 See `asset_annotation_data/ASSET_PHYSICS_QUALITY_SUMMARY.json` and
 `asset_annotation_data/asset_physics_profiles.json` for full-run counts and
 machine-readable assumptions.
+
+## 2026-07-20 mismatch and mass audit
+
+The v2 refresh replaced raw substring category matching with ordered complete
+word/phrase rules and corrected compound categories such as `tablet computer`,
+`desk calendar`, `toilet paper holder`, `table runner`, and `pet bed`. Vehicle
+references were also corrected to full-scale weights, with a dimension-based
+override for one miniature motorcycle asset.
+
+The standalone and bundled SceneSmith annotations were compared across all
+10,963 IDs. There are zero ID mismatches, zero physics/quality payload
+mismatches, zero formula mismatches, zero invalid mass intervals, and zero
+annotated IDs without a non-empty render directory. The full report and the
+469-category mass table are bundled as `ASSET_PHYSICS_QUALITY_AUDIT.json` and
+`ASSET_PHYSICS_CATEGORY_AUDIT.csv`.
+
+`asset_physics.audit` distinguishes rule-check passes from bounded estimates.
+It does not claim direct weighing, material measurement, or pixel-level proof
+that a render depicts the intended mesh.
