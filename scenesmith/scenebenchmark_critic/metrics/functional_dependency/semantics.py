@@ -17,6 +17,37 @@ from scenesmith.scenebenchmark_critic.metrics.functional_dependency.profiles imp
 )
 
 
+_CLASSROOM_STUDENT_OBJECT_RE = re.compile(
+    r"\b(?:student|classroom[_\s-]*student)[_\s-]*(chair|desk)[_\s-]*(\d+)\b",
+    re.IGNORECASE,
+)
+
+
+def _classroom_student_role(obj: dict[str, Any]) -> tuple[str, int] | None:
+    """Return the indexed student-chair/desk role encoded by an asset identity."""
+    for key in ("id", "name", "category", "category_norm", "asset_id"):
+        value = str(obj.get(key) or "")
+        match = _CLASSROOM_STUDENT_OBJECT_RE.search(value)
+        if match is None:
+            continue
+        return match.group(1).lower(), int(match.group(2))
+    return None
+
+
+def _is_classroom_student_pair(
+    subject: dict[str, Any], target: dict[str, Any]
+) -> bool:
+    """Whether a student chair and desk share the same explicit instance index."""
+    subject_role = _classroom_student_role(subject)
+    target_role = _classroom_student_role(target)
+    return bool(
+        subject_role
+        and target_role
+        and subject_role == ("chair", target_role[1])
+        and target_role[0] == "desk"
+    )
+
+
 def _is_work_surface_target(target: dict[str, Any]) -> bool:
     profile = object_function_profile(target)
     category = object_category(target)
@@ -542,6 +573,13 @@ def _is_actionable_seating_surface_pair(
     gap = bbox_gap_xy(subject, target)
     if gap is None:
         return False
+
+    # Classroom assets encode the intended chair-desk pairing in their indexed
+    # identities. Keep this relation actionable even after a bad layout has
+    # separated the pair beyond the generic proximity threshold, so the critic
+    # reports a concrete failure instead of treating the chair as independent.
+    if _is_classroom_student_pair(subject, target):
+        return True
 
     subject_category = object_category(subject)
     target_category = object_category(target)

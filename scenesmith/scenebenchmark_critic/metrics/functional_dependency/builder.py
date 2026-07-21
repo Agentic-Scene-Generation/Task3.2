@@ -25,6 +25,7 @@ from scenesmith.scenebenchmark_critic.metrics.functional_dependency.relations im
 )
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.semantics import (
     _is_any_lamp_object,
+    _is_classroom_student_pair,
     _is_nightstand_target,
     _is_seating_subject,
     _is_work_surface_target,
@@ -202,6 +203,9 @@ def build_checks(
 
         checks.extend(_build_explicit_target_relation_checks(objects, seen_check_ids))
         checks.extend(_build_dependency_annotation_checks(objects, seen_check_ids))
+        checks.extend(
+            _build_classroom_seating_checks(objects, seen_check_ids)
+        )
         checks.extend(
             _build_grouped_functional_dependency_checks(objects, seen_check_ids)
         )
@@ -639,6 +643,67 @@ def _build_grouped_functional_dependency_checks(
             checks.extend(_grouped_workstation_checks(obj, objects, seen_check_ids))
         elif category == "bed":
             checks.extend(_grouped_bedside_checks(obj, objects, seen_check_ids))
+    return checks
+
+
+def _build_classroom_seating_checks(
+    objects: dict[str, dict[str, Any]], seen_check_ids: set[str]
+) -> list[dict[str, Any]]:
+    """Build indexed student-chair to student-desk dependencies.
+
+    Classroom chairs are often initially placed along a wall, so proximity-based
+    proposal logic cannot discover their intended desks. The shared asset index
+    is the stable pairing signal for this layout.
+    """
+    chairs = [
+        obj
+        for obj in objects.values()
+        if _is_seating_subject(obj)
+    ]
+    desks = [
+        obj
+        for obj in objects.values()
+        if _is_work_surface_target(obj)
+    ]
+    checks: list[dict[str, Any]] = []
+    for chair in sorted(chairs, key=lambda obj: str(obj.get("id") or "")):
+        targets = [
+            desk
+            for desk in desks
+            if _is_classroom_student_pair(chair, desk)
+        ]
+        if not targets:
+            continue
+        target = targets[0]
+        chair_id = str(chair.get("id") or "")
+        desk_id = str(target.get("id") or "")
+        check_id = f"fd_{chair_id}_{desk_id}_classroom_seating"
+        if not chair_id or not desk_id or check_id in seen_check_ids:
+            continue
+        seen_check_ids.add(check_id)
+        checks.append(
+            {
+                "check_id": check_id,
+                "metric": "functional_dependency",
+                "subject_id": chair_id,
+                "target_ids": [desk_id],
+                "relation_type": "seating_to_work_surface",
+                "expected_use": "student chair is aligned with its indexed student desk",
+                "priority_weight": _priority_weight(
+                    chair, "functional_dependency", 0.95
+                ),
+                "question": (
+                    f"Is student chair `{chair_id}` aligned with its paired desk "
+                    f"`{desk_id}`?"
+                ),
+                "evidence": {
+                    "pairing": "indexed_student_chair_desk_asset_identity",
+                },
+                "evidence_refs": ["scene_geometry", "object_metadata"],
+                "check_source": "scenesmith_classroom_pairing",
+                "scoring_tier": "core",
+            }
+        )
     return checks
 
 
