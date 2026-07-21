@@ -1660,7 +1660,25 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
             preload_retriever=True,  # Always preload CLIP for consistent performance.
             hssd_data_path=str(hssd_config.data_path),
             hssd_preprocessed_path=str(hssd_config.preprocessed_path),
+            hssd_retrieval_backend=str(
+                getattr(hssd_config, "retrieval_backend", "clip")
+            ),
             hssd_top_k=hssd_config.use_top_k,
+            hssd_zvec_collection_path=(
+                str(hssd_config.zvec.collection_path)
+                if "zvec" in hssd_config and hssd_config.zvec is not None
+                else None
+            ),
+            hssd_embedding_base_url=(
+                str(hssd_config.zvec.base_url)
+                if "zvec" in hssd_config and hssd_config.zvec is not None
+                else None
+            ),
+            hssd_embedding_dimension=(
+                int(hssd_config.zvec.embedding_dimension)
+                if "zvec" in hssd_config and hssd_config.zvec is not None
+                else 2048
+            ),
             clip_device=retrieval_device,
         )
 

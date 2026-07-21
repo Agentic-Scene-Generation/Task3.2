@@ -17,7 +17,7 @@ from scenesmith.agent_utils.hssd_retrieval.clip_similarity import (
     compute_clip_similarities,
     filter_meshes_by_category,
 )
-from scenesmith.agent_utils.hssd_retrieval.config import HssdConfig
+from scenesmith.agent_utils.hssd_retrieval.config import HssdConfig, HssdZvecConfig
 from scenesmith.agent_utils.hssd_retrieval.data_loader import (
     HssdMeshMetadata,
     HssdPreprocessedData,
@@ -61,6 +61,29 @@ class TestHssdConfig(unittest.TestCase):
                 preprocessed_path=self.tmp_path / "nonexistent",
             )
         self.assertIn("Preprocessed data path does not exist", str(cm.exception))
+
+    def test_embedding_backend_requires_zvec_config(self):
+        """Embedding backend must declare Zvec settings."""
+        data_path = self.tmp_path / "hssd-models"
+        preprocessed_path = self.tmp_path / "preprocessed"
+        data_path.mkdir()
+        preprocessed_path.mkdir()
+
+        with self.assertRaises(ValueError) as cm:
+            HssdConfig(
+                data_path=data_path,
+                preprocessed_path=preprocessed_path,
+                retrieval_backend="embedding",
+            )
+        self.assertIn("requires hssd.zvec config", str(cm.exception))
+
+    def test_zvec_config_requires_existing_collection(self):
+        """Zvec configuration should fail early for a missing collection."""
+        with self.assertRaises(FileNotFoundError):
+            HssdZvecConfig(
+                collection_path=self.tmp_path / "missing-collection",
+                base_url="http://127.0.0.1:8014",
+            )
 
 
 class TestMeshPaths(unittest.TestCase):
