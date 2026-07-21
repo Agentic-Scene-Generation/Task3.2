@@ -132,8 +132,9 @@ class HssdConfig:
         Returns:
             HssdConfig instance.
         """
+        retrieval_backend = str(getattr(cfg, "retrieval_backend", "clip")).lower()
         zvec_cfg = None
-        if "zvec" in cfg and cfg.zvec is not None:
+        if retrieval_backend == "embedding" and "zvec" in cfg and cfg.zvec is not None:
             zvec_cfg = HssdZvecConfig(
                 collection_path=Path(cfg.zvec.collection_path),
                 base_url=str(cfg.zvec.base_url),
@@ -150,7 +151,7 @@ class HssdConfig:
         return cls(
             data_path=Path(cfg.data_path),
             preprocessed_path=Path(cfg.preprocessed_path),
-            retrieval_backend=str(getattr(cfg, "retrieval_backend", "clip")),
+            retrieval_backend=retrieval_backend,
             use_top_k=cfg.use_top_k,
             object_type_mapping=dict(cfg.object_type_mapping),
             zvec=zvec_cfg,
