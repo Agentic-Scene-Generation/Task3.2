@@ -61,11 +61,15 @@ from scenesmith.agent_utils.scoring import (
 from scenesmith.agent_utils.stage_working_memory import StageWorkingMemory
 from scenesmith.scene_expert.context_bundle import build_stage_context_bundle
 from scenesmith.agent_utils.thinking import (
+    chat_template_kwargs_from_effort,
     prepend_text_thinking_directive,
     thinking_directive_from_effort,
 )
 from scenesmith.agent_utils.turn_trimming_session import TurnTrimmingSession
 from scenesmith.prompts import prompt_registry
+from scenesmith.scenebenchmark_critic import evaluate_room_scene
+from scenesmith.scenebenchmark_critic.config import critic_config_from_any
+from scenesmith.scenebenchmark_critic.prompt_context import format_agent_prompt_context
 from scenesmith.utils.logging import BaseLogger
 from scenesmith.utils.openai import encode_image_to_base64
 
@@ -1164,8 +1168,14 @@ class BaseStatefulAgent(ABC):
         if extra_args:
             kwargs["extra_args"] = extra_args
 
-        # Note: reasoning_effort and verbosity are OpenAI Responses API specific
-        # parameters and are not supported by open-source model APIs (e.g., vLLM).
+        # Open-source Qwen servers do not interpret OpenAI's reasoning_effort
+        # field.  Pass the effective mode through llama.cpp's chat-template
+        # kwargs; the textual directive below is retained for readability and
+        # compatibility with other Qwen-compatible backends.
+        effort = None
+        if settings_key and hasattr(self.cfg.openai, "reasoning_effort"):
+            effort = getattr(self.cfg.openai.reasoning_effort, settings_key, None)
+        kwargs["extra_body"] = chat_template_kwargs_from_effort(effort)
 
         # Add tool_choice to force specific tool call first.
         if tool_choice:
@@ -2123,8 +2133,9 @@ class BaseStatefulAgent(ABC):
         self._reset_critic_candidate_cache()
 
         # Get physics violations using the same logic as the check_physics tool.
-        # The result is cached per candidate and reused by deterministic checks
-        # and critic prompt construction.
+        # The result is cached per candidate and reused by deterministic checks.
+        # SceneBenchmark feedback is added only after deterministic repair below,
+        # because a repair can replace this cached context and change the scene.
         physics_context = self._get_cached_physics_context()
         hard_state = (
             self._evaluate_current_hard_state(physics_context=physics_context)
@@ -2140,6 +2151,23 @@ class BaseStatefulAgent(ABC):
         )
         if repaired_physics_context is not None:
             physics_context = repaired_physics_context
+
+        # Build the geometry feedback from the final pre-critique candidate.
+        # Do this after repair so the context cannot be overwritten by the
+        # plain physics string returned from _try_deterministic_repair_for_hard_state.
+        benchmark_context = self._build_scenebenchmark_critic_context()
+        if benchmark_context:
+            physics_context = (
+                f"{physics_context}\n\n"
+                "Additional SceneBenchmark geometry critic context:\n"
+                f"{benchmark_context}"
+            )
+            console_logger.info(
+                "[CRITIC harness] SceneBenchmark context injected into %s critic "
+                "prompt (%d chars)",
+                self.agent_type.value,
+                len(benchmark_context),
+            )
         if repair_actions:
             console_logger.info(
                 "[CRITIC harness] Deterministic repair actions before scoring: %s",
@@ -2513,6 +2541,57 @@ class BaseStatefulAgent(ABC):
             },
         )
         return response.critique + score_change_msg + safety_msg
+
+    def _build_scenebenchmark_critic_context(self) -> str | None:
+        """Build deterministic geometry-rule feedback for the LLM critic prompt.
+
+        The embedded critic is deliberately limited to the existing furniture and
+        manipuland critic turns.  It does not alter generation, retrieval, asset
+        annotation, or VLM selection; it only supplies actionable rule failures
+        to the critic that is already evaluating the current scene.
+        """
+        critic_config = critic_config_from_any(self.cfg)
+        if not critic_config.enabled or not critic_config.inject_into_llm_critic:
+            return None
+        if self.agent_type not in {AgentType.FURNITURE, AgentType.MANIPULAND}:
+            return None
+
+        scene = getattr(self, "scene", None)
+        if scene is None:
+            return None
+
+        payload = evaluate_room_scene(
+            scene,
+            config=self.cfg,
+            stage=f"llm_critic_{self.agent_type.value}",
+            # Reuse the live renderer when the evaluator needs visual evidence.
+            # Agent configs are isolated subtrees, so this is the only reliable
+            # way to preserve the renderer dependency during critic injection.
+            blender_server=getattr(self, "blender_server", None),
+        )
+        if critic_config.agent_prompt_context_filter_enabled:
+            debug_dir = None
+            if critic_config.agent_prompt_context_debug_write:
+                scene_dir = getattr(scene, "scene_dir", None)
+                if scene_dir:
+                    debug_dir = (
+                        Path(scene_dir)
+                        / "scenebenchmark_prompt_context"
+                        / self.agent_type.value
+                    )
+            return format_agent_prompt_context(
+                payload,
+                scene=scene,
+                agent_type=self.agent_type,
+                current_furniture_id=getattr(self, "current_furniture_id", None),
+                max_issues=critic_config.max_issues_for_prompt,
+                debug_output_dir=debug_dir,
+            )
+        from scenesmith.scenebenchmark_critic import format_prompt_context
+
+        return format_prompt_context(
+            payload, max_issues=critic_config.max_issues_for_prompt
+        )
 
     @abstractmethod
     def _get_design_change_prompt_enum(self) -> Any:

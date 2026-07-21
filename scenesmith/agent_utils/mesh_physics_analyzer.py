@@ -21,6 +21,7 @@ from omegaconf import DictConfig
 
 from scenesmith.agent_utils.vlm_service import VLMService
 from scenesmith.prompts import MeshPhysicsPrompts, prompt_manager
+from scenesmith.utils.llm_json import parse_llm_json_object, preview_llm_json
 from scenesmith.utils.openai import encode_image_to_base64
 
 if TYPE_CHECKING:
@@ -52,6 +53,9 @@ class MeshPhysicsAnalysis:
     mass_range_kg: tuple[float, float]
     """Confidence range for mass (min, max) in kilograms."""
 
+    friction_coefficient: float | None = None
+    """Optional annotated friction; material lookup remains the fallback."""
+
 
 def _is_transient_vlm_error(error: Exception) -> bool:
     """Return whether a local OpenAI-compatible request failed in transport."""
@@ -75,6 +79,33 @@ def _is_transient_vlm_error(error: Exception) -> bool:
 def _fallback_hssd_physics(mesh_path: Path) -> MeshPhysicsAnalysis:
     """Conservative metadata for already-upright HSSD assets on VLM timeout."""
     name = mesh_path.stem.lower()
+    material = "wood"
+    mass_kg = 12.0
+    if any(term in name for term in ("painting", "artwork", "poster", "clock")):
+        mass_kg = 3.0
+    elif "mirror" in name:
+        material = "glass"
+        mass_kg = 8.0
+    elif any(term in name for term in ("chair", "stool")):
+        mass_kg = 7.0
+    elif any(term in name for term in ("sofa", "couch", "bed")):
+        mass_kg = 40.0
+    elif any(term in name for term in ("wardrobe", "cabinet", "bookshelf")):
+        mass_kg = 45.0
+    return MeshPhysicsAnalysis(
+        up_axis="+Z",
+        front_axis="+Y",
+        material=material,
+        mass_kg=mass_kg,
+        mass_range_kg=(max(0.5, mass_kg * 0.5), mass_kg * 2.0),
+    )
+
+
+def build_deterministic_hssd_physics(
+    mesh_path: Path, object_name: str | None = None
+) -> MeshPhysicsAnalysis:
+    """Return conservative metadata for an already-upright HSSD asset."""
+    name = (object_name or mesh_path.stem).lower()
     material = "wood"
     mass_kg = 12.0
     if any(term in name for term in ("painting", "artwork", "poster", "clock")):
@@ -338,9 +369,9 @@ def analyze_mesh_orientation_and_material(
         )
 
         try:
-            response_json = json.loads(response_text)
-        except json.JSONDecodeError as e:
-            preview = repr(response_text[:500]) if response_text else "None"
+            response_json = parse_llm_json_object(response_text)
+        except (json.JSONDecodeError, ValueError) as e:
+            preview = preview_llm_json(response_text, limit=500)
             raise RuntimeError(
                 f"VLM returned invalid JSON for {mesh_path.stem}. "
                 f"Parse error: {e}. Response preview: {preview}"
@@ -399,12 +430,25 @@ def analyze_mesh_orientation_and_material(
             )
 
         # Map front view image index to axis.
-        front_axis_raw = get_front_axis_from_image_number(
-            image_number=front_view_idx,
-            num_side_views=num_side_views,
-            include_diagonal_views=False,
-            include_vertical_views=include_vertical_views,
-        )
+        try:
+            front_axis_raw = get_front_axis_from_image_number(
+                image_number=front_view_idx,
+                num_side_views=num_side_views,
+                include_diagonal_views=False,
+                include_vertical_views=include_vertical_views,
+            )
+        except ValueError:
+            if prompt_type != "hssd":
+                raise
+            # HSSD meshes are already upright; an invalid local VLM index should
+            # not discard an otherwise usable retrieved asset.
+            console_logger.warning(
+                "Ignoring invalid HSSD front_view_image_index=%s for %s; "
+                "using canonical +Y front axis",
+                front_view_idx,
+                mesh_path.stem,
+            )
+            front_axis_raw = "y"
 
         # Convert to uppercase format.
         if front_axis_raw.startswith("-"):

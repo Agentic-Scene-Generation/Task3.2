@@ -92,8 +92,15 @@ asset_manager:
   # HSSD meshes are already Z-up. Preserve the asset with conservative physics
   # metadata when the optional local VLM material/orientation request times out.
   hssd_vlm_fallback_on_transient_error: true
+  # HSSD assets are already upright; avoid fragile VLM image-index parsing.
+  hssd_physics_analysis_mode: deterministic
   hssd_vlm_timeout_seconds: 90
   hssd_vlm_max_retries: 0
+  # Prefer curated SceneBenchmark asset-library front annotations over VLM picks.
+  # Missing or malformed annotations fall back to the analyzed front axis.
+  hssd_asset_annotations:
+    source: "scenebenchmark_critic"
+    annotation_lookup_path: null
 
   # 3D generation backend (only used when general_asset_source="generated")
   backend: "sam3d"

@@ -121,7 +121,13 @@ class BaseExperiment(ABC):
             else cfg_dict
         )
 
-        agent_config = config_dict["furniture_agent"]
+        # Agent configs are passed as isolated subtrees. Preserve the
+        # experiment-level benchmark settings explicitly for critic prompt
+        # injection inside BaseStatefulAgent.
+        agent_config = dict(config_dict["furniture_agent"])
+        agent_config["scenebenchmark_critic"] = config_dict["experiment"].get(
+            "scenebenchmark_critic", {}
+        )
         agent_name = agent_config["_name"]
 
         if agent_name not in compatible_agents:
@@ -187,7 +193,10 @@ class BaseExperiment(ABC):
             else cfg_dict
         )
 
-        agent_config = config_dict["manipuland_agent"]
+        agent_config = dict(config_dict["manipuland_agent"])
+        agent_config["scenebenchmark_critic"] = config_dict["experiment"].get(
+            "scenebenchmark_critic", {}
+        )
         agent_name = agent_config["_name"]
 
         if agent_name not in compatible_agents:
@@ -259,7 +268,10 @@ class BaseExperiment(ABC):
             else cfg_dict
         )
 
-        agent_config = config_dict["wall_agent"]
+        agent_config = dict(config_dict["wall_agent"])
+        agent_config["scenebenchmark_critic"] = config_dict["experiment"].get(
+            "scenebenchmark_critic", {}
+        )
         agent_name = agent_config["_name"]
 
         if agent_name not in compatible_agents:

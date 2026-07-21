@@ -1,0 +1,44 @@
+{
+  "schema_version": "hssd_asset_physics_profiles@1.0",
+  "materials_source": {
+    "repository": "Agentic-Scene-Generation/Task3.2",
+    "branch": "dev_hrk",
+    "commit": "b26591b06e16b3702fed00831c368868b8b1b385",
+    "path": "scenesmith/agent_utils/data/materials.yaml"
+  },
+  "materials": {
+    "cardboard": {"density_kg_m3": 700.0, "friction_coefficient": 0.32},
+    "wood": {"density_kg_m3": 600.0, "friction_coefficient": 0.4},
+    "rubber": {"density_kg_m3": 1100.0, "friction_coefficient": 1.15},
+    "plastic": {"density_kg_m3": 950.0, "friction_coefficient": 0.35},
+    "ceramic": {"density_kg_m3": 2400.0, "friction_coefficient": 0.35},
+    "glass": {"density_kg_m3": 2500.0, "friction_coefficient": 0.9},
+    "leather": {"density_kg_m3": 860.0, "friction_coefficient": 0.6},
+    "steel": {"density_kg_m3": 7800.0, "friction_coefficient": 0.74},
+    "aluminum": {"density_kg_m3": 2700.0, "friction_coefficient": 1.1},
+    "stone": {"density_kg_m3": 2600.0, "friction_coefficient": 0.9},
+    "foam": {"density_kg_m3": 30.0, "friction_coefficient": 0.4},
+    "fruit": {"density_kg_m3": 900.0, "friction_coefficient": 0.8},
+    "silicone": {"density_kg_m3": 1200.0, "friction_coefficient": 1.2},
+    "concrete": {"density_kg_m3": 2400.0, "friction_coefficient": 0.62},
+    "cork": {"density_kg_m3": 200.0, "friction_coefficient": 0.6},
+    "clay": {"density_kg_m3": 1900.0, "friction_coefficient": 0.7},
+    "carbon_fiber": {"density_kg_m3": 1600.0, "friction_coefficient": 0.5},
+    "fabric": {"density_kg_m3": 500.0, "friction_coefficient": 0.4},
+    "paper": {"density_kg_m3": 900.0, "friction_coefficient": 0.32}
+  },
+  "mass_estimation": {
+    "dimension_scale_exponent": 0.6666666667,
+    "dimension_scale_min": 0.35,
+    "dimension_scale_max": 3.0,
+    "default_reference_mass_kg": 12.0,
+    "range_factor_with_dimensions": [0.55, 1.8],
+    "range_factor_without_dimensions": [0.4, 2.2]
+  },
+  "quality_policy": {
+    "minimum_acceptable_score": 0.65,
+    "render_bundle_relative_template": "hssd_rendered_assets/{hssd_id}",
+    "watertight_without_mesh": null,
+    "note": "Render-directory presence and metadata are evidence, not a watertightness measurement."
+  }
+}

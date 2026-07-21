@@ -18,6 +18,7 @@ from pathlib import Path
 from openai import OpenAI
 
 from scenesmith.scene_expert.context_bundle import build_llm_call_debug_record
+from scenesmith.agent_utils.thinking import chat_template_kwargs_from_effort
 from scenesmith.scene_expert.schemas import (
     HarnessContext,
     MemoryPack,
@@ -195,6 +196,7 @@ class GlobalPlanner:
                 ],
                 temperature=self._temperature,
                 max_tokens=self._max_tokens,
+                extra_body=chat_template_kwargs_from_effort("none"),
             )
             raw = response.choices[0].message.content
             # Qwen3 with --reasoning-parser may put output in reasoning_content

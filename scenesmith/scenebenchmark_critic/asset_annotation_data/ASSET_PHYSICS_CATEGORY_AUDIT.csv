@@ -1,0 +1,470 @@
+category,asset_count,material,material_confidence,material_rule,reference_mass_kg,mass_rule,minimum_mass_kg,median_mass_kg,maximum_mass_kg,audit_flags
+air conditioner,7,steel,0.68,category_rule:steel,12.0,category_reference,6.328,12.0,22.158,
+air hockey table,2,wood,0.64,category_rule:wood,18.0,category_reference,17.639,17.998,18.357,
+alarm clock,13,plastic,0.62,category_rule:plastic,3.0,category_reference,2.124,3.0,4.606,
+aquarium,1,glass,0.82,category_rule:glass,25.0,category_reference,25.0,25.0,25.0,
+armchair,225,fabric,0.58,category_rule:fabric,25.0,category_reference,14.821,25.0,45.478,
+armoire,118,wood,0.64,category_rule:wood,55.0,category_reference,19.25,54.992,165.0,dimension_scale_clamped:2
+armrest,1,wood,0.64,category_rule:wood,4.0,category_reference,4.0,4.0,4.0,asset_dimensions_missing:1
+ashcan,95,plastic,0.62,category_rule:plastic,5.0,category_reference,3.35,5.0,7.217,
+ashtray,2,ceramic,0.7,category_rule:ceramic,0.75,category_reference,0.501,0.732,0.963,
+audio system,1,steel,0.7,category_rule:steel,8.0,category_reference,8.0,8.0,8.0,asset_dimensions_missing:1
+bag,4,fabric,0.76,category_rule:fabric,1.5,category_reference,1.453,1.5,1.876,
+balcony,5,concrete,0.5,category_rule:concrete,10.0,category_reference,4.948,10.0,13.208,low_material_confidence:5
+ball,1,plastic,0.58,category_rule:plastic,1.5,category_reference,1.5,1.5,1.5,asset_dimensions_missing:1
+ball chair,7,plastic,0.58,category_rule:plastic,12.0,category_reference,6.541,12.0,12.0,
+bar,8,wood,0.64,category_rule:wood,8.0,category_reference,4.351,7.971,14.897,
+bar stool,55,wood,0.64,category_rule:wood,8.0,category_reference,5.435,8.0,16.563,
+"bar stool.n.01,chair",52,wood,0.64,category_rule:wood,12.0,category_reference,7.802,12.0,16.254,
+barbecue,20,steel,0.68,category_rule:steel,18.0,category_reference,7.844,17.995,45.905,
+barrow,1,steel,0.68,category_rule:steel,4.0,category_reference,4.0,4.0,4.0,
+base cabinet,7,wood,0.64,category_rule:wood,42.0,category_reference,22.91,42.0,42.035,
+basket,65,wood,0.64,category_rule:wood,3.0,category_reference,1.05,3.0,6.431,dimension_scale_clamped:5
+bath mat,61,fabric,0.76,category_rule:fabric,1.2,category_reference,0.42,1.2,3.6,dimension_scale_clamped:2
+bath towel,1,fabric,0.76,category_rule:fabric,1.5,category_reference,1.5,1.5,1.5,
+bathrobe,4,fabric,0.76,category_rule:fabric,1.5,category_reference,1.5,1.5,1.5,asset_dimensions_missing:4
+bathroom scale,5,steel,0.68,category_rule:steel,2.0,category_reference,1.182,2.0,4.524,
+bathtub,51,ceramic,0.7,category_rule:ceramic,60.0,category_reference,40.786,60.0,180.0,dimension_scale_clamped:1
+"bathtub.n.01,shower stall",1,ceramic,0.7,category_rule:ceramic,60.0,category_reference,60.0,60.0,60.0,
+beam,7,wood,0.64,category_rule:wood,4.0,category_reference,4.0,4.0,4.0,asset_dimensions_missing:7
+beanbag chair,22,fabric,0.76,category_rule:fabric,12.0,category_reference,5.217,12.0,20.844,
+bed,21,wood,0.64,category_rule:wood,48.0,category_reference,16.8,48.0,66.43,dimension_scale_clamped:2
+bedclothes,12,fabric,0.76,category_rule:fabric,1.5,category_reference,1.5,1.5,1.5,asset_dimensions_missing:12
+bench,101,wood,0.64,category_rule:wood,18.0,category_reference,8.128,18.0,54.0,dimension_scale_clamped:3
+bench grinder,1,wood,0.64,category_rule:wood,18.0,category_reference,18.0,18.0,18.0,
+bicycle,3,steel,0.68,category_rule:steel,12.0,category_reference,4.2,12.0,12.406,dimension_scale_clamped:1
+bicycle rack,1,steel,0.7,category_rule:steel,12.0,category_reference,12.0,12.0,12.0,
+bidet,1,ceramic,0.7,category_rule:ceramic,15.0,category_reference,15.0,15.0,15.0,
+binder,1,paper,0.68,category_rule:paper,2.0,category_reference,2.0,2.0,2.0,asset_dimensions_missing:1
+birdcage,1,steel,0.68,category_rule:steel,3.0,category_reference,3.0,3.0,3.0,
+birdhouse,1,wood,0.72,category_rule:wood,4.0,category_reference,4.0,4.0,4.0,asset_dimensions_missing:1
+blackboard,10,paper,0.68,category_rule:paper,4.0,category_reference,1.4,3.999,12.0,dimension_scale_clamped:3
+blanket,2,fabric,0.76,category_rule:fabric,1.5,category_reference,1.5,1.5,1.5,asset_dimensions_missing:2
+blanket chest,2,wood,0.72,category_rule:wood,8.0,category_reference,6.905,7.964,9.024,
+blender,8,steel,0.68,category_rule:steel,3.0,category_reference,1.05,3.0,5.419,dimension_scale_clamped:1
+board game,2,plastic,0.62,category_rule:plastic,1.5,category_reference,1.5,1.5,1.5,asset_dimensions_missing:2
+"board game.n.01,chess",5,plastic,0.62,category_rule:plastic,1.5,category_reference,1.5,1.5,1.5,asset_dimensions_missing:5
+bolster,2,fabric,0.5,category_rule:fabric,1.0,category_reference,1.0,1.0,1.0,asset_dimensions_missing:2;low_material_confidence:2
+book,28,paper,0.68,category_rule:paper,1.5,category_reference,1.5,1.5,1.5,asset_dimensions_missing:28
+bookcase,135,wood,0.72,category_rule:wood,42.0,category_reference,14.7,42.0,68.923,dimension_scale_clamped:1
+bookend,1,wood,0.64,category_rule:wood,0.75,category_reference,0.75,0.75,0.75,asset_dimensions_missing:1
+bottle,20,glass,0.82,category_rule:glass,1.5,category_reference,1.5,1.5,1.5,asset_dimensions_missing:20
+bottle opener,1,steel,0.7,category_rule:steel,0.25,category_reference,0.25,0.25,0.25,asset_dimensions_missing:1
+bouquet,4,fabric,0.5,category_rule:fabric,1.5,category_reference,1.5,1.5,1.5,asset_dimensions_missing:4;low_material_confidence:4
+bowl,26,ceramic,0.7,category_rule:ceramic,1.5,category_reference,1.5,1.5,1.5,asset_dimensions_missing:26
+bread-bin,8,steel,0.68,category_rule:steel,1.0,category_reference,0.95,1.0,1.188,
+bridge,2,concrete,0.5,category_rule:concrete,12.0,category_reference,10.147,11.933,13.719,low_material_confidence:2
+broom,4,wood,0.64,category_rule:wood,1.5,category_reference,1.462,1.5,1.5,
+bucket,2,steel,0.68,category_rule:steel,2.0,category_reference,1.945,1.999,2.054,
+buffet,93,wood,0.64,category_rule:wood,25.0,category_reference,12.963,25.0,58.974,
+bulletin board,9,paper,0.68,category_rule:paper,4.0,category_reference,1.4,4.0,12.0,dimension_scale_clamped:3
+bunk bed,6,wood,0.64,category_rule:wood,55.0,category_reference,44.203,54.998,85.33,
+butter dish,2,ceramic,0.52,category_rule:ceramic,0.75,category_reference,0.75,0.75,0.75,asset_dimensions_missing:2;low_material_confidence:2
+cabin,5,wood,0.64,category_rule:wood,10.0,category_reference,10.0,10.0,10.0,asset_dimensions_missing:5
+cabinet,128,wood,0.64,category_rule:wood,42.0,category_reference,14.7,42.0,117.898,dimension_scale_clamped:10
+caddy,1,plastic,0.5,category_rule:plastic,2.0,category_reference,2.0,2.0,2.0,low_material_confidence:1
+cafeteria tray,31,plastic,0.5,category_rule:plastic,2.0,category_reference,2.0,2.0,2.0,asset_dimensions_missing:31;low_material_confidence:31
+cage,1,steel,0.68,category_rule:steel,1.0,category_reference,1.0,1.0,1.0,
+cake,1,ceramic,0.52,category_rule:ceramic,1.5,category_reference,1.5,1.5,1.5,asset_dimensions_missing:1;low_material_confidence:1
+cake stand,5,ceramic,0.52,category_rule:ceramic,1.5,category_reference,1.5,1.5,1.5,asset_dimensions_missing:5;low_material_confidence:5
+camcorder,1,plastic,0.62,category_rule:plastic,1.5,category_reference,1.5,1.5,1.5,
+camera,9,plastic,0.62,category_rule:plastic,3.0,category_reference,3.0,3.0,3.0,asset_dimensions_missing:9
+candelabrum,5,steel,0.68,category_rule:steel,1.5,category_reference,1.5,1.5,1.5,asset_dimensions_missing:5
+candle,16,silicone,0.48,category_rule:silicone,0.5,category_reference,0.5,0.5,0.5,asset_dimensions_missing:16;low_material_confidence:16
+"candle.n.01,candlestick",25,steel,0.68,category_rule:steel,0.5,category_reference,0.5,0.5,0.5,asset_dimensions_missing:25
+"candle.n.01,candlestick.n.01,wall mirror",1,glass,0.82,category_rule:glass,8.0,category_reference,8.0,8.0,8.0,asset_dimensions_missing:1
+candlestick,16,steel,0.68,category_rule:steel,1.5,category_reference,1.5,1.5,1.5,asset_dimensions_missing:16
+"candlestick.n.01,candle",34,steel,0.68,category_rule:steel,0.5,category_reference,0.5,0.5,0.5,asset_dimensions_missing:34
+canister,6,steel,0.68,category_rule:steel,0.75,category_reference,0.57,0.75,2.03,
+car,9,steel,0.68,category_rule:steel,1200.0,category_reference,835.829,1200.0,1581.5,
+carafe,9,glass,0.82,category_rule:glass,0.75,category_reference,0.561,0.75,1.088,
+casserole,14,ceramic,0.7,category_rule:ceramic,4.0,category_reference,4.0,4.0,4.0,asset_dimensions_missing:14
+ceiling fan,17,steel,0.68,category_rule:steel,8.0,category_reference,8.0,8.0,8.0,asset_dimensions_missing:17
+ceiling lamp,133,steel,0.68,category_rule:steel,5.0,category_reference,5.0,5.0,5.0,asset_dimensions_missing:133
+"ceiling lamp.n.01,track lighting",1,steel,0.68,category_rule:steel,5.0,category_reference,5.0,5.0,5.0,asset_dimensions_missing:1
+cellular telephone,2,plastic,0.62,category_rule:plastic,2.0,category_reference,2.0,2.0,2.0,asset_dimensions_missing:2
+chain saw,1,steel,0.7,category_rule:steel,3.0,category_reference,3.0,3.0,3.0,
+chair,168,wood,0.64,category_rule:wood,12.0,category_reference,7.979,12.0,36.0,dimension_scale_clamped:2
+chaise longue,37,fabric,0.58,category_rule:fabric,4.0,category_reference,2.009,4.0,5.686,
+chandelier,101,steel,0.68,category_rule:steel,5.0,category_reference,5.0,5.0,5.0,asset_dimensions_missing:101
+chess,1,plastic,0.62,category_rule:plastic,1.5,category_reference,1.5,1.5,1.5,
+chest,2,wood,0.64,category_rule:wood,8.0,category_reference,7.92,8.0,8.08,
+chest of drawers,229,wood,0.64,category_rule:wood,42.0,category_reference,14.7,42.0,86.933,dimension_scale_clamped:3
+"chest of drawers.n.01,end table",1,wood,0.64,category_rule:wood,42.0,category_reference,42.0,42.0,42.0,
+china cabinet,43,wood,0.64,category_rule:wood,55.0,category_reference,31.907,55.0,149.692,
+chopping board,4,wood,0.64,category_rule:wood,1.5,category_reference,1.017,1.492,1.983,
+christmas stocking,11,fabric,0.76,category_rule:fabric,1.5,category_reference,1.5,1.5,1.5,asset_dimensions_missing:11
+christmas tree,6,plastic,0.62,category_rule:plastic,4.0,category_reference,4.0,4.0,4.0,asset_dimensions_missing:6
+clock,5,plastic,0.62,category_rule:plastic,3.0,category_reference,3.0,3.0,3.0,asset_dimensions_missing:5
+"clothes dryer.n.01,drying rack",2,steel,0.7,category_rule:steel,70.0,category_reference,70.0,70.0,70.0,asset_dimensions_missing:2
+clothes tree,17,steel,0.7,category_rule:steel,5.0,category_reference,1.75,5.0,7.389,dimension_scale_clamped:2
+clothing rack,18,steel,0.7,category_rule:steel,8.0,category_reference,4.248,7.999,20.255,
+club chair,23,fabric,0.58,category_rule:fabric,25.0,category_reference,8.75,25.0,38.379,dimension_scale_clamped:1
+coaster,1,cork,0.62,category_rule:cork,0.25,category_reference,0.25,0.25,0.25,asset_dimensions_missing:1
+coatrack,1,steel,0.7,category_rule:steel,4.0,category_reference,4.0,4.0,4.0,
+cocktail shaker,5,steel,0.7,category_rule:steel,2.0,category_reference,1.393,2.0,2.384,
+coffee maker,17,steel,0.7,category_rule:steel,3.0,category_reference,1.05,3.0,9.0,dimension_scale_clamped:5
+coffee table,160,wood,0.64,category_rule:wood,18.0,category_reference,6.3,18.0,28.733,dimension_scale_clamped:5
+"coffee table.n.01,aquarium",1,glass,0.82,category_rule:glass,25.0,category_reference,25.0,25.0,25.0,
+coffeepot,2,steel,0.7,category_rule:steel,3.0,category_reference,2.095,2.939,3.783,
+colander,1,steel,0.7,category_rule:steel,2.0,category_reference,2.0,2.0,2.0,
+computer screen,2,plastic,0.62,category_rule:plastic,1.5,category_reference,1.173,1.484,1.794,
+conference table,1,wood,0.64,category_rule:wood,18.0,category_reference,18.0,18.0,18.0,
+console table,88,wood,0.64,category_rule:wood,18.0,category_reference,6.3,18.0,25.142,asset_dimensions_missing:1;dimension_scale_clamped:3
+"cooker.n.01,steamer",1,steel,0.68,category_rule:steel,3.0,category_reference,3.0,3.0,3.0,
+cookie sheet,6,steel,0.7,category_rule:steel,1.5,category_reference,1.5,1.5,1.5,asset_dimensions_missing:6
+countertop,2,concrete,0.5,category_rule:concrete,8.0,category_reference,7.667,7.997,8.326,low_material_confidence:2
+cradle,2,wood,0.64,category_rule:wood,48.0,category_reference,31.567,46.765,61.963,
+crate,10,wood,0.64,category_rule:wood,8.0,category_reference,8.0,8.0,8.0,asset_dimensions_missing:10
+credenza,2,wood,0.64,category_rule:wood,10.0,category_reference,8.143,9.921,11.698,
+crib,12,wood,0.64,category_rule:wood,48.0,category_reference,23.472,47.926,64.539,
+cruet,4,ceramic,0.7,category_rule:ceramic,0.75,category_reference,0.75,0.75,0.75,asset_dimensions_missing:4
+cup,47,ceramic,0.7,category_rule:ceramic,1.5,category_reference,1.5,1.5,1.5,asset_dimensions_missing:47
+curtain,10,fabric,0.76,category_rule:fabric,3.0,category_reference,1.497,2.968,9.0,dimension_scale_clamped:1
+curtain rod,3,steel,0.7,category_rule:steel,3.0,category_reference,3.0,3.0,3.0,asset_dimensions_missing:3
+cushion,3,fabric,0.76,category_rule:fabric,1.5,category_reference,1.5,1.5,1.5,asset_dimensions_missing:3
+darts,2,plastic,0.62,category_rule:plastic,1.5,category_reference,1.46,1.499,1.539,
+daybed,4,wood,0.64,category_rule:wood,48.0,category_reference,43.96,47.962,144.0,dimension_scale_clamped:1
+desk,170,wood,0.64,category_rule:wood,35.0,category_reference,12.25,35.0,105.0,dimension_scale_clamped:9
+desk calendar,2,paper,0.68,category_rule:paper,0.4,category_reference,0.4,0.4,0.4,asset_dimensions_missing:2
+desk organizer,3,plastic,0.58,category_rule:plastic,1.5,category_reference,1.5,1.5,1.5,asset_dimensions_missing:3
+dining table,110,wood,0.64,category_rule:wood,35.0,category_reference,13.352,34.999,55.175,
+dish rack,1,steel,0.7,category_rule:steel,8.0,category_reference,8.0,8.0,8.0,
+dishwasher,6,steel,0.68,category_rule:steel,45.0,category_reference,41.09,44.999,130.171,
+dollhouse,5,wood,0.64,category_rule:wood,4.0,category_reference,2.331,4.0,11.749,
+door,4,wood,0.64,category_rule:wood,25.0,category_reference,18.104,24.998,29.178,
+doorbell,2,plastic,0.58,category_rule:plastic,0.5,category_reference,0.376,0.493,0.61,
+doormat,4,fabric,0.5,category_rule:fabric,2.0,category_reference,2.0,2.0,2.0,asset_dimensions_missing:4;low_material_confidence:4
+double bed,10,wood,0.64,category_rule:wood,48.0,category_reference,29.463,47.999,58.569,
+double door,1,wood,0.64,category_rule:wood,25.0,category_reference,25.0,25.0,25.0,
+drawer,1,wood,0.64,category_rule:wood,1.5,category_reference,1.5,1.5,1.5,
+drawer unit,3,wood,0.64,category_rule:wood,25.0,category_reference,19.959,25.0,75.0,dimension_scale_clamped:1
+"drawer unit.n.01,file",13,wood,0.64,category_rule:wood,25.0,category_reference,18.4,25.0,41.183,
+dressing table,10,wood,0.64,category_rule:wood,12.0,category_reference,8.416,11.991,18.97,
+drum,1,fabric,0.5,category_rule:fabric,4.0,category_reference,4.0,4.0,4.0,low_material_confidence:1
+dryer,1,steel,0.68,category_rule:steel,70.0,category_reference,70.0,70.0,70.0,asset_dimensions_missing:1
+drying rack,4,steel,0.7,category_rule:steel,8.0,category_reference,6.062,7.971,14.841,
+dvd player,2,steel,0.7,category_rule:steel,1.5,category_reference,1.2,1.486,1.772,
+earphone,2,plastic,0.58,category_rule:plastic,0.5,category_reference,0.5,0.5,0.5,asset_dimensions_missing:2
+easel,3,wood,0.64,category_rule:wood,1.5,category_reference,0.525,1.5,2.676,dimension_scale_clamped:1
+easy chair,36,fabric,0.58,category_rule:fabric,25.0,category_reference,13.126,24.997,42.237,
+electric fan,2,steel,0.68,category_rule:steel,8.0,category_reference,2.8,7.514,12.229,dimension_scale_clamped:1
+electric frying pan,1,steel,0.7,category_rule:steel,2.0,category_reference,2.0,2.0,2.0,
+elevator,1,steel,0.68,category_rule:steel,800.0,category_reference,800.0,800.0,800.0,
+end table,181,wood,0.64,category_rule:wood,12.0,category_reference,4.295,12.0,35.786,
+espresso maker,9,steel,0.7,category_rule:steel,3.0,category_reference,1.05,3.0,9.0,dimension_scale_clamped:4
+exercise bike,11,steel,0.68,category_rule:steel,30.0,category_reference,27.185,30.0,57.73,
+fan,1,steel,0.68,category_rule:steel,8.0,category_reference,8.0,8.0,8.0,
+faucet,19,steel,0.68,category_rule:steel,2.0,category_reference,0.7,2.0,6.0,dimension_scale_clamped:3
+fence,15,steel,0.68,category_rule:steel,25.0,category_reference,25.0,25.0,25.0,asset_dimensions_missing:15
+file,3,plastic,0.5,category_rule:plastic,1.5,category_reference,0.936,1.5,2.014,low_material_confidence:3
+firepit,10,stone,0.62,category_rule:stone,30.0,category_reference,10.5,29.998,40.528,dimension_scale_clamped:1
+fireplace,43,stone,0.62,category_rule:stone,18.0,category_reference,6.3,18.0,54.0,dimension_scale_clamped:9
+flat bench,5,wood,0.64,category_rule:wood,18.0,category_reference,6.3,18.0,20.89,dimension_scale_clamped:1
+floor lamp,135,steel,0.68,category_rule:steel,5.0,category_reference,1.75,5.0,15.0,dimension_scale_clamped:7
+floor mirror,19,glass,0.82,category_rule:glass,8.0,category_reference,4.789,8.0,11.013,
+flower,25,fabric,0.5,category_rule:fabric,0.4,category_reference,0.4,0.4,0.4,asset_dimensions_missing:25;low_material_confidence:25
+flower in vase,81,ceramic,0.7,category_rule:ceramic,3.0,category_reference,3.0,3.0,3.0,asset_dimensions_missing:81
+folding chair,1,wood,0.64,category_rule:wood,12.0,category_reference,12.0,12.0,12.0,
+foosball table,3,wood,0.64,category_rule:wood,18.0,category_reference,17.723,18.0,23.025,
+football,1,plastic,0.58,category_rule:plastic,1.5,category_reference,1.5,1.5,1.5,asset_dimensions_missing:1
+footstool,95,wood,0.64,category_rule:wood,4.0,category_reference,1.767,4.0,8.572,
+frying pan,2,steel,0.7,category_rule:steel,2.0,category_reference,1.436,1.964,2.493,
+"game table.n.01,chessboard",1,wood,0.64,category_rule:wood,12.0,category_reference,12.0,12.0,12.0,
+garage door,3,wood,0.64,category_rule:wood,25.0,category_reference,25.0,25.0,26.069,
+gate,4,wood,0.64,category_rule:wood,25.0,category_reference,16.129,24.994,30.029,
+gazebo,10,wood,0.64,category_rule:wood,120.0,category_reference,83.525,120.0,158.364,
+gift box,12,cardboard,0.7,category_rule:cardboard,0.75,category_reference,0.75,0.75,0.75,asset_dimensions_missing:12
+glass,39,glass,0.82,category_rule:glass,1.5,category_reference,1.5,1.5,1.5,asset_dimensions_missing:39
+globe,7,plastic,0.62,category_rule:plastic,1.5,category_reference,1.5,1.5,1.5,asset_dimensions_missing:7
+grab bar,3,steel,0.7,category_rule:steel,8.0,category_reference,8.0,8.0,8.0,
+grandfather clock,3,plastic,0.62,category_rule:plastic,3.0,category_reference,1.61,3.0,3.0,
+greenhouse,2,glass,0.56,category_rule:glass,120.0,category_reference,109.782,119.791,129.8,
+guitar,9,wood,0.64,category_rule:wood,4.0,category_reference,4.0,4.0,4.0,asset_dimensions_missing:9
+gym equipment,17,steel,0.68,category_rule:steel,30.0,category_reference,10.5,30.0,90.0,dimension_scale_clamped:2
+hall tree,5,wood,0.64,category_rule:wood,4.0,category_reference,3.302,4.0,4.285,
+hammock,7,fabric,0.76,category_rule:fabric,1.5,category_reference,0.901,1.5,2.142,
+hamper,46,fabric,0.5,category_rule:fabric,3.0,category_reference,1.05,3.0,6.268,dimension_scale_clamped:1;low_material_confidence:46
+hand glass,1,glass,0.82,category_rule:glass,1.5,category_reference,1.5,1.5,1.5,
+handcart,4,steel,0.68,category_rule:steel,4.0,category_reference,1.4,3.784,6.742,dimension_scale_clamped:1
+handle,1,steel,0.68,category_rule:steel,0.5,category_reference,0.5,0.5,0.5,asset_dimensions_missing:1
+hanging cabinet,79,wood,0.64,category_rule:wood,42.0,category_reference,14.7,42.0,126.0,dimension_scale_clamped:8
+headboard,10,wood,0.64,category_rule:wood,5.0,category_reference,5.0,5.0,5.0,asset_dimensions_missing:10
+heating system,8,steel,0.68,category_rule:steel,12.0,category_reference,4.2,11.954,15.561,dimension_scale_clamped:2
+hedge,3,plastic,0.62,category_rule:plastic,5.0,category_reference,5.0,5.0,5.0,asset_dimensions_missing:3
+highchair,4,wood,0.64,category_rule:wood,4.0,category_reference,2.048,3.989,4.749,
+hobby,2,plastic,0.5,category_rule:plastic,0.5,category_reference,0.5,0.5,0.5,asset_dimensions_missing:2;low_material_confidence:2
+hook,4,steel,0.7,category_rule:steel,0.75,category_reference,0.75,0.75,0.75,
+hot tub,3,concrete,0.5,category_rule:concrete,180.0,category_reference,63.0,180.0,333.65,dimension_scale_clamped:1;low_material_confidence:3
+hourglass,2,glass,0.82,category_rule:glass,0.5,category_reference,0.438,0.498,0.558,
+ironing board,1,steel,0.68,category_rule:steel,3.0,category_reference,3.0,3.0,3.0,
+jar,21,ceramic,0.7,category_rule:ceramic,1.5,category_reference,1.5,1.5,1.5,asset_dimensions_missing:21
+jewelry box,3,wood,0.64,category_rule:wood,1.5,category_reference,0.587,1.5,2.58,
+jug,11,glass,0.82,category_rule:glass,0.75,category_reference,0.262,0.75,1.872,dimension_scale_clamped:2
+kettle,11,steel,0.68,category_rule:steel,3.0,category_reference,1.3,3.0,6.044,
+king bed,3,wood,0.64,category_rule:wood,48.0,category_reference,42.592,48.0,84.967,
+kitchen appliance,8,steel,0.7,category_rule:steel,8.0,category_reference,3.996,7.999,18.252,
+"kitchen appliance.n.01,slicer",1,steel,0.7,category_rule:steel,8.0,category_reference,8.0,8.0,8.0,
+kitchen cabinet,151,wood,0.64,category_rule:wood,42.0,category_reference,14.7,42.0,126.0,dimension_scale_clamped:14
+kitchen island,52,wood,0.64,category_rule:wood,42.0,category_reference,24.549,42.0,89.642,
+kitchen scale,10,steel,0.68,category_rule:steel,2.0,category_reference,0.7,1.985,4.171,dimension_scale_clamped:1
+kitchen timer,2,plastic,0.58,category_rule:plastic,0.5,category_reference,0.452,0.499,0.546,
+knocker,1,steel,0.68,category_rule:steel,0.75,category_reference,0.75,0.75,0.75,
+l-shaped couch,30,fabric,0.58,category_rule:fabric,90.0,category_reference,55.608,89.981,135.396,
+ladder,3,wood,0.64,category_rule:wood,12.0,category_reference,10.675,12.0,13.62,
+ladder bookcase,4,wood,0.72,category_rule:wood,42.0,category_reference,31.507,41.983,47.779,
+lamp,2,steel,0.68,category_rule:steel,5.0,category_reference,3.383,4.885,6.386,
+lantern,35,steel,0.68,category_rule:steel,5.0,category_reference,5.0,5.0,5.0,asset_dimensions_missing:35
+laptop,10,plastic,0.62,category_rule:plastic,3.0,category_reference,2.94,3.0,3.183,
+lawn mower,1,steel,0.68,category_rule:steel,12.0,category_reference,12.0,12.0,12.0,
+lectern,1,wood,0.64,category_rule:wood,4.0,category_reference,4.0,4.0,4.0,
+"letter.n.02,wall decor",55,paper,0.68,category_rule:paper,2.0,category_reference,2.0,2.0,2.0,asset_dimensions_missing:55
+loudspeaker,16,plastic,0.62,category_rule:plastic,8.0,category_reference,8.0,8.0,8.0,asset_dimensions_missing:16
+luggage rack,2,steel,0.7,category_rule:steel,8.0,category_reference,7.813,7.999,8.185,
+magazine,1,paper,0.68,category_rule:paper,2.0,category_reference,2.0,2.0,2.0,asset_dimensions_missing:1
+magazine rack,2,steel,0.7,category_rule:steel,8.0,category_reference,6.803,7.959,9.114,
+magnet,1,plastic,0.62,category_rule:plastic,0.25,category_reference,0.25,0.25,0.25,asset_dimensions_missing:1
+mailbox,3,steel,0.68,category_rule:steel,4.0,category_reference,2.998,4.0,4.0,
+makeup mirror,12,glass,0.82,category_rule:glass,8.0,category_reference,4.871,7.999,22.544,
+mantel,1,wood,0.64,category_rule:wood,10.0,category_reference,10.0,10.0,10.0,
+mantel clock,28,plastic,0.62,category_rule:plastic,3.0,category_reference,3.0,3.0,3.0,asset_dimensions_missing:28
+"mantel clock.n.01,radio receiver",2,plastic,0.62,category_rule:plastic,3.0,category_reference,3.0,3.0,3.0,asset_dimensions_missing:2
+mat,13,fabric,0.76,category_rule:fabric,2.0,category_reference,1.156,2.0,6.0,dimension_scale_clamped:3
+mattress,2,foam,0.78,category_rule:foam,18.0,category_reference,11.434,17.477,23.521,
+media player,1,steel,0.7,category_rule:steel,1.5,category_reference,1.5,1.5,1.5,
+medicine chest,6,wood,0.64,category_rule:wood,8.0,category_reference,5.601,7.999,12.196,
+microphone,1,steel,0.7,category_rule:steel,0.5,category_reference,0.5,0.5,0.5,
+microwave,9,steel,0.68,category_rule:steel,12.0,category_reference,10.11,12.0,36.0,dimension_scale_clamped:2
+mirror,13,glass,0.82,category_rule:glass,8.0,category_reference,2.8,8.0,24.0,dimension_scale_clamped:3
+mixer,4,steel,0.68,category_rule:steel,3.0,category_reference,3.0,3.0,9.0,dimension_scale_clamped:1
+mixing bowl,1,ceramic,0.7,category_rule:ceramic,1.5,category_reference,1.5,1.5,1.5,asset_dimensions_missing:1
+mobile,9,plastic,0.58,category_rule:plastic,1.5,category_reference,1.5,1.5,1.5,asset_dimensions_missing:9
+monitor,6,plastic,0.62,category_rule:plastic,8.0,category_reference,6.28,7.998,14.953,
+motorcycle,4,steel,0.68,category_rule:steel,120.0,category_reference,1.0,119.674,145.284,
+mousepad,1,rubber,0.76,category_rule:rubber,0.2,category_reference,0.2,0.2,0.2,
+music stand,1,steel,0.68,category_rule:steel,2.0,category_reference,2.0,2.0,2.0,
+napkin,4,fabric,0.76,category_rule:fabric,0.5,category_reference,0.5,0.5,0.5,asset_dimensions_missing:4
+net,2,plastic,0.62,category_rule:plastic,4.0,category_reference,4.0,4.0,4.0,asset_dimensions_missing:2
+nightstand,169,wood,0.64,category_rule:wood,12.0,category_reference,4.2,12.0,36.0,dimension_scale_clamped:13
+notebook,12,paper,0.68,category_rule:paper,0.5,category_reference,0.5,0.5,0.5,asset_dimensions_missing:12
+ottoman,33,fabric,0.58,category_rule:fabric,8.0,category_reference,5.983,8.0,24.0,dimension_scale_clamped:1
+oven,2,steel,0.68,category_rule:steel,60.0,category_reference,29.849,56.8,83.75,
+overnighter,3,fabric,0.62,category_rule:fabric,1.5,category_reference,1.125,1.5,1.676,
+pan,1,steel,0.7,category_rule:steel,2.0,category_reference,2.0,2.0,2.0,asset_dimensions_missing:1
+paper organizer,5,wood,0.72,category_rule:wood,2.0,category_reference,1.514,2.0,4.48,
+"paper towel.n.01,paper towel holder",1,paper,0.68,category_rule:paper,0.8,category_reference,0.8,0.8,0.8,
+paperweight,1,stone,0.6,category_rule:stone,0.5,category_reference,0.5,0.5,0.5,asset_dimensions_missing:1
+pathway light,9,steel,0.68,category_rule:steel,4.0,category_reference,4.0,4.0,4.0,asset_dimensions_missing:9
+pedestal sink,4,ceramic,0.7,category_rule:ceramic,12.0,category_reference,10.518,11.999,14.854,
+pen holder,1,plastic,0.62,category_rule:plastic,0.75,category_reference,0.75,0.75,0.75,
+pendant lamp,191,steel,0.68,category_rule:steel,5.0,category_reference,5.0,5.0,5.0,asset_dimensions_missing:191
+pepper mill,2,wood,0.64,category_rule:wood,1.5,category_reference,1.198,1.486,1.774,
+"pestle.n.03,mortar",3,stone,0.6,category_rule:stone,1.5,category_reference,1.175,1.5,1.64,
+pet bed,11,fabric,0.66,category_rule:fabric,5.0,category_reference,5.0,5.0,5.0,asset_dimensions_missing:11
+pet bowl,6,ceramic,0.7,category_rule:ceramic,1.5,category_reference,0.525,1.424,3.998,dimension_scale_clamped:2
+pet house,3,wood,0.72,category_rule:wood,4.0,category_reference,3.678,4.0,4.0,
+piano,5,wood,0.64,category_rule:wood,120.0,category_reference,120.0,120.0,120.0,asset_dimensions_missing:5
+picnic rug,9,fabric,0.76,category_rule:fabric,3.0,category_reference,1.8,3.0,4.357,
+picnic table,1,wood,0.64,category_rule:wood,18.0,category_reference,18.0,18.0,18.0,
+picture frame,88,wood,0.72,category_rule:wood,2.0,category_reference,2.0,2.0,2.0,asset_dimensions_missing:88
+pinball machine,2,plastic,0.62,category_rule:plastic,18.0,category_reference,18.0,18.0,18.0,
+pitcher,5,ceramic,0.7,category_rule:ceramic,0.75,category_reference,0.403,0.75,1.145,
+place mat,15,fabric,0.76,category_rule:fabric,0.2,category_reference,0.2,0.2,0.2,asset_dimensions_missing:15
+plant,44,ceramic,0.7,category_rule:ceramic,5.0,category_reference,5.0,5.0,5.0,asset_dimensions_missing:44
+plant stand,4,ceramic,0.7,category_rule:ceramic,5.0,category_reference,5.0,5.0,5.0,asset_dimensions_missing:4
+planter,23,ceramic,0.7,category_rule:ceramic,1.5,category_reference,1.5,1.5,1.5,asset_dimensions_missing:23
+plate,20,ceramic,0.7,category_rule:ceramic,1.5,category_reference,1.5,1.5,1.5,asset_dimensions_missing:20
+play area,4,plastic,0.62,category_rule:plastic,10.0,category_reference,4.456,9.997,10.4,
+playhouse,6,wood,0.64,category_rule:wood,4.0,category_reference,1.4,3.92,8.559,dimension_scale_clamped:2
+"playhouse.n.01,play area",1,plastic,0.62,category_rule:plastic,4.0,category_reference,4.0,4.0,4.0,
+playpen,1,plastic,0.62,category_rule:plastic,8.0,category_reference,8.0,8.0,8.0,
+plaything,9,plastic,0.62,category_rule:plastic,1.5,category_reference,1.5,1.5,1.5,asset_dimensions_missing:9
+plush toy,25,fabric,0.76,category_rule:fabric,1.5,category_reference,1.5,1.5,1.5,asset_dimensions_missing:25
+pond,1,glass,0.56,category_rule:glass,10.0,category_reference,10.0,10.0,10.0,
+pool table,6,wood,0.64,category_rule:wood,180.0,category_reference,69.697,180.0,266.887,
+postbox,1,steel,0.68,category_rule:steel,4.0,category_reference,4.0,4.0,4.0,
+"poster.n.01,wall art",6,paper,0.68,category_rule:paper,2.0,category_reference,2.0,2.0,2.0,asset_dimensions_missing:6
+potholder,2,fabric,0.76,category_rule:fabric,0.5,category_reference,0.5,0.5,0.5,asset_dimensions_missing:2
+potted plant,294,ceramic,0.7,category_rule:ceramic,5.0,category_reference,5.0,5.0,5.0,asset_dimensions_missing:294
+power saw,1,steel,0.7,category_rule:steel,3.0,category_reference,3.0,3.0,3.0,
+printer,10,plastic,0.62,category_rule:plastic,3.0,category_reference,1.871,2.996,9.0,dimension_scale_clamped:2
+projector,2,plastic,0.62,category_rule:plastic,3.0,category_reference,3.0,3.0,3.0,
+punch bowl,1,ceramic,0.7,category_rule:ceramic,1.5,category_reference,1.5,1.5,1.5,
+punching bag,3,fabric,0.76,category_rule:fabric,1.5,category_reference,1.109,1.5,1.695,
+purse,5,fabric,0.76,category_rule:fabric,1.5,category_reference,1.5,1.5,1.5,asset_dimensions_missing:5
+quilt,5,fabric,0.76,category_rule:fabric,1.5,category_reference,1.5,1.5,1.5,asset_dimensions_missing:5
+rack,4,steel,0.68,category_rule:steel,8.0,category_reference,6.443,8.0,11.715,
+radiator,6,steel,0.68,category_rule:steel,12.0,category_reference,5.137,11.706,18.721,
+radio receiver,8,plastic,0.62,category_rule:plastic,3.0,category_reference,3.0,3.0,3.0,asset_dimensions_missing:8
+"radio receiver.n.01,alarm clock",1,plastic,0.62,category_rule:plastic,3.0,category_reference,3.0,3.0,3.0,asset_dimensions_missing:1
+railing,28,steel,0.68,category_rule:steel,12.0,category_reference,4.2,11.998,36.0,dimension_scale_clamped:2
+range hood,27,steel,0.68,category_rule:steel,4.0,category_reference,4.0,4.0,4.0,asset_dimensions_missing:27
+reamer,1,steel,0.68,category_rule:steel,0.25,category_reference,0.25,0.25,0.25,
+recliner,1,fabric,0.58,category_rule:fabric,25.0,category_reference,25.0,25.0,25.0,
+record player,5,steel,0.7,category_rule:steel,3.0,category_reference,2.223,3.0,6.871,
+refrigerator,54,steel,0.68,category_rule:steel,90.0,category_reference,31.5,89.878,168.657,dimension_scale_clamped:1
+roaster,3,steel,0.68,category_rule:steel,3.0,category_reference,1.523,3.0,3.701,
+rock,6,stone,0.6,category_rule:stone,1.5,category_reference,1.5,1.5,1.5,asset_dimensions_missing:6
+rocking chair,23,wood,0.64,category_rule:wood,12.0,category_reference,4.622,12.0,21.487,
+roof,5,concrete,0.5,category_rule:concrete,12.0,category_reference,12.0,12.0,12.0,asset_dimensions_missing:5;low_material_confidence:5
+room divider,4,wood,0.64,category_rule:wood,25.0,category_reference,8.75,23.398,44.839,dimension_scale_clamped:1
+round daybed,1,wood,0.64,category_rule:wood,48.0,category_reference,48.0,48.0,48.0,
+rug,644,fabric,0.76,category_rule:fabric,8.0,category_reference,2.8,8.0,24.0,asset_dimensions_missing:2;dimension_scale_clamped:77
+safe,4,steel,0.68,category_rule:steel,30.0,category_reference,10.5,29.995,33.909,dimension_scale_clamped:1
+salver,1,ceramic,0.52,category_rule:ceramic,1.5,category_reference,1.5,1.5,1.5,asset_dimensions_missing:1;low_material_confidence:1
+saucepan,2,steel,0.7,category_rule:steel,2.0,category_reference,1.832,1.997,2.161,
+sauna,1,concrete,0.5,category_rule:concrete,180.0,category_reference,180.0,180.0,180.0,low_material_confidence:1
+scooter,2,steel,0.68,category_rule:steel,12.0,category_reference,5.91,11.348,16.786,
+sculpture,47,stone,0.62,category_rule:stone,5.0,category_reference,5.0,5.0,5.0,asset_dimensions_missing:47
+seat cushion,20,fabric,0.76,category_rule:fabric,1.5,category_reference,1.5,1.5,1.5,asset_dimensions_missing:20
+serving cart,20,steel,0.68,category_rule:steel,4.0,category_reference,2.571,3.999,5.851,
+sewing machine,3,steel,0.68,category_rule:steel,12.0,category_reference,9.876,12.0,15.479,
+shed,2,wood,0.64,category_rule:wood,120.0,category_reference,106.747,119.652,132.557,
+shelving,17,wood,0.64,category_rule:wood,12.0,category_reference,8.924,12.0,17.293,
+shoe,24,plastic,0.5,category_rule:plastic,1.0,category_reference,1.0,1.0,1.0,asset_dimensions_missing:24;low_material_confidence:24
+shoe rack,13,steel,0.68,category_rule:steel,1.0,category_reference,0.494,1.0,1.984,
+"shoe rack.n.01,cabinet",9,wood,0.72,category_rule:wood,1.0,category_reference,0.688,1.0,1.737,
+shoebox,1,plastic,0.62,category_rule:plastic,0.75,category_reference,0.75,0.75,0.75,
+shopping bag,6,fabric,0.76,category_rule:fabric,1.5,category_reference,1.5,1.5,1.5,asset_dimensions_missing:6
+shower caddy,2,steel,0.7,category_rule:steel,2.0,category_reference,0.811,1.853,2.895,
+shower curtain,15,fabric,0.76,category_rule:fabric,3.0,category_reference,2.853,3.0,4.914,
+shower faucet,6,steel,0.68,category_rule:steel,2.0,category_reference,0.7,1.998,3.004,dimension_scale_clamped:2
+shower pan,1,steel,0.7,category_rule:steel,12.0,category_reference,12.0,12.0,12.0,
+shower stall,18,glass,0.56,category_rule:glass,12.0,category_reference,8.352,12.0,18.751,
+showerhead,31,steel,0.68,category_rule:steel,2.0,category_reference,0.7,2.0,3.845,dimension_scale_clamped:5
+sink,22,ceramic,0.7,category_rule:ceramic,12.0,category_reference,4.2,11.992,24.99,dimension_scale_clamped:1
+sink cabinet,68,wood,0.72,category_rule:wood,42.0,category_reference,19.284,42.0,106.256,
+sink stand,9,ceramic,0.7,category_rule:ceramic,12.0,category_reference,7.495,12.0,18.054,
+skateboard,1,wood,0.64,category_rule:wood,5.0,category_reference,5.0,5.0,5.0,
+slide,1,plastic,0.62,category_rule:plastic,4.0,category_reference,4.0,4.0,4.0,
+smoke detector,1,plastic,0.58,category_rule:plastic,0.5,category_reference,0.5,0.5,0.5,
+soap,1,plastic,0.62,category_rule:plastic,0.75,category_reference,0.75,0.75,0.75,asset_dimensions_missing:1
+soap dish,9,ceramic,0.7,category_rule:ceramic,0.5,category_reference,0.5,0.5,0.5,asset_dimensions_missing:9
+soap dispenser,17,plastic,0.62,category_rule:plastic,2.0,category_reference,1.476,2.0,2.941,
+soccer ball,2,plastic,0.58,category_rule:plastic,1.5,category_reference,1.5,1.5,1.5,asset_dimensions_missing:2
+socket,6,plastic,0.62,category_rule:plastic,0.75,category_reference,0.598,0.743,0.924,
+soda can,1,plastic,0.62,category_rule:plastic,0.75,category_reference,0.75,0.75,0.75,asset_dimensions_missing:1
+sofa,214,fabric,0.58,category_rule:fabric,48.0,category_reference,16.8,48.0,144.0,dimension_scale_clamped:6
+space heater,1,steel,0.68,category_rule:steel,10.0,category_reference,10.0,10.0,10.0,
+spade,1,steel,0.68,category_rule:steel,1.5,category_reference,1.5,1.5,1.5,
+spectacles,3,glass,0.82,category_rule:glass,0.5,category_reference,0.5,0.5,0.5,asset_dimensions_missing:3
+spice holder,1,plastic,0.62,category_rule:plastic,0.75,category_reference,0.75,0.75,0.75,
+spice rack,1,steel,0.7,category_rule:steel,8.0,category_reference,8.0,8.0,8.0,
+spicemill,3,wood,0.64,category_rule:wood,1.5,category_reference,1.5,1.5,1.98,
+spoon,2,steel,0.7,category_rule:steel,0.5,category_reference,0.5,0.5,0.5,asset_dimensions_missing:2
+"stairway.n.01,stairs",25,wood,0.64,category_rule:wood,25.0,category_reference,8.75,25.0,75.0,dimension_scale_clamped:8
+step ladder,1,wood,0.64,category_rule:wood,12.0,category_reference,12.0,12.0,12.0,
+step stool,5,wood,0.64,category_rule:wood,8.0,category_reference,2.8,8.0,19.912,dimension_scale_clamped:1
+stool,63,wood,0.64,category_rule:wood,8.0,category_reference,2.8,8.0,15.001,dimension_scale_clamped:1
+storage bench,16,wood,0.64,category_rule:wood,18.0,category_reference,14.924,18.0,22.159,
+storage box,31,plastic,0.62,category_rule:plastic,5.0,category_reference,1.75,5.0,15.0,dimension_scale_clamped:11
+stove,7,steel,0.68,category_rule:steel,60.0,category_reference,60.0,60.0,60.0,asset_dimensions_missing:7
+"stove.n.01,oven",28,steel,0.68,category_rule:steel,60.0,category_reference,37.226,60.0,89.745,asset_dimensions_missing:2
+straight chair,17,wood,0.64,category_rule:wood,12.0,category_reference,6.22,12.0,20.652,
+strainer,1,steel,0.7,category_rule:steel,2.0,category_reference,2.0,2.0,2.0,asset_dimensions_missing:1
+streetlight,2,steel,0.68,category_rule:steel,4.0,category_reference,3.273,3.97,4.666,
+string lights,11,steel,0.68,category_rule:steel,1.5,category_reference,1.5,1.5,1.5,asset_dimensions_missing:11
+subwoofer,1,plastic,0.62,category_rule:plastic,8.0,category_reference,8.0,8.0,8.0,
+sugar bowl,1,ceramic,0.7,category_rule:ceramic,1.5,category_reference,1.5,1.5,1.5,
+surfboard,5,wood,0.64,category_rule:wood,5.0,category_reference,5.0,5.0,5.0,asset_dimensions_missing:5
+swimming pool,8,concrete,0.5,category_rule:concrete,180.0,category_reference,165.97,179.995,540.0,dimension_scale_clamped:1;low_material_confidence:8
+swing,2,wood,0.64,category_rule:wood,4.0,category_reference,2.034,3.796,5.557,
+swing bench,9,wood,0.64,category_rule:wood,18.0,category_reference,6.3,18.0,20.316,dimension_scale_clamped:1
+swing chair,8,wood,0.64,category_rule:wood,12.0,category_reference,8.57,12.0,16.823,
+"swing.n.02,play area",1,plastic,0.62,category_rule:plastic,4.0,category_reference,4.0,4.0,4.0,
+switch,3,plastic,0.62,category_rule:plastic,0.75,category_reference,0.75,0.75,1.115,
+"switch.n.01,dimmer",3,plastic,0.62,category_rule:plastic,0.75,category_reference,0.75,0.75,0.75,
+swivel chair,111,wood,0.64,category_rule:wood,12.0,category_reference,7.979,12.0,19.295,
+"swivel chair.n.01,ball chair",1,plastic,0.58,category_rule:plastic,12.0,category_reference,12.0,12.0,12.0,
+table,115,wood,0.64,category_rule:wood,12.0,category_reference,4.2,12.0,36.0,dimension_scale_clamped:6
+table lamp,251,steel,0.68,category_rule:steel,5.0,category_reference,1.75,5.0,15.0,dimension_scale_clamped:37
+table mirror,8,glass,0.82,category_rule:glass,4.0,category_reference,2.545,3.993,12.0,dimension_scale_clamped:2
+table runner,7,fabric,0.66,category_rule:fabric,0.4,category_reference,0.4,0.4,0.4,asset_dimensions_missing:7
+table-tennis table,1,wood,0.64,category_rule:wood,18.0,category_reference,18.0,18.0,18.0,
+tablet computer,2,plastic,0.58,category_rule:plastic,2.0,category_reference,0.7,1.862,3.024,dimension_scale_clamped:1
+tapestry,1,fabric,0.76,category_rule:fabric,1.5,category_reference,1.5,1.5,1.5,asset_dimensions_missing:1
+teapot,9,ceramic,0.7,category_rule:ceramic,0.75,category_reference,0.75,0.75,0.75,asset_dimensions_missing:9
+telephone,12,plastic,0.62,category_rule:plastic,2.0,category_reference,0.7,2.0,6.0,dimension_scale_clamped:3
+telescope,1,glass,0.56,category_rule:glass,4.0,category_reference,4.0,4.0,4.0,
+television receiver,21,plastic,0.62,category_rule:plastic,8.0,category_reference,2.828,8.0,13.678,
+tent,2,fabric,0.5,category_rule:fabric,10.0,category_reference,4.148,9.287,14.427,low_material_confidence:2
+thermos,3,steel,0.68,category_rule:steel,1.5,category_reference,0.525,1.5,1.807,dimension_scale_clamped:1
+throw,29,fabric,0.76,category_rule:fabric,1.5,category_reference,1.5,1.5,1.5,asset_dimensions_missing:29
+throw pillow,416,fabric,0.76,category_rule:fabric,1.5,category_reference,1.5,1.5,1.5,asset_dimensions_missing:416
+timer,2,plastic,0.58,category_rule:plastic,0.5,category_reference,0.498,0.5,0.502,
+tissue box,9,cardboard,0.7,category_rule:cardboard,0.75,category_reference,0.75,0.75,0.75,asset_dimensions_missing:9
+toaster,13,steel,0.68,category_rule:steel,3.0,category_reference,2.307,3.0,4.827,
+toaster oven,1,steel,0.7,category_rule:steel,12.0,category_reference,12.0,12.0,12.0,
+toilet,34,ceramic,0.7,category_rule:ceramic,35.0,category_reference,27.418,35.0,44.747,
+toilet bag,1,fabric,0.62,category_rule:fabric,0.8,category_reference,0.8,0.8,0.8,asset_dimensions_missing:1
+toilet brush,4,steel,0.7,category_rule:steel,0.8,category_reference,0.8,0.8,0.8,asset_dimensions_missing:4
+"toilet brush.n.01,toilet brush holder",26,steel,0.7,category_rule:steel,0.8,category_reference,0.8,0.8,0.8,asset_dimensions_missing:26
+"toilet brush.n.01,toilet paper holder",1,steel,0.7,category_rule:steel,0.8,category_reference,0.8,0.8,0.8,asset_dimensions_missing:1
+toilet flush plate,3,steel,0.7,category_rule:steel,0.8,category_reference,0.8,0.8,0.8,
+toilet paper holder,4,steel,0.7,category_rule:steel,0.8,category_reference,0.8,0.8,0.8,asset_dimensions_missing:4
+"toilet paper holder.n.01,toilet tissue",3,steel,0.7,category_rule:steel,0.8,category_reference,0.8,0.8,0.8,asset_dimensions_missing:3
+toiletry,24,plastic,0.58,category_rule:plastic,1.5,category_reference,1.5,1.5,1.5,asset_dimensions_missing:24
+"toiletry.n.01,bottle",2,plastic,0.58,category_rule:plastic,1.5,category_reference,1.5,1.5,1.5,asset_dimensions_missing:2
+"toiletry.n.01,perfume.n.02,bottle",4,plastic,0.58,category_rule:plastic,1.5,category_reference,1.5,1.5,1.5,asset_dimensions_missing:4
+towel,17,fabric,0.76,category_rule:fabric,1.5,category_reference,1.5,1.5,1.5,asset_dimensions_missing:17
+towel rack,17,steel,0.7,category_rule:steel,8.0,category_reference,2.8,8.0,24.0,dimension_scale_clamped:5
+"towel rack.n.01,radiator",2,steel,0.7,category_rule:steel,12.0,category_reference,9.811,11.907,14.004,
+towel rail,2,steel,0.7,category_rule:steel,2.0,category_reference,1.311,1.948,2.585,
+towel ring,2,steel,0.7,category_rule:steel,1.5,category_reference,1.465,1.5,1.534,
+toy box,6,wood,0.72,category_rule:wood,1.5,category_reference,1.068,1.498,1.641,
+track lighting,7,steel,0.68,category_rule:steel,4.0,category_reference,4.0,4.0,4.0,asset_dimensions_missing:7
+trampoline,3,plastic,0.62,category_rule:plastic,4.0,category_reference,1.4,4.0,4.302,dimension_scale_clamped:1
+tray,8,plastic,0.5,category_rule:plastic,2.0,category_reference,2.0,2.0,2.0,asset_dimensions_missing:8;low_material_confidence:8
+treadmill,5,steel,0.68,category_rule:steel,30.0,category_reference,26.684,30.0,35.756,
+trellis,5,wood,0.64,category_rule:wood,4.0,category_reference,4.0,4.0,4.0,asset_dimensions_missing:5
+trunk,17,wood,0.64,category_rule:wood,8.0,category_reference,2.8,8.0,11.06,dimension_scale_clamped:4
+tumbler,8,glass,0.82,category_rule:glass,0.75,category_reference,0.75,0.75,0.75,asset_dimensions_missing:8
+tureen,1,ceramic,0.7,category_rule:ceramic,1.5,category_reference,1.5,1.5,1.5,
+tv stand,73,wood,0.64,category_rule:wood,25.0,category_reference,8.75,25.0,74.24,dimension_scale_clamped:2
+umbrella,18,fabric,0.5,category_rule:fabric,5.0,category_reference,1.75,5.0,9.32,dimension_scale_clamped:1;low_material_confidence:18
+umbrella stand,6,steel,0.68,category_rule:steel,5.0,category_reference,3.495,4.99,9.679,
+urinal,1,ceramic,0.7,category_rule:ceramic,15.0,category_reference,15.0,15.0,15.0,
+vacuum,4,steel,0.68,category_rule:steel,12.0,category_reference,4.2,11.669,29.406,dimension_scale_clamped:1
+valve,4,steel,0.68,category_rule:steel,0.5,category_reference,0.347,0.497,0.829,
+vase,140,ceramic,0.7,category_rule:ceramic,3.0,category_reference,3.0,3.0,3.0,asset_dimensions_missing:140
+video game console,1,steel,0.7,category_rule:steel,1.5,category_reference,1.5,1.5,1.5,
+videodisk,1,plastic,0.58,category_rule:plastic,0.5,category_reference,0.5,0.5,0.5,asset_dimensions_missing:1
+wall art,1091,paper,0.68,category_rule:paper,2.0,category_reference,0.7,2.0,6.0,asset_dimensions_missing:23;dimension_scale_clamped:265
+"wall art.n.01,sign",8,paper,0.68,category_rule:paper,2.0,category_reference,1.214,2.0,6.0,asset_dimensions_missing:1;dimension_scale_clamped:1
+wall calendar,2,paper,0.68,category_rule:paper,0.5,category_reference,0.474,0.499,0.525,
+wall clock,87,plastic,0.62,category_rule:plastic,3.0,category_reference,3.0,3.0,3.0,asset_dimensions_missing:87
+wall decor,30,paper,0.68,category_rule:paper,2.0,category_reference,2.0,2.0,2.0,asset_dimensions_missing:30
+wall hook,2,steel,0.7,category_rule:steel,0.5,category_reference,0.227,0.468,0.71,
+wall hook rack,30,steel,0.7,category_rule:steel,8.0,category_reference,2.8,7.998,24.0,dimension_scale_clamped:4
+wall lamp,118,steel,0.68,category_rule:steel,5.0,category_reference,1.75,5.0,15.0,dimension_scale_clamped:21
+wall mirror,255,glass,0.82,category_rule:glass,8.0,category_reference,2.8,8.0,24.0,dimension_scale_clamped:37
+wall mounted screen,22,plastic,0.62,category_rule:plastic,4.0,category_reference,1.4,3.999,8.536,dimension_scale_clamped:2
+wall organizer,4,wood,0.72,category_rule:wood,2.0,category_reference,0.7,1.992,2.249,dimension_scale_clamped:1
+wall panel,7,wood,0.64,category_rule:wood,5.0,category_reference,5.0,5.0,5.0,asset_dimensions_missing:7
+wall shelf,33,wood,0.64,category_rule:wood,8.0,category_reference,2.8,8.0,24.0,dimension_scale_clamped:4
+wall sign,22,paper,0.68,category_rule:paper,2.0,category_reference,2.0,2.0,2.0,asset_dimensions_missing:22
+wall socket,1,plastic,0.62,category_rule:plastic,0.75,category_reference,0.75,0.75,0.75,
+wall sticker,4,paper,0.68,category_rule:paper,0.5,category_reference,0.5,0.5,0.5,asset_dimensions_missing:4
+wall unit,1,wood,0.64,category_rule:wood,10.0,category_reference,10.0,10.0,10.0,
+wardrobe,17,wood,0.64,category_rule:wood,55.0,category_reference,23.239,55.0,131.48,
+washbasin,4,ceramic,0.7,category_rule:ceramic,15.0,category_reference,12.752,14.988,45.0,dimension_scale_clamped:1
+washer,20,steel,0.68,category_rule:steel,70.0,category_reference,24.889,70.0,80.67,
+"washer.n.03,dryer",1,steel,0.68,category_rule:steel,70.0,category_reference,70.0,70.0,70.0,
+water heater,2,steel,0.68,category_rule:steel,60.0,category_reference,30.467,56.923,83.379,
+water scooter,2,steel,0.68,category_rule:steel,18.0,category_reference,18.0,18.0,18.0,
+watering can,2,steel,0.68,category_rule:steel,2.0,category_reference,1.388,1.958,2.529,
+weight,17,steel,0.68,category_rule:steel,4.0,category_reference,1.593,4.0,12.0,dimension_scale_clamped:6
+whiteboard,5,paper,0.68,category_rule:paper,4.0,category_reference,1.4,4.0,12.0,dimension_scale_clamped:3
+wind chime,2,steel,0.68,category_rule:steel,4.0,category_reference,4.0,4.0,4.0,asset_dimensions_missing:2
+window,2,glass,0.82,category_rule:glass,4.0,category_reference,3.266,3.969,4.672,
+window blind,24,fabric,0.76,category_rule:fabric,1.5,category_reference,1.5,1.5,1.5,asset_dimensions_missing:24
+window curtain,92,fabric,0.76,category_rule:fabric,3.0,category_reference,1.05,2.999,8.258,dimension_scale_clamped:7
+window shade,35,fabric,0.76,category_rule:fabric,1.5,category_reference,1.5,1.5,1.5,asset_dimensions_missing:35
+wine bottle,1,glass,0.82,category_rule:glass,1.5,category_reference,1.5,1.5,1.5,asset_dimensions_missing:1
+wine bucket,2,steel,0.68,category_rule:steel,2.0,category_reference,1.581,1.98,2.379,
+wine rack,6,steel,0.68,category_rule:steel,8.0,category_reference,2.8,7.997,10.002,dimension_scale_clamped:1
+wineglass,2,glass,0.82,category_rule:glass,0.75,category_reference,0.75,0.75,0.75,asset_dimensions_missing:2
+wok,1,steel,0.7,category_rule:steel,2.0,category_reference,2.0,2.0,2.0,
+workbench,2,wood,0.64,category_rule:wood,18.0,category_reference,13.532,17.749,21.967,
+wreath,12,fabric,0.5,category_rule:fabric,1.5,category_reference,1.5,1.5,1.5,asset_dimensions_missing:12;low_material_confidence:12
+xxxwall shelving,2,wood,0.64,category_rule:wood,12.0,category_reference,8.602,11.785,14.968,

@@ -78,7 +78,9 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         snapped = agent._snap_transform_to_wall(SimpleNamespace(), transform, "west")
 
         self.assertIsInstance(snapped, RigidTransform)
-        self.assertLess(snapped.translation()[0], 0.0)
+        # The object bounds start outside the west boundary, so moving the
+        # object's origin by a positive offset is the correct inward snap.
+        self.assertGreater(snapped.translation()[0], 0.0)
 
     @unittest.skipIf(
         StatefulFurnitureAgent is None,

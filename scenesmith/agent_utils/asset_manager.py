@@ -6,7 +6,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import trimesh
@@ -41,11 +41,18 @@ from scenesmith.agent_utils.image_generation import (
     AssetOperationType,
     create_image_generator,
 )
+from scenesmith.agent_utils.materials import load_materials
 from scenesmith.agent_utils.materials_retrieval_server import MaterialsRetrievalClient
 from scenesmith.agent_utils.mesh_canonicalization import canonicalize_mesh
+from scenesmith.agent_utils.mesh_frame import (
+    gltf_y_up_bounds_to_scene_z_up,
+    scene_dimensions_to_gltf_y_up,
+    validate_uniform_dimension_fit,
+)
 from scenesmith.agent_utils.mesh_physics_analyzer import (
     MeshPhysicsAnalysis,
     analyze_mesh_orientation_and_material,
+    build_deterministic_hssd_physics,
 )
 from scenesmith.agent_utils.mesh_utils import (
     load_mesh_as_trimesh,
@@ -75,6 +82,66 @@ if TYPE_CHECKING:
     from scenesmith.agent_utils.blender import BlenderServer
 
 console_logger = logging.getLogger(__name__)
+
+_HSSD_FRONT_AXIS_SOURCES = {
+    "scenebenchmark_critic",
+    "critic",
+    "annotation",
+    "annotations",
+}
+_VALID_HORIZONTAL_FRONT_AXES = {"+X", "-X", "+Y", "-Y"}
+
+
+def _get_hssd_front_axis_annotation_record(
+    hssd_id: str, lookup_path: str | Path | None = None
+) -> dict[str, Any] | None:
+    """Load one HSSD front-axis record from the SceneBenchmark critic lookup."""
+    if lookup_path:
+        from scenesmith.scenebenchmark_critic.asset_library_annotations import (
+            AssetLibraryAnnotationStore,
+        )
+
+        return AssetLibraryAnnotationStore(lookup_path=lookup_path).get(hssd_id)
+
+    from scenesmith.scenebenchmark_critic.asset_library_annotations import (
+        get_hssd_asset_annotations,
+    )
+
+    return get_hssd_asset_annotations(hssd_id)
+
+
+def _normalize_axis_string(value: Any) -> str | None:
+    text = str(value or "").strip().upper().replace(" ", "")
+    if text in _VALID_HORIZONTAL_FRONT_AXES:
+        return text
+    if len(text) == 1 and text in {"X", "Y"}:
+        return f"+{text}"
+    return None
+
+
+def _hsm_vector_to_blender_front_axis(value: Any) -> str | None:
+    """Convert HSSD/HSM asset-local front vector to a SceneSmith axis."""
+    if not isinstance(value, (list, tuple)) or len(value) != 3:
+        return None
+    try:
+        x_hsm, y_hsm, z_hsm = (float(value[0]), float(value[1]), float(value[2]))
+    except (TypeError, ValueError):
+        return None
+
+    # HSM is X-right/Y-up/Z-forward; SceneSmith is X-right/Y-forward/Z-up.
+    x_blender = x_hsm
+    y_blender = -z_hsm
+    z_blender = y_hsm
+    horizontal = {"X": x_blender, "Y": y_blender}
+    axis_name, axis_value = max(horizontal.items(), key=lambda item: abs(item[1]))
+    if abs(axis_value) < 1e-6 or abs(z_blender) > abs(axis_value):
+        return None
+    return f"{'+' if axis_value >= 0 else '-'}{axis_name}"
+
+
+def _normalize_hssd_annotation_front_axis(value: Any) -> str | None:
+    """Normalize a SceneBenchmark front annotation to +X/-X/+Y/-Y."""
+    return _normalize_axis_string(value) or _hsm_vector_to_blender_front_axis(value)
 
 
 @dataclass
@@ -353,6 +420,65 @@ class AssetManager:
         self.last_duplicate_info: dict[str, list[int]] | None = None
         self._fatal_asset_error: str | None = None
 
+    def _analyze_mesh_physics(
+        self,
+        *,
+        mesh_path: Path,
+        asset_source: str,
+        object_name: str,
+        debug_output_dir: Path,
+    ) -> MeshPhysicsAnalysis:
+        """Resolve asset physics without making HSSD depend on VLM indexing."""
+        if asset_source == "hssd" and str(
+            getattr(self.cfg.asset_manager, "hssd_physics_analysis_mode", "deterministic")
+        ).lower() == "deterministic":
+            physics = build_deterministic_hssd_physics(
+                mesh_path, object_name=object_name
+            )
+            console_logger.info(
+                "Using deterministic HSSD physics for %s: material=%s, mass=%.1fkg",
+                object_name,
+                physics.material,
+                physics.mass_kg,
+            )
+            return physics
+        return analyze_mesh_orientation_and_material(
+            mesh_path=mesh_path,
+            vlm_service=self.vlm_service,
+            cfg=self.cfg,
+            elevation_degrees=self.side_view_elevation_degrees,
+            blender_server=self.blender_server,
+            num_side_views=self.num_side_views_for_physics_analysis,
+            prompt_type="hssd" if asset_source == "hssd" else "generated",
+            include_vertical_views=asset_source != "hssd",
+            debug_output_dir=debug_output_dir,
+        )
+
+    def _scale_and_measure_canonical_mesh(
+        self,
+        *,
+        canonical_path: Path,
+        final_path: Path,
+        desired_dimensions: list[float] | tuple[float, ...] | None,
+    ) -> tuple[Path, np.ndarray, np.ndarray, float]:
+        """Scale canonical Y-up glTF and expose SceneSmith-frame bounds."""
+        applied_scale = 1.0
+        if desired_dimensions is not None:
+            final_path, applied_scale = scale_mesh_uniformly_to_dimensions(
+                mesh_path=canonical_path,
+                desired_dimensions=scene_dimensions_to_gltf_y_up(desired_dimensions),
+                output_path=final_path,
+                min_dimension_meters=self.min_mesh_dimension_meters,
+                relative_threshold=self.mesh_relative_dimension_threshold,
+            )
+        else:
+            canonical_path.replace(final_path)
+        mesh = load_mesh_as_trimesh(final_path, force_merge=True)
+        bbox_min, bbox_max = gltf_y_up_bounds_to_scene_z_up(mesh.bounds)
+        if desired_dimensions is not None:
+            validate_uniform_dimension_fit(bbox_max - bbox_min, desired_dimensions)
+        return final_path, bbox_min, bbox_max, applied_scale
+
     @staticmethod
     def _sanitize_filename(name: str, max_length: int = 50) -> str:
         """Sanitize a name for use as a filename.
@@ -485,6 +611,200 @@ class AssetManager:
             f"threshold={threshold})"
         )
 
+    def _hssd_asset_annotation_config(self) -> tuple[str, str | Path | None]:
+        """Return the HSSD annotation source, accepting the legacy front key."""
+        annotation_cfg = self.cfg.asset_manager.get("hssd_asset_annotations")
+        if annotation_cfg is None:
+            annotation_cfg = self.cfg.asset_manager.get("hssd_front_axis", {})
+        annotation_cfg = annotation_cfg or {}
+        if isinstance(annotation_cfg, str):
+            return annotation_cfg.strip().lower(), None
+        source = str(annotation_cfg.get("source", "vlm") or "vlm").strip().lower()
+        lookup_path = annotation_cfg.get("annotation_lookup_path")
+        if lookup_path in ("", None):
+            lookup_path = None
+        return source, lookup_path
+
+    def _hssd_front_axis_config(self) -> tuple[str, str | Path | None]:
+        """Compatibility alias for callers configured before physics annotations."""
+        return self._hssd_asset_annotation_config()
+
+    def _scenebenchmark_hssd_front_axis(self, hssd_id: str | None) -> str | None:
+        """Return the SceneBenchmark-annotated HSSD front axis when configured."""
+        source, lookup_path = self._hssd_asset_annotation_config()
+        if source not in _HSSD_FRONT_AXIS_SOURCES:
+            return None
+        if not hssd_id:
+            console_logger.warning(
+                "HSSD front-axis source is scenebenchmark_critic, but no hssd_id "
+                "was available; keeping VLM front axis"
+            )
+            return None
+
+        record = _get_hssd_front_axis_annotation_record(hssd_id, lookup_path)
+        if record is None:
+            console_logger.warning(
+                "No SceneBenchmark HSSD annotation found for %s; keeping VLM front axis",
+                hssd_id,
+            )
+            return None
+
+        canonical_front = record.get("canonical_front") or {}
+        axis_value = canonical_front.get("asset_local_front_axis")
+        if axis_value is None:
+            axis_value = canonical_front.get("canonical_orientation_axis")
+        if axis_value is None:
+            hints = (
+                record.get("scenebenchmark_functional_hints")
+                or (record.get("scenebenchmark_fd_sa") or {}).get("functional_hints")
+                or {}
+            )
+            axis_value = hints.get("asset_local_front_axis")
+
+        front_axis = _normalize_hssd_annotation_front_axis(axis_value)
+        if front_axis is None:
+            console_logger.warning(
+                "SceneBenchmark HSSD front-axis annotation for %s is unusable "
+                "(value=%r); keeping VLM front axis",
+                hssd_id,
+                axis_value,
+            )
+            return None
+        return front_axis
+
+    @staticmethod
+    def _front_axis_from_hssd_record(record: dict[str, Any]) -> str | None:
+        canonical_front = record.get("canonical_front") or {}
+        axis_value = canonical_front.get("asset_local_front_axis")
+        if axis_value is None:
+            axis_value = canonical_front.get("canonical_orientation_axis")
+        if axis_value is None:
+            hints = (
+                record.get("scenebenchmark_functional_hints")
+                or (record.get("scenebenchmark_fd_sa") or {}).get("functional_hints")
+                or {}
+            )
+            axis_value = hints.get("asset_local_front_axis")
+        return _normalize_hssd_annotation_front_axis(axis_value)
+
+    def _override_hssd_asset_annotations(
+        self, physics_analysis: MeshPhysicsAnalysis, hssd_id: str | None
+    ) -> MeshPhysicsAnalysis:
+        """Apply valid HSSD front and physics fields from one lookup operation."""
+        source, lookup_path = self._hssd_front_axis_config()
+        if source not in _HSSD_FRONT_AXIS_SOURCES or not hssd_id:
+            return physics_analysis
+        record = _get_hssd_front_axis_annotation_record(hssd_id, lookup_path)
+        if record is None:
+            console_logger.warning(
+                "No SceneBenchmark HSSD annotation found for %s; keeping analyzed values",
+                hssd_id,
+            )
+            return physics_analysis
+
+        front_axis = (
+            self._front_axis_from_hssd_record(record) or physics_analysis.front_axis
+        )
+        annotated = record.get("asset_physics") or {}
+        material = physics_analysis.material
+        candidate_material = str(annotated.get("material") or "").strip().lower()
+        if candidate_material:
+            if candidate_material in load_materials():
+                material = candidate_material
+            else:
+                console_logger.warning(
+                    "Ignoring invalid HSSD material %r for %s",
+                    candidate_material,
+                    hssd_id,
+                )
+
+        mass_kg = physics_analysis.mass_kg
+        mass_range_kg = physics_analysis.mass_range_kg
+        if "mass_kg" in annotated or "mass_range_kg" in annotated:
+            try:
+                candidate_mass = float(annotated["mass_kg"])
+                candidate_range = tuple(
+                    float(value) for value in annotated["mass_range_kg"]
+                )
+                if (
+                    candidate_mass <= 0
+                    or len(candidate_range) != 2
+                    or candidate_range[0] <= 0
+                    or candidate_range[0] > candidate_mass
+                    or candidate_mass > candidate_range[1]
+                ):
+                    raise ValueError("invalid mass estimate or range")
+                mass_kg = candidate_mass
+                mass_range_kg = candidate_range
+            except (KeyError, TypeError, ValueError):
+                console_logger.warning(
+                    "Ignoring invalid HSSD mass annotation for %s: %r",
+                    hssd_id,
+                    annotated,
+                )
+
+        friction = physics_analysis.friction_coefficient
+        if annotated.get("friction_coefficient") is not None:
+            try:
+                candidate_friction = float(annotated["friction_coefficient"])
+                if not 0.0 <= candidate_friction <= 2.0:
+                    raise ValueError("friction outside [0, 2]")
+                friction = candidate_friction
+            except (TypeError, ValueError):
+                console_logger.warning(
+                    "Ignoring invalid HSSD friction annotation for %s: %r",
+                    hssd_id,
+                    annotated.get("friction_coefficient"),
+                )
+
+        quality = record.get("asset_quality") or {}
+        if quality and not quality.get("is_acceptable", True):
+            console_logger.warning(
+                "HSSD asset %s is marked quality-unacceptable (score=%r); "
+                "metadata is reported but retrieval behavior is unchanged",
+                hssd_id,
+                quality.get("overall_score"),
+            )
+        return MeshPhysicsAnalysis(
+            up_axis=physics_analysis.up_axis,
+            front_axis=front_axis,
+            material=material,
+            mass_kg=mass_kg,
+            mass_range_kg=mass_range_kg,
+            friction_coefficient=friction,
+        )
+
+    def _override_hssd_front_axis_from_annotations(
+        self, physics_analysis: MeshPhysicsAnalysis, hssd_id: str | None
+    ) -> MeshPhysicsAnalysis:
+        """Replace only the HSSD VLM front axis with SceneBenchmark annotation."""
+        front_axis = self._scenebenchmark_hssd_front_axis(hssd_id)
+        if front_axis is None:
+            return physics_analysis
+        if front_axis == physics_analysis.front_axis:
+            console_logger.info(
+                "Using SceneBenchmark HSSD front axis: %s (hssd_id=%s)",
+                front_axis,
+                hssd_id,
+            )
+            return physics_analysis
+
+        console_logger.info(
+            "Overriding HSSD front axis from SceneBenchmark annotations: "
+            "%s -> %s (hssd_id=%s)",
+            physics_analysis.front_axis,
+            front_axis,
+            hssd_id,
+        )
+        return MeshPhysicsAnalysis(
+            up_axis=physics_analysis.up_axis,
+            front_axis=front_axis,
+            material=physics_analysis.material,
+            mass_kg=physics_analysis.mass_kg,
+            mass_range_kg=physics_analysis.mass_range_kg,
+            friction_coefficient=physics_analysis.friction_coefficient,
+        )
+
     def _retrieve_hssd_assets(
         self, request: AssetGenerationRequest
     ) -> AssetGenerationResult:
@@ -585,22 +905,23 @@ class AssetManager:
                 debug_dir = self.debug_dir / short_name
 
                 console_logger.info(
-                    f"Running VLM analysis for HSSD material/mass: {short_name}"
+                    "Resolving HSSD physics metadata for %s (mode=%s)",
+                    short_name,
+                    getattr(self.cfg.asset_manager, "hssd_physics_analysis_mode", "deterministic"),
                 )
-                vlm_physics = analyze_mesh_orientation_and_material(
+                vlm_physics = self._analyze_mesh_physics(
                     mesh_path=gltf_path,
-                    vlm_service=self.vlm_service,
-                    cfg=self.cfg,
-                    elevation_degrees=self.side_view_elevation_degrees,
-                    blender_server=self.blender_server,
-                    num_side_views=self.num_side_views_for_physics_analysis,
-                    prompt_type="hssd",
-                    include_vertical_views=False,
+                    asset_source="hssd",
+                    object_name=short_name,
                     debug_output_dir=debug_dir,
                 )
                 console_logger.info(
                     f"VLM analysis complete: material={vlm_physics.material}, "
                     f"mass={vlm_physics.mass_kg}kg, front={vlm_physics.front_axis}"
+                )
+                vlm_physics = self._override_hssd_asset_annotations(
+                    physics_analysis=vlm_physics,
+                    hssd_id=mesh_id,
                 )
 
                 # Use VLM's material, mass, and front axis determination.
@@ -611,6 +932,7 @@ class AssetManager:
                     material=vlm_physics.material,
                     mass_kg=vlm_physics.mass_kg,
                     mass_range_kg=vlm_physics.mass_range_kg,
+                    friction_coefficient=vlm_physics.friction_coefficient,
                 )
 
                 # Canonicalize mesh orientation to align with scenesmith canonical
@@ -620,21 +942,26 @@ class AssetManager:
                     f"Canonicalizing HSSD mesh: up={vlm_physics.up_axis}, "
                     f"front={vlm_physics.front_axis} → +Y"
                 )
-                final_gltf_path = config.sdf_dir / f"{config.short_name}.gltf"
+                canonical_path = config.sdf_dir / f"{config.short_name}_canonical.gltf"
                 canonicalize_mesh(
                     gltf_path=gltf_path,
-                    output_path=final_gltf_path,
+                    output_path=canonical_path,
                     up_axis=vlm_physics.up_axis,
                     front_axis=vlm_physics.front_axis,
                     blender_server=self.blender_server,
                     object_type=request.object_type,
                 )
 
+                final_gltf_path, bbox_min, bbox_max, _ = (
+                    self._scale_and_measure_canonical_mesh(
+                        canonical_path=canonical_path,
+                        final_path=config.sdf_dir / f"{config.short_name}.gltf",
+                        desired_dimensions=request.desired_dimensions[index],
+                    )
+                )
+
                 # Generate collision geometry via convex decomposition server.
                 collision_pieces = self._generate_collision_geometry(final_gltf_path)
-
-                # Load mesh for bounding box calculation.
-                mesh = load_mesh_as_trimesh(final_gltf_path, force_merge=True)
 
                 sdf_path = config.sdf_dir / f"{config.short_name}.sdf"
                 generate_drake_sdf(
@@ -644,9 +971,6 @@ class AssetManager:
                     output_path=sdf_path,
                     asset_name=config.short_name,
                 )
-
-                # Scene-graph transforms are already applied by the mesh loader.
-                bbox_min, bbox_max = mesh.bounds
 
                 # Create SceneObject using shared helper.
                 scene_obj = self._create_scene_object(
@@ -1470,6 +1794,7 @@ class AssetManager:
                     object_type=request.object_type,
                     desired_dimensions=item.dimensions,
                     asset_source=generated.asset_source,
+                    hssd_id=generated.hssd_id,
                 )
             )
 
@@ -1834,6 +2159,7 @@ class AssetManager:
         object_type: ObjectType,
         desired_dimensions: list[float] | None = None,
         asset_source: str = "generated",
+        hssd_id: str | None = None,
     ) -> tuple[Path, Path, np.ndarray, np.ndarray, float]:
         """Convert mesh to a simulatable Drake SDF.
 
@@ -1859,6 +2185,7 @@ class AssetManager:
             asset_source: Source of the asset ("generated" or "hssd"). HSSD assets
                 use specialized VLM prompts and skip vertical views since they're
                 already upright.
+            hssd_id: HSSD id used to look up a SceneBenchmark front-axis annotation.
 
         Returns:
             Tuple of (sdf_path, final_gltf_path, bbox_min, bbox_max, scale_factor).
@@ -1908,17 +2235,17 @@ class AssetManager:
             f"Running VLM analysis for mesh physics "
             f"(asset_source={asset_source}, prompt_type={prompt_type})"
         )
-        physics_analysis = analyze_mesh_orientation_and_material(
+        physics_analysis = self._analyze_mesh_physics(
             mesh_path=gltf_path,
-            vlm_service=self.vlm_service,
-            cfg=self.cfg,
-            elevation_degrees=self.side_view_elevation_degrees,
-            blender_server=self.blender_server,
-            num_side_views=self.num_side_views_for_physics_analysis,
+            asset_source=asset_source,
+            object_name=config.short_name,
             debug_output_dir=debug_dir,
-            prompt_type=prompt_type,
-            include_vertical_views=include_vertical_views,
         )
+        if is_hssd:
+            physics_analysis = self._override_hssd_asset_annotations(
+                physics_analysis=physics_analysis,
+                hssd_id=hssd_id,
+            )
 
         console_logger.info(
             f"VLM analysis complete: up={physics_analysis.up_axis}, "
@@ -1938,39 +2265,22 @@ class AssetManager:
             object_type=object_type,
         )
 
-        # Scale mesh to desired dimensions (if provided).
+        # Scale mesh to desired dimensions while keeping glTF Y-up explicit.
         # For generated assets: scale_factor=1.0 because support surface extraction runs
         # on the already-scaled mesh, so surfaces are at correct dimensions.
         # For HSSD assets: scale_factor=applied_scale because pre-computed surfaces
         # are at original HSSD dimensions and need scaling.
-        final_gltf_path = canonical_path
-        initial_scale = 1.0
-        if desired_dimensions is not None:
-            console_logger.info(
-                f"Scaling mesh to desired dimensions: {desired_dimensions}"
-            )
-            final_gltf_path = config.sdf_dir / f"{config.short_name}.gltf"
-            final_gltf_path, applied_scale = scale_mesh_uniformly_to_dimensions(
-                mesh_path=canonical_path,
+        final_gltf_path, bbox_min, bbox_max, applied_scale = (
+            self._scale_and_measure_canonical_mesh(
+                canonical_path=canonical_path,
+                final_path=config.sdf_dir / f"{config.short_name}.gltf",
                 desired_dimensions=desired_dimensions,
-                output_path=final_gltf_path,
-                min_dimension_meters=self.min_mesh_dimension_meters,
-                relative_threshold=self.mesh_relative_dimension_threshold,
             )
-            # HSSD pre-computed surfaces are at original mesh dimensions.
-            # They need scale_factor to match the physical scaling applied above.
-            if is_hssd:
-                initial_scale = applied_scale
-        else:
-            # Rename canonical to final name if no scaling needed.
-            final_gltf_path = config.sdf_dir / f"{config.short_name}.gltf"
-            canonical_path.rename(final_gltf_path)
+        )
+        initial_scale = applied_scale if is_hssd else 1.0
 
         # Generate collision geometry via convex decomposition server.
         collision_pieces = self._generate_collision_geometry(final_gltf_path)
-
-        # Load mesh for bounding box calculation.
-        mesh = load_mesh_as_trimesh(final_gltf_path, force_merge=True)
 
         # Generate Drake SDF.
         sdf_path = config.sdf_dir / f"{config.short_name}.sdf"
@@ -1981,10 +2291,6 @@ class AssetManager:
             output_path=sdf_path,
             asset_name=config.short_name,
         )
-
-        # Extract bounding box from scaled mesh.
-        # Scene-graph transforms are already applied by the mesh loader.
-        bbox_min, bbox_max = mesh.bounds
 
         console_logger.info(
             f"Drake SDF complete: SDF at {sdf_path}, bounds: {bbox_min} to {bbox_max}"
@@ -2047,8 +2353,7 @@ class AssetManager:
 
         # Load mesh for bounding box calculation.
         mesh = load_mesh_as_trimesh(gltf_path, force_merge=True)
-        # Scene-graph transforms are already applied by the mesh loader.
-        bbox_min, bbox_max = mesh.bounds
+        bbox_min, bbox_max = gltf_y_up_bounds_to_scene_z_up(mesh.bounds)
 
         console_logger.info(
             f"Thin covering SDF complete: {sdf_path}, bounds: {bbox_min} to {bbox_max}"
@@ -2195,8 +2500,7 @@ class AssetManager:
 
         # Extract bounds.
         bounds = mesh.bounds  # [[xmin, ymin, zmin], [xmax, ymax, zmax]]
-        bbox_min = bounds[0]
-        bbox_max = bounds[1]
+        bbox_min, bbox_max = gltf_y_up_bounds_to_scene_z_up(bounds)
 
         console_logger.debug(
             f"Extracted bounds from {gltf_path}: min={bbox_min}, max={bbox_max}"

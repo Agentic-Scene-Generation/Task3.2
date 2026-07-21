@@ -73,8 +73,15 @@ def run_local(cfg: DictConfig):
         console_logger.info(f"Outputs will be saved to: {output_dir}")
         print(cyan(f"Outputs will be saved to:"), output_dir)
 
-        (output_dir.parents[1] / "latest-run").unlink(missing_ok=True)
-        (output_dir.parents[1] / "latest-run").symlink_to(
+        # Parallel probe batches may place Hydra output in a per-batch
+        # ``.../batch_NNN/hydra`` directory.  Keep their convenience link
+        # local to the batch; otherwise concurrent processes race on one
+        # shared ``latest-run`` symlink.
+        latest_run_parent = (
+            output_dir.parent if output_dir.name == "hydra" else output_dir.parents[1]
+        )
+        (latest_run_parent / "latest-run").unlink(missing_ok=True)
+        (latest_run_parent / "latest-run").symlink_to(
             output_dir, target_is_directory=True
         )
 

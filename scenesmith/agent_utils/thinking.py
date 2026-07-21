@@ -16,6 +16,21 @@ def thinking_directive_from_effort(effort: Any) -> str:
     return "/think"
 
 
+def chat_template_kwargs_from_effort(effort: Any) -> dict[str, dict[str, bool]]:
+    """Build llama.cpp Qwen template kwargs for the configured effort.
+
+    The ``/think`` and ``/no_think`` strings are useful prompt annotations,
+    but llama.cpp's Qwen chat template selects the mode from the structured
+    ``enable_thinking`` template argument.  Send both so the behavior is
+    correct for local OpenAI-compatible servers and remains readable in logs.
+    """
+    return {
+        "chat_template_kwargs": {
+            "enable_thinking": thinking_directive_from_effort(effort) == "/think"
+        }
+    }
+
+
 def prepend_text_thinking_directive(text: str, directive: str) -> str:
     """Prefix text with exactly one Qwen thinking directive."""
     stripped = text.lstrip()

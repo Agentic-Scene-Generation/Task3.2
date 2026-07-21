@@ -1,0 +1,28 @@
+{
+  "schema_version": "hssd_asset_physics@1.0",
+  "method_version": "category-dimension-render-v2-20260720",
+  "total_records": 10963,
+  "physics_coverage": 10963,
+  "quality_coverage": 10963,
+  "records_with_asset_dimensions": 7998,
+  "material_counts": {
+    "cardboard": 21,
+    "ceramic": 889,
+    "concrete": 26,
+    "cork": 1,
+    "fabric": 2252,
+    "foam": 2,
+    "glass": 430,
+    "paper": 1287,
+    "plastic": 608,
+    "rubber": 1,
+    "silicone": 16,
+    "steel": 1859,
+    "stone": 110,
+    "wood": 3461
+  },
+  "quality_counts": {
+    "acceptable": 10963,
+    "render_evidence": 10963
+  }
+}

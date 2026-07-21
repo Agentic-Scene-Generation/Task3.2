@@ -29,6 +29,9 @@ from scenesmith.agent_utils.room import AgentType, RoomScene
 from scenesmith.agent_utils.scoring import WallCritiqueWithScores, log_agent_response
 from scenesmith.agent_utils.workflow_tools import WorkflowTools
 from scenesmith.prompts.registry import WallAgentPrompts
+from scenesmith.scenebenchmark_critic import evaluate_room_scene, format_prompt_context
+from scenesmith.scenebenchmark_critic.config import critic_config_from_any
+from scenesmith.scenebenchmark_critic.prompt_context import format_agent_prompt_context
 from scenesmith.utils.logging import BaseLogger
 from scenesmith.wall_agents.base_wall_agent import BaseWallAgent
 from scenesmith.wall_agents.tools.vision_tools import WallVisionTools
@@ -130,6 +133,7 @@ class StatefulWallAgent(BaseStatefulAgent, BaseWallAgent):
 
         # Wall tools will be set when adding wall objects.
         self.wall_tools: WallTools | None = None
+        self._latest_scenebenchmark_critic_context: str | None = None
 
     def _create_designer_tools(
         self, wall_surfaces: list[WallSurface]
@@ -231,6 +235,55 @@ class StatefulWallAgent(BaseStatefulAgent, BaseWallAgent):
             room_description=room_description,
             wall_count=len(self.wall_surfaces),
         )
+
+    def _build_scenebenchmark_critic_context(self) -> str | None:
+        """Inject wall-actionable deterministic feedback into critic output."""
+        self._latest_scenebenchmark_critic_context = None
+        critic_config = critic_config_from_any(self.cfg)
+        if not critic_config.enabled or not critic_config.inject_into_llm_critic:
+            return None
+
+        scene = getattr(self, "scene", None)
+        if scene is None:
+            return None
+
+        payload = evaluate_room_scene(
+            scene,
+            config=self.cfg,
+            stage=f"llm_critic_{self.agent_type.value}",
+            blender_server=getattr(self, "blender_server", None),
+        )
+        if critic_config.agent_prompt_context_filter_enabled:
+            context = format_agent_prompt_context(
+                payload,
+                scene=scene,
+                agent_type=self.agent_type,
+                current_furniture_id=getattr(self, "current_furniture_id", None),
+                max_issues=critic_config.max_issues_for_prompt,
+            )
+        else:
+            context = format_prompt_context(
+                payload, max_issues=critic_config.max_issues_for_prompt
+            )
+        if "no degraded or failed checks" not in context.lower():
+            # Preserve actionable IDs for the planner even if the VLM omits them
+            # from its natural-language critique.
+            self._latest_scenebenchmark_critic_context = context
+        return context
+
+    async def _request_critique_impl(self, update_checkpoint: bool = True) -> str:
+        """Return wall critique together with actionable benchmark evidence."""
+        self._latest_scenebenchmark_critic_context = None
+        critique = await super()._request_critique_impl(
+            update_checkpoint=update_checkpoint
+        )
+        if self._latest_scenebenchmark_critic_context:
+            critique += (
+                "\n\nVERBATIM SceneBenchmark action context (must be passed to "
+                "the designer):\n"
+                + self._latest_scenebenchmark_critic_context
+            )
+        return critique
 
     def _create_planner_agent(
         self, tools: list[FunctionTool], room_description: str

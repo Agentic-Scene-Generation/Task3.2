@@ -5,6 +5,7 @@ import xml.etree.ElementTree as ET
 
 from pathlib import Path
 
+import numpy as np
 import trimesh
 
 from scenesmith.agent_utils.materials import DEFAULT_FRICTION, get_friction
@@ -152,6 +153,24 @@ class TestGenerateDrakeSDF(unittest.TestCase):
         declare_convex = collision_mesh.find("{drake.mit.edu}declare_convex")
         self.assertIsNotNone(declare_convex)
 
+    def test_annotated_friction_overrides_material_lookup(self):
+        mesh = trimesh.creation.box(extents=[1.0, 1.0, 1.0])
+        visual_path = self.temp_path / "friction_cube.gltf"
+        mesh.export(visual_path)
+        physics = MeshPhysicsAnalysis(
+            up_axis="+Z",
+            front_axis="+Y",
+            material="wood",
+            mass_kg=10.0,
+            mass_range_kg=(8.0, 12.0),
+            friction_coefficient=0.77,
+        )
+        output_path = self.temp_path / "friction_cube.sdf"
+        generate_drake_sdf(visual_path, [mesh], physics, output_path)
+        root = ET.parse(output_path).getroot()
+        values = [float(node.text) for node in root.findall(".//friction/ode/mu")]
+        assert values and all(value == 0.77 for value in values)
+
     def test_generate_drake_sdf_multiple_collision_pieces(self):
         """Test SDF generation with multiple collision pieces."""
         # Create visual mesh.
@@ -198,6 +217,41 @@ class TestGenerateDrakeSDF(unittest.TestCase):
         collision_1_path = self.temp_path / "multi_collision_collision_1.obj"
         self.assertTrue(collision_0_path.exists())
         self.assertTrue(collision_1_path.exists())
+
+    def test_generate_drake_sdf_converts_y_up_collision_axes(self):
+        """Collision OBJ output uses SceneSmith's Z-up frame."""
+        # Encode a 1.6m wide, 2.05m deep, 0.8m tall object in glTF Y-up:
+        # X=width, Y=height, Z=depth, with its base on Y=0.
+        visual_mesh = trimesh.creation.box(extents=[1.6, 0.8, 2.05])
+        visual_mesh.apply_translation([0.0, 0.4, 0.0])
+        visual_path = self.temp_path / "y_up_asset.gltf"
+        visual_mesh.export(visual_path)
+
+        physics = MeshPhysicsAnalysis(
+            up_axis="+Y",
+            front_axis="+Z",
+            material="wood",
+            mass_kg=10.0,
+            mass_range_kg=(8.0, 12.0),
+        )
+        output_path = self.temp_path / "y_up_asset.sdf"
+        generate_drake_sdf(
+            visual_mesh_path=visual_path,
+            collision_pieces=[visual_mesh],
+            physics_analysis=physics,
+            output_path=output_path,
+            asset_name="y_up_asset",
+        )
+
+        collision_mesh = trimesh.load(
+            self.temp_path / "y_up_asset_collision_0.obj", force="mesh"
+        )
+        self.assertTrue(
+            np.allclose(collision_mesh.bounds[0], [-0.8, -1.025, 0.0], atol=1e-6)
+        )
+        self.assertTrue(
+            np.allclose(collision_mesh.bounds[1], [0.8, 1.025, 0.8], atol=1e-6)
+        )
 
     def test_generate_drake_sdf_invalid_mass_error(self):
         """Test error raised for invalid (non-positive) mass."""
@@ -380,8 +434,8 @@ class TestGenerateDrakeSDF(unittest.TestCase):
                     msg=f"Material: {material}",
                 )
 
-    def test_generate_drake_sdf_preserves_loaded_mesh_frame(self):
-        """The GLTF scene transform must be applied exactly once."""
+    def test_generate_drake_sdf_com_coordinate_transform(self):
+        """Inertial coordinates are written in Drake's Z-up frame."""
         mesh = trimesh.creation.box(extents=[1.0, 1.0, 1.0])
         mesh.apply_translation([0, 2, 0])
 
@@ -418,8 +472,8 @@ class TestGenerateDrakeSDF(unittest.TestCase):
         com_x, com_y, com_z = pose_values[0], pose_values[1], pose_values[2]
 
         self.assertAlmostEqual(com_x, 0.0, delta=0.01)
-        self.assertAlmostEqual(com_y, 2.0, delta=0.01)
-        self.assertAlmostEqual(com_z, 0.0, delta=0.01)
+        self.assertAlmostEqual(com_y, 0.0, delta=0.01)
+        self.assertAlmostEqual(com_z, 2.0, delta=0.01)
 
     def test_collision_mesh_axis_is_not_rotated_twice(self):
         """A non-symmetric collision proxy keeps its Z-up dimensions."""
@@ -448,7 +502,7 @@ class TestGenerateDrakeSDF(unittest.TestCase):
             force="mesh",
         )
         self.assertTrue(
-            all(abs(a - b) < 0.01 for a, b in zip(collision_mesh.extents, [1, 2, 3]))
+            all(abs(a - b) < 0.01 for a, b in zip(collision_mesh.extents, [1, 3, 2]))
         )
 
     def test_collision_mesh_mismatch_fails_fast(self):

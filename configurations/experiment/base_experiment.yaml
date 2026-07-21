@@ -92,6 +92,20 @@ pipeline:
   # Max concurrent rooms when parallel_rooms=true.
   max_parallel_rooms: 1
 
+# Optional deterministic SceneBenchmark rule critic.  When enabled it adds
+# relevant geometry-rule feedback to the existing furniture/manipuland LLM
+# critic prompts; it does not change generation, retrieval, or VLM filtering.
+scenebenchmark_critic:
+  enabled: false
+  metrics: ["functional_dependency", "spatial_accessibility", "interaction_clearance", "visual_clearance"]
+  inject_into_llm_critic: true
+  agent_prompt_context_filter_enabled: true
+  agent_prompt_context_debug_write: false
+  max_issues_for_prompt: 8
+  fd_relation_proposer_mode: "template"
+  max_fd_relation_proposals: 8
+  stable_orientation_contracts: true
+
 # Geometry generation server settings
 geometry_generation_server:
   host: "127.0.0.1"

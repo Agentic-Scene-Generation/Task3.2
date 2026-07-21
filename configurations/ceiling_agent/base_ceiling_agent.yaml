@@ -77,8 +77,14 @@ rendering:
 asset_manager:
   general_asset_source: "hssd"
   hssd_vlm_fallback_on_transient_error: true
+  hssd_physics_analysis_mode: deterministic
   hssd_vlm_timeout_seconds: 90
   hssd_vlm_max_retries: 0
+  # Prefer curated SceneBenchmark asset-library front annotations over VLM picks.
+  # Missing or malformed annotations fall back to the analyzed front axis.
+  hssd_asset_annotations:
+    source: "scenebenchmark_critic"
+    annotation_lookup_path: null
   backend: "sam3d"
 
   router:
