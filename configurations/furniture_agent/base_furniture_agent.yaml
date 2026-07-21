@@ -368,7 +368,11 @@ furniture_safety_controller:
     wardrobe_max_dimensions: [1.20, 0.70, 2.35]
     bed_wall_anchor_max_distance_m: 0.25
     wardrobe_wall_max_distance_m: 0.35
-    hard_plausibility_issues: true
+    # Bed anchoring, bedside symmetry, and wardrobe wall placement are quality
+    # relations: expose them to the agent/critic loop first, then generate a
+    # separately scored deterministic candidate only after agent exhaustion.
+    hard_plausibility_issues: false
+    deterministic_fallback_enabled: true
     # Full-height storage in front of a bedroom window is objectively unusable
     # and has a deterministic relocation operator, so repair it before scoring.
     window_blocking_is_hard: true

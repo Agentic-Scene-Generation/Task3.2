@@ -205,6 +205,24 @@ class FurnitureSafetyControllerTest(unittest.TestCase):
         self.assertTrue(evaluation.hard_valid)
         self.assertTrue(evaluation.soft_reasons)
 
+    def test_bedroom_plausibility_relations_can_be_deferred_to_fallback(self) -> None:
+        controller = FurnitureSafetyController(
+            {
+                "enabled": True,
+                "bedroom_layout": {"hard_plausibility_issues": False},
+            }
+        )
+
+        hard, soft = controller._classify_bedroom_plausibility_issues(
+            [
+                "bedroom plausibility: bed headboard faces west_wall, "
+                "expected north_wall"
+            ]
+        )
+
+        self.assertEqual(hard, [])
+        self.assertEqual(len(soft), 1)
+
     def test_collision_issue_is_hard_but_negated_collision_is_not(self) -> None:
         controller = FurnitureSafetyController({"enabled": True})
 

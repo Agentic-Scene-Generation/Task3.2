@@ -35,6 +35,7 @@ from scenesmith.agent_utils.furniture_functional_layout import (
 )
 from scenesmith.agent_utils.furniture_layout_planning import (
     build_bedroom_anchor_plan,
+    evaluate_bedroom_layout_plausibility,
     format_bedroom_anchor_guidance,
     is_bedroom_scene,
 )
@@ -564,10 +565,20 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             relation_changed = True
 
         if is_bedroom_scene(self.scene):
-            if self._anchor_existing_bed():
+            bed_repair_needed = (
+                "missing required bed" in reasons
+                or "bedroom plausibility: bed" in reasons
+                or window_conflict
+            )
+            nightstand_repair_needed = (
+                bed_repair_needed
+                or "missing required nightstand" in reasons
+                or "bedroom relation:" in reasons
+            )
+            if bed_repair_needed and self._anchor_existing_bed():
                 actions.append("anchored bed to deterministic bedroom head wall")
                 relation_changed = True
-            if self._repair_bedside_nightstands():
+            if nightstand_repair_needed and self._repair_bedside_nightstands():
                 actions.append(
                     "repositioned nightstands to deterministic bedside anchors"
                 )
@@ -755,6 +766,11 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             "schema_version": "1.0",
             "trigger": trigger,
             "agent_regeneration_attempts": regeneration_attempts,
+            "deterministic_layout_family": (
+                "bedroom"
+                if is_bedroom_scene(self.scene)
+                else functional_layout_family(self.scene) or "unsupported"
+            ),
             "agent_candidate": self._candidate_score_summary(agent_candidate),
             "agent_hard_valid": bool(
                 agent_hard_state is None or agent_hard_state.hard_valid
@@ -777,13 +793,25 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         self._write_fallback_comparison(comparison)
 
         controller_cfg = getattr(self.cfg, "furniture_safety_controller", None)
+        bedroom_cfg = getattr(controller_cfg, "bedroom_layout", None)
         functional_cfg = getattr(controller_cfg, "functional_layout", None)
-        fallback_enabled = bool(
+        functional_fallback_enabled = bool(
             getattr(functional_cfg, "deterministic_fallback_enabled", False)
+        )
+        fallback_enabled = (
+            bool(
+                getattr(
+                    bedroom_cfg,
+                    "deterministic_fallback_enabled",
+                    functional_fallback_enabled,
+                )
+            )
+            if is_bedroom_scene(self.scene)
+            else functional_fallback_enabled
         )
         if not fallback_enabled:
             comparison["selection_reason"] = (
-                "deterministic functional fallback is disabled by configuration"
+                "deterministic layout fallback is disabled by configuration"
             )
             self._write_fallback_comparison(comparison)
             return comparison
@@ -795,8 +823,8 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             self._allow_functional_layout_repair = False
         if not action:
             comparison["selection_reason"] = (
-                "no applicable living-room/classroom deterministic operator changed "
-                "the agent layout"
+                "no applicable deterministic room-layout operator changed the "
+                "agent layout"
             )
             self._write_fallback_comparison(comparison)
             return comparison
@@ -961,12 +989,65 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
     def _repair_functional_layout(self) -> str:
         if self.scene is None or not hasattr(self.scene, "objects"):
             return ""
+        if is_bedroom_scene(self.scene):
+            bedroom_actions = self._repair_bedroom_layout()
+            if bedroom_actions:
+                return "normalized bedroom fallback: " + "; ".join(
+                    bedroom_actions
+                )
         family = functional_layout_family(self.scene)
         if family == "living_room" and self._repair_living_room_layout():
             return "normalized sofa, rug, and plants into one conversation zone"
         if family == "classroom" and self._repair_classroom_layout():
             return "normalized classroom desk-chair pairs and front teaching zone"
         return ""
+
+    def _repair_bedroom_layout(self) -> list[str]:
+        """Build one coherent bedroom fallback from existing safe operators.
+
+        This method is invoked only by the separately rendered fallback path.
+        It reacts to deterministic plausibility evidence instead of normalizing
+        every low-scoring bedroom indiscriminately. Moving the bed also moves its
+        dependent nightstands and rechecks wardrobe anchoring as one candidate.
+        """
+        if self.scene is None:
+            return []
+        report = evaluate_bedroom_layout_plausibility(
+            scene=self.scene,
+            cfg=self._bedroom_layout_cfg(),
+        )
+        issue_text = " ".join(report.issues).lower()
+        if not issue_text:
+            return []
+
+        bed_relation_issue = any(
+            term in issue_text
+            for term in (
+                "bed headboard faces",
+                "bed headboard is not anchored",
+                "bed headboard overlaps",
+            )
+        )
+        nightstand_relation_issue = "nightstands are not on opposite" in issue_text
+        wardrobe_relation_issue = "wardrobe is floating away" in issue_text
+
+        actions: list[str] = []
+        bed_changed = bed_relation_issue and self._anchor_existing_bed()
+        if bed_changed:
+            actions.append("anchored bed headboard to the preferred solid wall")
+
+        nightstands_changed = (
+            bed_changed or nightstand_relation_issue
+        ) and self._repair_bedside_nightstands()
+        if nightstands_changed:
+            actions.append("placed paired nightstands beside the bed headboard")
+
+        wardrobe_changed = (
+            bed_changed or nightstands_changed or wardrobe_relation_issue
+        ) and self._repair_wardrobe_wall_anchor()
+        if wardrobe_changed:
+            actions.append("anchored wardrobe to a non-opening wall or corner")
+        return actions
 
     def _repair_living_room_layout(self) -> bool:
         if self.scene is None:

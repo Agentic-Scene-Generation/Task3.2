@@ -1,6 +1,8 @@
 import unittest
-from typing import Any
+
 from types import SimpleNamespace
+from typing import Any
+from unittest.mock import patch
 
 import numpy as np
 
@@ -136,6 +138,84 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         StatefulFurnitureAgent is None,
         f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
     )
+    def test_bedroom_is_dispatched_to_deterministic_fallback_operator(self) -> None:
+        agent = object.__new__(StatefulFurnitureAgent)
+        agent.scene = SimpleNamespace(
+            room_type="bedroom",
+            text_description="A bedroom with a bed.",
+            scene_expert_original_description="A bedroom with a bed.",
+            objects={"bed_0": object()},
+        )
+        agent._repair_bedroom_layout = lambda: ["anchored bed"]
+
+        action = agent._repair_functional_layout()
+
+        self.assertIn("normalized bedroom fallback", action)
+        self.assertIn("anchored bed", action)
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
+    def test_bedroom_fallback_moves_dependent_furniture_as_one_candidate(self) -> None:
+        agent = object.__new__(StatefulFurnitureAgent)
+        agent.scene = SimpleNamespace(objects={"bed_0": object()})
+        agent._bedroom_layout_cfg = lambda: SimpleNamespace()
+        calls: list[str] = []
+        agent._anchor_existing_bed = lambda: calls.append("bed") or True
+        agent._repair_bedside_nightstands = (
+            lambda: calls.append("nightstands") or True
+        )
+        agent._repair_wardrobe_wall_anchor = (
+            lambda: calls.append("wardrobe") or True
+        )
+
+        with patch(
+            "scenesmith.furniture_agents.stateful_furniture_agent."
+            "evaluate_bedroom_layout_plausibility",
+            return_value=SimpleNamespace(
+                issues=[
+                    "bedroom plausibility: bed headboard faces west_wall, "
+                    "expected north_wall"
+                ]
+            ),
+        ):
+            actions = agent._repair_bedroom_layout()
+
+        self.assertEqual(calls, ["bed", "nightstands", "wardrobe"])
+        self.assertEqual(len(actions), 3)
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
+    def test_bedroom_fallback_does_not_rearrange_unrelated_low_score(self) -> None:
+        agent = object.__new__(StatefulFurnitureAgent)
+        agent.scene = SimpleNamespace(objects={"bed_0": object()})
+        agent._bedroom_layout_cfg = lambda: SimpleNamespace()
+        calls: list[str] = []
+        agent._anchor_existing_bed = lambda: calls.append("bed") or True
+        agent._repair_bedside_nightstands = (
+            lambda: calls.append("nightstands") or True
+        )
+        agent._repair_wardrobe_wall_anchor = (
+            lambda: calls.append("wardrobe") or True
+        )
+
+        with patch(
+            "scenesmith.furniture_agents.stateful_furniture_agent."
+            "evaluate_bedroom_layout_plausibility",
+            return_value=SimpleNamespace(issues=[]),
+        ):
+            actions = agent._repair_bedroom_layout()
+
+        self.assertEqual(actions, [])
+        self.assertEqual(calls, [])
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
     def test_non_bedroom_missing_required_asset_uses_generic_repair(self) -> None:
         agent = object.__new__(StatefulFurnitureAgent)
         agent.scene = SimpleNamespace(
@@ -195,6 +275,42 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         self.assertTrue(repaired)
         self.assertIn(True, repair_calls)
         self.assertIn("cleared deterministic window forbidden zones", actions)
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
+    def test_unrelated_hard_repair_does_not_normalize_bedroom_relations(self) -> None:
+        agent = object.__new__(StatefulFurnitureAgent)
+        agent.scene = SimpleNamespace(
+            room_type="bedroom",
+            text_description="A bedroom with a bed.",
+            scene_expert_original_description="A bedroom with a bed.",
+        )
+        agent.furniture_safety_controller = SimpleNamespace(required_counts={})
+        agent._replace_geometry_failed_furniture_assets = lambda _reasons: 0
+        agent._replace_invalid_furniture_assets = lambda _state: 0
+        agent._repair_forbidden_zone_conflicts = lambda include_windows=False: False
+        calls: list[str] = []
+        agent._anchor_existing_bed = lambda: calls.append("bed") or True
+        agent._repair_bedside_nightstands = (
+            lambda: calls.append("nightstands") or True
+        )
+        agent._repair_wardrobe_wall_anchor = (
+            lambda: calls.append("wardrobe") or True
+        )
+        agent._repair_structured_collisions = lambda _state: 0
+
+        repaired, _ = agent._attempt_deterministic_repair(
+            SimpleNamespace(
+                hard_valid=False,
+                hard_reasons=["geometry construction failed for chair_0"],
+                issues=[],
+            )
+        )
+
+        self.assertFalse(repaired)
+        self.assertEqual(calls, [])
 
     @unittest.skipIf(
         StatefulFurnitureAgent is None,
