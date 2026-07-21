@@ -260,6 +260,8 @@ class AssetRouter:
         description: str,
         output_dir: Path | None = None,
         use_lenient: bool = False,
+        timeout_seconds: float | None = None,
+        max_retries: int | None = None,
     ) -> ValidationResult:
         """Validate a generated asset using VLM.
 
@@ -276,6 +278,8 @@ class AssetRouter:
             output_dir: Optional directory to save rendered images.
             use_lenient: If True, use lenient validation prompt. Lenient validation
                 accepts minor imperfections common in library assets.
+            timeout_seconds: Optional deadline for this asset-only VLM request.
+            max_retries: Optional retry count for this asset-only VLM request.
 
         Returns:
             ValidationResult with acceptance decision and reasoning.
@@ -359,6 +363,8 @@ class AssetRouter:
                 verbosity=verbosity,
                 response_format={"type": "json_object"},
                 vision_detail=vision_detail,
+                timeout_seconds=timeout_seconds,
+                max_retries=max_retries,
             )
             elapsed = time.time() - start_time
             response_json = json.loads(response_text)
@@ -375,10 +381,27 @@ class AssetRouter:
             )
 
         # Parse response.
+        front_view_image_index = response_json.get("front_view_image_index")
+        try:
+            if front_view_image_index is not None:
+                front_view_image_index = int(front_view_image_index)
+        except (TypeError, ValueError):
+            front_view_image_index = None
+        orientation_confidence = response_json.get("orientation_confidence")
+        try:
+            if orientation_confidence is not None:
+                orientation_confidence = max(
+                    0.0, min(1.0, float(orientation_confidence))
+                )
+        except (TypeError, ValueError):
+            orientation_confidence = None
+
         return ValidationResult(
             is_acceptable=response_json.get("is_acceptable", False),
             reason=response_json.get("reason", "Unknown"),
             suggestions=response_json.get("suggestions", []),
+            front_view_image_index=front_view_image_index,
+            orientation_confidence=orientation_confidence,
         )
 
     def validate_item_types(self, items: list[AssetItem]) -> str | None:

@@ -226,6 +226,56 @@ class TestAssetManager(unittest.TestCase):
             2,
         )
 
+    def test_direct_hssd_validation_reuses_front_calibration_and_deadline(self):
+        manager = object.__new__(AssetManager)
+        manager.cfg = OmegaConf.create(
+            {
+                "asset_manager": {
+                    "hssd": {
+                        "semantic_validation": {
+                            "enabled": True,
+                            "families": ["sofa"],
+                            "max_candidates": 1,
+                            "use_lenient": True,
+                            "timeout_seconds": 42,
+                            "max_retries": 0,
+                            "min_orientation_confidence": 0.55,
+                        }
+                    }
+                }
+            }
+        )
+        manager.debug_dir = self.temp_dir / "debug"
+        manager._thin_covering_router = MagicMock()
+        manager._thin_covering_router.validate_asset.return_value = ValidationResult(
+            True,
+            "Recognizable sofa with integral cushions",
+            front_view_image_index=4,
+            orientation_confidence=0.9,
+        )
+        sofa = HssdRetrievalResult(
+            mesh_path=str(self.temp_dir / "sofa.glb"),
+            hssd_id="sofa_asset",
+            object_name="sofa",
+            similarity_score=0.9,
+            size=(1.8, 0.9, 0.8),
+            category="large_objects",
+        )
+
+        manager._select_direct_hssd_candidate(
+            candidates=[sofa], description="two-seat sofa", short_name="sofa"
+        )
+        manager._select_direct_hssd_candidate(
+            candidates=[sofa], description="two-seat sofa", short_name="sofa"
+        )
+
+        manager._thin_covering_router.validate_asset.assert_called_once()
+        call_kwargs = manager._thin_covering_router.validate_asset.call_args.kwargs
+        self.assertTrue(call_kwargs["use_lenient"])
+        self.assertEqual(call_kwargs["timeout_seconds"], 42)
+        self.assertEqual(call_kwargs["max_retries"], 0)
+        self.assertEqual(manager._calibrated_hssd_front_axis("sofa_asset"), "-X")
+
     def test_direct_hssd_validation_is_not_spent_on_unconfigured_family(self):
         manager = object.__new__(AssetManager)
         manager.cfg = OmegaConf.create(

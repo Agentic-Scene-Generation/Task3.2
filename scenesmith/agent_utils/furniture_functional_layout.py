@@ -236,15 +236,27 @@ def _world_bounds(obj: Any) -> tuple[np.ndarray, np.ndarray] | None:
     return np.asarray(bounds[0], dtype=float), np.asarray(bounds[1], dtype=float)
 
 
-def _room_bounds(scene: Any) -> tuple[float, float, float, float] | None:
+def furnishable_room_bounds_xy(
+    scene: Any,
+) -> tuple[float, float, float, float] | None:
+    """Return wall-inner-face bounds, not the floor plan's outer envelope."""
     room_geometry = getattr(scene, "room_geometry", None)
     if room_geometry is None:
         return None
     length = float(getattr(room_geometry, "length", 0.0) or 0.0)
     width = float(getattr(room_geometry, "width", 0.0) or 0.0)
-    if length <= 0.0 or width <= 0.0:
+    wall_thickness = max(
+        0.0, float(getattr(room_geometry, "wall_thickness", 0.0) or 0.0)
+    )
+    half_length = length / 2.0 - wall_thickness
+    half_width = width / 2.0 - wall_thickness
+    if half_length <= 0.0 or half_width <= 0.0:
         return None
-    return -length / 2.0, -width / 2.0, length / 2.0, width / 2.0
+    return -half_length, -half_width, half_length, half_width
+
+
+def _room_bounds(scene: Any) -> tuple[float, float, float, float] | None:
+    return furnishable_room_bounds_xy(scene)
 
 
 def _nearest_wall(scene: Any, obj: Any) -> tuple[str, float] | None:

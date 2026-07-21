@@ -16,6 +16,9 @@ from scenesmith.agent_utils.asset_manager import (
     AssetGenerationResult as DomainAssetGenerationResult,
     AssetManager,
 )
+from scenesmith.agent_utils.furniture_functional_layout import (
+    furnishable_room_bounds_xy,
+)
 from scenesmith.agent_utils.furniture_layout_planning import (
     apply_bedroom_asset_size_policy,
 )
@@ -239,15 +242,7 @@ class FurnitureTools:
         return True, ""
 
     def _get_room_bounds_xy(self) -> tuple[float, float, float, float] | None:
-        room_geometry = self.scene.room_geometry
-        if not room_geometry or room_geometry.length <= 0 or room_geometry.width <= 0:
-            return None
-        return (
-            -room_geometry.length / 2,
-            -room_geometry.width / 2,
-            room_geometry.length / 2,
-            room_geometry.width / 2,
-        )
+        return furnishable_room_bounds_xy(self.scene)
 
     def _room_bounds_tolerance(self) -> float:
         safety_cfg = getattr(self.cfg, "furniture_safety_controller", None)

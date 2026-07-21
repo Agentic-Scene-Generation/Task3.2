@@ -219,8 +219,11 @@ class BaseStatefulAgent(ABC):
         self._stage_runtime_budget: dict[str, Any] = {}
         self._stage_runtime_started_at: float | None = None
         self._stage_runtime_exhausted = False
+        self._stage_runtime_phase = "agent"
         self._allow_degraded_stage_completion = False
         self._degraded_stage_reasons: list[str] = []
+        self._last_score_provenance: dict[str, Any] = {}
+        self._last_trusted_critic_candidate: dict[str, Any] | None = None
 
     def _configure_stage_runtime(self, scene: Any) -> None:
         """Bind SceneExpert's advisory budget to this stage's real execution."""
@@ -256,6 +259,9 @@ class BaseStatefulAgent(ABC):
             self._stage_runtime_budget = {}
         self._stage_runtime_started_at = time.monotonic()
         self._stage_runtime_exhausted = False
+        self._stage_runtime_phase = "agent"
+        self._last_score_provenance = {}
+        self._last_trusted_critic_candidate = None
 
     async def prepare_stage_regeneration(self, reasons: list[str]) -> None:
         """Reset conversational/checkpoint state before a full stage redesign.
@@ -313,13 +319,46 @@ class BaseStatefulAgent(ABC):
         )
         return min(configured, stage_limit)
 
-    def _remaining_stage_seconds(self) -> float | None:
+    def _remaining_stage_seconds(self, role: str | None = None) -> float | None:
+        """Return phase-aware time without letting design consume verification.
+
+        Designer calls stop before the critic and fallback reserves. The planner
+        is the coordinator around nested designer/critic tools, so it remains
+        alive into the critic window while preserving a final-critic slice plus
+        fallback/finalization. During explicit fallback comparison, the critic
+        may consume the fallback reserve while finalization remains protected.
+        """
         wall_clock_limit = float(
             self._stage_budget_value("max_wall_clock_seconds", 0.0) or 0.0
         )
         if wall_clock_limit <= 0 or self._stage_runtime_started_at is None:
             return None
-        return wall_clock_limit - (time.monotonic() - self._stage_runtime_started_at)
+        reserve_fraction = 0.0
+        critic_reserve = float(
+            self._stage_budget_value("critic_reserve_fraction", 0.25) or 0.0
+        )
+        final_critic_reserve = float(
+            self._stage_budget_value("final_critic_reserve_fraction", 0.10) or 0.0
+        )
+        fallback_reserve = float(
+            self._stage_budget_value("fallback_reserve_fraction", 0.10) or 0.0
+        )
+        finalization_reserve = float(
+            self._stage_budget_value("finalization_reserve_fraction", 0.05) or 0.0
+        )
+        if role == "designer":
+            reserve_fraction = critic_reserve + fallback_reserve + finalization_reserve
+        elif role == "planner":
+            reserve_fraction = (
+                final_critic_reserve + fallback_reserve + finalization_reserve
+            )
+        elif role == "critic":
+            reserve_fraction = finalization_reserve
+            if self._stage_runtime_phase != "fallback":
+                reserve_fraction += fallback_reserve
+        reserve_fraction = max(0.0, min(0.9, reserve_fraction))
+        elapsed = time.monotonic() - self._stage_runtime_started_at
+        return wall_clock_limit * (1.0 - reserve_fraction) - elapsed
 
     @staticmethod
     def _is_agent_budget_error(error: BaseException) -> bool:
@@ -368,7 +407,7 @@ class BaseStatefulAgent(ABC):
                     else stage_turns
                 )
 
-        remaining = self._remaining_stage_seconds()
+        remaining = self._remaining_stage_seconds(role)
         if remaining is not None and remaining <= 0:
             self._stage_runtime_exhausted = True
             self._planner_budget_exhausted = True
@@ -733,12 +772,28 @@ class BaseStatefulAgent(ABC):
     ) -> None:
         """Persist score artifacts and stage working memory for a render."""
         if images_dir:
-            self._write_score_artifacts(
+            provenance = self._write_score_artifacts(
                 response=response,
                 images_dir=images_dir,
                 physics_context=physics_context,
                 event=event,
             )
+            self._last_score_provenance = dict(provenance)
+            if (
+                provenance.get("score_source") == "vlm_critic"
+                and self.scene is not None
+            ):
+                controller = getattr(self, "furniture_safety_controller", None)
+                weighted_score = None
+                if controller is not None and getattr(controller, "enabled", False):
+                    weighted_score = controller.evaluate_scores(response).weighted_score
+                self._last_trusted_critic_candidate = {
+                    "scene_state": copy.deepcopy(self.scene.to_state_dict()),
+                    "scores": copy.deepcopy(response),
+                    "render_dir": images_dir,
+                    "weighted_score": weighted_score,
+                    "score_source": "vlm_critic",
+                }
             self._save_critic_working_memory(
                 render_dir=images_dir,
                 event=event,
@@ -1440,6 +1495,30 @@ class BaseStatefulAgent(ABC):
         controller = getattr(self, "furniture_safety_controller", None)
         if not controller or not controller.enabled:
             return "", scores, images_dir, True
+
+        score_source = self._last_score_provenance.get("score_source")
+        if score_source and score_source != "vlm_critic":
+            # Transport fallbacks and deterministic repair-priority grades are
+            # evidence, not visual quality judgments. They must never displace a
+            # real critic-scored candidate or claim that fallback improved it.
+            hard_state = self._evaluate_current_furniture_hard_state(
+                physics_context=physics_context
+            )
+            if hard_state is None or hard_state.hard_valid:
+                controller.remember_hard_valid_scene_state(
+                    scene_state=self.scene.to_state_dict(),
+                    source=f"{score_source}_unscored",
+                )
+            if controller.best_scene_state is not None:
+                self._restore_furniture_scene_state(controller.best_scene_state)
+            return (
+                "\n\n**Safety Controller:** visual critic unavailable; "
+                "preserved the best hard-valid candidate without treating "
+                "fallback grades as quality scores.",
+                controller.best_scores,
+                controller.best_render_dir,
+                controller.best_scene_state is not None,
+            )
 
         hard_state_evaluation = self._evaluate_current_furniture_hard_state(
             physics_context=physics_context

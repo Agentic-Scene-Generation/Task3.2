@@ -35,6 +35,55 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         StatefulFurnitureAgent is None,
         f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
     )
+    def test_quality_regeneration_requires_scene_expert_and_trusted_score(self) -> None:
+        agent = object.__new__(StatefulFurnitureAgent)
+        agent.scene = SimpleNamespace(scene_expert_stage_budget={"enabled": True})
+        agent.furniture_safety_controller = SimpleNamespace(accept_score_threshold=0.75)
+        trusted = {
+            "score_source": "vlm_critic",
+            "weighted_score": 0.6,
+            "scores": SimpleNamespace(critique="Sofa faces the wall."),
+        }
+
+        should_regenerate, reason = agent.should_regenerate_for_quality(trusted)
+
+        self.assertTrue(should_regenerate)
+        self.assertIn("Sofa faces the wall", reason)
+        trusted["score_source"] = "critic_fallback"
+        self.assertFalse(agent.should_regenerate_for_quality(trusted)[0])
+        agent.scene.scene_expert_stage_budget = {}
+        trusted["score_source"] = "vlm_critic"
+        self.assertFalse(agent.should_regenerate_for_quality(trusted)[0])
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
+    def test_functional_reorder_is_disabled_during_normal_hard_repair(self) -> None:
+        agent = object.__new__(StatefulFurnitureAgent)
+        agent.scene = SimpleNamespace(
+            room_type="living_room",
+            text_description="A living room with a sofa.",
+            scene_expert_original_description="A living room with a sofa.",
+        )
+        agent.furniture_safety_controller = SimpleNamespace(required_counts={})
+        agent._replace_invalid_furniture_assets = lambda _state: 0
+        agent._repair_forbidden_zone_conflicts = lambda include_windows=False: False
+        agent._repair_structured_collisions = lambda _state: 0
+        calls: list[str] = []
+        agent._repair_functional_layout = lambda: calls.append("reordered") or "changed"
+
+        repaired, _ = agent._attempt_deterministic_repair(
+            SimpleNamespace(hard_valid=False, hard_reasons=[], issues=[])
+        )
+
+        self.assertFalse(repaired)
+        self.assertEqual(calls, [])
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
     def test_non_bedroom_missing_required_asset_uses_generic_repair(self) -> None:
         agent = object.__new__(StatefulFurnitureAgent)
         agent.scene = SimpleNamespace(
@@ -42,9 +91,7 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
             text_description="A living room with a sofa.",
             scene_expert_original_description="A living room with a sofa.",
         )
-        agent.furniture_safety_controller = SimpleNamespace(
-            required_counts={"sofa": 1}
-        )
+        agent.furniture_safety_controller = SimpleNamespace(required_counts={"sofa": 1})
         repaired_categories: list[str] = []
         agent._ensure_required_furniture_asset = lambda category: (
             repaired_categories.append(category) or 1

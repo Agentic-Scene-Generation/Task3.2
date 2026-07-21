@@ -124,6 +124,10 @@ class StageBudget(BaseModel):
     max_designer_turns: int = 12
     max_critic_turns: int = 6
     max_wall_clock_seconds: float = 0.0
+    critic_reserve_fraction: float = 0.25
+    final_critic_reserve_fraction: float = 0.10
+    fallback_reserve_fraction: float = 0.10
+    finalization_reserve_fraction: float = 0.05
     max_asset_requests: int = 0
     max_optional_object_families: int = 0
     max_assets_per_request: int = 0

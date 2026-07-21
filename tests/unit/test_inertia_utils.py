@@ -135,6 +135,40 @@ class TestFixSdfFileInertia(unittest.TestCase):
         finally:
             sdf_path.unlink()
 
+    def test_boundary_projection_survives_sdf_text_round_trip(self):
+        """Serialization must not round a repaired tensor back to invalid."""
+        sdf_content = self._make_sdf(ixx=-0.01, iyy=1.0, izz=1.5)
+        with tempfile.NamedTemporaryFile(suffix=".sdf", mode="w", delete=False) as f:
+            f.write(sdf_content)
+            sdf_path = Path(f.name)
+
+        try:
+            self.assertTrue(fix_sdf_file_inertia(sdf_path))
+            inertia = ET.parse(sdf_path).getroot().find(".//inertia")
+            tensor = np.array(
+                [
+                    [
+                        float(inertia.findtext("ixx")),
+                        float(inertia.findtext("ixy")),
+                        float(inertia.findtext("ixz")),
+                    ],
+                    [
+                        float(inertia.findtext("ixy")),
+                        float(inertia.findtext("iyy")),
+                        float(inertia.findtext("iyz")),
+                    ],
+                    [
+                        float(inertia.findtext("ixz")),
+                        float(inertia.findtext("iyz")),
+                        float(inertia.findtext("izz")),
+                    ],
+                ]
+            )
+            eigs = np.sort(np.linalg.eigvalsh(tensor))
+            self.assertGreaterEqual(eigs[0] + eigs[1], eigs[2])
+        finally:
+            sdf_path.unlink()
+
     def test_mass_preserved_after_fix(self):
         """Mass and pose should be preserved when inertia is fixed."""
         sdf_content = self._make_sdf(ixx=0.1, iyy=0.2, izz=0.5)

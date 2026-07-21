@@ -84,6 +84,12 @@ class ValidationResult:
     suggestions: list[str] = field(default_factory=list)
     """Suggestions if rejected (what to try differently)."""
 
+    front_view_image_index: int | None = None
+    """Side-view image that shows the semantic front, when identifiable."""
+
+    orientation_confidence: float | None = None
+    """Confidence in ``front_view_image_index`` on a 0-1 scale."""
+
 
 @dataclass
 class GeneratedGeometry:

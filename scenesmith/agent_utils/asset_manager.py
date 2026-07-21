@@ -25,6 +25,7 @@ from scenesmith.agent_utils.asset_router.dataclasses import (
     AssetItem,
     GeneratedGeometry,
     ModificationInfo,
+    ValidationResult,
 )
 from scenesmith.agent_utils.asset_runtime import AssetRuntimeGate, semantic_asset_family
 from scenesmith.agent_utils.convex_decomposition_server import ConvexDecompositionClient
@@ -55,6 +56,7 @@ from scenesmith.agent_utils.mesh_physics_analyzer import (
     MeshPhysicsAnalysis,
     analyze_mesh_orientation_and_material,
     build_deterministic_hssd_physics,
+    get_front_axis_from_image_number,
 )
 from scenesmith.agent_utils.mesh_utils import (
     load_mesh_as_trimesh,
@@ -376,6 +378,11 @@ class AssetManager:
         self._runtime_gate = AssetRuntimeGate()
         self._collision_geometry_cache: dict[str, list[trimesh.Trimesh]] = {}
         self._collision_cache_lock = threading.Lock()
+        # Reuse the direct HSSD semantic call as an orientation calibration call.
+        # Cache semantic decisions by dataset ID + requested family, and retain
+        # the selected asset's calibration by dataset ID for canonicalization.
+        self._direct_hssd_validation_results: dict[str, ValidationResult] = {}
+        self._direct_hssd_semantic_cache: dict[str, ValidationResult] = {}
 
     def configure_runtime_budget(
         self,
@@ -653,12 +660,12 @@ class AssetManager:
 
     def _hssd_semantic_validation_settings(
         self, description: str, short_name: str
-    ) -> tuple[bool, int, bool]:
+    ) -> tuple[bool, int, bool, float, int, float]:
         """Resolve targeted direct-HSSD validation without enabling LLM routing."""
         hssd_cfg = getattr(self.cfg.asset_manager, "hssd", None)
         validation_cfg = getattr(hssd_cfg, "semantic_validation", None)
         if validation_cfg is None:
-            return False, 1, False
+            return False, 1, False, 180.0, 0, 0.55
         try:
             enabled = bool(validation_cfg.get("enabled", False))
             families = {
@@ -669,6 +676,13 @@ class AssetManager:
                 1, int(validation_cfg.get("max_candidates", 2) or 2)
             )
             use_lenient = bool(validation_cfg.get("use_lenient", False))
+            timeout_seconds = float(
+                validation_cfg.get("timeout_seconds", 180.0) or 180.0
+            )
+            max_retries = max(0, int(validation_cfg.get("max_retries", 0) or 0))
+            min_orientation_confidence = float(
+                validation_cfg.get("min_orientation_confidence", 0.55) or 0.55
+            )
         except Exception:
             enabled = bool(getattr(validation_cfg, "enabled", False))
             families = {
@@ -679,9 +693,58 @@ class AssetManager:
                 1, int(getattr(validation_cfg, "max_candidates", 2) or 2)
             )
             use_lenient = bool(getattr(validation_cfg, "use_lenient", False))
+            timeout_seconds = float(
+                getattr(validation_cfg, "timeout_seconds", 180.0) or 180.0
+            )
+            max_retries = max(0, int(getattr(validation_cfg, "max_retries", 0) or 0))
+            min_orientation_confidence = float(
+                getattr(validation_cfg, "min_orientation_confidence", 0.55) or 0.55
+            )
 
         family = semantic_asset_family(description, short_name)
-        return enabled and family in families, max_candidates, use_lenient
+        return (
+            enabled and family in families,
+            max_candidates,
+            use_lenient,
+            max(1.0, timeout_seconds),
+            max_retries,
+            max(0.0, min(1.0, min_orientation_confidence)),
+        )
+
+    def _calibrated_hssd_front_axis(self, mesh_id: str) -> str | None:
+        """Return a trusted front axis from the already-paid semantic VLM call."""
+        validation = getattr(self, "_direct_hssd_validation_results", {}).get(mesh_id)
+        if validation is None or validation.front_view_image_index is None:
+            return None
+        _, _, _, _, _, min_confidence = self._hssd_semantic_validation_settings(
+            mesh_id, mesh_id
+        )
+        confidence = float(validation.orientation_confidence or 0.0)
+        if confidence < min_confidence:
+            console_logger.warning(
+                "Ignoring low-confidence HSSD front calibration for %s (%.2f < %.2f)",
+                mesh_id,
+                confidence,
+                min_confidence,
+            )
+            return None
+        try:
+            raw_axis = get_front_axis_from_image_number(
+                image_number=int(validation.front_view_image_index),
+                num_side_views=4,
+                include_diagonal_views=False,
+                include_vertical_views=True,
+            )
+        except ValueError:
+            console_logger.warning(
+                "Ignoring invalid HSSD front-view image index %s for %s",
+                validation.front_view_image_index,
+                mesh_id,
+            )
+            return None
+        if raw_axis.lower() in {"z", "-z"}:
+            return None
+        return raw_axis.upper() if raw_axis.startswith("-") else f"+{raw_axis.upper()}"
 
     def _select_direct_hssd_candidate(
         self,
@@ -700,9 +763,14 @@ class AssetManager:
         if not candidates:
             raise ValueError("No results returned from HSSD server")
 
-        enabled, max_candidates, use_lenient = (
-            self._hssd_semantic_validation_settings(description, short_name)
-        )
+        (
+            enabled,
+            max_candidates,
+            use_lenient,
+            timeout_seconds,
+            max_retries,
+            _,
+        ) = self._hssd_semantic_validation_settings(description, short_name)
         if not enabled:
             return candidates[0]
 
@@ -718,19 +786,37 @@ class AssetManager:
         infrastructure_failures = 0
         considered = candidates[:max_candidates]
         for candidate_index, candidate in enumerate(considered):
+            validation_cache = getattr(self, "_direct_hssd_semantic_cache", None)
+            if validation_cache is None:
+                validation_cache = {}
+                self._direct_hssd_semantic_cache = validation_cache
+            family = semantic_asset_family(description, short_name)
+            validation_cache_key = f"{candidate.hssd_id}|{family}"
+            validation = validation_cache.get(validation_cache_key)
             mesh_path = Path(candidate.mesh_path)
             validation_dir = (
                 self.debug_dir
                 / short_name
                 / f"hssd_{candidate_index:02d}_{candidate.hssd_id[:12]}_validation"
             )
-            validation = validation_router.validate_asset(
-                mesh_path=mesh_path,
-                description=description,
-                output_dir=validation_dir,
-                use_lenient=use_lenient,
-            )
+            if validation is None:
+                validation = validation_router.validate_asset(
+                    mesh_path=mesh_path,
+                    description=description,
+                    output_dir=validation_dir,
+                    use_lenient=use_lenient,
+                    timeout_seconds=timeout_seconds,
+                    max_retries=max_retries,
+                )
+                validation_cache[validation_cache_key] = validation
             if validation.is_acceptable:
+                orientation_results = getattr(
+                    self, "_direct_hssd_validation_results", None
+                )
+                if orientation_results is None:
+                    orientation_results = {}
+                    self._direct_hssd_validation_results = orientation_results
+                orientation_results[candidate.hssd_id] = validation
                 console_logger.info(
                     "Direct HSSD semantic validation selected candidate %s for '%s'",
                     candidate.hssd_id,
@@ -768,7 +854,7 @@ class AssetManager:
     def _direct_hssd_candidate_count(
         self, description: str, short_name: str
     ) -> int:
-        enabled, max_candidates, _ = self._hssd_semantic_validation_settings(
+        enabled, max_candidates, _, _, _, _ = self._hssd_semantic_validation_settings(
             description, short_name
         )
         return max_candidates if enabled else 1
@@ -951,6 +1037,20 @@ class AssetManager:
                     object_name=short_name,
                     debug_output_dir=debug_dir,
                 )
+                calibrated_front_axis = self._calibrated_hssd_front_axis(mesh_id)
+                if calibrated_front_axis is not None:
+                    console_logger.info(
+                        "Using semantic multi-view HSSD front calibration for %s: %s",
+                        short_name,
+                        calibrated_front_axis,
+                    )
+                    vlm_physics = MeshPhysicsAnalysis(
+                        up_axis=vlm_physics.up_axis,
+                        front_axis=calibrated_front_axis,
+                        material=vlm_physics.material,
+                        mass_kg=vlm_physics.mass_kg,
+                        mass_range_kg=vlm_physics.mass_range_kg,
+                    )
                 console_logger.info(
                     f"HSSD physics metadata complete: material={vlm_physics.material}, "
                     f"mass={vlm_physics.mass_kg}kg, front={vlm_physics.front_axis}"
@@ -1013,6 +1113,24 @@ class AssetManager:
                     additional_metadata={
                         "asset_source": "hssd",
                         "hssd_mesh_id": mesh_id,
+                        "source_front_axis": physics_analysis.front_axis,
+                        "canonical_front_axis": "+Y",
+                        "front_axis_source": (
+                            "semantic_multiview"
+                            if calibrated_front_axis is not None
+                            else "hssd_default"
+                        ),
+                        "front_axis_confidence": (
+                            getattr(
+                                getattr(
+                                    self,
+                                    "_direct_hssd_validation_results",
+                                    {},
+                                ).get(mesh_id),
+                                "orientation_confidence",
+                                None,
+                            )
+                        ),
                         "requested_dimensions": list(request.desired_dimensions[index]),
                         "actual_dimensions": (bbox_max - bbox_min).tolist(),
                     },

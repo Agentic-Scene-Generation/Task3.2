@@ -19,6 +19,7 @@ from typing import Any
 
 from scenesmith.agent_utils.furniture_functional_layout import (
     evaluate_functional_layout,
+    furnishable_room_bounds_xy,
 )
 from scenesmith.agent_utils.furniture_layout_planning import (
     evaluate_bedroom_layout_plausibility,
@@ -1174,14 +1175,7 @@ class FurnitureSafetyController:
         return reasons, issues
 
     def _room_bounds_xy(self, scene: Any) -> tuple[float, float, float, float] | None:
-        room_geometry = getattr(scene, "room_geometry", None)
-        if room_geometry is None:
-            return None
-        length = float(getattr(room_geometry, "length", 0.0) or 0.0)
-        width = float(getattr(room_geometry, "width", 0.0) or 0.0)
-        if length <= 0 or width <= 0:
-            return None
-        return (-length / 2.0, -width / 2.0, length / 2.0, width / 2.0)
+        return furnishable_room_bounds_xy(scene)
 
     def _is_furniture_object(self, obj: Any) -> bool:
         object_type = getattr(obj, "object_type", "")

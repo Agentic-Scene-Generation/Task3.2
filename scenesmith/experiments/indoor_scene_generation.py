@@ -878,9 +878,63 @@ def _generate_room(
                 empty_stage_state = scene.to_state_dict()
                 stage_prompt = scene.text_description
                 regeneration_attempt = 0
+                best_agent_candidate = None
+                repairable_hard_exhausted = False
+                capture_agent_candidate = getattr(
+                    furniture_agent, "capture_agent_candidate", None
+                )
+                prefer_agent_candidate = getattr(
+                    furniture_agent, "prefer_agent_candidate", None
+                )
+                should_regenerate_for_quality = getattr(
+                    furniture_agent, "should_regenerate_for_quality", None
+                )
                 while True:
                     try:
                         asyncio.run(furniture_agent.add_furniture(scene=scene))
+                        candidate = (
+                            capture_agent_candidate()
+                            if callable(capture_agent_candidate)
+                            else None
+                        )
+                        if callable(prefer_agent_candidate):
+                            best_agent_candidate = prefer_agent_candidate(
+                                best_agent_candidate,
+                                candidate,
+                            )
+                        should_regenerate, quality_reason = (
+                            should_regenerate_for_quality(candidate)
+                            if callable(should_regenerate_for_quality)
+                            else (False, "quality fallback unsupported by this agent")
+                        )
+                        if (
+                            should_regenerate
+                            and regeneration_attempt < max_stage_regenerations
+                        ):
+                            regeneration_attempt += 1
+                            console_logger.warning(
+                                "Furniture agent candidate missed the trusted critic "
+                                "target; restarting the full designer/critic stage "
+                                "from the empty-room checkpoint (%d/%d): %s",
+                                regeneration_attempt,
+                                max_stage_regenerations,
+                                quality_reason,
+                            )
+                            scene.restore_from_state_dict(empty_stage_state)
+                            scene.text_description = (
+                                f"{stage_prompt}\n\n"
+                                "# Mandatory Quality Regeneration\n"
+                                "The previous layout was physically valid but did "
+                                "not meet the visual critic target. Propose a "
+                                "genuinely new expert layout and address: "
+                                f"{quality_reason}."
+                            )
+                            asyncio.run(
+                                furniture_agent.prepare_stage_regeneration(
+                                    [quality_reason]
+                                )
+                            )
+                            continue
                         break
                     except StageValidationError as exc:
                         repairable = _is_repairable_stage_validation(exc)
@@ -926,8 +980,59 @@ def _generate_room(
                                     exc.reasons
                                 )
                             )
+                            repairable_hard_exhausted = True
                             break
                         raise
+
+                # A deterministic relation layout is a final comparison candidate,
+                # never the normal generator. Trigger it only after the pure-agent
+                # regeneration budget is exhausted with a trustworthy low score.
+                if not repairable_hard_exhausted:
+                    latest_candidate = (
+                        capture_agent_candidate()
+                        if callable(capture_agent_candidate)
+                        else None
+                    )
+                    if callable(prefer_agent_candidate):
+                        best_agent_candidate = prefer_agent_candidate(
+                            best_agent_candidate,
+                            latest_candidate,
+                        )
+                    restore_agent_candidate = getattr(
+                        furniture_agent, "restore_agent_candidate", None
+                    )
+                    if (
+                        best_agent_candidate is not None
+                        and callable(restore_agent_candidate)
+                        and callable(should_regenerate_for_quality)
+                    ):
+                        restore_agent_candidate(best_agent_candidate)
+                        should_fallback, fallback_reason = (
+                            should_regenerate_for_quality(best_agent_candidate)
+                        )
+                        if (
+                            should_fallback
+                            and regeneration_attempt >= max_stage_regenerations
+                        ):
+                            console_logger.warning(
+                                "Pure-agent furniture budget exhausted below target; "
+                                "generating one separately rendered deterministic "
+                                "comparison candidate: %s",
+                                fallback_reason,
+                            )
+                            compare_deterministic_fallback = getattr(
+                                furniture_agent,
+                                "compare_deterministic_fallback",
+                                None,
+                            )
+                            if callable(compare_deterministic_fallback):
+                                asyncio.run(
+                                    compare_deterministic_fallback(
+                                        agent_candidate=best_agent_candidate,
+                                        trigger=fallback_reason,
+                                        regeneration_attempts=regeneration_attempt,
+                                    )
+                                )
                 end_time = time.time()
                 console_logger.info(
                     f"Furniture added to room {room_id} in "

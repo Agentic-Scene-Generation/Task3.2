@@ -164,7 +164,10 @@ asset_manager:
       # student desk cannot silently stand in for the teacher desk.
       families: [bed, sofa, wardrobe, desk, student_desk, teacher_desk, chair]
       max_candidates: 2
-      use_lenient: false
+      use_lenient: true
+      timeout_seconds: 180
+      max_retries: 0
+      min_orientation_confidence: 0.55
     object_type_mapping:
       FURNITURE: "large_objects"
       MANIPULAND: "small_objects"
@@ -371,9 +374,11 @@ furniture_safety_controller:
     max_plausibility_penalty: 0.35
   functional_layout:
     enabled: true
-    # These relations are direct prompt requirements and have deterministic
-    # geometry repairs, so gross violations should trigger repair before VLM scoring.
-    hard_relations: true
+    # Agent/critic guidance remains the primary layout mechanism. Relation
+    # diagnostics are soft during normal generation; deterministic reordering is
+    # only exposed as a separately rendered candidate after agent regeneration.
+    hard_relations: false
+    deterministic_fallback_enabled: true
     living_room:
       sofa_wall_max_gap_m: 0.30
       sofa_inward_min_dot: 0.70
