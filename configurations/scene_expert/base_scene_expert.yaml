@@ -121,6 +121,9 @@ stage_budget:
     max_designer_turns: 16
     max_critic_turns: 6
     max_wall_clock_seconds: 900
+    # Furniture quality gates must not inherit a nearly exhausted designer
+    # deadline. Each distinct rendered candidate gets one bounded VLM window.
+    critic_evaluation_max_seconds: 360
     fallback_reserve_fraction: 0.15
     max_asset_requests: 4
     max_optional_object_families: 2

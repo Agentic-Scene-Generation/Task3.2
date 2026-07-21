@@ -27,6 +27,7 @@ class StageRuntimeReserveTest(unittest.TestCase):
         }
         agent = SimpleNamespace(
             _stage_runtime_started_at=100.0,
+            _critic_evaluation_started_at=None,
             _stage_runtime_phase="agent",
             _stage_budget_value=lambda key, default: budget.get(key, default),
         )
@@ -53,6 +54,30 @@ class StageRuntimeReserveTest(unittest.TestCase):
         self.assertAlmostEqual(planner_remaining, 35.0)
         self.assertAlmostEqual(critic_remaining, 45.0)
         self.assertAlmostEqual(fallback_critic_remaining, 55.0)
+
+    @unittest.skipIf(
+        BaseStatefulAgent is None,
+        f"requires stateful agent dependencies: {_IMPORT_ERROR}",
+    )
+    def test_critic_evaluation_has_independent_bounded_window(self) -> None:
+        budget = {
+            "max_wall_clock_seconds": 100.0,
+            "critic_evaluation_max_seconds": 360.0,
+        }
+        agent = SimpleNamespace(
+            _stage_runtime_started_at=100.0,
+            _critic_evaluation_started_at=220.0,
+            _stage_runtime_phase="agent",
+            _stage_budget_value=lambda key, default: budget.get(key, default),
+        )
+
+        with patch(
+            "scenesmith.agent_utils.base_stateful_agent.time.monotonic",
+            return_value=280.0,
+        ):
+            remaining = BaseStatefulAgent._remaining_stage_seconds(agent, "critic")
+
+        self.assertAlmostEqual(remaining, 300.0)
 
 
 if __name__ == "__main__":

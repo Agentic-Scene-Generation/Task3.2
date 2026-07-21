@@ -251,6 +251,19 @@ class FurnitureSafetyControllerTest(unittest.TestCase):
         self.assertTrue(second.rollback_to_best)
         self.assertTrue(second.should_finish)
         self.assertEqual(controller.best_scene_state, {"state": 1})
+        self.assertEqual(controller.best_score_source, "vlm_critic")
+
+    def test_unscored_checkpoint_never_claims_visual_critic_provenance(self) -> None:
+        controller = FurnitureSafetyController({"enabled": True})
+
+        saved = controller.remember_hard_valid_scene_state(
+            scene_state={"state": "hard-valid"},
+            source="critic_fallback_unscored",
+        )
+
+        self.assertTrue(saved)
+        self.assertIsNone(controller.best_scores)
+        self.assertEqual(controller.best_score_source, "unscored_hard_valid")
 
     def test_low_functionality_score_is_not_hard_by_default(self) -> None:
         controller = FurnitureSafetyController({"enabled": True})

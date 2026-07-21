@@ -218,6 +218,7 @@ class BaseStatefulAgent(ABC):
         self._hard_repair_design_change_calls = 0
         self._stage_runtime_budget: dict[str, Any] = {}
         self._stage_runtime_started_at: float | None = None
+        self._critic_evaluation_started_at: float | None = None
         self._stage_runtime_exhausted = False
         self._stage_runtime_phase = "agent"
         self._allow_degraded_stage_completion = False
@@ -258,6 +259,7 @@ class BaseStatefulAgent(ABC):
         except (TypeError, ValueError):
             self._stage_runtime_budget = {}
         self._stage_runtime_started_at = time.monotonic()
+        self._critic_evaluation_started_at = None
         self._stage_runtime_exhausted = False
         self._stage_runtime_phase = "agent"
         self._last_score_provenance = {}
@@ -278,6 +280,12 @@ class BaseStatefulAgent(ABC):
         initialize_checkpoint_attributes(self)
         self._reset_planner_budget_tracking()
         self._reset_critic_candidate_cache()
+        # A full stage regeneration is a new agent attempt.  Reusing the
+        # exhausted timestamp made the replacement designer and critic no-ops,
+        # even though the expensive assets are intentionally cached.
+        self._stage_runtime_started_at = time.monotonic()
+        self._critic_evaluation_started_at = None
+        self._stage_runtime_exhausted = False
         rendering_manager = getattr(self, "rendering_manager", None)
         if rendering_manager is not None:
             rendering_manager.clear_cache()
@@ -328,6 +336,19 @@ class BaseStatefulAgent(ABC):
         fallback/finalization. During explicit fallback comparison, the critic
         may consume the fallback reserve while finalization remains protected.
         """
+        critic_evaluation_started_at = getattr(
+            self, "_critic_evaluation_started_at", None
+        )
+        if role == "critic" and critic_evaluation_started_at is not None:
+            evaluation_limit = float(
+                self._stage_budget_value("critic_evaluation_max_seconds", 0.0)
+                or 0.0
+            )
+            if evaluation_limit > 0:
+                return evaluation_limit - (
+                    time.monotonic() - critic_evaluation_started_at
+                )
+
         wall_clock_limit = float(
             self._stage_budget_value("max_wall_clock_seconds", 0.0) or 0.0
         )
@@ -668,6 +689,64 @@ class BaseStatefulAgent(ABC):
         # grades.  Persist explicit provenance and a source-specific copy so
         # offline evaluation cannot silently interpret repair priorities as
         # visual-quality ratings.
+        provenance = self._score_provenance_for_response(
+            response=response,
+            physics_context=physics_context,
+            event=event,
+        )
+        score_source = str(provenance["score_source"])
+        source_filename = str(provenance["source_scores_file"])
+        hard_check_passed = provenance["hard_check_passed"]
+
+        with open(images_dir / source_filename, "w") as f:
+            yaml.dump(
+                data=scores_dict,
+                stream=f,
+                default_flow_style=False,
+                sort_keys=False,
+            )
+        with open(images_dir / "score_provenance.yaml", "w") as f:
+            yaml.dump(
+                data=provenance,
+                stream=f,
+                default_flow_style=False,
+                sort_keys=False,
+            )
+        if hard_check_passed is not None:
+            with open(images_dir / "hard_check_report.yaml", "w") as f:
+                yaml.dump(
+                    data={
+                        "schema_version": "1.0",
+                        "passed": hard_check_passed,
+                        "evidence": str(physics_context or response.critique or ""),
+                        "decision_scores_file": (
+                            source_filename
+                            if score_source == "deterministic_hard_check"
+                            else ""
+                        ),
+                        "decision_scores_are_synthetic": (
+                            score_source == "deterministic_hard_check"
+                        ),
+                    },
+                    stream=f,
+                    default_flow_style=False,
+                    sort_keys=False,
+                )
+        console_logger.info(
+            "Score provenance saved to %s (source=%s)",
+            images_dir / "score_provenance.yaml",
+            score_source,
+        )
+        return provenance
+
+    def _score_provenance_for_response(
+        self,
+        *,
+        response: CritiqueWithScores,
+        physics_context: str = "",
+        event: str = "critique",
+    ) -> dict[str, Any]:
+        """Classify score evidence even when no render directory was produced."""
         critique_upper = str(response.critique or "").upper()
         if event == "deterministic_hard_fail":
             score_source = "deterministic_hard_check"
@@ -711,13 +790,6 @@ class BaseStatefulAgent(ABC):
         else:
             hard_check_passed = None
 
-        with open(images_dir / source_filename, "w") as f:
-            yaml.dump(
-                data=scores_dict,
-                stream=f,
-                default_flow_style=False,
-                sort_keys=False,
-            )
         provenance = {
             "schema_version": "1.0",
             "score_source": score_source,
@@ -728,38 +800,6 @@ class BaseStatefulAgent(ABC):
             "source_scores_file": source_filename,
             "hard_check_evidence": str(physics_context or ""),
         }
-        with open(images_dir / "score_provenance.yaml", "w") as f:
-            yaml.dump(
-                data=provenance,
-                stream=f,
-                default_flow_style=False,
-                sort_keys=False,
-            )
-        if hard_check_passed is not None:
-            with open(images_dir / "hard_check_report.yaml", "w") as f:
-                yaml.dump(
-                    data={
-                        "schema_version": "1.0",
-                        "passed": hard_check_passed,
-                        "evidence": str(physics_context or response.critique or ""),
-                        "decision_scores_file": (
-                            source_filename
-                            if score_source == "deterministic_hard_check"
-                            else ""
-                        ),
-                        "decision_scores_are_synthetic": (
-                            score_source == "deterministic_hard_check"
-                        ),
-                    },
-                    stream=f,
-                    default_flow_style=False,
-                    sort_keys=False,
-                )
-        console_logger.info(
-            "Score provenance saved to %s (source=%s)",
-            images_dir / "score_provenance.yaml",
-            score_source,
-        )
         return provenance
 
     def _write_scores_and_memory(
@@ -771,6 +811,15 @@ class BaseStatefulAgent(ABC):
         event: str = "critique",
     ) -> None:
         """Persist score artifacts and stage working memory for a render."""
+        provenance = self._score_provenance_for_response(
+            response=response,
+            physics_context=physics_context,
+            event=event,
+        )
+        # Provenance is a control-plane signal, not merely a render artifact.
+        # Record it before checking images_dir so a critic timeout that happened
+        # before observe_scene can never masquerade as a trusted VLM score.
+        self._last_score_provenance = dict(provenance)
         if images_dir:
             provenance = self._write_score_artifacts(
                 response=response,
@@ -778,7 +827,6 @@ class BaseStatefulAgent(ABC):
                 physics_context=physics_context,
                 event=event,
             )
-            self._last_score_provenance = dict(provenance)
             if (
                 provenance.get("score_source") == "vlm_critic"
                 and self.scene is not None
@@ -1529,6 +1577,7 @@ class BaseStatefulAgent(ABC):
             scene_state=candidate_state,
             render_dir=images_dir,
             hard_state_evaluation=hard_state_evaluation,
+            score_source="vlm_critic",
         )
 
         checkpoint_scores: CritiqueWithScores | None = None
@@ -2735,6 +2784,16 @@ class BaseStatefulAgent(ABC):
         else:
             self._pending_hard_repair_hint = ""
             self._hard_repair_design_change_calls = 0
+
+        # Visual scoring is a required decision boundary for quality
+        # regeneration, deterministic fallback selection, and positive memory.
+        # Give each distinct candidate one bounded evaluation window instead of
+        # whatever time happens to remain after asset acquisition and design.
+        self._critic_evaluation_started_at = time.monotonic()
+        if self._critic_fast_path_enabled("fresh_session_per_evaluation", True):
+            clear_session = getattr(self.critic_session, "clear_session", None)
+            if callable(clear_session):
+                await clear_session()
 
         prompt_enum = self._get_critique_prompt_enum()
         extra_kwargs = self._get_extra_critique_kwargs()

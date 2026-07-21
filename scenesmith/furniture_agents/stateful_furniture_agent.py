@@ -614,17 +614,26 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             }
         return {
             "scene_state": copy.deepcopy(controller.best_scene_state),
-            "scores": copy.deepcopy(controller.best_scores),
+            "scores": (
+                copy.deepcopy(controller.best_scores)
+                if getattr(controller, "best_score_source", "unavailable")
+                == "vlm_critic"
+                else None
+            ),
             "render_dir": controller.best_render_dir,
             "weighted_score": (
                 float(controller.best_weighted_score)
-                if controller.best_scores is not None
+                if (
+                    controller.best_scores is not None
+                    and getattr(controller, "best_score_source", "unavailable")
+                    == "vlm_critic"
+                )
                 else None
             ),
-            "score_source": (
-                "vlm_critic"
-                if controller.best_scores is not None
-                else "unscored_hard_valid"
+            "score_source": getattr(
+                controller,
+                "best_score_source",
+                "unscored_hard_valid",
             ),
         }
 
@@ -652,6 +661,9 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         controller = self.furniture_safety_controller
         controller.best_scene_state = copy.deepcopy(candidate["scene_state"])
         controller.best_scores = copy.deepcopy(candidate.get("scores"))
+        controller.best_score_source = str(
+            candidate.get("score_source", "unscored_hard_valid")
+        )
         controller.best_render_dir = candidate.get("render_dir")
         controller.best_weighted_score = float(
             candidate.get("weighted_score")
@@ -757,7 +769,12 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             },
             "selection": "agent_best_pre_deterministic",
             "selection_reason": "deterministic candidate was not generated",
+            "agent_render_dir": str(agent_render_dir),
         }
+        # Persist the trigger and pure-agent baseline before attempting any
+        # optional fallback work. A renderer/critic interruption must still
+        # leave a complete explanation of why no deterministic image appeared.
+        self._write_fallback_comparison(comparison)
 
         controller_cfg = getattr(self.cfg, "furniture_safety_controller", None)
         functional_cfg = getattr(controller_cfg, "functional_layout", None)
@@ -807,6 +824,11 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         )
 
         deterministic_hash = self.scene.content_hash()
+        comparison["deterministic_render_dir"] = str(deterministic_render_dir)
+        comparison["deterministic_scene_changed"] = deterministic_hash != agent_hash
+        # The deterministic render is a required diagnostic artifact, even if
+        # its later VLM comparison times out or the process is interrupted.
+        self._write_fallback_comparison(comparison)
         self._stage_runtime_phase = "fallback"
         try:
             if (
@@ -821,27 +843,30 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 comparison["selection_reason"] = (
                     "deterministic candidate failed physical hard checks"
                 )
-            elif self._critic_failed:
-                self.restore_agent_candidate(agent_candidate)
-                comparison["deterministic_candidate"] = {
-                    "score_source": "critic_unavailable",
-                    "weighted_score": None,
-                }
-                comparison["selection_reason"] = (
-                    "critic unavailable; rendered fallback retained for diagnosis only"
-                )
             else:
-                clear_session = getattr(self.critic_session, "clear_session", None)
-                if callable(clear_session):
-                    await clear_session()
+                # A failure on the agent candidate does not prove that the
+                # independent deterministic candidate is unscorable. Retry its
+                # visual decision with the fresh per-evaluation critic context.
+                self._critic_failed = False
                 self._last_trusted_critic_candidate = None
                 await self._request_critique_impl(update_checkpoint=False)
                 deterministic_candidate = self._last_trusted_critic_candidate
                 comparison["deterministic_candidate"] = self._candidate_score_summary(
                     deterministic_candidate
                 )
-                selected_deterministic = self.scene.content_hash() == deterministic_hash
-                if selected_deterministic:
+                if deterministic_candidate is None:
+                    self.restore_agent_candidate(agent_candidate)
+                    comparison["deterministic_candidate"] = {
+                        "score_source": self._last_score_provenance.get(
+                            "score_source", "critic_unavailable"
+                        ),
+                        "weighted_score": None,
+                    }
+                    comparison["selection_reason"] = (
+                        "deterministic candidate rendered, but its visual critic "
+                        "did not complete; pure-agent candidate preserved"
+                    )
+                elif self.scene.content_hash() == deterministic_hash:
                     comparison["selection"] = "deterministic_candidate"
                     comparison["selection_reason"] = (
                         "hard-valid deterministic candidate meaningfully improved "
@@ -871,9 +896,6 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
 
         # Preserve the diagnostic render path even when the controller restores
         # the incumbent after scoring.
-        comparison["agent_render_dir"] = str(agent_render_dir)
-        comparison["deterministic_render_dir"] = str(deterministic_render_dir)
-        comparison["deterministic_scene_changed"] = deterministic_hash != agent_hash
         self._write_fallback_comparison(comparison)
         await self._finalize_scene_and_scores()
         return comparison

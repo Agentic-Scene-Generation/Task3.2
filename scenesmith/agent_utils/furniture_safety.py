@@ -357,6 +357,7 @@ class FurnitureSafetyController:
 
         self.best_scene_state: dict[str, Any] | None = None
         self.best_scores: CritiqueWithScores | None = None
+        self.best_score_source = "unavailable"
         self.best_render_dir: Path | None = None
         self.best_weighted_score = -1.0
         self.best_reasons: list[str] = []
@@ -393,6 +394,7 @@ class FurnitureSafetyController:
         self.should_finish = False
         self.best_scene_state = None
         self.best_scores = None
+        self.best_score_source = "unavailable"
         self.best_render_dir = None
         self.best_weighted_score = -1.0
         self.best_reasons = []
@@ -1392,6 +1394,7 @@ class FurnitureSafetyController:
         weighted_score: float | None = None,
         scores: CritiqueWithScores | None = None,
         render_dir: Path | None = None,
+        score_source: str = "unscored_hard_valid",
     ) -> bool:
         """Save a deterministic hard-valid checkpoint when useful."""
         if not self.enabled:
@@ -1408,6 +1411,9 @@ class FurnitureSafetyController:
 
         self.best_scene_state = copy.deepcopy(scene_state)
         self.best_scores = copy.deepcopy(scores) if scores is not None else None
+        self.best_score_source = (
+            score_source if scores is not None else "unscored_hard_valid"
+        )
         self.best_render_dir = render_dir
         self.best_weighted_score = max(candidate_score, self.best_weighted_score)
         self.best_reasons = [f"deterministic hard-valid checkpoint from {source}"]
@@ -1430,6 +1436,7 @@ class FurnitureSafetyController:
         scene_state: dict[str, Any],
         render_dir: Path | None,
         hard_state_evaluation: HardStateEvaluation | None = None,
+        score_source: str = "vlm_critic",
     ) -> CandidateDecision:
         """Evaluate a critiqued candidate and update/rollback best state metadata."""
         evaluation = self.evaluate_scores(scores)
@@ -1459,6 +1466,7 @@ class FurnitureSafetyController:
             if self.best_scene_state is None or improvement >= self.min_accept_delta:
                 self.best_scene_state = copy.deepcopy(scene_state)
                 self.best_scores = copy.deepcopy(scores)
+                self.best_score_source = score_source
                 self.best_render_dir = render_dir
                 self.best_weighted_score = evaluation.weighted_score
                 self.best_reasons = []

@@ -6,6 +6,10 @@ import numpy as np
 
 try:
     from pydrake.all import RigidTransform
+    from scenesmith.agent_utils.scoring import (
+        CategoryScore,
+        FurnitureCritiqueWithScores,
+    )
     from scenesmith.furniture_agents.stateful_furniture_agent import (
         StatefulFurnitureAgent,
     )
@@ -54,6 +58,54 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         agent.scene.scene_expert_stage_budget = {}
         trusted["score_source"] = "vlm_critic"
         self.assertFalse(agent.should_regenerate_for_quality(trusted)[0])
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
+    def test_capture_does_not_promote_fallback_score_to_trusted_critic(self) -> None:
+        agent = object.__new__(StatefulFurnitureAgent)
+        fallback_scores = SimpleNamespace(critique="critic timed out")
+        agent.furniture_safety_controller = SimpleNamespace(
+            best_scene_state={"objects": []},
+            best_scores=fallback_scores,
+            best_score_source="critic_fallback",
+            best_render_dir=None,
+            best_weighted_score=0.575,
+        )
+
+        candidate = agent.capture_agent_candidate()
+
+        self.assertIsNotNone(candidate)
+        self.assertEqual(candidate["score_source"], "critic_fallback")
+        self.assertIsNone(candidate["scores"])
+        self.assertIsNone(candidate["weighted_score"])
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
+    def test_fallback_provenance_is_recorded_without_render_directory(self) -> None:
+        agent = object.__new__(StatefulFurnitureAgent)
+        agent._last_score_provenance = {}
+        neutral = CategoryScore(name="test", grade=5, comment="transport fallback")
+        response = FurnitureCritiqueWithScores(
+            critique="TRANSIENT LOCAL VLM TIMEOUT DURING VISUAL CRITIC SCORING.",
+            realism=neutral,
+            functionality=neutral,
+            layout=neutral,
+            layout_plausibility=neutral,
+            holistic_completeness=neutral,
+            prompt_following=neutral,
+            reachability=neutral,
+        )
+
+        agent._write_scores_and_memory(response=response, images_dir=None)
+
+        self.assertEqual(
+            agent._last_score_provenance["score_source"], "critic_fallback"
+        )
+        self.assertFalse(agent._last_score_provenance["vlm_scoring_performed"])
 
     @unittest.skipIf(
         StatefulFurnitureAgent is None,
