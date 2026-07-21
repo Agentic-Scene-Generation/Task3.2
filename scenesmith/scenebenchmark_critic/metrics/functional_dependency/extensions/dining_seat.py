@@ -82,22 +82,16 @@ def _evaluate_table(
         if not members:
             continue
         edge_length = depth if edge in {"left", "right"} else width
-        chair_spans = [_seat_tangent_span(seat, edge, yaw) for seat, _ in members]
-        perpendicular_length = width if edge in {"left", "right"} else depth
-        # 2026-07-13 修改原因：只扣半个椅宽会把长边端部槽位推到桌角，导致
-        # 座椅同时侵占相邻短边。至少扣除半个垂直边长，使槽位明确属于当前边。
-        margin = max(max(chair_spans) / 2, perpendicular_length / 2)
-        usable_span = max(0.0, edge_length - 2 * margin)
         count = len(members)
-        # 2026-07-13 修改原因：槽位由桌边长度和该边实际座椅数推导；单椅取
-        # 中点，多椅在扣除椅宽边距后等距分布，避免固定四人桌坐标。
-        slots = (
-            [0.0]
-            if count == 1
-            else [-usable_span / 2 + i * usable_span / (count - 1) for i in range(count)]
-        )
+        # 2026-07-21 修改原因：长边多椅不能只在扣除两端边距后均分椅子
+        # 中心。那会把两把椅子推到桌边附近，使中间空隙远大于两端空隙。
+        # 将整条有限桌边分成 count 个等长段，每把椅子取自己段落的中心：
+        # 对两把等宽椅子，端部空隙为 g，中间空隙自然为 2g；count > 2
+        # 时同一公式继续适用，不依赖固定桌长或固定座椅数量。
+        slots = _equal_edge_segment_slots(edge_length, count)
         actual = sorted(members, key=lambda row: (row[1], str(row[0]["id"])))
-        for (seat, position), slot, chair_span in zip(actual, slots, sorted(chair_spans)):
+        for segment_index, ((seat, position), slot) in enumerate(zip(actual, slots)):
+            chair_span = _seat_tangent_span(seat, edge, yaw)
             deviation = abs(position - slot)
             allowed = max(0.08, min(0.35 * chair_span, 0.08 * edge_length))
             passed = deviation <= allowed
@@ -108,6 +102,9 @@ def _evaluate_table(
             facing_passed = facing_error is None or facing_error <= 10.0
             diagnostics.append({
                 "seat_id": str(seat["id"]), "edge": edge,
+                "segment_index": segment_index,
+                "segment_count": count,
+                "segment_length_m": round(edge_length / count, 4),
                 "tangent_position_m": round(position, 4),
                 "target_position_m": round(slot, 4),
                 "deviation_m": round(deviation, 4),
@@ -120,7 +117,7 @@ def _evaluate_table(
                 direction = "positive" if slot > position else "negative"
                 failures.append(
                     f"`{seat['id']}` on the {edge} edge is {deviation:.2f}m from "
-                    f"its evenly distributed slot; move it in the {direction} edge direction"
+                    f"its equal-segment slot; move it in the {direction} edge direction"
                 )
             if not facing_passed:
                 failures.append(
@@ -135,13 +132,16 @@ def _evaluate_table(
     failed = bool(failures)
     reason = (
         "Dining chairs on each rectangular table edge must be centered when alone "
-        "and evenly distributed when multiple chairs share the edge. "
+        "and centered in equal edge segments when multiple chairs share the edge. "
+        "For two chairs, this keeps the two end gaps equal and the middle gap "
+        "approximately twice either end gap; apply the same equal-segment rule "
+        "for any number of chairs. "
         "For a dining chair, use an exact table-local slot and do not use generic "
         "center snapping or shift the chair along the edge normal to resolve a "
         "door conflict; move the table or door-compatible layout instead. "
         + "; ".join(failures)
         if failed else
-        "Dining chairs are centered or evenly distributed along their respective table edges."
+        "Dining chairs are centered when alone and centered in equal segments along their respective table edges."
     )
     return {
         "check_id": f"fd_{table_id}_{RELATION_TYPE}",
@@ -150,9 +150,20 @@ def _evaluate_table(
         "related_objects": related, "selected_related_objects": related,
         "blocking_objects": [], "relation_type": RELATION_TYPE, "reason": reason,
         "diagnostics": {"seat_slots": diagnostics},
-        "evidence": {"distribution": "table_local_edge_slots"},
+        "evidence": {"distribution": "table_local_equal_edge_segments"},
         "evaluation_source": "scenesmith_dining_seat_distribution", "scoring_tier": "core",
     }
+
+
+def _equal_edge_segment_slots(edge_length: float, count: int) -> list[float]:
+    """Return local tangent centers for ``count`` equal segments of an edge."""
+    if count <= 0 or edge_length <= 1e-6:
+        return []
+    segment_length = edge_length / count
+    return [
+        -edge_length / 2.0 + (index + 0.5) * segment_length
+        for index in range(count)
+    ]
 
 
 def _seat_tangent_span(seat: dict[str, Any], edge: str, table_yaw: float) -> float:
