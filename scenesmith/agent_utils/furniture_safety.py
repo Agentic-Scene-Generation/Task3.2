@@ -63,6 +63,15 @@ NUMBER_WORDS = {
     "six": 6,
 }
 
+DISTINCT_FURNITURE_ROLES = (
+    "student",
+    "teacher",
+    "guest",
+    "visitor",
+    "office",
+    "dining",
+)
+
 
 @dataclass
 class SafetyEvaluation:
@@ -339,7 +348,40 @@ class FurnitureSafetyController:
         if "twin_bed" in counts:
             counts.pop("bed", None)
         self._propagate_each_relation_counts(text, counts)
+        self._combine_distinct_role_counts(text, counts)
         return counts
+
+    def _combine_distinct_role_counts(
+        self, text: str, counts: dict[str, int]
+    ) -> None:
+        """Sum explicitly distinct desk/chair roles without double-counting briefs."""
+        number_pattern = "|".join([r"\d+", *NUMBER_WORDS.keys()])
+        for canonical in ("desk", "chair"):
+            role_counts: dict[str, int] = {}
+            for role in DISTINCT_FURNITURE_ROLES:
+                best_count = 0
+                for alias in DEFAULT_ALIASES[canonical]:
+                    pattern = (
+                        rf"(^|[^a-z0-9])(?:(?P<count>{number_pattern})\s+)?"
+                        rf"{role}(?:'s)?\s+(?:\w+\s+){{0,1}}"
+                        rf"{re.escape(alias)}([^a-z0-9]|$)"
+                    )
+                    for match in re.finditer(pattern, text):
+                        count_text = match.groupdict().get("count")
+                        count = 1
+                        if count_text:
+                            count = (
+                                int(count_text)
+                                if count_text.isdigit()
+                                else NUMBER_WORDS.get(count_text, 1)
+                            )
+                        best_count = max(best_count, count)
+                if best_count:
+                    role_counts[role] = best_count
+            if len(role_counts) >= 2:
+                counts[canonical] = max(
+                    counts.get(canonical, 0), sum(role_counts.values())
+                )
 
     def _propagate_each_relation_counts(
         self, text: str, counts: dict[str, int]

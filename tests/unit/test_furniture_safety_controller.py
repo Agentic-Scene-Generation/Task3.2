@@ -257,7 +257,7 @@ class FurnitureSafetyControllerTest(unittest.TestCase):
             "A teacher's desk sits at the front near the chalkboard."
         )
 
-        self.assertEqual(controller.required_counts.get("desk"), 6)
+        self.assertEqual(controller.required_counts.get("desk"), 7)
         self.assertEqual(controller.required_counts.get("chair"), 6)
         self.assertNotIn("table", controller.required_counts)
 
