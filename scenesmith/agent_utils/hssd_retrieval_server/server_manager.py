@@ -43,7 +43,11 @@ class HssdRetrievalServer:
         preload_retriever: bool = True,
         hssd_data_path: str | None = None,
         hssd_preprocessed_path: str | None = None,
+        hssd_retrieval_backend: str = "clip",
         hssd_top_k: int = 5,
+        hssd_zvec_collection_path: str | None = None,
+        hssd_embedding_base_url: str | None = None,
+        hssd_embedding_dimension: int = 2048,
         clip_device: str | None = None,
     ) -> None:
         """Initialize the HSSD retrieval server manager.
@@ -75,7 +79,11 @@ class HssdRetrievalServer:
         self._preload_retriever = preload_retriever
         self._hssd_data_path = hssd_data_path
         self._hssd_preprocessed_path = hssd_preprocessed_path
+        self._hssd_retrieval_backend = hssd_retrieval_backend
         self._hssd_top_k = hssd_top_k
+        self._hssd_zvec_collection_path = hssd_zvec_collection_path
+        self._hssd_embedding_base_url = hssd_embedding_base_url
+        self._hssd_embedding_dimension = hssd_embedding_dimension
         self._clip_device = clip_device
         self._app: HssdRetrievalApp | None = None
         self._server_thread: Thread | None = None
@@ -107,7 +115,11 @@ class HssdRetrievalServer:
                 preload_retriever=self._preload_retriever,
                 hssd_data_path=self._hssd_data_path,
                 hssd_preprocessed_path=self._hssd_preprocessed_path,
+                hssd_retrieval_backend=self._hssd_retrieval_backend,
                 hssd_top_k=self._hssd_top_k,
+                hssd_zvec_collection_path=self._hssd_zvec_collection_path,
+                hssd_embedding_base_url=self._hssd_embedding_base_url,
+                hssd_embedding_dimension=self._hssd_embedding_dimension,
                 clip_device=self._clip_device,
             )
 

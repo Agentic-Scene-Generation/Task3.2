@@ -1811,6 +1811,7 @@ dependencies = [
     { name = "vhacdx" },
     { name = "wandb" },
     { name = "xatlas" },
+    { name = "zvec" },
 ]
 
 [package.dev-dependencies]
@@ -1863,6 +1864,7 @@ requires-dist = [
     { name = "vhacdx", specifier = ">=0.0.10" },
     { name = "wandb", specifier = ">=0.21.1" },
     { name = "xatlas", specifier = ">=0.0.11" },
+    { name = "zvec", specifier = ">=0.5.1" },
 ]
 
 [package.metadata.requires-dev]
@@ -2435,4 +2437,18 @@ wheels = [
     { url = "https://pypi.tuna.tsinghua.edu.cn/packages/27/a9/92da42a5c4e7e4003271f2e1f0efd1f37cfd565d763ad3604e9597980a1c/zstandard-0.24.0-cp311-cp311-win32.whl", hash = "sha256:cda61c46343809ecda43dc620d1333dd7433a25d0a252f2dcc7667f6331c7b61", size = 435559, upload-time = "2025-08-17T18:22:17.29Z" },
     { url = "https://pypi.tuna.tsinghua.edu.cn/packages/e2/8e/2c8e5c681ae4937c007938f954a060fa7c74f36273b289cabdb5ef0e9a7e/zstandard-0.24.0-cp311-cp311-win_amd64.whl", hash = "sha256:3b95fc06489aa9388400d1aab01a83652bc040c9c087bd732eb214909d7fb0dd", size = 505070, upload-time = "2025-08-17T18:22:14.808Z" },
     { url = "https://pypi.tuna.tsinghua.edu.cn/packages/52/10/a2f27a66bec75e236b575c9f7b0d7d37004a03aa2dcde8e2decbe9ed7b4d/zstandard-0.24.0-cp311-cp311-win_arm64.whl", hash = "sha256:ad9fd176ff6800a0cf52bcf59c71e5de4fa25bf3ba62b58800e0f84885344d34", size = 461507, upload-time = "2025-08-17T18:22:15.964Z" },
+]
+
+[[package]]
+name = "zvec"
+version = "0.6.0"
+source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }
+dependencies = [
+    { name = "numpy" },
+]
+wheels = [
+    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/51/a3/1f46239b5b8c1863ae83592d0b62a831f8a8915491d0277c2231cd6a0933/zvec-0.6.0-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:4f0f4d2dbc2552d237c6209b09cc023914b70fc746fae1458511aedd34813383", size = 12331212, upload-time = "2026-07-20T03:44:19.133Z" },
+    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/d8/5f/5f3a93461bb18c561913e3cdc4681c650bd05623be2c46522f4ca9429af8/zvec-0.6.0-cp311-cp311-manylinux_2_28_aarch64.whl", hash = "sha256:60e9ba18b97ef2ffaaebbd233e1a91e5bb013ff4a73f54a6ca28dda7f3e4e9e8", size = 17436383, upload-time = "2026-07-20T03:39:48.105Z" },
+    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/fa/1b/d7bea9e9cd9f82947a26b7274539922ca66824d844161d69b57225d78e6e/zvec-0.6.0-cp311-cp311-manylinux_2_28_x86_64.whl", hash = "sha256:474de64920fb9d02817e6995f03937a4f3ec3594a0960b4d90624863bf2f3095", size = 19718087, upload-time = "2026-07-20T03:46:16.458Z" },
+    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/ae/0b/a91063ea0d6024d81bbfc0f8269bde3158e465baa2603839d2482688a7dd/zvec-0.6.0-cp311-cp311-win_amd64.whl", hash = "sha256:2d168fb8a15f2c6b37a3e9e8f818bab14317f42c5cab33edd628c3ebf8381f34", size = 12950419, upload-time = "2026-07-20T03:30:22.925Z" },
 ]
