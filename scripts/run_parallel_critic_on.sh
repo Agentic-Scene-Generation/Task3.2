@@ -42,6 +42,8 @@ DRY_RUN="${DRY_RUN:-false}"
 DISABLE_ARTICULATED="${SCENEEXPERT_DISABLE_ARTICULATED:-false}"
 DISABLE_MATERIALS="${SCENEEXPERT_DISABLE_MATERIALS:-false}"
 DISABLE_BWRAP="${SCENEEXPERT_DISABLE_BWRAP:-false}"
+HSSD_RETRIEVAL_BACKEND="${HSSD_RETRIEVAL_BACKEND:-clip}"
+HSSD_RENDERED_ASSET_CHOICE="${HSSD_RENDERED_ASSET_CHOICE:-false}"
 
 # Match the classmate's vLLM run. The agent code maps these values to Qwen
 # directives: none/minimal -> /no_think, all other values -> /think.
@@ -146,6 +148,14 @@ if ! DISABLE_BWRAP="$(normalize_bool "$DISABLE_BWRAP")"; then
     echo "ERROR: SCENEEXPERT_DISABLE_BWRAP must be true or false" >&2
     exit 1
 fi
+if [[ "$HSSD_RETRIEVAL_BACKEND" != "clip" && "$HSSD_RETRIEVAL_BACKEND" != "embedding" ]]; then
+    echo "ERROR: HSSD_RETRIEVAL_BACKEND must be clip or embedding" >&2
+    exit 1
+fi
+if ! HSSD_RENDERED_ASSET_CHOICE="$(normalize_bool "$HSSD_RENDERED_ASSET_CHOICE")"; then
+    echo "ERROR: HSSD_RENDERED_ASSET_CHOICE must be true or false" >&2
+    exit 1
+fi
 if ! FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS="$(normalize_bool "$FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS")"; then
     echo "ERROR: FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS must be true or false" >&2
     exit 1
@@ -212,6 +222,7 @@ export SCENEEXPERT_DISABLE_ARTICULATED="$DISABLE_ARTICULATED"
 export SCENEEXPERT_DISABLE_MATERIALS="$DISABLE_MATERIALS"
 export SCENEEXPERT_DISABLE_BWRAP="$DISABLE_BWRAP"
 export FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS
+export HSSD_RETRIEVAL_BACKEND HSSD_RENDERED_ASSET_CHOICE
 export FLOOR_PLAN_DESIGNER_THINKING FLOOR_PLAN_CRITIC_THINKING
 export FURNITURE_DESIGNER_THINKING FURNITURE_CRITIC_THINKING
 export WALL_DESIGNER_THINKING WALL_CRITIC_THINKING
@@ -232,6 +243,7 @@ echo "parallel batches: $CRITIC_PROBE_PARALLEL ($CRITIC_PROBE_INNER_PARALLELISM)
 echo "port allocation: base=$CRITIC_PROBE_PORT_BASE block=$CRITIC_PROBE_PORT_BLOCK_SIZE"
 echo "continue after batch failure: $CRITIC_PROBE_CONTINUE_ON_BATCH_FAILURE"
 echo "fail unresolved furniture hard constraints: $FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS"
+echo "HSSD retrieval: backend=$HSSD_RETRIEVAL_BACKEND rendered_asset_choice=$HSSD_RENDERED_ASSET_CHOICE"
 echo "thinking profile: floor_plan=${FLOOR_PLAN_DESIGNER_THINKING}/${FLOOR_PLAN_CRITIC_THINKING}, furniture=${FURNITURE_DESIGNER_THINKING}/${FURNITURE_CRITIC_THINKING}, wall=${WALL_DESIGNER_THINKING}/${WALL_CRITIC_THINKING}, ceiling=${CEILING_DESIGNER_THINKING}/${CEILING_CRITIC_THINKING}, manipuland=${MANIPULAND_DESIGNER_THINKING}/${MANIPULAND_CRITIC_THINKING}"
 echo "shared base: $BRANCH_FROM_SHARED_BASE (generate=$GENERATE_SHARED_BASE)"
 echo "==============================================="
@@ -265,6 +277,14 @@ COMMON_ARGS=(
     "ceiling_agent.openai.reasoning_effort.critic=${CEILING_CRITIC_THINKING}"
     "manipuland_agent.openai.reasoning_effort.designer=${MANIPULAND_DESIGNER_THINKING}"
     "manipuland_agent.openai.reasoning_effort.critic=${MANIPULAND_CRITIC_THINKING}"
+    "furniture_agent.asset_manager.hssd.retrieval_backend=${HSSD_RETRIEVAL_BACKEND}"
+    "wall_agent.asset_manager.hssd.retrieval_backend=${HSSD_RETRIEVAL_BACKEND}"
+    "ceiling_agent.asset_manager.hssd.retrieval_backend=${HSSD_RETRIEVAL_BACKEND}"
+    "manipuland_agent.asset_manager.hssd.retrieval_backend=${HSSD_RETRIEVAL_BACKEND}"
+    "furniture_agent.asset_manager.hssd.rendered_asset_choice.enabled=${HSSD_RENDERED_ASSET_CHOICE}"
+    "wall_agent.asset_manager.hssd.rendered_asset_choice.enabled=${HSSD_RENDERED_ASSET_CHOICE}"
+    "ceiling_agent.asset_manager.hssd.rendered_asset_choice.enabled=${HSSD_RENDERED_ASSET_CHOICE}"
+    "manipuland_agent.asset_manager.hssd.rendered_asset_choice.enabled=${HSSD_RENDERED_ASSET_CHOICE}"
 )
 
 if [ "$DISABLE_ARTICULATED" = "true" ]; then
