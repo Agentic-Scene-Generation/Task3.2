@@ -195,6 +195,7 @@ class CeilingTools:
                 object_type=ObjectType.CEILING_MOUNTED,
                 desired_dimensions=desired_dimensions,
                 style_context=style_context,
+                scene_prompt_context=self.scene.text_description,
                 scene_id=self.scene.scene_dir.name,
             )
             return self._generate_assets_impl(request)

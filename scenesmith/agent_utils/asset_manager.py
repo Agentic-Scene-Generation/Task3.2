@@ -186,6 +186,9 @@ class AssetGenerationRequest:
     style_context: str | None = None
     """Style context for consistency (e.g., 'modern minimalist kitchen')."""
 
+    scene_prompt_context: str | None = None
+    """Original room prompt for context-aware asset choice."""
+
     operation_type: AssetOperationType = AssetOperationType.INITIAL
     """Type of generation operation."""
 
@@ -1277,6 +1280,7 @@ class AssetManager:
             object_type=request.object_type,
             desired_dimensions=unique_dimensions,
             style_context=request.style_context,
+            scene_prompt_context=request.scene_prompt_context,
             operation_type=request.operation_type,
             scene_id=request.scene_id,
         )
@@ -1724,6 +1728,7 @@ class AssetManager:
             articulated_client=self.articulated_client,
             materials_client=self.materials_client,
             scene_id=request.scene_id,
+            scene_prompt_context=request.scene_prompt_context,
         )
 
     def _convert_generated_to_scene_object(
