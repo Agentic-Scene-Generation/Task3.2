@@ -486,6 +486,7 @@ class FurnitureTools:
                 object_type=ObjectType.FURNITURE,
                 desired_dimensions=size_policy_result.desired_dimensions,
                 style_context=style_context,
+                scene_prompt_context=self.scene.text_description,
                 scene_id=self.scene.scene_dir.name,
             )
             return self._generate_assets_impl(request)
