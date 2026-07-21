@@ -3,6 +3,12 @@
 # service ports. This script intentionally has no critic-off, embedding, or VLM
 # annotation path: SceneBenchmark feedback is injected only into existing LLM
 # critic prompts.
+#
+# Shared-base replay:
+#   GENERATE_SHARED_BASE=true ... bash scripts/run_parallel_critic_on.sh
+# generates OUTPUT_ROOT/shared_base and branches the critic run from it.
+# To reuse a previous base, set BRANCH_FROM_SHARED_BASE=true and point
+# SHARED_BASE_ROOT at that directory.
 
 set -euo pipefail
 
@@ -95,6 +101,17 @@ next_stage_after() {
         furniture) printf 'wall_mounted' ;;
         wall_mounted) printf 'ceiling_mounted' ;;
         ceiling_mounted) printf 'manipuland' ;;
+        *) return 1 ;;
+    esac
+}
+
+pipeline_stage_index() {
+    case "$1" in
+        floor_plan) printf '0' ;;
+        furniture) printf '1' ;;
+        wall_mounted) printf '2' ;;
+        ceiling_mounted) printf '3' ;;
+        manipuland) printf '4' ;;
         *) return 1 ;;
     esac
 }
@@ -197,6 +214,10 @@ if [ "$BRANCH_FROM_SHARED_BASE" = "true" ] || [ "$GENERATE_SHARED_BASE" = "true"
             ;;
     esac
     BRANCH_START_STAGE="$(next_stage_after "$SHARED_BASE_STOP_STAGE")"
+    if [ "$(pipeline_stage_index "$PIPELINE_STOP_STAGE")" -le "$(pipeline_stage_index "$SHARED_BASE_STOP_STAGE")" ]; then
+        echo "ERROR: PIPELINE_STOP_STAGE must be after SHARED_BASE_STOP_STAGE when using a shared base" >&2
+        exit 1
+    fi
     if [ -z "$SHARED_BASE_ROOT" ]; then
         SHARED_BASE_ROOT="$OUTPUT_ROOT/shared_base"
     fi
@@ -255,6 +276,10 @@ CASES=(
     "default_living_room|ACP default scene 1|A living room with a two-seater sofa against the wall, a square rug in the middle in front of the sofa, and two large plants on the floor near the sofa."
     "default_classroom|ACP default scene 2|A classroom with six student desks, each with a chair. A teacher's desk sits at the front near the chalkboard, which hangs on the wall."
     "default_rustic_bedroom|ACP default scene 3|A bedroom featuring rustic farmhouse decor with exposed wooden beams."
+    "living_room_media_bottleneck|sofa-coffee-table-TV functional relation and living-room circulation bottleneck|A living room with a sofa against the back wall facing a TV stand and television on the opposite wall, a coffee table centered between the sofa and TV stand, two armchairs flanking the coffee table near each end of the sofa, and a floor lamp beside one armchair. A remote control and a few magazines lie on the coffee table, and a small rug lies between the coffee table and TV stand."
+    "study_desk_access_crunch|desk-chair-monitor functional relation and study access|A study with a desk centered against the back wall, an office chair tucked under the desk, a computer monitor on the desk, two guest chairs against the side wall facing the desk, and a bookshelf on the adjacent wall. A desk lamp and a notebook sit on the desk, a pen holder next to the monitor, and a small trash can beside the desk."
+    "bedroom_bedside_blockage|bed-nightstand-lamp functional relation and bed-side/wardrobe accessibility|A bedroom with a bed centered on the main wall, a nightstand with a table lamp on each side of the bed, a dresser against the opposite wall directly facing the bed, and a wardrobe placed next to the dresser. An alarm clock sits on one nightstand, a book on the other, and a small wastebasket near the dresser."
+    "dining_room_service_squeeze|dining table-chair-place-setting relation and dining/sideboard accessibility|A dining room with a dining table in the center, four dining chairs arranged around it with one on each side, a sideboard against the wall behind the chairs on one side, and table settings for four including plates, cutlery, and glasses. A centerpiece vase with flowers sits in the middle of the table, and a set of coasters sits on the sideboard."
 )
 
 COMMON_ARGS=(

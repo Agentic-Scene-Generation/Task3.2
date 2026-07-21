@@ -15,6 +15,8 @@ from scenesmith.scenebenchmark_critic.core.geometry import (
     object_category,
 )
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.semantics import (
+    _classroom_student_role,
+    _is_classroom_student_pair,
     _is_actionable_seating_surface_pair,
 )
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.profiles import (
@@ -204,6 +206,13 @@ def _contract_is_usable(
     if relation_type not in CONTRACT_RELATIONS:
         return False
 
+    classroom_target = _classroom_student_partner(subject, objects)
+    if classroom_target is not None:
+        return (
+            relation_type == "seating_to_work_surface"
+            and target_ids == [str(classroom_target.get("id") or "")]
+        )
+
     # 2026-07-14 修改原因：dining_chair 被门净空或桌椅碰撞推到墙边后，旧逻辑
     # 会把它重新识别为 back_against_wall，覆盖“餐椅属于餐桌”的功能依赖，导致
     # 椅子不再保持餐桌座位线。餐椅存在餐桌时，餐桌 contract 优先于墙 contract。
@@ -264,6 +273,19 @@ def _plan_contract(
     media_intent: bool,
     stage: str,
 ) -> dict[str, Any] | None:
+    classroom_desk = _classroom_student_partner(subject, objects)
+    if classroom_desk is not None:
+        return _contract(
+            subject,
+            classroom_desk,
+            relation_type="seating_to_work_surface",
+            stage=stage,
+            reason=(
+                "indexed classroom student chair is paired with its matching "
+                "student desk; pairing takes priority over incidental wall proximity"
+            ),
+        )
+
     # 2026-07-14 修改原因：餐桌座位关系是显式功能拓扑，优先于几何上更近的
     # 墙面；否则门净空把 dining_chair 推近墙后会发生 wall/table contract 抖动。
     dining_table = _nearest_dining_table(subject, objects)
@@ -339,6 +361,21 @@ def _plan_contract(
             "surface"
         ),
     )
+
+
+def _classroom_student_partner(
+    subject: dict[str, Any], objects: list[dict[str, Any]]
+) -> dict[str, Any] | None:
+    role = _classroom_student_role(subject)
+    if role is None or role[0] != "chair":
+        return None
+    candidates = [
+        obj
+        for obj in objects
+        if _is_classroom_student_pair(subject, obj)
+    ]
+    candidates.sort(key=lambda obj: str(obj.get("id") or ""))
+    return candidates[0] if candidates else None
 
 
 def _nearest_dining_table(
