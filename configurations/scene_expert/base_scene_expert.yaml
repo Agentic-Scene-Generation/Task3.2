@@ -93,23 +93,28 @@ stage_budget:
     max_designer_turns: 12
     max_critic_turns: 6
     max_wall_clock_seconds: 600
+    critic_evaluation_max_seconds: 240
     # Preserve role-specific tails instead of allowing design work to consume
     # the whole stage deadline before visual verification and finalization.
     critic_reserve_fraction: 0.25
-    final_critic_reserve_fraction: 0.10
+    # Reserve enough time for one compact multimodal score plus one retry.
+    final_critic_reserve_fraction: 0.35
     fallback_reserve_fraction: 0.10
     finalization_reserve_fraction: 0.05
     max_asset_requests: 4
     max_optional_object_families: 3
     max_assets_per_request: 6
     max_semantic_retries_per_family: 2
+    min_output_objects: 0
+    max_output_objects: 0
+    max_stage_regenerations: 1
   floor_plan:
     max_designer_iterations: 2
     max_repair_steps: 1
     max_planner_turns: 8
     max_designer_turns: 12
     max_critic_turns: 4
-    max_wall_clock_seconds: 600
+    max_wall_clock_seconds: 420
     max_asset_requests: 4
     max_optional_object_families: 0
     max_assets_per_request: 0
@@ -124,6 +129,7 @@ stage_budget:
     # Furniture quality gates must not inherit a nearly exhausted designer
     # deadline. Each distinct rendered candidate gets one bounded VLM window.
     critic_evaluation_max_seconds: 360
+    final_critic_reserve_fraction: 0.20
     fallback_reserve_fraction: 0.15
     max_asset_requests: 4
     max_optional_object_families: 2
@@ -135,22 +141,30 @@ stage_budget:
     max_planner_turns: 3
     max_designer_turns: 10
     max_critic_turns: 5
-    max_wall_clock_seconds: 360
+    max_wall_clock_seconds: 420
     max_asset_requests: 2
     max_optional_object_families: 3
     max_assets_per_request: 4
     max_semantic_retries_per_family: 1
+    # Decoration stages must produce a bounded, non-empty result. Explicit
+    # prompt requirements may raise the effective maximum above this value.
+    min_output_objects: 1
+    max_output_objects: 3
+    max_stage_regenerations: 1
   ceiling_mounted:
     max_designer_iterations: 1
     max_repair_steps: 1
     max_planner_turns: 3
     max_designer_turns: 8
     max_critic_turns: 5
-    max_wall_clock_seconds: 300
+    max_wall_clock_seconds: 360
     max_asset_requests: 2
     max_optional_object_families: 1
     max_assets_per_request: 2
     max_semantic_retries_per_family: 1
+    min_output_objects: 1
+    max_output_objects: 1
+    max_stage_regenerations: 1
   # Manipuland is the most error-prone stage — allow more repair attempts
   manipuland:
     max_designer_iterations: 2
@@ -158,11 +172,15 @@ stage_budget:
     max_planner_turns: 4
     max_designer_turns: 12
     max_critic_turns: 6
-    max_wall_clock_seconds: 900
+    max_wall_clock_seconds: 600
+    final_critic_reserve_fraction: 0.25
     max_asset_requests: 4
     max_optional_object_families: 4
     max_assets_per_request: 6
     max_semantic_retries_per_family: 2
+    min_output_objects: 1
+    max_output_objects: 4
+    max_stage_regenerations: 1
 
 # Verifier pass thresholds
 verifier:

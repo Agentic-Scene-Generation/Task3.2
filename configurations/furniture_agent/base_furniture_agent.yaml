@@ -310,10 +310,14 @@ critic_fast_path:
   skip_vlm_on_hard_fail: true
   render_hard_fail_candidate: true
   direct_scene_state_cache: true
+  direct_multimodal_evaluation: true
+  direct_multimodal_max_images: 4
+  direct_multimodal_max_attempts: 2
+  direct_multimodal_attempt_timeout_seconds: 120
   # Candidate evaluations are independent decisions. Reusing the previous
   # designer/critic transcript bloats the multimodal prompt and couples retries.
   fresh_session_per_evaluation: true
-  use_intermediate_render_profile: true
+  use_intermediate_render_profile: false
   scene_state_max_chars: 8000
   max_hard_repair_design_changes: 1
 

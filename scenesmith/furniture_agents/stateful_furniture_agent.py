@@ -1158,10 +1158,16 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             / "fallback_comparison.json"
         )
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(
-            json.dumps(comparison, indent=2, ensure_ascii=False),
-            encoding="utf-8",
+        payload = json.dumps(comparison, indent=2, ensure_ascii=False)
+        output_path.write_text(payload, encoding="utf-8")
+        render_manifest_path = (
+            self.logger.output_dir
+            / "scene_renders"
+            / "furniture"
+            / "fallback_comparison.json"
         )
+        render_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        render_manifest_path.write_text(payload, encoding="utf-8")
         console_logger.info("Furniture fallback comparison saved to %s", output_path)
         return output_path
 

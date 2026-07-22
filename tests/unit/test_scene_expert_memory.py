@@ -331,7 +331,74 @@ class SceneExpertMemoryTest(unittest.TestCase):
             self.assertEqual("critic_fallback", report.score_source)
             self.assertFalse(report.vlm_scoring_performed)
             self.assertEqual({}, report.scores)
-            self.assertTrue(report.pass_stage)
+            self.assertFalse(report.pass_stage)
+            self.assertIn(
+                "critic_unavailable",
+                {issue.issue_type for issue in report.issues},
+            )
+
+    def test_empty_optional_stage_fails_nonzero_completion_contract(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scores_dir = root / "scene_states" / "wall"
+            scores_dir.mkdir(parents=True)
+            (scores_dir / "scores.yaml").write_text(
+                "Realism:\n  grade: 8\nFunctionality:\n  grade: 8\n",
+                encoding="utf-8",
+            )
+            (scores_dir / "score_provenance.yaml").write_text(
+                "score_source: vlm_critic\nvlm_scoring_performed: true\n",
+                encoding="utf-8",
+            )
+
+            report = StageVerifier(pass_threshold=0.6).verify(
+                stage="wall_mounted",
+                stage_output_dir=str(root),
+                task_spec=SceneTaskSpec(room_type="bedroom", style="standard"),
+                scene_state_info={
+                    "object_names": [],
+                    "object_counts": {"wall_mounted": 0},
+                    "stage_min_output_objects": 1,
+                    "stage_max_output_objects": 3,
+                },
+            )
+
+            self.assertFalse(report.pass_stage)
+            self.assertIn(
+                "insufficient_stage_objects",
+                {issue.issue_type for issue in report.issues},
+            )
+
+    def test_provenance_only_unscored_stage_is_discoverable(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scores_dir = root / "scene_states" / "ceiling"
+            scores_dir.mkdir(parents=True)
+            (scores_dir / "score_provenance.yaml").write_text(
+                "score_source: critic_fallback\n"
+                "vlm_scoring_performed: false\n"
+                "source_scores_file: critic_unavailable.yaml\n",
+                encoding="utf-8",
+            )
+            (scores_dir / "critic_unavailable.yaml").write_text(
+                "status: unscored\nreason: timeout\n",
+                encoding="utf-8",
+            )
+
+            report = StageVerifier(pass_threshold=0.6).verify(
+                stage="ceiling_mounted",
+                stage_output_dir=str(root),
+                task_spec=SceneTaskSpec(room_type="bedroom", style="standard"),
+                scene_state_info={
+                    "object_names": ["ceiling_light_0"],
+                    "object_counts": {"ceiling_mounted": 1},
+                    "stage_min_output_objects": 1,
+                    "stage_max_output_objects": 1,
+                },
+            )
+
+            self.assertEqual("critic_fallback", report.score_source)
+            self.assertFalse(report.pass_stage)
 
     def test_full_verifier_gates_low_plausibility_even_with_high_average(
         self,

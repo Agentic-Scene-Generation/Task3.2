@@ -133,6 +133,9 @@ class StageBudget(BaseModel):
     max_optional_object_families: int = 0
     max_assets_per_request: int = 0
     max_semantic_retries_per_family: int = 2
+    min_output_objects: int = 0
+    max_output_objects: int = 0
+    max_stage_regenerations: int = 1
 
 
 class HarnessContext(BaseModel):

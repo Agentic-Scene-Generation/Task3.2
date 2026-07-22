@@ -207,7 +207,7 @@ def _find_scores_yaml(stage_output_dir: str, stage: str = "") -> Path | None:
     subdir = _STAGE_SCORES_SUBDIR.get(stage)
     if subdir:
         candidate = root / "scene_states" / subdir / "scores.yaml"
-        if candidate.exists():
+        if candidate.exists() or (candidate.parent / "score_provenance.yaml").exists():
             return candidate
 
     if stage == "manipuland":
@@ -228,6 +228,10 @@ def _find_scores_yaml(stage_output_dir: str, stage: str = "") -> Path | None:
         all_candidates = list(scene_states_dir.rglob("scores.yaml"))
         if all_candidates:
             return max(all_candidates, key=lambda p: p.stat().st_mtime)
+        provenance_candidates = list(scene_states_dir.rglob("score_provenance.yaml"))
+        if provenance_candidates:
+            latest = max(provenance_candidates, key=lambda p: p.stat().st_mtime)
+            return latest.parent / "scores.yaml"
 
     # Last resort: anywhere under root.
     all_root_candidates = list(root.rglob("scores.yaml"))
@@ -362,6 +366,46 @@ def _check_required_objects(
     return issues
 
 
+def _check_stage_population(stage: str, scene_state_info: dict) -> list[VerifyIssue]:
+    """Enforce SceneExpert's bounded, non-empty placement-stage contract."""
+    object_type_by_stage = {
+        "furniture": "furniture",
+        "wall_mounted": "wall_mounted",
+        "ceiling_mounted": "ceiling_mounted",
+        "manipuland": "manipuland",
+    }
+    object_type = object_type_by_stage.get(stage)
+    if object_type is None:
+        return []
+
+    counts = scene_state_info.get("object_counts", {}) or {}
+    count = int(counts.get(object_type, 0) or 0)
+    minimum = int(scene_state_info.get("stage_min_output_objects", 0) or 0)
+    maximum = int(scene_state_info.get("stage_max_output_objects", 0) or 0)
+    issues: list[VerifyIssue] = []
+    if count < minimum:
+        issues.append(
+            VerifyIssue(
+                issue_type="insufficient_stage_objects",
+                description=(
+                    f"Stage '{stage}' produced {count} {object_type} objects; "
+                    f"the completion contract requires at least {minimum}"
+                ),
+            )
+        )
+    if maximum > 0 and count > maximum:
+        issues.append(
+            VerifyIssue(
+                issue_type="excessive_stage_objects",
+                description=(
+                    f"Stage '{stage}' produced {count} {object_type} objects; "
+                    f"the completion contract allows at most {maximum}"
+                ),
+            )
+        )
+    return issues
+
+
 def _check_floor_plan_layout(scene_state_info: dict) -> list[VerifyIssue]:
     """Check structural validity and professional single-room proportions."""
     issues: list[VerifyIssue] = []
@@ -478,7 +522,9 @@ class StageVerifier:
         # --- 1. Load SceneSmith scores ---
         scores_path = _find_scores_yaml(stage_output_dir, stage=stage)
         raw_scores, critique_summary = (
-            _load_scores_yaml(scores_path) if scores_path else ({}, "")
+            _load_scores_yaml(scores_path)
+            if scores_path is not None and scores_path.exists()
+            else ({}, "")
         )
         provenance = _load_score_provenance(
             scores_path,
@@ -529,6 +575,14 @@ class StageVerifier:
                         f"Add missing object '{issue.object_name}' to the scene"
                     )
 
+            population_issues = _check_stage_population(stage, scene_state_info)
+            issues.extend(population_issues)
+            if population_issues:
+                repair_suggestions.append(
+                    "Regenerate this stage from its input checkpoint and satisfy the "
+                    "bounded stage-native object count before continuing"
+                )
+
             if stage == "furniture":
                 placeholder_names = sorted(
                     {
@@ -566,6 +620,32 @@ class StageVerifier:
                     description=(
                         "Deterministic validation failed before VLM scoring; "
                         "synthetic repair grades were excluded from visual metrics"
+                    ),
+                ),
+            )
+        if score_source not in {"vlm_critic", "deterministic_hard_check"}:
+            _add_issue_once(
+                issues,
+                VerifyIssue(
+                    issue_type="critic_unavailable",
+                    description=(
+                        f"Stage '{stage}' has no trustworthy visual critic result "
+                        f"(score_source={score_source})"
+                    ),
+                ),
+            )
+            repair_suggestions.append(
+                "Retry the compact visual critic evaluation; do not use placeholder "
+                "numeric grades for acceptance or memory"
+            )
+        elif score_source == "vlm_critic" and not mapped_scores:
+            _add_issue_once(
+                issues,
+                VerifyIssue(
+                    issue_type="unusable_critic_scores",
+                    description=(
+                        f"Stage '{stage}' reports a VLM critic source but contains no "
+                        "recognized numeric quality dimensions"
                     ),
                 ),
             )

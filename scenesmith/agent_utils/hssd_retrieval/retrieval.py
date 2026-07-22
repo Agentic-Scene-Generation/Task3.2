@@ -19,6 +19,7 @@ from scenesmith.agent_utils.hssd_retrieval.data_loader import (
     construct_hssd_mesh_path,
     load_preprocessed_data,
 )
+from scenesmith.agent_utils.mesh_frame import uniform_scale_shape_error
 
 console_logger = logging.getLogger(__name__)
 
@@ -69,16 +70,19 @@ class HssdRetriever:
     def _calculate_bbox_score(
         self, target_dimensions: np.ndarray, mesh_extents: np.ndarray
     ) -> float:
-        """Calculate bounding box score (L1 distance).
+        """Calculate scale-invariant residual after SceneSmith uniform scaling.
 
         Args:
             target_dimensions: Desired dimensions (3,).
             mesh_extents: Actual mesh extents (3,).
 
         Returns:
-            L1 distance score (lower is better).
+            Log-ratio residual score (lower is better).
         """
-        return float(np.sum(np.abs(target_dimensions - mesh_extents)))
+        # Downstream scaling uses the median per-axis scale factor. Ranking raw
+        # library meters with L1 distance can therefore select the wrong shape
+        # merely because its arbitrary source scale is closer to the request.
+        return uniform_scale_shape_error(mesh_extents, target_dimensions)
 
     def _load_and_process_mesh(
         self, mesh_id: str, metadata: HssdMeshMetadata

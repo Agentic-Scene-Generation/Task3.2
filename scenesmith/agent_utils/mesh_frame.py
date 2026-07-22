@@ -68,3 +68,18 @@ def validate_uniform_dimension_fit(
             f"actual={actual.tolist()}, requested={requested.tolist()}, "
             f"ratios={ratios.round(3).tolist()}, allowed=[{min_ratio}, {max_ratio}]"
         )
+
+
+def uniform_scale_shape_error(
+    actual_dimensions: Sequence[float], requested_dimensions: Sequence[float]
+) -> float:
+    """Return scale-invariant log-ratio error under the production scaler."""
+    actual = np.asarray(actual_dimensions, dtype=float)
+    requested = np.asarray(requested_dimensions, dtype=float)
+    if actual.shape != (3,) or requested.shape != (3,):
+        raise ValueError("Actual and requested dimensions must each have 3 values")
+    if np.any(actual <= 0) or np.any(requested <= 0):
+        return float("inf")
+    uniform_scale = float(np.median(requested / actual))
+    scaled = actual * uniform_scale
+    return float(np.sum(np.abs(np.log(scaled / requested))))

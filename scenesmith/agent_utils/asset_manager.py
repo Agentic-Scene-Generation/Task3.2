@@ -752,6 +752,7 @@ class AssetManager:
         candidates: list[HssdRetrievalResult],
         description: str,
         short_name: str,
+        desired_dimensions: list[float] | tuple[float, ...] | None = None,
     ) -> HssdRetrievalResult:
         """Select a visually valid candidate for silhouette-critical furniture.
 
@@ -762,6 +763,36 @@ class AssetManager:
         """
         if not candidates:
             raise ValueError("No results returned from HSSD server")
+
+        if desired_dimensions is not None:
+            target = np.asarray(
+                scene_dimensions_to_gltf_y_up(desired_dimensions), dtype=float
+            )
+            min_ratio, max_ratio = self._uniform_dimension_fit_bounds()
+            proportion_compatible: list[HssdRetrievalResult] = []
+            for candidate in candidates:
+                extents = np.asarray(candidate.size, dtype=float)
+                if np.any(extents <= 0):
+                    continue
+                predicted = extents * float(np.median(target / extents))
+                try:
+                    validate_uniform_dimension_fit(
+                        predicted,
+                        target,
+                        min_ratio=min_ratio,
+                        max_ratio=max_ratio,
+                    )
+                except ValueError:
+                    continue
+                proportion_compatible.append(candidate)
+            if proportion_compatible:
+                candidates = proportion_compatible
+            else:
+                console_logger.warning(
+                    "No retrieved HSSD candidate for '%s' fully matches the "
+                    "requested proportions; trying the best scale-invariant shape",
+                    description,
+                )
 
         (
             enabled,
@@ -857,7 +888,23 @@ class AssetManager:
         enabled, max_candidates, _, _, _, _ = self._hssd_semantic_validation_settings(
             description, short_name
         )
-        return max_candidates if enabled else 1
+        if enabled:
+            return max_candidates
+        hssd_cfg = getattr(self.cfg.asset_manager, "hssd", None)
+        try:
+            return max(1, int(hssd_cfg.get("dimension_candidates", 3) or 3))
+        except Exception:
+            return max(1, int(getattr(hssd_cfg, "dimension_candidates", 3) or 3))
+
+    def _uniform_dimension_fit_bounds(self) -> tuple[float, float]:
+        """Return bounded residual tolerance for approximate LLM dimensions."""
+        if self.agent_type in {AgentType.WALL_MOUNTED, AgentType.CEILING_MOUNTED}:
+            # Mounted-object prompts often specify a target footprint while HSSD
+            # preserves a natural frame depth or pendant drop. Keep the guard
+            # bounded, but do not reject a semantic match for a 2-3x axial
+            # difference in an approximate designer estimate.
+            return 0.30, 2.50
+        return 0.50, 1.75
 
     def _scale_and_measure_canonical_mesh(
         self,
@@ -884,7 +931,13 @@ class AssetManager:
         bbox_min, bbox_max = gltf_y_up_bounds_to_scene_z_up(mesh.bounds)
         if desired_dimensions is not None:
             actual_dimensions = bbox_max - bbox_min
-            validate_uniform_dimension_fit(actual_dimensions, desired_dimensions)
+            min_ratio, max_ratio = self._uniform_dimension_fit_bounds()
+            validate_uniform_dimension_fit(
+                actual_dimensions,
+                desired_dimensions,
+                min_ratio=min_ratio,
+                max_ratio=max_ratio,
+            )
             console_logger.info(
                 "Canonical asset dimensions: requested=%s, actual=%s, scale=%.3f",
                 list(desired_dimensions),
@@ -990,6 +1043,7 @@ class AssetManager:
                     candidates=response.results,
                     description=desc,
                     short_name=short_name,
+                    desired_dimensions=request.desired_dimensions[index],
                 )
                 server_mesh_path = Path(result.mesh_path)
                 mesh_id = result.hssd_id

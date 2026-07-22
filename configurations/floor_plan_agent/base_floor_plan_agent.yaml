@@ -169,6 +169,11 @@ api_timeout:
 # Maximum number of critique-and-improve rounds before stopping
 max_critique_rounds: 2
 
+# Framework-driven one-shot visual critic: render deterministically, then pass
+# the image + compact ASCII/validation evidence in a fresh structured request.
+critic_fast_path:
+  direct_multimodal_evaluation: true
+
 # Scene reset thresholds for detecting quality degradation
 reset_single_category_threshold: 2
 reset_total_sum_threshold: 1

@@ -339,7 +339,11 @@ critic_fast_path:
   skip_vlm_on_hard_fail: true
   render_hard_fail_candidate: true
   direct_scene_state_cache: true
-  use_intermediate_render_profile: true
+  direct_multimodal_evaluation: true
+  direct_multimodal_max_images: 5
+  direct_multimodal_max_attempts: 2
+  direct_multimodal_attempt_timeout_seconds: 120
+  use_intermediate_render_profile: false
   scene_state_max_chars: 8000
   max_hard_repair_design_changes: 1
 

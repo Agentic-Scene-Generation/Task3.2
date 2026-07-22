@@ -1,5 +1,7 @@
 import unittest
 
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
@@ -142,6 +144,37 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
             agent._last_score_provenance["score_source"], "critic_fallback"
         )
         self.assertFalse(agent._last_score_provenance["vlm_scoring_performed"])
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
+    def test_fallback_artifact_has_no_placeholder_numeric_scores(self) -> None:
+        agent = object.__new__(StatefulFurnitureAgent)
+        neutral = CategoryScore(name="test", grade=5, comment="transport fallback")
+        response = FurnitureCritiqueWithScores(
+            critique="TRANSIENT LOCAL VLM TIMEOUT DURING VISUAL CRITIC SCORING.",
+            realism=neutral,
+            functionality=neutral,
+            layout=neutral,
+            layout_plausibility=neutral,
+            holistic_completeness=neutral,
+            prompt_following=neutral,
+            reachability=neutral,
+        )
+
+        with TemporaryDirectory() as tmp:
+            render_dir = Path(tmp)
+            provenance = agent._write_score_artifacts(
+                response=response,
+                images_dir=render_dir,
+                physics_context="No physics violations detected.",
+            )
+
+            self.assertEqual("critic_fallback", provenance["score_source"])
+            self.assertFalse((render_dir / "scores.yaml").exists())
+            self.assertFalse((render_dir / "critic_fallback_scores.yaml").exists())
+            self.assertTrue((render_dir / "critic_unavailable.yaml").exists())
 
     @unittest.skipIf(
         StatefulFurnitureAgent is None,

@@ -1051,11 +1051,38 @@ class SceneExpertHookRunner:
             "ceiling_mounted": self._task_spec.required_ceiling_objects,
             "manipuland": self._task_spec.required_small_objects,
         }
+        required_objects = list(required_by_stage.get(stage, []))
         setattr(
             scene,
             "scene_expert_required_objects",
-            list(required_by_stage.get(stage, [])),
+            required_objects,
         )
+        min_output_objects = max(
+            len(required_objects),
+            int(context.stage_budget.min_output_objects or 0),
+        )
+        configured_max = int(context.stage_budget.max_output_objects or 0)
+        max_output_objects = (
+            max(configured_max, len(required_objects)) if configured_max > 0 else 0
+        )
+        setattr(scene, "scene_expert_min_output_objects", min_output_objects)
+        setattr(scene, "scene_expert_max_output_objects", max_output_objects)
+        if min_output_objects > 0 or max_output_objects > 0:
+            maximum_text = (
+                str(max_output_objects) if max_output_objects > 0 else "unbounded"
+            )
+            completion_contract = (
+                f"=== SceneExpert Stage Completion Contract: {stage} ===\n"
+                f"Add {min_output_objects} to {maximum_text} stage-native objects. "
+                "The stage must not finish below the minimum, even when every "
+                "object is optional in the raw user prompt. Prefer a small coherent "
+                "set over filler objects. If an asset request fails, choose a "
+                "semantically equivalent substitute with realistic natural "
+                "proportions and retry within the stage budget.\n"
+                "=== End Stage Completion Contract ==="
+            )
+            injection_parts.append(completion_contract)
+            scene.text_description += "\n\n" + completion_contract
         injection_text = "\n\n".join(injection_parts)
         self._current_execution_evidence = self._build_execution_evidence(
             stage=stage,
@@ -1411,12 +1438,33 @@ class SceneExpertHookRunner:
                 for obj in scene.objects.values()
                 if (getattr(obj, "metadata", {}) or {}).get("repair_placeholder")
             ]
+            object_counts: dict[str, int] = {}
+            for obj in scene.objects.values():
+                object_type = getattr(obj, "object_type", None)
+                object_type_name = str(getattr(object_type, "value", object_type) or "")
+                if object_type_name:
+                    object_counts[object_type_name] = (
+                        object_counts.get(object_type_name, 0) + 1
+                    )
             return {
                 "object_names": names,
                 "placeholder_names": placeholder_names,
+                "object_counts": object_counts,
+                "stage_min_output_objects": int(
+                    getattr(scene, "scene_expert_min_output_objects", 0) or 0
+                ),
+                "stage_max_output_objects": int(
+                    getattr(scene, "scene_expert_max_output_objects", 0) or 0
+                ),
             }
         except Exception:
-            return {"object_names": [], "placeholder_names": []}
+            return {
+                "object_names": [],
+                "placeholder_names": [],
+                "object_counts": {},
+                "stage_min_output_objects": 0,
+                "stage_max_output_objects": 0,
+            }
 
 
 # ------------------------------------------------------------------

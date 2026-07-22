@@ -340,7 +340,7 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
         validation_layout: str,
         validation_connectivity: str,
     ) -> FloorPlanCritiqueWithScores:
-        """Create conservative scores without discarding a usable layout."""
+        """Create an unpersisted control response without discarding the layout."""
         validation_ok = (
             validation_layout == "ok" and validation_connectivity == "ok"
         )
@@ -431,40 +431,61 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
             ),
         )
 
+        direct_multimodal = self._critic_fast_path_enabled(
+            "direct_multimodal_evaluation", True
+        )
+        direct_images: list[dict[str, str]] = []
         result_observe: RunResult | None = None
-        try:
-            result_observe = await self._run_agent_with_stage_sla(
-                starting_agent=critic_observe,
-                input=critique_instruction,
-                role="critic",
-                event="floor_plan_observe_scene",
-                session=self.critic_session,
-                configured_max_turns=self.cfg.agents.critic_agent.max_turns,
-                run_config=run_config,
-            )
-        except Exception as exc:
-            if not self._is_transient_model_error(exc):
-                raise
-            console_logger.warning(
-                "Floor-plan visual observation request failed transiently; "
-                "falling back to a direct deterministic render: %s: %s",
-                type(exc).__name__,
-                exc,
-            )
-        if result_observe is not None:
-            log_agent_usage(
-                result=result_observe, agent_name="CRITIC (FLOOR PLAN OBSERVE)"
-            )
-        if vision_tools.last_render_dir is None:
+        if direct_multimodal:
             try:
-                vision_tools._observe_scene_impl()
+                direct_outputs = list(vision_tools._observe_scene_impl() or [])
+                for output in direct_outputs:
+                    image_url = getattr(output, "image_url", None)
+                    if image_url and len(direct_images) < 3:
+                        direct_images.append(
+                            {"type": "input_image", "image_url": str(image_url)}
+                        )
             except Exception as exc:
                 console_logger.warning(
-                    "Direct floor-plan render fallback failed; continuing with "
+                    "Direct floor-plan render failed; continuing with "
                     "ASCII and validation evidence: %s: %s",
                     type(exc).__name__,
                     exc,
                 )
+        else:
+            try:
+                result_observe = await self._run_agent_with_stage_sla(
+                    starting_agent=critic_observe,
+                    input=critique_instruction,
+                    role="critic",
+                    event="floor_plan_observe_scene",
+                    session=self.critic_session,
+                    configured_max_turns=self.cfg.agents.critic_agent.max_turns,
+                    run_config=run_config,
+                )
+            except Exception as exc:
+                if not self._is_transient_model_error(exc):
+                    raise
+                console_logger.warning(
+                    "Floor-plan visual observation request failed transiently; "
+                    "falling back to a direct deterministic render: %s: %s",
+                    type(exc).__name__,
+                    exc,
+                )
+            if result_observe is not None:
+                log_agent_usage(
+                    result=result_observe, agent_name="CRITIC (FLOOR PLAN OBSERVE)"
+                )
+            if vision_tools.last_render_dir is None:
+                try:
+                    vision_tools._observe_scene_impl()
+                except Exception as exc:
+                    console_logger.warning(
+                        "Direct floor-plan render fallback failed; continuing with "
+                        "ASCII and validation evidence: %s: %s",
+                        type(exc).__name__,
+                        exc,
+                    )
 
         score_prompt = (
             "/no_think\n"
@@ -476,16 +497,40 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
             f"ASCII FLOOR PLAN:\n{ascii_layout}"
         )
         response: FloorPlanCritiqueWithScores
+        score_input: Any = score_prompt
+        score_session = self.critic_session
+        if direct_multimodal:
+            score_input = [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": critique_instruction + "\n\n" + score_prompt,
+                        },
+                        *direct_images,
+                    ],
+                }
+            ]
+            score_session = None
         try:
-            result = await self._run_agent_with_stage_sla(
-                starting_agent=critic_score,
-                input=score_prompt,
-                role="critic",
-                event="floor_plan_score",
-                session=self.critic_session,
-                configured_max_turns=self.cfg.agents.critic_agent.max_turns,
-                run_config=run_config,
-            )
+            result = None
+            attempts = 2 if direct_images else 0
+            if not direct_multimodal:
+                attempts = 1
+            for attempt in range(1, attempts + 1):
+                result = await self._run_agent_with_stage_sla(
+                    starting_agent=critic_score,
+                    input=score_input,
+                    role="critic",
+                    event=f"floor_plan_score_attempt_{attempt}",
+                    session=score_session,
+                    configured_max_turns=self.cfg.agents.critic_agent.max_turns,
+                    run_config=run_config,
+                    call_timeout_seconds=(120.0 if direct_multimodal else None),
+                )
+                if result is not None:
+                    break
             if result is None:
                 response = self._make_floor_plan_critic_fallback_scores(
                     error=TimeoutError("floor-plan critic budget exhausted"),
@@ -523,8 +568,8 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
                 "ModelBehaviorError"
             ):
                 console_logger.warning(
-                    "Floor-plan critic scoring degraded; persisting conservative "
-                    "scores and retaining the usable layout: %s: %s",
+                    "Floor-plan critic scoring degraded; recording an unscored "
+                    "diagnostic and retaining the usable layout: %s: %s",
                     type(exc).__name__,
                     exc,
                 )
@@ -538,7 +583,16 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
 
         # Log critique.
         log_agent_response(response=response.critique, agent_name="CRITIC")
-        log_critique_scores(response, title="FLOOR PLAN CRITIQUE SCORES")
+        response_provenance = self._score_provenance_for_response(
+            response=response,
+            physics_context=validation_text,
+        )
+        if response_provenance.get("score_source") == "critic_fallback":
+            console_logger.warning(
+                "Floor-plan critic is unscored; suppressing legacy placeholder grades"
+            )
+        else:
+            log_critique_scores(response, title="FLOOR PLAN CRITIQUE SCORES")
 
         # Save scores to render directory.
         render_dir = vision_tools.last_render_dir
@@ -717,7 +771,7 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
                 "vlm_scores.yaml",
                 "hard_check_decision_scores.yaml",
                 "hard_check_report.yaml",
-                "critic_fallback_scores.yaml",
+                "critic_unavailable.yaml",
             )
             copied_score_artifacts = []
             for filename in score_artifacts:

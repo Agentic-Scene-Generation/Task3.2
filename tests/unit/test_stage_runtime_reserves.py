@@ -59,7 +59,7 @@ class StageRuntimeReserveTest(unittest.TestCase):
         BaseStatefulAgent is None,
         f"requires stateful agent dependencies: {_IMPORT_ERROR}",
     )
-    def test_critic_evaluation_has_independent_bounded_window(self) -> None:
+    def test_critic_evaluation_is_bounded_by_total_stage_window(self) -> None:
         budget = {
             "max_wall_clock_seconds": 100.0,
             "critic_evaluation_max_seconds": 360.0,
@@ -77,7 +77,7 @@ class StageRuntimeReserveTest(unittest.TestCase):
         ):
             remaining = BaseStatefulAgent._remaining_stage_seconds(agent, "critic")
 
-        self.assertAlmostEqual(remaining, 300.0)
+        self.assertAlmostEqual(remaining, -95.0)
 
 
 if __name__ == "__main__":

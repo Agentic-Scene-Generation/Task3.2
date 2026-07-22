@@ -297,6 +297,18 @@ class BaseStatefulAgent(ABC):
             "; ".join(reasons),
         )
 
+    async def retry_final_critic_evaluation(self) -> None:
+        """Retry only the final visual decision for an otherwise valid scene."""
+        self._stage_runtime_started_at = time.monotonic()
+        self._critic_evaluation_started_at = None
+        self._stage_runtime_exhausted = False
+        self._stage_runtime_phase = "fallback"
+        try:
+            await self._request_critique_impl(update_checkpoint=False)
+            await self._finalize_scene_and_scores()
+        finally:
+            self._stage_runtime_phase = "agent"
+
     async def complete_repair_exhausted_stage(self, reasons: list[str]) -> None:
         """Persist a diagnosed degraded stage instead of aborting the pipeline."""
         self._allow_degraded_stage_completion = True
@@ -339,13 +351,14 @@ class BaseStatefulAgent(ABC):
         critic_evaluation_started_at = getattr(
             self, "_critic_evaluation_started_at", None
         )
+        evaluation_remaining: float | None = None
         if role == "critic" and critic_evaluation_started_at is not None:
             evaluation_limit = float(
                 self._stage_budget_value("critic_evaluation_max_seconds", 0.0)
                 or 0.0
             )
             if evaluation_limit > 0:
-                return evaluation_limit - (
+                evaluation_remaining = evaluation_limit - (
                     time.monotonic() - critic_evaluation_started_at
                 )
 
@@ -353,7 +366,7 @@ class BaseStatefulAgent(ABC):
             self._stage_budget_value("max_wall_clock_seconds", 0.0) or 0.0
         )
         if wall_clock_limit <= 0 or self._stage_runtime_started_at is None:
-            return None
+            return evaluation_remaining
         reserve_fraction = 0.0
         critic_reserve = float(
             self._stage_budget_value("critic_reserve_fraction", 0.25) or 0.0
@@ -379,7 +392,10 @@ class BaseStatefulAgent(ABC):
                 reserve_fraction += fallback_reserve
         reserve_fraction = max(0.0, min(0.9, reserve_fraction))
         elapsed = time.monotonic() - self._stage_runtime_started_at
-        return wall_clock_limit * (1.0 - reserve_fraction) - elapsed
+        stage_remaining = wall_clock_limit * (1.0 - reserve_fraction) - elapsed
+        if evaluation_remaining is None:
+            return stage_remaining
+        return min(stage_remaining, evaluation_remaining)
 
     @staticmethod
     def _is_agent_budget_error(error: BaseException) -> bool:
@@ -406,6 +422,7 @@ class BaseStatefulAgent(ABC):
         configured_max_turns: int | None = None,
         session: Session | None = None,
         run_config: RunConfig | None = None,
+        call_timeout_seconds: float | None = None,
     ) -> RunResult | None:
         """Run one Agents SDK call under the stage turn and wall-clock SLA.
 
@@ -429,6 +446,12 @@ class BaseStatefulAgent(ABC):
                 )
 
         remaining = self._remaining_stage_seconds(role)
+        if call_timeout_seconds is not None and call_timeout_seconds > 0:
+            remaining = (
+                min(remaining, call_timeout_seconds)
+                if remaining is not None
+                else call_timeout_seconds
+            )
         if remaining is not None and remaining <= 0:
             self._stage_runtime_exhausted = True
             self._planner_budget_exhausted = True
@@ -672,6 +695,59 @@ class BaseStatefulAgent(ABC):
         event: str = "critique",
     ) -> dict[str, Any]:
         """Persist decision scores, source-specific scores, and provenance."""
+        provenance = self._score_provenance_for_response(
+            response=response,
+            physics_context=physics_context,
+            event=event,
+        )
+        score_source = str(provenance["score_source"])
+        source_filename = str(provenance["source_scores_file"])
+        hard_check_passed = provenance["hard_check_passed"]
+
+        # A transport timeout has no numeric meaning. Keep a diagnostic marker,
+        # but never emit made-up 5/10 values into scores.yaml or the memory path.
+        if score_source == "critic_fallback":
+            diagnostic = {
+                "schema_version": "1.0",
+                "status": "unscored",
+                "reason": str(response.critique or "visual critic unavailable"),
+                "retryable": True,
+            }
+            with open(images_dir / source_filename, "w") as f:
+                yaml.dump(
+                    data=diagnostic,
+                    stream=f,
+                    default_flow_style=False,
+                    sort_keys=False,
+                )
+            with open(images_dir / "score_provenance.yaml", "w") as f:
+                yaml.dump(
+                    data=provenance,
+                    stream=f,
+                    default_flow_style=False,
+                    sort_keys=False,
+                )
+            if hard_check_passed is not None:
+                with open(images_dir / "hard_check_report.yaml", "w") as f:
+                    yaml.dump(
+                        data={
+                            "schema_version": "1.0",
+                            "passed": hard_check_passed,
+                            "evidence": str(physics_context or ""),
+                            "decision_scores_file": "",
+                            "decision_scores_are_synthetic": False,
+                        },
+                        stream=f,
+                        default_flow_style=False,
+                        sort_keys=False,
+                    )
+            console_logger.warning(
+                "Visual critic did not complete; wrote unscored diagnostic to %s "
+                "without placeholder numeric grades",
+                images_dir / source_filename,
+            )
+            return provenance
+
         scores_dict = scores_to_dict(response)
         scores_path = images_dir / "scores.yaml"
         with open(scores_path, "w") as f:
@@ -682,21 +758,6 @@ class BaseStatefulAgent(ABC):
                 sort_keys=False,
             )
         console_logger.info(f"Scores saved to: {scores_path}")
-
-        # scores.yaml is the score payload used by the existing checkpoint
-        # controller.  It is not always a VLM opinion: deterministic hard
-        # failures and transient critic fallbacks intentionally use synthetic
-        # grades.  Persist explicit provenance and a source-specific copy so
-        # offline evaluation cannot silently interpret repair priorities as
-        # visual-quality ratings.
-        provenance = self._score_provenance_for_response(
-            response=response,
-            physics_context=physics_context,
-            event=event,
-        )
-        score_source = str(provenance["score_source"])
-        source_filename = str(provenance["source_scores_file"])
-        hard_check_passed = provenance["hard_check_passed"]
 
         with open(images_dir / source_filename, "w") as f:
             yaml.dump(
@@ -763,9 +824,9 @@ class BaseStatefulAgent(ABC):
             )
         ):
             score_source = "critic_fallback"
-            source_filename = "critic_fallback_scores.yaml"
+            source_filename = "critic_unavailable.yaml"
             score_semantics = (
-                "Conservative transport fallback; no successful VLM assessment."
+                "Unscored transport failure; no numeric quality assessment exists."
             )
         else:
             score_source = "vlm_critic"
@@ -796,7 +857,9 @@ class BaseStatefulAgent(ABC):
             "vlm_scoring_performed": score_source == "vlm_critic",
             "hard_check_passed": hard_check_passed,
             "scores_semantics": score_semantics,
-            "decision_scores_file": "scores.yaml",
+            "decision_scores_file": (
+                "" if score_source == "critic_fallback" else "scores.yaml"
+            ),
             "source_scores_file": source_filename,
             "hard_check_evidence": str(physics_context or ""),
         }
@@ -1129,6 +1192,52 @@ class BaseStatefulAgent(ABC):
             )
 
         hard_reasons = self._parse_generic_physics_hard_reasons(physics_context)
+        if self.scene is not None and self._stage_runtime_budget:
+            object_type = self.agent_type.to_object_type()
+            if object_type is not None:
+                stage_objects = self.scene.get_objects_by_type(object_type)
+                minimum = int(
+                    getattr(self.scene, "scene_expert_min_output_objects", 0) or 0
+                )
+                maximum = int(
+                    getattr(self.scene, "scene_expert_max_output_objects", 0) or 0
+                )
+                if len(stage_objects) < minimum:
+                    hard_reasons.append(
+                        "missing required stage output: "
+                        f"{self.agent_type.value} produced {len(stage_objects)} "
+                        f"objects but requires at least {minimum}"
+                    )
+                if maximum > 0 and len(stage_objects) > maximum:
+                    hard_reasons.append(
+                        "stage object count exceeded: "
+                        f"{self.agent_type.value} produced {len(stage_objects)} "
+                        f"objects but allows at most {maximum}"
+                    )
+
+                present_text = [
+                    " ".join(
+                        str(value or "").lower()
+                        for value in (
+                            getattr(obj, "object_id", ""),
+                            getattr(obj, "name", ""),
+                            getattr(obj, "description", ""),
+                        )
+                    )
+                    for obj in stage_objects
+                ]
+                for required in list(
+                    getattr(self.scene, "scene_expert_required_objects", []) or []
+                ):
+                    required_text = str(required).strip().lower()
+                    if required_text and not any(
+                        required_text in candidate or candidate in required_text
+                        for candidate in present_text
+                        if candidate
+                    ):
+                        hard_reasons.append(
+                            f"missing required stage object '{required}'"
+                        )
         if not hard_reasons:
             return HardStateEvaluation(hard_valid=True)
         return HardStateEvaluation(hard_valid=False, hard_reasons=hard_reasons)
@@ -1150,6 +1259,11 @@ class BaseStatefulAgent(ABC):
             hints.append(
                 "Missing required objects detected. The next designer action must "
                 f"generate/place these objects before any decorative changes: {missing_text}."
+            )
+        if any("stage object count exceeded" in reason.lower() for reason in reasons):
+            hints.append(
+                "Remove the least essential stage-native extras until the configured "
+                "maximum is met; preserve every explicitly required object."
             )
         if any("collision" in reason.lower() for reason in reasons):
             hints.append(
@@ -1284,12 +1398,12 @@ class BaseStatefulAgent(ABC):
         *,
         error: Exception,
     ) -> CritiqueWithScores:
-        """Create conservative persisted scores when local vLLM times out.
+        """Create an in-memory control response when local vLLM times out.
 
         The hard-check-first path has already verified required objects and
-        deterministic geometry before this fallback is reached.  These scores
-        therefore record completion without pretending that visual quality was
-        evaluated successfully.
+        deterministic geometry before this fallback is reached. Numeric values
+        keep the legacy planner schema satisfied but are never persisted as
+        scores or admitted to SceneExpert verification/memory.
         """
         output_type = self._critic_output_type or type(self.previous_scores)
         detail = f"Visual critic unavailable: {type(error).__name__}: {error}"
@@ -1443,6 +1557,62 @@ class BaseStatefulAgent(ABC):
             extra={"render_profile": render_profile},
         )
         return self.rendering_manager.last_render_dir
+
+    def _collect_direct_critic_observation(
+        self, render_profile: str
+    ) -> tuple[Path | None, list[dict[str, str]], str]:
+        """Render once in-process and return compact multimodal critic content."""
+        owner = getattr(self, "_critic_vision_tools", None)
+        method = (
+            getattr(owner, "_observe_scene_impl", None) if owner is not None else None
+        )
+        outputs: list[Any] = []
+        fallback_image_urls: list[str] = []
+        if method is None:
+            render_dir = self._observe_scene_for_synthetic_score(render_profile)
+            if render_dir is not None:
+                for image_path in sorted(render_dir.glob("*.png")):
+                    fallback_image_urls.append(
+                        "data:image/png;base64,"
+                        + encode_image_to_base64(image_path)
+                    )
+        else:
+            observe_start = time.time()
+            with self.rendering_manager.use_render_profile(render_profile):
+                outputs = list(method() or [])
+            self._record_module_timing(
+                "critic",
+                "observe_scene_direct",
+                observe_start,
+                extra={"render_profile": render_profile},
+            )
+            render_dir = self.rendering_manager.last_render_dir
+
+        max_images = max(
+            1,
+            int(
+                _cfg_get(
+                    self._critic_fast_path_cfg(),
+                    "direct_multimodal_max_images",
+                    6,
+                )
+                or 6
+            ),
+        )
+        image_parts: list[dict[str, str]] = []
+        notes: list[str] = []
+        for image_url in fallback_image_urls[:max_images]:
+            image_parts.append({"type": "input_image", "image_url": image_url})
+        for output in outputs:
+            image_url = getattr(output, "image_url", None)
+            if image_url and len(image_parts) < max_images:
+                image_parts.append(
+                    {"type": "input_image", "image_url": str(image_url)}
+                )
+            text_output = getattr(output, "text", None)
+            if text_output:
+                notes.append(str(text_output))
+        return render_dir, image_parts, "\n".join(notes)
 
     def _begin_furniture_design_transaction(
         self, call_kind: str
@@ -2105,6 +2275,55 @@ class BaseStatefulAgent(ABC):
                         reasons=final_hard_state.hard_reasons,
                     )
 
+        enforce_sceneexpert_completion = bool(
+            self._stage_runtime_budget
+            and self.agent_type.is_placement_agent
+            and not (controller and getattr(controller, "enabled", False))
+            and fail_on_hard_constraints
+        )
+        if enforce_sceneexpert_completion:
+            final_hard_state = self._evaluate_current_hard_state()
+            if final_hard_state is not None and not final_hard_state.hard_valid:
+                reasons = list(final_hard_state.hard_reasons)
+                if self._allow_degraded_stage_completion:
+                    console_logger.warning(
+                        "%s stage exhausted regeneration; preserving an explicitly "
+                        "degraded result: %s",
+                        self.agent_type.value,
+                        "; ".join(reasons),
+                    )
+                    self._degraded_stage_reasons = reasons
+                else:
+                    raise StageValidationError(
+                        stage=self.agent_type.value,
+                        reasons=reasons,
+                    )
+
+        if self._stage_runtime_budget and self.agent_type.is_placement_agent:
+            trusted_score_available = (
+                bool(
+                    controller
+                    and getattr(controller, "enabled", False)
+                    and getattr(controller, "best_score_source", "") == "vlm_critic"
+                )
+                or self._last_score_provenance.get("score_source") == "vlm_critic"
+            )
+            if not trusted_score_available:
+                reason = (
+                    "visual critic did not produce a trustworthy score after "
+                    "bounded compact retries"
+                )
+                if self._allow_degraded_stage_completion:
+                    console_logger.warning(
+                        "%s; stage remains explicitly unscored", reason
+                    )
+                    self._degraded_stage_reasons.append(reason)
+                else:
+                    raise StageValidationError(
+                        stage=self.agent_type.value,
+                        reasons=[reason],
+                    )
+
         # Copy final scores and renders to per-stage directory.
         # Use final_render_dir (tracks actual last render) instead of checkpoint_render_dir
         # (which may be stale when final critique uses update_checkpoint=False).
@@ -2122,7 +2341,7 @@ class BaseStatefulAgent(ABC):
                 "vlm_scores.yaml",
                 "hard_check_decision_scores.yaml",
                 "hard_check_report.yaml",
-                "critic_fallback_scores.yaml",
+                "critic_unavailable.yaml",
             )
             copied_score_artifacts: list[str] = []
             for filename in score_artifacts:
@@ -2890,33 +3109,54 @@ class BaseStatefulAgent(ABC):
             ),
         )
 
-        # All three steps share self.critic_session so history accumulates
-        # naturally; inputs are strings (lists are illegal when a session is
-        # used without a custom session_input_callback).
-
-        # Step 1: force observe_scene; stop_on_first_tool returns immediately.
-        console_logger.info("[CRITIC harness] Step 1: observe_scene")
-        observe_start = time.time()
-        with self.rendering_manager.use_render_profile(render_profile):
-            result_observe = await self._run_agent_with_stage_sla(
-                starting_agent=critic_observe,
-                input=critique_instruction,
-                role="critic",
-                event="observe_scene",
-                session=self.critic_session,
-                configured_max_turns=self.cfg.agents.critic_agent.max_turns,
-                run_config=run_config,
-            )
-        self._record_module_timing("critic", "observe_scene", observe_start)
-        if result_observe is not None:
-            log_agent_usage(result=result_observe, agent_name="CRITIC (observe)")
-        self._record_llm_call_debug(
-            agent_role="critic",
-            event="observe_scene",
-            prompt=critique_instruction,
-            output=(result_observe.final_output or "") if result_observe else "",
-            result=result_observe,
+        direct_multimodal = self._critic_fast_path_enabled(
+            "direct_multimodal_evaluation", True
         )
+        direct_image_parts: list[dict[str, str]] = []
+        direct_observation_note = ""
+        if direct_multimodal:
+            console_logger.info(
+                "[CRITIC harness] Step 1: direct framework render (no tool-call LLM)"
+            )
+            (
+                _,
+                direct_image_parts,
+                direct_observation_note,
+            ) = self._collect_direct_critic_observation(render_profile)
+            result_observe = None
+            self._record_llm_call_debug(
+                agent_role="critic",
+                event="observe_scene_direct",
+                prompt=critique_instruction,
+                output=(
+                    f"framework render supplied {len(direct_image_parts)} image(s)"
+                ),
+            )
+        else:
+            # Compatibility path for providers that require tool-output images in
+            # session history. Qwen/vLLM uses the direct path above.
+            console_logger.info("[CRITIC harness] Step 1: observe_scene")
+            observe_start = time.time()
+            with self.rendering_manager.use_render_profile(render_profile):
+                result_observe = await self._run_agent_with_stage_sla(
+                    starting_agent=critic_observe,
+                    input=critique_instruction,
+                    role="critic",
+                    event="observe_scene",
+                    session=self.critic_session,
+                    configured_max_turns=self.cfg.agents.critic_agent.max_turns,
+                    run_config=run_config,
+                )
+            self._record_module_timing("critic", "observe_scene", observe_start)
+            if result_observe is not None:
+                log_agent_usage(result=result_observe, agent_name="CRITIC (observe)")
+            self._record_llm_call_debug(
+                agent_role="critic",
+                event="observe_scene",
+                prompt=critique_instruction,
+                output=(result_observe.final_output or "") if result_observe else "",
+                result=result_observe,
+            )
 
         # Step 2: force get_current_scene_state; session carries Step 1 history.
         direct_scene_state = self._get_critic_scene_state_direct()
@@ -2937,7 +3177,7 @@ class BaseStatefulAgent(ABC):
             console_logger.info(
                 "[CRITIC harness] Step 2: get_current_scene_state direct cache"
             )
-        else:
+        elif not direct_multimodal:
             console_logger.info("[CRITIC harness] Step 2: get_current_scene_state")
             scene_state_start = time.time()
             result_scene = await self._run_agent_with_stage_sla(
@@ -2982,16 +3222,77 @@ class BaseStatefulAgent(ABC):
             "critique with scores."
             f"{scene_state_block}"
         )
+        score_input: Any = score_prompt
+        score_session: Session | None = self.critic_session
+        if direct_multimodal:
+            direct_text = critique_instruction + "\n\n" + score_prompt
+            if direct_observation_note:
+                direct_text += "\n\nRender result: " + direct_observation_note
+            score_input = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": direct_text},
+                        *direct_image_parts,
+                    ],
+                }
+            ]
+            # A fresh one-shot multimodal request avoids carrying old images and
+            # tool traces through SQLite session history.
+            score_session = None
         try:
-            result = await self._run_agent_with_stage_sla(
-                starting_agent=critic_score,
-                input=score_prompt,
-                role="critic",
-                event="score_scene",
-                session=self.critic_session,
-                configured_max_turns=self.cfg.agents.critic_agent.max_turns,
-                run_config=run_config,
+            max_attempts = (
+                max(
+                    1,
+                    int(
+                        _cfg_get(
+                            self._critic_fast_path_cfg(),
+                            "direct_multimodal_max_attempts",
+                            2,
+                        )
+                        or 2
+                    ),
+                )
+                if direct_multimodal
+                else 1
             )
+            if direct_multimodal and not direct_image_parts:
+                console_logger.warning(
+                    "Direct visual critic render produced no images; recording the "
+                    "candidate as unscored instead of issuing a text-only score"
+                )
+                max_attempts = 0
+            attempt_timeout = float(
+                _cfg_get(
+                    self._critic_fast_path_cfg(),
+                    "direct_multimodal_attempt_timeout_seconds",
+                    120.0,
+                )
+                or 120.0
+            )
+            result = None
+            for attempt in range(1, max_attempts + 1):
+                result = await self._run_agent_with_stage_sla(
+                    starting_agent=critic_score,
+                    input=score_input,
+                    role="critic",
+                    event=f"score_scene_attempt_{attempt}",
+                    session=score_session,
+                    configured_max_turns=self.cfg.agents.critic_agent.max_turns,
+                    run_config=run_config,
+                    call_timeout_seconds=(
+                        attempt_timeout if direct_multimodal else None
+                    ),
+                )
+                if result is not None:
+                    break
+                if attempt < max_attempts:
+                    console_logger.warning(
+                        "Compact visual critic attempt %d/%d did not complete; "
+                        "retrying the same rendered candidate with fresh context",
+                        attempt,
+                        max_attempts,
+                    )
             self._record_module_timing("critic", "score_scene", score_start)
             if result is None:
                 response = self._make_transient_critic_fallback_scores(
@@ -3017,8 +3318,8 @@ class BaseStatefulAgent(ABC):
                 extra={"fallback": "transient_model_error", "error": str(exc)},
             )
             console_logger.warning(
-                "Local VLM critic scoring failed transiently; persisting "
-                "conservative deterministic fallback scores: %s: %s",
+                "Local VLM critic scoring failed transiently; recording an "
+                "unscored retryable diagnostic: %s: %s",
                 type(exc).__name__,
                 exc,
             )
@@ -3031,7 +3332,7 @@ class BaseStatefulAgent(ABC):
                 error=f"{type(exc).__name__}: {exc}",
             )
 
-        # Parse structured output or the conservative transport fallback.
+        # Parse structured output or the unscored transport diagnostic.
         if not isinstance(response, CritiqueWithScores):
             raise TypeError(
                 "Critic returned an unexpected final output type: "
@@ -3040,7 +3341,16 @@ class BaseStatefulAgent(ABC):
 
         # Log critique text and scores to console.
         log_agent_response(response=response.critique, agent_name="CRITIC")
-        log_critique_scores(response, title="CRITIQUE SCORES")
+        response_provenance = self._score_provenance_for_response(
+            response=response,
+            physics_context=physics_context,
+        )
+        if response_provenance.get("score_source") == "critic_fallback":
+            console_logger.warning(
+                "Critic response is unscored; suppressing legacy placeholder grades"
+            )
+        else:
+            log_critique_scores(response, title="CRITIQUE SCORES")
 
         # Save scores to YAML next to scene renders (from observe_scene call).
         images_dir = self.rendering_manager.last_render_dir

@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import csv
 import faulthandler
 import json
@@ -11,7 +12,7 @@ import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 from threading import Lock
-from typing import Callable
+from typing import Any, Callable
 
 from agents import custom_span, trace
 from omegaconf import DictConfig, OmegaConf
@@ -162,6 +163,80 @@ def _is_repairable_stage_validation(error: StageValidationError) -> bool:
         "unrecoverable environment",
     )
     return not any(marker in text for marker in terminal_markers)
+
+
+def _run_sceneexpert_placement_stage(
+    *,
+    stage: str,
+    agent: Any,
+    scene: RoomScene,
+    run_once: Callable[[], Any],
+) -> int:
+    """Run a placement stage with bounded critic retry and full regeneration."""
+    baseline_state = copy.deepcopy(scene.to_state_dict())
+    stage_prompt = str(scene.text_description or "")
+    budget = getattr(scene, "scene_expert_stage_budget", {}) or {}
+    max_regenerations = max(
+        0, int(budget.get("max_stage_regenerations", 0) or 0)
+    )
+    regeneration_attempt = 0
+    critic_retry_attempted = False
+
+    while True:
+        try:
+            asyncio.run(run_once())
+            return regeneration_attempt
+        except StageValidationError as exc:
+            if not _is_repairable_stage_validation(exc):
+                raise
+            critic_only = bool(exc.reasons) and all(
+                "visual critic did not produce a trustworthy score" in reason.lower()
+                for reason in exc.reasons
+            )
+            if critic_only and not critic_retry_attempted:
+                critic_retry_attempted = True
+                console_logger.warning(
+                    "%s output is hard-valid but unscored; retrying only the compact "
+                    "final critic before considering regeneration",
+                    stage,
+                )
+                retry_critic = getattr(agent, "retry_final_critic_evaluation", None)
+                if callable(retry_critic):
+                    asyncio.run(retry_critic())
+                    return regeneration_attempt
+
+            if regeneration_attempt >= max_regenerations:
+                console_logger.error(
+                    "%s stage remained invalid after %d full regeneration(s): %s",
+                    stage,
+                    regeneration_attempt,
+                    "; ".join(exc.reasons),
+                )
+                raise
+
+            regeneration_attempt += 1
+            console_logger.warning(
+                "%s stage failed its completion contract; restoring the stage "
+                "input checkpoint and requesting a new agent design (%d/%d): %s",
+                stage,
+                regeneration_attempt,
+                max_regenerations,
+                "; ".join(exc.reasons),
+            )
+            scene.restore_from_state_dict(copy.deepcopy(baseline_state))
+            scene.text_description = (
+                f"{stage_prompt}\n\n"
+                "# Mandatory Stage Regeneration\n"
+                "The previous attempt was rejected. Create a genuinely new, "
+                "bounded stage layout and do not finish with zero stage-native "
+                "objects. If a requested asset failed, choose a semantically "
+                "equivalent HSSD substitute with realistic natural proportions. "
+                "Resolve all of: "
+                + "; ".join(exc.reasons)
+            )
+            prepare_regeneration = getattr(agent, "prepare_stage_regeneration", None)
+            if callable(prepare_regeneration):
+                asyncio.run(prepare_regeneration(list(exc.reasons)))
 
 
 def _root_error_summary(error: str, max_chars: int = 700) -> str:
@@ -878,6 +953,7 @@ def _generate_room(
                 empty_stage_state = scene.to_state_dict()
                 stage_prompt = scene.text_description
                 regeneration_attempt = 0
+                critic_only_retry_attempted = False
                 best_agent_candidate = None
                 repairable_hard_exhausted = False
                 capture_agent_candidate = getattr(
@@ -937,6 +1013,26 @@ def _generate_room(
                             continue
                         break
                     except StageValidationError as exc:
+                        critic_only = bool(exc.reasons) and all(
+                            "visual critic did not produce a trustworthy score"
+                            in reason.lower()
+                            for reason in exc.reasons
+                        )
+                        if critic_only and not critic_only_retry_attempted:
+                            critic_only_retry_attempted = True
+                            console_logger.warning(
+                                "Furniture output is hard-valid but unscored; "
+                                "retrying only the compact final critic before "
+                                "discarding the layout"
+                            )
+                            try:
+                                asyncio.run(
+                                    furniture_agent.retry_final_critic_evaluation()
+                                )
+                                break
+                            except StageValidationError as retry_exc:
+                                exc = retry_exc
+
                         repairable = _is_repairable_stage_validation(exc)
                         if (
                             repairable
@@ -1222,7 +1318,12 @@ def _generate_room(
                 render_gpu_id=render_gpu_id,
             )
             try:
-                asyncio.run(wall_agent.add_wall_objects(scene=scene))
+                _run_sceneexpert_placement_stage(
+                    stage="wall_mounted",
+                    agent=wall_agent,
+                    scene=scene,
+                    run_once=lambda: wall_agent.add_wall_objects(scene=scene),
+                )
             finally:
                 # Always cleanup server subprocesses.
                 wall_agent.cleanup()
@@ -1285,7 +1386,12 @@ def _generate_room(
                 render_gpu_id=render_gpu_id,
             )
             try:
-                asyncio.run(ceiling_agent.add_ceiling_objects(scene=scene))
+                _run_sceneexpert_placement_stage(
+                    stage="ceiling_mounted",
+                    agent=ceiling_agent,
+                    scene=scene,
+                    run_once=lambda: ceiling_agent.add_ceiling_objects(scene=scene),
+                )
             finally:
                 # Always cleanup server subprocesses.
                 ceiling_agent.cleanup()
@@ -1349,7 +1455,12 @@ def _generate_room(
             logger=logger,
             render_gpu_id=render_gpu_id,
         )
-        asyncio.run(manipuland_agent.add_manipulands(scene=scene))
+        _run_sceneexpert_placement_stage(
+            stage="manipuland",
+            agent=manipuland_agent,
+            scene=scene,
+            run_once=lambda: manipuland_agent.add_manipulands(scene=scene),
+        )
         end_time = time.time()
         console_logger.info(
             f"Manipulands added to room {room_id} in "

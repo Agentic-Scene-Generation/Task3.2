@@ -44,6 +44,7 @@ from scenesmith.manipuland_agents.base_manipuland_agent import BaseManipulandAge
 from scenesmith.manipuland_agents.tools.manipuland_tools import ManipulandTools
 from scenesmith.manipuland_agents.tools.vision_tools import ManipulandVisionTools
 from scenesmith.prompts.registry import ManipulandAgentPrompts
+from scenesmith.scene_expert.exceptions import StageValidationError
 from scenesmith.utils.logging import BaseLogger
 
 console_logger = logging.getLogger(__name__)
@@ -728,6 +729,13 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
 
         if not furniture_data:
             console_logger.info("No furniture identified for manipuland placement")
+            if self._stage_runtime_budget:
+                hard_state = self._evaluate_current_hard_state()
+                if hard_state is not None and not hard_state.hard_valid:
+                    raise StageValidationError(
+                        stage=self.agent_type.value,
+                        reasons=list(hard_state.hard_reasons),
+                    )
             return
 
         console_logger.info(
@@ -870,6 +878,22 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
                     )
                     # Continue to next furniture piece.
                     continue
+
+        if self._stage_runtime_budget:
+            final_hard_state = self._evaluate_current_hard_state()
+            if final_hard_state is not None and not final_hard_state.hard_valid:
+                raise StageValidationError(
+                    stage=self.agent_type.value,
+                    reasons=list(final_hard_state.hard_reasons),
+                )
+            if self._last_score_provenance.get("score_source") != "vlm_critic":
+                raise StageValidationError(
+                    stage=self.agent_type.value,
+                    reasons=[
+                        "visual critic did not produce a trustworthy score after "
+                        "bounded compact retries"
+                    ],
+                )
 
         console_logger.info("Manipuland placement complete")
 

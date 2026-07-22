@@ -5,11 +5,20 @@ import numpy as np
 from scenesmith.agent_utils.mesh_frame import (
     gltf_y_up_bounds_to_scene_z_up,
     scene_dimensions_to_gltf_y_up,
+    uniform_scale_shape_error,
     validate_uniform_dimension_fit,
 )
 
 
 class MeshFrameTest(unittest.TestCase):
+    def test_scale_invariant_shape_error_ignores_arbitrary_source_scale(self) -> None:
+        target = [1.4, 0.3, 1.4]
+
+        shape_match = uniform_scale_shape_error([14.0, 3.0, 14.0], target)
+        wrong_shape = uniform_scale_shape_error([1.4, 1.2, 1.0], target)
+
+        self.assertLess(shape_match, wrong_shape)
+
     def test_scene_dimensions_are_reordered_for_gltf_scaling(self) -> None:
         self.assertEqual(
             scene_dimensions_to_gltf_y_up([1.6, 2.05, 0.8]),
