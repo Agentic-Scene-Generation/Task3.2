@@ -1,6 +1,7 @@
 """VLM-assisted choice among rendered HSSD retrieval candidates."""
 
 import logging
+import os
 import time
 
 from dataclasses import dataclass
@@ -18,6 +19,34 @@ if TYPE_CHECKING:
 
 
 console_logger = logging.getLogger(__name__)
+
+
+def hssd_rendered_choice_options(cfg: object) -> tuple[bool, int, Path]:
+    """Read shared config and environment options for rendered HSSD choice."""
+    hssd_cfg = cfg.asset_manager.get("hssd", {}) or {}
+    choice_cfg = hssd_cfg.get("rendered_asset_choice", {}) or {}
+
+    enabled = bool(choice_cfg.get("enabled", False))
+    env_enabled = os.environ.get("HSSD_RENDERED_ASSET_CHOICE")
+    if env_enabled is not None:
+        enabled = env_enabled.strip().lower() in {"1", "true", "yes", "on"}
+
+    raw_top_n = os.environ.get("HSSD_RENDERED_ASSET_CHOICE_TOP_N")
+    if raw_top_n is None:
+        raw_top_n = choice_cfg.get("top_n", 4)
+    try:
+        top_n = max(1, int(raw_top_n))
+    except (TypeError, ValueError):
+        console_logger.warning(
+            "Invalid HSSD rendered_asset_choice top_n=%r; using 4", raw_top_n
+        )
+        top_n = 4
+
+    rendered_assets_dir = Path(
+        os.environ.get("HSSD_RENDERED_ASSETS_DIR")
+        or choice_cfg.get("rendered_assets_dir", "data/hssd_rendered_assets")
+    )
+    return enabled, top_n, rendered_assets_dir
 
 
 @dataclass(frozen=True)

@@ -160,6 +160,9 @@ asset_manager:
     retrieval_backend: "clip" # clip or embedding
     use_top_k: 5  # Number of top CLIP candidates before size ranking
     use_lenient_validation: true  # Use lenient validation for retrieved assets
+    # Tall foliage often has a low solid-mesh height after uniform fitting because
+    # sparse leaves do not fill its requested envelope. Keep this relaxation plant-only.
+    plant_uniform_fit_min_ratio: 0.45
     rendered_asset_choice:
       enabled: false
       top_n: 4
