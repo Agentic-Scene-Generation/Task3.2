@@ -21,10 +21,15 @@ from scenesmith.agent_utils.asset_manager import (
 from scenesmith.agent_utils.geometry_generation_server.dataclasses import (
     GeometryGenerationServerResponse,
 )
+from scenesmith.agent_utils.hssd_retrieval_server.dataclasses import (
+    HssdRetrievalResult,
+    HssdRetrievalServerResponse,
+)
 from scenesmith.agent_utils.image_generation import (
     AssetOperationType,
     OpenAIImageGenerator,
 )
+from scenesmith.agent_utils.mesh_frame import validate_uniform_dimension_fit
 from scenesmith.agent_utils.mesh_physics_analyzer import MeshPhysicsAnalysis
 from scenesmith.agent_utils.room import AgentType, ObjectType, SceneObject
 from tests.unit.mock_utils import create_mock_logger
@@ -128,7 +133,6 @@ class TestAssetManager(unittest.TestCase):
         if self.temp_dir.exists():
             shutil.rmtree(self.temp_dir)
 
-
     def test_asset_generation_request_creation(self):
         """Test creating AssetGenerationRequest instances."""
         request = AssetGenerationRequest(
@@ -175,6 +179,94 @@ class TestAssetManager(unittest.TestCase):
         """Test AssetManager initialization."""
         self.assertEqual(self.asset_manager.output_dir, self.output_dir)
         self.assertEqual(self.asset_manager.logger, self.mock_logger)
+
+    def test_direct_hssd_requests_top_n_and_retries_failed_candidate(self):
+        """Direct HSSD path should request and try rendered-choice candidates."""
+        request = AssetGenerationRequest(
+            object_descriptions=["Large indoor potted floor plant"],
+            short_names=["plant"],
+            object_type=ObjectType.FURNITURE,
+            desired_dimensions=[[0.6, 0.6, 1.2]],
+            scene_prompt_context="A bright living room with two floor plants.",
+        )
+        candidates = [
+            HssdRetrievalResult(
+                mesh_path=f"/tmp/plant_{index}.glb",
+                hssd_id=f"plant_{index}",
+                object_name=f"plant {index}",
+                similarity_score=0.9 - index * 0.01,
+                size=(0.6, 0.6, 1.2),
+                category="plant",
+            )
+            for index in range(2)
+        ]
+        response = HssdRetrievalServerResponse(
+            results=candidates,
+            query_description=request.object_descriptions[0],
+        )
+        self.asset_manager.hssd_client = MagicMock()
+        self.asset_manager.hssd_client.retrieve_objects.return_value = iter(
+            [(0, response)]
+        )
+        recovered = SceneObject(
+            object_id="plant_0",
+            object_type=ObjectType.FURNITURE,
+            name="plant",
+            description=request.object_descriptions[0],
+            transform=MagicMock(),
+            metadata={"asset_source": "hssd"},
+        )
+
+        with (
+            patch.dict(
+                "os.environ",
+                {
+                    "HSSD_RENDERED_ASSET_CHOICE": "true",
+                    "HSSD_RENDERED_ASSET_CHOICE_TOP_N": "5",
+                    "HSSD_RENDERED_ASSETS_DIR": str(self.temp_dir),
+                },
+            ),
+            patch.object(
+                self.asset_manager,
+                "_process_direct_hssd_candidate",
+                side_effect=[ValueError("bad proportions"), recovered],
+            ) as process_candidate,
+        ):
+            result = self.asset_manager._retrieve_hssd_assets(request)
+
+        sent_requests = self.asset_manager.hssd_client.retrieve_objects.call_args.args[
+            0
+        ]
+        self.assertEqual(sent_requests[0].num_candidates, 5)
+        self.assertEqual(
+            [
+                call.kwargs["candidate"].hssd_id
+                for call in process_candidate.call_args_list
+            ],
+            ["plant_0", "plant_1"],
+        )
+        self.assertEqual(result.successful_assets, [recovered])
+        self.assertEqual(result.failed_assets, [])
+
+    def test_plant_uniform_fit_relaxation_is_targeted(self):
+        """Plant envelopes may use 0.45; other assets retain the 0.50 floor."""
+        actual = np.array([0.6, 0.754861, 0.556976])
+        requested = np.array([0.6, 0.6, 1.2])
+
+        plant_min_ratio = self.asset_manager._hssd_uniform_fit_min_ratio(
+            "Large indoor potted floor plant"
+        )
+        self.assertEqual(plant_min_ratio, 0.45)
+        validate_uniform_dimension_fit(actual, requested, min_ratio=plant_min_ratio)
+
+        non_plant_min_ratio = self.asset_manager._hssd_uniform_fit_min_ratio(
+            "Tall wooden bookcase"
+        )
+        self.assertEqual(non_plant_min_ratio, 0.5)
+        with self.assertRaisesRegex(ValueError, "allowed=\\[0.5, 1.75\\]"):
+            validate_uniform_dimension_fit(
+                actual, requested, min_ratio=non_plant_min_ratio
+            )
 
     def test_create_asset_paths_disambiguates_duplicate_short_names(self):
         """Duplicate requested objects must not share intermediate asset paths."""
@@ -1138,7 +1230,9 @@ class TestHssdFrontAxisOverride(unittest.TestCase):
         """HSM +Z-forward becomes SceneSmith/Blender -Y."""
         self.assertEqual(_normalize_hssd_annotation_front_axis([0.0, 0.0, 1.0]), "-Y")
 
-    @patch("scenesmith.agent_utils.asset_manager._get_hssd_front_axis_annotation_record")
+    @patch(
+        "scenesmith.agent_utils.asset_manager._get_hssd_front_axis_annotation_record"
+    )
     def test_annotation_replaces_only_front_axis(self, mock_annotation_record):
         """Curated front replaces VLM orientation without changing physics metadata."""
         mock_annotation_record.return_value = {

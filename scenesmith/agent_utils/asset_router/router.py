@@ -1,7 +1,6 @@
 """Asset router for LLM-advised asset generation."""
 
 import logging
-import os
 import tempfile
 import time
 
@@ -26,6 +25,7 @@ from scenesmith.agent_utils.asset_router.dataclasses import (
 )
 from scenesmith.agent_utils.asset_router.rendered_asset_choice import (
     choose_hssd_candidate_from_iso_renders,
+    hssd_rendered_choice_options,
 )
 from scenesmith.agent_utils.blender.constants import (
     ARTICULATED_LIGHT_ENERGY,
@@ -1593,30 +1593,7 @@ class AssetRouter:
 
     def _hssd_rendered_choice_options(self) -> tuple[bool, int, Path]:
         """Read config and environment options for rendered HSSD choice."""
-        hssd_cfg = self.cfg.asset_manager.get("hssd", {}) or {}
-        choice_cfg = hssd_cfg.get("rendered_asset_choice", {}) or {}
-
-        enabled = bool(choice_cfg.get("enabled", False))
-        env_enabled = os.environ.get("HSSD_RENDERED_ASSET_CHOICE")
-        if env_enabled is not None:
-            enabled = env_enabled.strip().lower() in {"1", "true", "yes", "on"}
-
-        raw_top_n = os.environ.get("HSSD_RENDERED_ASSET_CHOICE_TOP_N")
-        if raw_top_n is None:
-            raw_top_n = choice_cfg.get("top_n", 4)
-        try:
-            top_n = max(1, int(raw_top_n))
-        except (TypeError, ValueError):
-            console_logger.warning(
-                "Invalid HSSD rendered_asset_choice top_n=%r; using 4", raw_top_n
-            )
-            top_n = 4
-
-        rendered_assets_dir = Path(
-            os.environ.get("HSSD_RENDERED_ASSETS_DIR")
-            or choice_cfg.get("rendered_assets_dir", "data/hssd_rendered_assets")
-        )
-        return enabled, top_n, rendered_assets_dir
+        return hssd_rendered_choice_options(self.cfg)
 
     def _rank_hssd_candidates_with_rendered_iso(
         self,
