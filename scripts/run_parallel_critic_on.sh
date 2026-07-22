@@ -50,6 +50,10 @@ DISABLE_MATERIALS="${SCENEEXPERT_DISABLE_MATERIALS:-false}"
 DISABLE_BWRAP="${SCENEEXPERT_DISABLE_BWRAP:-false}"
 HSSD_RETRIEVAL_BACKEND="${HSSD_RETRIEVAL_BACKEND:-clip}"
 HSSD_RENDERED_ASSET_CHOICE="${HSSD_RENDERED_ASSET_CHOICE:-false}"
+# os.cpu_count() sees the host's 192 logical CPUs in the CCI container, while
+# the job is limited to roughly 22 CPU cores.  Allow the caller to cap each
+# isolated convex-decomposition server without changing the stable defaults.
+CONVEX_MAX_OMP_THREADS="${SCENEEXPERT_CONVEX_MAX_OMP_THREADS:-}"
 
 # Match the classmate's vLLM run. The agent code maps these values to Qwen
 # directives: none/minimal -> /no_think, all other values -> /think.
@@ -128,6 +132,9 @@ require_positive_integer CRITIC_PROBE_INNER_PARALLELISM "$CRITIC_PROBE_INNER_PAR
 require_positive_integer CRITIC_PROBE_PORT_BASE "$CRITIC_PROBE_PORT_BASE"
 require_positive_integer CRITIC_PROBE_PORT_BLOCK_SIZE "$CRITIC_PROBE_PORT_BLOCK_SIZE"
 require_positive_integer CRITIC_PROBE_SHUTDOWN_GRACE_SECONDS "$CRITIC_PROBE_SHUTDOWN_GRACE_SECONDS"
+if [ -n "$CONVEX_MAX_OMP_THREADS" ]; then
+    require_positive_integer SCENEEXPERT_CONVEX_MAX_OMP_THREADS "$CONVEX_MAX_OMP_THREADS"
+fi
 
 if [ "$CRITIC_PROBE_PORT_BLOCK_SIZE" -lt 375 ]; then
     echo "ERROR: CRITIC_PROBE_PORT_BLOCK_SIZE must be at least 375" >&2
@@ -244,6 +251,7 @@ export SCENEEXPERT_DISABLE_MATERIALS="$DISABLE_MATERIALS"
 export SCENEEXPERT_DISABLE_BWRAP="$DISABLE_BWRAP"
 export FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS
 export HSSD_RETRIEVAL_BACKEND HSSD_RENDERED_ASSET_CHOICE
+export CONVEX_MAX_OMP_THREADS
 export FLOOR_PLAN_DESIGNER_THINKING FLOOR_PLAN_CRITIC_THINKING
 export FURNITURE_DESIGNER_THINKING FURNITURE_CRITIC_THINKING
 export WALL_DESIGNER_THINKING WALL_CRITIC_THINKING
@@ -265,6 +273,9 @@ echo "port allocation: base=$CRITIC_PROBE_PORT_BASE block=$CRITIC_PROBE_PORT_BLO
 echo "continue after batch failure: $CRITIC_PROBE_CONTINUE_ON_BATCH_FAILURE"
 echo "fail unresolved furniture hard constraints: $FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS"
 echo "HSSD retrieval: backend=$HSSD_RETRIEVAL_BACKEND rendered_asset_choice=$HSSD_RENDERED_ASSET_CHOICE"
+if [ -n "$CONVEX_MAX_OMP_THREADS" ]; then
+    echo "convex decomposition max OMP threads: $CONVEX_MAX_OMP_THREADS"
+fi
 echo "thinking profile: floor_plan=${FLOOR_PLAN_DESIGNER_THINKING}/${FLOOR_PLAN_CRITIC_THINKING}, furniture=${FURNITURE_DESIGNER_THINKING}/${FURNITURE_CRITIC_THINKING}, wall=${WALL_DESIGNER_THINKING}/${WALL_CRITIC_THINKING}, ceiling=${CEILING_DESIGNER_THINKING}/${CEILING_CRITIC_THINKING}, manipuland=${MANIPULAND_DESIGNER_THINKING}/${MANIPULAND_CRITIC_THINKING}"
 echo "shared base: $BRANCH_FROM_SHARED_BASE (generate=$GENERATE_SHARED_BASE)"
 echo "==============================================="
@@ -311,6 +322,15 @@ COMMON_ARGS=(
     "ceiling_agent.asset_manager.hssd.rendered_asset_choice.enabled=${HSSD_RENDERED_ASSET_CHOICE}"
     "manipuland_agent.asset_manager.hssd.rendered_asset_choice.enabled=${HSSD_RENDERED_ASSET_CHOICE}"
 )
+
+if [ -n "$CONVEX_MAX_OMP_THREADS" ]; then
+    COMMON_ARGS+=(
+        "furniture_agent.collision_geometry.max_omp_threads=${CONVEX_MAX_OMP_THREADS}"
+        "wall_agent.collision_geometry.max_omp_threads=${CONVEX_MAX_OMP_THREADS}"
+        "ceiling_agent.collision_geometry.max_omp_threads=${CONVEX_MAX_OMP_THREADS}"
+        "manipuland_agent.collision_geometry.max_omp_threads=${CONVEX_MAX_OMP_THREADS}"
+    )
+fi
 
 if [ "$DISABLE_ARTICULATED" = "true" ]; then
     COMMON_ARGS+=(
