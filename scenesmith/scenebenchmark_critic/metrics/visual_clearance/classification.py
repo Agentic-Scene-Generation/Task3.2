@@ -7,19 +7,21 @@ from typing import Any
 
 _DISPLAY_WORDS = re.compile(
     r"\b(?:art|artwork|canvas|clock|frame|mirror|painting|photo|photograph|"
-    r"picture|poster|print|tapestry)\b"
+    r"picture|poster|print|shelf|shelving|tapestry)\b"
 )
 _EXCLUDED_WORDS = re.compile(
-    r"\b(?:display|light|projection screen|screen|sconce|shelf|television|tv)\b"
+    r"\b(?:display|light|projection screen|screen|sconce|television|tv)\b"
 )
 
 
 def is_wall_mounted_visual_subject(obj: dict[str, Any]) -> bool:
     """Return whether an object is decorative wall content."""
     hints = obj.get("functional_hints") or {}
-    scene_type = str(
-        obj.get("object_type") or hints.get("scene_object_type") or ""
-    ).strip().lower()
+    scene_type = (
+        str(obj.get("object_type") or hints.get("scene_object_type") or "")
+        .strip()
+        .lower()
+    )
     if scene_type != "wall_mounted":
         return False
     text = " ".join(

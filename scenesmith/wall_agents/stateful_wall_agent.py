@@ -33,6 +33,9 @@ from scenesmith.prompts.registry import WallAgentPrompts
 from scenesmith.scenebenchmark_critic import evaluate_room_scene, format_prompt_context
 from scenesmith.scenebenchmark_critic.config import critic_config_from_any
 from scenesmith.scenebenchmark_critic.prompt_context import format_agent_prompt_context
+from scenesmith.scenebenchmark_critic.visual_clearance_repair import (
+    improve_wall_visual_clearance,
+)
 from scenesmith.utils.logging import BaseLogger
 from scenesmith.wall_agents.base_wall_agent import BaseWallAgent
 from scenesmith.wall_agents.prompt_constraints import (
@@ -315,8 +318,7 @@ class StatefulWallAgent(BaseStatefulAgent, BaseWallAgent):
         if self._latest_scenebenchmark_critic_context:
             critique += (
                 "\n\nVERBATIM SceneBenchmark action context (must be passed to "
-                "the designer):\n"
-                + self._latest_scenebenchmark_critic_context
+                "the designer):\n" + self._latest_scenebenchmark_critic_context
             )
         return critique
 
@@ -586,6 +588,17 @@ class StatefulWallAgent(BaseStatefulAgent, BaseWallAgent):
 
                 # Run multi-agent workflow.
                 await self._run_wall_workflow()
+
+                # The final critic call can identify an occluded clock/shelf after
+                # the planner has exhausted its designer budget. Repair those
+                # geometry-proven issues before the caller persists the wall stage.
+                fixes = improve_wall_visual_clearance(
+                    scene,
+                    wall_surfaces=self.wall_surfaces,
+                    config=self.cfg,
+                )
+                if fixes:
+                    self.rendering_manager.clear_cache()
 
             except Exception as e:
                 console_logger.error(
