@@ -4,6 +4,7 @@ import tempfile
 import unittest
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from omegaconf import OmegaConf
@@ -23,6 +24,7 @@ class TestRenderingManager(unittest.TestCase):
         self.mock_scene = Mock(spec=RoomScene)
         self.mock_scene.objects = {}
         self.mock_scene.text_description = "Test scene"
+        self.mock_scene.room_geometry = None
         # Mock content_hash method for automatic caching tests.
         self.mock_scene.content_hash.return_value = "default_content_hash"
 
@@ -124,6 +126,30 @@ class TestRenderingManager(unittest.TestCase):
 
         # Verify render counter incremented.
         self.assertEqual(self.rendering_manager._render_counter, 1)
+
+    @patch(
+        "scenesmith.agent_utils.rendering_manager.render_scene_for_agent_observation"
+    )
+    def test_room_geometry_anchors_camera_frame(self, mock_render_function):
+        mock_image_paths = [Path(self.temp_dir / "top_view.png")]
+        mock_image_paths[0].touch()
+        mock_render_function.return_value = mock_image_paths
+        self.mock_logger.log_images_to_dir.side_effect = (
+            self._create_mock_log_images_to_dir()
+        )
+        self.mock_scene.room_geometry = SimpleNamespace(
+            length=5.0,
+            width=4.0,
+            wall_height=2.7,
+        )
+
+        self.rendering_manager.render_scene(
+            self.mock_scene, blender_server=self.mock_blender_server
+        )
+
+        kwargs = mock_render_function.call_args.kwargs
+        self.assertEqual(kwargs["room_bounds"], (-2.5, -2.0, 2.5, 2.0))
+        self.assertEqual(kwargs["ceiling_height"], 2.7)
 
     @patch(
         "scenesmith.agent_utils.rendering_manager.render_scene_for_agent_observation"

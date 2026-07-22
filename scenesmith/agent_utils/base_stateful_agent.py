@@ -2022,6 +2022,46 @@ class BaseStatefulAgent(ABC):
                     "Deterministic repair attempted during finalization: %s",
                     "; ".join(final_repair_actions),
                 )
+                # The repair changed the canonical scene after the previous
+                # render/score decision.  Never copy the stale hard-fail
+                # artifacts as if they described the repaired final state.
+                if final_hard_state is None or final_hard_state.hard_valid:
+                    repaired_hash = self.scene.content_hash()
+                    if self._last_scored_scene_hash != repaired_hash:
+                        console_logger.info(
+                            "Final deterministic repair produced a hard-valid "
+                            "scene; rendering and scoring the repaired state"
+                        )
+                        self.rendering_manager.clear_cache()
+                        try:
+                            await self._request_critique_impl(update_checkpoint=False)
+                        except Exception as exc:
+                            # A transport/renderer failure must not re-label the
+                            # repaired scene with an earlier hard-fail score.
+                            console_logger.warning(
+                                "Could not score final repaired scene; preserving "
+                                "it as explicitly unscored: %s: %s",
+                                type(exc).__name__,
+                                exc,
+                            )
+                            self.previous_scores = None
+                            self.final_render_dir = None
+                            self.checkpoint_render_dir = None
+                            try:
+                                self.final_render_dir = (
+                                    self.rendering_manager.render_scene(
+                                        scene=self.scene,
+                                        blender_server=self.blender_server,
+                                        rendering_mode=self.agent_type.value,
+                                        render_name="final_repaired_unscored",
+                                    )
+                                )
+                            except Exception:
+                                console_logger.warning(
+                                    "Could not render final repaired scene",
+                                    exc_info=True,
+                                )
+                        final_hard_state = self._evaluate_current_hard_state()
             if final_hard_state is not None and not final_hard_state.hard_valid:
                 if getattr(controller, "best_scene_state", None) is not None:
                     self._restore_furniture_scene_state(controller.best_scene_state)

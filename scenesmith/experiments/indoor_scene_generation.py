@@ -984,55 +984,76 @@ def _generate_room(
                             break
                         raise
 
-                # A deterministic relation layout is a final comparison candidate,
-                # never the normal generator. Trigger it only after the pure-agent
-                # regeneration budget is exhausted with a trustworthy low score.
-                if not repairable_hard_exhausted:
-                    latest_candidate = (
-                        capture_agent_candidate()
-                        if callable(capture_agent_candidate)
-                        else None
+                # A deterministic relation layout remains a final comparison
+                # candidate, never the normal generator.  Hard-recovery
+                # exhaustion and missing critic evidence are not successful
+                # agent outcomes, so they must not silently bypass this branch.
+                latest_candidate = (
+                    capture_agent_candidate(
+                        allow_hard_invalid=repairable_hard_exhausted
                     )
+                    if callable(capture_agent_candidate)
+                    else None
+                )
+                if repairable_hard_exhausted:
+                    comparison_candidate = latest_candidate
+                else:
                     if callable(prefer_agent_candidate):
                         best_agent_candidate = prefer_agent_candidate(
                             best_agent_candidate,
                             latest_candidate,
                         )
-                    restore_agent_candidate = getattr(
-                        furniture_agent, "restore_agent_candidate", None
+                    comparison_candidate = best_agent_candidate
+                restore_agent_candidate = getattr(
+                    furniture_agent, "restore_agent_candidate", None
+                )
+                should_generate_fallback = getattr(
+                    furniture_agent,
+                    "should_generate_deterministic_fallback",
+                    None,
+                )
+                if (
+                    comparison_candidate is not None
+                    and callable(restore_agent_candidate)
+                    and callable(should_generate_fallback)
+                ):
+                    restore_agent_candidate(comparison_candidate)
+                    should_fallback, fallback_reason = should_generate_fallback(
+                        comparison_candidate,
+                        regeneration_attempts=regeneration_attempt,
+                        max_stage_regenerations=max_stage_regenerations,
+                        repairable_hard_exhausted=repairable_hard_exhausted,
                     )
-                    if (
-                        best_agent_candidate is not None
-                        and callable(restore_agent_candidate)
-                        and callable(should_regenerate_for_quality)
-                    ):
-                        restore_agent_candidate(best_agent_candidate)
-                        should_fallback, fallback_reason = (
-                            should_regenerate_for_quality(best_agent_candidate)
+                    if should_fallback:
+                        console_logger.warning(
+                            "Pure-agent furniture workflow exhausted; generating "
+                            "one separately rendered deterministic comparison "
+                            "candidate: %s",
+                            fallback_reason,
                         )
-                        if (
-                            should_fallback
-                            and regeneration_attempt >= max_stage_regenerations
-                        ):
-                            console_logger.warning(
-                                "Pure-agent furniture budget exhausted below target; "
-                                "generating one separately rendered deterministic "
-                                "comparison candidate: %s",
-                                fallback_reason,
-                            )
-                            compare_deterministic_fallback = getattr(
-                                furniture_agent,
-                                "compare_deterministic_fallback",
-                                None,
-                            )
-                            if callable(compare_deterministic_fallback):
-                                asyncio.run(
-                                    compare_deterministic_fallback(
-                                        agent_candidate=best_agent_candidate,
-                                        trigger=fallback_reason,
-                                        regeneration_attempts=regeneration_attempt,
-                                    )
+                        compare_deterministic_fallback = getattr(
+                            furniture_agent,
+                            "compare_deterministic_fallback",
+                            None,
+                        )
+                        if callable(compare_deterministic_fallback):
+                            asyncio.run(
+                                compare_deterministic_fallback(
+                                    agent_candidate=comparison_candidate,
+                                    trigger=fallback_reason,
+                                    regeneration_attempts=regeneration_attempt,
                                 )
+                            )
+                    else:
+                        persist_agent_best = getattr(
+                            furniture_agent,
+                            "persist_agent_best_candidate",
+                            None,
+                        )
+                        if callable(persist_agent_best) and getattr(
+                            scene, "scene_expert_stage_budget", None
+                        ):
+                            persist_agent_best(comparison_candidate)
                 end_time = time.time()
                 console_logger.info(
                     f"Furniture added to room {room_id} in "

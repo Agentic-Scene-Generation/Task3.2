@@ -882,9 +882,10 @@ def render_scene_for_agent_observation(
         wall_furniture_map: For wall mode, mapping from surface_id to list of furniture
             UniqueIDs to include in that wall's orthographic render. Required when
             rendering_mode="wall".
-        room_bounds: For ceiling_perspective mode, room XY bounds
-            (min_x, min_y, max_x, max_y) in meters.
-        ceiling_height: For ceiling_perspective mode, ceiling height in meters.
+        room_bounds: Architectural room XY bounds used for stable camera framing
+            and ceiling views, as (min_x, min_y, max_x, max_y) in meters.
+        ceiling_height: Architectural room height used for stable camera framing
+            and ceiling views, in meters.
         context_furniture_ids: For manipuland mode, list of furniture IDs to keep
             visible in per-surface top-down renders. These provide spatial context
             for item placement orientation (e.g., chairs around a table).

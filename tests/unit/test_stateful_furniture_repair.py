@@ -65,6 +65,40 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         StatefulFurnitureAgent is None,
         f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
     )
+    def test_untrusted_or_hard_exhausted_candidate_triggers_fallback(self) -> None:
+        agent = object.__new__(StatefulFurnitureAgent)
+        agent.scene = SimpleNamespace(scene_expert_stage_budget={"enabled": True})
+        agent.furniture_safety_controller = SimpleNamespace(accept_score_threshold=0.75)
+        untrusted = {
+            "score_source": "deterministic_hard_check",
+            "weighted_score": None,
+            "hard_valid": True,
+        }
+
+        should_fallback, reason = agent.should_generate_deterministic_fallback(
+            untrusted,
+            regeneration_attempts=0,
+            max_stage_regenerations=1,
+            repairable_hard_exhausted=False,
+        )
+
+        self.assertTrue(should_fallback)
+        self.assertIn("without a trustworthy visual critic", reason)
+        untrusted["hard_valid"] = False
+        untrusted["hard_reasons"] = ["physics hard violation: collisions"]
+        should_fallback, reason = agent.should_generate_deterministic_fallback(
+            untrusted,
+            regeneration_attempts=1,
+            max_stage_regenerations=1,
+            repairable_hard_exhausted=True,
+        )
+        self.assertTrue(should_fallback)
+        self.assertIn("hard-constraint recovery exhausted", reason)
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
     def test_capture_does_not_promote_fallback_score_to_trusted_critic(self) -> None:
         agent = object.__new__(StatefulFurnitureAgent)
         fallback_scores = SimpleNamespace(critique="critic timed out")
