@@ -121,6 +121,26 @@ class FurnitureSafetyControllerTest(unittest.TestCase):
         self.assertFalse(allowed)
         self.assertIn("required", message)
 
+    def test_media_room_infers_all_required_major_furniture(self) -> None:
+        controller = FurnitureSafetyController({"enabled": True})
+        controller.reset_for_scene(
+            "A living room with a sofa, a TV stand, two armchairs, and a floor lamp."
+        )
+
+        self.assertEqual(controller.required_counts["sofa"], 1)
+        self.assertEqual(controller.required_counts["tv_stand"], 1)
+        self.assertEqual(controller.required_counts["armchair"], 2)
+        self.assertEqual(controller.required_counts["floor_lamp"], 1)
+
+    def test_dining_room_infers_sideboard(self) -> None:
+        controller = FurnitureSafetyController({"enabled": True})
+        controller.reset_for_scene(
+            "A dining room with a sideboard and four dining chairs."
+        )
+
+        self.assertEqual(controller.required_counts["sideboard"], 1)
+        self.assertEqual(controller.required_counts["chair"], 4)
+
     def test_candidate_must_clearly_improve_best(self) -> None:
         controller = FurnitureSafetyController(
             {
