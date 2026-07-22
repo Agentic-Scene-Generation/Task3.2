@@ -1030,6 +1030,16 @@ class BaseStatefulAgent(ABC):
         try:
             hard_eval = self._evaluate_current_furniture_hard_state()
             call_kind = transaction["call_kind"]
+            hard_eval, _, repair_actions = self._try_deterministic_repair_for_hard_state(
+                hard_eval,
+                source=f"post-{call_kind}-transaction",
+            )
+            if repair_actions:
+                console_logger.info(
+                    "Deterministic repair before %s transaction rollback: %s",
+                    call_kind,
+                    "; ".join(repair_actions),
+                )
             if hard_eval and hard_eval.hard_valid:
                 controller.remember_hard_valid_scene_state(
                     scene_state=copy.deepcopy(self.scene.to_state_dict()),

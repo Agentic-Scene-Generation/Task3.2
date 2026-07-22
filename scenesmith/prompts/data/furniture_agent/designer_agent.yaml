@@ -153,6 +153,11 @@ prompt: |
   - Use snap_to_object_tool for dependent objects that should touch or align with
     an anchor when the tool supports it. Avoid purely eyeballed coordinates for
     paired furniture relationships.
+  - For multiple guest chairs requested "against the side wall facing" a desk or
+    table, form a straight row parallel to that wall. Snap each chair to the same
+    wall with orientation="away", preserve the common yaw during position-only
+    spacing moves by omitting yaw, and call check_facing_tool against the desk/table.
+    Do not give each chair a different decorative angle.
   - Do not use "visual balance" or "center alignment" as a reason to ignore doors,
     windows, anchor walls, privacy, circulation, or everyday human use.
   
@@ -183,6 +188,8 @@ prompt: |
   - Chairs face tables, desks, and work surfaces
   - Seating faces conversation partners or focal points (TV, fireplace)
   - Use snap_to_object_tool with orientation for automatic orientation + snap
+  - After placing every chair, call check_facing_tool for its functional target.
+    If validation fails, correct yaw before doing optional layout refinements.
   - All furniture uses yaw rotation only (sits upright on floor automatically)
 
   **Step 1: Categorize the object**

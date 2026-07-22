@@ -27,7 +27,7 @@ class TestBenchmarkConfigPropagation(unittest.TestCase):
                 "furniture_agent": {"_name": "fake_furniture"},
                 "manipuland_agent": {"_name": "fake_manipuland"},
                 "wall_agent": {"_name": "fake_wall"},
-                "floor_plan_agent": {},
+                "floor_plan_agent": {"windows": {"default_width": 1.2}},
                 "experiment": {
                     "num_workers": 1,
                     "scenebenchmark_critic": self.critic_config,
@@ -79,6 +79,9 @@ class TestBenchmarkConfigPropagation(unittest.TestCase):
 
         self.assertEqual(
             dict(agent.cfg.scenebenchmark_critic), self.critic_config
+        )
+        self.assertEqual(
+            agent.cfg.floor_plan_geometry_config.windows.default_width, 1.2
         )
 
 
