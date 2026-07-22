@@ -133,14 +133,29 @@ def _normalize_score_name(name: str) -> str:
     return name.lower().replace(" ", "_").replace("-", "_")
 
 
-def _contains_alias(text: str, alias: str) -> bool:
+def _contains_alias(
+    text: str,
+    alias: str,
+    *,
+    category: str | None = None,
+) -> bool:
     normalized = text.lower().replace("_", " ")
     escaped = re.escape(alias.lower())
-    if " " in alias:
-        return (
-            re.search(rf"(^|[^a-z0-9]){escaped}([^a-z0-9]|$)", normalized) is not None
-        )
-    return re.search(rf"(^|[^a-z0-9]){escaped}([^a-z0-9]|$)", normalized) is not None
+    for match in re.finditer(
+        rf"(^|[^a-z0-9]){escaped}([^a-z0-9]|$)", normalized
+    ):
+        if category == "table" and _is_non_furniture_table_reference(
+            normalized, match.end() - 1
+        ):
+            continue
+        return True
+    return False
+
+
+def _is_non_furniture_table_reference(text: str, end: int) -> bool:
+    """Exclude table-lamp/settings phrases from furniture-table matching."""
+    suffix = text[end + 1 :].lstrip()
+    return re.match(r"(?:lamp|lamps|setting|settings)\b", suffix) is not None
 
 
 def _has_unnegated_collision(text: str) -> bool:
@@ -318,7 +333,10 @@ class FurnitureSafetyController:
         terms = set()
         text = prompt.lower()
         for canonical, aliases in DEFAULT_ALIASES.items():
-            if any(_contains_alias(text, alias) for alias in aliases):
+            if any(
+                _contains_alias(text, alias, category=canonical)
+                for alias in aliases
+            ):
                 terms.add(canonical)
         if "twin_bed" in terms:
             terms.discard("bed")
@@ -338,6 +356,10 @@ class FurnitureSafetyController:
                     rf"([^a-z0-9]|$)"
                 )
                 for match in re.finditer(pattern, text):
+                    if canonical == "table" and _is_non_furniture_table_reference(
+                        text, match.end() - 1
+                    ):
+                        continue
                     count_text = match.groupdict().get("count")
                     count = 1
                     if count_text:
@@ -415,7 +437,10 @@ class FurnitureSafetyController:
 
     def _infer_category(self, text: str) -> str | None:
         for canonical, aliases in DEFAULT_ALIASES.items():
-            if any(_contains_alias(text, alias) for alias in [canonical, *aliases]):
+            if any(
+                _contains_alias(text, alias, category=canonical)
+                for alias in [canonical, *aliases]
+            ):
                 return canonical
         return None
 
@@ -430,7 +455,10 @@ class FurnitureSafetyController:
         text = f"{object_id} {object_text}".lower().replace("_", " ")
         for term in self.required_terms:
             aliases = DEFAULT_ALIASES.get(term, [term])
-            if any(_contains_alias(text, alias) for alias in [term, *aliases]):
+            if any(
+                _contains_alias(text, alias, category=term)
+                for alias in [term, *aliases]
+            ):
                 return True
         return False
 
