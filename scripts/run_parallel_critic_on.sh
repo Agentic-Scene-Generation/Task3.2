@@ -453,6 +453,7 @@ run_batches() {
     local active_labels=()
     local failed_group_pids=()
     local batch_index=0
+    local source_batch_index=0
     local selected=0
     local batch_entries=()
     local batch_failure=0
@@ -610,13 +611,20 @@ run_batches() {
         IFS='|' read -r case_id critic_goal prompt <<< "${CASES[$index]}"
         if [ -n "$CASE_FILTER" ] && [[ "$case_id" != *"$CASE_FILTER"* ]]; then continue; fi
         if [ "$MAX_CASES" -gt 0 ] && [ "$selected" -ge "$MAX_CASES" ]; then break; fi
+        source_batch_index=$((index / SCENE_BATCH_SIZE + 1))
+        if [ "${#batch_entries[@]}" -gt 0 ] && [ "$batch_index" -ne "$source_batch_index" ]; then
+            launch
+            batch_entries=()
+            batch_index=0
+        fi
+        if [ "$batch_index" -eq 0 ]; then batch_index="$source_batch_index"; fi
         batch_entries+=("$index|$case_id|$critic_goal|$prompt")
         selected=$((selected + 1))
         if [ "${#batch_entries[@]}" -eq "$SCENE_BATCH_SIZE" ]; then
-            batch_index=$((batch_index + 1)); launch; batch_entries=()
+            launch; batch_entries=(); batch_index=0
         fi
     done
-    if [ "${#batch_entries[@]}" -gt 0 ]; then batch_index=$((batch_index + 1)); launch; fi
+    if [ "${#batch_entries[@]}" -gt 0 ]; then launch; fi
     while [ "${#active_pids[@]}" -gt 0 ]; do wait_one; done
     # A failed parallel batch can leave native descendants behind even though
     # its shell leader has exited. Reap those groups after other batches finish.
