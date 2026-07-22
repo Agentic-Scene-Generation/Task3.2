@@ -141,6 +141,15 @@ class FurnitureSafetyControllerTest(unittest.TestCase):
         self.assertEqual(controller.required_counts["sideboard"], 1)
         self.assertEqual(controller.required_counts["chair"], 4)
 
+    def test_table_lamp_is_not_required_furniture_table(self) -> None:
+        controller = FurnitureSafetyController({"enabled": True})
+        controller.reset_for_scene(
+            "A bedroom with a bed and a table lamp on each nightstand."
+        )
+
+        self.assertNotIn("table", controller.required_counts)
+        self.assertIsNone(controller._infer_category("table_lamp_0 table lamp"))
+
     def test_candidate_must_clearly_improve_best(self) -> None:
         controller = FurnitureSafetyController(
             {
