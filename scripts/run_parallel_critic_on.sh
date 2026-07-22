@@ -381,6 +381,7 @@ run_batch() {
     local critic_enabled=true
     local start_stage=""
     local resume_from=""
+    local shared_base_batch_root=""
 
     build_port_args "$batch_index"
     mkdir -p "$run_root"
@@ -395,11 +396,28 @@ run_batch() {
         critic_enabled=false
     elif [ "$BRANCH_FROM_SHARED_BASE" = "true" ]; then
         start_stage="$BRANCH_START_STAGE"
-        resume_from="$SHARED_BASE_ROOT/$batch_label"
+        shared_base_batch_root="$SHARED_BASE_ROOT/$batch_label"
+        # This script puts Hydra's scene directory below a per-batch
+        # ``hydra`` directory to avoid latest-run symlink races.  The
+        # single-room probe uses the batch directory directly, so accept both
+        # layouts when replaying a shared base.
+        if [ -d "$shared_base_batch_root/hydra" ]; then
+            resume_from="$shared_base_batch_root/hydra"
+        else
+            resume_from="$shared_base_batch_root"
+        fi
         if [ ! -d "$resume_from" ]; then
             echo "ERROR: missing reusable shared-base batch: $resume_from" >&2
             exit 1
         fi
+        for entry in "${batch_entries[@]}"; do
+            IFS='|' read -r scene_index _case_id _critic_goal _prompt <<< "$entry"
+            if [ ! -d "$resume_from/scene_$(printf '%03d' "$scene_index")" ]; then
+                echo "ERROR: shared-base scene directory not found: $resume_from/scene_$(printf '%03d' "$scene_index")" >&2
+                echo "       Expected the shared base under $shared_base_batch_root/hydra or $shared_base_batch_root." >&2
+                exit 1
+            fi
+        done
     fi
 
     local cmd=(
