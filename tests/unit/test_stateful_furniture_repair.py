@@ -35,6 +35,18 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         StatefulFurnitureAgent is None,
         f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
     )
+    def test_head_wall_yaw_points_bed_arrow_inward(self) -> None:
+        agent = object.__new__(StatefulFurnitureAgent)
+
+        self.assertEqual(agent._yaw_for_head_wall("east"), 90.0)
+        self.assertEqual(agent._yaw_for_head_wall("west"), -90.0)
+        self.assertEqual(agent._yaw_for_head_wall("north"), 180.0)
+        self.assertEqual(agent._yaw_for_head_wall("south"), 0.0)
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
     def test_transaction_repairs_hard_failure_before_rollback(self) -> None:
         agent = object.__new__(StatefulFurnitureAgent)
         remembered: list[tuple[dict[str, Any], str]] = []

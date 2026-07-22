@@ -958,7 +958,9 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         bed_center = np.asarray(bed.transform.translation(), dtype=float)
         rotation = np.asarray(bed.transform.rotation().matrix(), dtype=float)
         lateral = rotation @ np.array([1.0, 0.0, 0.0])
-        head = rotation @ np.array([0.0, 1.0, 0.0])
+        # Bed assets point +Y toward the foot; bedside furniture belongs at
+        # the opposite (headboard) end.
+        head = -(rotation @ np.array([0.0, 1.0, 0.0]))
         yaw = math.degrees(RollPitchYaw(bed.transform.rotation()).yaw_angle())
         gap = float(self._repair_cfg_value("nightstand_gap_m", 0.08))
 
@@ -1417,11 +1419,13 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         return RigidTransform(R=transform.rotation(), p=translation)
 
     def _yaw_for_head_wall(self, wall: str) -> float:
+        # The bed tool/render arrow is the foot direction, so it must point
+        # inward while the headboard faces the selected wall.
         return {
-            "north": 0.0,
-            "south": 180.0,
-            "east": -90.0,
-            "west": 90.0,
+            "north": 180.0,
+            "south": 0.0,
+            "east": 90.0,
+            "west": -90.0,
         }.get(wall, 0.0)
 
     def _yaw_for_inward_wall(self, wall: str) -> float:
