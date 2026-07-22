@@ -12,17 +12,17 @@ FAIL_OCCLUSION = 0.20
 
 _DISPLAY_WORDS = re.compile(
     r"\b(?:art|artwork|canvas|clock|frame|mirror|painting|photo|photograph|"
-    r"picture|poster|print|tapestry)\b"
+    r"picture|poster|print|shelf|shelving|tapestry)\b"
 )
 _EXCLUDED_WORDS = re.compile(
-    r"\b(?:display|light|projection screen|screen|sconce|shelf|television|tv)\b"
+    r"\b(?:display|light|projection screen|screen|sconce|television|tv)\b"
 )
 
 
 def evaluate_wall_mounted_visibility(
     case_pack: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    """Check that wall art, mirrors, and clocks remain visible past furniture."""
+    """Check that wall decor and shelves remain visible past furniture."""
     geometry = case_pack.get("scene_geometry") or {}
     objects = [
         obj
