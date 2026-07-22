@@ -136,6 +136,11 @@ def _archive_failed_scene_attempt(
 def _is_retryable_scene_failure(error: str) -> bool:
     """Return whether a fresh process can plausibly recover this failure."""
     normalized = error.lower()
+    # Deterministic content/layout failures are handled inside the stage.  A
+    # fresh scene process merely repeats the same agent decision, archives useful
+    # diagnostics, and wastes the full upstream generation budget.
+    if "stage failed deterministic validation" in normalized:
+        return False
     transient_markers = (
         "sigsegv",
         "sigabrt",
@@ -148,7 +153,6 @@ def _is_retryable_scene_failure(error: str) -> bool:
         "request timed out",
         "connection reset",
         "connection refused",
-        "stage failed deterministic validation",
     )
     return any(marker in normalized for marker in transient_markers)
 
@@ -172,15 +176,15 @@ def _run_sceneexpert_placement_stage(
     scene: RoomScene,
     run_once: Callable[[], Any],
 ) -> int:
-    """Run a placement stage with bounded critic retry and full regeneration."""
+    """Run a placement stage with bounded agent-led recovery and degradation."""
     baseline_state = copy.deepcopy(scene.to_state_dict())
     stage_prompt = str(scene.text_description or "")
     budget = getattr(scene, "scene_expert_stage_budget", {}) or {}
-    max_regenerations = max(
-        0, int(budget.get("max_stage_regenerations", 0) or 0)
-    )
+    max_regenerations = max(0, int(budget.get("max_stage_regenerations", 0) or 0))
+    recovery_enabled = bool(budget)
     regeneration_attempt = 0
     critic_retry_attempted = False
+    completion_rescue_attempted = False
 
     while True:
         try:
@@ -206,12 +210,63 @@ def _run_sceneexpert_placement_stage(
                     return regeneration_attempt
 
             if regeneration_attempt >= max_regenerations:
-                console_logger.error(
-                    "%s stage remained invalid after %d full regeneration(s): %s",
+                if not recovery_enabled:
+                    raise
+                if not completion_rescue_attempted:
+                    completion_rescue_attempted = True
+                    rescue = getattr(
+                        agent, "run_required_stage_completion_rescue", None
+                    )
+                    if callable(rescue):
+                        console_logger.warning(
+                            "%s stage remained invalid after %d full "
+                            "regeneration(s); bypassing the planner for one "
+                            "focused agent-led completion rescue: %s",
+                            stage,
+                            regeneration_attempt,
+                            "; ".join(exc.reasons),
+                        )
+                        prepare_regeneration = getattr(
+                            agent, "prepare_stage_regeneration", None
+                        )
+                        if callable(prepare_regeneration):
+                            asyncio.run(prepare_regeneration(list(exc.reasons)))
+                        try:
+                            asyncio.run(rescue(list(exc.reasons)))
+                            return regeneration_attempt
+                        except StageValidationError as rescue_exc:
+                            if not _is_repairable_stage_validation(rescue_exc):
+                                raise
+                            exc = rescue_exc
+                        except Exception as rescue_exc:
+                            console_logger.exception(
+                                "%s agent-led completion rescue failed; preserving "
+                                "the diagnosed candidate and continuing downstream",
+                                stage,
+                            )
+                            exc = StageValidationError(
+                                stage=stage,
+                                reasons=[
+                                    *list(exc.reasons),
+                                    "agent-led completion rescue failed: "
+                                    f"{type(rescue_exc).__name__}: {rescue_exc}",
+                                ],
+                            )
+
+                console_logger.warning(
+                    "%s stage exhausted %d full regeneration(s) and its focused "
+                    "completion rescue. Persisting an explicitly degraded stage "
+                    "and continuing ACP: %s",
                     stage,
                     regeneration_attempt,
                     "; ".join(exc.reasons),
                 )
+                complete_degraded = getattr(
+                    agent, "complete_repair_exhausted_stage", None
+                )
+                if callable(complete_degraded):
+                    asyncio.run(complete_degraded(list(exc.reasons)))
+                    return regeneration_attempt
                 raise
 
             regeneration_attempt += 1
@@ -231,8 +286,7 @@ def _run_sceneexpert_placement_stage(
                 "bounded stage layout and do not finish with zero stage-native "
                 "objects. If a requested asset failed, choose a semantically "
                 "equivalent HSSD substitute with realistic natural proportions. "
-                "Resolve all of: "
-                + "; ".join(exc.reasons)
+                "Resolve all of: " + "; ".join(exc.reasons)
             )
             prepare_regeneration = getattr(agent, "prepare_stage_regeneration", None)
             if callable(prepare_regeneration):

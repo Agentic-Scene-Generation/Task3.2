@@ -1,3 +1,4 @@
+import asyncio
 import unittest
 
 from types import SimpleNamespace
@@ -51,9 +52,11 @@ class StageRuntimeReserveTest(unittest.TestCase):
             )
 
         self.assertAlmostEqual(designer_remaining, 20.0)
-        self.assertAlmostEqual(planner_remaining, 35.0)
+        self.assertAlmostEqual(planner_remaining, 55.0)
         self.assertAlmostEqual(critic_remaining, 45.0)
         self.assertAlmostEqual(fallback_critic_remaining, 55.0)
+        self.assertGreater(planner_remaining, designer_remaining)
+        self.assertGreater(planner_remaining, critic_remaining)
 
     @unittest.skipIf(
         BaseStatefulAgent is None,
@@ -78,6 +81,64 @@ class StageRuntimeReserveTest(unittest.TestCase):
             remaining = BaseStatefulAgent._remaining_stage_seconds(agent, "critic")
 
         self.assertAlmostEqual(remaining, -95.0)
+
+    @unittest.skipIf(
+        BaseStatefulAgent is None,
+        f"requires stateful agent dependencies: {_IMPORT_ERROR}",
+    )
+    def test_required_output_rescue_bypasses_planner(self) -> None:
+        events: list[tuple[str, object]] = []
+
+        async def request_change(instruction: str) -> str:
+            events.append(("designer", instruction))
+            return "placed one object"
+
+        async def request_critique(*, update_checkpoint: bool) -> str:
+            events.append(("critic", update_checkpoint))
+            return "accepted"
+
+        async def finalize() -> None:
+            events.append(("finalize", None))
+
+        agent = SimpleNamespace(
+            _stage_budget_value=lambda key, default: {
+                "min_output_objects": 1,
+                "max_output_objects": 3,
+            }.get(key, default),
+            _request_design_change_impl=request_change,
+            _request_critique_impl=request_critique,
+            _finalize_scene_and_scores=finalize,
+        )
+
+        asyncio.run(
+            BaseStatefulAgent.run_required_stage_completion_rescue(
+                agent,
+                ["missing required stage output"],
+            )
+        )
+
+        self.assertEqual(
+            [event[0] for event in events], ["designer", "critic", "finalize"]
+        )
+        self.assertIn("between 1 and 3", events[0][1])
+        self.assertEqual(agent._stage_runtime_phase, "agent")
+
+    @unittest.skipIf(
+        BaseStatefulAgent is None,
+        f"requires stateful agent dependencies: {_IMPORT_ERROR}",
+    )
+    def test_planner_contract_overrides_optional_zero_object_guidance(self) -> None:
+        budget = {"min_output_objects": 1, "max_output_objects": 3}
+        agent = SimpleNamespace(
+            _stage_runtime_budget=budget,
+            _stage_budget_value=lambda key, default: budget.get(key, default),
+        )
+
+        contract = BaseStatefulAgent._planner_completion_contract(agent)
+
+        self.assertIn("must call request_initial_design", contract)
+        self.assertIn("at least 1 and no more than 3", contract)
+        self.assertIn("zero-object result is not valid", contract)
 
 
 if __name__ == "__main__":

@@ -321,8 +321,77 @@ class BaseStatefulAgent(ABC):
             )
         await self._finalize_scene_and_scores()
 
+    async def run_required_stage_completion_rescue(self, reasons: list[str]) -> None:
+        """Give the designer one focused attempt after planner regeneration fails.
+
+        The planner is intentionally bypassed here.  This keeps the last recovery
+        agent-led while avoiding another coordinator round that can consume the
+        deadline before the designer's placement tools finish.  Deterministic
+        checks still decide whether the rescued candidate is admissible.
+        """
+        self._stage_runtime_started_at = time.monotonic()
+        self._critic_evaluation_started_at = None
+        self._stage_runtime_exhausted = False
+        self._stage_runtime_phase = "fallback"
+        self._allow_degraded_stage_completion = False
+        minimum = max(
+            1,
+            int(self._stage_budget_value("min_output_objects", 1) or 1),
+        )
+        configured_maximum = int(self._stage_budget_value("max_output_objects", 0) or 0)
+        quantity_instruction = (
+            f"Place between {minimum} and "
+            f"{max(configured_maximum, minimum)} stage-native objects. "
+            if configured_maximum > 0
+            else (
+                f"Place at least {minimum} stage-native objects, using the "
+                "smallest coherent set. "
+            )
+        )
+        instruction = (
+            "FINAL BOUNDED STAGE-COMPLETION RESCUE. The planner and its full "
+            "regeneration attempt are exhausted. Do not redesign upstream stages. "
+            f"Resolve these deterministic failures: {'; '.join(reasons)}. "
+            f"{quantity_instruction}Prefer one semantically appropriate, readily available "
+            "asset when that satisfies the minimum. Reuse existing valid assets, "
+            "or choose a close substitute if retrieval fails. Inspect only what "
+            "you need, place the object(s), run the stage physics check once, and "
+            "finish as soon as the listed failures are resolved."
+        )
+        try:
+            await self._request_design_change_impl(instruction)
+            await self._request_critique_impl(update_checkpoint=False)
+            await self._finalize_scene_and_scores()
+        finally:
+            self._stage_runtime_phase = "agent"
+
     def _stage_budget_value(self, key: str, default: Any) -> Any:
         return self._stage_runtime_budget.get(key, default)
+
+    def _planner_completion_contract(self) -> str:
+        """Return a runtime planner directive for mandatory stage output."""
+        if not self._stage_runtime_budget:
+            return ""
+        minimum = max(
+            0,
+            int(self._stage_budget_value("min_output_objects", 0) or 0),
+        )
+        if minimum <= 0:
+            return ""
+        configured_maximum = int(self._stage_budget_value("max_output_objects", 0) or 0)
+        maximum_clause = (
+            f" and no more than {max(configured_maximum, minimum)}"
+            if configured_maximum > 0
+            else ""
+        )
+        return (
+            "\n\nRUNTIME STAGE COMPLETION CONTRACT: You must call "
+            "request_initial_design() and ensure the designer places at least "
+            f"{minimum}{maximum_clause} stage-native objects before finish_stage. "
+            "A zero-object result is not valid for this run, even if the generic "
+            "room guidance says decoration is optional. Rules only validate the "
+            "count; let the designer choose suitable object types and placements."
+        )
 
     def _effective_critique_round_limit(self) -> int:
         configured = max(0, int(_cfg_get(self.cfg, "max_critique_rounds", 0)))
@@ -343,10 +412,10 @@ class BaseStatefulAgent(ABC):
         """Return phase-aware time without letting design consume verification.
 
         Designer calls stop before the critic and fallback reserves. The planner
-        is the coordinator around nested designer/critic tools, so it remains
-        alive into the critic window while preserving a final-critic slice plus
-        fallback/finalization. During explicit fallback comparison, the critic
-        may consume the fallback reserve while finalization remains protected.
+        wraps nested designer/critic tool calls, so its parent deadline must be
+        later than every nested normal-phase deadline; the nested calls enforce
+        their own reserves. During explicit fallback comparison, the critic may
+        consume the fallback reserve while finalization remains protected.
         """
         critic_evaluation_started_at = getattr(
             self, "_critic_evaluation_started_at", None
@@ -371,9 +440,6 @@ class BaseStatefulAgent(ABC):
         critic_reserve = float(
             self._stage_budget_value("critic_reserve_fraction", 0.25) or 0.0
         )
-        final_critic_reserve = float(
-            self._stage_budget_value("final_critic_reserve_fraction", 0.10) or 0.0
-        )
         fallback_reserve = float(
             self._stage_budget_value("fallback_reserve_fraction", 0.10) or 0.0
         )
@@ -383,9 +449,10 @@ class BaseStatefulAgent(ABC):
         if role == "designer":
             reserve_fraction = critic_reserve + fallback_reserve + finalization_reserve
         elif role == "planner":
-            reserve_fraction = (
-                final_critic_reserve + fallback_reserve + finalization_reserve
-            )
+            # A shorter outer planner deadline cancels an in-flight designer or
+            # critic before its own valid budget expires.  Only finalization is
+            # reserved here; nested role deadlines preserve critic/fallback time.
+            reserve_fraction = finalization_reserve
         elif role == "critic":
             reserve_fraction = finalization_reserve
             if self._stage_runtime_phase != "fallback":
@@ -430,6 +497,8 @@ class BaseStatefulAgent(ABC):
         caller keeps the current candidate and proceeds to deterministic
         validation, repair, and best-checkpoint selection.
         """
+        if role == "planner" and isinstance(input, str):
+            input += self._planner_completion_contract()
         role_turn_key = {
             "planner": "max_planner_turns",
             "designer": "max_designer_turns",
