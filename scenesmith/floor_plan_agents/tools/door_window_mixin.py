@@ -861,3 +861,132 @@ class DoorWindowMixin:
             console_logger.debug(f"Invalidated geometry for room: {window.room_id}")
 
         return Result(success=True, message=f"Removed window '{window_id}'.")
+
+    def _resize_window_impl(
+        self,
+        window_id: str,
+        width: float | None = None,
+        height: float | None = None,
+        sill_height: float | None = None,
+    ):
+        """Resize a window around its current center without changing its wall."""
+        from scenesmith.floor_plan_agents.tools.floor_plan_tools import Result
+
+        error = self._check_rooms_exist()
+        if error:
+            return error
+        window = next((item for item in self.layout.windows if item.id == window_id), None)
+        if window is None:
+            return self._fail(f"Window '{window_id}' not found.")
+        cfg = self.door_window_config
+        new_width = cfg.window_default_width if width is None else float(width)
+        new_height = window.height if height is None else float(height)
+        new_sill = window.sill_height if sill_height is None else float(sill_height)
+        if not (cfg.window_width_min <= new_width <= cfg.window_width_max):
+            return self._fail(
+                f"Window width must be {cfg.window_width_min}-{cfg.window_width_max}m."
+            )
+        if not (cfg.window_height_min <= new_height <= cfg.window_height_max):
+            return self._fail(
+                f"Window height must be {cfg.window_height_min}-{cfg.window_height_max}m."
+            )
+        if new_sill < 0:
+            return self._fail("Window sill height cannot be negative.")
+        placed_room = next(
+            (room for room in self.layout.placed_rooms if room.room_id == window.room_id),
+            None,
+        )
+        wall = None
+        if placed_room and window.wall_direction:
+            wall = next(
+                (item for item in placed_room.walls if item.direction == window.wall_direction),
+                None,
+            )
+        if wall is None:
+            return self._fail(f"Wall for window '{window_id}' is no longer available.")
+        new_position = window.position_along_wall + (window.width - new_width) / 2.0
+        if new_position < 0 or new_position + new_width > wall.length:
+            return self._fail(f"Resized window '{window_id}' does not fit on its wall.")
+        for opening in wall.openings:
+            if opening.opening_id == window_id:
+                continue
+            if (
+                new_position
+                < opening.position_along_wall
+                + opening.width
+                + self.min_opening_separation
+                and new_position + new_width
+                > opening.position_along_wall - self.min_opening_separation
+            ):
+                return self._fail(
+                    f"Resized window '{window_id}' overlaps opening "
+                    f"'{opening.opening_id}'."
+                )
+        window.position_along_wall = new_position
+        window.width = new_width
+        window.height = new_height
+        window.sill_height = new_sill
+        opening = next(
+            (item for item in wall.openings if item.opening_id == window_id), None
+        )
+        if opening is None:
+            return self._fail(f"Opening for window '{window_id}' is missing.")
+        opening.position_along_wall = new_position
+        opening.width = new_width
+        opening.height = new_height
+        opening.sill_height = new_sill
+        self.layout.invalidate_room_geometry(window.room_id)
+        return Result(success=True, message=f"Resized window '{window_id}'.")
+
+    def _move_window_impl(self, window_id: str, position_along_wall: float):
+        """Move a window along its current wall without changing its size."""
+        from scenesmith.floor_plan_agents.tools.floor_plan_tools import Result
+
+        error = self._check_rooms_exist()
+        if error:
+            return error
+        window = next((item for item in self.layout.windows if item.id == window_id), None)
+        if window is None:
+            return self._fail(f"Window '{window_id}' not found.")
+        placed_room = next(
+            (room for room in self.layout.placed_rooms if room.room_id == window.room_id),
+            None,
+        )
+        wall = None
+        if placed_room and window.wall_direction:
+            wall = next(
+                (item for item in placed_room.walls if item.direction == window.wall_direction),
+                None,
+            )
+        if wall is None:
+            return self._fail(f"Wall for window '{window_id}' is no longer available.")
+        new_position = float(position_along_wall)
+        if new_position < 0 or new_position + window.width > wall.length:
+            return self._fail(
+                f"Window '{window_id}' at position {new_position:.2f}m does not fit "
+                f"on its {wall.length:.2f}m wall."
+            )
+        for opening in wall.openings:
+            if opening.opening_id == window_id:
+                continue
+            if (
+                new_position
+                < opening.position_along_wall
+                + opening.width
+                + self.min_opening_separation
+                and new_position + window.width
+                > opening.position_along_wall - self.min_opening_separation
+            ):
+                return self._fail(
+                    f"Moved window '{window_id}' overlaps opening "
+                    f"'{opening.opening_id}'."
+                )
+        window.position_along_wall = new_position
+        opening = next(
+            (item for item in wall.openings if item.opening_id == window_id), None
+        )
+        if opening is None:
+            return self._fail(f"Opening for window '{window_id}' is missing.")
+        opening.position_along_wall = new_position
+        self.layout.invalidate_room_geometry(window.room_id)
+        return Result(success=True, message=f"Moved window '{window_id}'.")

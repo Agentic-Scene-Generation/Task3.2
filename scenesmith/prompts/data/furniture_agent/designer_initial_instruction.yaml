@@ -49,6 +49,10 @@ prompt: |
   - Use snap_to_object_tool for relationships that should be physically adjacent
     when the tool supports it; do not rely on eyeballed coordinates for paired
     furniture such as nightstands beside a bed.
+  - When the prompt requests multiple guest chairs against one side wall, keep them
+    in one wall-parallel row with a shared yaw. Snap each to that wall using
+    orientation="away", omit yaw from later position-only spacing moves, and verify
+    each chair faces its desk/table with check_facing_tool before finishing.
 
   7. Generate all furniture assets (batch for style consistency)
   8. Place items using EXACT names returned from generate_assets
@@ -68,6 +72,8 @@ prompt: |
   nightstands at the foot of a bed, chairs not facing their target, storage blocking
   daily use, or a primary furniture anchor that ignores obvious doors/windows when
   a better placement exists.
+  Call check_facing_tool for every chair-target relation explicitly required by the
+  prompt; visual inspection alone is not sufficient.
 
   ## Return Format:
   Provide a structured summary including:

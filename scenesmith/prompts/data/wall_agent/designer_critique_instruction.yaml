@@ -15,8 +15,23 @@ prompt: |
   5. Create specific fix TODOs for critical feedback only
   6. Implement the proposed solutions exactly as specified:
      - To move objects: use move_wall_object with new coordinates
+     - To center a TV/monitor over a console: use align_wall_object_over_support
+       with the exact wall object ID and support furniture ID
+       - A successful alignment response is authoritative. Wall-object `position_x`
+         is wall-local while support furniture coordinates are world-space; never
+         copy a furniture world x/y value into move_wall_object and never override a
+         successful alignment with a visually estimated manual move.
      - To remove objects: use remove_wall_object
      - To add objects: generate new assets and place them
+  6.1 **Media/window conflict repair (MANDATORY when reported)**:
+     - Call list_windows() to obtain exact window IDs before editing an opening
+     - Keep the TV wall and TV stand fixed; do not move the TV sideways just to avoid
+       a window
+     - Repair the blocking opening in this order: resize_window(width=0.6), then
+       move_window(position_along_wall=...), then remove_window(window_id=...)
+     - After every window edit, call list_windows() and list_wall_surfaces() again;
+       the tools rebuild the wall/SDF geometry and refresh excluded regions
+     - Finally call align_wall_object_over_support() and verify with observe_scene()
   7. Use full object_ids (from get_current_scene_state) for operations
   8. **DO NOT move objects that are correctly placed** - if an object is well-positioned,
      leave it there even if the critique suggests minor adjustments

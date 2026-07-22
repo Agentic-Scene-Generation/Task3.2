@@ -125,6 +125,11 @@ class WallTools:
                 f"Unsupported noise mode {mode}, keeping current profile"
             )
 
+    def refresh_wall_surfaces(self, wall_surfaces: list[WallSurface]) -> None:
+        """Refresh wall bounds/exclusions after floor-plan opening edits."""
+        self.wall_surfaces = wall_surfaces
+        self.surfaces_by_id = {str(s.surface_id): s for s in wall_surfaces}
+
     def _create_loop_error_response(
         self, method_name: str, attempt_count: int, _args: tuple, kwargs: dict
     ) -> str:
@@ -306,6 +311,16 @@ class WallTools:
             )
 
         @function_tool
+        def align_wall_object_over_support(
+            object_id: str, support_object_id: str
+        ) -> str:
+            """Center a wall object above a furniture support on its wall."""
+            return self._align_wall_object_over_support_impl(
+                object_id=object_id,
+                support_object_id=support_object_id,
+            )
+
+        @function_tool
         def remove_wall_object(object_id: str) -> str:
             """Remove a wall object from the scene.
 
@@ -372,6 +387,7 @@ class WallTools:
             "list_wall_surfaces": list_wall_surfaces,
             "place_wall_object": place_wall_object,
             "move_wall_object": move_wall_object,
+            "align_wall_object_over_support": align_wall_object_over_support,
             "remove_wall_object": remove_wall_object,
             "rescale_wall_object": rescale_wall_object,
             "get_current_scene_state": get_current_scene_state,
@@ -746,6 +762,80 @@ class WallTools:
                 object_id=object_id,
                 error_type=None,
             ).to_json()
+
+    @log_scene_action
+    def _align_wall_object_over_support_impl(
+        self, object_id: str, support_object_id: str, **kwargs
+    ) -> str:
+        """Move a wall object above the support on the support's nearest wall."""
+        try:
+            object_item = self.scene.get_object(UniqueID(object_id))
+            support_item = self.scene.get_object(UniqueID(support_object_id))
+            if object_item is None or support_item is None:
+                return WallOperationResult(
+                    success=False,
+                    message="Wall object or support object was not found.",
+                    object_id=object_id,
+                    error_type=WallErrorType.OBJECT_NOT_FOUND,
+                ).to_json()
+            if object_item.object_type != ObjectType.WALL_MOUNTED:
+                return WallOperationResult(
+                    success=False,
+                    message=f"Object {object_id} is not wall-mounted.",
+                    object_id=object_id,
+                    error_type=WallErrorType.INVALID_OPERATION,
+                ).to_json()
+            support_bounds = support_item.compute_world_bounds()
+            if support_bounds is None:
+                return WallOperationResult(
+                    success=False,
+                    message=f"Support object {support_object_id} has no world bounds.",
+                    object_id=object_id,
+                    error_type=WallErrorType.INVALID_OPERATION,
+                ).to_json()
+            support_min, support_max = support_bounds
+            support_center = (support_min + support_max) / 2.0
+            surface = min(
+                self.wall_surfaces,
+                key=lambda candidate: self._wall_surface_distance(
+                    candidate, support_center
+                ),
+                default=None,
+            )
+            if surface is None:
+                return WallOperationResult(
+                    success=False,
+                    message="No wall surface is available for the support object.",
+                    object_id=object_id,
+                    error_type=WallErrorType.SURFACE_NOT_FOUND,
+                ).to_json()
+            local_support = surface.transform.inverse() @ support_center
+            object_height = float(object_item.bbox_max[2] - object_item.bbox_min[2])
+            position_z = float(support_max[2]) + object_height / 2.0 + 0.05
+            return self._move_wall_object_impl(
+                object_id=object_id,
+                wall_surface_id=str(surface.surface_id),
+                position_x=float(local_support[0]),
+                position_z=position_z,
+                rotation_degrees=0.0,
+            )
+        except Exception as exc:
+            console_logger.error("Error aligning wall object over support", exc_info=True)
+            return WallOperationResult(
+                success=False,
+                message=f"Unexpected error: {exc}",
+                object_id=object_id,
+                error_type=None,
+            ).to_json()
+
+    @staticmethod
+    def _wall_surface_distance(surface: WallSurface, point: np.ndarray) -> float:
+        """Return distance from a world point to a finite wall surface."""
+        local_point = surface.transform.inverse() @ point
+        outside_span = max(
+            -float(local_point[0]), float(local_point[0]) - surface.length, 0.0
+        )
+        return abs(float(local_point[1])) + 2.0 * outside_span
 
     @log_scene_action
     def _remove_wall_object_impl(self, object_id: str, **kwargs) -> str:
