@@ -52,12 +52,12 @@ def align_seating_to_nearest_surface(
     scene: RoomScene,
     *,
     max_target_distance_m: float = 2.0,
-    repair_angle_threshold_deg: float = 120.0,
+    repair_angle_threshold_deg: float = 45.0,
     wall_anchor_gap_ratio: float = 0.45,
     standalone_surface_gap_ratio: float = 0.5,
     wall_preference_margin_ratio: float = 0.2,
 ) -> list[SeatingOrientationFix]:
-    """Rotate clearly backward seating toward its nearest functional surface."""
+    """Rotate misaligned seating toward its nearest functional surface."""
     furniture = [
         obj for obj in scene.objects.values() if obj.object_type == ObjectType.FURNITURE
     ]
@@ -117,15 +117,15 @@ def align_seating_to_nearest_surface(
             )
             continue
         angle = _front_angle_to_target_deg(seat, target)
-        if angle is None or angle < repair_angle_threshold_deg:
+        if angle is None or angle <= repair_angle_threshold_deg:
             continue
         old_rpy = RollPitchYaw(seat.transform.rotation())
         new_yaw_deg = compute_optimal_facing_yaw(
             origin_a=seat.transform.translation(),
             target_point=target.transform.translation(),
         )
-        # 2026-07-09 修改原因：LLM 家具阶段可能因物理误报回滚到更高总分但
-        # seating 背对 table/desk 的 checkpoint；这里只修正明确背向的座椅 yaw。
+        # 2026-07-22 修改原因：functional dependency 要求座椅朝向 table/desk
+        # 的夹角不超过 45°；独立墙边座椅已在上方分支优先按墙法线朝向室内。
         seat.transform = RigidTransform(
             rpy=RollPitchYaw(
                 old_rpy.roll_angle(),
