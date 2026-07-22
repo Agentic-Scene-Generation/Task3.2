@@ -80,6 +80,10 @@ REPAIR_ASSET_SPECS: dict[str, tuple[str, list[float]]] = {
     "bookshelf": ("Compact freestanding bookshelf", [0.90, 0.35, 1.80]),
     "plant": ("Large indoor potted floor plant", [0.60, 0.60, 1.20]),
     "rug": ("Square low-pile area rug", [1.80, 1.80, 0.03]),
+    "armchair": ("Compact upholstered armchair", [0.75, 0.75, 0.95]),
+    "floor_lamp": ("Slim standing floor lamp", [0.40, 0.40, 1.60]),
+    "tv_stand": ("Low media console TV stand", [1.60, 0.45, 0.65]),
+    "sideboard": ("Compact dining room sideboard", [1.40, 0.45, 0.80]),
 }
 
 

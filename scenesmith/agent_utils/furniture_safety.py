@@ -42,6 +42,7 @@ DEFAULT_ALIASES = {
     "nightstand": ["nightstand", "nightstands", "bedside table", "bedside tables"],
     "wardrobe": ["wardrobe", "wardrobes", "closet", "closets"],
     "dresser": ["dresser", "dressers", "chest of drawers"],
+    "armchair": ["armchair", "armchairs", "arm chair", "arm chairs"],
     "desk": ["desk", "desks"],
     "chair": ["chair", "chairs"],
     "sofa": ["sofa", "sofas", "couch", "couches"],
@@ -50,6 +51,9 @@ DEFAULT_ALIASES = {
     "bookshelf": ["bookshelf", "bookshelves", "bookcase", "bookcases"],
     "plant": ["plant", "plants", "potted plant", "potted plants"],
     "rug": ["rug", "rugs", "area rug", "area rugs"],
+    "floor_lamp": ["floor lamp", "floor lamps", "floorlamp", "floorlamps"],
+    "tv_stand": ["tv stand", "tv stands", "tvstand", "tvstands", "media console"],
+    "sideboard": ["sideboard", "sideboards", "buffet cabinet"],
 }
 
 NUMBER_WORDS = {
