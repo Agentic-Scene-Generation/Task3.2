@@ -53,6 +53,7 @@ from scenesmith.agent_utils.scoring import (
     log_agent_response,
 )
 from scenesmith.agent_utils.sdf_generator import generate_drake_sdf
+from scenesmith.agent_utils.thin_covering_generator import generate_thin_covering_sdf
 from scenesmith.agent_utils.workflow_tools import WorkflowTools
 from scenesmith.furniture_agents.base_furniture_agent import BaseFurnitureAgent
 from scenesmith.furniture_agents.tools.furniture_tools import FurnitureTools
@@ -524,6 +525,13 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             actions.append("cleared deterministic door/opening forbidden zones")
 
         if not is_bedroom_scene(self.scene):
+            if (
+                "collisions" in reasons
+                and self._repair_generic_wall_collisions()
+            ):
+                actions.append(
+                    "moved generic furniture away from room walls to the deterministic margin"
+                )
             return bool(actions), actions
 
         if self._anchor_existing_bed():
@@ -551,6 +559,38 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             actions.append("moved wardrobe to a deterministic wall/corner anchor")
 
         return bool(actions), actions
+
+    def _repair_generic_wall_collisions(self) -> bool:
+        """Move non-bedroom furniture back inside a conservative wall margin.
+
+        The furniture designer can place a thin rug or a duplicate/repair asset
+        exactly on the room-boundary AABB.  Drake then reports a small collision
+        with the wall thickness even though the object appears visually inside the
+        room.  Bedroom repairs already use the deterministic wall margin, but
+        generic rooms previously left this case to the planner/LLM.  Refit every
+        mutable furniture object once; the operation is idempotent and preserves
+        the requested object set.
+        """
+        if self.scene is None or self._room_bounds_xy() is None:
+            return False
+
+        changed = False
+        for obj in self.scene.objects.values():
+            if getattr(obj, "immutable", False):
+                continue
+            if getattr(obj, "object_type", None) != ObjectType.FURNITURE:
+                continue
+            transform = self._fit_transform_inside_room(obj, obj.transform)
+            if self._transform_close(obj.transform, transform):
+                continue
+            self.scene.move_object(obj.object_id, transform)
+            changed = True
+            console_logger.info(
+                "Deterministic generic wall repair moved %s (%s) inside room margin",
+                obj.object_id,
+                obj.name,
+            )
+        return changed
 
     def _replace_geometry_failed_furniture_assets(self, reasons: str) -> int:
         """Replace required furniture whose SDF/mesh cannot be loaded by Drake."""
@@ -789,20 +829,31 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             gltf_path = repair_root / f"{category}_placeholder.gltf"
             sdf_path = repair_root / f"{category}_placeholder.sdf"
             mesh.export(gltf_path)
-            physics = MeshPhysicsAnalysis(
-                up_axis="+Z",
-                front_axis="+Y",
-                material="wood",
-                mass_kg=max(1.0, width * depth * height * 35.0),
-                mass_range_kg=(1.0, max(1.0, width * depth * height * 50.0)),
-            )
-            generate_drake_sdf(
-                visual_mesh_path=gltf_path,
-                collision_pieces=[mesh.copy()],
-                physics_analysis=physics,
-                output_path=sdf_path,
-                asset_name=f"{category}_placeholder",
-            )
+            if category == "rug":
+                # Rugs are floor coverings, not rigid furniture.  Keep the
+                # visual mesh in the scene but omit collision geometry so a
+                # fallback rug cannot collide with walls or furniture merely
+                # because all retrieved rug meshes were invalid.
+                generate_thin_covering_sdf(
+                    visual_mesh_path=gltf_path,
+                    output_path=sdf_path,
+                    model_name=f"{category}_placeholder",
+                )
+            else:
+                physics = MeshPhysicsAnalysis(
+                    up_axis="+Z",
+                    front_axis="+Y",
+                    material="wood",
+                    mass_kg=max(1.0, width * depth * height * 35.0),
+                    mass_range_kg=(1.0, max(1.0, width * depth * height * 50.0)),
+                )
+                generate_drake_sdf(
+                    visual_mesh_path=gltf_path,
+                    collision_pieces=[mesh.copy()],
+                    physics_analysis=physics,
+                    output_path=sdf_path,
+                    asset_name=f"{category}_placeholder",
+                )
             object_id = self.asset_manager.registry.generate_unique_id(
                 f"{category}_repair_placeholder"
             )
@@ -817,9 +868,23 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 bbox_min=np.asarray([-width / 2.0, -depth / 2.0, 0.0], dtype=float),
                 bbox_max=np.asarray([width / 2.0, depth / 2.0, height], dtype=float),
                 metadata={
-                    "asset_source": "deterministic_placeholder",
+                    "asset_source": (
+                        "thin_covering"
+                        if category == "rug"
+                        else "deterministic_placeholder"
+                    ),
                     "repair_placeholder": True,
                     "generation_timestamp": time.time(),
+                    **(
+                        {
+                            "width_m": width,
+                            "depth_m": depth,
+                            "shape": "rectangular",
+                            "is_wall_covering": False,
+                        }
+                        if category == "rug"
+                        else {}
+                    ),
                 },
             )
             self.asset_manager.registry.register(placeholder)
@@ -1549,7 +1614,10 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             return transform
         min_x, min_y, max_x, max_y = room_bounds
         world_min, world_max = bounds
-        margin = 0.03
+        margin = max(
+            0.03,
+            float(self._repair_cfg_value("wall_margin_m", 0.08)),
+        )
         translation = np.asarray(transform.translation(), dtype=float).copy()
         if world_min[0] < min_x + margin:
             translation[0] += min_x + margin - float(world_min[0])

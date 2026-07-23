@@ -171,9 +171,8 @@ class BlenderServer:
                 else:
                     console_logger.warning(
                         f"GPU isolation requested (gpu_id={self._gpu_id}) but "
-                        "bubblewrap not installed. Install with: "
-                        "sudo apt-get install bubblewrap. "
-                        "Falling back to shared GPU access."
+                        "bubblewrap is not installed or unavailable in this "
+                        "container. Falling back to shared GPU access."
                     )
 
             # Start the server process.
@@ -222,8 +221,42 @@ class BlenderServer:
         return target_port
 
     def _is_bwrap_available(self) -> bool:
-        """Check if bubblewrap is installed."""
-        return shutil.which("bwrap") is not None
+        """Return whether bubblewrap is installed *and usable*.
+
+        Some CCI/container environments ship the ``bwrap`` executable but deny
+        unprivileged user namespaces.  Treating presence alone as support makes
+        the child server exit immediately with ``Operation not permitted`` and
+        the caller only observes a misleading readiness timeout.  Probe the
+        smallest namespace before enabling GPU isolation; a failed probe falls
+        back to the normal subprocess, which can still use the requested GPU.
+        """
+        bwrap = shutil.which("bwrap")
+        if bwrap is None:
+            return False
+        try:
+            probe = subprocess.run(
+                [
+                    bwrap,
+                    "--die-with-parent",
+                    "--ro-bind",
+                    "/",
+                    "/",
+                    "--proc",
+                    "/proc",
+                    "--dev-bind",
+                    "/dev/null",
+                    "/dev/null",
+                    "--",
+                    "true",
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                timeout=2.0,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return probe.returncode == 0
 
     def _build_bwrap_command(self, cmd: list[str], gpu_id: int) -> list[str]:
         """Wrap command in bubblewrap for GPU isolation.
