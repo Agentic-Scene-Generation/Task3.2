@@ -68,7 +68,10 @@ REPAIR_ASSET_SPECS: dict[str, tuple[str, list[float]]] = {
         "Compact standard double bed with headboard, mattress, pillows, and bedding",
         [1.60, 2.05, 0.80],
     ),
-    "twin_bed": ("Compact single twin bed with mattress and headboard", [1.0, 2.0, 0.75]),
+    "twin_bed": (
+        "Compact single twin bed with mattress and headboard",
+        [1.0, 2.0, 0.75],
+    ),
     "nightstand": ("Compact bedside nightstand with drawer", [0.45, 0.42, 0.55]),
     "wardrobe": ("Compact wardrobe closet with simple doors", [0.90, 0.55, 2.00]),
     "dresser": ("Low dresser chest with storage drawers", [1.10, 0.48, 0.85]),
@@ -526,6 +529,8 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             actions.append("anchored bed to deterministic bedroom head wall")
         if self._repair_bedside_nightstands():
             actions.append("repositioned nightstands to deterministic bedside anchors")
+        if "dresser" in reasons and self._repair_dresser_opposite_bed_wall_anchor():
+            actions.append("anchored dresser to the wall opposite the bed")
         if (
             "window access warning" in reasons
             or "wardrobe" in reasons
@@ -1043,6 +1048,39 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         ):
             return False
         self.scene.move_object(wardrobe.object_id, best_transform)
+        return True
+
+    def _repair_dresser_opposite_bed_wall_anchor(self) -> bool:
+        """Back the dresser against the wall faced by the foot of the bed."""
+        dressers = self._furniture_by_category("dresser")
+        beds = self._furniture_by_category("bed")
+        if not dressers or not beds or self.scene is None:
+            return False
+
+        dresser = dressers[0]
+        bed = beds[0]
+        plan = build_bedroom_anchor_plan(self.scene, self._bedroom_layout_cfg())
+        head_wall = plan.bed_head_wall if plan and plan.bed_head_wall else "north"
+        opposite_wall = {
+            "north": "south",
+            "south": "north",
+            "east": "west",
+            "west": "east",
+        }.get(head_wall, "south")
+        bed_center = np.asarray(bed.transform.translation(), dtype=float)
+        x = float(bed_center[0])
+        y = float(bed_center[1])
+        transform = self._grounded_transform(
+            dresser,
+            x=x,
+            y=y,
+            yaw_deg=self._yaw_for_inward_wall(opposite_wall),
+        )
+        transform = self._snap_transform_to_wall(dresser, transform, opposite_wall)
+        transform = self._fit_transform_inside_room(dresser, transform)
+        if self._transform_close(dresser.transform, transform):
+            return False
+        self.scene.move_object(dresser.object_id, transform)
         return True
 
     def _repair_forbidden_zone_conflicts(self, include_windows: bool = False) -> bool:

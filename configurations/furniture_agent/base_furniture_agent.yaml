@@ -380,6 +380,7 @@ furniture_safety_controller:
     window_blocking_is_hard: false
     nightstand_bed_overlap_tolerance_m: 0.03
     nightstand_bed_max_gap_m: 0.55
+    storage_wall_max_distance_m: 0.35
     max_plausibility_penalty: 0.35
   deterministic_repair:
     enabled: true
