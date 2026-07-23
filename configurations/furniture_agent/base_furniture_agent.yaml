@@ -381,12 +381,14 @@ furniture_safety_controller:
     nightstand_bed_overlap_tolerance_m: 0.03
     nightstand_bed_max_gap_m: 0.55
     storage_wall_max_distance_m: 0.35
+    storage_pair_max_gap_m: 0.25
     max_plausibility_penalty: 0.35
   deterministic_repair:
     enabled: true
     max_attempts: ${oc.env:SCENEEXPERT_DETERMINISTIC_REPAIR_MAX_ATTEMPTS,2}
     wall_margin_m: 0.08
     nightstand_gap_m: 0.08
+    storage_pair_gap_m: 0.08
   required_object_names: []
   score_weights:
     prompt_following: 0.25

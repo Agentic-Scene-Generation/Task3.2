@@ -287,7 +287,7 @@ class FurnitureSafetyControllerTest(unittest.TestCase):
         controller = FurnitureSafetyController({"enabled": True})
         controller.reset_for_scene(
             "A bedroom with a bed, two nightstands, and a dresser against the "
-            "opposite wall directly facing the bed."
+            "opposite wall directly facing the bed, with a wardrobe next to the dresser."
         )
         yaw_180 = ((-1.0, 0.0, 0.0), (0.0, -1.0, 0.0), (0.0, 0.0, 1.0))
         yaw_0 = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
@@ -325,6 +325,13 @@ class FurnitureSafetyControllerTest(unittest.TestCase):
                     world_max=(-1.45, 0.3, 0.9),
                     rotation_matrix=yaw_0,
                 ),
+                "wardrobe_0": BoundedFurniture(
+                    name="wardrobe",
+                    description="wardrobe",
+                    world_min=(1.4, -0.3, 0.0),
+                    world_max=(2.3, 0.3, 2.0),
+                    rotation_matrix=yaw_0,
+                ),
             },
         )
 
@@ -340,6 +347,12 @@ class FurnitureSafetyControllerTest(unittest.TestCase):
         self.assertTrue(
             any(
                 "nightstand_0 use direction is not aligned" in reason
+                for reason in evaluation.hard_reasons
+            )
+        )
+        self.assertTrue(
+            any(
+                "wardrobe_0 is 2.85m from dresser_0" in reason
                 for reason in evaluation.hard_reasons
             )
         )

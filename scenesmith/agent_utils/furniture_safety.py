@@ -269,6 +269,9 @@ class FurnitureSafetyController:
         self.storage_wall_max_distance_m = float(
             _cfg_get(self.bedroom_layout_cfg, "storage_wall_max_distance_m", 0.35)
         )
+        self.storage_pair_max_gap_m = float(
+            _cfg_get(self.bedroom_layout_cfg, "storage_pair_max_gap_m", 0.25)
+        )
         self.required_object_names = [
             str(x).lower()
             for x in list(_cfg_get(cfg, "required_object_names", []) or [])
@@ -1088,6 +1091,21 @@ class FurnitureSafetyController:
                             f"{self.storage_wall_max_distance_m:.2f}m)"
                         )
 
+        if self._prompt_requires_wardrobe_next_to_dresser(scene):
+            dressers = objects_by_category["dresser"]
+            wardrobes = objects_by_category["wardrobe"]
+            if dressers and wardrobes:
+                dresser_bounds = self._safe_world_bounds(dressers[0][1])
+                wardrobe_bounds = self._safe_world_bounds(wardrobes[0][1])
+                if dresser_bounds is not None and wardrobe_bounds is not None:
+                    pair_gap = self._xy_aabb_gap_m(dresser_bounds, wardrobe_bounds)
+                    if pair_gap > self.storage_pair_max_gap_m:
+                        hard_reasons.append(
+                            f"bedroom relation: {wardrobes[0][0]} is {pair_gap:.2f}m "
+                            f"from {dressers[0][0]}, above the requested next-to "
+                            f"gap {self.storage_pair_max_gap_m:.2f}m"
+                        )
+
         if not beds or not nightstands:
             return hard_reasons
 
@@ -1168,6 +1186,23 @@ class FurnitureSafetyController:
         return bool(
             re.search(rf"{dresser}.{{0,100}}{wall_relation}.{{0,40}}wall", text)
             or re.search(rf"{wall_relation}.{{0,40}}wall.{{0,100}}{dresser}", text)
+        )
+
+    def _prompt_requires_wardrobe_next_to_dresser(self, scene: Any) -> bool:
+        text = str(
+            getattr(scene, "scene_expert_original_description", "")
+            or getattr(scene, "text_description", "")
+            or ""
+        ).lower()
+        wardrobe = r"(?:wardrobe|closet|armoire)"
+        dresser = r"(?:dresser|chest\s+of\s+drawers)"
+        return bool(
+            re.search(
+                rf"{wardrobe}.{{0,50}}(?:next|adjacent)\s+to.{{0,30}}{dresser}", text
+            )
+            or re.search(
+                rf"{dresser}.{{0,50}}(?:next|adjacent)\s+to.{{0,30}}{wardrobe}", text
+            )
         )
 
     def _safe_world_bounds(

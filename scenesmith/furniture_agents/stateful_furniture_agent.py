@@ -7,6 +7,7 @@ SQLiteSession agents that maintain conversation memory across interactions.
 
 import logging
 import math
+import re
 import time
 
 from pathlib import Path
@@ -531,13 +532,22 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             actions.append("repositioned nightstands to deterministic bedside anchors")
         if "dresser" in reasons and self._repair_dresser_opposite_bed_wall_anchor():
             actions.append("anchored dresser to the wall opposite the bed")
+        repaired_storage_pair = False
+        if self._prompt_requires_wardrobe_next_to_dresser():
+            repaired_storage_pair = self._repair_wardrobe_next_to_dresser()
+            if repaired_storage_pair:
+                actions.append("placed wardrobe against the wall next to dresser")
         if (
-            "window access warning" in reasons
-            or "wardrobe" in reasons
-            or "closet" in reasons
-            or "collisions" in reasons
-            or FailureCategory.WINDOW_OR_WALL_ACCESS in repair_plan.categories
-        ) and self._repair_wardrobe_wall_anchor():
+            not repaired_storage_pair
+            and (
+                "window access warning" in reasons
+                or "wardrobe" in reasons
+                or "closet" in reasons
+                or "collisions" in reasons
+                or FailureCategory.WINDOW_OR_WALL_ACCESS in repair_plan.categories
+            )
+            and self._repair_wardrobe_wall_anchor()
+        ):
             actions.append("moved wardrobe to a deterministic wall/corner anchor")
 
         return bool(actions), actions
@@ -1083,6 +1093,110 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         self.scene.move_object(dresser.object_id, transform)
         return True
 
+    def _prompt_requires_wardrobe_next_to_dresser(self) -> bool:
+        if self.scene is None:
+            return False
+        text = str(
+            getattr(self.scene, "scene_expert_original_description", "")
+            or getattr(self.scene, "text_description", "")
+            or ""
+        ).lower()
+        wardrobe = r"(?:wardrobe|closet|armoire)"
+        dresser = r"(?:dresser|chest\s+of\s+drawers)"
+        return bool(
+            re.search(
+                rf"{wardrobe}.{{0,50}}(?:next|adjacent)\s+to.{{0,30}}{dresser}", text
+            )
+            or re.search(
+                rf"{dresser}.{{0,50}}(?:next|adjacent)\s+to.{{0,30}}{wardrobe}", text
+            )
+        )
+
+    def _repair_wardrobe_next_to_dresser(self) -> bool:
+        wardrobes = self._furniture_by_category("wardrobe")
+        dressers = self._furniture_by_category("dresser")
+        beds = self._furniture_by_category("bed")
+        if not wardrobes or not dressers or not beds or self.scene is None:
+            return False
+        wardrobe = wardrobes[0]
+        dresser = dressers[0]
+        dresser_bounds = dresser.compute_world_bounds()
+        if dresser_bounds is None:
+            return False
+
+        plan = build_bedroom_anchor_plan(self.scene, self._bedroom_layout_cfg())
+        head_wall = plan.bed_head_wall if plan and plan.bed_head_wall else "north"
+        wall = {
+            "north": "south",
+            "south": "north",
+            "east": "west",
+            "west": "east",
+        }.get(head_wall, "south")
+        dresser_min, dresser_max = dresser_bounds
+        wardrobe_size = self._local_size(wardrobe, [0.90, 0.55, 2.00])
+        gap = float(self._repair_cfg_value("storage_pair_gap_m", 0.08))
+        dresser_center = np.asarray(dresser.transform.translation(), dtype=float)
+        candidates: list[RigidTransform] = []
+        if wall in ("north", "south"):
+            for x in (
+                float(dresser_min[0]) - wardrobe_size[0] / 2.0 - gap,
+                float(dresser_max[0]) + wardrobe_size[0] / 2.0 + gap,
+            ):
+                candidates.append(
+                    self._grounded_transform(
+                        wardrobe,
+                        x=x,
+                        y=float(dresser_center[1]),
+                        yaw_deg=self._yaw_for_inward_wall(wall),
+                    )
+                )
+        else:
+            for y in (
+                float(dresser_min[1]) - wardrobe_size[1] / 2.0 - gap,
+                float(dresser_max[1]) + wardrobe_size[1] / 2.0 + gap,
+            ):
+                candidates.append(
+                    self._grounded_transform(
+                        wardrobe,
+                        x=float(dresser_center[0]),
+                        y=y,
+                        yaw_deg=self._yaw_for_inward_wall(wall),
+                    )
+                )
+
+        obstacles = self._furniture_by_category("bed") + self._furniture_by_category(
+            "nightstand"
+        )
+        original = np.asarray(wardrobe.transform.translation(), dtype=float)
+        best_transform = None
+        best_score = -1e18
+        for candidate in candidates:
+            candidate = self._snap_transform_to_wall(wardrobe, candidate, wall)
+            candidate = self._fit_transform_inside_room(wardrobe, candidate)
+            bounds = self._bounds_for_transform(wardrobe, candidate)
+            if bounds is None:
+                continue
+            overlap_penalty = 0.0
+            for obstacle in obstacles:
+                obstacle_bounds = obstacle.compute_world_bounds()
+                if obstacle_bounds is None:
+                    continue
+                overlap_x, overlap_y = self._xy_overlap_depths(bounds, obstacle_bounds)
+                overlap_penalty += overlap_x * overlap_y * 500.0
+            move_penalty = float(
+                np.linalg.norm(np.asarray(candidate.translation())[:2] - original[:2])
+            )
+            score = -overlap_penalty - move_penalty
+            if score > best_score:
+                best_score = score
+                best_transform = candidate
+        if best_transform is None or self._transform_close(
+            wardrobe.transform, best_transform
+        ):
+            return False
+        self.scene.move_object(wardrobe.object_id, best_transform)
+        return True
+
     def _repair_forbidden_zone_conflicts(self, include_windows: bool = False) -> bool:
         """Move objects out of door/opening clearance zones using generic anchors."""
         if self.scene is None:
@@ -1348,22 +1462,9 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 candidates.append((wall, x, y, self._yaw_for_inward_wall(wall)))
 
         transforms: list[tuple[RigidTransform, float]] = []
-        collision_clearance = float(
-            self._repair_cfg_value("wardrobe_wall_clearance_m", 0.35)
-        )
         for wall, x, y, yaw in candidates:
             transform = self._grounded_transform(wardrobe, x=x, y=y, yaw_deg=yaw)
             transform = self._snap_transform_to_wall(wardrobe, transform, wall)
-            translation = np.asarray(transform.translation(), dtype=float).copy()
-            if wall == "north":
-                translation[1] -= collision_clearance
-            elif wall == "south":
-                translation[1] += collision_clearance
-            elif wall == "east":
-                translation[0] -= collision_clearance
-            else:
-                translation[0] += collision_clearance
-            transform = RigidTransform(R=transform.rotation(), p=translation)
             transform = self._fit_transform_inside_room(wardrobe, transform)
             opening_penalty = 5.0 if wall_openings.get(wall) else 0.0
             transforms.append((transform, opening_penalty))
