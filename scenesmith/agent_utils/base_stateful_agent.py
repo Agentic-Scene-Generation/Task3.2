@@ -447,7 +447,9 @@ class BaseStatefulAgent(ABC):
             self._stage_budget_value("finalization_reserve_fraction", 0.05) or 0.0
         )
         if role == "designer":
-            reserve_fraction = critic_reserve + fallback_reserve + finalization_reserve
+            reserve_fraction = critic_reserve + finalization_reserve
+            if self._stage_runtime_phase != "fallback":
+                reserve_fraction += fallback_reserve
         elif role == "planner":
             # A shorter outer planner deadline cancels an in-flight designer or
             # critic before its own valid budget expires.  Only finalization is
@@ -2186,10 +2188,14 @@ class BaseStatefulAgent(ABC):
         of _get_final_scores_directory().
         """
         controller = getattr(self, "furniture_safety_controller", None)
+        freeze_selected_candidate = bool(
+            getattr(self, "_freeze_selected_fallback_candidate", False)
+        )
         if (
             controller
             and controller.enabled
             and controller.best_scene_state is not None
+            and not freeze_selected_candidate
         ):
             self._restore_furniture_scene_state(controller.best_scene_state)
             self.scene_checkpoint = copy.deepcopy(controller.best_scene_state)
@@ -2250,12 +2256,15 @@ class BaseStatefulAgent(ABC):
             and fail_on_hard_constraints
         ):
             final_hard_state = self._evaluate_current_hard_state()
-            final_hard_state, _, final_repair_actions = (
-                self._try_deterministic_repair_for_hard_state(
-                    final_hard_state,
-                    source="finalize",
+            if freeze_selected_candidate:
+                final_repair_actions: list[str] = []
+            else:
+                final_hard_state, _, final_repair_actions = (
+                    self._try_deterministic_repair_for_hard_state(
+                        final_hard_state,
+                        source="finalize",
+                    )
                 )
-            )
             if final_repair_actions:
                 console_logger.info(
                     "Deterministic repair attempted during finalization: %s",
@@ -2347,6 +2356,7 @@ class BaseStatefulAgent(ABC):
         enforce_sceneexpert_completion = bool(
             self._stage_runtime_budget
             and self.agent_type.is_placement_agent
+            and not getattr(self, "_defer_stage_completion_contract", False)
             and not (controller and getattr(controller, "enabled", False))
             and fail_on_hard_constraints
         )
@@ -2368,7 +2378,11 @@ class BaseStatefulAgent(ABC):
                         reasons=reasons,
                     )
 
-        if self._stage_runtime_budget and self.agent_type.is_placement_agent:
+        if (
+            self._stage_runtime_budget
+            and self.agent_type.is_placement_agent
+            and not getattr(self, "_defer_stage_completion_contract", False)
+        ):
             trusted_score_available = (
                 bool(
                     controller

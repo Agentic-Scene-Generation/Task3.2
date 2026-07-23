@@ -209,6 +209,31 @@ def _run_sceneexpert_placement_stage(
                     asyncio.run(retry_critic())
                     return regeneration_attempt
 
+            missing_required_output = any(
+                "missing required stage output" in reason.lower()
+                for reason in exc.reasons
+            )
+            agent_budget_exhausted = bool(
+                getattr(agent, "_stage_runtime_exhausted", False)
+                or getattr(agent, "_planner_budget_exhausted", False)
+            )
+            if (
+                recovery_enabled
+                and missing_required_output
+                and agent_budget_exhausted
+                and regeneration_attempt < max_regenerations
+            ):
+                # Repeating the same planner after it consumed the whole stage
+                # SLA produced another zero-object scene in the observed ACP
+                # run. Preserve the regeneration allowance for the compact,
+                # fresh-session designer rescue below.
+                console_logger.warning(
+                    "%s planner exhausted its budget before producing required "
+                    "output; skipping a redundant full-planner regeneration",
+                    stage,
+                )
+                regeneration_attempt = max_regenerations
+
             if regeneration_attempt >= max_regenerations:
                 if not recovery_enabled:
                     raise
@@ -219,8 +244,9 @@ def _run_sceneexpert_placement_stage(
                     )
                     if callable(rescue):
                         console_logger.warning(
-                            "%s stage remained invalid after %d full "
-                            "regeneration(s); bypassing the planner for one "
+                            "%s stage remained invalid after planner recovery "
+                            "was exhausted (%d full regeneration(s)); bypassing "
+                            "the planner for one "
                             "focused agent-led completion rescue: %s",
                             stage,
                             regeneration_attempt,
@@ -1212,6 +1238,14 @@ def _generate_room(
 
                 pre_postprocess_hash = scene.content_hash()
                 pre_postprocess_state = scene.to_state_dict()
+                capture_postprocessing_guard = getattr(
+                    furniture_agent, "capture_postprocessing_guard", None
+                )
+                postprocessing_guard = (
+                    capture_postprocessing_guard()
+                    if callable(capture_postprocessing_guard)
+                    else {}
+                )
 
                 # Furniture post-processing (projection + simulation).
                 if projection_cfg["enabled"] and projection_cfg["furniture"]["enabled"]:
@@ -1271,6 +1305,25 @@ def _generate_room(
                         scene.restore_from_state_dict(pre_postprocess_state)
                         removed_ids = []
                     else:
+                        postprocessing_regression_reason = getattr(
+                            furniture_agent,
+                            "postprocessing_regression_reason",
+                            None,
+                        )
+                        regression_reason = (
+                            postprocessing_regression_reason(postprocessing_guard)
+                            if callable(postprocessing_regression_reason)
+                            else ""
+                        )
+                        if regression_reason:
+                            console_logger.warning(
+                                "Furniture post-processing regressed the selected "
+                                "candidate; restoring the selected pre-physics "
+                                "state: %s",
+                                regression_reason,
+                            )
+                            scene.restore_from_state_dict(pre_postprocess_state)
+                            removed_ids = []
                         if removed_ids:
                             console_logger.info(
                                 f"Removed {len(removed_ids)} fallen furniture item(s) "
@@ -1654,13 +1707,24 @@ def _run_sequential_room_generation(
         room_geometry = house_layout.get_room_geometry(room_id)
         if room_geometry is None:
             raise RuntimeError(f"Room geometry not generated for room '{room_id}'")
+        room_prompt = room_spec.prompt
+        if scene_expert_hooks:
+            # The floor-plan subprocess persists the effective house prompt in
+            # RoomSpec.  Remove its transient StageBrief/memory blocks before a
+            # room-specific brief is added, otherwise unrelated failure examples
+            # can become accidental furniture requests.
+            from scenesmith.scene_expert.prompt_context import (
+                strip_sceneexpert_injected_blocks,
+            )
+
+            room_prompt = strip_sceneexpert_injected_blocks(room_prompt)
 
         with custom_span(f"room_{room_id}_generation"):
             with logger.room_context(room_id) as room_dir:
-                console_logger.info(f"Generating room '{room_id}': {room_spec.prompt}")
+                console_logger.info(f"Generating room '{room_id}': {room_prompt}")
                 room_scene = _generate_room(
                     room_id=room_id,
-                    room_prompt=room_spec.prompt,
+                    room_prompt=room_prompt,
                     room_geometry=room_geometry,
                     room_dir=room_dir,
                     logger=logger,

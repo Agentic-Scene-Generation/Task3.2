@@ -420,15 +420,15 @@ class FurnitureTools:
         ) -> str:
             """Create 3D furniture models from descriptions with specified dimensions.
 
-            Generate floor-standing furniture items only. This tool is restricted
-            to furniture that sits flat on the floor.
+            Generate floor-standing furniture and requested floor coverings.
+            Rugs/carpets are routed to the dedicated thin-covering generator and
+            do not consume a general 3D generation request.
 
             DO NOT generate:
             - Manipulands (small objects meant for surfaces like books, vases, cups)
-            - Carpets or rugs
             - Wall decorations
 
-            ONLY generate furniture items that rest directly on the floor.
+            ONLY generate items that rest directly on the floor.
 
             You MUST specify dimensions for each object considering the
             relative sizes of other objects in the scene. Use realistic furniture

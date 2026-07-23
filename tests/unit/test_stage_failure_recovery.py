@@ -127,6 +127,56 @@ class StageFailureRecoveryTest(unittest.TestCase):
 
         self.assertEqual(calls, {"run": 1, "rescue": 0})
 
+    def test_budget_exhausted_zero_output_skips_redundant_planner_retry(
+        self,
+    ) -> None:
+        class FakeScene:
+            text_description = "living room"
+            scene_expert_stage_budget = {"max_stage_regenerations": 1}
+
+            @staticmethod
+            def to_state_dict() -> dict:
+                return {"objects": {}}
+
+            @staticmethod
+            def restore_from_state_dict(state: dict) -> None:
+                del state
+
+        calls = {"run": 0, "prepare": 0, "rescue": 0}
+
+        async def run_once() -> None:
+            calls["run"] += 1
+            raise StageValidationError(
+                stage="wall_mounted",
+                reasons=[
+                    "missing required stage output: wall_mounted produced 0 "
+                    "objects but requires at least 1"
+                ],
+            )
+
+        async def prepare(reasons: list[str]) -> None:
+            del reasons
+            calls["prepare"] += 1
+
+        async def rescue(reasons: list[str]) -> None:
+            del reasons
+            calls["rescue"] += 1
+
+        attempts = _run_sceneexpert_placement_stage(
+            stage="wall_mounted",
+            agent=SimpleNamespace(
+                _stage_runtime_exhausted=True,
+                _planner_budget_exhausted=True,
+                prepare_stage_regeneration=prepare,
+                run_required_stage_completion_rescue=rescue,
+            ),
+            scene=FakeScene(),
+            run_once=run_once,
+        )
+
+        self.assertEqual(1, attempts)
+        self.assertEqual({"run": 1, "prepare": 1, "rescue": 1}, calls)
+
 
 if __name__ == "__main__":
     unittest.main()

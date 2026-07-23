@@ -43,6 +43,44 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         StatefulFurnitureAgent is None,
         f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
     )
+    def test_deterministic_candidate_requires_trusted_score_delta(self) -> None:
+        agent_candidate = {
+            "score_source": "vlm_critic",
+            "weighted_score": 0.72,
+        }
+        deterministic_candidate = {
+            "score_source": "vlm_critic",
+            "weighted_score": 0.76,
+        }
+
+        self.assertFalse(
+            StatefulFurnitureAgent.deterministic_candidate_improves(
+                agent_candidate,
+                deterministic_candidate,
+                minimum_delta=0.05,
+            )
+        )
+        deterministic_candidate["weighted_score"] = 0.78
+        self.assertTrue(
+            StatefulFurnitureAgent.deterministic_candidate_improves(
+                agent_candidate,
+                deterministic_candidate,
+                minimum_delta=0.05,
+            )
+        )
+        agent_candidate["score_source"] = "deterministic_hard_check"
+        self.assertFalse(
+            StatefulFurnitureAgent.deterministic_candidate_improves(
+                agent_candidate,
+                deterministic_candidate,
+                minimum_delta=0.05,
+            )
+        )
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
     def test_quality_regeneration_requires_scene_expert_and_trusted_score(self) -> None:
         agent = object.__new__(StatefulFurnitureAgent)
         agent.scene = SimpleNamespace(scene_expert_stage_budget={"enabled": True})

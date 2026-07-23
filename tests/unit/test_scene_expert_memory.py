@@ -18,7 +18,7 @@ from scenesmith.scene_expert.memory.embedding import (
 )
 from scenesmith.scene_expert.memory.hybrid_retriever import HybridMemoryRetriever
 from scenesmith.scene_expert.memory.index import NumpyMemoryIndex
-from scenesmith.scene_expert.memory.retriever import _tokenize
+from scenesmith.scene_expert.memory.retriever import MemoryRetriever, _tokenize
 from scenesmith.scene_expert.memory.schemas import (
     FailureCase,
     MemoryUpdateOp,
@@ -41,6 +41,7 @@ from scenesmith.scene_expert.schemas import (
 from scenesmith.agent_utils.scoring import CategoryScore, FurnitureCritiqueWithScores
 from scenesmith.agent_utils.stage_working_memory import StageWorkingMemory
 from scenesmith.scene_expert.task_compiler import _fallback_spec_from_prompt
+from scenesmith.scene_expert.prompt_context import strip_sceneexpert_injected_blocks
 from scenesmith.scene_expert.verifier import (
     FullVerifier,
     StageVerifier,
@@ -49,6 +50,72 @@ from scenesmith.scene_expert.verifier import (
 
 
 class SceneExpertMemoryTest(unittest.TestCase):
+    def test_transient_floor_plan_context_is_not_reused_as_room_prompt(self) -> None:
+        prompt = (
+            "A living room with a sofa, rug, and two plants.\n\n"
+            "=== SceneExpert Stage Brief: floor_plan ===\n"
+            "Known failure patterns to avoid:\n"
+            "  - bedroom bed collision from an unrelated case\n"
+            "=== End Stage Brief ===\n\n"
+            "=== SceneExpert Retrieved Memory Directives ===\n"
+            "Negative constraints from retrieved memory:\n"
+            "  - do not place a bed under a bedroom window\n"
+            "=== End Retrieved Memory Directives ==="
+        )
+
+        cleaned = strip_sceneexpert_injected_blocks(prompt)
+
+        self.assertEqual(
+            "A living room with a sofa, rug, and two plants.",
+            cleaned,
+        )
+        self.assertNotIn("bed", cleaned)
+
+    def test_keyword_memory_does_not_cross_room_type_for_object_cases(self) -> None:
+        with TemporaryDirectory() as tmp:
+            store = FastMemoryStore(tmp)
+            store.add_failure_case(
+                FailureCase(
+                    failure_id="bedroom_bed_failure",
+                    room_type="bedroom",
+                    stage="furniture",
+                    object="bed",
+                    failure_type="collision",
+                    bad_pattern="bed intersects the wall",
+                )
+            )
+            store.add_failure_case(
+                FailureCase(
+                    failure_id="living_sofa_failure",
+                    room_type="living_room",
+                    stage="furniture",
+                    object="sofa",
+                    failure_type="orientation",
+                    bad_pattern="sofa faces the wall",
+                )
+            )
+            store.add_failure_case(
+                FailureCase(
+                    failure_id="contaminated_living_bed_failure",
+                    room_type="living_room",
+                    stage="furniture",
+                    object="bed",
+                    failure_type="unexpected_object",
+                    bad_pattern="do not add a bed to this living room",
+                )
+            )
+            pack = MemoryRetriever(store=store).retrieve(
+                SceneTaskSpec(
+                    room_type="living_room",
+                    style="modern",
+                    required_large_objects=["sofa", "rug", "plant"],
+                ),
+                "furniture",
+            )
+
+        self.assertEqual(["living_sofa_failure"], pack.failure_case_ids)
+        self.assertNotIn("bed", " ".join(pack.failure_hints).lower())
+
     def test_memory_writer_normalizes_null_noop_fields(self) -> None:
         normalized = MemoryWriter._normalize_update_op(
             {

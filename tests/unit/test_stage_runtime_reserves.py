@@ -47,6 +47,9 @@ class StageRuntimeReserveTest(unittest.TestCase):
                 agent, "critic"
             )
             agent._stage_runtime_phase = "fallback"
+            fallback_designer_remaining = (
+                BaseStatefulAgent._remaining_stage_seconds(agent, "designer")
+            )
             fallback_critic_remaining = BaseStatefulAgent._remaining_stage_seconds(
                 agent, "critic"
             )
@@ -54,6 +57,7 @@ class StageRuntimeReserveTest(unittest.TestCase):
         self.assertAlmostEqual(designer_remaining, 20.0)
         self.assertAlmostEqual(planner_remaining, 55.0)
         self.assertAlmostEqual(critic_remaining, 45.0)
+        self.assertAlmostEqual(fallback_designer_remaining, 30.0)
         self.assertAlmostEqual(fallback_critic_remaining, 55.0)
         self.assertGreater(planner_remaining, designer_remaining)
         self.assertGreater(planner_remaining, critic_remaining)

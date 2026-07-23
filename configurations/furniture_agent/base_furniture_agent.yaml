@@ -409,6 +409,10 @@ furniture_safety_controller:
     enabled: true
     max_attempts: ${oc.env:SCENEEXPERT_DETERMINISTIC_REPAIR_MAX_ATTEMPTS,2}
     wall_margin_m: 0.08
+    # Retrieved collision proxies often extend beyond the visible sofa back.
+    # Keep the deterministic conversation-zone anchor clear of the wall while
+    # still visually reading as wall-backed.
+    functional_wall_margin_m: 0.18
     wall_clearance_gap_m: 0.03
     nightstand_gap_m: 0.08
 

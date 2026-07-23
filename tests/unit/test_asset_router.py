@@ -3,6 +3,8 @@
 import unittest
 
 from unittest.mock import MagicMock
+from pathlib import Path
+from types import SimpleNamespace
 
 from scenesmith.agent_utils.asset_router import AssetRouter
 from scenesmith.agent_utils.asset_router.dataclasses import AnalysisResult, AssetItem
@@ -143,6 +145,47 @@ class TestAssetRouterItemTypeValidation(unittest.TestCase):
         error = router.validate_item_types(items)
         assert error is not None
         assert "manipuland" in error.lower()
+
+    def test_thin_covering_uses_generated_fallback_without_material_server(
+        self,
+    ) -> None:
+        router = object.__new__(AssetRouter)
+        router.agent_type = AgentType.FURNITURE
+        router.cfg = SimpleNamespace(
+            asset_manager=SimpleNamespace(
+                router=SimpleNamespace(
+                    strategies=SimpleNamespace(
+                        thin_covering=SimpleNamespace(thickness_m=0.003)
+                    )
+                )
+            )
+        )
+        generated = MagicMock()
+        router._try_generated_thin_covering = MagicMock()
+        router._generate_procedural_floor_covering_fallback = MagicMock(
+            return_value=generated
+        )
+        item = AssetItem(
+            description="square low-pile rug",
+            short_name="rug",
+            dimensions=[1.8, 1.8, 0.03],
+            object_type=ObjectType.FURNITURE,
+            strategies=["thin_covering"],
+            thin_covering_type="tileable",
+        )
+
+        result = router._try_thin_covering_strategy(
+            item=item,
+            max_retries=0,
+            materials_client=None,
+            image_generator=MagicMock(),
+            geometry_dir=Path("geometry"),
+            debug_dir=Path("debug"),
+        )
+
+        self.assertIs(result, generated)
+        router._try_generated_thin_covering.assert_not_called()
+        router._generate_procedural_floor_covering_fallback.assert_called_once()
 
 
 class TestAnalysisResponseParsing(unittest.TestCase):

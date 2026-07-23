@@ -243,7 +243,22 @@ class HybridMemoryRetriever:
             return False
 
         if memory_type == "failure" and isinstance(record, FailureCase):
+            task_objects = task_required_objects(task_spec, stage)
+            if record.object and (
+                object_overlap([record.object], task_objects)
+                < self._object_overlap_threshold
+            ):
+                return False
             if record.scope in ("global", "stage") or record.is_deterministic:
+                # Geometry/physics rules may transfer across rooms, but an
+                # object-specific deterministic failure (for example a bed)
+                # must not be injected into an unrelated living-room task.
+                record_objects = record_required_objects(record)
+                if record_objects:
+                    return bool(task_objects) and (
+                        object_overlap(record_objects, task_objects)
+                        >= self._object_overlap_threshold
+                    )
                 return True
             if not record_room_compatible(record, task_spec):
                 return False

@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 import tempfile
 import time
 
@@ -9,6 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from omegaconf import DictConfig
+from PIL import Image, ImageDraw
 
 from scenesmith.agent_utils.articulated_retrieval_server import (
     ArticulatedRetrievalClient,
@@ -871,12 +873,6 @@ class AssetRouter:
         Returns:
             GeneratedGeometry if successful, None if retrieval/validation fails.
         """
-        if materials_client is None:
-            console_logger.warning(
-                f"Materials client not available for '{item.description}'"
-            )
-            return None
-
         # Wall agent uses vertical geometry (wall-mounted).
         is_wall_mode = self.agent_type == AgentType.WALL_MOUNTED
 
@@ -911,6 +907,50 @@ class AssetRouter:
                 f"({width:.2f}m x {depth:.2f}m)"
             )
 
+        thin_covering_cfg = self.cfg.asset_manager.router.strategies.thin_covering
+        thickness = thin_covering_cfg.thickness_m
+
+        def generated_fallback(reason: str) -> GeneratedGeometry | None:
+            console_logger.warning(
+                "%s; trying configured covering fallback for '%s'",
+                reason,
+                item.description,
+            )
+            if max_retries == 0 and not is_wall_mode:
+                return self._generate_procedural_floor_covering_fallback(
+                    item=item,
+                    width=width,
+                    depth=depth,
+                    thickness=thickness,
+                    geometry_dir=geometry_dir,
+                    shape=shape,
+                )
+            generated = self._try_generated_thin_covering(
+                item=item,
+                image_generator=image_generator,
+                width=width,
+                second_dim=height if is_wall_mode else depth,
+                thickness=thickness,
+                geometry_dir=geometry_dir,
+                debug_dir=debug_dir,
+                is_wall_mode=is_wall_mode,
+                shape=shape,
+                validate=max_retries > 0,
+            )
+            if generated is not None or is_wall_mode:
+                return generated
+            return self._generate_procedural_floor_covering_fallback(
+                item=item,
+                width=width,
+                depth=depth,
+                thickness=thickness,
+                geometry_dir=geometry_dir,
+                shape=shape,
+            )
+
+        if materials_client is None:
+            return generated_fallback("Materials client is unavailable")
+
         # Request materials from server.
         request = MaterialsRetrievalServerRequest(
             material_description=item.description,
@@ -923,29 +963,22 @@ class AssetRouter:
             # Fetch materials (single request returns single response).
             responses = list(materials_client.retrieve_materials([request]))
             if not responses:
-                console_logger.warning(
-                    f"No material response for thin covering '{item.description}'"
+                return generated_fallback(
+                    "Materials server returned no thin-covering response"
                 )
-                return None
             _, response = responses[0]
             materials = response.results
         except Exception as e:
-            console_logger.error(
-                f"Materials retrieval failed for thin covering '{item.description}': {e}"
+            return generated_fallback(
+                f"Materials retrieval failed ({type(e).__name__}: {e})"
             )
-            return None
 
         if not materials:
-            console_logger.warning(
-                f"No materials found for thin covering '{item.description}'"
-            )
-            return None
+            return generated_fallback("Materials server returned no candidates")
         console_logger.info(
             f"Got {len(materials)} material candidates for '{item.description}'"
         )
 
-        thin_covering_cfg = self.cfg.asset_manager.router.strategies.thin_covering
-        thickness = thin_covering_cfg.thickness_m
         # single_image (artwork) uses cover mode, tileable uses configured scale.
         is_single_image = item.thin_covering_type == "single_image"
         texture_scale = None if is_single_image else thin_covering_cfg.texture_scale
@@ -1015,17 +1048,52 @@ class AssetRouter:
             f"thin covering '{item.description}'"
         )
 
-        # Fallback to AI texture generation if enabled and image_generator available.
-        return self._try_generated_thin_covering(
+        return generated_fallback(
+            f"All {len(materials)} retrieved materials failed validation"
+        )
+
+    def _generate_procedural_floor_covering_fallback(
+        self,
+        *,
+        item: AssetItem,
+        width: float,
+        depth: float,
+        thickness: float,
+        geometry_dir: Path,
+        shape: str,
+    ) -> GeneratedGeometry | None:
+        """Create a local woven rug when both material backends are unavailable."""
+        geometry_dir.mkdir(parents=True, exist_ok=True)
+        safe_name = re.sub(r"[^a-zA-Z0-9_-]+", "_", item.short_name).strip("_")
+        texture_path = geometry_dir / f"{safe_name or 'rug'}_woven_fallback.png"
+        size = 512
+        image = Image.new("RGB", (size, size), color=(128, 96, 74))
+        draw = ImageDraw.Draw(image)
+        for offset in range(0, size, 8):
+            tone = (151, 116, 87) if (offset // 8) % 2 == 0 else (108, 78, 61)
+            draw.line((0, offset, size, offset), fill=tone, width=2)
+            draw.line((offset, 0, offset, size), fill=tone, width=1)
+        border = max(8, size // 32)
+        draw.rectangle(
+            (border, border, size - border, size - border),
+            outline=(70, 51, 40),
+            width=max(3, border // 3),
+        )
+        image.save(texture_path)
+        console_logger.warning(
+            "Using local woven texture fallback for floor covering '%s'",
+            item.description,
+        )
+        return self._generate_thin_covering_geometry(
             item=item,
-            image_generator=image_generator,
+            material_path=texture_path,
             width=width,
-            second_dim=height if is_wall_mode else depth,
+            second_dim=depth,
             thickness=thickness,
             geometry_dir=geometry_dir,
-            debug_dir=debug_dir,
-            is_wall_mode=is_wall_mode,
+            is_wall_mode=False,
             shape=shape,
+            texture_scale=None,
         )
 
     def generate_thin_covering_without_validation(
@@ -1060,6 +1128,7 @@ class AssetRouter:
         debug_dir: Path,
         is_wall_mode: bool,
         shape: str,
+        validate: bool = True,
     ) -> GeneratedGeometry | None:
         """Try generating thin covering texture with AI when retrieval fails.
 
@@ -1152,6 +1221,9 @@ class AssetRouter:
 
             if result is None:
                 continue
+
+            if not validate:
+                return result
 
             # Validate with VLM.
             validation = self._validate_thin_covering(

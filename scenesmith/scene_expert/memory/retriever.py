@@ -82,6 +82,14 @@ def _keyword_score(query_tokens: set[str], candidate_tokens: list[str]) -> float
     return len(intersection) / (len(query_tokens | candidate_set) + 1e-9)
 
 
+def _room_type_matches(record_room: str, task_room: str) -> bool:
+    """Require room-scoped memories to match instead of merely adding a bonus."""
+    generic = {"", "*", "all", "any", "generic"}
+    record_norm = str(record_room or "").lower().replace("_", " ").strip()
+    task_norm = str(task_room or "").lower().replace("_", " ").strip()
+    return record_norm in generic or task_norm in generic or record_norm == task_norm
+
+
 def _build_query_tokens(task_spec: SceneTaskSpec, stage: str) -> set[str]:
     """Build a flat token set from the task spec for retrieval matching."""
     texts = (
@@ -95,6 +103,23 @@ def _build_query_tokens(task_spec: SceneTaskSpec, stage: str) -> set[str]:
     tokens: set[str] = set()
     for t in texts:
         tokens.update(_tokenize(t))
+    return tokens
+
+
+def _stage_required_object_tokens(
+    task_spec: SceneTaskSpec,
+    stage: str,
+) -> set[str]:
+    by_stage = {
+        "floor_plan": task_spec.required_large_objects,
+        "furniture": task_spec.required_large_objects,
+        "wall_mounted": task_spec.required_wall_objects,
+        "ceiling_mounted": task_spec.required_ceiling_objects,
+        "manipuland": task_spec.required_small_objects,
+    }
+    tokens: set[str] = set()
+    for value in by_stage.get(stage, []):
+        tokens.update(_tokenize(value))
     return tokens
 
 
@@ -148,13 +173,14 @@ class MemoryRetriever:
         """
         scored: list[tuple[float, SuccessCase]] = []
         for case in self._store.success_cases:
-            if case.stage != stage:
+            if case.stage != stage or not _room_type_matches(
+                case.room_type, task_spec.room_type
+            ):
                 continue
-            room_bonus = 1.5 if case.room_type == task_spec.room_type else 1.0
             candidate_tokens = _tokenize(
                 " ".join([case.room_type, case.style] + case.task_signature)
             )
-            score = _keyword_score(query_tokens, candidate_tokens) * room_bonus
+            score = _keyword_score(query_tokens, candidate_tokens) * 1.5
             scored.append((score, case))
 
         scored.sort(key=lambda x: x[0], reverse=True)
@@ -176,16 +202,23 @@ class MemoryRetriever:
         self, task_spec: SceneTaskSpec, stage: str, query_tokens: set[str]
     ) -> tuple[list[str], list[str]]:
         scored: list[tuple[float, FailureCase]] = []
+        task_object_tokens = _stage_required_object_tokens(task_spec, stage)
         for case in self._store.failure_cases:
-            if case.stage != stage:
+            if case.stage != stage or not _room_type_matches(
+                case.room_type, task_spec.room_type
+            ):
                 continue
-            room_bonus = 1.5 if case.room_type == task_spec.room_type else 1.0
+            case_object_tokens = set(_tokenize(case.object))
+            if case_object_tokens and not (
+                case_object_tokens & task_object_tokens
+            ):
+                continue
             candidate_tokens = _tokenize(
                 " ".join(
                     [case.room_type, case.object, case.failure_type, case.bad_pattern]
                 )
             )
-            score = _keyword_score(query_tokens, candidate_tokens) * room_bonus
+            score = _keyword_score(query_tokens, candidate_tokens) * 1.5
             scored.append((score, case))
 
         scored.sort(key=lambda x: x[0], reverse=True)
@@ -206,7 +239,14 @@ class MemoryRetriever:
         for skill in self._store.skills:
             if skill.stage != stage:
                 continue
-            room_bonus = 1.5 if task_spec.room_type in skill.room_types else 1.0
+            skill_rooms = list(skill.room_types)
+            if getattr(skill, "room_type", ""):
+                skill_rooms.append(skill.room_type)
+            if skill_rooms and not any(
+                _room_type_matches(room, task_spec.room_type) for room in skill_rooms
+            ):
+                continue
+            room_bonus = 1.5 if skill_rooms else 1.0
             candidate_tokens = _tokenize(
                 " ".join(
                     [skill.skill_name, skill.stage]
