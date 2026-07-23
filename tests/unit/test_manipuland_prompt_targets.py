@@ -51,7 +51,6 @@ def test_recovery_adds_missing_dining_table_without_duplicate_sideboard() -> Non
         }.get(object_id),
     )
     agent = object.__new__(StatefulManipulandAgent)
-    agent.cfg = SimpleNamespace(scenebenchmark_critic={"enabled": True})
     selections = [
         FurnitureSelection(
             furniture_id=sideboard.object_id,
