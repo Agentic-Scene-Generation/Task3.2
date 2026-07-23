@@ -1019,6 +1019,22 @@ tmp/house_blend_views/
 --hide-name-contains ceiling --hide-name-contains roof
 ```
 
+### 为 critic probe 批量生成最终高清视图
+
+对一个运行目录执行：
+
+```bash
+blender -b --python scripts/render_critic_final_views.py -- \
+  outputs/critic_probe/<run_id>
+```
+
+脚本会在每个 `scene_*/` 目录下生成 `critic_final_views/00_top.png` 和
+`critic_final_views/01_side.png`（默认 2048 分辨率、无标签；side 视角只隐藏
+朝向相机的墙）。共享 base 默认跳过；明确处理共享 base 时加
+`--include-shared-base`。新运行也可以设置
+`CRITIC_PROBE_RENDER_FINAL_VIEWS=true`，由
+`scripts/run_parallel_critic_on.sh` 在所有 batch 完成后自动生成。
+
 如果渲染太慢，优先使用 `--engine eevee`；只需要快速看几何布局时可改用 `--engine workbench`。如果服务器完全没有 Blender，只能在本地或图形节点打开 `.blend`：`File -> Open` 打开文件，设置相机视角后执行 `Render -> Render Image`，再通过 `Image -> Save As` 保存 PNG。
 
 ## 9. SceneExpert trace 与 memory
