@@ -123,6 +123,14 @@ class ManipulandTools:
         self.current_furniture_id = current_furniture_id
         self.support_surfaces = support_surfaces
 
+        # HSSD sometimes describes one continuous dining tabletop as adjacent
+        # coplanar strips (for example S_8/S_9 split at the table centre).  That
+        # split is an extraction detail, not a usable dining boundary: a chair at
+        # the centre of a long edge must still receive its plate on the centre
+        # line.  Coalesce such strips before exposing surfaces to the designer and
+        # before the deterministic critic repair runs.
+        self._coalesce_dining_tabletop_surfaces()
+
         # Initialize placement noise configuration.
         # Start with natural profile as default until planner sets it.
         self.placement_noise_config = cfg.placement_noise
@@ -154,6 +162,158 @@ class ManipulandTools:
 
         # Create tool closures.
         self.tools = self._create_tool_closures()
+
+    def _coalesce_dining_tabletop_surfaces(self) -> None:
+        """Expose one logical top surface for adjacent dining-table strips.
+
+        The physical tabletop remains bounded by the union's outer footprint.  We
+        only merge surfaces that are coplanar and touch/overlap in the tabletop
+        plane, so separate shelves or disconnected pieces remain independent.
+        ``SupportSurface`` uses a convex hull for point validation; the merged
+        surface mesh is therefore deliberately built from the connected outer
+        rectangle, which is exact for the rectangular tabletop strips this rule
+        targets and keeps the normal no-out-of-table-boundary validation active.
+        """
+        furniture = None
+        for object_id, scene_object in getattr(self.scene, "objects", {}).items():
+            if str(object_id) == str(self.current_furniture_id):
+                furniture = scene_object
+                break
+        if furniture is None:
+            return
+
+        text = f"{getattr(furniture, 'name', '')} {getattr(furniture, 'description', '')}".lower()
+        if not any(token in text for token in ("dining table", "dining_table")):
+            return
+
+        surfaces = list(getattr(furniture, "support_surfaces", []) or [])
+        merged_surfaces = self._coalesce_adjacent_support_surfaces(surfaces)
+        if len(merged_surfaces) == len(surfaces):
+            return
+
+        furniture.support_surfaces[:] = merged_surfaces
+        self.support_surfaces.clear()
+        self.support_surfaces.update(
+            {str(surface.surface_id): surface for surface in merged_surfaces}
+        )
+        console_logger.info(
+            "Coalesced dining tabletop support strips for %s: %d -> %d surface(s)",
+            furniture.object_id,
+            len(surfaces),
+            len(merged_surfaces),
+        )
+
+    @staticmethod
+    def _coalesce_adjacent_support_surfaces(
+        surfaces: list[SupportSurface],
+    ) -> list[SupportSurface]:
+        """Merge connected, same-height support rectangles deterministically."""
+        if len(surfaces) < 2:
+            return list(surfaces)
+
+        groups: list[list[SupportSurface]] = []
+        remaining = list(surfaces)
+        while remaining:
+            group = [remaining.pop(0)]
+            changed = True
+            while changed:
+                changed = False
+                for candidate in list(remaining):
+                    if any(
+                        ManipulandTools._support_surfaces_are_adjacent(
+                            current, candidate
+                        )
+                        for current in group
+                    ):
+                        group.append(candidate)
+                        remaining.remove(candidate)
+                        changed = True
+            groups.append(group)
+
+        result: list[SupportSurface] = []
+        for group in groups:
+            if len(group) == 1:
+                result.extend(group)
+                continue
+            result.append(ManipulandTools._merge_support_surface_group(group))
+        return result
+
+    @staticmethod
+    def _surface_bounds_in_reference_frame(
+        surface: SupportSurface, reference: SupportSurface
+    ) -> tuple[float, float, float, float]:
+        corners = []
+        for x in (float(surface.bounding_box_min[0]), float(surface.bounding_box_max[0])):
+            for y in (float(surface.bounding_box_min[1]), float(surface.bounding_box_max[1])):
+                world = surface.transform @ np.array([x, y, 0.0])
+                local = reference.transform.inverse() @ world
+                corners.append(local[:2])
+        points = np.asarray(corners, dtype=float)
+        return (
+            float(points[:, 0].min()),
+            float(points[:, 0].max()),
+            float(points[:, 1].min()),
+            float(points[:, 1].max()),
+        )
+
+    @staticmethod
+    def _support_surfaces_are_adjacent(
+        first: SupportSurface, second: SupportSurface
+    ) -> bool:
+        # Use the first surface as the local frame.  Small HSSD pose noise is
+        # tolerated, but different height layers are never merged.
+        first_height = float((first.transform @ np.array([0.0, 0.0, 0.0]))[2])
+        second_height = float((second.transform @ np.array([0.0, 0.0, 0.0]))[2])
+        if abs(first_height - second_height) > 0.03:
+            return False
+
+        a = ManipulandTools._surface_bounds_in_reference_frame(first, first)
+        b = ManipulandTools._surface_bounds_in_reference_frame(second, first)
+        tolerance = 0.04
+        overlap_x = min(a[1], b[1]) - max(a[0], b[0])
+        overlap_y = min(a[3], b[3]) - max(a[2], b[2])
+        gap_x = max(0.0, max(a[0], b[0]) - min(a[1], b[1]))
+        gap_y = max(0.0, max(a[2], b[2]) - min(a[3], b[3]))
+        return (overlap_y >= -tolerance and gap_x <= tolerance) or (
+            overlap_x >= -tolerance and gap_y <= tolerance
+        )
+
+    @staticmethod
+    def _merge_support_surface_group(
+        surfaces: list[SupportSurface],
+    ) -> SupportSurface:
+        reference = surfaces[0]
+        bounds = [
+            ManipulandTools._surface_bounds_in_reference_frame(surface, reference)
+            for surface in surfaces
+        ]
+        min_x = min(item[0] for item in bounds)
+        max_x = max(item[1] for item in bounds)
+        min_y = min(item[2] for item in bounds)
+        max_y = max(item[3] for item in bounds)
+        mesh = trimesh.Trimesh(
+            vertices=np.array(
+                [
+                    [min_x, min_y, 0.0],
+                    [max_x, min_y, 0.0],
+                    [max_x, max_y, 0.0],
+                    [min_x, max_y, 0.0],
+                ],
+                dtype=float,
+            ),
+            faces=np.array([[0, 1, 2], [0, 2, 3]], dtype=int),
+            process=False,
+        )
+        min_z = min(float(surface.bounding_box_min[2]) for surface in surfaces)
+        max_z = min(float(surface.bounding_box_max[2]) for surface in surfaces)
+        return SupportSurface(
+            surface_id=UniqueID(str(reference.surface_id)),
+            bounding_box_min=np.array([min_x, min_y, min_z], dtype=float),
+            bounding_box_max=np.array([max_x, max_y, max_z], dtype=float),
+            transform=reference.transform,
+            mesh=mesh,
+            link_name=reference.link_name,
+        )
 
     def set_noise_profile(self, mode: PlacementNoiseMode) -> None:
         """Update the active noise profile based on placement style.
