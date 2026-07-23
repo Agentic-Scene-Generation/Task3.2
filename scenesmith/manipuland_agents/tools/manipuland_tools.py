@@ -12,7 +12,7 @@ import trimesh
 
 from agents import function_tool
 from omegaconf import DictConfig
-from pydrake.all import RollPitchYaw
+from pydrake.all import RigidTransform, RollPitchYaw
 from scipy.spatial import ConvexHull, QhullError
 from typing_extensions import TypedDict
 
@@ -61,6 +61,10 @@ from scenesmith.manipuland_agents.tools.response_dataclasses import (
     SupportSurfaceWithManipulands,
 )
 from scenesmith.manipuland_agents.tools.stack_tools import create_stack_tool_impl
+from scenesmith.scenebenchmark_critic import room_scene_to_case_pack
+from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.dining_place_setting import (
+    evaluate_dining_place_setting_alignment,
+)
 
 console_logger = logging.getLogger(__name__)
 
@@ -92,6 +96,7 @@ class ManipulandTools:
     - remove_manipuland: Delete manipuland from scene
     - get_current_scene_state: Get furniture + manipulands for current surface
     - list_available_assets: List all available manipuland assets
+    - align_dining_place_settings: Deterministically map each setting to its chair
     """
 
     def __init__(
@@ -645,6 +650,30 @@ class ManipulandTools:
             )
 
         @function_tool
+        def align_dining_place_settings(table_id: str = "") -> str:
+            """Align every dining plate/bowl and its nearby setting items to chairs.
+
+            Use this when SceneBenchmark reports a
+            `dining_place_setting_alignment` failure. The tool assigns each plate
+            or bowl to one distinct nearby dining chair, selects the correct
+            support surface even when a physical tabletop is split into multiple
+            surface IDs, then moves each associated utensil/drinkware with it.
+
+            Args:
+                table_id: Dining table object ID. Leave empty for the furniture
+                    currently being populated.
+
+            Returns:
+                JSON report with per-seat target surfaces and moves applied.
+            """
+            return self._align_dining_place_settings_impl(
+                table_id=table_id,
+                _action_metadata={
+                    "furniture_id": str(self.current_furniture_id),
+                },
+            )
+
+        @function_tool
         def remove_manipuland(object_id: str) -> str:
             """Remove a manipuland from the scene.
 
@@ -974,6 +1003,7 @@ class ManipulandTools:
             "generate_manipuland_assets": generate_manipuland_assets,
             "place_manipuland_on_surface": place_manipuland_on_surface,
             "move_manipuland": move_manipuland,
+            "align_dining_place_settings": align_dining_place_settings,
             "remove_manipuland": remove_manipuland,
             "rescale_manipuland": rescale_manipuland,
             "get_current_scene_state": get_current_scene_state,
@@ -1542,6 +1572,330 @@ class ManipulandTools:
                 message=f"Unexpected error: {str(e)}",
                 error_type=None,
             )
+
+    @log_scene_action
+    def _align_dining_place_settings_impl(
+        self,
+        table_id: str = "",
+        **kwargs,
+    ) -> str:
+        """Deterministically reflow dining settings onto their seat-facing surfaces."""
+        resolved_table_id = str(table_id or self.current_furniture_id)
+        table = self.scene.get_object(UniqueID(resolved_table_id))
+        if table is None:
+            return json.dumps(
+                {
+                    "success": False,
+                    "message": f"Dining table '{resolved_table_id}' was not found.",
+                }
+            )
+        if not table.support_surfaces:
+            return json.dumps(
+                {
+                    "success": False,
+                    "message": (
+                        f"Dining table '{resolved_table_id}' has no support surfaces."
+                    ),
+                }
+            )
+
+        # 2026-07-23 修改原因：新仓库保留了餐位对齐 critic 却遗漏其执行工具，
+        # 使餐盘和餐具虽生成齐全但无法按椅子一一归位。复用 critic 的一对一
+        # 分配并转换到真实分段桌面的局部坐标，避免模型自行换算 world XY。
+        case_pack = room_scene_to_case_pack(
+            self.scene, stage="dining_place_setting_repair"
+        )
+        alignment = next(
+            (
+                result
+                for result in evaluate_dining_place_setting_alignment(case_pack)
+                if str(result.get("primary_object") or "") == resolved_table_id
+            ),
+            None,
+        )
+        if alignment is None:
+            return json.dumps(
+                {
+                    "success": False,
+                    "message": (
+                        "No one-to-one dining place-setting assignment is available. "
+                        "Use this only after plates/bowls and discrete dining chairs exist."
+                    ),
+                }
+            )
+
+        assignments = (alignment.get("diagnostics") or {}).get("assignments") or []
+        if not assignments:
+            return json.dumps(
+                {"success": False, "message": "No dining place settings were found."}
+            )
+
+        surface_map = {
+            str(surface.surface_id): surface for surface in table.support_surfaces
+        }
+        if not surface_map:
+            return json.dumps(
+                {
+                    "success": False,
+                    "message": "No usable dining support surfaces found.",
+                }
+            )
+
+        objects_by_id = {
+            str(scene_object.object_id): scene_object
+            for scene_object in self.scene.objects.values()
+        }
+        original_xy = {
+            object_id: self._object_world_xy(scene_object)
+            for object_id, scene_object in objects_by_id.items()
+        }
+        table_center = self._object_world_xy(table)
+        moves: list[dict[str, Any]] = []
+        failures: list[str] = []
+
+        previous_noise_profile = self.active_noise_profile
+        self.active_noise_profile = self.placement_noise_config.perfect_profile
+        try:
+            # Keep an optional centerpiece at the table center, leaving each edge
+            # surface available for a seated diner.
+            for scene_object in objects_by_id.values():
+                if not self._is_dining_centerpiece(scene_object):
+                    continue
+                if table_center is None:
+                    failures.append("Dining table has no usable world-space center.")
+                    break
+                selected = self._select_dining_surface_position(
+                    surface_map=surface_map,
+                    scene_object=scene_object,
+                    target_xy=table_center,
+                )
+                if selected is None:
+                    failures.append(
+                        "Could not find a centered support position for "
+                        f"`{scene_object.object_id}`."
+                    )
+                    continue
+                surface, position = selected
+                move = self._move_dining_object(scene_object, surface, position)
+                moves.append(move)
+                if not move["success"]:
+                    failures.append(move["message"])
+
+            for row in assignments:
+                anchor_id = str(row.get("anchor_id") or "")
+                anchor = objects_by_id.get(anchor_id)
+                target = row.get("recommended_anchor_center_xy_m") or []
+                if anchor is None or len(target) < 2:
+                    failures.append(f"Incomplete assignment for anchor `{anchor_id}`.")
+                    continue
+                target_xy = (float(target[0]), float(target[1]))
+                selected = self._select_dining_surface_position(
+                    surface_map=surface_map,
+                    scene_object=anchor,
+                    target_xy=target_xy,
+                    preferred_surface_id=str(
+                        row.get("recommended_support_surface_id") or ""
+                    ),
+                )
+                if selected is None:
+                    failures.append(
+                        f"Could not find a valid support position for `{anchor_id}`."
+                    )
+                    continue
+                surface, position = selected
+                anchor_before = original_xy.get(anchor_id)
+                move = self._move_dining_object(anchor, surface, position)
+                move["seat_id"] = str(row.get("seat_id") or "")
+                moves.append(move)
+                if not move["success"]:
+                    failures.append(move["message"])
+                    continue
+
+                anchor_after = self._object_world_xy(anchor)
+                if anchor_before is None or anchor_after is None:
+                    continue
+                for companion_id in row.get("companion_ids") or []:
+                    companion = objects_by_id.get(str(companion_id))
+                    companion_before = original_xy.get(str(companion_id))
+                    if companion is None or companion_before is None:
+                        continue
+                    companion_target = (
+                        anchor_after[0] + companion_before[0] - anchor_before[0],
+                        anchor_after[1] + companion_before[1] - anchor_before[1],
+                    )
+                    companion_selected = self._select_dining_surface_position(
+                        surface_map=surface_map,
+                        scene_object=companion,
+                        target_xy=companion_target,
+                        preferred_surface_id=str(surface.surface_id),
+                    )
+                    if companion_selected is None:
+                        failures.append(
+                            "Could not find a valid support position for "
+                            f"`{companion_id}`."
+                        )
+                        continue
+                    companion_surface, companion_position = companion_selected
+                    companion_move = self._move_dining_object(
+                        companion, companion_surface, companion_position
+                    )
+                    companion_move["anchor_id"] = anchor_id
+                    moves.append(companion_move)
+                    if not companion_move["success"]:
+                        failures.append(companion_move["message"])
+        finally:
+            self.active_noise_profile = previous_noise_profile
+
+        return json.dumps(
+            {
+                "success": not failures,
+                "message": (
+                    "Aligned dining place settings to their seat-facing support surfaces."
+                    if not failures
+                    else "Dining setting alignment completed with some unresolved moves."
+                ),
+                "table_id": resolved_table_id,
+                "moves": moves,
+                "failures": failures,
+            }
+        )
+
+    @staticmethod
+    def _object_world_xy(scene_object: SceneObject) -> tuple[float, float] | None:
+        if scene_object is None:
+            return None
+        position = scene_object.transform.translation()
+        return float(position[0]), float(position[1])
+
+    @staticmethod
+    def _is_dining_centerpiece(scene_object: SceneObject) -> bool:
+        if scene_object.object_type != ObjectType.MANIPULAND:
+            return False
+        text = f"{scene_object.name} {scene_object.description}".lower()
+        return any(token in text for token in ("vase", "centerpiece", "flowers"))
+
+    def _select_dining_surface_position(
+        self,
+        *,
+        surface_map: dict[str, SupportSurface],
+        scene_object: SceneObject,
+        target_xy: tuple[float, float],
+        preferred_surface_id: str = "",
+    ) -> tuple[SupportSurface, np.ndarray] | None:
+        """Map a world target onto a valid segmented tabletop support surface."""
+        candidates = list(surface_map.values())
+        candidates.sort(
+            key=lambda surface: (
+                0 if str(surface.surface_id) == preferred_surface_id else 1,
+                math.hypot(
+                    float(surface.transform.translation()[0]) - target_xy[0],
+                    float(surface.transform.translation()[1]) - target_xy[1],
+                ),
+                str(surface.surface_id),
+            )
+        )
+        rotation_degrees = self._surface_rotation_degrees(scene_object)
+        for surface in candidates:
+            position = self._surface_local_target(surface, scene_object, target_xy)
+            if position is None:
+                continue
+            if self._dining_position_is_valid(
+                surface, scene_object, position, rotation_degrees
+            ):
+                return surface, position
+        return None
+
+    def _surface_local_target(
+        self,
+        surface: SupportSurface,
+        scene_object: SceneObject,
+        target_xy: tuple[float, float],
+    ) -> np.ndarray | None:
+        surface_z = float(surface.transform.translation()[2])
+        world_target = RigidTransform(p=[target_xy[0], target_xy[1], surface_z])
+        local, _rotation = surface.from_world_pose(world_target)
+        item_size = np.asarray(scene_object.bbox_max[:2]) - np.asarray(
+            scene_object.bbox_min[:2]
+        )
+        inset = 0.5 * float(np.max(np.abs(item_size))) + 0.01
+        lower = np.asarray(surface.bounding_box_min[:2], dtype=float) + inset
+        upper = np.asarray(surface.bounding_box_max[:2], dtype=float) - inset
+        if np.any(lower > upper):
+            lower = np.asarray(surface.bounding_box_min[:2], dtype=float)
+            upper = np.asarray(surface.bounding_box_max[:2], dtype=float)
+        clipped = np.clip(local, lower, upper)
+        for fraction in (1.0, 0.8, 0.6, 0.4, 0.2, 0.0):
+            candidate = clipped * fraction
+            try:
+                if surface.contains_point_2d(candidate):
+                    return candidate
+            except ValueError:
+                continue
+        return None
+
+    def _dining_position_is_valid(
+        self,
+        surface: SupportSurface,
+        scene_object: SceneObject,
+        position: np.ndarray,
+        rotation_degrees: float,
+    ) -> bool:
+        geometry_path = scene_object.geometry_path
+        if geometry_path is None:
+            return False
+        overlap_ratio = (
+            self.top_surface_overlap_tolerance
+            if self._is_top_surface(str(surface.surface_id))
+            else 0.0
+        )
+        valid, _message = self._validate_convex_hull_footprint(
+            target_surface=surface,
+            geometry_path=geometry_path,
+            position_2d=position,
+            rotation_degrees=rotation_degrees,
+            allow_overlap_ratio=overlap_ratio,
+            scale_factor=scene_object.scale_factor,
+        )
+        return bool(valid)
+
+    @staticmethod
+    def _surface_rotation_degrees(scene_object: SceneObject) -> float:
+        placement = scene_object.placement_info
+        if placement is None:
+            return 0.0
+        return math.degrees(float(placement.rotation_2d))
+
+    def _move_dining_object(
+        self,
+        scene_object: SceneObject,
+        surface: SupportSurface,
+        position: np.ndarray,
+    ) -> dict[str, Any]:
+        object_id = str(scene_object.object_id)
+        rotation_degrees = self._surface_rotation_degrees(scene_object)
+        result = json.loads(
+            self._move_manipuland_impl(
+                object_id=object_id,
+                surface_id=str(surface.surface_id),
+                position_x=float(position[0]),
+                position_z=float(position[1]),
+                rotation_degrees=rotation_degrees,
+            )
+        )
+        # A setting already at its deterministic target is a successful no-op.
+        success = (
+            bool(result.get("success")) or result.get("error_type") == "no_movement"
+        )
+        return {
+            "object_id": object_id,
+            "success": success,
+            "message": str(result.get("message") or ""),
+            "surface_id": str(surface.surface_id),
+            "surface_position": [
+                round(float(position[0]), 4),
+                round(float(position[1]), 4),
+            ],
+        }
 
     @log_scene_action
     def _remove_manipuland_impl(self, object_id: str, **kwargs) -> str:
