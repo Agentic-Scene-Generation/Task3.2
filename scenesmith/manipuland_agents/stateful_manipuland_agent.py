@@ -892,15 +892,7 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
         scene: RoomScene,
         furniture_data: list[FurnitureSelection],
     ) -> list[FurnitureSelection]:
-        """Add critic-only fallback targets for explicit prompt obligations."""
-        critic_cfg = getattr(self.cfg, "scenebenchmark_critic", None)
-        try:
-            critic_enabled = bool(critic_cfg.get("enabled", False))
-        except Exception:
-            critic_enabled = bool(getattr(critic_cfg, "enabled", False))
-        if not critic_enabled:
-            return furniture_data
-
+        """Add fallback targets for explicit, non-optional prompt obligations."""
         description = str(
             getattr(scene, "scene_expert_original_description", "")
             or getattr(scene, "text_description", "")
