@@ -42,6 +42,7 @@ from scenesmith.manipuland_agents.stateful_manipuland_agent import (
     StatefulManipulandAgent,
 )
 from scenesmith.utils.logging import ConsoleLogger, FileLoggingContext
+from scenesmith.utils.openai import configure_reasoning_persistence
 from scenesmith.utils.parallel import run_parallel_isolated
 from scenesmith.utils.print_utils import bold_green, yellow
 from scenesmith.wall_agents.stateful_wall_agent import StatefulWallAgent
@@ -297,6 +298,24 @@ def _reset_inherited_sdk_state() -> None:
         del local
     except Exception:
         pass  # Best effort.
+
+
+def _configure_reasoning_persistence_for_worker(cfg_dict: dict) -> None:
+    """Restore process-local reasoning persistence in an isolated worker.
+
+    Scene, floor-plan, and room tasks use a clean forkserver/spawn process, so
+    they do not inherit the configuration applied by ``main.py``. Reapply the
+    same passive persistence settings before any OpenAI client is constructed.
+    """
+    openai_cfg = cfg_dict.get("openai", {})
+    persistence_cfg = openai_cfg.get("reasoning_persistence") or {}
+    llm_cfg = cfg_dict.get("llm", {})
+    configure_reasoning_persistence(
+        enabled=bool(persistence_cfg.get("enabled", False)),
+        provider=persistence_cfg.get("provider", "disabled"),
+        model_id=llm_cfg.get("model_id"),
+        base_url=os.environ.get("OPENAI_BASE_URL"),
+    )
 
 
 def _load_prompts_from_csv(csv_path: str) -> list[tuple[int, str]]:
@@ -1209,6 +1228,7 @@ def _generate_floor_plan_worker(
     """
     # Reset any SDK state inherited via fork (defense in depth).
     _reset_inherited_sdk_state()
+    _configure_reasoning_persistence_for_worker(cfg_dict)
 
     faulthandler.enable()
 
@@ -1292,6 +1312,7 @@ def _generate_room_worker(
     """
     # Reset any SDK state inherited via fork (defense in depth).
     _reset_inherited_sdk_state()
+    _configure_reasoning_persistence_for_worker(cfg_dict)
 
     room_dir_path = Path(room_dir)
 
@@ -1851,6 +1872,7 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
         """
         # Reset any SDK state inherited via fork (defense in depth).
         _reset_inherited_sdk_state()
+        _configure_reasoning_persistence_for_worker(cfg_dict)
 
         faulthandler.enable()
 

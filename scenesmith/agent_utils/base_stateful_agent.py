@@ -71,7 +71,11 @@ from scenesmith.scenebenchmark_critic import evaluate_room_scene
 from scenesmith.scenebenchmark_critic.config import critic_config_from_any
 from scenesmith.scenebenchmark_critic.prompt_context import format_agent_prompt_context
 from scenesmith.utils.logging import BaseLogger
-from scenesmith.utils.openai import encode_image_to_base64
+from scenesmith.utils.openai import (
+    ReasoningPersistenceAsyncOpenAIClient,
+    encode_image_to_base64,
+    reasoning_persistence_context,
+)
 
 console_logger = logging.getLogger(__name__)
 
@@ -1341,6 +1345,19 @@ class BaseStatefulAgent(ABC):
 
         return designer_session, critic_session
 
+    @staticmethod
+    def _session_db_path_for(session: Any) -> str | Path | None:
+        """Return the underlying SQLite path for wrapped or direct sessions."""
+        inner = getattr(session, "wrapped_session", session)
+        return getattr(inner, "db_path", None)
+
+    def _reasoning_persistence_context_for_session(self, session: Any):
+        """Create a task-local, fail-open persistence context for a session."""
+        return reasoning_persistence_context(
+            session_id=getattr(session, "session_id", "unknown"),
+            db_path=self._session_db_path_for(session),
+        )
+
     def _create_run_config(self) -> RunConfig:
         """Create RunConfig with intra-turn image filter if enabled.
 
@@ -1356,9 +1373,12 @@ class BaseStatefulAgent(ABC):
         # instead of being routed through MultiProvider's prefix registry.
         # use_responses=False forces /chat/completions instead of /responses,
         # because vLLM's --tool-call-parser hermes only works on /chat/completions.
-        provider = OpenAIProvider(
+        openai_client = ReasoningPersistenceAsyncOpenAIClient(
             base_url=os.environ.get("OPENAI_BASE_URL", "http://localhost:8000/v1"),
             api_key=os.environ.get("OPENAI_API_KEY", "dummy"),
+        )
+        provider = OpenAIProvider(
+            openai_client=openai_client,
             use_responses=False,
         )
         intra_cfg = self.cfg.session_memory.intra_turn_observation_stripping
@@ -2342,13 +2362,14 @@ class BaseStatefulAgent(ABC):
         # Step 1: force observe_scene; stop_on_first_tool returns immediately.
         console_logger.info("[CRITIC harness] Step 1: observe_scene")
         observe_start = time.time()
-        with self.rendering_manager.use_render_profile(render_profile):
-            result_observe = await Runner.run(
-                starting_agent=critic_observe,
-                input=critique_instruction,
-                session=self.critic_session,
-                run_config=run_config,
-            )
+        async with self._reasoning_persistence_context_for_session(self.critic_session):
+            with self.rendering_manager.use_render_profile(render_profile):
+                result_observe = await Runner.run(
+                    starting_agent=critic_observe,
+                    input=critique_instruction,
+                    session=self.critic_session,
+                    run_config=run_config,
+                )
         self._record_module_timing("critic", "observe_scene", observe_start)
         log_agent_usage(result=result_observe, agent_name="CRITIC (observe)")
         self._record_llm_call_debug(
@@ -2381,12 +2402,15 @@ class BaseStatefulAgent(ABC):
         else:
             console_logger.info("[CRITIC harness] Step 2: get_current_scene_state")
             scene_state_start = time.time()
-            result_scene = await Runner.run(
-                starting_agent=critic_scene_state,
-                input="Now retrieve exact object data with get_current_scene_state.",
-                session=self.critic_session,
-                run_config=run_config,
-            )
+            async with self._reasoning_persistence_context_for_session(
+                self.critic_session
+            ):
+                result_scene = await Runner.run(
+                    starting_agent=critic_scene_state,
+                    input="Now retrieve exact object data with get_current_scene_state.",
+                    session=self.critic_session,
+                    run_config=run_config,
+                )
             self._record_module_timing(
                 "critic", "get_current_scene_state", scene_state_start
             )
@@ -2420,13 +2444,16 @@ class BaseStatefulAgent(ABC):
             f"{scene_state_block}"
         )
         try:
-            result = await Runner.run(
-                starting_agent=critic_score,
-                input=score_prompt,
-                session=self.critic_session,
-                max_turns=self.cfg.agents.critic_agent.max_turns,
-                run_config=run_config,
-            )
+            async with self._reasoning_persistence_context_for_session(
+                self.critic_session
+            ):
+                result = await Runner.run(
+                    starting_agent=critic_score,
+                    input=score_prompt,
+                    session=self.critic_session,
+                    max_turns=self.cfg.agents.critic_agent.max_turns,
+                    run_config=run_config,
+                )
             self._record_module_timing("critic", "score_scene", score_start)
             log_agent_usage(result=result, agent_name="CRITIC (score)")
             self._record_llm_call_debug(
@@ -2634,13 +2661,16 @@ class BaseStatefulAgent(ABC):
         designer_start = time.time()
         render_dir_before = self.rendering_manager.last_render_dir
         try:
-            result = await Runner.run(
-                starting_agent=self.designer,
-                input=full_instruction,
-                session=self.designer_session,
-                max_turns=self.cfg.agents.designer_agent.max_turns,
-                run_config=self._create_run_config(),
-            )
+            async with self._reasoning_persistence_context_for_session(
+                self.designer_session
+            ):
+                result = await Runner.run(
+                    starting_agent=self.designer,
+                    input=full_instruction,
+                    session=self.designer_session,
+                    max_turns=self.cfg.agents.designer_agent.max_turns,
+                    run_config=self._create_run_config(),
+                )
         except Exception as exc:
             self._record_llm_call_debug(
                 agent_role="designer",
@@ -2767,13 +2797,16 @@ class BaseStatefulAgent(ABC):
         designer_start = time.time()
         render_dir_before = self.rendering_manager.last_render_dir
         try:
-            result = await Runner.run(
-                starting_agent=self.designer,
-                input=input_message,
-                session=self.designer_session,
-                max_turns=self.cfg.agents.designer_agent.max_turns,
-                run_config=self._create_run_config(),
-            )
+            async with self._reasoning_persistence_context_for_session(
+                self.designer_session
+            ):
+                result = await Runner.run(
+                    starting_agent=self.designer,
+                    input=input_message,
+                    session=self.designer_session,
+                    max_turns=self.cfg.agents.designer_agent.max_turns,
+                    run_config=self._create_run_config(),
+                )
         except Exception as exc:
             self._record_llm_call_debug(
                 agent_role="designer",

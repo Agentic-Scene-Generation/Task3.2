@@ -88,17 +88,17 @@ asset_manager:
   backend: "sam3d"
 
   router:
-    enabled: false
+    enabled: true
     parallel_workers: 10
     # Max retries for VLM analysis if parsing fails (e.g., invalid object_type)
-    analysis_max_retries: 1
+    analysis_max_retries: 3
     strategies:
       generated:
         enabled: true
-        max_retries: 1
+        max_retries: 2
       articulated:
         enabled: true
-        max_retries: 1
+        max_retries: 3
         use_lenient_validation: true
       # Thin covering not used for ceiling typically.
       thin_covering:

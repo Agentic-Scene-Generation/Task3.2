@@ -27,6 +27,7 @@ if __name__ != "__mp_main__":
 
 from scenesmith.utils.logging import FileLoggingContext
 from scenesmith.utils.omegaconf import register_resolvers
+from scenesmith.utils.openai import configure_reasoning_persistence
 from scenesmith.utils.print_utils import cyan
 
 console_logger = logging.getLogger(__name__)
@@ -133,6 +134,20 @@ def run(cfg: DictConfig):
 
         set_tracing_export_api_key(tracing_api_key)
         console_logger.info("Using separate API key for tracing exports")
+
+    persistence_cfg = cfg.openai.get("reasoning_persistence", None)
+    configure_reasoning_persistence(
+        enabled=(
+            bool(persistence_cfg.get("enabled", False)) if persistence_cfg else False
+        ),
+        provider=(
+            persistence_cfg.get("provider", "disabled")
+            if persistence_cfg
+            else "disabled"
+        ),
+        model_id=str(cfg.llm.model_id),
+        base_url=os.environ.get("OPENAI_BASE_URL"),
+    )
 
     run_local(cfg)
 

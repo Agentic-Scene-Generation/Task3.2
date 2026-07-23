@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import scenesmith.experiments.indoor_scene_generation as scene_generation
 from scenesmith.experiments.indoor_scene_generation import (
     IndoorSceneGenerationExperiment,
 )
@@ -114,6 +115,90 @@ class TestSceneTaskIsolation(unittest.TestCase):
 
         self.assertEqual(call_count, 1)
         self.assertFalse((self.output_dir / "failed_attempts").exists())
+
+
+class TestWorkerReasoningPersistenceBootstrap(unittest.TestCase):
+    """Verify every clean worker restores passive reasoning persistence."""
+
+    def setUp(self) -> None:
+        self.cfg_dict = {
+            "openai": {
+                "reasoning_persistence": {
+                    "enabled": True,
+                    "provider": "qwen",
+                }
+            },
+            "llm": {"model_id": "Qwen/Qwen3.6-27B"},
+        }
+
+    def test_worker_configuration_is_restored_from_serialized_config(self) -> None:
+        with (
+            patch.object(
+                scene_generation, "configure_reasoning_persistence"
+            ) as configure,
+            patch.dict(
+                scene_generation.os.environ,
+                {"OPENAI_BASE_URL": "http://127.0.0.1:8002/v1"},
+            ),
+        ):
+            scene_generation._configure_reasoning_persistence_for_worker(
+                self.cfg_dict
+            )
+
+        configure.assert_called_once_with(
+            enabled=True,
+            provider="qwen",
+            model_id="Qwen/Qwen3.6-27B",
+            base_url="http://127.0.0.1:8002/v1",
+        )
+
+    def test_all_isolated_worker_entrypoints_restore_configuration(self) -> None:
+        class StopAfterBootstrap(Exception):
+            pass
+
+        worker_calls = (
+            lambda: IndoorSceneGenerationExperiment._generate_single_scene(
+                prompt="A bedroom",
+                scene_id=0,
+                output_dir=Path("/tmp/test-reasoning-bootstrap"),
+                cfg_dict=self.cfg_dict,
+            ),
+            lambda: scene_generation._generate_floor_plan_worker(
+                prompt="A bedroom",
+                scene_dir="/tmp/test-reasoning-bootstrap/scene_000",
+                cfg_dict=self.cfg_dict,
+                experiment_run_id=None,
+            ),
+            lambda: scene_generation._generate_room_worker(
+                room_id="bedroom",
+                room_prompt="A bedroom",
+                room_geometry_dict={},
+                room_dir="/tmp/test-reasoning-bootstrap/scene_000/room_bedroom",
+                cfg_dict=self.cfg_dict,
+                start_stage="furniture",
+                stop_stage="manipuland",
+                scene_id=0,
+            ),
+        )
+
+        for worker_call in worker_calls:
+            with self.subTest(worker=worker_call):
+                with (
+                    patch.object(scene_generation, "_reset_inherited_sdk_state"),
+                    patch.object(
+                        scene_generation,
+                        "_configure_reasoning_persistence_for_worker",
+                    ) as configure,
+                    patch.object(
+                        scene_generation.faulthandler,
+                        "enable",
+                        side_effect=StopAfterBootstrap,
+                    ),
+                ):
+                    with self.assertRaises(StopAfterBootstrap):
+                        worker_call()
+
+                configure.assert_called_once_with(self.cfg_dict)
 
 
 if __name__ == "__main__":

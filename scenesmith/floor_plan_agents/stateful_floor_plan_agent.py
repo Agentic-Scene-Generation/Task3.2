@@ -352,13 +352,14 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
 
         # Run critic.
         # Critic will call observe_scene, render_ascii, and validate tools.
-        result = await Runner.run(
-            starting_agent=self.critic,
-            input=critique_instruction,
-            session=self.critic_session,
-            max_turns=self.cfg.agents.critic_agent.max_turns,
-            run_config=self._create_run_config(),
-        )
+        async with self._reasoning_persistence_context_for_session(self.critic_session):
+            result = await Runner.run(
+                starting_agent=self.critic,
+                input=critique_instruction,
+                session=self.critic_session,
+                max_turns=self.cfg.agents.critic_agent.max_turns,
+                run_config=self._create_run_config(),
+            )
         log_agent_usage(result=result, agent_name="CRITIC (FLOOR PLAN)")
         vision_tools = self._get_vision_tools()
 
@@ -582,13 +583,16 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
         )
 
         # Run designer.
-        result = await Runner.run(
-            starting_agent=self.designer,
-            input=instruction,
-            session=self.designer_session,
-            max_turns=self.cfg.agents.designer_agent.max_turns,
-            run_config=self._create_run_config(),
-        )
+        async with self._reasoning_persistence_context_for_session(
+            self.designer_session
+        ):
+            result = await Runner.run(
+                starting_agent=self.designer,
+                input=instruction,
+                session=self.designer_session,
+                max_turns=self.cfg.agents.designer_agent.max_turns,
+                run_config=self._create_run_config(),
+            )
         log_agent_usage(result=result, agent_name="DESIGNER (INITIAL FLOOR PLAN)")
 
         if result.final_output:
@@ -616,13 +620,16 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
         )
 
         # Run designer.
-        result = await Runner.run(
-            starting_agent=self.designer,
-            input=full_instruction,
-            session=self.designer_session,
-            max_turns=self.cfg.agents.designer_agent.max_turns,
-            run_config=self._create_run_config(),
-        )
+        async with self._reasoning_persistence_context_for_session(
+            self.designer_session
+        ):
+            result = await Runner.run(
+                starting_agent=self.designer,
+                input=full_instruction,
+                session=self.designer_session,
+                max_turns=self.cfg.agents.designer_agent.max_turns,
+                run_config=self._create_run_config(),
+            )
         log_agent_usage(result=result, agent_name="DESIGNER (CHANGE FLOOR PLAN)")
 
         if result.final_output:

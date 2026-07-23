@@ -1,4 +1,5 @@
 import shutil
+import sqlite3
 import tempfile
 import unittest
 
@@ -6,6 +7,10 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from scenesmith.agent_utils.vlm_service import VLMService
+from scenesmith.utils.openai import (
+    configure_reasoning_persistence,
+    reasoning_persistence_context,
+)
 
 
 class TestVLMService(unittest.TestCase):
@@ -18,6 +23,7 @@ class TestVLMService(unittest.TestCase):
 
     def tearDown(self):
         """Clean up test fixtures."""
+        configure_reasoning_persistence(enabled=False, provider="disabled")
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     @patch("scenesmith.agent_utils.vlm_service.OpenAI")
@@ -29,10 +35,119 @@ class TestVLMService(unittest.TestCase):
 
         # Verify VLMService was initialized.
         self.assertIsNotNone(vlm_service)
-        self.assertEqual(vlm_service.client, self.mock_openai_client)
+        self.assertIs(vlm_service.client._client, self.mock_openai_client)
 
         # Verify OpenAI client was created.
         mock_openai_class.assert_called_once()
+
+    @patch("scenesmith.agent_utils.vlm_service.OpenAI")
+    def test_qwen_vlm_thinking_persists_as_vlm_without_changing_content(
+        self, mock_openai_class
+    ):
+        mock_openai_client = Mock()
+        mock_openai_class.return_value = mock_openai_client
+        mock_message = Mock()
+        mock_message.content = '{"material": "wood"}'
+        mock_message.reasoning_content = "tool-only reasoning"
+        mock_response = Mock()
+        mock_response.choices = [Mock(message=mock_message)]
+        mock_openai_client.chat.completions.create.return_value = mock_response
+        configure_reasoning_persistence(enabled=True, provider="qwen")
+        db_path = self.temp_dir / "designer.db"
+
+        async def run():
+            async with reasoning_persistence_context("designer", db_path):
+                service = VLMService()
+                result = service.create_completion(
+                    model="Qwen/Qwen3.6-35B-A3B",
+                    messages=[{"role": "user", "content": "Analyze."}],
+                    reasoning_effort="high",
+                    verbosity="low",
+                )
+                self.assertEqual(result, '{"material": "wood"}')
+                self.assertEqual(mock_message.content, '{"material": "wood"}')
+
+        import asyncio
+
+        asyncio.run(run())
+
+        with sqlite3.connect(db_path) as conn:
+            row = conn.execute(
+                "SELECT session_id, thinking FROM agent_thinking"
+            ).fetchone()
+        self.assertEqual(row, ("vlm", "tool-only reasoning"))
+
+    @patch("scenesmith.agent_utils.vlm_service.OpenAI")
+    def test_vlm_persistence_failure_does_not_change_normal_return(
+        self, mock_openai_class
+    ):
+        mock_openai_client = Mock()
+        mock_openai_class.return_value = mock_openai_client
+        mock_message = Mock()
+        mock_message.content = "visible"
+        mock_message.reasoning_content = "tool reasoning"
+        mock_response = Mock()
+        mock_response.choices = [Mock(message=mock_message)]
+        mock_openai_client.chat.completions.create.return_value = mock_response
+        configure_reasoning_persistence(enabled=True, provider="qwen")
+        db_path = self.temp_dir / "designer.db"
+
+        async def run():
+            async with reasoning_persistence_context("designer", db_path):
+                service = VLMService()
+                with patch(
+                    "scenesmith.utils.openai._write_qwen_records",
+                    side_effect=sqlite3.OperationalError("database is locked"),
+                ):
+                    return service.create_completion(
+                        model="Qwen/Qwen3.6-35B-A3B",
+                        messages=[{"role": "user", "content": "Analyze."}],
+                        reasoning_effort="high",
+                        verbosity="low",
+                    )
+
+        import asyncio
+
+        self.assertEqual(asyncio.run(run()), "visible")
+
+    @patch("scenesmith.agent_utils.vlm_service.OpenAI")
+    def test_openrouter_tool_vlm_reasoning_is_not_mixed_into_agent_artifacts(
+        self, mock_openai_class
+    ):
+        mock_openai_client = Mock()
+        mock_openai_class.return_value = mock_openai_client
+        mock_message = Mock()
+        mock_message.content = "visible"
+        mock_message.reasoning = "tool reasoning"
+        mock_message.reasoning_details = [{"summary": "tool summary"}]
+        mock_response = Mock()
+        mock_response.choices = [Mock(message=mock_message)]
+        mock_openai_client.chat.completions.create.return_value = mock_response
+        configure_reasoning_persistence(enabled=True, provider="openrouter")
+        db_path = self.temp_dir / "designer.db"
+
+        async def run():
+            async with reasoning_persistence_context("designer", db_path):
+                service = VLMService()
+                self.assertEqual(
+                    service.create_completion(
+                        model="openai/gpt-5.2",
+                        messages=[{"role": "user", "content": "Analyze."}],
+                        reasoning_effort="none",
+                        verbosity="low",
+                    ),
+                    "visible",
+                )
+
+        import asyncio
+
+        asyncio.run(run())
+
+        with sqlite3.connect(db_path) as conn:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM agent_reasoning_artifacts"
+            ).fetchone()[0]
+        self.assertEqual(count, 0)
 
     @patch("scenesmith.agent_utils.vlm_service.OpenAI")
     def test_create_completion_basic(self, mock_openai_class):
