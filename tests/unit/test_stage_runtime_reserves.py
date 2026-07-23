@@ -105,10 +105,20 @@ class StageRuntimeReserveTest(unittest.TestCase):
             events.append(("finalize", None))
 
         agent = SimpleNamespace(
+            scene=SimpleNamespace(
+                scene_expert_min_output_objects=1,
+                scene_expert_max_output_objects=3,
+            ),
+            _stage_runtime_budget={
+                "min_output_objects": 1,
+                "max_output_objects": 3,
+            },
             _stage_budget_value=lambda key, default: {
                 "min_output_objects": 1,
                 "max_output_objects": 3,
             }.get(key, default),
+            _expand_critical_retry_budget=lambda: None,
+            _refresh_asset_runtime_budget=lambda: None,
             _request_design_change_impl=request_change,
             _request_critique_impl=request_critique,
             _finalize_scene_and_scores=finalize,
@@ -143,6 +153,25 @@ class StageRuntimeReserveTest(unittest.TestCase):
         self.assertIn("must call request_initial_design", contract)
         self.assertIn("at least 1 and no more than 3", contract)
         self.assertIn("zero-object result is not valid", contract)
+
+    @unittest.skipIf(
+        BaseStatefulAgent is None,
+        f"requires stateful agent dependencies: {_IMPORT_ERROR}",
+    )
+    def test_prompt_requirements_raise_planner_count_contract(self) -> None:
+        budget = {"min_output_objects": 1, "max_output_objects": 3}
+        agent = SimpleNamespace(
+            scene=SimpleNamespace(
+                scene_expert_min_output_objects=4,
+                scene_expert_max_output_objects=4,
+            ),
+            _stage_runtime_budget=budget,
+            _stage_budget_value=lambda key, default: budget.get(key, default),
+        )
+
+        contract = BaseStatefulAgent._planner_completion_contract(agent)
+
+        self.assertIn("at least 4 and no more than 4", contract)
 
 
 if __name__ == "__main__":

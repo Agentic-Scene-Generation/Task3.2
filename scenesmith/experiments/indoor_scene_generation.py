@@ -169,6 +169,44 @@ def _is_repairable_stage_validation(error: StageValidationError) -> bool:
     return not any(marker in text for marker in terminal_markers)
 
 
+def _stage_validation_kind(
+    error: StageValidationError,
+    agent: Any,
+) -> str:
+    """Classify a stage failure so recovery spends budget only where useful."""
+    text = " ".join(error.reasons).lower()
+    if error.reasons and all(
+        "visual critic did not produce a trustworthy score" in reason.lower()
+        for reason in error.reasons
+    ):
+        return "critic_unavailable"
+    if any(
+        marker in text
+        for marker in (
+            "stage surface unavailable",
+            "no valid furniture support target",
+            "support surface unavailable",
+        )
+    ):
+        return "structural_unavailable"
+    if (
+        getattr(agent, "_stage_runtime_exhausted", False)
+        or getattr(agent, "_planner_budget_exhausted", False)
+        or any(
+            marker in text
+            for marker in (
+                "budget exhausted",
+                "execution budget",
+                "max turns",
+                "timed out",
+                "timeout",
+            )
+        )
+    ):
+        return "execution_budget"
+    return "repairable_quality"
+
+
 def _run_sceneexpert_placement_stage(
     *,
     stage: str,
@@ -185,29 +223,63 @@ def _run_sceneexpert_placement_stage(
     regeneration_attempt = 0
     critic_retry_attempted = False
     completion_rescue_attempted = False
+    runtime_events: list[str] = []
 
     while True:
         try:
             asyncio.run(run_once())
+            setattr(scene, "scene_expert_runtime_repair_events", runtime_events)
             return regeneration_attempt
         except StageValidationError as exc:
             if not _is_repairable_stage_validation(exc):
                 raise
-            critic_only = bool(exc.reasons) and all(
-                "visual critic did not produce a trustworthy score" in reason.lower()
-                for reason in exc.reasons
-            )
+            failure_kind = _stage_validation_kind(exc, agent)
+            critic_only = failure_kind == "critic_unavailable"
             if critic_only and not critic_retry_attempted:
                 critic_retry_attempted = True
                 console_logger.warning(
-                    "%s output is hard-valid but unscored; retrying only the compact "
-                    "final critic before considering regeneration",
+                    "%s output is hard-valid but unscored; retrying one compact "
+                    "final critic with an expanded critical budget",
                     stage,
                 )
                 retry_critic = getattr(agent, "retry_final_critic_evaluation", None)
                 if callable(retry_critic):
-                    asyncio.run(retry_critic())
-                    return regeneration_attempt
+                    runtime_events.append("expanded_compact_critic_retry")
+                    try:
+                        asyncio.run(retry_critic())
+                        setattr(
+                            scene,
+                            "scene_expert_runtime_repair_events",
+                            runtime_events,
+                        )
+                        return regeneration_attempt
+                    except StageValidationError as retry_exc:
+                        if not _is_repairable_stage_validation(retry_exc):
+                            raise
+                        exc = retry_exc
+                        failure_kind = _stage_validation_kind(exc, agent)
+                    except Exception as retry_exc:
+                        console_logger.exception(
+                            "%s expanded critic retry failed; preserving an "
+                            "explicitly unscored stage instead of aborting ACP",
+                            stage,
+                        )
+                        exc = StageValidationError(
+                            stage=stage,
+                            reasons=[
+                                *list(exc.reasons),
+                                "expanded visual critic retry failed: "
+                                f"{type(retry_exc).__name__}: {retry_exc}",
+                            ],
+                        )
+                        failure_kind = "critic_unavailable"
+
+            # A second critic transport failure cannot be repaired by redesigning
+            # the same hard-valid scene. Structural surface absence likewise
+            # cannot benefit from another LLM loop.
+            if failure_kind in {"critic_unavailable", "structural_unavailable"}:
+                regeneration_attempt = max_regenerations
+                completion_rescue_attempted = True
 
             missing_required_output = any(
                 "missing required stage output" in reason.lower()
@@ -258,7 +330,13 @@ def _run_sceneexpert_placement_stage(
                         if callable(prepare_regeneration):
                             asyncio.run(prepare_regeneration(list(exc.reasons)))
                         try:
+                            runtime_events.append("focused_completion_rescue")
                             asyncio.run(rescue(list(exc.reasons)))
+                            setattr(
+                                scene,
+                                "scene_expert_runtime_repair_events",
+                                runtime_events,
+                            )
                             return regeneration_attempt
                         except StageValidationError as rescue_exc:
                             if not _is_repairable_stage_validation(rescue_exc):
@@ -291,11 +369,22 @@ def _run_sceneexpert_placement_stage(
                     agent, "complete_repair_exhausted_stage", None
                 )
                 if callable(complete_degraded):
+                    runtime_events.append(
+                        f"degraded_after_{failure_kind}"
+                    )
                     asyncio.run(complete_degraded(list(exc.reasons)))
+                    setattr(
+                        scene,
+                        "scene_expert_runtime_repair_events",
+                        runtime_events,
+                    )
                     return regeneration_attempt
                 raise
 
             regeneration_attempt += 1
+            runtime_events.append(
+                f"full_stage_regeneration_{regeneration_attempt}"
+            )
             console_logger.warning(
                 "%s stage failed its completion contract; restoring the stage "
                 "input checkpoint and requesting a new agent design (%d/%d): %s",
@@ -1597,9 +1686,12 @@ def _generate_room(
         # Fallen furniture removal is not needed here (furniture is welded).
         # Get fallen manipuland config from manipuland_agent physics_validation.
         manipuland_physics_cfg = cfg_dict["manipuland_agent"]["physics_validation"]
-        scene, projection_success, removed_ids = (
-            apply_physical_feasibility_postprocessing(
-                scene=scene,
+
+        def run_final_postprocessing(
+            candidate_scene: RoomScene,
+        ) -> tuple[RoomScene, bool, list[str]]:
+            return apply_physical_feasibility_postprocessing(
+                scene=candidate_scene,
                 weld_furniture=True,
                 projection_enabled=True,
                 projection_influence_distance=final_cfg["influence_distance"],
@@ -1627,24 +1719,193 @@ def _generate_room(
                     "fallen_manipuland_z_displacement"
                 ],
             )
-        )
-        end_time = time.time()
+
+        scene, projection_success, removed_ids = run_final_postprocessing(scene)
+        postprocess_critic_attempted = False
         if not projection_success:
             console_logger.error(
                 "Final projection failed; restoring original positions"
             )
             scene.restore_from_state_dict(pre_final_postprocess_state)
             removed_ids = []
+            degraded_reasons = list(
+                getattr(scene, "scene_expert_degraded_stage_reasons", []) or []
+            )
+            degraded_reasons.append(
+                "final manipuland physics projection failed; restored the "
+                "pre-projection candidate without final physics verification"
+            )
+            setattr(
+                scene,
+                "scene_expert_degraded_stage_reasons",
+                degraded_reasons,
+            )
         else:
             if removed_ids:
                 console_logger.info(
                     f"Removed {len(removed_ids)} fallen manipuland(s) during "
                     f"final simulation: {removed_ids}"
                 )
-            console_logger.info(
-                f"Final post-processing completed for room {room_id} in "
-                f"{end_time - start_time:.2f} seconds"
+            minimum_manipulands = int(
+                getattr(scene, "scene_expert_min_output_objects", 0) or 0
             )
+            final_manipuland_count = len(
+                scene.get_objects_by_type(ObjectType.MANIPULAND)
+            )
+            if (
+                minimum_manipulands > 0
+                and final_manipuland_count < minimum_manipulands
+            ):
+                reason = (
+                    "final physics post-processing removed required manipulands: "
+                    f"{final_manipuland_count} remain, "
+                    f"{minimum_manipulands} required"
+                )
+                console_logger.warning(
+                    "%s; running one focused, expanded-budget completion rescue",
+                    reason,
+                )
+                runtime_events = list(
+                    getattr(scene, "scene_expert_runtime_repair_events", []) or []
+                )
+                runtime_events.append("postprocess_completion_rescue")
+                setattr(
+                    scene,
+                    "scene_expert_runtime_repair_events",
+                    runtime_events,
+                )
+                try:
+                    manipuland_agent.scene = scene
+                    asyncio.run(
+                        manipuland_agent.prepare_stage_regeneration([reason])
+                    )
+                    asyncio.run(
+                        manipuland_agent.run_required_stage_completion_rescue(
+                            [reason]
+                        )
+                    )
+                    scene = manipuland_agent.scene
+                    post_rescue_state = scene.to_state_dict()
+                    (
+                        scene,
+                        rescue_projection_success,
+                        rescue_removed_ids,
+                    ) = run_final_postprocessing(scene)
+                    if not rescue_projection_success:
+                        scene.restore_from_state_dict(post_rescue_state)
+                        raise RuntimeError(
+                            "final projection failed after manipuland rescue"
+                        )
+                    remaining_after_rescue = len(
+                        scene.get_objects_by_type(ObjectType.MANIPULAND)
+                    )
+                    if remaining_after_rescue < minimum_manipulands:
+                        raise StageValidationError(
+                            stage="manipuland",
+                            reasons=[
+                                "focused post-processing rescue still left "
+                                f"{remaining_after_rescue} manipulands; "
+                                f"{minimum_manipulands} required; removed="
+                                f"{rescue_removed_ids}"
+                            ],
+                        )
+                    manipuland_agent.scene = scene
+                    postprocess_critic_attempted = True
+                    asyncio.run(
+                        manipuland_agent.retry_final_critic_evaluation()
+                    )
+                    runtime_events.append("postprocess_rescue_verified")
+                    setattr(
+                        scene,
+                        "scene_expert_runtime_repair_events",
+                        runtime_events,
+                    )
+                except Exception as rescue_exc:
+                    degraded_reasons = list(
+                        getattr(
+                            scene,
+                            "scene_expert_degraded_stage_reasons",
+                            [],
+                        )
+                        or []
+                    )
+                    degraded_reasons.append(
+                        reason
+                        + "; focused rescue failed: "
+                        + f"{type(rescue_exc).__name__}: {rescue_exc}"
+                    )
+                    setattr(
+                        scene,
+                        "scene_expert_degraded_stage_reasons",
+                        degraded_reasons,
+                    )
+                    console_logger.exception(
+                        "Manipuland post-processing rescue did not produce a "
+                        "verified minimum-output scene; continuing as degraded"
+                    )
+            final_manipuland_count = len(
+                scene.get_objects_by_type(ObjectType.MANIPULAND)
+            )
+            if (
+                getattr(manipuland_agent, "_stage_runtime_budget", {})
+                and final_manipuland_count >= minimum_manipulands
+                and not postprocess_critic_attempted
+                and getattr(manipuland_agent, "_last_scored_scene_hash", None)
+                != scene.content_hash()
+            ):
+                console_logger.info(
+                    "Final physics post-processing changed the manipuland scene; "
+                    "scoring the actual post-processed candidate once"
+                )
+                runtime_events = list(
+                    getattr(scene, "scene_expert_runtime_repair_events", []) or []
+                )
+                runtime_events.append("postprocess_final_critic")
+                setattr(
+                    scene,
+                    "scene_expert_runtime_repair_events",
+                    runtime_events,
+                )
+                try:
+                    manipuland_agent.scene = scene
+                    postprocess_critic_attempted = True
+                    asyncio.run(
+                        manipuland_agent.retry_final_critic_evaluation()
+                    )
+                    runtime_events.append("postprocess_final_critic_verified")
+                    setattr(
+                        scene,
+                        "scene_expert_runtime_repair_events",
+                        runtime_events,
+                    )
+                except Exception as critic_exc:
+                    degraded_reasons = list(
+                        getattr(
+                            scene,
+                            "scene_expert_degraded_stage_reasons",
+                            [],
+                        )
+                        or []
+                    )
+                    degraded_reasons.append(
+                        "final post-processed manipuland scene could not be "
+                        "visually verified: "
+                        f"{type(critic_exc).__name__}: {critic_exc}"
+                    )
+                    setattr(
+                        scene,
+                        "scene_expert_degraded_stage_reasons",
+                        degraded_reasons,
+                    )
+                    console_logger.exception(
+                        "Final post-processed manipuland critic did not complete; "
+                        "continuing as degraded"
+                    )
+        end_time = time.time()
+        console_logger.info(
+            f"Final post-processing completed for room {room_id} in "
+            f"{end_time - start_time:.2f} seconds"
+        )
 
     # Log and export final scene.
     logger.log_scene(scene=scene, name="final_scene")
@@ -1788,13 +2049,14 @@ def _generate_floor_plan_worker(
                     logger=logger,
                     render_gpu_id=render_gpu_id,
                 )
+                floor_plan_budget = resolve_scene_expert_stage_budget(
+                    cfg_dict, "floor_plan"
+                )
                 configure_runtime_budget = getattr(
                     floor_plan_agent, "configure_stage_runtime_budget", None
                 )
                 if callable(configure_runtime_budget):
-                    configure_runtime_budget(
-                        resolve_scene_expert_stage_budget(cfg_dict, "floor_plan")
-                    )
+                    configure_runtime_budget(floor_plan_budget)
                 try:
                     house_layout = asyncio.run(
                         floor_plan_agent.generate_house_layout(
@@ -1802,6 +2064,40 @@ def _generate_floor_plan_worker(
                             output_dir=scene_path / "floor_plans",
                         )
                     )
+                    if (
+                        floor_plan_budget
+                        and getattr(
+                            floor_plan_agent,
+                            "_last_score_provenance",
+                            {},
+                        ).get("score_source")
+                        != "vlm_critic"
+                    ):
+                        console_logger.warning(
+                            "Floor-plan output is usable but visually unscored; "
+                            "retrying one compact critic with an expanded critical "
+                            "budget"
+                        )
+                        try:
+                            asyncio.run(
+                                floor_plan_agent.retry_final_critic_evaluation()
+                            )
+                            house_layout = floor_plan_agent.layout
+                        except Exception:
+                            console_logger.exception(
+                                "Expanded floor-plan critic retry failed; retaining "
+                                "the usable layout as explicitly unscored"
+                            )
+                        if getattr(
+                            floor_plan_agent,
+                            "_last_score_provenance",
+                            {},
+                        ).get("score_source") != "vlm_critic":
+                            console_logger.error(
+                                "Floor-plan visual critic remained unavailable after "
+                                "the single expanded retry; downstream verification "
+                                "will fail this stage and suppress success memory"
+                            )
                 finally:
                     floor_plan_agent.cleanup()
 

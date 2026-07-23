@@ -129,6 +129,7 @@ class StageBudget(BaseModel):
     final_critic_reserve_fraction: float = 0.10
     fallback_reserve_fraction: float = 0.10
     finalization_reserve_fraction: float = 0.05
+    critical_retry_budget_multiplier: float = 1.5
     max_asset_requests: int = 0
     max_optional_object_families: int = 0
     max_assets_per_request: int = 0
@@ -136,6 +137,7 @@ class StageBudget(BaseModel):
     min_output_objects: int = 0
     max_output_objects: int = 0
     max_stage_regenerations: int = 1
+    min_visual_score: float = 0.60
 
 
 class HarnessContext(BaseModel):
@@ -220,7 +222,15 @@ class StageVerifyReport(BaseModel):
     pass_stage: bool
     scores: dict[str, float] = Field(
         default_factory=dict,
-        description="Scores 0-1 for semantic, aesthetic, physics, interaction",
+        description="Backward-compatible alias of VLM-only visual_scores",
+    )
+    visual_scores: dict[str, float] = Field(
+        default_factory=dict,
+        description="VLM-only 0-1 quality metrics",
+    )
+    rule_scores: dict[str, float] = Field(
+        default_factory=dict,
+        description="Deterministic rule metrics kept separate from VLM quality",
     )
     issues: list[VerifyIssue] = Field(default_factory=list)
     repair_suggestions: list[str] = Field(default_factory=list)
@@ -240,6 +250,7 @@ class StageVerifyReport(BaseModel):
         default_factory=dict,
         description="Deterministic validation provenance kept separate from VLM scores",
     )
+    runtime_repair_events: list[str] = Field(default_factory=list)
 
 
 class FullVerifyReport(BaseModel):
@@ -256,6 +267,9 @@ class FullVerifyReport(BaseModel):
     support_relation_accuracy: float = 0.0
     overall_score: float = 0.0
     pass_scene: bool = False
+    expected_stages: list[str] = Field(default_factory=list)
+    completed_stages: list[str] = Field(default_factory=list)
+    missing_stages: list[str] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------

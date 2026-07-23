@@ -143,6 +143,11 @@ def _load_score_provenance(
         "score_source": source,
         "vlm_scoring_performed": source == "vlm_critic",
         "hard_check_passed": False if source == "deterministic_hard_check" else None,
+        "score_scale": (
+            "0-10"
+            if raw_scores and any(abs(value) > 1.0 for value in raw_scores.values())
+            else "0-1"
+        ),
         "inferred_for_legacy_artifact": True,
     }
 
@@ -151,24 +156,14 @@ def _map_trustworthy_scores(
     raw_scores: dict[str, float],
     critique_summary: str,
     score_source: str,
+    score_scale: str = "",
 ) -> dict[str, float]:
     """Map only score dimensions supported by the recorded evidence source."""
     if score_source == "vlm_critic":
-        return _map_scenesmith_scores(raw_scores)
-    if score_source != "deterministic_hard_check":
-        return {}
-
-    # Synthetic hard-check grades are deliberately not mapped.  Preserve only
-    # objective failure dimensions explicitly supported by deterministic text.
-    summary = str(critique_summary or "").lower()
-    mapped: dict[str, float] = {}
-    if _critique_has_hard_collision(summary) or "physics hard violation" in summary:
-        mapped["physics"] = 0.0
-    if "missing required" in summary:
-        mapped["semantic"] = 0.0
-    if "window access warning" in summary or "door" in summary:
-        mapped["interaction"] = 0.0
-    return mapped
+        return _map_scenesmith_scores(raw_scores, score_scale=score_scale)
+    # Synthetic hard-check grades and evidence-derived failures belong only in
+    # rule_scores/issues. They must never enter the visual score namespace.
+    return {}
 
 
 # Maps stage name → subdirectory under scene_states/ that holds the stage scores.yaml.
@@ -183,13 +178,8 @@ _STAGE_SCORES_SUBDIR = {
 def _find_scores_yaml(stage_output_dir: str, stage: str = "") -> Path | None:
     """Find the definitive scores.yaml for a given stage.
 
-    Prefers the stage-specific path (scene_states/<subdir>/scores.yaml) to avoid
-    picking up per-render or per-iteration scores files.  Falls back to most-recently-
-    modified scores.yaml anywhere under the directory only when the expected path
-    is absent.
-
-    For the manipuland stage, aggregates scores from all
-    scene_states/manipuland_*/scores.yaml files and writes a temporary combined file.
+    Score provenance is stage-local evidence. Never borrow the most recently
+    modified score from another stage when the requested stage is unscored.
     """
     root = Path(stage_output_dir)
     if not root.exists():
@@ -200,7 +190,9 @@ def _find_scores_yaml(stage_output_dir: str, stage: str = "") -> Path | None:
             root / "final_floor_plan" / "scores.yaml",
             root / "floor_plans" / "final_floor_plan" / "scores.yaml",
         ):
-            if candidate.exists():
+            if candidate.exists() or (
+                candidate.parent / "score_provenance.yaml"
+            ).exists():
                 return candidate
 
     # Try stage-specific known path first.
@@ -211,42 +203,56 @@ def _find_scores_yaml(stage_output_dir: str, stage: str = "") -> Path | None:
             return candidate
 
     if stage == "manipuland":
-        # Collect all per-object manipuland scores files.
-        candidates = (
-            sorted((root / "scene_states").glob("manipuland_*/scores.yaml"))
-            if (root / "scene_states").exists()
+        scene_states_dir = root / "scene_states"
+        stage_dirs = (
+            [
+                path
+                for path in scene_states_dir.glob("manipuland_*")
+                if path.is_dir()
+                and (
+                    (path / "scores.yaml").exists()
+                    or (path / "score_provenance.yaml").exists()
+                )
+            ]
+            if scene_states_dir.exists()
             else []
         )
-        if candidates:
-            # Return the most recent per-object scores file (last manipuland placed).
-            return max(candidates, key=lambda p: p.stat().st_mtime)
-
-    # Generic fallback: most recent scores.yaml under scene_states/ only
-    # (exclude scene_renders/ which has per-iteration files).
-    scene_states_dir = root / "scene_states"
-    if scene_states_dir.exists():
-        all_candidates = list(scene_states_dir.rglob("scores.yaml"))
-        if all_candidates:
-            return max(all_candidates, key=lambda p: p.stat().st_mtime)
-        provenance_candidates = list(scene_states_dir.rglob("score_provenance.yaml"))
-        if provenance_candidates:
-            latest = max(provenance_candidates, key=lambda p: p.stat().st_mtime)
-            return latest.parent / "scores.yaml"
-
-    # Last resort: anywhere under root.
-    all_root_candidates = list(root.rglob("scores.yaml"))
-    if all_root_candidates:
-        return max(all_root_candidates, key=lambda p: p.stat().st_mtime)
+        if stage_dirs:
+            latest = max(
+                stage_dirs,
+                key=lambda path: max(
+                    (
+                        candidate.stat().st_mtime
+                        for candidate in (
+                            path / "scores.yaml",
+                            path / "score_provenance.yaml",
+                        )
+                        if candidate.exists()
+                    ),
+                    default=0.0,
+                ),
+            )
+            return latest / "scores.yaml"
 
     return None
 
 
-def _map_scenesmith_scores(raw_scores: dict[str, float]) -> dict[str, float]:
+def _map_scenesmith_scores(
+    raw_scores: dict[str, float],
+    *,
+    score_scale: str = "",
+) -> dict[str, float]:
     """Map SceneSmith raw scores to SceneExpert categories (0-1 scale)."""
     mapped: dict[str, list[float]] = {}
+    ten_point_scale = score_scale == "0-10" or (
+        not score_scale and any(abs(value) > 1.0 for value in raw_scores.values())
+    )
     for key, value in raw_scores.items():
-        # SceneSmith uses 0-10 scale; normalize to 0-1
-        normalized = value / 10.0 if value > 1.0 else value
+        # Current SceneSmith CategoryScore values are 0-10. Use provenance for
+        # the otherwise ambiguous 0/10 and 1/10 values; legacy normalized
+        # artifacts remain supported when provenance says 0-1.
+        normalized = value / 10.0 if ten_point_scale else value
+        normalized = max(0.0, min(1.0, normalized))
         # Try exact match first, then partial match
         for sm_key, se_cat in _SCENESMITH_SCORE_MAPPING.items():
             if sm_key in key.lower():
@@ -543,13 +549,20 @@ class StageVerifier:
             )
             if part
         )
-        mapped_scores = _map_trustworthy_scores(
+        visual_scores = _map_trustworthy_scores(
             raw_scores,
             verification_evidence,
             score_source,
+            score_scale=str(provenance.get("score_scale", "")),
         )
+        rule_scores: dict[str, float] = {}
+        hard_check_passed = provenance.get("hard_check_passed")
+        if hard_check_passed is True:
+            rule_scores["physics"] = 1.0
+        elif hard_check_passed is False:
+            rule_scores["physics"] = 0.0
 
-        if not mapped_scores:
+        if not visual_scores:
             console_logger.warning(
                 "No trustworthy numeric quality scores for stage %s "
                 "(score_source=%s)",
@@ -581,6 +594,22 @@ class StageVerifier:
                 repair_suggestions.append(
                     "Regenerate this stage from its input checkpoint and satisfy the "
                     "bounded stage-native object count before continuing"
+                )
+
+            degraded_reasons = [
+                str(reason)
+                for reason in scene_state_info.get("degraded_stage_reasons", [])
+                if str(reason).strip()
+            ]
+            if degraded_reasons:
+                issues.append(
+                    VerifyIssue(
+                        issue_type="degraded_stage",
+                        description=(
+                            f"Stage '{stage}' exhausted runtime recovery: "
+                            + "; ".join(degraded_reasons)
+                        ),
+                    )
                 )
 
             if stage == "furniture":
@@ -638,7 +667,7 @@ class StageVerifier:
                 "Retry the compact visual critic evaluation; do not use placeholder "
                 "numeric grades for acceptance or memory"
             )
-        elif score_source == "vlm_critic" and not mapped_scores:
+        elif score_source == "vlm_critic" and not visual_scores:
             _add_issue_once(
                 issues,
                 VerifyIssue(
@@ -730,16 +759,18 @@ class StageVerifier:
                 repair_suggestions.append(f"Ensure you avoid: {pattern}")
 
         # --- 4. Compute pass/fail ---
-        avg_score = (
-            sum(mapped_scores.values()) / len(mapped_scores)
-            if mapped_scores
-            else None
-        )
-        plausibility_score = mapped_scores.get("plausibility")
+        plausibility_score = visual_scores.get("plausibility")
         pass_plausibility = (
             plausibility_score is None or plausibility_score >= self._pass_threshold
         )
-        pass_score_gate = avg_score is None or avg_score >= self._pass_threshold
+        visual_avg_score = (
+            sum(visual_scores.values()) / len(visual_scores)
+            if visual_scores
+            else None
+        )
+        pass_score_gate = (
+            visual_avg_score is None or visual_avg_score >= self._pass_threshold
+        )
         pass_stage = pass_score_gate and pass_plausibility and len(issues) == 0
         if not pass_plausibility:
             repair_suggestions.append(
@@ -749,24 +780,42 @@ class StageVerifier:
             )
 
         console_logger.info(
-            "StageVerifier stage=%s: avg_score=%s "
+            "StageVerifier stage=%s: visual_avg=%s "
             f"pass={pass_stage} issues={len(issues)} "
             f"plausibility={plausibility_score if plausibility_score is not None else 'n/a'} "
             f"source={score_source}",
             stage,
-            f"{avg_score:.2f}" if avg_score is not None else "n/a",
+            (
+                f"{visual_avg_score:.2f}"
+                if visual_avg_score is not None
+                else "n/a"
+            ),
         )
 
         return StageVerifyReport(
             stage=stage,
             pass_stage=pass_stage,
-            scores=mapped_scores,
+            scores=visual_scores,
+            visual_scores=visual_scores,
+            rule_scores=rule_scores,
             issues=issues,
             repair_suggestions=repair_suggestions,
             critique_summary=critique_summary,
             score_source=score_source,
             vlm_scoring_performed=vlm_scoring_performed,
             hard_check_report=provenance,
+            runtime_repair_events=(
+                [
+                    str(event)
+                    for event in scene_state_info.get(
+                        "runtime_repair_events",
+                        [],
+                    )
+                    if str(event).strip()
+                ]
+                if scene_state_info
+                else []
+            ),
         )
 
 
@@ -780,6 +829,7 @@ class FullVerifier:
         self,
         stage_reports: list[StageVerifyReport],
         final_scene_path: str = "",
+        expected_stages: list[str] | None = None,
     ) -> FullVerifyReport:
         """Compute final scene quality metrics from stage reports.
 
@@ -790,71 +840,105 @@ class FullVerifier:
         Returns:
             FullVerifyReport with aggregated scores.
         """
+        expected = list(expected_stages or [])
+        completed = [report.stage for report in stage_reports]
+        unmatched_completed = list(completed)
+        missing: list[str] = []
+        for stage in expected:
+            if stage in unmatched_completed:
+                unmatched_completed.remove(stage)
+            else:
+                missing.append(stage)
         if not stage_reports:
-            return FullVerifyReport()
+            return FullVerifyReport(
+                expected_stages=expected,
+                completed_stages=completed,
+                missing_stages=missing,
+            )
 
-        # Aggregate scores across stages
-        all_scores: dict[str, list[float]] = {}
+        # Aggregate visual quality independently from deterministic rule results.
+        # Physics rules are pass/fail evidence, not substitute VLM grades.
+        visual_scores_by_category: dict[str, list[float]] = {}
+        rule_scores_by_category: dict[str, list[float]] = {}
         for report in stage_reports:
-            for category, score in report.scores.items():
-                all_scores.setdefault(category, []).append(score)
+            stage_visual_scores = report.visual_scores or report.scores
+            for category, score in stage_visual_scores.items():
+                visual_scores_by_category.setdefault(category, []).append(score)
+            for category, score in report.rule_scores.items():
+                rule_scores_by_category.setdefault(category, []).append(score)
 
-        def avg(key: str) -> float:
-            vals = all_scores.get(key, [])
+        def visual_avg(key: str) -> float:
+            vals = visual_scores_by_category.get(key, [])
             return sum(vals) / len(vals) if vals else 0.0
 
-        semantic = avg("semantic")
-        aesthetic = avg("aesthetic")
-        plausibility = avg("plausibility")
-        physics = avg("physics")
-        interaction = avg("interaction")
-        walkability = avg("walkability")
+        def rule_avg(key: str) -> float | None:
+            vals = rule_scores_by_category.get(key, [])
+            return sum(vals) / len(vals) if vals else None
 
-        # Derived overall score
+        semantic = visual_avg("semantic")
+        aesthetic = visual_avg("aesthetic")
+        plausibility = visual_avg("plausibility")
+        visual_physics = visual_avg("physics")
+        hard_physics = rule_avg("physics")
+        interaction = visual_avg("interaction")
+        walkability = visual_avg("walkability")
+
+        # Overall remains a visual-quality metric. Hard physics gates acceptance
+        # through each stage's pass flag and is reported separately below.
+        visual_dimensions = [
+            key
+            for key in (
+                "semantic",
+                "aesthetic",
+                "plausibility",
+                "physics",
+                "interaction",
+                "walkability",
+            )
+            if key in visual_scores_by_category
+        ]
         overall = (
-            semantic + aesthetic + plausibility + physics + interaction + walkability
-        ) / max(
-            sum(
-                1
-                for k in [
-                    "semantic",
-                    "aesthetic",
-                    "plausibility",
-                    "physics",
-                    "interaction",
-                    "walkability",
-                ]
-                if k in all_scores
-            ),
-            1,
+            sum(visual_avg(key) for key in visual_dimensions)
+            / len(visual_dimensions)
+            if visual_dimensions
+            else 0.0
         )
 
-        has_plausibility = "plausibility" in all_scores
+        has_plausibility = "plausibility" in visual_scores_by_category
         pass_plausibility = not has_plausibility or plausibility >= self._pass_threshold
+        collision_free_rate = (
+            hard_physics if hard_physics is not None else visual_physics
+        )
 
         report = FullVerifyReport(
             semantic_score=semantic,
             aesthetic_score=aesthetic,
             plausibility_score=plausibility,
             style_consistency=aesthetic,  # proxy
-            collision_free_rate=physics,
-            stability_score=physics,  # proxy
+            collision_free_rate=collision_free_rate,
+            stability_score=visual_physics,  # VLM physics-quality proxy
             walkable_area_ratio=walkability if walkability > 0 else 0.0,
             reachability_score=interaction,
             support_relation_accuracy=interaction,  # proxy
             overall_score=overall,
             pass_scene=(
-                bool(all_scores)
+                bool(visual_scores_by_category)
+                and not missing
                 and all(stage.pass_stage for stage in stage_reports)
                 and overall >= self._pass_threshold
                 and pass_plausibility
             ),
+            expected_stages=expected,
+            completed_stages=completed,
+            missing_stages=missing,
         )
 
         console_logger.info(
             "FullVerifier: "
             f"semantic={semantic:.2f} aesthetic={aesthetic:.2f} "
-            f"plausibility_score={plausibility:.2f} physics={physics:.2f} "
+            f"plausibility_score={plausibility:.2f} "
+            f"visual_physics={visual_physics:.2f} "
+            f"hard_physics={hard_physics if hard_physics is not None else 'n/a'} "
             f"interaction={interaction:.2f} walkability={walkability:.2f} "
             f"overall={overall:.2f} pass={'YES' if report.pass_scene else 'NO'}"
         )

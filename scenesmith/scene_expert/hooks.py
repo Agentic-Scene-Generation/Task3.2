@@ -338,6 +338,7 @@ class SceneExpertHookRunner:
             task_spec=self._task_spec.model_dump(),
         )
         self._stage_reports: list[StageVerifyReport] = []
+        self._expected_stages: list[str] = []
         self._completed_stages: list[str] = list(self._stage_order_baseline)
         self._qwen_calls = 0
 
@@ -499,9 +500,15 @@ class SceneExpertHookRunner:
             )
 
     def _stage_score_quality(self, report: StageVerifyReport) -> float:
-        if not report.scores:
+        if not report.visual_scores:
             return 0.0
-        return max(0.0, min(1.0, sum(report.scores.values()) / len(report.scores)))
+        return max(
+            0.0,
+            min(
+                1.0,
+                sum(report.visual_scores.values()) / len(report.visual_scores),
+            ),
+        )
 
     def _commit_stage_memory(
         self,
@@ -530,7 +537,10 @@ class SceneExpertHookRunner:
                 "scene_state_path": scene_state_path,
                 "pass_stage": verify_report.pass_stage,
                 "quality_score": quality,
-                "scores": verify_report.scores,
+                "visual_scores": verify_report.visual_scores,
+                "rule_scores": verify_report.rule_scores,
+                "score_source": verify_report.score_source,
+                "runtime_repair_events": verify_report.runtime_repair_events,
                 "issues": [issue.model_dump() for issue in verify_report.issues],
                 "repair_actions": [
                     (
@@ -547,7 +557,11 @@ class SceneExpertHookRunner:
             digest = hashlib.sha1(
                 json.dumps(event, sort_keys=True, default=str).encode("utf-8")
             ).hexdigest()[:12]
-            if verify_report.pass_stage and quality >= 0.75:
+            if (
+                verify_report.pass_stage
+                and verify_report.score_source == "vlm_critic"
+                and quality >= 0.75
+            ):
                 case = SuccessCase(
                     case_id=f"success_{self._task_spec.room_type}_{stage}_{digest}",
                     room_type=self._task_spec.room_type,
@@ -568,7 +582,7 @@ class SceneExpertHookRunner:
                         "Use as a weak positive prior; adapt geometry to the "
                         "current room and re-check hard constraints."
                     ],
-                    scores=verify_report.scores,
+                    scores=verify_report.visual_scores,
                     trace_ref=f"trace_{self._scene_id:06d}",
                     quality_score=quality,
                     confidence=0.4,
@@ -637,6 +651,24 @@ class SceneExpertHookRunner:
             return list(self._task_spec.required_small_objects)
         return []
 
+    def _prompt_forbids_unrequested_objects(self) -> bool:
+        """Honor explicit closed-world prompts instead of injecting filler."""
+        text = self._prompt.lower()
+        return any(
+            marker in text
+            for marker in (
+                "nothing else",
+                "no other objects",
+                "no other items",
+                "without any additional objects",
+                "without any other objects",
+                "\u4e0d\u8981\u5176\u4ed6\u7269\u4f53",
+                "\u4e0d\u8981\u5176\u5b83\u7269\u4f53",
+                "\u4e0d\u8981\u989d\u5916\u7269\u4f53",
+                "\u9664\u6b64\u4e4b\u5916\u4e0d\u8981",
+            )
+        )
+
     # ------------------------------------------------------------------
     # Pre-stage hook: called BEFORE the SceneSmith stage agent runs
     # ------------------------------------------------------------------
@@ -651,6 +683,7 @@ class SceneExpertHookRunner:
         stage = "floor_plan"
         console_logger.info(f"[SceneExpert/{self._mode}] pre_stage: {stage}")
         self._validate_stage_transition(stage)
+        self._expected_stages.append(stage)
         self._current_stage = stage
         self._stage_start_time = time.time()
         self._qwen_calls = 0
@@ -711,16 +744,16 @@ class SceneExpertHookRunner:
         else:
             self._current_memory_pack = _empty_memory_pack()
 
+        context = self._harness.build_context(
+            stage=stage,
+            task_spec=self._task_spec,
+            memory_pack=self._current_memory_pack,
+        )
         self._current_stage_brief = None
         stage_brief_source = "disabled"
         if self._mode in ("harness_only", "harness_memory", "full"):
             try:
                 planner_start = time.time()
-                context = self._harness.build_context(
-                    stage=stage,
-                    task_spec=self._task_spec,
-                    memory_pack=self._current_memory_pack,
-                )
                 self._current_stage_brief = self._global_planner.generate_stage_brief(
                     context=context,
                     scene_state_summary="No floor plan has been generated yet.",
@@ -821,24 +854,11 @@ class SceneExpertHookRunner:
                     f"[SceneExpert] Stage {stage} FAILED verification: "
                     f"issues={[i.issue_type for i in verify_report.issues]}"
                 )
-                decision = self._harness.decide_repair(stage, verify_report)
-                if decision.should_repair:
-                    repair_result = self._repair_controller.repair(
-                        repair_type=decision.strategy,
-                        stage=stage,
-                        verify_report=verify_report,
-                        scene_path=str(scene_dir),
-                        stage_brief=self._current_stage_brief,
-                        task_spec=self._task_spec,
-                    )
-                    repair_actions.append(repair_result)
-                    self._repair_controller.record_failure_to_memory(
-                        stage=stage,
-                        room_type=self._task_spec.room_type,
-                        repair_result=repair_result,
-                        verify_report=verify_report,
-                        repair_verified=False,
-                    )
+                console_logger.warning(
+                    "[SceneExpert] Post-stage verification is diagnostic only; "
+                    "no repair is recorded unless the runtime stage loop actually "
+                    "executed it"
+                )
             else:
                 console_logger.info(f"[SceneExpert] Stage {stage} PASSED verification")
         except Exception as e:
@@ -890,10 +910,13 @@ class SceneExpertHookRunner:
         """
         console_logger.info(f"[SceneExpert/{self._mode}] pre_stage: {stage}")
         self._validate_stage_transition(stage)
+        self._expected_stages.append(stage)
         self._current_stage = stage
         self._stage_start_time = time.time()
         self._qwen_calls = 0
         self._current_memory_status = {"source": "disabled", "degraded": False}
+        setattr(scene, "scene_expert_degraded_stage_reasons", [])
+        setattr(scene, "scene_expert_runtime_repair_events", [])
 
         # Save original text_description for restoration after stage
         self._original_text_descriptions[stage] = scene.text_description
@@ -960,17 +983,17 @@ class SceneExpertHookRunner:
             self._current_memory_pack = _empty_memory_pack()
 
         # --- Step 2: Global Planner -> StageBrief ---
+        context = self._harness.build_context(
+            stage=stage,
+            task_spec=self._task_spec,
+            memory_pack=self._current_memory_pack,
+        )
         self._current_stage_brief = None
         stage_brief_source = "disabled"
         if self._mode in ("harness_only", "harness_memory", "full"):
             try:
                 planner_start = time.time()
                 scene_state_summary = self._build_scene_state_summary()
-                context = self._harness.build_context(
-                    stage=stage,
-                    task_spec=self._task_spec,
-                    memory_pack=self._current_memory_pack,
-                )
                 self._current_stage_brief = self._global_planner.generate_stage_brief(
                     context=context,
                     scene_state_summary=scene_state_summary,
@@ -1057,14 +1080,20 @@ class SceneExpertHookRunner:
             "scene_expert_required_objects",
             required_objects,
         )
-        min_output_objects = max(
-            len(required_objects),
-            int(context.stage_budget.min_output_objects or 0),
-        )
-        configured_max = int(context.stage_budget.max_output_objects or 0)
-        max_output_objects = (
-            max(configured_max, len(required_objects)) if configured_max > 0 else 0
-        )
+        if self._prompt_forbids_unrequested_objects():
+            min_output_objects = len(required_objects)
+            max_output_objects = len(required_objects)
+        else:
+            min_output_objects = max(
+                len(required_objects),
+                int(context.stage_budget.min_output_objects or 0),
+            )
+            configured_max = int(context.stage_budget.max_output_objects or 0)
+            max_output_objects = (
+                max(configured_max, len(required_objects))
+                if configured_max > 0
+                else 0
+            )
         setattr(scene, "scene_expert_min_output_objects", min_output_objects)
         setattr(scene, "scene_expert_max_output_objects", max_output_objects)
         if min_output_objects > 0 or max_output_objects > 0:
@@ -1155,26 +1184,10 @@ class SceneExpertHookRunner:
                     f"[SceneExpert] Stage {stage} FAILED verification: "
                     f"issues={[i.issue_type for i in verify_report.issues]}"
                 )
-                # Log repair decision for trace (actual re-execution not done here)
-                decision = self._harness.decide_repair(stage, verify_report)
-                if decision.should_repair:
-                    repair_result = self._repair_controller.repair(
-                        repair_type=decision.strategy,
-                        stage=stage,
-                        verify_report=verify_report,
-                        scene_path=str(room_dir),
-                        stage_brief=self._current_stage_brief,
-                        task_spec=self._task_spec,
-                    )
-                    repair_actions.append(repair_result)
-                    # Record failure to memory for future runs
-                    self._repair_controller.record_failure_to_memory(
-                        stage=stage,
-                        room_type=self._task_spec.room_type,
-                        repair_result=repair_result,
-                        verify_report=verify_report,
-                        repair_verified=False,  # can't verify without re-running
-                    )
+                console_logger.warning(
+                    "[SceneExpert] Runtime recovery is authoritative; the post-stage "
+                    "hook will not emit a fictitious repair action"
+                )
             else:
                 console_logger.info(f"[SceneExpert] Stage {stage} PASSED verification")
 
@@ -1242,6 +1255,7 @@ class SceneExpertHookRunner:
             full_report = self._full_verifier.verify(
                 stage_reports=self._stage_reports,
                 final_scene_path=final_scene_path,
+                expected_stages=self._expected_stages,
             )
             console_logger.info(
                 "[SceneExpertTiming] stage=full_scene module=full_verifier elapsed=%.2fs",
@@ -1456,6 +1470,12 @@ class SceneExpertHookRunner:
                 "stage_max_output_objects": int(
                     getattr(scene, "scene_expert_max_output_objects", 0) or 0
                 ),
+                "degraded_stage_reasons": list(
+                    getattr(scene, "scene_expert_degraded_stage_reasons", []) or []
+                ),
+                "runtime_repair_events": list(
+                    getattr(scene, "scene_expert_runtime_repair_events", []) or []
+                ),
             }
         except Exception:
             return {
@@ -1464,6 +1484,8 @@ class SceneExpertHookRunner:
                 "object_counts": {},
                 "stage_min_output_objects": 0,
                 "stage_max_output_objects": 0,
+                "degraded_stage_reasons": [],
+                "runtime_repair_events": [],
             }
 
 

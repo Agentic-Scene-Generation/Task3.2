@@ -324,8 +324,9 @@ loop_detection:
   max_repeated_attempts: 25  # Block after 2 identical attempts
   tracking_window: 30  # Track last 30 calls
 
-# Maximum number of critique-and-improve rounds before stopping
-max_critique_rounds: 1
+# Score the initial candidate and allow one critic-guided designer correction.
+max_critique_rounds: 2
+auto_score_after_design_attempts: true
 
 # Process only the most valuable support surfaces by default. The previous
 # per-furniture loop could spend hours on every bed/wardrobe/nightstand.

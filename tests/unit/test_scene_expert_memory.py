@@ -345,10 +345,20 @@ class SceneExpertMemoryTest(unittest.TestCase):
             self.assertFalse(report.vlm_scoring_performed)
             self.assertNotIn("aesthetic", report.scores)
             self.assertNotIn("semantic", report.scores)
-            self.assertEqual(0.0, report.scores["physics"])
+            self.assertEqual({}, report.scores)
+            self.assertEqual(0.0, report.rule_scores["physics"])
             issue_types = {issue.issue_type for issue in report.issues}
             self.assertIn("deterministic_hard_fail", issue_types)
             self.assertNotIn("low_prompt_following", issue_types)
+
+    def test_explicit_ten_point_scale_preserves_one_out_of_ten(self) -> None:
+        mapped = _map_scenesmith_scores(
+            {"Realism": 1, "Functionality": 10},
+            score_scale="0-10",
+        )
+
+        self.assertAlmostEqual(0.1, mapped["aesthetic"])
+        self.assertAlmostEqual(1.0, mapped["semantic"])
 
     def test_full_verifier_requires_each_stage_gate(self) -> None:
         reports = [
@@ -367,6 +377,40 @@ class SceneExpertMemoryTest(unittest.TestCase):
         full_report = FullVerifier(pass_threshold=0.7).verify(reports)
 
         self.assertAlmostEqual(0.9, full_report.overall_score)
+        self.assertFalse(full_report.pass_scene)
+
+    def test_full_verifier_rejects_missing_expected_stage(self) -> None:
+        report = StageVerifyReport(
+            stage="furniture",
+            pass_stage=True,
+            scores={"semantic": 0.9},
+            visual_scores={"semantic": 0.9},
+            rule_scores={"physics": 1.0},
+        )
+
+        full_report = FullVerifier(pass_threshold=0.7).verify(
+            [report],
+            expected_stages=["furniture", "wall_mounted"],
+        )
+
+        self.assertEqual(["wall_mounted"], full_report.missing_stages)
+        self.assertEqual(["furniture"], full_report.completed_stages)
+        self.assertFalse(full_report.pass_scene)
+
+    def test_full_verifier_counts_each_room_stage_invocation(self) -> None:
+        report = StageVerifyReport(
+            stage="furniture",
+            pass_stage=True,
+            scores={"semantic": 0.9},
+            visual_scores={"semantic": 0.9},
+        )
+
+        full_report = FullVerifier(pass_threshold=0.7).verify(
+            [report],
+            expected_stages=["furniture", "furniture"],
+        )
+
+        self.assertEqual(["furniture"], full_report.missing_stages)
         self.assertFalse(full_report.pass_scene)
 
     def test_transient_critic_fallback_is_not_mapped_as_vlm_score(self) -> None:

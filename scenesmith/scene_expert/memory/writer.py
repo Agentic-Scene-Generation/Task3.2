@@ -280,6 +280,7 @@ class MemoryWriter:
     def _should_build_fallback(self, full_report: FullVerifyReport) -> bool:
         return (
             bool(full_report.pass_scene)
+            and not full_report.missing_stages
             and full_report.overall_score >= SUCCESS_MEMORY_MIN_OVERALL_SCORE
         )
 
@@ -356,7 +357,8 @@ class MemoryWriter:
     ) -> list[tuple[str, dict[str, float]]]:
         stages: list[tuple[str, dict[str, float]]] = []
         pattern = re.compile(
-            r"^\s*\[(?P<stage>[^\]]+)\].*?verify=PASS\s+scores=\((?P<scores>[^)]*)\)",
+            r"^\s*\[(?P<stage>[^\]]+)\].*?verify=PASS\s+"
+            r"(?:visual_)?scores=\((?P<scores>[^)]*)\)",
             re.MULTILINE,
         )
         for match in pattern.finditer(trace_summary):
@@ -503,10 +505,18 @@ class MemoryWriter:
                 continue
 
             if op.memory_type == "success_case":
-                if full_report.overall_score < SUCCESS_MEMORY_MIN_OVERALL_SCORE:
+                if (
+                    not full_report.pass_scene
+                    or full_report.missing_stages
+                    or full_report.overall_score
+                    < SUCCESS_MEMORY_MIN_OVERALL_SCORE
+                ):
                     console_logger.info(
-                        "MemoryWriter: dropped success_case below quality gate "
-                        f"(overall={full_report.overall_score:.2f})"
+                        "MemoryWriter: dropped success_case because the final "
+                        "verification is incomplete or below the quality gate "
+                        f"(pass={full_report.pass_scene}, "
+                        f"missing={full_report.missing_stages}, "
+                        f"overall={full_report.overall_score:.2f})"
                     )
                     continue
                 enriched = self._enrich_success_content(op.content, full_report)

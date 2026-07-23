@@ -587,6 +587,10 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
             response=response,
             physics_context=validation_text,
         )
+        self._last_score_provenance = dict(response_provenance)
+        trusted_visual_score = (
+            response_provenance.get("score_source") == "vlm_critic"
+        )
         if response_provenance.get("score_source") == "critic_fallback":
             console_logger.warning(
                 "Floor-plan critic is unscored; suppressing legacy placeholder grades"
@@ -618,7 +622,7 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
 
         # Shift checkpoints only during iteration critiques, not final critique.
         # This preserves N-1 checkpoint for reset check in _finalize_scene_and_scores.
-        if update_checkpoint:
+        if update_checkpoint and trusted_visual_score:
             # Update checkpoint state (shift current to previous before saving new).
             self.previous_scene_checkpoint = self.scene_checkpoint
             self.previous_checkpoint_scores = self.checkpoint_scores
@@ -636,15 +640,15 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
 
         # Compute score deltas BEFORE updating previous_scores.
         score_change_msg = ""
-        if self.previous_scores is not None:
+        if trusted_visual_score and self.previous_scores is not None:
             score_change_msg = format_score_deltas_for_planner(
                 current_scores=response,
                 previous_scores=self.previous_scores,
                 format_style="detailed",
             )
 
-        # Always update previous_scores for delta formatting in planner.
-        self.previous_scores = response
+        if trusted_visual_score:
+            self.previous_scores = response
 
         return response.critique + score_change_msg
 

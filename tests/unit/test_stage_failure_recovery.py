@@ -177,6 +177,59 @@ class StageFailureRecoveryTest(unittest.TestCase):
         self.assertEqual(1, attempts)
         self.assertEqual({"run": 1, "prepare": 1, "rescue": 1}, calls)
 
+    def test_second_critic_timeout_degrades_without_redesign_loop(self) -> None:
+        class FakeScene:
+            text_description = "living room"
+            scene_expert_stage_budget = {"max_stage_regenerations": 1}
+
+            @staticmethod
+            def to_state_dict() -> dict:
+                return {"objects": {}}
+
+        calls = {"run": 0, "critic": 0, "degraded": 0}
+
+        async def run_once() -> None:
+            calls["run"] += 1
+            raise StageValidationError(
+                stage="wall_mounted",
+                reasons=[
+                    "visual critic did not produce a trustworthy score after "
+                    "bounded compact retries"
+                ],
+            )
+
+        async def retry_critic() -> None:
+            calls["critic"] += 1
+            raise StageValidationError(
+                stage="wall_mounted",
+                reasons=[
+                    "visual critic did not produce a trustworthy score after "
+                    "bounded compact retries"
+                ],
+            )
+
+        async def complete_degraded(reasons: list[str]) -> None:
+            del reasons
+            calls["degraded"] += 1
+
+        scene = FakeScene()
+        attempts = _run_sceneexpert_placement_stage(
+            stage="wall_mounted",
+            agent=SimpleNamespace(
+                retry_final_critic_evaluation=retry_critic,
+                complete_repair_exhausted_stage=complete_degraded,
+            ),
+            scene=scene,
+            run_once=run_once,
+        )
+
+        self.assertEqual(1, attempts)
+        self.assertEqual({"run": 1, "critic": 1, "degraded": 1}, calls)
+        self.assertIn(
+            "expanded_compact_critic_retry",
+            scene.scene_expert_runtime_repair_events,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

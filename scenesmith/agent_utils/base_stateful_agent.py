@@ -225,6 +225,8 @@ class BaseStatefulAgent(ABC):
         self._degraded_stage_reasons: list[str] = []
         self._last_score_provenance: dict[str, Any] = {}
         self._last_trusted_critic_candidate: dict[str, Any] | None = None
+        self._critical_retry_compact_context = False
+        self._critical_retry_budget_expanded = False
 
     def _configure_stage_runtime(self, scene: Any) -> None:
         """Bind SceneExpert's advisory budget to this stage's real execution."""
@@ -246,6 +248,75 @@ class BaseStatefulAgent(ABC):
                 ),
             )
 
+    def _refresh_asset_runtime_budget(self) -> None:
+        """Reset the per-attempt asset gate for a critical completion retry."""
+        if self.scene is None:
+            return
+        asset_manager = getattr(self, "asset_manager", None)
+        configure_asset_budget = getattr(
+            asset_manager, "configure_runtime_budget", None
+        )
+        if callable(configure_asset_budget):
+            configure_asset_budget(
+                stage=str(
+                    getattr(self.scene, "scene_expert_stage", self.agent_type.value)
+                ),
+                budget=self._stage_runtime_budget,
+                required_objects=list(
+                    getattr(self.scene, "scene_expert_required_objects", []) or []
+                ),
+            )
+
+    def _expand_critical_retry_budget(self) -> None:
+        """Grant one quality-critical retry a larger, fresh role budget."""
+        if not self._stage_runtime_budget or self._critical_retry_budget_expanded:
+            return
+        multiplier = max(
+            1.0,
+            float(
+                self._stage_budget_value(
+                    "critical_retry_budget_multiplier",
+                    1.5,
+                )
+                or 1.5
+            ),
+        )
+        for key in (
+            "max_wall_clock_seconds",
+            "critic_evaluation_max_seconds",
+            "max_designer_turns",
+            "max_critic_turns",
+            "max_asset_requests",
+            "max_semantic_retries_per_family",
+        ):
+            value = float(self._stage_runtime_budget.get(key, 0) or 0)
+            if value <= 0:
+                continue
+            expanded = value * multiplier
+            self._stage_runtime_budget[key] = (
+                int(round(expanded))
+                if key.startswith("max_") and not key.endswith("_seconds")
+                else expanded
+            )
+        wall_clock = float(
+            self._stage_runtime_budget.get("max_wall_clock_seconds", 0.0) or 0.0
+        )
+        final_fraction = float(
+            self._stage_runtime_budget.get("final_critic_reserve_fraction", 0.0)
+            or 0.0
+        )
+        if wall_clock > 0 and final_fraction > 0:
+            self._stage_runtime_budget["critic_evaluation_max_seconds"] = max(
+                float(
+                    self._stage_runtime_budget.get(
+                        "critic_evaluation_max_seconds", 0.0
+                    )
+                    or 0.0
+                ),
+                wall_clock * min(0.9, max(0.0, final_fraction)),
+            )
+        self._critical_retry_budget_expanded = True
+
     def configure_stage_runtime_budget(self, raw_budget: Any) -> None:
         """Bind an execution budget when no ``RoomScene`` object is available.
 
@@ -261,6 +332,8 @@ class BaseStatefulAgent(ABC):
         self._stage_runtime_started_at = time.monotonic()
         self._critic_evaluation_started_at = None
         self._stage_runtime_exhausted = False
+        self._critical_retry_budget_expanded = False
+        self._refresh_asset_runtime_budget()
         self._stage_runtime_phase = "agent"
         self._last_score_provenance = {}
         self._last_trusted_critic_candidate = None
@@ -299,14 +372,17 @@ class BaseStatefulAgent(ABC):
 
     async def retry_final_critic_evaluation(self) -> None:
         """Retry only the final visual decision for an otherwise valid scene."""
+        self._expand_critical_retry_budget()
         self._stage_runtime_started_at = time.monotonic()
         self._critic_evaluation_started_at = None
         self._stage_runtime_exhausted = False
         self._stage_runtime_phase = "fallback"
+        self._critical_retry_compact_context = True
         try:
             await self._request_critique_impl(update_checkpoint=False)
             await self._finalize_scene_and_scores()
         finally:
+            self._critical_retry_compact_context = False
             self._stage_runtime_phase = "agent"
 
     async def complete_repair_exhausted_stage(self, reasons: list[str]) -> None:
@@ -329,16 +405,27 @@ class BaseStatefulAgent(ABC):
         deadline before the designer's placement tools finish.  Deterministic
         checks still decide whether the rescued candidate is admissible.
         """
+        self._expand_critical_retry_budget()
         self._stage_runtime_started_at = time.monotonic()
         self._critic_evaluation_started_at = None
         self._stage_runtime_exhausted = False
         self._stage_runtime_phase = "fallback"
+        self._critical_retry_compact_context = True
         self._allow_degraded_stage_completion = False
+        self._refresh_asset_runtime_budget()
         minimum = max(
             1,
-            int(self._stage_budget_value("min_output_objects", 1) or 1),
+            int(
+                getattr(self.scene, "scene_expert_min_output_objects", 0)
+                or self._stage_budget_value("min_output_objects", 1)
+                or 1
+            ),
         )
-        configured_maximum = int(self._stage_budget_value("max_output_objects", 0) or 0)
+        configured_maximum = int(
+            getattr(self.scene, "scene_expert_max_output_objects", 0)
+            or self._stage_budget_value("max_output_objects", 0)
+            or 0
+        )
         quantity_instruction = (
             f"Place between {minimum} and "
             f"{max(configured_maximum, minimum)} stage-native objects. "
@@ -363,6 +450,7 @@ class BaseStatefulAgent(ABC):
             await self._request_critique_impl(update_checkpoint=False)
             await self._finalize_scene_and_scores()
         finally:
+            self._critical_retry_compact_context = False
             self._stage_runtime_phase = "agent"
 
     def _stage_budget_value(self, key: str, default: Any) -> Any:
@@ -374,11 +462,27 @@ class BaseStatefulAgent(ABC):
             return ""
         minimum = max(
             0,
-            int(self._stage_budget_value("min_output_objects", 0) or 0),
+            int(
+                getattr(
+                    getattr(self, "scene", None),
+                    "scene_expert_min_output_objects",
+                    0,
+                )
+                or self._stage_budget_value("min_output_objects", 0)
+                or 0
+            ),
+        )
+        configured_maximum = int(
+            getattr(
+                getattr(self, "scene", None),
+                "scene_expert_max_output_objects",
+                0,
+            )
+            or self._stage_budget_value("max_output_objects", 0)
+            or 0
         )
         if minimum <= 0:
             return ""
-        configured_maximum = int(self._stage_budget_value("max_output_objects", 0) or 0)
         maximum_clause = (
             f" and no more than {max(configured_maximum, minimum)}"
             if configured_maximum > 0
@@ -608,6 +712,8 @@ class BaseStatefulAgent(ABC):
 
     def _retrieve_working_memory_for_designer(self, query: str) -> str:
         """Fetch compact online memory to inject into the next designer call."""
+        if self._critical_retry_compact_context:
+            return ""
         try:
             memory_text = self.stage_working_memory.retrieve_for_designer(
                 query=query,
@@ -683,7 +789,12 @@ class BaseStatefulAgent(ABC):
             self.stage_working_memory.save_context_bundle(bundle)
             if not self._stage_context_injection_enabled():
                 return ""
-            return bundle.to_llm_text(max_chars=self._stage_context_max_chars())
+            max_chars = (
+                min(900, self._stage_context_max_chars())
+                if self._critical_retry_compact_context
+                else self._stage_context_max_chars()
+            )
+            return bundle.to_llm_text(max_chars=max_chars)
         except Exception as e:
             console_logger.warning("Failed to prepare StageContextBundle: %s", e)
             return ""
@@ -737,9 +848,10 @@ class BaseStatefulAgent(ABC):
         *,
         render_dir: Path | None,
         event: str,
-        scores: CritiqueWithScores,
+        scores: CritiqueWithScores | None,
         critique: str,
         physics_context: str,
+        score_source: str,
     ) -> None:
         """Attach critic scores and critique text to the current render memory."""
         if render_dir is None:
@@ -752,6 +864,7 @@ class BaseStatefulAgent(ABC):
                 scene=self.scene,
                 scores=scores,
                 critique=critique,
+                score_source=score_source,
                 extra={"physics_context": physics_context[:1500]},
             )
         except Exception as e:
@@ -926,6 +1039,9 @@ class BaseStatefulAgent(ABC):
             "schema_version": "1.0",
             "score_source": score_source,
             "vlm_scoring_performed": score_source == "vlm_critic",
+            "score_scale": (
+                "none" if score_source == "critic_fallback" else "0-10"
+            ),
             "hard_check_passed": hard_check_passed,
             "scores_semantics": score_semantics,
             "decision_scores_file": (
@@ -935,6 +1051,18 @@ class BaseStatefulAgent(ABC):
             "hard_check_evidence": str(physics_context or ""),
         }
         return provenance
+
+    @staticmethod
+    def _normalized_visual_score(scores: CritiqueWithScores | None) -> float | None:
+        """Return the mean 0-1 VLM quality score for one candidate."""
+        if scores is None:
+            return None
+        categories = list(scores.get_scores())
+        if not categories:
+            return None
+        return sum(max(0, min(10, score.grade)) for score in categories) / (
+            10.0 * len(categories)
+        )
 
     def _write_scores_and_memory(
         self,
@@ -979,9 +1107,15 @@ class BaseStatefulAgent(ABC):
             self._save_critic_working_memory(
                 render_dir=images_dir,
                 event=event,
-                scores=response,
+                scores=(
+                    response
+                    if provenance.get("score_source")
+                    in {"vlm_critic", "deterministic_hard_check"}
+                    else None
+                ),
                 critique=response.critique,
                 physics_context=physics_context,
+                score_source=str(provenance.get("score_source", "unknown")),
             )
         else:
             console_logger.error(
@@ -2406,6 +2540,27 @@ class BaseStatefulAgent(ABC):
                         stage=self.agent_type.value,
                         reasons=[reason],
                     )
+            elif not (controller and getattr(controller, "enabled", False)):
+                visual_score = self._normalized_visual_score(self.previous_scores)
+                minimum_visual_score = float(
+                    self._stage_budget_value("min_visual_score", 0.60) or 0.60
+                )
+                if (
+                    visual_score is not None
+                    and visual_score < minimum_visual_score
+                ):
+                    reason = (
+                        "visual critic quality below stage threshold: "
+                        f"{visual_score:.3f} < {minimum_visual_score:.3f}"
+                    )
+                    if self._allow_degraded_stage_completion:
+                        console_logger.warning("%s", reason)
+                        self._degraded_stage_reasons.append(reason)
+                    else:
+                        raise StageValidationError(
+                            stage=self.agent_type.value,
+                            reasons=[reason],
+                        )
 
         # Copy final scores and renders to per-stage directory.
         # Use final_render_dir (tracks actual last render) instead of checkpoint_render_dir
@@ -3061,13 +3216,9 @@ class BaseStatefulAgent(ABC):
                 event="deterministic_hard_fail",
             )
 
+            # Synthetic hard-check grades are repair priorities, not a quality
+            # checkpoint and not a commensurate score delta.
             score_change_msg = ""
-            if self.previous_scores is not None:
-                score_change_msg = format_score_deltas_for_planner(
-                    current_scores=response,
-                    previous_scores=self.previous_scores,
-                    format_style="detailed",
-                )
 
             controller = getattr(self, "furniture_safety_controller", None)
             if controller and controller.enabled:
@@ -3103,9 +3254,7 @@ class BaseStatefulAgent(ABC):
                     "failed."
                 )
 
-            self.previous_scores = response
             self.final_render_dir = checkpoint_render_dir or images_dir
-            self._last_scored_scene_hash = self.scene.content_hash()
             self._last_critique_render_profile = render_profile
             self._record_module_timing(
                 "critic",
@@ -3146,6 +3295,21 @@ class BaseStatefulAgent(ABC):
             placement_style=self.placement_style,
             **extra_kwargs,
         )
+        if hard_state is not None and hard_state.soft_reasons:
+            critique_instruction += (
+                "\n\nDeterministic soft diagnostics for this same candidate "
+                "(verify them against the renders and exact scene state; do not "
+                "treat them as automatic hard failures):\n- "
+                + "\n- ".join(hard_state.soft_reasons[:8])
+            )
+        if self.agent_type == AgentType.FURNITURE:
+            critique_instruction += (
+                "\n\nOrientation evidence contract: asset preprocessing "
+                "canonicalizes the visual front to local +Y. Therefore an "
+                "object's world-facing direction is its local +Y transformed by "
+                "the reported yaw. Evaluate sofa/bed/chair facing in this same "
+                "critic pass; do not claim a separate facing-tool result."
+            )
         context_block = self._prepare_stage_context_for_llm(
             agent_role="critic",
             event="request_critique",
@@ -3444,8 +3608,11 @@ class BaseStatefulAgent(ABC):
         )
 
         # Compute score deltas and format for planner if we have previous scores.
+        trusted_visual_score = (
+            response_provenance.get("score_source") == "vlm_critic"
+        )
         score_change_msg = ""
-        if self.previous_scores is not None:
+        if trusted_visual_score and self.previous_scores is not None:
             score_change_msg = format_score_deltas_for_planner(
                 current_scores=response,
                 previous_scores=self.previous_scores,
@@ -3459,6 +3626,7 @@ class BaseStatefulAgent(ABC):
                 physics_context=physics_context,
             )
         )
+        checkpoint_accepted = bool(checkpoint_accepted and trusted_visual_score)
 
         # Shift checkpoints only during iteration critiques, not final critique.
         # This preserves N-1 checkpoint for reset check in _finalize_scene_and_scores.
@@ -3482,14 +3650,18 @@ class BaseStatefulAgent(ABC):
                 "the current candidate."
             )
 
-        # Always update previous_scores for delta formatting in planner.
-        self.previous_scores = response
+        # Only comparable VLM quality scores participate in deltas and
+        # checkpoint selection. Transport placeholders and deterministic repair
+        # grades remain available through their separate provenance artifacts.
+        if trusted_visual_score:
+            self.previous_scores = response
 
         # Always track the final render directory (separate from checkpoint logic).
         # This is needed because final critique uses update_checkpoint=False, but we
         # still need to know the actual last render dir for copying to final output.
         self.final_render_dir = checkpoint_render_dir or images_dir
-        self._last_scored_scene_hash = self.scene.content_hash()
+        if trusted_visual_score:
+            self._last_scored_scene_hash = self.scene.content_hash()
         self._last_critique_render_profile = render_profile
 
         # Return natural language critique with score deltas for planner.

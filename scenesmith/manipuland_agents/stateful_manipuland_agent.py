@@ -672,6 +672,9 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
             self._defer_stage_completion_contract = False
         if self._last_score_provenance.get("score_source") == "vlm_critic":
             self._stage_trusted_score_available = True
+            visual_score = self._normalized_visual_score(self.previous_scores)
+            if visual_score is not None:
+                self._stage_visual_scores.append(visual_score)
 
         console_logger.info(
             f"Completed manipuland placement for furniture {furniture_id}"
@@ -728,6 +731,7 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
         self._configure_stage_runtime(scene)
         self.scene = scene
         self._stage_trusted_score_available = False
+        self._stage_visual_scores: list[float] = []
 
         # Clear render cache to ensure fresh renders for manipulands.
         # This prevents cache key collisions when object IDs are reused.
@@ -739,6 +743,19 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
         if not furniture_data:
             console_logger.info("No furniture identified for manipuland placement")
             if self._stage_runtime_budget:
+                eligible_support_objects = [
+                    obj
+                    for obj in scene.get_objects_by_type(ObjectType.FURNITURE)
+                    if not getattr(obj, "immutable", False)
+                ]
+                if not eligible_support_objects:
+                    raise StageValidationError(
+                        stage=self.agent_type.value,
+                        reasons=[
+                            "support surface unavailable: the scene contains no "
+                            "eligible furniture for manipuland placement"
+                        ],
+                    )
                 hard_state = self._evaluate_current_hard_state()
                 if hard_state is not None and not hard_state.hard_valid:
                     raise StageValidationError(
@@ -770,8 +787,8 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
             raise StageValidationError(
                 stage=self.agent_type.value,
                 reasons=[
-                    "missing required stage output: no valid furniture support "
-                    "target was selected for manipuland placement"
+                    "missing required stage output: the analyzer selection "
+                    "contained no eligible furniture support target"
                 ],
             )
         max_target_furniture = self._get_max_target_furniture()
@@ -920,6 +937,16 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
                         minimum > 0
                         and placed_count >= minimum
                         and self._stage_trusted_score_available
+                        and self._stage_visual_scores
+                        and self._last_scored_scene_hash == self.scene.content_hash()
+                        and self._stage_visual_scores[-1]
+                        >= float(
+                            self._stage_budget_value(
+                                "min_visual_score",
+                                0.60,
+                            )
+                            or 0.60
+                        )
                     ):
                         console_logger.info(
                             "Manipuland completion contract satisfied after %s "
@@ -945,12 +972,35 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
                     stage=self.agent_type.value,
                     reasons=list(final_hard_state.hard_reasons),
                 )
-            if not self._stage_trusted_score_available:
+            current_scene_scored = (
+                self._stage_trusted_score_available
+                and self._last_scored_scene_hash == self.scene.content_hash()
+            )
+            if not current_scene_scored:
                 raise StageValidationError(
                     stage=self.agent_type.value,
                     reasons=[
-                        "visual critic did not produce a trustworthy score after "
-                        "bounded compact retries"
+                        "visual critic did not produce a trustworthy score for "
+                        "the final manipuland scene after bounded compact retries"
+                    ],
+                )
+            final_visual_score = (
+                self._stage_visual_scores[-1]
+                if self._stage_visual_scores
+                else None
+            )
+            minimum_visual_score = float(
+                self._stage_budget_value("min_visual_score", 0.60) or 0.60
+            )
+            if (
+                final_visual_score is not None
+                and final_visual_score < minimum_visual_score
+            ):
+                raise StageValidationError(
+                    stage=self.agent_type.value,
+                    reasons=[
+                        "visual critic quality below stage threshold: "
+                        f"{final_visual_score:.3f} < {minimum_visual_score:.3f}"
                     ],
                 )
 

@@ -28,6 +28,7 @@ from scenesmith.agent_utils.room import AgentType, RoomScene
 from scenesmith.agent_utils.scoring import WallCritiqueWithScores, log_agent_response
 from scenesmith.agent_utils.workflow_tools import WorkflowTools
 from scenesmith.prompts.registry import WallAgentPrompts
+from scenesmith.scene_expert.exceptions import StageValidationError
 from scenesmith.utils.logging import BaseLogger
 from scenesmith.wall_agents.base_wall_agent import BaseWallAgent
 from scenesmith.wall_agents.tools.vision_tools import WallVisionTools
@@ -431,6 +432,17 @@ class StatefulWallAgent(BaseStatefulAgent, BaseWallAgent):
 
         if not self.wall_surfaces:
             console_logger.warning(f"No wall surfaces found for room {room_id}")
+            minimum = int(
+                getattr(scene, "scene_expert_min_output_objects", 0) or 0
+            )
+            if minimum > 0:
+                raise StageValidationError(
+                    stage=self.agent_type.value,
+                    reasons=[
+                        "stage surface unavailable: no usable wall surfaces were "
+                        f"extracted for room {room_id}"
+                    ],
+                )
             return
 
         console_logger.info(

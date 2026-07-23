@@ -299,6 +299,7 @@ class StageWorkingMemory:
         text: str = "",
         scores: Any | None = None,
         critique: str = "",
+        score_source: str = "",
         extra: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Save a compact record for one render or scored render."""
@@ -316,11 +317,12 @@ class StageWorkingMemory:
             critique=critique or text,
             invalid_assets=_invalid_asset_names(scene),
         )
-        score_source = "none"
-        if event == "deterministic_hard_fail":
-            score_source = "deterministic_hard_check"
-        elif score_data and role == "critic":
-            score_source = "vlm_critic"
+        resolved_score_source = str(score_source or "none")
+        if not score_source:
+            if event == "deterministic_hard_fail":
+                resolved_score_source = "deterministic_hard_check"
+            elif score_data and role == "critic":
+                resolved_score_source = "vlm_critic"
         record = {
             "schema_version": "1.0",
             "created_at": _now(),
@@ -336,7 +338,7 @@ class StageWorkingMemory:
             ),
             "scores": score_data,
             "score_total": _score_total(scores),
-            "score_source": score_source,
+            "score_source": resolved_score_source,
             "critique": _compact(critique, max_chars=900),
             "text": _compact(text, max_chars=900),
             "scene_hash": _scene_hash(scene),
@@ -563,7 +565,11 @@ class StageWorkingMemory:
             quality = record.get("deterministic_quality") or {}
             scores = record.get("scores") or {}
             hard_valid = bool(quality.get("hard_valid", True))
-            if hard_valid and scores:
+            if (
+                hard_valid
+                and scores
+                and record.get("score_source") == "vlm_critic"
+            ):
                 self._commit_public_success_case(record)
             elif not hard_valid or record.get("event") == "deterministic_hard_fail":
                 self._commit_public_failure_case(record)

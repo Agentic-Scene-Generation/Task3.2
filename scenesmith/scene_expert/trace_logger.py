@@ -331,10 +331,23 @@ class TraceLogger:
                 stage_line += f" objective={entry.stage_brief.stage_objective!r}"
             if entry.verify_report:
                 passed = "PASS" if entry.verify_report.pass_stage else "FAIL"
-                scores = ", ".join(
-                    f"{k}={v:.2f}" for k, v in entry.verify_report.scores.items()
+                visual_scores = ", ".join(
+                    f"{k}={v:.2f}"
+                    for k, v in entry.verify_report.visual_scores.items()
                 )
-                stage_line += f" verify={passed} scores=({scores})"
+                rule_scores = ", ".join(
+                    f"{k}={v:.2f}"
+                    for k, v in entry.verify_report.rule_scores.items()
+                )
+                stage_line += (
+                    f" verify={passed} visual_scores=({visual_scores}) "
+                    f"rule_scores=({rule_scores})"
+                )
+                if entry.verify_report.runtime_repair_events:
+                    stage_line += (
+                        " runtime_recovery="
+                        f"{entry.verify_report.runtime_repair_events}"
+                    )
                 if entry.verify_report.issues:
                     issue_types = [i.issue_type for i in entry.verify_report.issues]
                     stage_line += f" issues={issue_types}"

@@ -207,8 +207,9 @@ collision_geometry:
 # Maximum number of agent turns before stopping.
 max_turns: 80
 
-# Maximum number of critique-and-improve rounds before stopping.
-max_critique_rounds: 1
+# Score the initial candidate and allow one critic-guided designer correction.
+max_critique_rounds: 2
+auto_score_after_design_attempts: true
 
 # Critic fast path: deterministic hard checks run before expensive VLM scoring.
 critic_fast_path:

@@ -101,6 +101,9 @@ stage_budget:
     final_critic_reserve_fraction: 0.35
     fallback_reserve_fraction: 0.10
     finalization_reserve_fraction: 0.05
+    # One compact retry may exceed the normal per-call allowance when the only
+    # failure is transport latency or an exhausted role deadline.
+    critical_retry_budget_multiplier: 1.5
     max_asset_requests: 4
     max_optional_object_families: 3
     max_assets_per_request: 6
@@ -108,6 +111,7 @@ stage_budget:
     min_output_objects: 0
     max_output_objects: 0
     max_stage_regenerations: 1
+    min_visual_score: 0.60
   floor_plan:
     max_designer_iterations: 2
     max_repair_steps: 1
@@ -135,6 +139,10 @@ stage_budget:
     max_optional_object_families: 2
     max_assets_per_request: 6
     max_semantic_retries_per_family: 2
+    # Every placement stage must create at least one stage-native object. Prompt
+    # requirements may raise this effective minimum, but do not require filler
+    # objects in addition to explicitly requested furniture.
+    min_output_objects: 1
   wall_mounted:
     max_designer_iterations: 1
     max_repair_steps: 1
