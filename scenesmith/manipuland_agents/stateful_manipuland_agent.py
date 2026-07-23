@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from agents import Agent, FunctionTool, Runner, RunResult, custom_span
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 
 from scenesmith.agent_utils.base_stateful_agent import (
     BaseStatefulAgent,
@@ -44,6 +44,10 @@ from scenesmith.manipuland_agents.base_manipuland_agent import BaseManipulandAge
 from scenesmith.manipuland_agents.tools.manipuland_tools import ManipulandTools
 from scenesmith.manipuland_agents.tools.vision_tools import ManipulandVisionTools
 from scenesmith.prompts.registry import ManipulandAgentPrompts
+from scenesmith.scenebenchmark_critic.manipuland_targets import (
+    classify_manipuland_furniture,
+    infer_prompt_manipuland_obligations,
+)
 from scenesmith.utils.logging import BaseLogger
 
 console_logger = logging.getLogger(__name__)
@@ -720,6 +724,10 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
 
         # Phase 1: Initial analysis - identify which furniture to populate.
         furniture_data = await self._analyze_furniture_for_placement(scene)
+        furniture_data = self._recover_prompt_required_manipuland_targets(
+            scene=scene,
+            furniture_data=furniture_data,
+        )
 
         if not furniture_data:
             console_logger.info("No furniture identified for manipuland placement")
@@ -877,6 +885,70 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
             return max(0, int(value or 0))
         except Exception:
             return 0
+
+    def _recover_prompt_required_manipuland_targets(
+        self,
+        *,
+        scene: RoomScene,
+        furniture_data: list[FurnitureSelection],
+    ) -> list[FurnitureSelection]:
+        """Add critic-only fallback targets for explicit prompt obligations."""
+        critic_cfg = getattr(self.cfg, "scenebenchmark_critic", None)
+        try:
+            critic_enabled = bool(critic_cfg.get("enabled", False))
+        except Exception:
+            critic_enabled = bool(getattr(critic_cfg, "enabled", False))
+        if not critic_enabled:
+            return furniture_data
+
+        description = str(
+            getattr(scene, "scene_expert_original_description", "")
+            or getattr(scene, "text_description", "")
+            or ""
+        )
+        obligations = infer_prompt_manipuland_obligations(description)
+        if not obligations:
+            return furniture_data
+
+        recovered = list(furniture_data)
+        for obligation in obligations:
+            selected_ids = {
+                selection.furniture_id
+                for selection in recovered
+                if classify_manipuland_furniture(
+                    scene.get_object(selection.furniture_id), selection.furniture_id
+                )
+                == obligation.category
+            }
+            missing = max(0, obligation.target_count - len(selected_ids))
+            if missing <= 0:
+                continue
+            candidates = [
+                obj
+                for object_id, obj in scene.objects.items()
+                if object_id not in selected_ids
+                and not getattr(obj, "immutable", False)
+                and classify_manipuland_furniture(obj, object_id) == obligation.category
+            ]
+            candidates.sort(key=lambda obj: str(obj.object_id))
+            for obj in candidates[:missing]:
+                recovered.append(
+                    FurnitureSelection(
+                        furniture_id=obj.object_id,
+                        suggested_items=f"REQUIRED: {obligation.required_items}",
+                        prompt_constraints=(
+                            "Deterministic critic recovery: this furniture has "
+                            "explicit small-object obligations in the scene prompt."
+                        ),
+                        style_notes="Follow the requested quantity and distribution exactly.",
+                    )
+                )
+                console_logger.warning(
+                    "Recovered prompt-required manipuland target omitted by VLM: %s (%s)",
+                    obj.object_id,
+                    obligation.category,
+                )
+        return recovered
 
     def _select_manipuland_targets(
         self,
