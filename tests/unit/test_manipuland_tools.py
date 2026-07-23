@@ -90,6 +90,41 @@ class TestManipulandTools(unittest.TestCase):
         # 文字建议，否则盘子虽齐全仍会随机散落在餐桌上。
         self.assertIn("align_dining_place_settings", self.manipuland_tools.tools)
 
+    def test_adjacent_dining_table_strips_are_coalesced(self):
+        # 2026-07-23 修改原因：桌面内部的 HSSD seam 不应把长边中点餐位推到
+        # S8 或 S9 的一侧；相邻条带合并后仍使用真实外轮廓做边界校验。
+        def surface(surface_id: str, x: float) -> SupportSurface:
+            return SupportSurface(
+                surface_id=UniqueID(surface_id),
+                bounding_box_min=np.array([-0.5, -0.4, 0.01]),
+                bounding_box_max=np.array([0.5, 0.4, 0.5]),
+                transform=RigidTransform(p=[x, 0.0, 0.8]),
+            )
+
+        merged = ManipulandTools._coalesce_adjacent_support_surfaces(
+            [surface("S_8", 0.0), surface("S_9", 1.0)]
+        )
+
+        self.assertEqual(len(merged), 1)
+        logical_surface = merged[0]
+        self.assertTrue(logical_surface.contains_point_2d(np.array([0.0, 0.0])))
+        self.assertTrue(logical_surface.contains_point_2d(np.array([0.99, 0.0])))
+
+    def test_disconnected_support_surfaces_are_not_coalesced(self):
+        def surface(surface_id: str, x: float) -> SupportSurface:
+            return SupportSurface(
+                surface_id=UniqueID(surface_id),
+                bounding_box_min=np.array([-0.3, -0.3, 0.01]),
+                bounding_box_max=np.array([0.3, 0.3, 0.5]),
+                transform=RigidTransform(p=[x, 0.0, 0.8]),
+            )
+
+        result = ManipulandTools._coalesce_adjacent_support_surfaces(
+            [surface("S_left", 0.0), surface("S_right", 1.0)]
+        )
+
+        self.assertEqual([str(surface.surface_id) for surface in result], ["S_left", "S_right"])
+
     @patch.object(ManipulandTools, "_dining_position_is_valid", return_value=True)
     def test_dining_target_uses_critic_selected_segmented_surface(self, _mock_valid):
         # 2026-07-23 修改原因：真实 HSSD 餐桌可能由多个连续 surface strip 组成。
