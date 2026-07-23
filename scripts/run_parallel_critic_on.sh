@@ -46,7 +46,7 @@ MAX_CASES="${MAX_CASES:-0}"
 CASE_FILTER="${CASE_FILTER:-}"
 DRY_RUN="${DRY_RUN:-false}"
 CRITIC_PROBE_RENDER_FINAL_VIEWS="${CRITIC_PROBE_RENDER_FINAL_VIEWS:-false}"
-BLENDER_BIN="${BLENDER_BIN:-blender}"
+FINAL_VIEW_PYTHON_BIN="${FINAL_VIEW_PYTHON_BIN:-$PYTHON_BIN}"
 DISABLE_ARTICULATED="${SCENEEXPERT_DISABLE_ARTICULATED:-false}"
 DISABLE_MATERIALS="${SCENEEXPERT_DISABLE_MATERIALS:-false}"
 DISABLE_BWRAP="${SCENEEXPERT_DISABLE_BWRAP:-false}"
@@ -668,10 +668,6 @@ if [ "$GENERATE_SHARED_BASE" = "true" ]; then
 fi
 run_batches critic_on
 if [ "${CRITIC_PROBE_RENDER_FINAL_VIEWS,,}" = "true" ] || [ "${CRITIC_PROBE_RENDER_FINAL_VIEWS}" = "1" ]; then
-    command -v "$BLENDER_BIN" >/dev/null 2>&1 || {
-        echo "ERROR: BLENDER_BIN not found: $BLENDER_BIN" >&2
-        exit 1
-    }
-    "$BLENDER_BIN" -b --python "$SCRIPT_DIR/render_critic_final_views.py" -- "$OUTPUT_ROOT"
+    "$FINAL_VIEW_PYTHON_BIN" "$SCRIPT_DIR/render_critic_final_views.py" -- "$OUTPUT_ROOT"
 fi
 echo "critic-on probe complete: $OUTPUT_ROOT"
