@@ -196,6 +196,26 @@ class ManipulandTools:
         self.support_surfaces.update(
             {str(surface.surface_id): surface for surface in merged_surfaces}
         )
+        merged_ids = set(self.support_surfaces)
+        for scene_object in getattr(self.scene, "objects", {}).values():
+            if scene_object.object_type != ObjectType.MANIPULAND:
+                continue
+            placement = scene_object.placement_info
+            if placement is None or str(placement.parent_surface_id) in merged_ids:
+                continue
+            world_pose = scene_object.transform
+            for surface in merged_surfaces:
+                local_position, local_rotation = surface.from_world_pose(world_pose)
+                try:
+                    inside = surface.contains_point_2d(local_position)
+                except ValueError:
+                    inside = False
+                if not inside:
+                    continue
+                placement.parent_surface_id = UniqueID(str(surface.surface_id))
+                placement.position_2d = local_position
+                placement.rotation_2d = local_rotation
+                break
         console_logger.info(
             "Coalesced dining tabletop support strips for %s: %d -> %d surface(s)",
             furniture.object_id,
