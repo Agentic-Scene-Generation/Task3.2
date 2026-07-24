@@ -37,7 +37,11 @@ class HssdRetrievalApp(flask.Flask):
         preload_retriever: bool = True,
         hssd_data_path: str | None = None,
         hssd_preprocessed_path: str | None = None,
+        hssd_retrieval_backend: str = "clip",
         hssd_top_k: int = 5,
+        hssd_zvec_collection_path: str | None = None,
+        hssd_embedding_base_url: str | None = None,
+        hssd_embedding_dimension: int = 2048,
         clip_device: str | None = None,
     ) -> None:
         """Initialize Flask app.
@@ -50,7 +54,11 @@ class HssdRetrievalApp(flask.Flask):
             hssd_preprocessed_path: Path to preprocessed data directory. If None,
                 uses environment variable HSSD_PREPROCESSED_PATH or default
                 "data/preprocessed".
-            hssd_top_k: Number of top CLIP candidates before size ranking (default: 5).
+            hssd_retrieval_backend: Semantic backend, either ``clip`` or ``embedding``.
+            hssd_top_k: Number of top semantic candidates before size ranking.
+            hssd_zvec_collection_path: Path to the local Zvec collection.
+            hssd_embedding_base_url: Base URL for the llama.cpp embeddings endpoint.
+            hssd_embedding_dimension: Expected embedding dimension.
             clip_device: Target device for CLIP model (e.g., "cuda:0"). If None,
                 uses default (cuda if available, else cpu).
         """
@@ -61,7 +69,11 @@ class HssdRetrievalApp(flask.Flask):
         # Store HSSD config parameters for lazy initialization.
         self._hssd_data_path = hssd_data_path
         self._hssd_preprocessed_path = hssd_preprocessed_path
+        self._hssd_retrieval_backend = hssd_retrieval_backend
         self._hssd_top_k = hssd_top_k
+        self._hssd_zvec_collection_path = hssd_zvec_collection_path
+        self._hssd_embedding_base_url = hssd_embedding_base_url
+        self._hssd_embedding_dimension = hssd_embedding_dimension
         self._clip_device = clip_device
         self._fatal_error: str | None = None
 
@@ -78,13 +90,14 @@ class HssdRetrievalApp(flask.Flask):
 
         # Preload retriever if requested.
         if preload_retriever:
-            console_logger.info("Preloading HSSD retriever and CLIP model...")
+            console_logger.info("Preloading HSSD retriever...")
             start_time = time.time()
             self._get_retriever()
-            warmup_clip_model(device=self._clip_device)
+            if self._hssd_retrieval_backend == "clip":
+                warmup_clip_model(device=self._clip_device)
             load_time = time.time() - start_time
             console_logger.info(
-                f"HSSD retriever preloaded in {load_time:.2f}s " "(includes CLIP model)"
+                f"HSSD retriever preloaded in {load_time:.2f}s"
             )
 
         # Setup routes.
@@ -104,7 +117,10 @@ class HssdRetrievalApp(flask.Flask):
         if self._retriever is None:
             import os
 
-            from scenesmith.agent_utils.hssd_retrieval.config import HssdConfig
+            from scenesmith.agent_utils.hssd_retrieval.config import (
+                HssdConfig,
+                HssdZvecConfig,
+            )
 
             # Use provided paths or fall back to environment variables/defaults.
             data_path = self._hssd_data_path or os.environ.get(
@@ -112,6 +128,20 @@ class HssdRetrievalApp(flask.Flask):
             )
             preprocessed_path = self._hssd_preprocessed_path or os.environ.get(
                 "HSSD_PREPROCESSED_PATH", "data/preprocessed"
+            )
+            retrieval_backend = self._hssd_retrieval_backend or os.environ.get(
+                "HSSD_RETRIEVAL_BACKEND", "clip"
+            )
+            zvec_collection_path = self._hssd_zvec_collection_path or os.environ.get(
+                "HSSD_ZVEC_COLLECTION_PATH"
+            )
+            embedding_base_url = self._hssd_embedding_base_url or os.environ.get(
+                "HSSD_EMBEDDING_BASE_URL"
+            )
+            embedding_dimension = int(
+                os.environ.get(
+                    "HSSD_EMBEDDING_DIMENSION", str(self._hssd_embedding_dimension)
+                )
             )
 
             # Resolve relative paths to project root.
@@ -123,12 +153,31 @@ class HssdRetrievalApp(flask.Flask):
             if not preprocessed_path.is_absolute():
                 project_root = Path(__file__).parent.parent.parent.parent
                 preprocessed_path = project_root / preprocessed_path
+            zvec_path = Path(zvec_collection_path) if zvec_collection_path else None
+            if zvec_path is not None and not zvec_path.is_absolute():
+                project_root = Path(__file__).parent.parent.parent.parent
+                zvec_path = project_root / zvec_path
+
+            zvec_config = None
+            if retrieval_backend == "embedding":
+                if zvec_path is None or embedding_base_url is None:
+                    raise ValueError(
+                        "Embedding backend requires Zvec collection path and "
+                        "embedding base URL"
+                    )
+                zvec_config = HssdZvecConfig(
+                    collection_path=zvec_path,
+                    base_url=embedding_base_url,
+                    embedding_dimension=embedding_dimension,
+                )
 
             config = HssdConfig(
                 data_path=data_path,
                 preprocessed_path=preprocessed_path,
+                retrieval_backend=retrieval_backend,
                 use_top_k=self._hssd_top_k,
                 object_type_mapping=None,  # Will use defaults from __post_init__
+                zvec=zvec_config,
             )
             self._retriever = HssdRetriever(
                 config=config, clip_device=self._clip_device

@@ -46,6 +46,7 @@ dependencies = [
     "vhacdx>=0.0.10",
     "wandb>=0.21.1",
     "xatlas>=0.0.11",
+    "zvec>=0.5.1",
 ]
 
 [dependency-groups]

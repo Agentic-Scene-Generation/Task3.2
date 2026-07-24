@@ -35,6 +35,64 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         StatefulFurnitureAgent is None,
         f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
     )
+    def test_head_wall_yaw_points_bed_arrow_inward(self) -> None:
+        agent = object.__new__(StatefulFurnitureAgent)
+
+        self.assertEqual(agent._yaw_for_head_wall("east"), 90.0)
+        self.assertEqual(agent._yaw_for_head_wall("west"), -90.0)
+        self.assertEqual(agent._yaw_for_head_wall("north"), 180.0)
+        self.assertEqual(agent._yaw_for_head_wall("south"), 0.0)
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
+    def test_transaction_repairs_hard_failure_before_rollback(self) -> None:
+        agent = object.__new__(StatefulFurnitureAgent)
+        remembered: list[tuple[dict[str, Any], str]] = []
+        ended: list[bool] = []
+        agent.scene = SimpleNamespace(to_state_dict=lambda: {"objects": ["repaired"]})
+        agent.furniture_safety_controller = SimpleNamespace(
+            enabled=True,
+            best_scene_state={"objects": ["old"]},
+            remember_hard_valid_scene_state=lambda scene_state, source: remembered.append(
+                (scene_state, source)
+            ),
+            end_designer_call=lambda: ended.append(True),
+        )
+        agent._evaluate_current_furniture_hard_state = lambda: SimpleNamespace(
+            hard_valid=False,
+            hard_reasons=["wardrobe collision"],
+        )
+        repair_sources: list[str] = []
+
+        def repair(hard_state, *, source):
+            repair_sources.append(source)
+            return (
+                SimpleNamespace(hard_valid=True, hard_reasons=[]),
+                None,
+                ["moved wardrobe to wall anchor"],
+            )
+
+        agent._try_deterministic_repair_for_hard_state = repair
+
+        result = agent._end_furniture_design_transaction(
+            {
+                "call_kind": "change",
+                "pre_state": {"objects": ["old"]},
+                "pre_hard_valid": True,
+            }
+        )
+
+        self.assertEqual(repair_sources, ["post-change-transaction"])
+        self.assertEqual(remembered, [({"objects": ["repaired"]}, "post-change")])
+        self.assertEqual(ended, [True])
+        self.assertIn("hard checks passed", result)
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
     def test_non_bedroom_missing_required_asset_uses_generic_repair(self) -> None:
         agent = object.__new__(StatefulFurnitureAgent)
         agent.scene = SimpleNamespace(

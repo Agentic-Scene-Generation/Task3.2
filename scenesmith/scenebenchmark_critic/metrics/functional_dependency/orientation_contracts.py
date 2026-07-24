@@ -15,10 +15,18 @@ from scenesmith.scenebenchmark_critic.core.geometry import (
     object_category,
 )
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.semantics import (
+    _classroom_student_role,
+    _is_classroom_student_pair,
     _is_actionable_seating_surface_pair,
 )
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.profiles import (
     object_function_profile,
+)
+from scenesmith.scenebenchmark_critic.metrics.functional_dependency.seat_surface_assignment import (
+    ASSIGNMENT_SOURCE,
+    SeatSurfaceAssignment,
+    assign_work_seats_to_surfaces,
+    work_seat_candidates,
 )
 
 console_logger = logging.getLogger(__name__)
@@ -118,6 +126,30 @@ def stabilize_orientation_contracts(
     room_type = str(case_pack.get("room_type") or "")
     media_focus = _best_media_focus(objects, task_text=task_text, room_type=room_type)
     media_intent = _has_media_intent(task_text, room_type) and media_focus is not None
+    fixed_pairs = {
+        str(subject_id): str((contract.get("target_ids") or [""])[0])
+        for subject_id, contract in memory.items()
+        if isinstance(contract, dict)
+        and contract.get("assignment_source") == ASSIGNMENT_SOURCE
+        and contract.get("target_ids")
+    }
+    work_assignments = assign_work_seats_to_surfaces(
+        objects,
+        task_instruction=task_text,
+        room_type=room_type,
+        fixed_pairs=fixed_pairs,
+    )
+    work_assignment_by_seat = {
+        assignment.seat_id: assignment for assignment in work_assignments
+    }
+    work_cohort_ids = {
+        str(obj.get("id") or "")
+        for obj in work_seat_candidates(
+            objects,
+            task_instruction=task_text,
+            room_type=room_type,
+        )
+    }
 
     checks_added = 0
     for subject in objects:
@@ -133,6 +165,8 @@ def stabilize_orientation_contracts(
             objects,
             media_intent,
             media_focus,
+            work_assignment_by_seat.get(subject_id),
+            subject_id in work_cohort_ids,
         ):
             contract = dict(existing)
             contract["stage_last_seen"] = stage
@@ -142,6 +176,8 @@ def stabilize_orientation_contracts(
                 objects,
                 media_focus=media_focus,
                 media_intent=media_intent,
+                work_assignment=work_assignment_by_seat.get(subject_id),
+                work_cohort_member=subject_id in work_cohort_ids,
                 stage=stage,
             )
 
@@ -192,6 +228,8 @@ def _contract_is_usable(
     objects: list[dict[str, Any]],
     media_intent: bool,
     media_focus: dict[str, Any] | None,
+    work_assignment: SeatSurfaceAssignment | None,
+    work_cohort_member: bool,
 ) -> bool:
     if not isinstance(contract, dict):
         return False
@@ -203,6 +241,21 @@ def _contract_is_usable(
     relation_type = str(contract.get("relation_type") or "")
     if relation_type not in CONTRACT_RELATIONS:
         return False
+
+    if work_assignment is not None:
+        return (
+            relation_type == "seating_to_work_surface"
+            and target_ids == [work_assignment.surface_id]
+        )
+    if work_cohort_member:
+        return False
+
+    classroom_target = _classroom_student_partner(subject, objects)
+    if classroom_target is not None:
+        return (
+            relation_type == "seating_to_work_surface"
+            and target_ids == [str(classroom_target.get("id") or "")]
+        )
 
     # 2026-07-14 修改原因：dining_chair 被门净空或桌椅碰撞推到墙边后，旧逻辑
     # 会把它重新识别为 back_against_wall，覆盖“餐椅属于餐桌”的功能依赖，导致
@@ -262,8 +315,48 @@ def _plan_contract(
     *,
     media_focus: dict[str, Any] | None,
     media_intent: bool,
+    work_assignment: SeatSurfaceAssignment | None,
+    work_cohort_member: bool,
     stage: str,
 ) -> dict[str, Any] | None:
+    if work_assignment is not None:
+        target = next(
+            (
+                obj
+                for obj in objects
+                if str(obj.get("id") or "") == work_assignment.surface_id
+            ),
+            None,
+        )
+        if target is not None:
+            return _contract(
+                subject,
+                target,
+                relation_type="seating_to_work_surface",
+                stage=stage,
+                reason=(
+                    "functional annotations and surface-local geometry assign this "
+                    "work seat to a distinct work-surface slot"
+                ),
+                assignment=work_assignment,
+            )
+
+    classroom_desk = _classroom_student_partner(subject, objects)
+    if classroom_desk is not None:
+        return _contract(
+            subject,
+            classroom_desk,
+            relation_type="seating_to_work_surface",
+            stage=stage,
+            reason=(
+                "indexed classroom student chair is paired with its matching "
+                "student desk; pairing takes priority over incidental wall proximity"
+            ),
+        )
+
+    if work_cohort_member:
+        return None
+
     # 2026-07-14 修改原因：餐桌座位关系是显式功能拓扑，优先于几何上更近的
     # 墙面；否则门净空把 dining_chair 推近墙后会发生 wall/table contract 抖动。
     dining_table = _nearest_dining_table(subject, objects)
@@ -341,6 +434,21 @@ def _plan_contract(
     )
 
 
+def _classroom_student_partner(
+    subject: dict[str, Any], objects: list[dict[str, Any]]
+) -> dict[str, Any] | None:
+    role = _classroom_student_role(subject)
+    if role is None or role[0] != "chair":
+        return None
+    candidates = [
+        obj
+        for obj in objects
+        if _is_classroom_student_pair(subject, obj)
+    ]
+    candidates.sort(key=lambda obj: str(obj.get("id") or ""))
+    return candidates[0] if candidates else None
+
+
 def _nearest_dining_table(
     subject: dict[str, Any], objects: list[dict[str, Any]]
 ) -> dict[str, Any] | None:
@@ -372,8 +480,9 @@ def _contract(
     relation_type: str,
     stage: str,
     reason: str,
+    assignment: SeatSurfaceAssignment | None = None,
 ) -> dict[str, Any]:
-    return {
+    contract = {
         "schema_version": "scenesmith.scenebenchmark_critic.orientation_contract.v1",
         "subject_id": str(subject.get("id") or ""),
         "target_ids": [str(target.get("id") or "")],
@@ -386,6 +495,9 @@ def _contract(
         ),
         "reason": reason,
     }
+    if assignment is not None:
+        contract.update(assignment.evidence())
+    return contract
 
 
 def _replace_contract_check(
@@ -433,6 +545,10 @@ def _replace_contract_check(
                 "reason": contract.get("reason"),
                 "stage_created": contract.get("stage_created"),
                 "stage_last_seen": contract.get("stage_last_seen"),
+                "assignment_source": contract.get("assignment_source"),
+                "topology_required": contract.get("topology_required"),
+                "target_slot": contract.get("target_slot"),
+                "annotation_sources": contract.get("annotation_sources"),
             },
             "evidence_refs": ["scene_geometry"],
             "check_source": CONTRACT_CHECK_SOURCE,

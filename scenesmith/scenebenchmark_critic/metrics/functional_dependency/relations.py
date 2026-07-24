@@ -29,6 +29,9 @@ from scenesmith.scenebenchmark_critic.metrics.functional_dependency.results impo
     _target_eval_payload,
     _unknown,
 )
+from scenesmith.scenebenchmark_critic.metrics.functional_dependency.seat_surface_assignment import (
+    ASSIGNMENT_SOURCE,
+)
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.semantics import (
     _category_group,
     _category_token_has_any,
@@ -92,6 +95,8 @@ def evaluate_functional_dependency(
         if str(item)
     ]
     repair_advice = ""
+    assignment_evidence = check.get("evidence") or {}
+    assignment_check = _is_required_seat_surface_assignment(check)
     living_room_coffee_pair = (
         relation_type == "seating_to_work_surface"
         and object_category(subject) in LIVING_ROOM_SEATING
@@ -109,6 +114,24 @@ def evaluate_functional_dependency(
             "tool's broad `is_facing` boolean is true; do not leave the chair facing "
             "outward from the local activity area."
         )
+    elif assignment_check and label in {"unknown", "degraded", "fail"}:
+        slot = assignment_evidence.get("target_slot") or {}
+        center = slot.get("center_xy") or []
+        yaw = slot.get("yaw_deg")
+        if len(center) >= 2 and yaw is not None:
+            repair_advice = (
+                f"One-to-one work-seat repair: move `{subject_id}` beside "
+                f"`{target_ids[0]}` near XY [{float(center[0]):.3f}, "
+                f"{float(center[1]):.3f}] and set yaw near {float(yaw):.1f} degrees. "
+                "Keep this chair assigned to this surface; do not reuse the same "
+                "desk for another work chair."
+            )
+        else:
+            repair_advice = (
+                f"One-to-one work-seat repair: move `{subject_id}` to a usable edge "
+                f"of `{target_ids[0]}` and rotate the chair toward the work surface."
+            )
+        diagnostics["seat_surface_assignment"] = assignment_evidence
     return {
         "check_id": check.get("check_id"),
         "metric": "functional_dependency",
@@ -259,7 +282,17 @@ def _eval_relation_over_targets(
                 )
             )
         else:
-            label, confidence, reason = evaluator(subject, target, target_relation)
+            if evaluator is _eval_seating_to_surface:
+                if _is_required_seat_surface_assignment(check):
+                    label, confidence, reason = _eval_assigned_seating_slot(
+                        subject, target, check or {}
+                    )
+                else:
+                    label, confidence, reason = _eval_seating_to_surface(
+                        subject, target, target_relation
+                    )
+            else:
+                label, confidence, reason = evaluator(subject, target, target_relation)
             scored.append(
                 _target_eval_payload(target, label, confidence, reason, target_relation)
             )
@@ -650,7 +683,11 @@ def _eval_bedside_pair(
 
 
 def _eval_seating_to_surface(
-    subject: dict[str, Any], target: dict[str, Any], _relation_type: str
+    subject: dict[str, Any],
+    target: dict[str, Any],
+    _relation_type: str,
+    *,
+    topology_required: bool = False,
 ) -> tuple[str, float, str]:
     gap = bbox_gap_xy(subject, target)
     angle, angle_mode = seating_angle_to_target_deg(subject, target)
@@ -667,7 +704,7 @@ def _eval_seating_to_surface(
         angle_note = " using front-facing table-edge fallback"
     elif angle_mode == "reversed_front_fallback":
         angle_note = " using flipped-front fallback"
-    if not _is_actionable_seating_surface_pair(subject, target):
+    if not topology_required and not _is_actionable_seating_surface_pair(subject, target):
         return (
             "unknown",
             0.0,
@@ -783,6 +820,52 @@ def _eval_seating_to_surface(
         "fail",
         0.85,
         f"target is too far or poorly oriented: gap {gap:.2f}m, facing angle {angle:.0f}deg{angle_note}.",
+    )
+
+
+def _is_required_seat_surface_assignment(check: dict[str, Any] | None) -> bool:
+    evidence = (check or {}).get("evidence") or {}
+    return bool(
+        evidence.get("topology_required")
+        and evidence.get("assignment_source") == ASSIGNMENT_SOURCE
+    )
+
+
+def _eval_assigned_seating_slot(
+    subject: dict[str, Any], target: dict[str, Any], check: dict[str, Any]
+) -> tuple[str, float, str]:
+    evidence = check.get("evidence") or {}
+    slot = evidence.get("target_slot") or {}
+    raw_center = slot.get("center_xy") or []
+    target_yaw = slot.get("yaw_deg")
+    subject_center = bbox_center_xy(subject)
+    if subject_center is None or len(raw_center) < 2 or target_yaw is None:
+        return _eval_seating_to_surface(
+            subject, target, "seating_to_work_surface", topology_required=True
+        )
+    slot_center = (float(raw_center[0]), float(raw_center[1]))
+    center_error = math.hypot(
+        subject_center[0] - slot_center[0], subject_center[1] - slot_center[1]
+    )
+    current_yaw = float(subject.get("yaw_deg") or 0.0)
+    yaw_error = abs((current_yaw - float(target_yaw) + 180.0) % 360.0 - 180.0)
+    size = (subject.get("bbox_world") or {}).get("size") or []
+    footprint_scale = (
+        min(float(size[0]), float(size[1])) if len(size) >= 2 else 0.5
+    )
+    position_tolerance = max(0.25, 0.65 * footprint_scale)
+    if center_error <= position_tolerance and yaw_error <= 30.0:
+        label, confidence = "pass", 0.95
+    elif center_error <= 1.75 * position_tolerance and yaw_error <= 60.0:
+        label, confidence = "degraded", 0.82
+    else:
+        label, confidence = "fail", 0.93
+    return (
+        label,
+        confidence,
+        f"assigned one-to-one slot at [{slot_center[0]:.2f}, {slot_center[1]:.2f}] "
+        f"with yaw {float(target_yaw):.1f}deg; center error {center_error:.2f}m and "
+        f"yaw error {yaw_error:.0f}deg.",
     )
 
 

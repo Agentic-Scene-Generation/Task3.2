@@ -25,6 +25,10 @@ from scenesmith.agent_utils.asset_router.dataclasses import (
     GeneratedGeometry,
     ModificationInfo,
 )
+from scenesmith.agent_utils.asset_router.rendered_asset_choice import (
+    choose_hssd_candidate_from_iso_renders,
+    hssd_rendered_choice_options,
+)
 from scenesmith.agent_utils.convex_decomposition_server import ConvexDecompositionClient
 from scenesmith.agent_utils.geometry_generation_server.client import (
     GeometryGenerationClient,
@@ -35,6 +39,7 @@ from scenesmith.agent_utils.geometry_generation_server.dataclasses import (
 )
 from scenesmith.agent_utils.hssd_retrieval_server import HssdRetrievalClient
 from scenesmith.agent_utils.hssd_retrieval_server.dataclasses import (
+    HssdRetrievalResult,
     HssdRetrievalServerRequest,
 )
 from scenesmith.agent_utils.image_generation import (
@@ -185,6 +190,9 @@ class AssetGenerationRequest:
 
     style_context: str | None = None
     """Style context for consistency (e.g., 'modern minimalist kitchen')."""
+
+    scene_prompt_context: str | None = None
+    """Original room prompt for context-aware asset choice."""
 
     operation_type: AssetOperationType = AssetOperationType.INITIAL
     """Type of generation operation."""
@@ -429,9 +437,17 @@ class AssetManager:
         debug_output_dir: Path,
     ) -> MeshPhysicsAnalysis:
         """Resolve asset physics without making HSSD depend on VLM indexing."""
-        if asset_source == "hssd" and str(
-            getattr(self.cfg.asset_manager, "hssd_physics_analysis_mode", "deterministic")
-        ).lower() == "deterministic":
+        if (
+            asset_source == "hssd"
+            and str(
+                getattr(
+                    self.cfg.asset_manager,
+                    "hssd_physics_analysis_mode",
+                    "deterministic",
+                )
+            ).lower()
+            == "deterministic"
+        ):
             physics = build_deterministic_hssd_physics(
                 mesh_path, object_name=object_name
             )
@@ -460,6 +476,7 @@ class AssetManager:
         canonical_path: Path,
         final_path: Path,
         desired_dimensions: list[float] | tuple[float, ...] | None,
+        uniform_fit_min_ratio: float = 0.5,
     ) -> tuple[Path, np.ndarray, np.ndarray, float]:
         """Scale canonical Y-up glTF and expose SceneSmith-frame bounds."""
         applied_scale = 1.0
@@ -476,8 +493,21 @@ class AssetManager:
         mesh = load_mesh_as_trimesh(final_path, force_merge=True)
         bbox_min, bbox_max = gltf_y_up_bounds_to_scene_z_up(mesh.bounds)
         if desired_dimensions is not None:
-            validate_uniform_dimension_fit(bbox_max - bbox_min, desired_dimensions)
+            validate_uniform_dimension_fit(
+                bbox_max - bbox_min,
+                desired_dimensions,
+                min_ratio=uniform_fit_min_ratio,
+            )
         return final_path, bbox_min, bbox_max, applied_scale
+
+    def _hssd_uniform_fit_min_ratio(self, description: str) -> float:
+        """Use a narrowly relaxed uniform-fit floor for plant assets only."""
+        normalized = re.sub(r"[^a-z0-9]+", "_", description.lower())
+        tokens = {token for token in normalized.split("_") if token}
+        if "plant" not in tokens:
+            return 0.5
+        hssd_cfg = self.cfg.asset_manager.get("hssd", {}) or {}
+        return float(hssd_cfg.get("plant_uniform_fit_min_ratio", 0.45))
 
     @staticmethod
     def _sanitize_filename(name: str, max_length: int = 50) -> str:
@@ -837,6 +867,11 @@ class AssetManager:
         for config in asset_path_configs:
             config.sdf_dir.mkdir(parents=True, exist_ok=True)
 
+        rendered_choice_enabled, rendered_choice_top_n, rendered_assets_dir = (
+            hssd_rendered_choice_options(self.cfg)
+        )
+        num_candidates = rendered_choice_top_n if rendered_choice_enabled else 1
+
         # Create batch requests for HSSD server with client-specified output dirs.
         retrieval_requests = [
             HssdRetrievalServerRequest(
@@ -845,6 +880,7 @@ class AssetManager:
                 desired_dimensions=tuple(dims) if dims else None,
                 output_dir=str(config.sdf_dir),
                 scene_id=request.scene_id,
+                num_candidates=num_candidates,
             )
             for desc, dims, config in zip(
                 request.object_descriptions,
@@ -859,7 +895,6 @@ class AssetManager:
         # Submit batch to server and process streaming responses.
         for index, response in self.hssd_client.retrieve_objects(retrieval_requests):
             desc = request.object_descriptions[index]
-            short_name = request.short_names[index]
             config = asset_path_configs[index]
 
             try:
@@ -872,125 +907,49 @@ class AssetManager:
                 if not response.results:
                     raise ValueError("No results returned from HSSD server")
 
-                result = response.results[0]  # Get top result.
-                server_mesh_path = Path(result.mesh_path)
-                mesh_id = result.hssd_id
-
-                # Server exported to our specified output_dir, convert GLB to GLTF if
-                # needed. Uses BlenderServer for crash isolation.
-                if server_mesh_path.suffix.lower() == ".glb":
-                    # Server exported GLB, convert to GLTF with Y-up coordinates.
-                    # Keep the GLB because duplicate requests may legitimately
-                    # reference the same retrieved mesh in the same batch.
-                    gltf_path = server_mesh_path.with_suffix(".gltf")
-                    if not gltf_path.exists():
-                        if not server_mesh_path.exists():
-                            raise FileNotFoundError(
-                                f"Retrieved mesh file missing: {server_mesh_path}"
-                            )
-                        self.blender_server.convert_glb_to_gltf(
-                            input_path=server_mesh_path,
-                            output_path=gltf_path,
-                            export_yup=True,
+                candidates = self._rank_direct_hssd_candidates(
+                    request=request,
+                    index=index,
+                    candidates=response.results,
+                    enabled=rendered_choice_enabled,
+                    top_n=rendered_choice_top_n,
+                    rendered_assets_dir=rendered_assets_dir,
+                )
+                candidate_errors: list[str] = []
+                for candidate_number, candidate in enumerate(candidates, start=1):
+                    try:
+                        scene_obj = self._process_direct_hssd_candidate(
+                            request=request,
+                            index=index,
+                            config=config,
+                            candidate=candidate,
                         )
-                else:
-                    # Already GLTF, use as-is.
-                    gltf_path = server_mesh_path
-
-                # Run VLM analysis for material and mass estimation.
-                # Use HSSD-specific prompts and only side views to constrain
-                # rotation to Z-axis. Orientation (Z-up) is correct from HSSD
-                # transformation pipeline.
-                # Create debug directory for saving multi-view physics analysis images.
-                debug_dir = self.debug_dir / short_name
-
-                console_logger.info(
-                    "Resolving HSSD physics metadata for %s (mode=%s)",
-                    short_name,
-                    getattr(self.cfg.asset_manager, "hssd_physics_analysis_mode", "deterministic"),
-                )
-                vlm_physics = self._analyze_mesh_physics(
-                    mesh_path=gltf_path,
-                    asset_source="hssd",
-                    object_name=short_name,
-                    debug_output_dir=debug_dir,
-                )
-                console_logger.info(
-                    f"VLM analysis complete: material={vlm_physics.material}, "
-                    f"mass={vlm_physics.mass_kg}kg, front={vlm_physics.front_axis}"
-                )
-                vlm_physics = self._override_hssd_asset_annotations(
-                    physics_analysis=vlm_physics,
-                    hssd_id=mesh_id,
-                )
-
-                # Use VLM's material, mass, and front axis determination.
-                # up_axis is always Z for HSSD (validated by VLM).
-                physics_analysis = MeshPhysicsAnalysis(
-                    up_axis=vlm_physics.up_axis,
-                    front_axis=vlm_physics.front_axis,
-                    material=vlm_physics.material,
-                    mass_kg=vlm_physics.mass_kg,
-                    mass_range_kg=vlm_physics.mass_range_kg,
-                    friction_coefficient=vlm_physics.friction_coefficient,
-                )
-
-                # Canonicalize mesh orientation to align with scenesmith canonical
-                # (Z-up, Y-forward). For HSSD objects already with front=+Y, this is
-                # a no-op (fast return). Otherwise, applies Z-rotation to align front.
-                console_logger.info(
-                    f"Canonicalizing HSSD mesh: up={vlm_physics.up_axis}, "
-                    f"front={vlm_physics.front_axis} → +Y"
-                )
-                canonical_path = config.sdf_dir / f"{config.short_name}_canonical.gltf"
-                canonicalize_mesh(
-                    gltf_path=gltf_path,
-                    output_path=canonical_path,
-                    up_axis=vlm_physics.up_axis,
-                    front_axis=vlm_physics.front_axis,
-                    blender_server=self.blender_server,
-                    object_type=request.object_type,
-                )
-
-                final_gltf_path, bbox_min, bbox_max, _ = (
-                    self._scale_and_measure_canonical_mesh(
-                        canonical_path=canonical_path,
-                        final_path=config.sdf_dir / f"{config.short_name}.gltf",
-                        desired_dimensions=request.desired_dimensions[index],
+                    except Exception as candidate_error:
+                        candidate_errors.append(
+                            f"{candidate.hssd_id}: {candidate_error}"
+                        )
+                        console_logger.warning(
+                            "HSSD candidate %d/%d failed for '%s' (%s): %s",
+                            candidate_number,
+                            len(candidates),
+                            desc,
+                            candidate.hssd_id,
+                            candidate_error,
+                        )
+                        continue
+                    successful_objects.append(scene_obj)
+                    console_logger.info(
+                        "HSSD asset retrieved successfully: %s (candidate %d/%d, %s)",
+                        config.short_name,
+                        candidate_number,
+                        len(candidates),
+                        candidate.hssd_id,
                     )
-                )
-
-                # Generate collision geometry via convex decomposition server.
-                collision_pieces = self._generate_collision_geometry(final_gltf_path)
-
-                sdf_path = config.sdf_dir / f"{config.short_name}.sdf"
-                generate_drake_sdf(
-                    visual_mesh_path=final_gltf_path,
-                    collision_pieces=collision_pieces,
-                    physics_analysis=physics_analysis,
-                    output_path=sdf_path,
-                    asset_name=config.short_name,
-                )
-
-                # Create SceneObject using shared helper.
-                scene_obj = self._create_scene_object(
-                    config=config,
-                    object_type=request.object_type,
-                    sdf_path=sdf_path,
-                    final_gltf_path=final_gltf_path,
-                    bbox_min=bbox_min,
-                    bbox_max=bbox_max,
-                    additional_metadata={
-                        "asset_source": "hssd",
-                        "hssd_mesh_id": mesh_id,
-                    },
-                )
-
-                successful_objects.append(scene_obj)
-
-                console_logger.info(
-                    f"HSSD asset retrieved successfully: {config.short_name}"
-                )
+                    break
+                else:
+                    raise ValueError(
+                        "All HSSD candidates failed: " + "; ".join(candidate_errors)
+                    )
 
             except Exception as e:
                 console_logger.error(
@@ -1002,6 +961,152 @@ class AssetManager:
 
         return AssetGenerationResult(
             successful_assets=successful_objects, failed_assets=failed_assets
+        )
+
+    def _rank_direct_hssd_candidates(
+        self,
+        *,
+        request: AssetGenerationRequest,
+        index: int,
+        candidates: list[HssdRetrievalResult],
+        enabled: bool,
+        top_n: int,
+        rendered_assets_dir: Path,
+    ) -> list[HssdRetrievalResult]:
+        """Apply rendered-choice ranking to the direct, non-router HSSD path."""
+        if not enabled or len(candidates) <= 1:
+            return candidates
+        openai_config = self.cfg.openai
+        choice = choose_hssd_candidate_from_iso_renders(
+            candidates=candidates,
+            object_description=request.object_descriptions[index],
+            scene_context=request.scene_prompt_context,
+            vlm_service=self.vlm_service,
+            model=openai_config.model,
+            reasoning_effort=openai_config.reasoning_effort.asset_validation,
+            verbosity=openai_config.verbosity.asset_validation,
+            vision_detail=openai_config.vision_detail,
+            rendered_assets_dir=rendered_assets_dir,
+            top_n=top_n,
+        )
+        if choice.selected_hssd_id:
+            console_logger.info(
+                "Direct rendered HSSD choice selected candidate %s/%s for '%s': "
+                "%s (%s)",
+                choice.selected_index,
+                len(candidates),
+                request.object_descriptions[index],
+                choice.selected_hssd_id,
+                choice.reason,
+            )
+        return choice.candidates
+
+    def _process_direct_hssd_candidate(
+        self,
+        *,
+        request: AssetGenerationRequest,
+        index: int,
+        config: AssetPathConfig,
+        candidate: HssdRetrievalResult,
+    ) -> SceneObject:
+        """Convert one direct HSSD candidate, allowing the caller to retry."""
+        short_name = request.short_names[index]
+        server_mesh_path = Path(candidate.mesh_path)
+        mesh_id = candidate.hssd_id
+
+        if server_mesh_path.suffix.lower() == ".glb":
+            gltf_path = server_mesh_path.with_suffix(".gltf")
+            if not gltf_path.exists():
+                if not server_mesh_path.exists():
+                    raise FileNotFoundError(
+                        f"Retrieved mesh file missing: {server_mesh_path}"
+                    )
+                self.blender_server.convert_glb_to_gltf(
+                    input_path=server_mesh_path,
+                    output_path=gltf_path,
+                    export_yup=True,
+                )
+        else:
+            gltf_path = server_mesh_path
+
+        debug_dir = self.debug_dir / short_name
+        console_logger.info(
+            "Resolving HSSD physics metadata for %s (mode=%s)",
+            short_name,
+            getattr(
+                self.cfg.asset_manager,
+                "hssd_physics_analysis_mode",
+                "deterministic",
+            ),
+        )
+        vlm_physics = self._analyze_mesh_physics(
+            mesh_path=gltf_path,
+            asset_source="hssd",
+            object_name=short_name,
+            debug_output_dir=debug_dir,
+        )
+        console_logger.info(
+            "VLM analysis complete: material=%s, mass=%skg, front=%s",
+            vlm_physics.material,
+            vlm_physics.mass_kg,
+            vlm_physics.front_axis,
+        )
+        vlm_physics = self._override_hssd_asset_annotations(
+            physics_analysis=vlm_physics,
+            hssd_id=mesh_id,
+        )
+        physics_analysis = MeshPhysicsAnalysis(
+            up_axis=vlm_physics.up_axis,
+            front_axis=vlm_physics.front_axis,
+            material=vlm_physics.material,
+            mass_kg=vlm_physics.mass_kg,
+            mass_range_kg=vlm_physics.mass_range_kg,
+            friction_coefficient=vlm_physics.friction_coefficient,
+        )
+
+        console_logger.info(
+            "Canonicalizing HSSD mesh: up=%s, front=%s → +Y",
+            vlm_physics.up_axis,
+            vlm_physics.front_axis,
+        )
+        canonical_path = config.sdf_dir / f"{config.short_name}_canonical.gltf"
+        canonicalize_mesh(
+            gltf_path=gltf_path,
+            output_path=canonical_path,
+            up_axis=vlm_physics.up_axis,
+            front_axis=vlm_physics.front_axis,
+            blender_server=self.blender_server,
+            object_type=request.object_type,
+        )
+
+        final_gltf_path, bbox_min, bbox_max, _ = self._scale_and_measure_canonical_mesh(
+            canonical_path=canonical_path,
+            final_path=config.sdf_dir / f"{config.short_name}.gltf",
+            desired_dimensions=request.desired_dimensions[index],
+            uniform_fit_min_ratio=self._hssd_uniform_fit_min_ratio(
+                request.object_descriptions[index]
+            ),
+        )
+        collision_pieces = self._generate_collision_geometry(final_gltf_path)
+        sdf_path = config.sdf_dir / f"{config.short_name}.sdf"
+        generate_drake_sdf(
+            visual_mesh_path=final_gltf_path,
+            collision_pieces=collision_pieces,
+            physics_analysis=physics_analysis,
+            output_path=sdf_path,
+            asset_name=config.short_name,
+        )
+        return self._create_scene_object(
+            config=config,
+            object_type=request.object_type,
+            sdf_path=sdf_path,
+            final_gltf_path=final_gltf_path,
+            bbox_min=bbox_min,
+            bbox_max=bbox_max,
+            additional_metadata={
+                "asset_source": "hssd",
+                "hssd_mesh_id": mesh_id,
+            },
         )
 
     def _retrieve_objaverse_assets(
@@ -1277,6 +1382,7 @@ class AssetManager:
             object_type=request.object_type,
             desired_dimensions=unique_dimensions,
             style_context=request.style_context,
+            scene_prompt_context=request.scene_prompt_context,
             operation_type=request.operation_type,
             scene_id=request.scene_id,
         )
@@ -1724,6 +1830,7 @@ class AssetManager:
             articulated_client=self.articulated_client,
             materials_client=self.materials_client,
             scene_id=request.scene_id,
+            scene_prompt_context=request.scene_prompt_context,
         )
 
     def _convert_generated_to_scene_object(

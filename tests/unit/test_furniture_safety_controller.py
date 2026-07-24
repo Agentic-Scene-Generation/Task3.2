@@ -72,6 +72,7 @@ class BoundedFurniture:
         description: str,
         world_min: tuple[float, float, float],
         world_max: tuple[float, float, float],
+        rotation_matrix: tuple[tuple[float, float, float], ...] | None = None,
     ) -> None:
         self.name = name
         self.description = description
@@ -79,6 +80,10 @@ class BoundedFurniture:
         self.immutable = False
         self._world_min = world_min
         self._world_max = world_max
+        if rotation_matrix is not None:
+            self.transform = SimpleNamespace(
+                rotation=lambda: SimpleNamespace(matrix=lambda: rotation_matrix)
+            )
 
     def compute_world_bounds(
         self,
@@ -120,6 +125,44 @@ class FurnitureSafetyControllerTest(unittest.TestCase):
 
         self.assertFalse(allowed)
         self.assertIn("required", message)
+
+    def test_media_room_infers_all_required_major_furniture(self) -> None:
+        controller = FurnitureSafetyController({"enabled": True})
+        controller.reset_for_scene(
+            "A living room with a sofa, a TV stand, two armchairs, and a floor lamp."
+        )
+
+        self.assertEqual(controller.required_counts["sofa"], 1)
+        self.assertEqual(controller.required_counts["tv_stand"], 1)
+        self.assertEqual(controller.required_counts["armchair"], 2)
+        self.assertEqual(controller.required_counts["floor_lamp"], 1)
+
+    def test_dining_room_infers_sideboard(self) -> None:
+        controller = FurnitureSafetyController({"enabled": True})
+        controller.reset_for_scene(
+            "A dining room with a sideboard and four dining chairs."
+        )
+
+        self.assertEqual(controller.required_counts["sideboard"], 1)
+        self.assertEqual(controller.required_counts["chair"], 4)
+
+    def test_table_lamp_is_not_required_furniture_table(self) -> None:
+        controller = FurnitureSafetyController({"enabled": True})
+        controller.reset_for_scene(
+            "A bedroom with a bed and a table lamp on each nightstand."
+        )
+
+        self.assertNotIn("table", controller.required_counts)
+        self.assertIsNone(controller._infer_category("table_lamp_0 table lamp"))
+
+    def test_lamp_on_each_bed_side_requires_two_nightstands(self) -> None:
+        controller = FurnitureSafetyController({"enabled": True})
+        controller.reset_for_scene(
+            "A bedroom with a bed centered on the main wall, a nightstand with "
+            "a table lamp on each side of the bed."
+        )
+
+        self.assertEqual(controller.required_counts["nightstand"], 2)
 
     def test_candidate_must_clearly_improve_best(self) -> None:
         controller = FurnitureSafetyController(
@@ -217,7 +260,7 @@ class FurnitureSafetyControllerTest(unittest.TestCase):
                     world_min=(0.80, -0.20, 0.0),
                     world_max=(1.20, 0.40, 0.6),
                 ),
-            }
+            },
         )
 
         evaluation = controller.evaluate_scene_state(scene)
@@ -240,6 +283,80 @@ class FurnitureSafetyControllerTest(unittest.TestCase):
         self.assertEqual(controller.required_counts.get("bed"), 1)
         self.assertEqual(controller.required_counts.get("wardrobe"), 1)
 
+    def test_dresser_uses_opposite_wall_and_nightstand_matches_bed_yaw(self) -> None:
+        controller = FurnitureSafetyController({"enabled": True})
+        controller.reset_for_scene(
+            "A bedroom with a bed, two nightstands, and a dresser against the "
+            "opposite wall directly facing the bed, with a wardrobe next to the dresser."
+        )
+        yaw_180 = ((-1.0, 0.0, 0.0), (0.0, -1.0, 0.0), (0.0, 0.0, 1.0))
+        yaw_0 = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
+        scene = SimpleNamespace(
+            room_type="bedroom",
+            text_description=controller.scene_description,
+            scene_expert_original_description=controller.scene_description,
+            room_geometry=SimpleNamespace(length=5.0, width=4.5),
+            objects={
+                "bed_0": BoundedFurniture(
+                    name="bed",
+                    description="bed",
+                    world_min=(-0.8, 0.1, 0.0),
+                    world_max=(0.8, 2.1, 0.8),
+                    rotation_matrix=yaw_180,
+                ),
+                "nightstand_0": BoundedFurniture(
+                    name="nightstand",
+                    description="nightstand",
+                    world_min=(-1.3, 1.3, 0.0),
+                    world_max=(-0.9, 1.7, 0.6),
+                    rotation_matrix=yaw_0,
+                ),
+                "nightstand_1": BoundedFurniture(
+                    name="nightstand",
+                    description="nightstand",
+                    world_min=(0.9, 1.3, 0.0),
+                    world_max=(1.3, 1.7, 0.6),
+                    rotation_matrix=yaw_180,
+                ),
+                "dresser_0": BoundedFurniture(
+                    name="dresser",
+                    description="dresser",
+                    world_min=(-2.45, -0.3, 0.0),
+                    world_max=(-1.45, 0.3, 0.9),
+                    rotation_matrix=yaw_0,
+                ),
+                "wardrobe_0": BoundedFurniture(
+                    name="wardrobe",
+                    description="wardrobe",
+                    world_min=(1.4, -0.3, 0.0),
+                    world_max=(2.3, 0.3, 2.0),
+                    rotation_matrix=yaw_0,
+                ),
+            },
+        )
+
+        evaluation = controller.evaluate_scene_state(scene)
+
+        self.assertFalse(evaluation.hard_valid)
+        self.assertTrue(
+            any(
+                "dresser_0 is not backed against the south wall" in reason
+                for reason in evaluation.hard_reasons
+            )
+        )
+        self.assertTrue(
+            any(
+                "nightstand_0 use direction is not aligned" in reason
+                for reason in evaluation.hard_reasons
+            )
+        )
+        self.assertTrue(
+            any(
+                "wardrobe_0 is 2.85m from dresser_0" in reason
+                for reason in evaluation.hard_reasons
+            )
+        )
+
     def test_style_only_bedroom_still_requires_a_bed(self) -> None:
         controller = FurnitureSafetyController({"enabled": True})
 
@@ -257,7 +374,7 @@ class FurnitureSafetyControllerTest(unittest.TestCase):
             "A teacher's desk sits at the front near the chalkboard."
         )
 
-        self.assertEqual(controller.required_counts.get("desk"), 6)
+        self.assertEqual(controller.required_counts.get("desk"), 7)
         self.assertEqual(controller.required_counts.get("chair"), 6)
         self.assertNotIn("table", controller.required_counts)
 
@@ -278,9 +395,7 @@ class FurnitureSafetyControllerTest(unittest.TestCase):
         controller.reset_for_scene("A living room with a two-seater sofa.")
         scene = SimpleNamespace(
             room_type="living_room",
-            scene_expert_original_description=(
-                "A living room with a two-seater sofa."
-            ),
+            scene_expert_original_description=("A living room with a two-seater sofa."),
             text_description=(
                 "A living room with a two-seater sofa.\n\n"
                 "Retrieved failure memory: a bed and wardrobe blocked a window."

@@ -3,6 +3,7 @@
 import logging
 
 from dataclasses import dataclass
+from typing import Protocol
 
 import numpy as np
 import trimesh
@@ -19,8 +20,22 @@ from scenesmith.agent_utils.hssd_retrieval.data_loader import (
     construct_hssd_mesh_path,
     load_preprocessed_data,
 )
+from scenesmith.agent_utils.hssd_retrieval.zvec_similarity import HssdZvecSearcher
 
 console_logger = logging.getLogger(__name__)
+
+
+class SemanticSearcher(Protocol):
+    """Protocol for HSSD semantic candidate generation."""
+
+    def get_top_k_similar_meshes(
+        self,
+        text_description: str,
+        preprocessed_data: object,
+        category: str | None = None,
+        top_k: int = 5,
+    ) -> list[tuple[str, float]]:
+        """Return semantic candidates ranked best-first."""
 
 
 @dataclass
@@ -64,7 +79,16 @@ class HssdRetriever:
         self.config = config
         self.clip_device = clip_device
         self.preprocessed_data = load_preprocessed_data(config.preprocessed_path)
+        self.semantic_searcher = self._create_semantic_searcher()
         console_logger.info(f"HSSD retriever initialized (clip_device={clip_device})")
+
+    def _create_semantic_searcher(self) -> SemanticSearcher:
+        """Build the semantic search backend selected by config."""
+        if self.config.retrieval_backend == "embedding":
+            if self.config.zvec is None:
+                raise ValueError("Missing Zvec config for embedding retrieval backend")
+            return HssdZvecSearcher(self.config.zvec)
+        return _ClipSemanticSearcher(device=self.clip_device)
 
     def _calculate_bbox_score(
         self, target_dimensions: np.ndarray, mesh_extents: np.ndarray
@@ -197,12 +221,16 @@ class HssdRetriever:
             )
             return []
 
-        top_k_meshes = get_top_k_similar_meshes(
+        semantic_searcher = getattr(self, "semantic_searcher", None)
+        if semantic_searcher is None:
+            semantic_searcher = self._create_semantic_searcher()
+            self.semantic_searcher = semantic_searcher
+
+        top_k_meshes = semantic_searcher.get_top_k_similar_meshes(
             text_description=description,
             preprocessed_data=self.preprocessed_data,
             category=category,
             top_k=self.config.use_top_k,
-            device=self.clip_device,
         )
 
         if not top_k_meshes:
@@ -265,3 +293,25 @@ class HssdRetriever:
         )
 
         return candidates
+
+
+class _ClipSemanticSearcher:
+    """Adapter around the existing CLIP similarity search."""
+
+    def __init__(self, device: str | None = None) -> None:
+        self.device = device
+
+    def get_top_k_similar_meshes(
+        self,
+        text_description: str,
+        preprocessed_data: object,
+        category: str | None = None,
+        top_k: int = 5,
+    ) -> list[tuple[str, float]]:
+        return get_top_k_similar_meshes(
+            text_description=text_description,
+            preprocessed_data=preprocessed_data,
+            category=category,
+            top_k=top_k,
+            device=self.device,
+        )

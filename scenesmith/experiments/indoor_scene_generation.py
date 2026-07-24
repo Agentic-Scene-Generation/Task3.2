@@ -19,6 +19,9 @@ from omegaconf import DictConfig, OmegaConf
 from scenesmith.agent_utils.articulated_retrieval_server import (
     ArticulatedRetrievalServer,
 )
+from scenesmith.agent_utils.furniture_accessibility_guard import (
+    improve_storage_front_access,
+)
 from scenesmith.agent_utils.geometry_generation_server import GeometryGenerationServer
 from scenesmith.agent_utils.house import HouseLayout, HouseScene, RoomGeometry
 from scenesmith.agent_utils.hssd_retrieval_server import HssdRetrievalServer
@@ -32,6 +35,9 @@ from scenesmith.agent_utils.sceneeval_exporter import (
     SceneEvalExportConfig,
     SceneEvalExporter,
 )
+from scenesmith.agent_utils.seating_orientation_guard import (
+    align_seating_to_nearest_surface,
+)
 from scenesmith.ceiling_agents.stateful_ceiling_agent import StatefulCeilingAgent
 from scenesmith.experiments.base_experiment import BaseExperiment
 from scenesmith.floor_plan_agents.stateful_floor_plan_agent import (
@@ -41,6 +47,7 @@ from scenesmith.furniture_agents.stateful_furniture_agent import StatefulFurnitu
 from scenesmith.manipuland_agents.stateful_manipuland_agent import (
     StatefulManipulandAgent,
 )
+from scenesmith.scenebenchmark_critic.config import critic_config_from_any
 from scenesmith.utils.logging import ConsoleLogger, FileLoggingContext
 from scenesmith.utils.openai import configure_reasoning_persistence
 from scenesmith.utils.parallel import run_parallel_isolated
@@ -851,6 +858,13 @@ def _generate_room(
                 # scoring/rendering that depends on the agent's Blender server.
                 furniture_agent.cleanup()
 
+        # LLM furniture repairs can restore a checkpoint with a seat facing away
+        # from its functional surface. Apply deterministic geometry guards before
+        # persisting the checkpoint used by later stages.
+        align_seating_to_nearest_surface(scene)
+        if critic_config_from_any(cfg_dict).enabled:
+            improve_storage_front_access(scene, config=cfg_dict)
+
         # Always save state after furniture stage (unconditional for resumability).
         logger.log_scene(scene=scene, name="scene_after_furniture")
         _export_scene_blend_file(
@@ -1055,6 +1069,10 @@ def _generate_room(
             f"Manipulands added to room {room_id} in "
             f"{timedelta(seconds=end_time - start_time)}"
         )
+
+    # Final post-processing can be reached from a checkpoint resume. Reapply the
+    # seating orientation guard so the final scene cannot inherit a backward seat.
+    align_seating_to_nearest_surface(scene)
 
     # Final post-processing (projection + simulation).
     if projection_cfg["enabled"] and projection_cfg["final"]["enabled"]:
@@ -1660,7 +1678,25 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
             preload_retriever=True,  # Always preload CLIP for consistent performance.
             hssd_data_path=str(hssd_config.data_path),
             hssd_preprocessed_path=str(hssd_config.preprocessed_path),
+            hssd_retrieval_backend=str(
+                getattr(hssd_config, "retrieval_backend", "clip")
+            ),
             hssd_top_k=hssd_config.use_top_k,
+            hssd_zvec_collection_path=(
+                str(hssd_config.zvec.collection_path)
+                if "zvec" in hssd_config and hssd_config.zvec is not None
+                else None
+            ),
+            hssd_embedding_base_url=(
+                str(hssd_config.zvec.base_url)
+                if "zvec" in hssd_config and hssd_config.zvec is not None
+                else None
+            ),
+            hssd_embedding_dimension=(
+                int(hssd_config.zvec.embedding_dimension)
+                if "zvec" in hssd_config and hssd_config.zvec is not None
+                else 2048
+            ),
             clip_device=retrieval_device,
         )
 

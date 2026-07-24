@@ -7,6 +7,7 @@ SQLiteSession agents that maintain conversation memory across interactions.
 
 import logging
 import math
+import re
 import time
 
 from pathlib import Path
@@ -52,6 +53,7 @@ from scenesmith.agent_utils.scoring import (
     log_agent_response,
 )
 from scenesmith.agent_utils.sdf_generator import generate_drake_sdf
+from scenesmith.agent_utils.thin_covering_generator import generate_thin_covering_sdf
 from scenesmith.agent_utils.workflow_tools import WorkflowTools
 from scenesmith.furniture_agents.base_furniture_agent import BaseFurnitureAgent
 from scenesmith.furniture_agents.tools.furniture_tools import FurnitureTools
@@ -68,7 +70,10 @@ REPAIR_ASSET_SPECS: dict[str, tuple[str, list[float]]] = {
         "Compact standard double bed with headboard, mattress, pillows, and bedding",
         [1.60, 2.05, 0.80],
     ),
-    "twin_bed": ("Compact single twin bed with mattress and headboard", [1.0, 2.0, 0.75]),
+    "twin_bed": (
+        "Compact single twin bed with mattress and headboard",
+        [1.0, 2.0, 0.75],
+    ),
     "nightstand": ("Compact bedside nightstand with drawer", [0.45, 0.42, 0.55]),
     "wardrobe": ("Compact wardrobe closet with simple doors", [0.90, 0.55, 2.00]),
     "dresser": ("Low dresser chest with storage drawers", [1.10, 0.48, 0.85]),
@@ -80,6 +85,10 @@ REPAIR_ASSET_SPECS: dict[str, tuple[str, list[float]]] = {
     "bookshelf": ("Compact freestanding bookshelf", [0.90, 0.35, 1.80]),
     "plant": ("Large indoor potted floor plant", [0.60, 0.60, 1.20]),
     "rug": ("Square low-pile area rug", [1.80, 1.80, 0.03]),
+    "armchair": ("Compact upholstered armchair", [0.75, 0.75, 0.95]),
+    "floor_lamp": ("Slim standing floor lamp", [0.40, 0.40, 1.60]),
+    "tv_stand": ("Low media console TV stand", [1.60, 0.45, 0.65]),
+    "sideboard": ("Compact dining room sideboard", [1.40, 0.45, 0.80]),
 }
 
 
@@ -516,22 +525,72 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             actions.append("cleared deterministic door/opening forbidden zones")
 
         if not is_bedroom_scene(self.scene):
+            if (
+                "collisions" in reasons
+                and self._repair_generic_wall_collisions()
+            ):
+                actions.append(
+                    "moved generic furniture away from room walls to the deterministic margin"
+                )
             return bool(actions), actions
 
         if self._anchor_existing_bed():
             actions.append("anchored bed to deterministic bedroom head wall")
         if self._repair_bedside_nightstands():
             actions.append("repositioned nightstands to deterministic bedside anchors")
+        if "dresser" in reasons and self._repair_dresser_opposite_bed_wall_anchor():
+            actions.append("anchored dresser to the wall opposite the bed")
+        repaired_storage_pair = False
+        if self._prompt_requires_wardrobe_next_to_dresser():
+            repaired_storage_pair = self._repair_wardrobe_next_to_dresser()
+            if repaired_storage_pair:
+                actions.append("placed wardrobe against the wall next to dresser")
         if (
-            "window access warning" in reasons
-            or "wardrobe" in reasons
-            or "closet" in reasons
-            or "collisions" in reasons
-            or FailureCategory.WINDOW_OR_WALL_ACCESS in repair_plan.categories
-        ) and self._repair_wardrobe_wall_anchor():
+            not repaired_storage_pair
+            and (
+                "window access warning" in reasons
+                or "wardrobe" in reasons
+                or "closet" in reasons
+                or "collisions" in reasons
+                or FailureCategory.WINDOW_OR_WALL_ACCESS in repair_plan.categories
+            )
+            and self._repair_wardrobe_wall_anchor()
+        ):
             actions.append("moved wardrobe to a deterministic wall/corner anchor")
 
         return bool(actions), actions
+
+    def _repair_generic_wall_collisions(self) -> bool:
+        """Move non-bedroom furniture back inside a conservative wall margin.
+
+        The furniture designer can place a thin rug or a duplicate/repair asset
+        exactly on the room-boundary AABB.  Drake then reports a small collision
+        with the wall thickness even though the object appears visually inside the
+        room.  Bedroom repairs already use the deterministic wall margin, but
+        generic rooms previously left this case to the planner/LLM.  Refit every
+        mutable furniture object once; the operation is idempotent and preserves
+        the requested object set.
+        """
+        if self.scene is None or self._room_bounds_xy() is None:
+            return False
+
+        changed = False
+        for obj in self.scene.objects.values():
+            if getattr(obj, "immutable", False):
+                continue
+            if getattr(obj, "object_type", None) != ObjectType.FURNITURE:
+                continue
+            transform = self._fit_transform_inside_room(obj, obj.transform)
+            if self._transform_close(obj.transform, transform):
+                continue
+            self.scene.move_object(obj.object_id, transform)
+            changed = True
+            console_logger.info(
+                "Deterministic generic wall repair moved %s (%s) inside room margin",
+                obj.object_id,
+                obj.name,
+            )
+        return changed
 
     def _replace_geometry_failed_furniture_assets(self, reasons: str) -> int:
         """Replace required furniture whose SDF/mesh cannot be loaded by Drake."""
@@ -770,20 +829,31 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             gltf_path = repair_root / f"{category}_placeholder.gltf"
             sdf_path = repair_root / f"{category}_placeholder.sdf"
             mesh.export(gltf_path)
-            physics = MeshPhysicsAnalysis(
-                up_axis="+Z",
-                front_axis="+Y",
-                material="wood",
-                mass_kg=max(1.0, width * depth * height * 35.0),
-                mass_range_kg=(1.0, max(1.0, width * depth * height * 50.0)),
-            )
-            generate_drake_sdf(
-                visual_mesh_path=gltf_path,
-                collision_pieces=[mesh.copy()],
-                physics_analysis=physics,
-                output_path=sdf_path,
-                asset_name=f"{category}_placeholder",
-            )
+            if category == "rug":
+                # Rugs are floor coverings, not rigid furniture.  Keep the
+                # visual mesh in the scene but omit collision geometry so a
+                # fallback rug cannot collide with walls or furniture merely
+                # because all retrieved rug meshes were invalid.
+                generate_thin_covering_sdf(
+                    visual_mesh_path=gltf_path,
+                    output_path=sdf_path,
+                    model_name=f"{category}_placeholder",
+                )
+            else:
+                physics = MeshPhysicsAnalysis(
+                    up_axis="+Z",
+                    front_axis="+Y",
+                    material="wood",
+                    mass_kg=max(1.0, width * depth * height * 35.0),
+                    mass_range_kg=(1.0, max(1.0, width * depth * height * 50.0)),
+                )
+                generate_drake_sdf(
+                    visual_mesh_path=gltf_path,
+                    collision_pieces=[mesh.copy()],
+                    physics_analysis=physics,
+                    output_path=sdf_path,
+                    asset_name=f"{category}_placeholder",
+                )
             object_id = self.asset_manager.registry.generate_unique_id(
                 f"{category}_repair_placeholder"
             )
@@ -798,9 +868,23 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 bbox_min=np.asarray([-width / 2.0, -depth / 2.0, 0.0], dtype=float),
                 bbox_max=np.asarray([width / 2.0, depth / 2.0, height], dtype=float),
                 metadata={
-                    "asset_source": "deterministic_placeholder",
+                    "asset_source": (
+                        "thin_covering"
+                        if category == "rug"
+                        else "deterministic_placeholder"
+                    ),
                     "repair_placeholder": True,
                     "generation_timestamp": time.time(),
+                    **(
+                        {
+                            "width_m": width,
+                            "depth_m": depth,
+                            "shape": "rectangular",
+                            "is_wall_covering": False,
+                        }
+                        if category == "rug"
+                        else {}
+                    ),
                 },
             )
             self.asset_manager.registry.register(placeholder)
@@ -958,7 +1042,9 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         bed_center = np.asarray(bed.transform.translation(), dtype=float)
         rotation = np.asarray(bed.transform.rotation().matrix(), dtype=float)
         lateral = rotation @ np.array([1.0, 0.0, 0.0])
-        head = rotation @ np.array([0.0, 1.0, 0.0])
+        # Bed assets point +Y toward the foot; bedside furniture belongs at
+        # the opposite (headboard) end.
+        head = -(rotation @ np.array([0.0, 1.0, 0.0]))
         yaw = math.degrees(RollPitchYaw(bed.transform.rotation()).yaw_angle())
         gap = float(self._repair_cfg_value("nightstand_gap_m", 0.08))
 
@@ -1032,6 +1118,143 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         if best_transform is None:
             best_transform = fallback_transform
 
+        if best_transform is None or self._transform_close(
+            wardrobe.transform, best_transform
+        ):
+            return False
+        self.scene.move_object(wardrobe.object_id, best_transform)
+        return True
+
+    def _repair_dresser_opposite_bed_wall_anchor(self) -> bool:
+        """Back the dresser against the wall faced by the foot of the bed."""
+        dressers = self._furniture_by_category("dresser")
+        beds = self._furniture_by_category("bed")
+        if not dressers or not beds or self.scene is None:
+            return False
+
+        dresser = dressers[0]
+        bed = beds[0]
+        plan = build_bedroom_anchor_plan(self.scene, self._bedroom_layout_cfg())
+        head_wall = plan.bed_head_wall if plan and plan.bed_head_wall else "north"
+        opposite_wall = {
+            "north": "south",
+            "south": "north",
+            "east": "west",
+            "west": "east",
+        }.get(head_wall, "south")
+        bed_center = np.asarray(bed.transform.translation(), dtype=float)
+        x = float(bed_center[0])
+        y = float(bed_center[1])
+        transform = self._grounded_transform(
+            dresser,
+            x=x,
+            y=y,
+            yaw_deg=self._yaw_for_inward_wall(opposite_wall),
+        )
+        transform = self._snap_transform_to_wall(dresser, transform, opposite_wall)
+        transform = self._fit_transform_inside_room(dresser, transform)
+        if self._transform_close(dresser.transform, transform):
+            return False
+        self.scene.move_object(dresser.object_id, transform)
+        return True
+
+    def _prompt_requires_wardrobe_next_to_dresser(self) -> bool:
+        if self.scene is None:
+            return False
+        text = str(
+            getattr(self.scene, "scene_expert_original_description", "")
+            or getattr(self.scene, "text_description", "")
+            or ""
+        ).lower()
+        wardrobe = r"(?:wardrobe|closet|armoire)"
+        dresser = r"(?:dresser|chest\s+of\s+drawers)"
+        return bool(
+            re.search(
+                rf"{wardrobe}.{{0,50}}(?:next|adjacent)\s+to.{{0,30}}{dresser}", text
+            )
+            or re.search(
+                rf"{dresser}.{{0,50}}(?:next|adjacent)\s+to.{{0,30}}{wardrobe}", text
+            )
+        )
+
+    def _repair_wardrobe_next_to_dresser(self) -> bool:
+        wardrobes = self._furniture_by_category("wardrobe")
+        dressers = self._furniture_by_category("dresser")
+        beds = self._furniture_by_category("bed")
+        if not wardrobes or not dressers or not beds or self.scene is None:
+            return False
+        wardrobe = wardrobes[0]
+        dresser = dressers[0]
+        dresser_bounds = dresser.compute_world_bounds()
+        if dresser_bounds is None:
+            return False
+
+        plan = build_bedroom_anchor_plan(self.scene, self._bedroom_layout_cfg())
+        head_wall = plan.bed_head_wall if plan and plan.bed_head_wall else "north"
+        wall = {
+            "north": "south",
+            "south": "north",
+            "east": "west",
+            "west": "east",
+        }.get(head_wall, "south")
+        dresser_min, dresser_max = dresser_bounds
+        wardrobe_size = self._local_size(wardrobe, [0.90, 0.55, 2.00])
+        gap = float(self._repair_cfg_value("storage_pair_gap_m", 0.08))
+        dresser_center = np.asarray(dresser.transform.translation(), dtype=float)
+        candidates: list[RigidTransform] = []
+        if wall in ("north", "south"):
+            for x in (
+                float(dresser_min[0]) - wardrobe_size[0] / 2.0 - gap,
+                float(dresser_max[0]) + wardrobe_size[0] / 2.0 + gap,
+            ):
+                candidates.append(
+                    self._grounded_transform(
+                        wardrobe,
+                        x=x,
+                        y=float(dresser_center[1]),
+                        yaw_deg=self._yaw_for_inward_wall(wall),
+                    )
+                )
+        else:
+            for y in (
+                float(dresser_min[1]) - wardrobe_size[1] / 2.0 - gap,
+                float(dresser_max[1]) + wardrobe_size[1] / 2.0 + gap,
+            ):
+                candidates.append(
+                    self._grounded_transform(
+                        wardrobe,
+                        x=float(dresser_center[0]),
+                        y=y,
+                        yaw_deg=self._yaw_for_inward_wall(wall),
+                    )
+                )
+
+        obstacles = self._furniture_by_category("bed") + self._furniture_by_category(
+            "nightstand"
+        )
+        original = np.asarray(wardrobe.transform.translation(), dtype=float)
+        best_transform = None
+        best_score = -1e18
+        for candidate in candidates:
+            candidate = self._snap_transform_to_wall(wardrobe, candidate, wall)
+            candidate = self._fit_transform_inside_room(wardrobe, candidate)
+            bounds = self._bounds_for_transform(wardrobe, candidate)
+            if bounds is None:
+                continue
+            overlap_penalty = 0.0
+            for obstacle in obstacles:
+                obstacle_bounds = obstacle.compute_world_bounds()
+                if obstacle_bounds is None:
+                    continue
+                overlap_x, overlap_y = self._xy_overlap_depths(bounds, obstacle_bounds)
+                overlap_penalty += overlap_x * overlap_y * 500.0
+            move_penalty = float(
+                np.linalg.norm(np.asarray(candidate.translation())[:2] - original[:2])
+            )
+            score = -overlap_penalty - move_penalty
+            if score > best_score:
+                best_score = score
+                best_transform = candidate
         if best_transform is None or self._transform_close(
             wardrobe.transform, best_transform
         ):
@@ -1304,22 +1527,9 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 candidates.append((wall, x, y, self._yaw_for_inward_wall(wall)))
 
         transforms: list[tuple[RigidTransform, float]] = []
-        collision_clearance = float(
-            self._repair_cfg_value("wardrobe_wall_clearance_m", 0.35)
-        )
         for wall, x, y, yaw in candidates:
             transform = self._grounded_transform(wardrobe, x=x, y=y, yaw_deg=yaw)
             transform = self._snap_transform_to_wall(wardrobe, transform, wall)
-            translation = np.asarray(transform.translation(), dtype=float).copy()
-            if wall == "north":
-                translation[1] -= collision_clearance
-            elif wall == "south":
-                translation[1] += collision_clearance
-            elif wall == "east":
-                translation[0] -= collision_clearance
-            else:
-                translation[0] += collision_clearance
-            transform = RigidTransform(R=transform.rotation(), p=translation)
             transform = self._fit_transform_inside_room(wardrobe, transform)
             opening_penalty = 5.0 if wall_openings.get(wall) else 0.0
             transforms.append((transform, opening_penalty))
@@ -1404,7 +1614,10 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             return transform
         min_x, min_y, max_x, max_y = room_bounds
         world_min, world_max = bounds
-        margin = 0.03
+        margin = max(
+            0.03,
+            float(self._repair_cfg_value("wall_margin_m", 0.08)),
+        )
         translation = np.asarray(transform.translation(), dtype=float).copy()
         if world_min[0] < min_x + margin:
             translation[0] += min_x + margin - float(world_min[0])
@@ -1417,11 +1630,13 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         return RigidTransform(R=transform.rotation(), p=translation)
 
     def _yaw_for_head_wall(self, wall: str) -> float:
+        # The bed tool/render arrow is the foot direction, so it must point
+        # inward while the headboard faces the selected wall.
         return {
-            "north": 0.0,
-            "south": 180.0,
-            "east": -90.0,
-            "west": 90.0,
+            "north": 180.0,
+            "south": 0.0,
+            "east": 90.0,
+            "west": -90.0,
         }.get(wall, 0.0)
 
     def _yaw_for_inward_wall(self, wall: str) -> float:

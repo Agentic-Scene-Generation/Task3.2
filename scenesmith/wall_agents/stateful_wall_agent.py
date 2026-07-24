@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from agents import Agent, FunctionTool, Runner
+from agents.exceptions import MaxTurnsExceeded
 from agents.run import RunResult
 from agents.tracing import custom_span
 from omegaconf import DictConfig
@@ -25,18 +26,25 @@ from scenesmith.agent_utils.base_stateful_agent import (
 )
 from scenesmith.agent_utils.house import HouseLayout
 from scenesmith.agent_utils.placement_noise import PlacementNoiseMode
-from scenesmith.agent_utils.room import AgentType, RoomScene
+from scenesmith.agent_utils.room import AgentType, ObjectType, RoomScene
 from scenesmith.agent_utils.scoring import WallCritiqueWithScores, log_agent_response
 from scenesmith.agent_utils.workflow_tools import WorkflowTools
 from scenesmith.prompts.registry import WallAgentPrompts
 from scenesmith.scenebenchmark_critic import evaluate_room_scene, format_prompt_context
 from scenesmith.scenebenchmark_critic.config import critic_config_from_any
 from scenesmith.scenebenchmark_critic.prompt_context import format_agent_prompt_context
+from scenesmith.scenebenchmark_critic.visual_clearance_repair import (
+    improve_wall_visual_clearance,
+)
 from scenesmith.utils.logging import BaseLogger
 from scenesmith.wall_agents.base_wall_agent import BaseWallAgent
+from scenesmith.wall_agents.prompt_constraints import (
+    build_required_wall_object_constraints,
+)
 from scenesmith.wall_agents.tools.vision_tools import WallVisionTools
 from scenesmith.wall_agents.tools.wall_surface import WallSurface
 from scenesmith.wall_agents.tools.wall_tools import WallTools
+from scenesmith.wall_agents.tools.window_tools import WindowRepairTools
 
 console_logger = logging.getLogger(__name__)
 
@@ -133,7 +141,12 @@ class StatefulWallAgent(BaseStatefulAgent, BaseWallAgent):
 
         # Wall tools will be set when adding wall objects.
         self.wall_tools: WallTools | None = None
+        self.window_repair_tools: WindowRepairTools | None = None
         self._latest_scenebenchmark_critic_context: str | None = None
+        self.required_wall_object_constraints = (
+            "- No explicit wall-object obligations were extracted from the prompt. "
+            "Decorate walls contextually."
+        )
 
     def _create_designer_tools(
         self, wall_surfaces: list[WallSurface]
@@ -159,13 +172,36 @@ class StatefulWallAgent(BaseStatefulAgent, BaseWallAgent):
             asset_manager=self.asset_manager,
             cfg=self.cfg,
         )
-        workflow_tools = WorkflowTools()
+        floor_plan_cfg = self.cfg.get("floor_plan_geometry_config")
+        if floor_plan_cfg:
+            self.window_repair_tools = WindowRepairTools(
+                scene=self.scene,
+                house_layout=self.house_layout,
+                floor_plan_cfg=floor_plan_cfg,
+                room_output_dir=self.logger.output_dir,
+                refresh_wall_surfaces=self._refresh_wall_surfaces_after_window_edit,
+                rendering_manager=self.rendering_manager,
+                logger=self.logger,
+            )
+        self.workflow_tools = WorkflowTools()
 
         return [
             *vision_tools.tools.values(),
             *self.wall_tools.tools.values(),
-            *workflow_tools.tools.values(),
+            *(
+                self.window_repair_tools.tools.values()
+                if self.window_repair_tools is not None
+                else []
+            ),
+            *self.workflow_tools.tools.values(),
         ]
+
+    def _refresh_wall_surfaces_after_window_edit(self) -> None:
+        """Refresh placement exclusions after a window geometry edit."""
+        refreshed = self._extract_wall_surfaces(room_id=self.scene.room_id)
+        self.wall_surfaces[:] = refreshed
+        if self.wall_tools is not None:
+            self.wall_tools.refresh_wall_surfaces(self.wall_surfaces)
 
     def _create_designer_agent(
         self, tools: list[FunctionTool], room_description: str
@@ -187,6 +223,7 @@ class StatefulWallAgent(BaseStatefulAgent, BaseWallAgent):
             prompt_enum=designer_prompt_enum,
             room_description=room_description,
             wall_count=len(self.wall_surfaces),
+            required_wall_objects=self.required_wall_object_constraints,
         )
 
     def _create_critic_tools(self) -> list[FunctionTool]:
@@ -234,6 +271,7 @@ class StatefulWallAgent(BaseStatefulAgent, BaseWallAgent):
             output_type=WallCritiqueWithScores,
             room_description=room_description,
             wall_count=len(self.wall_surfaces),
+            required_wall_objects=self.required_wall_object_constraints,
         )
 
     def _build_scenebenchmark_critic_context(self) -> str | None:
@@ -280,8 +318,7 @@ class StatefulWallAgent(BaseStatefulAgent, BaseWallAgent):
         if self._latest_scenebenchmark_critic_context:
             critique += (
                 "\n\nVERBATIM SceneBenchmark action context (must be passed to "
-                "the designer):\n"
-                + self._latest_scenebenchmark_critic_context
+                "the designer):\n" + self._latest_scenebenchmark_critic_context
             )
         return critique
 
@@ -307,6 +344,7 @@ class StatefulWallAgent(BaseStatefulAgent, BaseWallAgent):
             prompt_enum=planner_prompt_enum,
             room_description=room_description,
             wall_count=len(self.wall_surfaces),
+            required_wall_objects=self.required_wall_object_constraints,
             max_critique_rounds=self.cfg.max_critique_rounds,
             reset_single_category_threshold=single_threshold,
             reset_total_sum_threshold=total_threshold,
@@ -341,7 +379,10 @@ class StatefulWallAgent(BaseStatefulAgent, BaseWallAgent):
                 f"{surface.bounding_box_max[2]:.1f}m tall{exclusion_note}"
             )
 
-        return {"wall_summary": "\n".join(wall_summary)}
+        return {
+            "wall_summary": "\n".join(wall_summary),
+            "required_wall_objects": self.required_wall_object_constraints,
+        }
 
     def _get_design_change_prompt_enum(self) -> Any:
         """Get the prompt enum for design change instruction.
@@ -382,6 +423,9 @@ class StatefulWallAgent(BaseStatefulAgent, BaseWallAgent):
         Args:
             room_description: Human-readable room description.
         """
+        self.required_wall_object_constraints = build_required_wall_object_constraints(
+            room_description
+        )
         # Create designer tools first.
         designer_tools = self._create_designer_tools(
             wall_surfaces=self.wall_surfaces,
@@ -413,11 +457,48 @@ class StatefulWallAgent(BaseStatefulAgent, BaseWallAgent):
 
     async def _run_wall_workflow(self) -> None:
         """Execute the multi-agent workflow for wall decoration."""
+        required_prepass_ran = False
+        # The local planner can finish without ever invoking the designer.  For an
+        # explicit wall-object obligation (notably a TV above a media console),
+        # guarantee one executable design pass before planner refinement.
+        if (
+            "No explicit wall-object obligations"
+            not in self.required_wall_object_constraints
+        ):
+            wall_objects = self.scene.get_objects_by_type(ObjectType.WALL_MOUNTED)
+            if not wall_objects:
+                console_logger.info(
+                    "Explicit wall requirement detected; forcing initial wall design"
+                )
+                required_prepass_ran = True
+                try:
+                    await self._request_initial_design_impl()
+                except MaxTurnsExceeded:
+                    # Tool side effects already committed by the designer are useful.
+                    # Let the planner inspect and repair the partial result instead of
+                    # failing the whole scene solely because this pre-pass hit its cap.
+                    console_logger.warning(
+                        "Required wall design pre-pass reached its turn limit; "
+                        "continuing with planner refinement"
+                    )
+
         # Get runner instruction for planner to start workflow.
         planner_runner_prompt = WallAgentPrompts.STATEFUL_PLANNER_RUNNER_INSTRUCTION
         runner_instruction = self.prompt_registry.get_prompt(
             prompt_enum=planner_runner_prompt,
         )
+        if required_prepass_ran:
+            runner_instruction += (
+                "\n\nThe required initial designer pass has already run. Do NOT call "
+                "request_initial_design again. Start with request_critique, then use "
+                "request_design_change only for verified remaining issues. If the "
+                "critique confirms every explicit wall requirement is satisfied and "
+                "reports no critical, physics, or SceneBenchmark geometry issue, "
+                "finish immediately even when optional decoration or a completeness "
+                "score below the normal early-finish threshold is mentioned. Do not "
+                "request optional artwork, mirrors, shelves, or other enhancements "
+                "during this required-object pass."
+            )
 
         result: RunResult = await Runner.run(
             starting_agent=self.planner,
@@ -507,6 +588,17 @@ class StatefulWallAgent(BaseStatefulAgent, BaseWallAgent):
 
                 # Run multi-agent workflow.
                 await self._run_wall_workflow()
+
+                # The final critic call can identify an occluded clock/shelf after
+                # the planner has exhausted its designer budget. Repair those
+                # geometry-proven issues before the caller persists the wall stage.
+                fixes = improve_wall_visual_clearance(
+                    scene,
+                    wall_surfaces=self.wall_surfaces,
+                    config=self.cfg,
+                )
+                if fixes:
+                    self.rendering_manager.clear_cache()
 
             except Exception as e:
                 console_logger.error(

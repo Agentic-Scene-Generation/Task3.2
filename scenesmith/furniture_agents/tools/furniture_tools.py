@@ -272,9 +272,25 @@ class FurnitureTools:
     def _world_bounds_for_transform(
         self, scene_obj: SceneObject, transform: RigidTransform
     ) -> tuple[np.ndarray, np.ndarray] | None:
-        if scene_obj.bbox_min is None or scene_obj.bbox_max is None:
+        bbox_min = getattr(scene_obj, "bbox_min", None)
+        bbox_max = getattr(scene_obj, "bbox_max", None)
+        if bbox_min is None or bbox_max is None:
             return None
-        corners = compute_aabb_corners(scene_obj.bbox_min, scene_obj.bbox_max)
+        try:
+            bbox_min = np.asarray(bbox_min, dtype=float)
+            bbox_max = np.asarray(bbox_max, dtype=float)
+        except (TypeError, ValueError):
+            # Lightweight unit-test doubles and incomplete retrieved assets may
+            # expose bbox attributes without providing numeric bounds.
+            return None
+        if (
+            bbox_min.shape != (3,)
+            or bbox_max.shape != (3,)
+            or not np.all(np.isfinite(bbox_min))
+            or not np.all(np.isfinite(bbox_max))
+        ):
+            return None
+        corners = compute_aabb_corners(bbox_min, bbox_max)
         world_corners = np.array([transform @ corner for corner in corners])
         return np.min(world_corners, axis=0), np.max(world_corners, axis=0)
 
@@ -486,6 +502,7 @@ class FurnitureTools:
                 object_type=ObjectType.FURNITURE,
                 desired_dimensions=size_policy_result.desired_dimensions,
                 style_context=style_context,
+                scene_prompt_context=self.scene.text_description,
                 scene_id=self.scene.scene_dir.name,
             )
             return self._generate_assets_impl(request)
@@ -533,13 +550,13 @@ class FurnitureTools:
             object_id: str,
             x: float,
             y: float,
-            yaw: float = 0.0,
+            yaw: float | None = None,
         ) -> str:
             """Move existing furniture to a new floor position.
 
             Furniture sits flat on the floor at z=0 with upright orientation.
-            You can only control the x, y position and yaw rotation (rotation
-            around the vertical axis).
+            You can control the x, y position and optionally the yaw rotation
+            (rotation around the vertical axis).
 
             Use this to relocate furniture that's already in the room. You need
             the object ID from when you placed it or from 'get_current_scene_state'.
@@ -548,8 +565,9 @@ class FurnitureTools:
                 object_id: ID of the furniture item to move.
                 x: New X position in the room (meters).
                 y: New Y position in the room (meters).
-                yaw: New yaw rotation in degrees around vertical axis (default: 0.0).
-                    Positive values rotate counterclockwise in top-down view.
+                yaw: New yaw rotation in degrees around vertical axis. Omit it to
+                    preserve the furniture's current rotation during position-only
+                    repairs. Positive values rotate counterclockwise in top-down view.
 
             Returns:
                 Confirmation that the furniture was moved successfully.
@@ -837,7 +855,7 @@ class FurnitureTools:
         z: float,
         roll: float,
         pitch: float,
-        yaw: float,
+        yaw: float | None,
     ) -> str:
         """
         Implementation for moving furniture to absolute pose. Rotations are in degrees.
@@ -898,7 +916,6 @@ class FurnitureTools:
             current_rpy = RollPitchYaw(current_transform.rotation())
 
             new_position = np.array([x, y, z])
-            new_rotation = np.array([roll, pitch, yaw])
             current_rotation = np.array(
                 [
                     math.degrees(current_rpy.roll_angle()),
@@ -906,6 +923,11 @@ class FurnitureTools:
                     math.degrees(current_rpy.yaw_angle()),
                 ]
             )  # Current rotation in degrees for comparison
+            if yaw is None:
+                # Position-only critic repairs must preserve the existing facing.
+                # Resetting omitted yaw to 0 undid wall/bedside snaps on every move.
+                yaw = float(current_rotation[2])
+            new_rotation = np.array([roll, pitch, yaw])
 
             # Check if both position and rotation are unchanged.
             position_unchanged = np.allclose(current_position, new_position, atol=1e-6)
@@ -957,45 +979,17 @@ class FurnitureTools:
                     base_lift,
                 )
 
-            noisy_transform = apply_placement_noise(
+            valid_base, base_error = self._check_object_bounds_for_transform(
+                scene_obj=scene_obj,
                 transform=new_transform,
-                position_xy_std_meters=self.active_noise_profile.position_xy_std_meters,
-                rotation_yaw_std_degrees=self.active_noise_profile.rotation_yaw_std_degrees,
             )
-            noisy_transform, noisy_lift = self._ground_transform_to_floor_if_needed(
-                scene_obj=scene_obj,
-                transform=noisy_transform,
-            )
-            if noisy_lift > 0:
-                console_logger.info(
-                    "Auto-grounded noisy furniture move for '%s' by lifting %.3fm",
-                    object_id,
-                    noisy_lift,
-                )
-            valid_noisy, noisy_error = self._check_object_bounds_for_transform(
-                scene_obj=scene_obj,
-                transform=noisy_transform,
-            )
-            if valid_noisy:
-                new_transform = noisy_transform
-            else:
-                valid_base, base_error = self._check_object_bounds_for_transform(
-                    scene_obj=scene_obj,
-                    transform=new_transform,
-                )
-                if not valid_base:
-                    return FurnitureOperationResult(
-                        success=False,
-                        message=base_error,
-                        object_id=object_id,
-                        error_type=FurnitureErrorType.POSITION_OUT_OF_BOUNDS,
-                    ).to_json()
-                console_logger.info(
-                    "Placement noise would violate room bounds for %s; using "
-                    "un-noised transform. Noise error: %s",
-                    object_id,
-                    noisy_error,
-                )
+            if not valid_base:
+                return FurnitureOperationResult(
+                    success=False,
+                    message=base_error,
+                    object_id=object_id,
+                    error_type=FurnitureErrorType.POSITION_OUT_OF_BOUNDS,
+                ).to_json()
 
             # Update object to new absolute pose.
             self.scene.move_object(object_id=unique_id, new_transform=new_transform)

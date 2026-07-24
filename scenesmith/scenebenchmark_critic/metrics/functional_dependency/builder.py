@@ -23,6 +23,11 @@ from scenesmith.scenebenchmark_critic.metrics.functional_dependency.relations im
     _infer_relation_type,
     _relation_target_is_valid,
 )
+from scenesmith.scenebenchmark_critic.metrics.functional_dependency.seat_surface_assignment import (
+    ASSIGNMENT_SOURCE,
+    assign_work_seats_to_surfaces,
+    work_seat_candidates,
+)
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.semantics import (
     _is_any_lamp_object,
     _is_nightstand_target,
@@ -200,8 +205,25 @@ def build_checks(
             )
             seen_check_ids.add(check_id)
 
-        checks.extend(_build_explicit_target_relation_checks(objects, seen_check_ids))
+        work_cohort_ids = {
+            str(obj.get("id") or "")
+            for obj in work_seat_candidates(
+                objects,
+                task_instruction=str(case_pack.get("task_instruction") or ""),
+                room_type=str(case_pack.get("room_type") or ""),
+            )
+        }
+        checks.extend(
+            _build_explicit_target_relation_checks(
+                objects,
+                seen_check_ids,
+                excluded_work_seat_ids=work_cohort_ids,
+            )
+        )
         checks.extend(_build_dependency_annotation_checks(objects, seen_check_ids))
+        checks.extend(
+            _build_seat_surface_assignment_checks(case_pack, objects, seen_check_ids)
+        )
         checks.extend(
             _build_grouped_functional_dependency_checks(objects, seen_check_ids)
         )
@@ -434,7 +456,10 @@ def _metadata_relation_type(
 
 
 def _build_explicit_target_relation_checks(
-    objects: dict[str, dict[str, Any]], seen_check_ids: set[str]
+    objects: dict[str, dict[str, Any]],
+    seen_check_ids: set[str],
+    *,
+    excluded_work_seat_ids: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     checks: list[dict[str, Any]] = []
     for subject in objects.values():
@@ -449,6 +474,11 @@ def _build_explicit_target_relation_checks(
         relation_type = _infer_relation_type(subject, targets[0]) or _relation_type_for(
             subject, targets[0]
         )
+        if (
+            str(subject.get("id") or "") in (excluded_work_seat_ids or set())
+            and relation_type == "seating_to_work_surface"
+        ):
+            continue
         compatible_targets = [
             target
             for target in targets
@@ -639,6 +669,53 @@ def _build_grouped_functional_dependency_checks(
             checks.extend(_grouped_workstation_checks(obj, objects, seen_check_ids))
         elif category == "bed":
             checks.extend(_grouped_bedside_checks(obj, objects, seen_check_ids))
+    return checks
+
+
+def _build_seat_surface_assignment_checks(
+    case_pack: dict[str, Any],
+    objects: dict[str, dict[str, Any]],
+    seen_check_ids: set[str],
+) -> list[dict[str, Any]]:
+    """Build annotation-driven, globally assigned work-seat dependencies."""
+    checks: list[dict[str, Any]] = []
+    assignments = assign_work_seats_to_surfaces(
+        objects,
+        task_instruction=str(case_pack.get("task_instruction") or ""),
+        room_type=str(case_pack.get("room_type") or ""),
+    )
+    for assignment in assignments:
+        chair = objects.get(assignment.seat_id)
+        target = objects.get(assignment.surface_id)
+        if chair is None or target is None:
+            continue
+        chair_id = assignment.seat_id
+        desk_id = assignment.surface_id
+        check_id = f"fd_{chair_id}_{desk_id}_seat_surface_assignment"
+        if not chair_id or not desk_id or check_id in seen_check_ids:
+            continue
+        seen_check_ids.add(check_id)
+        checks.append(
+            {
+                "check_id": check_id,
+                "metric": "functional_dependency",
+                "subject_id": chair_id,
+                "target_ids": [desk_id],
+                "relation_type": "seating_to_work_surface",
+                "expected_use": "work seat occupies a distinct usable slot at its assigned work surface",
+                "priority_weight": _priority_weight(
+                    chair, "functional_dependency", 0.95
+                ),
+                "question": (
+                    f"Is work seat `{chair_id}` aligned with its globally assigned "
+                    f"work surface `{desk_id}`?"
+                ),
+                "evidence": assignment.evidence(),
+                "evidence_refs": ["scene_geometry", "object_metadata"],
+                "check_source": ASSIGNMENT_SOURCE,
+                "scoring_tier": "core",
+            }
+        )
     return checks
 
 

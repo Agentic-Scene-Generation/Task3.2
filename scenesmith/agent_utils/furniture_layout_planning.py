@@ -448,7 +448,9 @@ def _rotation_matrix(obj: Any) -> np.ndarray:
 
 def _bed_head_vector_xy(obj: Any) -> np.ndarray:
     rotation = _rotation_matrix(obj)
-    head = rotation @ np.array([0.0, 1.0, 0.0])
+    # HSSD bed assets use their local +Y facing/arrow direction toward the
+    # foot of the bed.  The headboard is therefore on the opposite end.
+    head = -(rotation @ np.array([0.0, 1.0, 0.0]))
     xy = head[:2]
     norm = float(np.linalg.norm(xy))
     if norm <= 1e-8:
