@@ -839,7 +839,11 @@ def _generate_room(
                             "seconds"
                         )
 
-                layout_actions = furniture_agent.enforce_prompt_layout_contracts()
+                # Physical post-processing can return a scene object after internal
+                # repair flows have replaced the agent's previous reference.
+                layout_actions = furniture_agent.enforce_prompt_layout_contracts(
+                    scene=scene
+                )
                 if layout_actions:
                     console_logger.info(
                         "Applied deterministic prompt-layout contracts: %s",
