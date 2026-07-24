@@ -124,6 +124,14 @@ class StageBudget(BaseModel):
     max_designer_turns: int = 12
     max_critic_turns: int = 6
     max_wall_clock_seconds: float = 0.0
+    planner_active_max_seconds: float = 0.0
+    designer_active_max_seconds: float = 0.0
+    critic_active_max_seconds: float = 0.0
+    planner_max_output_tokens: int = 0
+    designer_max_output_tokens: int = 0
+    critic_max_output_tokens: int = 0
+    critic_max_attempts: int = 1
+    critic_attempt_timeout_seconds: float = 0.0
     critic_evaluation_max_seconds: float = 0.0
     critic_reserve_fraction: float = 0.25
     final_critic_reserve_fraction: float = 0.10

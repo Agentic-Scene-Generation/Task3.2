@@ -12,7 +12,6 @@ import json
 import logging
 import os
 import time
-import hashlib
 from pathlib import Path
 from typing import Any
 
@@ -543,7 +542,7 @@ class StageWorkingMemory:
         )
 
     def _commit_public_stage_event(self, record: dict[str, Any]) -> None:
-        """Append a durable stage event and optional memory case to the shared bank."""
+        """Append durable evidence; long-term cases have a single owner."""
         if self.public_events_path is None or self.public_memory_dir is None:
             return
         event_payload = {
@@ -559,148 +558,10 @@ class StageWorkingMemory:
         }
         _append_jsonl(self.public_events_path, event_payload)
 
-        if record.get("role") != "critic":
-            return
-        try:
-            quality = record.get("deterministic_quality") or {}
-            scores = record.get("scores") or {}
-            hard_valid = bool(quality.get("hard_valid", True))
-            if (
-                hard_valid
-                and scores
-                and record.get("score_source") == "vlm_critic"
-            ):
-                self._commit_public_success_case(record)
-            elif not hard_valid or record.get("event") == "deterministic_hard_fail":
-                self._commit_public_failure_case(record)
-        except Exception as e:
-            console_logger.warning("Failed to commit public stage memory event: %s", e)
-
-    def _memory_id(self, prefix: str, record: dict[str, Any]) -> str:
-        payload = "|".join(
-            [
-                self.stage,
-                str(record.get("role", "")),
-                str(record.get("event", "")),
-                str(record.get("scene_hash", "")),
-                str(record.get("render_dir", "")),
-                str(record.get("critique", ""))[:300],
-            ]
-        )
-        digest = hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
-        return f"{prefix}_{self.stage}_{digest}"
-
-    def _room_type_from_record(self, record: dict[str, Any]) -> str:
-        text = " ".join(
-            [
-                self.stage,
-                str(record.get("text", "")),
-                str(record.get("critique", "")),
-                " ".join(str(x) for x in record.get("object_names", [])),
-            ]
-        ).lower()
-        if "bedroom" in text or "bed" in text or "nightstand" in text:
-            return "bedroom"
-        return "room"
-
-    def _normalized_quality(self, record: dict[str, Any]) -> float:
-        total = record.get("score_total")
-        scores = record.get("scores") or {}
-        if not isinstance(total, (int, float)) or not scores:
-            return 0.0
-        max_total = 10.0 * max(1, len(scores))
-        return max(0.0, min(1.0, float(total) / max_total))
-
-    def _commit_public_success_case(self, record: dict[str, Any]) -> None:
-        quality_score = self._normalized_quality(record)
-        if quality_score < 0.75:
-            return
-        from scenesmith.scene_expert.memory.schemas import SuccessCase
-        from scenesmith.scene_expert.memory.store import FastMemoryStore
-        from scenesmith.scene_expert.memory.text_builder import build_embedding_text
-
-        case = SuccessCase(
-            case_id=self._memory_id("success", record),
-            room_type=self._room_type_from_record(record),
-            style="",
-            stage=self.stage,
-            task_signature=list(record.get("object_names", []))[:12],
-            required_objects=list(
-                (record.get("deterministic_quality") or {})
-                .get("required_counts", {})
-                .keys()
-            ),
-            scene_summary=f"Stage {self.stage} critic accepted render {record.get('render_dir', '')}.",
-            successful_pattern=[
-                _compact(record.get("critique", ""), 500)
-                or f"{self.stage} produced a hard-valid scored candidate."
-            ],
-            scores={
-                k: float(v.get("grade", v))
-                for k, v in (record.get("scores") or {}).items()
-                if isinstance(v, (int, float, dict))
-                and (
-                    not isinstance(v, dict) or isinstance(v.get("grade"), (int, float))
-                )
-            },
-            trace_ref=str(record.get("render_dir", "")),
-            quality_score=quality_score,
-            confidence=0.45,
-            created_at=_now(),
-        )
-        if not case.embedding_text:
-            case = case.model_copy(
-                update={"embedding_text": build_embedding_text(case)}
-            )
-        FastMemoryStore(str(self.public_memory_dir)).add_success_case(case)
-
-    def _commit_public_failure_case(self, record: dict[str, Any]) -> None:
-        from scenesmith.scene_expert.memory.schemas import FailureCase
-        from scenesmith.scene_expert.memory.store import FastMemoryStore
-        from scenesmith.scene_expert.memory.text_builder import build_embedding_text
-
-        quality = record.get("deterministic_quality") or {}
-        note = (
-            quality.get("deterministic_note")
-            or record.get("critique")
-            or record.get("text")
-            or ""
-        )
-        failure_type = "deterministic_hard_fail"
-        lowered = str(note).lower()
-        if "missing required" in lowered:
-            failure_type = "missing_required_object"
-        elif "door" in lowered or "open-connection" in lowered or "opening" in lowered:
-            failure_type = "door_or_opening_clearance"
-        elif "collision" in lowered or "overlap" in lowered:
-            failure_type = "collision_or_overlap"
-        case = FailureCase(
-            failure_id=self._memory_id("failure", record),
-            room_type=self._room_type_from_record(record),
-            stage=self.stage,
-            object="",
-            failure_type=failure_type,
-            bad_pattern=_compact(note, 900),
-            failure_reason=_compact(note, 900),
-            repair_action="Run stage repair loop and re-score before accepting this candidate.",
-            repair_verified=False,
-            required_objects=list((quality.get("required_counts") or {}).keys()),
-            scene_summary=f"Stage {self.stage} hard-failed at render {record.get('render_dir', '')}.",
-            quality_score=max(0.0, self._normalized_quality(record)),
-            confidence=0.6,
-            created_at=_now(),
-            scope="stage",
-            is_deterministic=True,
-            negative_constraint=_compact(note, 700),
-            critic_check="Verify deterministic hard constraints before invoking VLM scoring.",
-            trace_ref=str(record.get("render_dir", "")),
-        )
-        if not case.embedding_text:
-            case = case.model_copy(
-                update={"embedding_text": build_embedding_text(case)}
-            )
-        FastMemoryStore(str(self.public_memory_dir)).add_failure_case(case)
-
+        # Working memory is evidence, not a second long-term memory writer.
+        # SceneExpert's post-stage committer owns verified success/failure cases;
+        # keeping mutation out of this diagnostic path prevents duplicate and
+        # unverified records from entering Fast Memory.
 
 def save_generic_render_memory(
     *,

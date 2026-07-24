@@ -44,6 +44,12 @@ from scenesmith.manipuland_agents.stateful_manipuland_agent import (
 )
 from scenesmith.scene_expert.config_utils import resolve_scene_expert_stage_budget
 from scenesmith.scene_expert.exceptions import StageValidationError
+from scenesmith.scene_expert.runtime_state import (
+    ScenePausedError,
+    is_scene_paused_error,
+    mark_retryable_pause_resolved,
+    persist_retryable_pause,
+)
 from scenesmith.utils.logging import ConsoleLogger, FileLoggingContext
 from scenesmith.utils.parallel import run_parallel_isolated
 from scenesmith.utils.print_utils import bold_green, yellow
@@ -169,16 +175,20 @@ def _is_repairable_stage_validation(error: StageValidationError) -> bool:
     return not any(marker in text for marker in terminal_markers)
 
 
+def _is_critic_unavailable_validation(error: StageValidationError) -> bool:
+    return bool(error.reasons) and all(
+        "visual critic did not produce a trustworthy score" in reason.lower()
+        for reason in error.reasons
+    )
+
+
 def _stage_validation_kind(
     error: StageValidationError,
     agent: Any,
 ) -> str:
     """Classify a stage failure so recovery spends budget only where useful."""
     text = " ".join(error.reasons).lower()
-    if error.reasons and all(
-        "visual critic did not produce a trustworthy score" in reason.lower()
-        for reason in error.reasons
-    ):
+    if _is_critic_unavailable_validation(error):
         return "critic_unavailable"
     if any(
         marker in text
@@ -207,6 +217,90 @@ def _stage_validation_kind(
     return "repairable_quality"
 
 
+def _pause_unscored_scene_candidate(
+    *,
+    stage: str,
+    agent: Any,
+    scene: RoomScene,
+    reasons: list[str],
+    runtime_events: list[str],
+) -> None:
+    """Persist the current hard-valid candidate and pause only this scene."""
+
+    working_memory = getattr(agent, "stage_working_memory", None)
+    scene_root_dir = getattr(working_memory, "scene_root_dir", scene.scene_dir)
+    rendering_manager = getattr(agent, "rendering_manager", None)
+    render_dir = getattr(agent, "final_render_dir", None) or getattr(
+        rendering_manager,
+        "last_render_dir",
+        None,
+    )
+    runtime_events.append("paused_retryable_at_critic")
+    setattr(scene, "scene_expert_runtime_repair_events", runtime_events)
+    reason = "; ".join(str(item) for item in reasons if str(item).strip())
+    manifest_path = persist_retryable_pause(
+        scene_root_dir=scene_root_dir,
+        stage=stage,
+        reason=reason,
+        candidate_state=scene.to_state_dict(),
+        candidate_hash=scene.content_hash(),
+        render_dir=render_dir,
+        attempt_count=2,
+        metadata={
+            "room_id": str(getattr(scene, "room_id", "")),
+            "room_dir": str(getattr(scene, "scene_dir", "")),
+            "score_provenance": dict(
+                getattr(agent, "_last_score_provenance", {}) or {}
+            ),
+            "runtime_events": list(runtime_events),
+        },
+    )
+    raise ScenePausedError(stage, reason, str(manifest_path))
+
+
+def _score_postprocessed_candidate_or_pause(
+    *,
+    stage: str,
+    agent: Any,
+    scene: RoomScene,
+    runtime_events: list[str],
+) -> None:
+    """Score an actual post-physics candidate, retrying only transport failure."""
+
+    retry_critic = getattr(agent, "retry_final_critic_evaluation", None)
+    if not callable(retry_critic):
+        raise RuntimeError(f"{stage} agent has no final critic retry entry point")
+
+    reasons: list[str] = []
+    for attempt in range(1, 3):
+        runtime_events.append(f"postprocess_critic_attempt_{attempt}")
+        try:
+            asyncio.run(retry_critic())
+            runtime_events.append("postprocess_final_critic_verified")
+            setattr(scene, "scene_expert_runtime_repair_events", runtime_events)
+            return
+        except StageValidationError as exc:
+            if not _is_critic_unavailable_validation(exc):
+                raise
+            reasons = list(exc.reasons)
+        except Exception as exc:
+            is_transient = getattr(agent, "_is_transient_model_error", None)
+            if callable(is_transient) and not is_transient(exc):
+                raise
+            reasons = [
+                "visual critic did not produce a trustworthy score: "
+                f"{type(exc).__name__}: {exc}"
+            ]
+
+    _pause_unscored_scene_candidate(
+        stage=stage,
+        agent=agent,
+        scene=scene,
+        reasons=reasons,
+        runtime_events=runtime_events,
+    )
+
+
 def _run_sceneexpert_placement_stage(
     *,
     stage: str,
@@ -222,7 +316,6 @@ def _run_sceneexpert_placement_stage(
     recovery_enabled = bool(budget)
     regeneration_attempt = 0
     critic_retry_attempted = False
-    completion_rescue_attempted = False
     runtime_events: list[str] = []
 
     while True:
@@ -274,92 +367,27 @@ def _run_sceneexpert_placement_stage(
                         )
                         failure_kind = "critic_unavailable"
 
-            # A second critic transport failure cannot be repaired by redesigning
-            # the same hard-valid scene. Structural surface absence likewise
-            # cannot benefit from another LLM loop.
-            if failure_kind in {"critic_unavailable", "structural_unavailable"}:
-                regeneration_attempt = max_regenerations
-                completion_rescue_attempted = True
-
-            missing_required_output = any(
-                "missing required stage output" in reason.lower()
-                for reason in exc.reasons
-            )
-            agent_budget_exhausted = bool(
-                getattr(agent, "_stage_runtime_exhausted", False)
-                or getattr(agent, "_planner_budget_exhausted", False)
-            )
-            if (
-                recovery_enabled
-                and missing_required_output
-                and agent_budget_exhausted
-                and regeneration_attempt < max_regenerations
-            ):
-                # Repeating the same planner after it consumed the whole stage
-                # SLA produced another zero-object scene in the observed ACP
-                # run. Preserve the regeneration allowance for the compact,
-                # fresh-session designer rescue below.
-                console_logger.warning(
-                    "%s planner exhausted its budget before producing required "
-                    "output; skipping a redundant full-planner regeneration",
-                    stage,
+            if failure_kind == "critic_unavailable" and critic_retry_attempted:
+                _pause_unscored_scene_candidate(
+                    stage=stage,
+                    agent=agent,
+                    scene=scene,
+                    reasons=list(exc.reasons),
+                    runtime_events=runtime_events,
                 )
+
+            # A structural surface absence cannot benefit from another layout
+            # proposal. Critic transport failure is handled as a resumable scene
+            # pause below; it must not trigger a redesign of a hard-valid scene.
+            if failure_kind == "structural_unavailable":
                 regeneration_attempt = max_regenerations
 
             if regeneration_attempt >= max_regenerations:
                 if not recovery_enabled:
                     raise
-                if not completion_rescue_attempted:
-                    completion_rescue_attempted = True
-                    rescue = getattr(
-                        agent, "run_required_stage_completion_rescue", None
-                    )
-                    if callable(rescue):
-                        console_logger.warning(
-                            "%s stage remained invalid after planner recovery "
-                            "was exhausted (%d full regeneration(s)); bypassing "
-                            "the planner for one "
-                            "focused agent-led completion rescue: %s",
-                            stage,
-                            regeneration_attempt,
-                            "; ".join(exc.reasons),
-                        )
-                        prepare_regeneration = getattr(
-                            agent, "prepare_stage_regeneration", None
-                        )
-                        if callable(prepare_regeneration):
-                            asyncio.run(prepare_regeneration(list(exc.reasons)))
-                        try:
-                            runtime_events.append("focused_completion_rescue")
-                            asyncio.run(rescue(list(exc.reasons)))
-                            setattr(
-                                scene,
-                                "scene_expert_runtime_repair_events",
-                                runtime_events,
-                            )
-                            return regeneration_attempt
-                        except StageValidationError as rescue_exc:
-                            if not _is_repairable_stage_validation(rescue_exc):
-                                raise
-                            exc = rescue_exc
-                        except Exception as rescue_exc:
-                            console_logger.exception(
-                                "%s agent-led completion rescue failed; preserving "
-                                "the diagnosed candidate and continuing downstream",
-                                stage,
-                            )
-                            exc = StageValidationError(
-                                stage=stage,
-                                reasons=[
-                                    *list(exc.reasons),
-                                    "agent-led completion rescue failed: "
-                                    f"{type(rescue_exc).__name__}: {rescue_exc}",
-                                ],
-                            )
-
                 console_logger.warning(
-                    "%s stage exhausted %d full regeneration(s) and its focused "
-                    "completion rescue. Persisting an explicitly degraded stage "
+                    "%s stage exhausted %d full planner/designer/critic "
+                    "regeneration(s). Persisting an explicitly degraded stage "
                     "and continuing ACP: %s",
                     stage,
                     regeneration_attempt,
@@ -426,7 +454,7 @@ def _write_batch_summary(
     output_dir: Path,
     experiment_run_id: str,
     prompts_with_ids: list[tuple[int, str]],
-    results: dict[str, tuple[bool, str | None]],
+    results: dict[str, tuple[str, str | None]],
 ) -> None:
     summary_path = output_dir / "batch_summary.json"
     existing_scenes: dict[str, dict] = {}
@@ -444,12 +472,19 @@ def _write_batch_summary(
     prompt_map = {scene_id: prompt for scene_id, prompt in prompts_with_ids}
     for scene_id, prompt in prompts_with_ids:
         task_id = f"scene_{scene_id:03d}"
-        success, error = results.get(task_id, (False, "Missing worker result"))
+        status, error = results.get(
+            task_id,
+            ("failed", "Missing worker result"),
+        )
         existing_scenes[task_id] = {
             "scene_id": task_id,
             "prompt": prompt_map[scene_id],
-            "status": "completed" if success else "failed",
-            "root_error": "" if success else _root_error_summary(str(error)),
+            "status": status,
+            "root_error": (
+                ""
+                if status == "completed"
+                else _root_error_summary(str(error))
+            ),
             "scene_status_path": str(output_dir / task_id / _SCENE_STATUS_FILENAME),
         }
 
@@ -462,6 +497,9 @@ def _write_batch_summary(
             1 for item in scenes if item["status"] == "completed"
         ),
         "failed_scenes": sum(1 for item in scenes if item["status"] == "failed"),
+        "paused_retryable_scenes": sum(
+            1 for item in scenes if item["status"] == "paused_retryable"
+        ),
         "scenes": scenes,
     }
     temporary_path = summary_path.with_suffix(".json.tmp")
@@ -1202,6 +1240,25 @@ def _generate_room(
                             except StageValidationError as retry_exc:
                                 exc = retry_exc
 
+                        critic_still_unavailable = (
+                            _is_critic_unavailable_validation(exc)
+                        )
+                        if critic_only_retry_attempted and critic_still_unavailable:
+                            _pause_unscored_scene_candidate(
+                                stage="furniture",
+                                agent=furniture_agent,
+                                scene=scene,
+                                reasons=list(exc.reasons),
+                                runtime_events=list(
+                                    getattr(
+                                        scene,
+                                        "scene_expert_runtime_repair_events",
+                                        [],
+                                    )
+                                    or []
+                                ),
+                            )
+
                         repairable = _is_repairable_stage_validation(exc)
                         if (
                             repairable
@@ -1762,7 +1819,7 @@ def _generate_room(
                     f"{minimum_manipulands} required"
                 )
                 console_logger.warning(
-                    "%s; running one focused, expanded-budget completion rescue",
+                    "%s; restarting the original planner/designer/critic loop once",
                     reason,
                 )
                 runtime_events = list(
@@ -1779,11 +1836,7 @@ def _generate_room(
                     asyncio.run(
                         manipuland_agent.prepare_stage_regeneration([reason])
                     )
-                    asyncio.run(
-                        manipuland_agent.run_required_stage_completion_rescue(
-                            [reason]
-                        )
-                    )
+                    asyncio.run(manipuland_agent.add_manipulands(scene=scene))
                     scene = manipuland_agent.scene
                     post_rescue_state = scene.to_state_dict()
                     (
@@ -1811,15 +1864,20 @@ def _generate_room(
                         )
                     manipuland_agent.scene = scene
                     postprocess_critic_attempted = True
-                    asyncio.run(
-                        manipuland_agent.retry_final_critic_evaluation()
+                    _score_postprocessed_candidate_or_pause(
+                        stage="manipuland",
+                        agent=manipuland_agent,
+                        scene=scene,
+                        runtime_events=runtime_events,
                     )
-                    runtime_events.append("postprocess_rescue_verified")
+                    runtime_events.append("postprocess_planner_rescue_verified")
                     setattr(
                         scene,
                         "scene_expert_runtime_repair_events",
                         runtime_events,
                     )
+                except ScenePausedError:
+                    raise
                 except Exception as rescue_exc:
                     degraded_reasons = list(
                         getattr(
@@ -1869,15 +1927,14 @@ def _generate_room(
                 try:
                     manipuland_agent.scene = scene
                     postprocess_critic_attempted = True
-                    asyncio.run(
-                        manipuland_agent.retry_final_critic_evaluation()
+                    _score_postprocessed_candidate_or_pause(
+                        stage="manipuland",
+                        agent=manipuland_agent,
+                        scene=scene,
+                        runtime_events=runtime_events,
                     )
-                    runtime_events.append("postprocess_final_critic_verified")
-                    setattr(
-                        scene,
-                        "scene_expert_runtime_repair_events",
-                        runtime_events,
-                    )
+                except ScenePausedError:
+                    raise
                 except Exception as critic_exc:
                     degraded_reasons = list(
                         getattr(
@@ -2057,6 +2114,7 @@ def _generate_floor_plan_worker(
                 )
                 if callable(configure_runtime_budget):
                     configure_runtime_budget(floor_plan_budget)
+                pause_reason = ""
                 try:
                     house_layout = asyncio.run(
                         floor_plan_agent.generate_house_layout(
@@ -2096,16 +2154,50 @@ def _generate_floor_plan_worker(
                             console_logger.error(
                                 "Floor-plan visual critic remained unavailable after "
                                 "the single expanded retry; downstream verification "
-                                "will fail this stage and suppress success memory"
+                                "will pause this scene before downstream generation"
+                            )
+                            pause_reason = (
+                                "Floor-plan visual critic did not produce a "
+                                "trustworthy score after the isolated retry."
                             )
                 finally:
                     floor_plan_agent.cleanup()
 
                 # Save to disk for parent to load.
                 house_layout_path = scene_path / "house_layout.json"
+                serialized_layout = house_layout.to_dict(scene_dir=scene_path)
                 with open(house_layout_path, "w") as f:
-                    json.dump(house_layout.to_dict(scene_dir=scene_path), f, indent=2)
+                    json.dump(serialized_layout, f, indent=2)
                 console_logger.info(f"Saved house layout to {house_layout_path}")
+                if pause_reason:
+                    manifest_path = persist_retryable_pause(
+                        scene_root_dir=scene_path,
+                        stage="floor_plan",
+                        reason=pause_reason,
+                        candidate_state=serialized_layout,
+                        candidate_hash=house_layout.content_hash(),
+                        render_dir=getattr(
+                            floor_plan_agent,
+                            "final_render_dir",
+                            None,
+                        ),
+                        attempt_count=2,
+                        metadata={
+                            "score_provenance": dict(
+                                getattr(
+                                    floor_plan_agent,
+                                    "_last_score_provenance",
+                                    {},
+                                )
+                                or {}
+                            )
+                        },
+                    )
+                    raise ScenePausedError(
+                        "floor_plan",
+                        pause_reason,
+                        str(manifest_path),
+                    )
 
 
 def _generate_room_worker(
@@ -2849,6 +2941,11 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                         # Check for failure.
                         success, error = results["floor_plan"]
                         if not success:
+                            if is_scene_paused_error(error):
+                                raise ScenePausedError(
+                                    "floor_plan",
+                                    str(error),
+                                )
                             raise RuntimeError(f"Floor plan generation failed: {error}")
 
                         # Load result from disk (subprocess saved it).
@@ -2902,6 +2999,7 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                             status="completed",
                             attempt=attempt,
                         )
+                        mark_retryable_pause_resolved(scene_dir)
                         (scene_dir / _SCENE_SUCCESS_MARKER).write_text(
                             "completed\n", encoding="utf-8"
                         )
@@ -3002,6 +3100,22 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                         f"{timedelta(seconds=time.time() - scene_generation_start_time)}"
                     )
 
+            except ScenePausedError as e:
+                if scene_expert_hooks:
+                    scene_expert_hooks.save_partial_trace(error=str(e))
+                _write_scene_status(
+                    output_dir=output_dir,
+                    scene_id=scene_id,
+                    prompt=prompt,
+                    status="paused_retryable",
+                    attempt=attempt,
+                    error=str(e),
+                )
+                console_logger.warning(
+                    "Scene generation paused at a recoverable critic boundary: %s",
+                    e,
+                )
+                raise
             except Exception as e:
                 if scene_expert_hooks:
                     scene_expert_hooks.save_partial_trace(error=str(e))
@@ -3023,6 +3137,7 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
             status="completed",
             attempt=attempt,
         )
+        mark_retryable_pause_resolved(scene_dir)
         (scene_dir / _SCENE_SUCCESS_MARKER).write_text("completed\n", encoding="utf-8")
 
     def _run_serial_generation(
@@ -3109,7 +3224,7 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
             pending[task_id] = (scene_id, prompt, render_gpu_id)
             console_logger.info(f"Queued {task_id} (GPU {render_gpu_id}): {prompt}")
 
-        final_results: dict[str, tuple[bool, str | None]] = {}
+        final_results: dict[str, tuple[str, str | None]] = {}
         attempt = 1
         while pending:
             tasks: list[tuple[str, Callable, dict]] = []
@@ -3138,11 +3253,28 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                 scene_id, prompt, _ = metadata
                 success, result_or_error = results[task_id]
                 if success:
-                    final_results[task_id] = (True, None)
+                    final_results[task_id] = ("completed", None)
                     console_logger.info(f"Completed {task_id} on attempt {attempt}")
                     continue
 
                 error = str(result_or_error)
+                if is_scene_paused_error(error):
+                    _write_scene_status(
+                        output_dir=self.output_dir,
+                        scene_id=scene_id,
+                        prompt=prompt,
+                        status="paused_retryable",
+                        attempt=attempt,
+                        error=error[-8000:],
+                    )
+                    final_results[task_id] = ("paused_retryable", error)
+                    console_logger.warning(
+                        "%s paused at a recoverable critic boundary; other scene "
+                        "tasks will continue. %s",
+                        task_id,
+                        _root_error_summary(error),
+                    )
+                    continue
                 _write_scene_status(
                     output_dir=self.output_dir,
                     scene_id=scene_id,
@@ -3167,7 +3299,7 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                     )
                     retry_pending[task_id] = metadata
                 else:
-                    final_results[task_id] = (False, error)
+                    final_results[task_id] = ("failed", error)
                     console_logger.error(
                         f"{task_id} failed permanently after attempt {attempt}: "
                         f"{_root_error_summary(error)}"
@@ -3185,8 +3317,8 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
 
         failed_scenes = [
             (task_id, error)
-            for task_id, (success, error) in final_results.items()
-            if not success
+            for task_id, (status, error) in final_results.items()
+            if status == "failed"
         ]
         if failed_scenes:
             failure_details = "\n".join(

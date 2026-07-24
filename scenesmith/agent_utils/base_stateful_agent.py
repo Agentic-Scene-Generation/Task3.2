@@ -14,6 +14,7 @@ import shutil
 import time
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -66,11 +67,58 @@ from scenesmith.agent_utils.thinking import (
 from scenesmith.agent_utils.turn_trimming_session import TurnTrimmingSession
 from scenesmith.prompts import prompt_registry
 from scenesmith.scene_expert.context_bundle import build_stage_context_bundle
+from scenesmith.scene_expert.critic_feedback import (
+    CriticFeedback,
+    critic_feedback_contract,
+    parse_critic_feedback,
+)
 from scenesmith.scene_expert.exceptions import StageValidationError
 from scenesmith.utils.logging import BaseLogger
 from scenesmith.utils.openai import encode_image_to_base64
 
 console_logger = logging.getLogger(__name__)
+
+
+@dataclass
+class _AgentExecutionLease:
+    """A pausable active-time lease for one nested Agents SDK invocation."""
+
+    role: str
+    timeout: asyncio.Timeout
+    remaining_seconds: float
+    resumed_at: float
+    active_elapsed_seconds: float = 0.0
+
+    def pause(self) -> None:
+        if self.resumed_at <= 0:
+            return
+        now = asyncio.get_running_loop().time()
+        elapsed = max(0.0, now - self.resumed_at)
+        self.active_elapsed_seconds += elapsed
+        self.remaining_seconds = max(0.0, self.remaining_seconds - elapsed)
+        self.resumed_at = 0.0
+        try:
+            self.timeout.reschedule(None)
+        except RuntimeError:
+            # An already-expiring timeout cannot be rescheduled. Accounting is
+            # still correct and the surrounding context will raise TimeoutError.
+            pass
+
+    def resume(self, maximum_seconds: float | None = None) -> None:
+        if self.resumed_at > 0:
+            return
+        if maximum_seconds is not None:
+            self.remaining_seconds = min(
+                self.remaining_seconds,
+                max(0.0, maximum_seconds),
+            )
+        loop = asyncio.get_running_loop()
+        self.resumed_at = loop.time()
+        try:
+            self.timeout.reschedule(loop.time() + max(0.001, self.remaining_seconds))
+        except RuntimeError:
+            # The parent has already expired while its child was unwinding.
+            pass
 
 
 def _cfg_get(cfg: Any, key: str, default: Any) -> Any:
@@ -227,6 +275,9 @@ class BaseStatefulAgent(ABC):
         self._last_trusted_critic_candidate: dict[str, Any] | None = None
         self._critical_retry_compact_context = False
         self._critical_retry_budget_expanded = False
+        self._stage_role_active_consumed: dict[str, float] = {}
+        self._agent_execution_leases: list[_AgentExecutionLease] = []
+        self._last_critic_feedback = CriticFeedback()
 
     def _configure_stage_runtime(self, scene: Any) -> None:
         """Bind SceneExpert's advisory budget to this stage's real execution."""
@@ -289,6 +340,9 @@ class BaseStatefulAgent(ABC):
         )
         for key in (
             "max_wall_clock_seconds",
+            "planner_active_max_seconds",
+            "designer_active_max_seconds",
+            "critic_active_max_seconds",
             "critic_evaluation_max_seconds",
             "max_designer_turns",
             "max_critic_turns",
@@ -343,6 +397,9 @@ class BaseStatefulAgent(ABC):
         self._stage_runtime_phase = "agent"
         self._last_score_provenance = {}
         self._last_trusted_critic_candidate = None
+        self._stage_role_active_consumed = {}
+        self._agent_execution_leases = []
+        self._last_critic_feedback = CriticFeedback()
 
     async def prepare_stage_regeneration(self, reasons: list[str]) -> None:
         """Reset conversational/checkpoint state before a full stage redesign.
@@ -365,6 +422,8 @@ class BaseStatefulAgent(ABC):
         self._stage_runtime_started_at = time.monotonic()
         self._critic_evaluation_started_at = None
         self._stage_runtime_exhausted = False
+        self._stage_role_active_consumed = {}
+        self._agent_execution_leases = []
         rendering_manager = getattr(self, "rendering_manager", None)
         if rendering_manager is not None:
             rendering_manager.clear_cache()
@@ -382,6 +441,7 @@ class BaseStatefulAgent(ABC):
         self._stage_runtime_started_at = time.monotonic()
         self._critic_evaluation_started_at = None
         self._stage_runtime_exhausted = False
+        self._stage_role_active_consumed.pop("critic", None)
         self._stage_runtime_phase = "fallback"
         self._critical_retry_compact_context = True
         try:
@@ -402,62 +462,6 @@ class BaseStatefulAgent(ABC):
                 list(reasons),
             )
         await self._finalize_scene_and_scores()
-
-    async def run_required_stage_completion_rescue(self, reasons: list[str]) -> None:
-        """Give the designer one focused attempt after planner regeneration fails.
-
-        The planner is intentionally bypassed here.  This keeps the last recovery
-        agent-led while avoiding another coordinator round that can consume the
-        deadline before the designer's placement tools finish.  Deterministic
-        checks still decide whether the rescued candidate is admissible.
-        """
-        self._expand_critical_retry_budget()
-        self._stage_runtime_started_at = time.monotonic()
-        self._critic_evaluation_started_at = None
-        self._stage_runtime_exhausted = False
-        self._stage_runtime_phase = "fallback"
-        self._critical_retry_compact_context = True
-        self._allow_degraded_stage_completion = False
-        self._refresh_asset_runtime_budget()
-        minimum = max(
-            1,
-            int(
-                getattr(self.scene, "scene_expert_min_output_objects", 0)
-                or self._stage_budget_value("min_output_objects", 1)
-                or 1
-            ),
-        )
-        configured_maximum = int(
-            getattr(self.scene, "scene_expert_max_output_objects", 0)
-            or self._stage_budget_value("max_output_objects", 0)
-            or 0
-        )
-        quantity_instruction = (
-            f"Place between {minimum} and "
-            f"{max(configured_maximum, minimum)} stage-native objects. "
-            if configured_maximum > 0
-            else (
-                f"Place at least {minimum} stage-native objects, using the "
-                "smallest coherent set. "
-            )
-        )
-        instruction = (
-            "FINAL BOUNDED STAGE-COMPLETION RESCUE. The planner and its full "
-            "regeneration attempt are exhausted. Do not redesign upstream stages. "
-            f"Resolve these deterministic failures: {'; '.join(reasons)}. "
-            f"{quantity_instruction}Prefer one semantically appropriate, readily available "
-            "asset when that satisfies the minimum. Reuse existing valid assets, "
-            "or choose a close substitute if retrieval fails. Inspect only what "
-            "you need, place the object(s), run the stage physics check once, and "
-            "finish as soon as the listed failures are resolved."
-        )
-        try:
-            await self._request_design_change_impl(instruction)
-            await self._request_critique_impl(update_checkpoint=False)
-            await self._finalize_scene_and_scores()
-        finally:
-            self._critical_retry_compact_context = False
-            self._stage_runtime_phase = "agent"
 
     def _stage_budget_value(self, key: str, default: Any) -> Any:
         return self._stage_runtime_budget.get(key, default)
@@ -517,6 +521,53 @@ class BaseStatefulAgent(ABC):
             ),
         )
         return min(configured, stage_limit)
+
+    def _remaining_role_active_seconds(self, role: str) -> float | None:
+        """Return a role's exclusive active-time allowance.
+
+        Planner time is charged only while the planner model is active. Nested
+        designer/critic calls pause the planner lease, so the parent coordinator
+        can no longer cancel an otherwise valid child call merely because both
+        were charged for the same wall-clock interval.
+        """
+
+        key = {
+            "planner": "planner_active_max_seconds",
+            "designer": "designer_active_max_seconds",
+            "critic": "critic_active_max_seconds",
+        }.get(role)
+        if not key:
+            return None
+        limit = float(self._stage_budget_value(key, 0.0) or 0.0)
+        if limit <= 0:
+            return None
+        consumed = float(self._stage_role_active_consumed.get(role, 0.0))
+        return limit - consumed
+
+    @staticmethod
+    def _minimum_positive_seconds(*values: float | None) -> float | None:
+        positive = [float(value) for value in values if value is not None]
+        return min(positive) if positive else None
+
+    def _pause_parent_execution_lease(self, role: str) -> _AgentExecutionLease | None:
+        """Pause a planner's active-time lease while its child agent runs."""
+
+        if not self._agent_execution_leases:
+            return None
+        parent = self._agent_execution_leases[-1]
+        if parent.role != "planner" or role == "planner":
+            return None
+        parent.pause()
+        return parent
+
+    def _resume_parent_execution_lease(
+        self,
+        parent: _AgentExecutionLease | None,
+    ) -> None:
+        if parent is None:
+            return
+        stage_remaining = self._remaining_stage_seconds(parent.role)
+        parent.resume(maximum_seconds=stage_remaining)
 
     def _remaining_stage_seconds(self, role: str | None = None) -> float | None:
         """Return phase-aware time without letting design consume verification.
@@ -626,13 +677,15 @@ class BaseStatefulAgent(ABC):
                     else stage_turns
                 )
 
-        remaining = self._remaining_stage_seconds(role)
-        if call_timeout_seconds is not None and call_timeout_seconds > 0:
-            remaining = (
-                min(remaining, call_timeout_seconds)
-                if remaining is not None
-                else call_timeout_seconds
-            )
+        remaining = self._minimum_positive_seconds(
+            self._remaining_stage_seconds(role),
+            self._remaining_role_active_seconds(role),
+            (
+                call_timeout_seconds
+                if call_timeout_seconds is not None and call_timeout_seconds > 0
+                else None
+            ),
+        )
         if remaining is not None and remaining <= 0:
             self._stage_runtime_exhausted = True
             self._planner_budget_exhausted = True
@@ -643,6 +696,7 @@ class BaseStatefulAgent(ABC):
             )
             return None
 
+        parent_lease = self._pause_parent_execution_lease(role)
         start_time = time.time()
         try:
             run_kwargs: dict[str, Any] = {
@@ -657,8 +711,30 @@ class BaseStatefulAgent(ABC):
                 run_kwargs["run_config"] = run_config
             if remaining is None:
                 return await Runner.run(**run_kwargs)
-            async with asyncio.timeout(max(0.1, remaining)):
-                return await Runner.run(**run_kwargs)
+            async with asyncio.timeout(max(0.1, remaining)) as timeout:
+                lease = _AgentExecutionLease(
+                    role=role,
+                    timeout=timeout,
+                    remaining_seconds=max(0.1, remaining),
+                    resumed_at=asyncio.get_running_loop().time(),
+                )
+                self._agent_execution_leases.append(lease)
+                try:
+                    return await Runner.run(**run_kwargs)
+                finally:
+                    lease.pause()
+                    if self._agent_execution_leases:
+                        popped = self._agent_execution_leases.pop()
+                        if popped is not lease:
+                            self._agent_execution_leases.clear()
+                            console_logger.error(
+                                "SceneExpert nested execution lease stack became "
+                                "inconsistent; cleared it defensively"
+                            )
+                    self._stage_role_active_consumed[role] = (
+                        float(self._stage_role_active_consumed.get(role, 0.0))
+                        + lease.active_elapsed_seconds
+                    )
         except Exception as exc:
             budget_error = isinstance(exc, TimeoutError) or self._is_agent_budget_error(
                 exc
@@ -694,6 +770,8 @@ class BaseStatefulAgent(ABC):
                 exc,
             )
             return None
+        finally:
+            self._resume_parent_execution_lease(parent_lease)
 
     def _record_module_timing(
         self,
@@ -863,6 +941,7 @@ class BaseStatefulAgent(ABC):
         if render_dir is None:
             return
         try:
+            feedback = parse_critic_feedback(critique)
             self.stage_working_memory.save_render_record(
                 render_dir=render_dir,
                 role="critic",
@@ -871,7 +950,10 @@ class BaseStatefulAgent(ABC):
                 scores=scores,
                 critique=critique,
                 score_source=score_source,
-                extra={"physics_context": physics_context[:1500]},
+                extra={
+                    "physics_context": physics_context[:1500],
+                    "critic_feedback": feedback.model_dump(),
+                },
             )
         except Exception as e:
             console_logger.warning("Failed to save critic working memory: %s", e)
@@ -1181,8 +1263,34 @@ class BaseStatefulAgent(ABC):
     def _critic_fast_path_cfg(self) -> Any:
         return _cfg_get(self.cfg, "critic_fast_path", {})
 
+    def _critic_fast_path_value(self, key: str, default: Any) -> Any:
+        return _cfg_get(self._critic_fast_path_cfg(), key, default)
+
     def _critic_fast_path_enabled(self, key: str, default: bool = True) -> bool:
-        return bool(_cfg_get(self._critic_fast_path_cfg(), key, default))
+        return bool(self._critic_fast_path_value(key, default))
+
+    def _sceneexpert_critic_feedback_contract(self) -> str:
+        if not self._stage_runtime_budget:
+            return ""
+        return critic_feedback_contract()
+
+    def _remember_critic_feedback(self, critique: str) -> CriticFeedback:
+        feedback = parse_critic_feedback(critique)
+        self._last_critic_feedback = feedback
+        return feedback
+
+    def _critic_feedback_for_planner(
+        self,
+        critique: str,
+        *,
+        max_chars: int = 5000,
+    ) -> str:
+        feedback = self._remember_critic_feedback(critique)
+        return feedback.to_designer_text(max_chars=max_chars)
+
+    def _critic_feedback_for_designer(self, max_chars: int = 5000) -> str:
+        feedback = getattr(self, "_last_critic_feedback", CriticFeedback())
+        return feedback.to_designer_text(max_chars=max_chars)
 
     def _hard_repair_design_change_limit(self) -> int:
         return int(
@@ -2040,10 +2148,20 @@ class BaseStatefulAgent(ABC):
         # inherit the backend's large default and a single malformed response can
         # occupy the floor-plan worker for tens of minutes.
         output_limits = getattr(self.cfg.openai, "max_output_tokens", None)
+        runtime_limit = None
+        if settings_key and self._stage_runtime_budget:
+            runtime_limit = self._stage_budget_value(
+                f"{settings_key}_max_output_tokens",
+                None,
+            )
         if settings_key and output_limits is not None:
             max_tokens = _cfg_get(output_limits, settings_key, None)
-            if max_tokens is not None and int(max_tokens) > 0:
-                kwargs["max_tokens"] = int(max_tokens)
+        else:
+            max_tokens = None
+        if runtime_limit is not None and int(runtime_limit) > 0:
+            max_tokens = runtime_limit
+        if max_tokens is not None and int(max_tokens) > 0:
+            kwargs["max_tokens"] = int(max_tokens)
 
         # Add tool_choice to force specific tool call first.
         if tool_choice:
@@ -3316,6 +3434,9 @@ class BaseStatefulAgent(ABC):
                 "the reported yaw. Evaluate sofa/bed/chair facing in this same "
                 "critic pass; do not claim a separate facing-tool result."
             )
+        feedback_contract = self._sceneexpert_critic_feedback_contract()
+        if feedback_contract:
+            critique_instruction += "\n\n" + feedback_contract
         context_block = self._prepare_stage_context_for_llm(
             agent_role="critic",
             event="request_critique",
@@ -3494,20 +3615,24 @@ class BaseStatefulAgent(ABC):
             # tool traces through SQLite session history.
             score_session = None
         try:
-            max_attempts = (
-                max(
-                    1,
-                    int(
-                        _cfg_get(
-                            self._critic_fast_path_cfg(),
-                            "direct_multimodal_max_attempts",
-                            2,
-                        )
-                        or 2
-                    ),
+            configured_max_attempts = int(
+                _cfg_get(
+                    self._critic_fast_path_cfg(),
+                    "direct_multimodal_max_attempts",
+                    2,
                 )
-                if direct_multimodal
-                else 1
+                or 2
+            )
+            if self._stage_runtime_budget:
+                configured_max_attempts = int(
+                    self._stage_budget_value(
+                        "critic_max_attempts",
+                        configured_max_attempts,
+                    )
+                    or configured_max_attempts
+                )
+            max_attempts = (
+                max(1, configured_max_attempts) if direct_multimodal else 1
             )
             if direct_multimodal and not direct_image_parts:
                 console_logger.warning(
@@ -3515,13 +3640,21 @@ class BaseStatefulAgent(ABC):
                     "candidate as unscored instead of issuing a text-only score"
                 )
                 max_attempts = 0
-            attempt_timeout = float(
+            configured_attempt_timeout = float(
                 _cfg_get(
                     self._critic_fast_path_cfg(),
                     "direct_multimodal_attempt_timeout_seconds",
                     120.0,
                 )
                 or 120.0
+            )
+            attempt_timeout = float(
+                self._stage_budget_value(
+                    "critic_attempt_timeout_seconds",
+                    configured_attempt_timeout,
+                )
+                if self._stage_runtime_budget
+                else configured_attempt_timeout
             )
             result = None
             for attempt in range(1, max_attempts + 1):
@@ -3591,6 +3724,8 @@ class BaseStatefulAgent(ABC):
                 "Critic returned an unexpected final output type: "
                 f"{type(response).__name__}"
             )
+
+        self._remember_critic_feedback(response.critique)
 
         # Log critique text and scores to console.
         log_agent_response(response=response.critique, agent_name="CRITIC")
@@ -3681,7 +3816,8 @@ class BaseStatefulAgent(ABC):
                 "render_profile": render_profile,
             },
         )
-        return response.critique + score_change_msg + safety_msg
+        planner_feedback = self._critic_feedback_for_planner(response.critique)
+        return planner_feedback + score_change_msg + safety_msg
 
     @abstractmethod
     def _get_design_change_prompt_enum(self) -> Any:
@@ -3709,6 +3845,14 @@ class BaseStatefulAgent(ABC):
             prompt_enum=prompt_enum,
             instruction=instruction,
         )
+        critic_feedback = self._critic_feedback_for_designer()
+        if critic_feedback:
+            full_instruction += (
+                "\n\nThe planner selected this repair turn. Use the authoritative "
+                "critic evidence below without dropping object IDs, required "
+                "changes, preserve constraints, or acceptance checks.\n"
+                + critic_feedback
+            )
         memory_context = self._retrieve_working_memory_for_designer(instruction)
         if memory_context:
             full_instruction += "\n\n" + memory_context

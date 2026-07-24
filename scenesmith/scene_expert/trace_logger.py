@@ -12,6 +12,7 @@ import logging
 import time
 from pathlib import Path
 
+from scenesmith.scene_expert.critic_feedback import parse_critic_feedback
 from scenesmith.scene_expert.schemas import (
     FullVerifyReport,
     HarnessContext,
@@ -358,11 +359,30 @@ class TraceLogger:
 
             # Include critic summary — the most informative per-stage content.
             if entry.verify_report and entry.verify_report.critique_summary:
-                # Truncate very long summaries to keep the trace summary manageable.
-                summary_text = entry.verify_report.critique_summary
-                if len(summary_text) > 800:
-                    summary_text = summary_text[:800] + "... [truncated]"
-                lines.append(f"    Critic: {summary_text}")
+                feedback = parse_critic_feedback(
+                    entry.verify_report.critique_summary
+                )
+                if feedback.structured:
+                    lines.append(
+                        f"    Critic: status={feedback.status} "
+                        f"summary={feedback.summary!r}"
+                    )
+                    for finding in feedback.findings:
+                        lines.append(
+                            "      finding="
+                            f"{finding.severity}/{finding.category} "
+                            f"objects={finding.object_ids} "
+                            f"observed={finding.observation!r} "
+                            f"reason={finding.reason!r} "
+                            f"change={finding.required_change!r} "
+                            f"preserve={finding.preserve!r} "
+                            f"check={finding.acceptance_check!r}"
+                        )
+                else:
+                    summary_text = entry.verify_report.critique_summary
+                    if len(summary_text) > 800:
+                        summary_text = summary_text[:800] + "... [truncated]"
+                    lines.append(f"    CriticLegacy: {summary_text}")
 
         if self._full_report:
             lines.append(

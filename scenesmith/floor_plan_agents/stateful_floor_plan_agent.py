@@ -399,6 +399,9 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
         critique_instruction = self.prompt_registry.get_prompt(
             prompt_enum=FloorPlanAgentPrompts.CRITIC_RUNNER_INSTRUCTION,
         )
+        feedback_contract = self._sceneexpert_critic_feedback_contract()
+        if feedback_contract:
+            critique_instruction += "\n\n" + feedback_contract
         vision_tools = self._get_vision_tools()
         validation_tools = self._critic_floor_plan_tools
         if validation_tools is None:
@@ -515,7 +518,29 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
             score_session = None
         try:
             result = None
-            attempts = 2 if direct_images else 0
+            configured_attempts = int(
+                self._critic_fast_path_value(
+                    "direct_multimodal_max_attempts",
+                    2,
+                )
+                or 2
+            )
+            if self._stage_runtime_budget:
+                configured_attempts = int(
+                    self._stage_budget_value(
+                        "critic_max_attempts",
+                        configured_attempts,
+                    )
+                    or configured_attempts
+                )
+            attempts = (
+                max(
+                    1,
+                    configured_attempts,
+                )
+                if direct_images
+                else 0
+            )
             if not direct_multimodal:
                 attempts = 1
             for attempt in range(1, attempts + 1):
@@ -527,7 +552,28 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
                     session=score_session,
                     configured_max_turns=self.cfg.agents.critic_agent.max_turns,
                     run_config=run_config,
-                    call_timeout_seconds=(120.0 if direct_multimodal else None),
+                    call_timeout_seconds=(
+                        float(
+                            self._stage_budget_value(
+                                "critic_attempt_timeout_seconds",
+                                float(
+                                    self._critic_fast_path_value(
+                                        "direct_multimodal_attempt_timeout_seconds",
+                                        120.0,
+                                    )
+                                    or 120.0
+                                ),
+                            )
+                            if self._stage_runtime_budget
+                            else self._critic_fast_path_value(
+                                "direct_multimodal_attempt_timeout_seconds",
+                                120.0,
+                            )
+                            or 120.0
+                        )
+                        if direct_multimodal
+                        else None
+                    ),
                 )
                 if result is not None:
                     break
@@ -580,6 +626,8 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
                 )
             else:
                 raise
+
+        self._remember_critic_feedback(response.critique)
 
         # Log critique.
         log_agent_response(response=response.critique, agent_name="CRITIC")
@@ -650,7 +698,7 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
         if trusted_visual_score:
             self.previous_scores = response
 
-        return response.critique + score_change_msg
+        return self._critic_feedback_for_planner(response.critique) + score_change_msg
 
     @log_scene_action
     def _perform_checkpoint_reset(self, checkpoint_state_dict: dict) -> None:

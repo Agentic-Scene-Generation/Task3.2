@@ -17,6 +17,7 @@ Ablation mode controls which components are active:
 from __future__ import annotations
 
 import logging
+import math
 import os
 import time
 import hashlib
@@ -29,6 +30,11 @@ from scenesmith.scene_expert.config_utils import resolve_scene_expert_config
 from scenesmith.scene_expert.context_bundle import (
     build_stage_context_bundle,
     stable_hash,
+)
+from scenesmith.scene_expert.critic_feedback import (
+    feedback_issue_text,
+    feedback_repair_text,
+    parse_critic_feedback,
 )
 from scenesmith.scene_expert.global_planner import GlobalPlanner
 from scenesmith.scene_expert.harness import STAGE_ORDER, Harness
@@ -516,6 +522,7 @@ class SceneExpertHookRunner:
         stage: str,
         verify_report: StageVerifyReport | None,
         scene_state_path: str,
+        scene_state_info: dict | None,
         repair_actions: list[RepairResult],
     ) -> None:
         """Continuously commit post-stage verifier results to the shared bank."""
@@ -527,6 +534,9 @@ class SceneExpertHookRunner:
             return
         try:
             quality = self._stage_score_quality(verify_report)
+            critic_feedback = parse_critic_feedback(
+                verify_report.critique_summary
+            )
             event = {
                 "schema_version": "1.0",
                 "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -551,6 +561,7 @@ class SceneExpertHookRunner:
                     for action in repair_actions
                 ],
                 "critique_summary": verify_report.critique_summary[:2000],
+                "critic_feedback": critic_feedback.model_dump(),
             }
             self._memory_store.append_event(event)
 
@@ -562,6 +573,34 @@ class SceneExpertHookRunner:
                 and verify_report.score_source == "vlm_critic"
                 and quality >= 0.75
             ):
+                success_summary = (
+                    critic_feedback.summary
+                    if critic_feedback.status == "PASS"
+                    and critic_feedback.summary
+                    else (
+                        f"{stage} passed with trustworthy visual quality "
+                        f"{quality:.2f} and deterministic constraints satisfied."
+                    )
+                )
+                stage_object_type = {
+                    "furniture": "furniture",
+                    "wall_mounted": "wall_mounted",
+                    "ceiling_mounted": "ceiling_mounted",
+                    "manipuland": "manipuland",
+                }.get(stage, "")
+                placement_reference = [
+                    (
+                        f"{item['object_id']} ({item['name']}): "
+                        f"x={item['x']:.3f}, y={item['y']:.3f}, "
+                        f"z={item['z']:.3f}, yaw={item['yaw_degrees']:.1f}"
+                    )
+                    for item in (scene_state_info or {}).get(
+                        "object_placements",
+                        [],
+                    )
+                    if not stage_object_type
+                    or item.get("object_type") == stage_object_type
+                ]
                 case = SuccessCase(
                     case_id=f"success_{self._task_spec.room_type}_{stage}_{digest}",
                     room_type=self._task_spec.room_type,
@@ -574,13 +613,13 @@ class SceneExpertHookRunner:
                         f"{stage} passed SceneExpert stage verifier in "
                         f"trace_{self._scene_id:06d}."
                     ),
-                    successful_pattern=[
-                        verify_report.critique_summary[:900]
-                        or f"{stage} passed with quality_score={quality:.2f}."
-                    ],
+                    successful_pattern=[success_summary],
+                    placement_reference=placement_reference,
                     positive_guidance=[
-                        "Use as a weak positive prior; adapt geometry to the "
-                        "current room and re-check hard constraints."
+                        f"Preserve the verified {stage} functional relationships "
+                        "while adapting positions to the current room geometry.",
+                        "Re-check object scale, openings, support, and collision "
+                        "constraints instead of copying coordinates blindly.",
                     ],
                     scores=verify_report.visual_scores,
                     trace_ref=f"trace_{self._scene_id:06d}",
@@ -599,20 +638,63 @@ class SceneExpertHookRunner:
                     for issue in verify_report.issues
                 ]
                 classified = classify_hard_reasons(reasons)
+                repair_verified = any(
+                    bool(action.repair_verified) for action in repair_actions
+                )
+                deterministic = bool(classified) and all(
+                    item.deterministic for item in classified
+                )
+                # VLM-only failures remain trace evidence until a later candidate
+                # proves that the proposed repair worked. Infrastructure and
+                # unverified semantic failures must not become durable layout
+                # "knowledge".
+                if not deterministic and not repair_verified:
+                    return
+                primary_finding = (
+                    critic_feedback.findings[0]
+                    if critic_feedback.findings
+                    else None
+                )
+                failure_description = (
+                    feedback_issue_text(primary_finding)
+                    if primary_finding is not None
+                    else verify_report.issues[0].description
+                )
+                failure_type = (
+                    classified[0].category.value
+                    if classified
+                    else (
+                        primary_finding.category
+                        if primary_finding is not None
+                        else verify_report.issues[0].issue_type
+                    )
+                )
+                failure_object = (
+                    primary_finding.object_ids[0]
+                    if primary_finding is not None
+                    and primary_finding.object_ids
+                    else verify_report.issues[0].object_name
+                )
+                repair_text = (
+                    feedback_repair_text(primary_finding)
+                    if primary_finding is not None
+                    else ""
+                )
                 case = FailureCase(
                     failure_id=f"failure_{self._task_spec.room_type}_{stage}_{digest}",
                     room_type=self._task_spec.room_type,
                     stage=stage,
-                    object=verify_report.issues[0].object_name,
-                    failure_type=classified[0].category.value,
-                    bad_pattern=verify_report.issues[0].description,
+                    object=failure_object,
+                    failure_type=failure_type,
+                    bad_pattern=failure_description,
                     failure_reason="; ".join(reasons)[:900],
                     repair_action=(
                         repair_actions[0].repair_action
                         if repair_actions
-                        else "Run stage repair loop, re-render, and re-score before accepting."
+                        else repair_text
+                        or "Run stage repair loop, re-render, and re-score before accepting."
                     ),
-                    repair_verified=False,
+                    repair_verified=repair_verified,
                     required_objects=self._stage_required_objects(stage),
                     functional_zones=self._task_spec.functional_zones,
                     scene_summary=(
@@ -623,9 +705,13 @@ class SceneExpertHookRunner:
                     confidence=0.55,
                     created_at=event["created_at"],
                     scope="stage",
-                    is_deterministic=all(item.deterministic for item in classified),
+                    is_deterministic=deterministic,
                     negative_constraint="; ".join(reasons)[:700],
-                    critic_check="Verify this failure class before stage acceptance.",
+                    critic_check=(
+                        primary_finding.acceptance_check
+                        if primary_finding is not None
+                        else "Verify this failure class before stage acceptance."
+                    ),
                     trace_ref=f"trace_{self._scene_id:06d}",
                 )
                 if not case.embedding_text:
@@ -871,6 +957,7 @@ class SceneExpertHookRunner:
             stage=stage,
             verify_report=verify_report,
             scene_state_path=str(scene_dir),
+            scene_state_info=scene_state_info,
             repair_actions=repair_actions,
         )
         self._trace_logger.log_stage(
@@ -1202,6 +1289,7 @@ class SceneExpertHookRunner:
             stage=stage,
             verify_report=verify_report,
             scene_state_path=str(room_dir),
+            scene_state_info=scene_state_info,
             repair_actions=repair_actions,
         )
         self._trace_logger.log_stage(
@@ -1453,17 +1541,43 @@ class SceneExpertHookRunner:
                 if (getattr(obj, "metadata", {}) or {}).get("repair_placeholder")
             ]
             object_counts: dict[str, int] = {}
-            for obj in scene.objects.values():
+            object_placements: list[dict[str, Any]] = []
+            for object_id, obj in scene.objects.items():
                 object_type = getattr(obj, "object_type", None)
                 object_type_name = str(getattr(object_type, "value", object_type) or "")
                 if object_type_name:
                     object_counts[object_type_name] = (
                         object_counts.get(object_type_name, 0) + 1
                     )
+                transform = getattr(obj, "transform", None)
+                if transform is None:
+                    continue
+                try:
+                    translation = transform.translation()
+                    rotation = transform.rotation().matrix()
+                    object_placements.append(
+                        {
+                            "object_id": str(object_id),
+                            "name": str(getattr(obj, "name", object_id)),
+                            "object_type": object_type_name,
+                            "x": float(translation[0]),
+                            "y": float(translation[1]),
+                            "z": float(translation[2]),
+                            "yaw_degrees": math.degrees(
+                                math.atan2(
+                                    float(rotation[1, 0]),
+                                    float(rotation[0, 0]),
+                                )
+                            ),
+                        }
+                    )
+                except Exception:
+                    continue
             return {
                 "object_names": names,
                 "placeholder_names": placeholder_names,
                 "object_counts": object_counts,
+                "object_placements": object_placements,
                 "stage_min_output_objects": int(
                     getattr(scene, "scene_expert_min_output_objects", 0) or 0
                 ),
@@ -1482,6 +1596,7 @@ class SceneExpertHookRunner:
                 "object_names": [],
                 "placeholder_names": [],
                 "object_counts": {},
+                "object_placements": [],
                 "stage_min_output_objects": 0,
                 "stage_max_output_objects": 0,
                 "degraded_stage_reasons": [],

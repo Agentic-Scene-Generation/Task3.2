@@ -95,6 +95,15 @@ Rules:
   procedure. Prefer NOOP over inventing a vague skill.
 - Focus on patterns that generalize to other rooms of the same type, not one-off details.
 - Extract one memory entry per distinct lesson learned. Avoid redundancy with existing memory.
+- Treat normalized `finding=` records as the authoritative critic evidence.
+- A success pattern must describe a verified relationship that worked; never copy
+  unresolved critic findings or optional recommendations into successful_pattern.
+- Map failure evidence as: observed -> bad_pattern, reason -> failure_reason,
+  change -> repair_action, and check -> critic_check.
+- Infrastructure timeouts and PAUSED_RETRYABLE states are operational events,
+  not scene-layout failures. Emit NOOP for them.
+- When Related Existing Memory already contains the same room/stage lesson, use
+  UPDATE or NOOP instead of adding a duplicate case.
 """
 
 

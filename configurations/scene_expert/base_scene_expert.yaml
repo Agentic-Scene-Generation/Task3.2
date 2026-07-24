@@ -93,6 +93,18 @@ stage_budget:
     max_designer_turns: 12
     max_critic_turns: 6
     max_wall_clock_seconds: 600
+    # Exclusive role-active leases. Planner time pauses while its nested
+    # designer/critic tools run; max_wall_clock_seconds remains the hard stage cap.
+    planner_active_max_seconds: 120
+    designer_active_max_seconds: 360
+    critic_active_max_seconds: 300
+    # Compact response caps and the normal critic attempt live here so pure
+    # SceneSmith/disabled ablations preserve their original runtime behavior.
+    planner_max_output_tokens: 768
+    designer_max_output_tokens: 1536
+    critic_max_output_tokens: 1536
+    critic_max_attempts: 1
+    critic_attempt_timeout_seconds: 150
     critic_evaluation_max_seconds: 240
     # Preserve role-specific tails instead of allowing design work to consume
     # the whole stage deadline before visual verification and finalization.
@@ -119,6 +131,9 @@ stage_budget:
     max_designer_turns: 12
     max_critic_turns: 4
     max_wall_clock_seconds: 420
+    planner_active_max_seconds: 120
+    designer_active_max_seconds: 240
+    critic_active_max_seconds: 240
     max_asset_requests: 4
     max_optional_object_families: 0
     max_assets_per_request: 0
@@ -130,6 +145,9 @@ stage_budget:
     max_designer_turns: 16
     max_critic_turns: 6
     max_wall_clock_seconds: 900
+    planner_active_max_seconds: 150
+    designer_active_max_seconds: 480
+    critic_active_max_seconds: 360
     # Furniture quality gates must not inherit a nearly exhausted designer
     # deadline. Each distinct rendered candidate gets one bounded VLM window.
     critic_evaluation_max_seconds: 360
@@ -150,6 +168,9 @@ stage_budget:
     max_designer_turns: 10
     max_critic_turns: 5
     max_wall_clock_seconds: 420
+    planner_active_max_seconds: 120
+    designer_active_max_seconds: 240
+    critic_active_max_seconds: 240
     max_asset_requests: 2
     max_optional_object_families: 3
     max_assets_per_request: 4
@@ -166,6 +187,9 @@ stage_budget:
     max_designer_turns: 8
     max_critic_turns: 5
     max_wall_clock_seconds: 360
+    planner_active_max_seconds: 90
+    designer_active_max_seconds: 210
+    critic_active_max_seconds: 240
     max_asset_requests: 2
     max_optional_object_families: 1
     max_assets_per_request: 2
@@ -181,6 +205,9 @@ stage_budget:
     max_designer_turns: 12
     max_critic_turns: 6
     max_wall_clock_seconds: 600
+    planner_active_max_seconds: 120
+    designer_active_max_seconds: 360
+    critic_active_max_seconds: 300
     final_critic_reserve_fraction: 0.25
     max_asset_requests: 4
     max_optional_object_families: 4

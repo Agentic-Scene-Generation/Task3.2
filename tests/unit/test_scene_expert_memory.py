@@ -179,7 +179,9 @@ class SceneExpertMemoryTest(unittest.TestCase):
         self.assertIn("door clearance violation", text)
         self.assertIn("bedroom", text)
 
-    def test_stage_working_memory_commits_public_failure_event(self) -> None:
+    def test_stage_working_memory_commits_evidence_without_long_term_case(
+        self,
+    ) -> None:
         class FakeTransform:
             def translation(self):
                 return np.array([0.0, 0.0, 0.0])
@@ -240,8 +242,13 @@ class SceneExpertMemoryTest(unittest.TestCase):
                     os.environ["SCENEEXPERT_ACTIVE_MEMORY_BANK_DIR"] = old_env
 
             self.assertTrue((public_dir / "events.jsonl").exists())
-            self.assertTrue((public_dir / "failure_cases.jsonl").exists())
-            self.assertGreater((public_dir / "failure_cases.jsonl").stat().st_size, 0)
+            event = json.loads(
+                (public_dir / "events.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()[0]
+            )
+            self.assertEqual("stage_working_memory", event["event_type"])
+            self.assertFalse((public_dir / "failure_cases.jsonl").exists())
 
     def test_furniture_stage_verifier_fails_hard_missing_and_collision(self) -> None:
         with TemporaryDirectory() as tmp:

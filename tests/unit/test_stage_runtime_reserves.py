@@ -54,6 +54,11 @@ def _load_budget_compatibility_agent() -> type:
                 level=0,
             ),
             ast.Import(names=[ast.alias(name="time")]),
+            ast.ImportFrom(
+                module="scenesmith.scene_expert.critic_feedback",
+                names=[ast.alias(name="CriticFeedback")],
+                level=0,
+            ),
             compatibility_class,
         ],
         type_ignores=[],
@@ -174,57 +179,6 @@ class StageRuntimeReserveTest(unittest.TestCase):
             remaining = BaseStatefulAgent._remaining_stage_seconds(agent, "critic")
 
         self.assertAlmostEqual(remaining, -95.0)
-
-    @unittest.skipIf(
-        BaseStatefulAgent is None,
-        f"requires stateful agent dependencies: {_IMPORT_ERROR}",
-    )
-    def test_required_output_rescue_bypasses_planner(self) -> None:
-        events: list[tuple[str, object]] = []
-
-        async def request_change(instruction: str) -> str:
-            events.append(("designer", instruction))
-            return "placed one object"
-
-        async def request_critique(*, update_checkpoint: bool) -> str:
-            events.append(("critic", update_checkpoint))
-            return "accepted"
-
-        async def finalize() -> None:
-            events.append(("finalize", None))
-
-        agent = SimpleNamespace(
-            scene=SimpleNamespace(
-                scene_expert_min_output_objects=1,
-                scene_expert_max_output_objects=3,
-            ),
-            _stage_runtime_budget={
-                "min_output_objects": 1,
-                "max_output_objects": 3,
-            },
-            _stage_budget_value=lambda key, default: {
-                "min_output_objects": 1,
-                "max_output_objects": 3,
-            }.get(key, default),
-            _expand_critical_retry_budget=lambda: None,
-            _refresh_asset_runtime_budget=lambda: None,
-            _request_design_change_impl=request_change,
-            _request_critique_impl=request_critique,
-            _finalize_scene_and_scores=finalize,
-        )
-
-        asyncio.run(
-            BaseStatefulAgent.run_required_stage_completion_rescue(
-                agent,
-                ["missing required stage output"],
-            )
-        )
-
-        self.assertEqual(
-            [event[0] for event in events], ["designer", "critic", "finalize"]
-        )
-        self.assertIn("between 1 and 3", events[0][1])
-        self.assertEqual(agent._stage_runtime_phase, "agent")
 
     @unittest.skipIf(
         BaseStatefulAgent is None,

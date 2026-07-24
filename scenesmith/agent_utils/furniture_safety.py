@@ -26,6 +26,7 @@ from scenesmith.agent_utils.furniture_layout_planning import (
     is_bedroom_scene,
 )
 from scenesmith.agent_utils.scoring import CritiqueWithScores
+from scenesmith.scene_expert.critic_feedback import parse_critic_feedback
 
 console_logger = logging.getLogger(__name__)
 
@@ -879,7 +880,22 @@ class FurnitureSafetyController:
 
         critique_text = scores.critique.lower()
         comments_text = " ".join(score.comment.lower() for score in scores.get_scores())
-        text = f"{critique_text} {comments_text}"
+        feedback = parse_critic_feedback(scores.critique)
+        finding_text = " ".join(
+            " ".join(
+                (
+                    finding.severity,
+                    finding.category,
+                    " ".join(finding.object_ids),
+                    finding.observation,
+                    finding.reason,
+                    finding.required_change,
+                    finding.acceptance_check,
+                )
+            )
+            for finding in feedback.findings
+        ).lower()
+        text = f"{critique_text} {comments_text} {finding_text}"
 
         hard_reasons: list[str] = []
         soft_reasons: list[str] = []

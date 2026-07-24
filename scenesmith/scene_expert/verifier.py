@@ -18,6 +18,11 @@ from pathlib import Path
 import yaml
 
 from scenesmith.agent_utils.room_size_policy import normalize_room_dimensions
+from scenesmith.scene_expert.critic_feedback import (
+    feedback_issue_text,
+    feedback_repair_text,
+    parse_critic_feedback,
+)
 from scenesmith.scene_expert.schemas import (
     FullVerifyReport,
     SceneTaskSpec,
@@ -634,6 +639,37 @@ class StageVerifier:
                         "Regenerate placeholder furniture with canonicalized HSSD "
                         "assets before accepting the stage"
                     )
+
+        # --- 2a. Structured visual-critic findings ---
+        # The compact repair brief is the primary semantic signal. Legacy text
+        # heuristics below remain only for artifacts produced before this contract.
+        critic_feedback = parse_critic_feedback(critique_summary)
+        for finding in critic_feedback.findings:
+            if finding.severity not in {"blocking", "critical", "hard", "major"}:
+                continue
+            category = re.sub(r"[^a-z0-9_]+", "_", finding.category.casefold()).strip(
+                "_"
+            )
+            issue_type = (
+                "physics_collision"
+                if any(
+                    marker in category
+                    for marker in ("collision", "penetration", "overlap")
+                )
+                else f"critic_{category or 'quality'}"
+            )
+            _add_issue_once(
+                issues,
+                VerifyIssue(
+                    issue_type=issue_type,
+                    object_name=(finding.object_ids[0] if finding.object_ids else ""),
+                    description=feedback_issue_text(finding)
+                    or f"Visual critic reported {finding.category}",
+                ),
+            )
+            repair = feedback_repair_text(finding)
+            if repair:
+                repair_suggestions.append(repair)
 
         # --- 2b. Hard critique/score checks for stages where averages are unsafe ---
         # A low average can hide hard failures such as "missing bed" if other
