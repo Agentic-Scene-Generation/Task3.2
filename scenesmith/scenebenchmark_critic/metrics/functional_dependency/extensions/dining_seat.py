@@ -15,6 +15,7 @@ from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.m
 from scenesmith.scenebenchmark_critic.core.geometry import (
     bbox_center_xy,
     front_vector,
+    object_footprint_polygon,
 )
 
 RELATION_TYPE = "dining_seat_distribution"
@@ -48,16 +49,16 @@ def _evaluate_table(
     table: dict[str, Any], seats: list[dict[str, Any]]
 ) -> dict[str, Any] | None:
     center = bbox_center_xy(table)
-    size = (table.get("bbox_world") or {}).get("size") or []
     seats = [seat for seat in seats if "bench" not in _object_identity_text(seat)]
-    if center is None or len(size) < 2 or not seats:
-        return None
-    width, depth = float(size[0]), float(size[1])
-    if min(width, depth) <= 1e-6:
+    if center is None or not seats:
         return None
     yaw = math.radians(float(table.get("yaw_deg") or 0.0))
     tangent_x = (math.cos(yaw), math.sin(yaw))
     tangent_y = (-math.sin(yaw), math.cos(yaw))
+    width = _footprint_extent(table, tangent_x)
+    depth = _footprint_extent(table, tangent_y)
+    if width is None or depth is None or min(width, depth) <= 1e-6:
+        return None
     grouped: dict[str, list[tuple[dict[str, Any], float]]] = {
         "left": [], "right": [], "front": [], "back": []
     }
@@ -91,6 +92,9 @@ def _evaluate_table(
         slots = _equal_edge_segment_slots(edge_length, count)
         actual = sorted(members, key=lambda row: (row[1], str(row[0]["id"])))
         for segment_index, ((seat, position), slot) in enumerate(zip(actual, slots)):
+            seat_center = bbox_center_xy(seat)
+            if seat_center is None:
+                continue
             chair_span = _seat_tangent_span(seat, edge, yaw)
             deviation = abs(position - slot)
             allowed = max(0.08, min(0.35 * chair_span, 0.08 * edge_length))
@@ -100,6 +104,12 @@ def _evaluate_table(
             # 短边椅仍各自落在单椅边位，不再因错误分组漏掉 180° 翻转。
             facing_error = _seat_facing_error_deg(seat, center) if count == 1 else None
             facing_passed = facing_error is None or facing_error <= 10.0
+            edge_tangent = tangent_y if edge in {"left", "right"} else tangent_x
+            target_xy = (
+                seat_center[0] + (slot - position) * edge_tangent[0],
+                seat_center[1] + (slot - position) * edge_tangent[1],
+            )
+            seat_front = front_vector(seat)
             diagnostics.append({
                 "seat_id": str(seat["id"]), "edge": edge,
                 "segment_index": segment_index,
@@ -109,6 +119,10 @@ def _evaluate_table(
                 "target_position_m": round(slot, 4),
                 "deviation_m": round(deviation, 4),
                 "allowed_deviation_m": round(allowed, 4), "aligned": passed,
+                "target_center_xy_m": [round(value, 6) for value in target_xy],
+                "edge_tangent_xy": [round(value, 6) for value in edge_tangent],
+                "current_front_xy": [round(value, 6) for value in seat_front],
+                "facing_target_xy_m": [round(value, 6) for value in center],
                 "facing_error_deg": round(facing_error, 2) if facing_error is not None else None,
                 "facing_allowed_error_deg": 10.0,
                 "facing_aligned": facing_passed,
@@ -153,6 +167,19 @@ def _evaluate_table(
         "evidence": {"distribution": "table_local_equal_edge_segments"},
         "evaluation_source": "scenesmith_dining_seat_distribution", "scoring_tier": "core",
     }
+
+
+def _footprint_extent(
+    obj: dict[str, Any], axis: tuple[float, float]
+) -> float | None:
+    polygon = object_footprint_polygon(obj) or []
+    if polygon:
+        projections = [x * axis[0] + y * axis[1] for x, y in polygon]
+        return max(projections) - min(projections)
+    size = (obj.get("bbox_world") or {}).get("size") or []
+    if len(size) < 2:
+        return None
+    return abs(axis[0]) * float(size[0]) + abs(axis[1]) * float(size[1])
 
 
 def _equal_edge_segment_slots(edge_length: float, count: int) -> list[float]:

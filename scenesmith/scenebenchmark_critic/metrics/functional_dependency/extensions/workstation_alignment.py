@@ -87,6 +87,11 @@ def _evaluate_pair(
     focus_half = max(_extent_along(obj, desk_side) for obj in focus) / 2.0
     desk_long_span = max(_extent_along(desk, desk_side), _extent_along(desk, desk_front))
     lateral_tolerance = max(seat_half, focus_half, 0.15 * desk_long_span)
+    lateral_delta = focus_lateral - seat_lateral
+    target_center = (
+        seat_center[0] + lateral_delta * desk_side[0],
+        seat_center[1] + lateral_delta * desk_side[1],
+    )
     angle = _angle_to_target(seat, seat_center, focus_center)
     if angle is None:
         return None
@@ -128,6 +133,12 @@ def _evaluate_pair(
             "seat_id": seat_id,
             "desk_id": desk_id,
             "focus_ids": focus_ids,
+            "seat_center_xy_m": [round(value, 6) for value in seat_center],
+            "target_center_xy_m": [round(value, 6) for value in target_center],
+            "desk_side_axis_xy": [round(value, 6) for value in desk_side],
+            "current_front_xy": [round(value, 6) for value in front_vector(seat)],
+            "facing_target_xy_m": [round(value, 6) for value in focus_center],
+            "signed_lateral_delta_m": round(lateral_delta, 6),
             "lateral_offset_m": round(lateral_offset, 6),
             "lateral_tolerance_m": round(lateral_tolerance, 6),
             "angle_to_focus_deg": round(angle, 6),

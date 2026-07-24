@@ -32,6 +32,9 @@ from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.r
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.workstation_alignment import (
     evaluate_workstation_focal_alignment,
 )
+from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.wall_backed_storage import (
+    evaluate_wall_backed_storage_alignment,
+)
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.proposer import (
     augment_functional_dependency_checks,
 )
@@ -87,6 +90,7 @@ METRIC_REGISTRY: dict[str, MetricPlugin] = {
             evaluate_manipuland_completeness,
             evaluate_dining_place_setting_alignment,
             evaluate_workstation_focal_alignment,
+            evaluate_wall_backed_storage_alignment,
         ),
     ),
     "spatial_accessibility": MetricPlugin(

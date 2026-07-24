@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import unittest
 
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.dining_seat import (
@@ -88,3 +89,27 @@ class TestDiningSeatDistribution(unittest.TestCase):
         slots = result["diagnostics"]["seat_slots"]
         self.assertEqual([item["segment_count"] for item in slots], [3, 3, 3])
         self.assertEqual([item["target_position_m"] for item in slots], [-1.1, 0.0, 1.1])
+
+    def test_rotated_table_reports_world_target_without_changing_normal_gap(self):
+        yaw = math.radians(30.0)
+        tangent_x = (math.cos(yaw), math.sin(yaw))
+        tangent_y = (-math.sin(yaw), math.cos(yaw))
+        table = _table()
+        table["yaw_deg"] = 30.0
+        table["footprint_world"] = [
+            [du * tangent_x[0] + dv * tangent_y[0], du * tangent_x[1] + dv * tangent_y[1]]
+            for du, dv in ((-1.65, -0.395), (1.65, -0.395), (1.65, 0.395), (-1.65, 0.395))
+        ]
+        chair_center = (
+            0.55 * tangent_x[0] - 0.95 * tangent_y[0],
+            0.55 * tangent_x[1] - 0.95 * tangent_y[1],
+        )
+        chair = _chair("seat_any_name", *chair_center)
+
+        result = _evaluate_table(table, [chair])
+
+        self.assertIsNotNone(result)
+        slot = result["diagnostics"]["seat_slots"][0]
+        self.assertEqual(slot["edge"], "front")
+        self.assertAlmostEqual(slot["target_center_xy_m"][0], -0.95 * tangent_y[0], places=5)
+        self.assertAlmostEqual(slot["target_center_xy_m"][1], -0.95 * tangent_y[1], places=5)
