@@ -254,6 +254,13 @@ def _result_severity(result: dict[str, Any]) -> tuple[int, float]:
             0.0,
             float(diagnostics.get("nearest_wall_gap_m") or 0.0)
             - float(diagnostics.get("allowed_wall_gap_m") or 0.0),
+        ) + max(
+            0.0,
+            (
+                float(diagnostics.get("front_error_deg") or 0.0)
+                - float(diagnostics.get("allowed_front_error_deg") or 0.0)
+            )
+            / 90.0,
         )
     return _label_severity(label), round(magnitude, 9)
 

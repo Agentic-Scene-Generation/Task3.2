@@ -12,7 +12,7 @@ def _bbox(center, size):
     }
 
 
-def _case_pack(storage_x: float) -> dict:
+def _case_pack(storage_x: float, *, yaw_deg: float = 270.0) -> dict:
     return {
         "scene_geometry": {
             "rooms": [{"bbox": {"min": [-2.5, -2.0, 0.0], "max": [2.5, 2.0, 2.7]}}],
@@ -26,7 +26,7 @@ def _case_pack(storage_x: float) -> dict:
                     "id": "storage_piece_alpha",
                     "object_type": "furniture",
                     "category": "shelving_unit",
-                    "yaw_deg": 0.0,
+                    "yaw_deg": yaw_deg,
                     "bbox_world": _bbox((storage_x, 0.0), (0.8, 0.3, 1.8)),
                     "footprint_world": [
                         [storage_x - 0.4, -0.15],
@@ -56,3 +56,10 @@ def test_storage_already_at_wall_passes() -> None:
     result = evaluate_wall_backed_storage_alignment(_case_pack(-2.05))[0]
 
     assert result["label"] == "pass"
+
+
+def test_storage_at_wall_with_front_parallel_to_wall_fails() -> None:
+    result = evaluate_wall_backed_storage_alignment(_case_pack(-2.05, yaw_deg=0.0))[0]
+
+    assert result["label"] == "fail"
+    assert result["diagnostics"]["front_error_deg"] == 90.0

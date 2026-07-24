@@ -9,6 +9,7 @@ from pydrake.math import RigidTransform, RollPitchYaw
 from scenesmith.agent_utils.room import ObjectType, RoomScene, SceneObject, UniqueID
 from scenesmith.agent_utils.seating_orientation_guard import (
     _front_angle_to_target_deg,
+    _is_functional_surface,
     align_seating_to_nearest_surface,
 )
 
@@ -68,12 +69,8 @@ def test_standalone_wall_chair_keeps_wall_normal_priority() -> None:
     chair = _object(
         "guest_chair_0", ObjectType.FURNITURE, (2.0, 0.0, 0.5), (0.8, 0.8, 1.0)
     )
-    table = _object(
-        "desk_0", ObjectType.FURNITURE, (0.8, 0.0, 0.4), (0.8, 1.0, 0.8)
-    )
-    east_wall = _object(
-        "east_wall", ObjectType.WALL, (2.5, 0.0, 1.35), (0.1, 5.0, 2.7)
-    )
+    table = _object("desk_0", ObjectType.FURNITURE, (0.8, 0.0, 0.4), (0.8, 1.0, 0.8))
+    east_wall = _object("east_wall", ObjectType.WALL, (2.5, 0.0, 1.35), (0.1, 5.0, 2.7))
 
     fixes = align_seating_to_nearest_surface(_scene(chair, table, east_wall))
 
@@ -82,6 +79,40 @@ def test_standalone_wall_chair_keeps_wall_normal_priority() -> None:
     ]
     front = chair.transform.rotation().matrix() @ np.array([0.0, 1.0, 0.0])
     np.testing.assert_allclose(front[:2], [-1.0, 0.0], atol=1e-7)
+    chair_bounds = chair.compute_world_bounds()
+    wall_bounds = east_wall.compute_world_bounds()
+    assert chair_bounds is not None and wall_bounds is not None
+    assert abs(wall_bounds[0][0] - chair_bounds[1][0] - 0.03) < 1e-7
+
+
+def test_wall_chairs_just_outside_old_ratio_are_backed_and_face_inward() -> None:
+    chairs = [
+        _object(
+            f"office_chair_{index}",
+            ObjectType.FURNITURE,
+            (-1.9, -1.5 + index * 0.8, 0.45),
+            (0.6, 0.61, 0.9),
+        )
+        for index in range(2)
+    ]
+    for chair in chairs:
+        chair.description = "ergonomic office chair with adjustable height"
+    west_wall = _object(
+        "west_wall", ObjectType.WALL, (-2.5, 0.0, 1.35), (0.05, 4.5, 2.7)
+    )
+
+    fixes = align_seating_to_nearest_surface(_scene(*chairs, west_wall))
+
+    assert not any(_is_functional_surface(chair) for chair in chairs)
+    assert {fix.subject_id for fix in fixes} == {"office_chair_0", "office_chair_1"}
+    wall_bounds = west_wall.compute_world_bounds()
+    assert wall_bounds is not None
+    for chair in chairs:
+        front = chair.transform.rotation().matrix() @ np.array([0.0, 1.0, 0.0])
+        np.testing.assert_allclose(front[:2], [1.0, 0.0], atol=1e-7)
+        chair_bounds = chair.compute_world_bounds()
+        assert chair_bounds is not None
+        assert abs(chair_bounds[0][0] - wall_bounds[1][0] - 0.03) < 1e-7
 
 
 def test_seat_within_forty_five_degrees_is_unchanged() -> None:

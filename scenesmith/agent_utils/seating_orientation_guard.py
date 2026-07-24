@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 
 from dataclasses import dataclass
 
@@ -53,7 +54,7 @@ def align_seating_to_nearest_surface(
     *,
     max_target_distance_m: float = 2.0,
     repair_angle_threshold_deg: float = 45.0,
-    wall_anchor_gap_ratio: float = 0.45,
+    wall_anchor_gap_ratio: float = 0.55,
     standalone_surface_gap_ratio: float = 0.5,
     wall_preference_margin_ratio: float = 0.2,
 ) -> list[SeatingOrientationFix]:
@@ -72,6 +73,7 @@ def align_seating_to_nearest_surface(
             seat,
             scene.get_objects_by_type(ObjectType.WALL),
             max_gap_ratio=wall_anchor_gap_ratio,
+            peer_seating=seating,
         )
         target = _nearest_surface(seat, surfaces, max_distance_m=max_target_distance_m)
         if target is None or (
@@ -98,14 +100,14 @@ def align_seating_to_nearest_surface(
             )
             # 2026-07-12 修改原因：独立墙边座椅不应依赖 guest/visitor 名称；
             # 当它本来就是靠墙摆放时，兜底为背靠最近墙面、前向室内，保证平行稳定。
-            seat.transform = RigidTransform(
-                rpy=RollPitchYaw(
-                    old_rpy.roll_angle(),
-                    old_rpy.pitch_angle(),
-                    math.radians(new_yaw_deg),
-                ),
-                p=seat.transform.translation(),
+            new_transform = _wall_backed_transform(
+                seat,
+                wall_target,
+                new_yaw_deg=new_yaw_deg,
             )
+            if new_transform is None:
+                continue
+            seat.transform = new_transform
             fixes.append(
                 SeatingOrientationFix(
                     subject_id=str(seat.object_id),
@@ -162,10 +164,11 @@ def _nearest_wall_anchor(
     walls: list[SceneObject],
     *,
     max_gap_ratio: float,
+    peer_seating: list[SceneObject] | None = None,
 ) -> SceneObject | None:
     if not _is_wall_anchor_candidate(seat):
         return None
-    ranked: list[tuple[float, str, SceneObject]] = []
+    ranked: list[tuple[int, float, str, SceneObject]] = []
     seat_bounds = seat.compute_world_bounds()
     if seat_bounds is None:
         return None
@@ -180,11 +183,51 @@ def _nearest_wall_anchor(
         wall_min, wall_max = wall_bounds
         gap = _aabb_gap_xy(seat_min, seat_max, wall_min, wall_max)
         if gap <= footprint_scale * max_gap_ratio:
-            ranked.append((gap, str(wall.object_id), wall))
+            support = _wall_row_support(
+                seat,
+                wall,
+                peer_seating or [],
+                max_gap_ratio=max_gap_ratio,
+            )
+            ranked.append((-support, gap, str(wall.object_id), wall))
     if not ranked:
         return None
-    ranked.sort(key=lambda item: (item[0], item[1]))
-    return ranked[0][2]
+    ranked.sort(key=lambda item: (item[0], item[1], item[2]))
+    return ranked[0][3]
+
+
+def _wall_row_support(
+    seat: SceneObject,
+    wall: SceneObject,
+    peer_seating: list[SceneObject],
+    *,
+    max_gap_ratio: float,
+) -> int:
+    """Count nearby seats aligned in a row parallel to the candidate wall."""
+    wall_bounds = wall.compute_world_bounds()
+    seat_scale = _seat_footprint_scale(seat)
+    if wall_bounds is None or seat_scale is None:
+        return 0
+    wall_span = wall_bounds[1] - wall_bounds[0]
+    normal_axis = 0 if float(wall_span[0]) < float(wall_span[1]) else 1
+    seat_normal = float(seat.transform.translation()[normal_axis])
+    support = 0
+    for peer in peer_seating:
+        if peer.object_id == seat.object_id:
+            continue
+        peer_bounds = peer.compute_world_bounds()
+        peer_scale = _seat_footprint_scale(peer)
+        if peer_bounds is None or peer_scale is None:
+            continue
+        peer_gap = _aabb_gap_xy(
+            peer_bounds[0], peer_bounds[1], wall_bounds[0], wall_bounds[1]
+        )
+        if peer_gap > peer_scale * max_gap_ratio:
+            continue
+        peer_normal = float(peer.transform.translation()[normal_axis])
+        if abs(peer_normal - seat_normal) <= max(seat_scale, peer_scale) * 0.5:
+            support += 1
+    return support
 
 
 def _surface_gap_xy(seat: SceneObject, surface: SceneObject | None) -> float | None:
@@ -248,6 +291,57 @@ def _wall_away_target_point(seat: SceneObject, wall: SceneObject) -> np.ndarray 
         return None
     target[normal_axis] += 1.0 if direction > 0.0 else -1.0
     return target
+
+
+def _wall_backed_transform(
+    seat: SceneObject,
+    wall: SceneObject,
+    *,
+    new_yaw_deg: float,
+    back_gap_m: float = 0.03,
+) -> RigidTransform | None:
+    """Rotate a standalone seat inward and place its back near the wall face."""
+    wall_bounds = wall.compute_world_bounds()
+    if wall_bounds is None:
+        return None
+    wall_min, wall_max = wall_bounds
+    wall_span = wall_max - wall_min
+    normal_axis = 0 if float(wall_span[0]) < float(wall_span[1]) else 1
+    seat_center = np.asarray(seat.transform.translation(), dtype=float)
+    wall_center = np.asarray(wall.transform.translation(), dtype=float)
+    direction = float(seat_center[normal_axis] - wall_center[normal_axis])
+    if abs(direction) < 1e-6:
+        return None
+
+    old_rpy = RollPitchYaw(seat.transform.rotation())
+    rotated = RigidTransform(
+        rpy=RollPitchYaw(
+            old_rpy.roll_angle(),
+            old_rpy.pitch_angle(),
+            math.radians(new_yaw_deg),
+        ),
+        p=seat_center,
+    )
+    old_transform = seat.transform
+    try:
+        seat.transform = rotated
+        seat_bounds = seat.compute_world_bounds()
+    finally:
+        seat.transform = old_transform
+    if seat_bounds is None:
+        return None
+
+    seat_min, seat_max = seat_bounds
+    translation = seat_center.copy()
+    if direction > 0.0:
+        translation[normal_axis] += (
+            float(wall_max[normal_axis]) + back_gap_m - float(seat_min[normal_axis])
+        )
+    else:
+        translation[normal_axis] += (
+            float(wall_min[normal_axis]) - back_gap_m - float(seat_max[normal_axis])
+        )
+    return RigidTransform(R=rotated.rotation(), p=translation)
 
 
 def _aabb_gap_xy(
@@ -339,6 +433,6 @@ def _compound_tokens(text: str) -> set[str]:
     normalized = text.lower().replace("-", "_").replace(" ", "_")
     out: set[str] = set()
     for token in SEATING_TOKENS | SURFACE_TOKENS:
-        if token in normalized:
+        if re.search(rf"(?:^|_){re.escape(token)}(?:_|$)", normalized):
             out.add(token)
     return out

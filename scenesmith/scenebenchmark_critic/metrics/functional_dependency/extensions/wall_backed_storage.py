@@ -47,9 +47,10 @@ def evaluate_wall_backed_storage_alignment(
             continue
         nearest = min(candidates, key=lambda item: item["translation_m"])
         gap = float(nearest["wall_gap_m"])
-        if gap <= 0.1:
+        front_error = float(nearest["front_error_deg"])
+        if gap <= 0.1 and front_error <= 20.0:
             label, confidence = "pass", 0.91
-        elif gap <= 0.3:
+        elif gap <= 0.3 and front_error <= 45.0:
             label, confidence = "degraded", 0.87
         else:
             label, confidence = "fail", 0.94
@@ -68,7 +69,8 @@ def evaluate_wall_backed_storage_alignment(
                 "relation_type": RELATION_TYPE,
                 "reason": (
                     f"Storage furniture {object_id!r} has a {gap:.2f} m footprint "
-                    f"gap to its nearest usable wall {wall_id!r}."
+                    f"gap to its nearest usable wall {wall_id!r} and its front "
+                    f"is {front_error:.0f} degrees from the inward wall normal."
                 ),
                 "repair_advice": (
                     "Use one of the critic-provided wall poses and accept it only "
@@ -81,9 +83,13 @@ def evaluate_wall_backed_storage_alignment(
                     "current_center_xy_m": [round(value, 6) for value in center],
                     "nearest_wall_gap_m": round(gap, 6),
                     "allowed_wall_gap_m": 0.1,
+                    "front_error_deg": round(front_error, 6),
+                    "allowed_front_error_deg": 20.0,
                     "candidate_poses": candidates,
                 },
-                "evidence": {"constraint": "storage_footprint_backed_by_room_wall"},
+                "evidence": {
+                    "constraint": "storage_backed_by_wall_with_front_facing_inward"
+                },
                 "evaluation_source": "scenesmith_wall_backed_storage_alignment",
                 "scoring_tier": "core",
             }
@@ -148,39 +154,44 @@ def _candidate_poses(
             wall_min - max(current_normal_values),
             min(current_normal_values) - wall_max,
         )
-        for delta_deg in (0.0, 90.0, 180.0, 270.0):
-            candidate_yaw = yaw + math.radians(delta_deg)
-            axis_x = (math.cos(candidate_yaw), math.sin(candidate_yaw))
-            axis_y = (-math.sin(candidate_yaw), math.cos(candidate_yaw))
-            normal = (1.0, 0.0) if normal_index == 0 else (0.0, 1.0)
-            tangent = (0.0, 1.0) if normal_index == 0 else (1.0, 0.0)
-            normal_half = (
-                abs(_dot(axis_x, normal)) * width
-                + abs(_dot(axis_y, normal)) * depth
-            ) / 2.0
-            tangent_half = (
-                abs(_dot(axis_x, tangent)) * width
-                + abs(_dot(axis_y, tangent)) * depth
-            ) / 2.0
-            target = [float(center[0]), float(center[1])]
-            target[normal_index] = wall_coord + inward * (
-                wall_half + normal_half + 0.02
-            )
-            tangent_limit = max(0.0, wall_tangent_half - tangent_half - 0.05)
-            target[tangent_index] = min(
-                max(target[tangent_index], float(wall_center[tangent_index]) - tangent_limit),
-                float(wall_center[tangent_index]) + tangent_limit,
-            )
-            translation = math.hypot(target[0] - center[0], target[1] - center[1])
-            candidates.append(
-                {
-                    "wall_id": str(wall.get("id") or ""),
-                    "target_center_xy_m": [round(value, 6) for value in target],
-                    "target_yaw_deg": round((math.degrees(candidate_yaw) % 360.0), 6),
-                    "wall_gap_m": round(current_gap, 6),
-                    "translation_m": round(translation, 6),
-                }
-            )
+        inward_normal = [0.0, 0.0]
+        inward_normal[normal_index] = inward
+        candidate_yaw = math.atan2(-inward_normal[0], inward_normal[1])
+        candidate_yaw_deg = math.degrees(candidate_yaw) % 360.0
+        axis_x = (math.cos(candidate_yaw), math.sin(candidate_yaw))
+        axis_y = (-math.sin(candidate_yaw), math.cos(candidate_yaw))
+        normal = (1.0, 0.0) if normal_index == 0 else (0.0, 1.0)
+        tangent = (0.0, 1.0) if normal_index == 0 else (1.0, 0.0)
+        normal_half = (
+            abs(_dot(axis_x, normal)) * width + abs(_dot(axis_y, normal)) * depth
+        ) / 2.0
+        tangent_half = (
+            abs(_dot(axis_x, tangent)) * width + abs(_dot(axis_y, tangent)) * depth
+        ) / 2.0
+        target = [float(center[0]), float(center[1])]
+        target[normal_index] = wall_coord + inward * (wall_half + normal_half + 0.02)
+        tangent_limit = max(0.0, wall_tangent_half - tangent_half - 0.05)
+        target[tangent_index] = min(
+            max(
+                target[tangent_index],
+                float(wall_center[tangent_index]) - tangent_limit,
+            ),
+            float(wall_center[tangent_index]) + tangent_limit,
+        )
+        translation = math.hypot(target[0] - center[0], target[1] - center[1])
+        candidates.append(
+            {
+                "wall_id": str(wall.get("id") or ""),
+                "target_center_xy_m": [round(value, 6) for value in target],
+                "target_yaw_deg": round(candidate_yaw_deg, 6),
+                "front_error_deg": round(
+                    abs((candidate_yaw_deg - yaw_deg + 180.0) % 360.0 - 180.0),
+                    6,
+                ),
+                "wall_gap_m": round(current_gap, 6),
+                "translation_m": round(translation, 6),
+            }
+        )
     candidates.sort(
         key=lambda item: (
             item["translation_m"],

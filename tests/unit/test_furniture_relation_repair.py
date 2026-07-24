@@ -164,6 +164,8 @@ def test_repairs_generic_storage_to_wall(tmp_path: Path) -> None:
         ("storage_piece_alpha", "wall_backed_storage_alignment")
     ]
     assert storage.transform.translation()[0] < -1.8
+    front = storage.transform.rotation().matrix() @ np.array([0.0, 1.0, 0.0])
+    np.testing.assert_allclose(front[:2], [1.0, 0.0], atol=1e-7)
 
 
 def test_rejects_assigned_work_seat_slot_outside_room(tmp_path: Path) -> None:
