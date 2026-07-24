@@ -839,13 +839,6 @@ def _generate_room(
                             "seconds"
                         )
 
-                layout_actions = furniture_agent.enforce_prompt_layout_contracts()
-                if layout_actions:
-                    console_logger.info(
-                        "Applied deterministic prompt-layout contracts: %s",
-                        "; ".join(layout_actions),
-                    )
-
                 if scene.content_hash() != pre_postprocess_hash:
                     try:
                         asyncio.run(
