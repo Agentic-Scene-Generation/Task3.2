@@ -48,6 +48,9 @@ from scenesmith.manipuland_agents.stateful_manipuland_agent import (
     StatefulManipulandAgent,
 )
 from scenesmith.scenebenchmark_critic.config import critic_config_from_any
+from scenesmith.scenebenchmark_critic.furniture_relation_repair import (
+    improve_furniture_relations,
+)
 from scenesmith.utils.logging import ConsoleLogger, FileLoggingContext
 from scenesmith.utils.openai import configure_reasoning_persistence
 from scenesmith.utils.parallel import run_parallel_isolated
@@ -864,6 +867,7 @@ def _generate_room(
         align_seating_to_nearest_surface(scene)
         if critic_config_from_any(cfg_dict).enabled:
             improve_storage_front_access(scene, config=cfg_dict)
+            improve_furniture_relations(scene, config=cfg_dict)
 
         # Always save state after furniture stage (unconditional for resumability).
         logger.log_scene(scene=scene, name="scene_after_furniture")
