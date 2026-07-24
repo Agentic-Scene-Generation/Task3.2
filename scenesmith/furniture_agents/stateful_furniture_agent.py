@@ -580,9 +580,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
 
         return bool(actions), actions
 
-    def enforce_prompt_layout_contracts(
-        self, scene: RoomScene | None = None
-    ) -> list[str]:
+    def enforce_prompt_layout_contracts(self) -> list[str]:
         """Restore narrow, prompt-explicit furniture relationships post projection.
 
         The furniture designer and the physics projection can both preserve object
@@ -591,8 +589,6 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         which we have deterministic geometry: a study workstation with two guest
         chairs, and a four-chair rectangular dining table.
         """
-        if scene is not None:
-            self.scene = scene
         if self.scene is None:
             return []
 

@@ -224,42 +224,6 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         StatefulFurnitureAgent is None,
         f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
     )
-    def test_explicit_scene_replaces_stale_agent_scene(self) -> None:
-        current_scene_agent = self._make_layout_agent(
-            "A study with a desk centered against the back wall, an office chair "
-            "tucked under the desk, two guest chairs against the side wall facing "
-            "the desk, and a bookshelf on the adjacent wall."
-        )
-        for object_id, name, center, size in (
-            ("desk_0", "desk", [1.0, 0.0, 0.0], [1.4, 0.8, 0.75]),
-            ("bookshelf_0", "bookshelf", [-0.5, 0.0, 0.0], [0.9, 0.35, 1.8]),
-            ("office_chair_0", "office chair", [-0.5, 0.2, 0.0], [0.5, 0.5, 0.9]),
-            ("office_chair_1", "office chair", [-0.2, 0.2, 0.0], [0.5, 0.5, 0.9]),
-            ("office_chair_2", "office chair", [0.1, 0.2, 0.0], [0.5, 0.5, 0.9]),
-        ):
-            self._add_furniture(
-                current_scene_agent.scene, object_id, name, center, size
-            )
-
-        stale_scene_agent = self._make_layout_agent("A room with a sofa.")
-        current_scene = current_scene_agent.scene
-        current_scene_agent.scene = stale_scene_agent.scene
-
-        actions = current_scene_agent.enforce_prompt_layout_contracts(
-            scene=current_scene
-        )
-
-        self.assertTrue(actions)
-        self.assertIs(current_scene_agent.scene, current_scene)
-        self.assertGreater(
-            float(current_scene.objects[UniqueID("desk_0")].transform.translation()[1]),
-            1.5,
-        )
-
-    @unittest.skipIf(
-        StatefulFurnitureAgent is None,
-        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
-    )
     def test_explicit_four_chair_dining_contract_centers_each_edge(self) -> None:
         agent = self._make_layout_agent(
             "A dining room with a dining table in the center and four dining chairs "
