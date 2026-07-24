@@ -91,17 +91,17 @@ asset_manager:
   backend: "sam3d"
 
   router:
-    enabled: false
+    enabled: true
     parallel_workers: 10
     # Max retries for VLM analysis if parsing fails (e.g., invalid object_type)
-    analysis_max_retries: 1
+    analysis_max_retries: 3
     strategies:
       generated:
         enabled: true
-        max_retries: 1
+        max_retries: 2
       articulated:
         enabled: true
-        max_retries: 1
+        max_retries: 3
         use_lenient_validation: true
       # Thin covering: textured flat surfaces (e.g., wall posters).
       thin_covering:
@@ -110,7 +110,7 @@ asset_manager:
         thickness_m: 0.01
         texture_scale: 0.5  # Meters per tile for retrieved library textures (tileable)
         generator:
-          enabled: true  # AI generation for custom artwork (posters, paintings, wall art)
+          enabled: false  # AI image generation disabled; use retrieved materials only
           backend: "openai"
           max_retries: 3
           default_roughness: 128

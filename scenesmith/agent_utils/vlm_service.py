@@ -10,6 +10,7 @@ from scenesmith.agent_utils.thinking import (
     responses_api_reasoning_effort,
     thinking_directive_from_effort,
 )
+from scenesmith.utils.openai import ReasoningPersistenceOpenAIClient
 
 console_logger = logging.getLogger(__name__)
 
@@ -31,7 +32,13 @@ class VLMService:
                 Valid values: "default", "flex", "priority", or None to use
                 project default.
         """
-        self.client = OpenAI()
+        self.client = ReasoningPersistenceOpenAIClient(
+            client=OpenAI(),
+            session_id_override="vlm",
+            # Keep online tool/VLM artifacts out of the main Agent dataset.
+            # Qwen VLM thinking is still captured when an Agent context is active.
+            capture_online=False,
+        )
         # Cache for model type detection.
         self._reasoning_models = {"gpt-5", "gpt-5.2", "o3", "o4"}
         self.service_tier = service_tier

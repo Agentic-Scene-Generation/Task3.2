@@ -8,6 +8,13 @@ openai:
   #   "flex"     - Lower cost, slower processing (Batch API rates)
   #   "priority" - Lower latency, premium pricing
   service_tier: null
+  # Passive response persistence only. This does not change model requests,
+  # thinking settings, or the Chat Completions / Responses API selection.
+  reasoning_persistence:
+    enabled: true
+    # Task3.2 defaults to Qwen. Set explicitly to "openrouter" or "openai"
+    # for online runs. "auto" is optional and fails closed when ambiguous.
+    provider: qwen
 
 # LLM settings shared by all agents. The served model name must match the
 # vLLM --served-model-name value.

@@ -111,30 +111,30 @@ asset_manager:
   # (either via text-to-3D generation or HSSD retrieval).
   router:
     # Enable LLM-based request analysis and validation
-    enabled: false
+    enabled: true
     # Number of concurrent item generation threads (overlaps I/O-bound work)
     parallel_workers: 10
     # Max retries for VLM analysis if parsing fails (e.g., invalid object_type)
-    analysis_max_retries: 1
+    analysis_max_retries: 3
     strategies:
       # Standard asset acquisition - fulfilled by top-level "strategy" setting
       generated:
         enabled: true
-        max_retries: 1  # Retry with same prompt (randomness gives different results)
+        max_retries: 2  # Retry with same prompt (randomness gives different results)
       # Articulated objects
       articulated:
         enabled: true
-        max_retries: 1
+        max_retries: 3
         use_lenient_validation: true  # Lenient validation for dataset objects
       # Thin covering: flat floor surfaces (rugs, yoga mats, runners).
       thin_covering:
         enabled: true
-        max_retries: 1 # Retry with different materials if validation fails
+        max_retries: 3 # Retry with different materials if validation fails
         thickness_m: 0.003  # 3mm default thickness
         texture_scale: 0.5  # Meters per tile for retrieved library textures (tileable)
         # AI material generation fallback (when library retrieval fails)
         generator:
-          enabled: true  # Enable as fallback when all retrieval candidates fail
+          enabled: false  # AI image generation disabled; use retrieved materials only
           backend: "openai"  # or "gemini" (uses image_generation config)
           max_retries: 2  # Max AI generation attempts
           default_roughness: 128  # 0-255 grayscale for PBR roughness map

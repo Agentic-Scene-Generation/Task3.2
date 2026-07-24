@@ -103,29 +103,29 @@ asset_manager:
   # (either via text-to-3D generation or HSSD retrieval).
   router:
     # Enable LLM-based request analysis and validation
-    enabled: false
+    enabled: true
     # Number of concurrent item generation threads (overlaps I/O-bound work)
     parallel_workers: 10
     # Max retries for VLM analysis if parsing fails (e.g., invalid object_type)
-    analysis_max_retries: 1
+    analysis_max_retries: 3
     strategies:
       # Standard asset acquisition - fulfilled by top-level "strategy" setting
       generated:
         enabled: true
-        max_retries: 1  # Retry with same prompt (randomness gives different results)
+        max_retries: 2  # Retry with same prompt (randomness gives different results)
       # Articulated objects
       articulated:
         enabled: true
-        max_retries: 1
+        max_retries: 3
         use_lenient_validation: true  # Lenient validation for dataset objects
       # Thin covering: flat fabric items (tablecloths, placemats, table runners).
       thin_covering:
         enabled: true
-        max_retries: 1
+        max_retries: 3
         thickness_m: 0.002
         texture_scale: 0.5  # Meters per tile for retrieved library textures (tileable)
         generator:
-          enabled: true  # AI generation for custom patterns (plate settings, themed tablecloths)
+          enabled: false  # AI image generation disabled; use retrieved materials only
           backend: "openai"
           max_retries: 2
           default_roughness: 128
