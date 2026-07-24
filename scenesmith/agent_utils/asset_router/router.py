@@ -77,6 +77,23 @@ if TYPE_CHECKING:
 
 console_logger = logging.getLogger(__name__)
 
+_ARTICULATED_FIRST_FURNITURE_NAMES = frozenset(
+    {"nightstand", "night_stand", "bedside_table", "bedside_cabinet"}
+)
+
+
+def _prefers_articulated_furniture(short_name: str, description: str) -> bool:
+    """Return whether a furniture request should try an articulated asset first."""
+    normalized_name = short_name.strip().lower().replace("-", "_")
+    normalized_description = description.strip().lower().replace("-", " ")
+    return (
+        normalized_name in _ARTICULATED_FIRST_FURNITURE_NAMES
+        or normalized_name.endswith("_nightstand")
+        or "nightstand" in normalized_description
+        or "bedside table" in normalized_description
+        or "bedside cabinet" in normalized_description
+    )
+
 
 class AssetRouter:
     """Routes asset generation requests through LLM analysis and validation.
@@ -233,13 +250,33 @@ class AssetRouter:
         for item_data in response.get("items", []):
             try:
                 object_type = ObjectType(item_data["object_type"].lower())
+                description = item_data["description"]
+                short_name = item_data["short_name"]
+                strategies = list(item_data["strategies"])
+                if (
+                    object_type == ObjectType.FURNITURE
+                    and _prefers_articulated_furniture(short_name, description)
+                ):
+                    # Nightstands almost always contain drawers or doors. Prefer
+                    # preprocessed articulated assets, whose collision geometry is
+                    # substantially more reliable than an on-the-fly HSSD proxy.
+                    strategies = [
+                        "articulated",
+                        *(
+                            strategy
+                            for strategy in strategies
+                            if strategy not in {"articulated", "generated"}
+                        ),
+                        "generated",
+                    ]
+
                 items.append(
                     AssetItem(
-                        description=item_data["description"],
-                        short_name=item_data["short_name"],
+                        description=description,
+                        short_name=short_name,
                         dimensions=item_data["dimensions"],
                         object_type=object_type,
-                        strategies=item_data["strategies"],
+                        strategies=strategies,
                         thin_covering_type=item_data.get("thin_covering_type"),
                     )
                 )

@@ -1,2 +1,5 @@
 *
 !.gitignore
+!prompt_gen/
+prompt_gen/*
+!prompt_gen/prompts_v1.csv

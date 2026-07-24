@@ -259,6 +259,35 @@ class TestVLMService(unittest.TestCase):
         self.assertEqual(call_args[1]["response_format"], {"type": "json_object"})
 
     @patch("scenesmith.agent_utils.vlm_service.OpenAI")
+    def test_create_completion_can_hard_disable_qwen_thinking(self, mock_openai_class):
+        mock_openai_client = Mock()
+        mock_openai_class.return_value = mock_openai_client
+
+        mock_response = Mock()
+        mock_message = Mock()
+        mock_message.content = '{"material": "wood"}'
+        mock_choice = Mock()
+        mock_choice.message = mock_message
+        mock_response.choices = [mock_choice]
+        mock_openai_client.chat.completions.create.return_value = mock_response
+
+        vlm_service = VLMService()
+        vlm_service.create_completion(
+            model="Qwen/Qwen3.6-35B-A3B",
+            messages=[{"role": "user", "content": "Analyze this mesh."}],
+            reasoning_effort="high",
+            verbosity="low",
+            enable_thinking=False,
+        )
+
+        kwargs = mock_openai_client.chat.completions.create.call_args.kwargs
+        self.assertEqual(
+            kwargs["extra_body"],
+            {"chat_template_kwargs": {"enable_thinking": False}},
+        )
+        self.assertTrue(kwargs["messages"][0]["content"].startswith("/no_think"))
+
+    @patch("scenesmith.agent_utils.vlm_service.OpenAI")
     def test_error_handling_for_api_failures(self, mock_openai_class):
         """Test handling of OpenAI API errors."""
         mock_openai_client = Mock()

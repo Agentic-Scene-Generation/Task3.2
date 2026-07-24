@@ -268,6 +268,11 @@ class TestVLMResponseParsing(unittest.TestCase):
             self.assertEqual(result.up_axis, "+Z")
             self.assertEqual(result.front_axis, "+Y")
             self.assertGreater(result.mass_kg, 0.0)
+            self.assertFalse(
+                mock_vlm_instance.create_completion.call_args.kwargs[
+                    "enable_thinking"
+                ]
+            )
         finally:
             if mesh_path.exists():
                 mesh_path.unlink()

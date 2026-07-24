@@ -174,6 +174,28 @@ class TestAnalysisResponseParsing(unittest.TestCase):
         assert result.items[0].object_type == ObjectType.FURNITURE
         assert not result.was_modified
 
+    def test_nightstand_prefers_articulated_with_generated_fallback(self) -> None:
+        """Nightstands deterministically use the safer articulated route first."""
+        router = AssetRouter(
+            agent_type=AgentType.FURNITURE, vlm_service=MagicMock(), cfg=MagicMock()
+        )
+        response = {
+            "items": [
+                {
+                    "description": "sleek wooden nightstand",
+                    "short_name": "scandinavian_nightstand",
+                    "dimensions": [0.4, 0.35, 0.45],
+                    "object_type": "FURNITURE",
+                    "strategies": ["generated"],
+                }
+            ]
+        }
+
+        result = router._parse_analysis_response(response)
+
+        assert len(result.items) == 1
+        assert result.items[0].strategies == ["articulated", "generated"]
+
     def test_parse_composite_split(self) -> None:
         """Parse response with composite split into multiple items."""
         router = AssetRouter(

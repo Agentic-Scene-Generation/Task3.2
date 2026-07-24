@@ -24,8 +24,10 @@ debug_asset_gen/
 debug_rendering/
 debug_furniture_agent/
 
-# Data — datasets, assets, materials
-data/
+# Data — datasets, assets, materials. Keep the small batch prompt manifest in Git.
+data/*
+!data/.gitignore
+!data/prompt_gen/
 materials/
 artvip/
 outputs/
@@ -44,7 +46,12 @@ external/checkpoints/
 # Logs
 *.log
 vllm_server.log
+logs/
 /tmp
+
+# Local runtime binaries and caches
+.runtime_cache/
+bin/
 
 # Secrets
 .env

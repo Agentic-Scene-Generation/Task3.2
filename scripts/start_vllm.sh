@@ -45,6 +45,9 @@ ENFORCE_EAGER="${SCENEEXPERT_VLLM_ENFORCE_EAGER:-0}"
 ENABLE_AUTO_TOOL_CHOICE="${SCENEEXPERT_ENABLE_AUTO_TOOL_CHOICE:-1}"
 TOOL_CALL_PARSER="${SCENEEXPERT_TOOL_CALL_PARSER:-qwen3_xml}"
 REASONING_PARSER="${SCENEEXPERT_REASONING_PARSER:-qwen3}"
+GDN_PREFILL_BACKEND="${SCENEEXPERT_GDN_PREFILL_BACKEND:-triton}"
+ENABLE_PREFIX_CACHING="${SCENEEXPERT_VLLM_ENABLE_PREFIX_CACHING:-1}"
+DISABLE_CUSTOM_ALL_REDUCE="${SCENEEXPERT_VLLM_DISABLE_CUSTOM_ALL_REDUCE:-1}"
 VLLM_LOG="${SCENEEXPERT_VLLM_LOG:-$PROJECT_DIR/vllm_server.log}"
 
 if [ ! -d "$MODEL_DIR" ]; then
@@ -113,6 +116,9 @@ echo "  health timeout: ${VLLM_WAIT_TIMEOUT_SECONDS}s"
 echo "  engine ready timeout: ${VLLM_ENGINE_READY_TIMEOUT_S}s"
 echo "  DeepGEMM: use=${USE_DEEP_GEMM}, moe_use=${MOE_USE_DEEP_GEMM}, warmup=${DEEP_GEMM_WARMUP}"
 echo "  enforce eager: ${ENFORCE_EAGER}"
+echo "  GDN prefill backend: ${GDN_PREFILL_BACKEND:-default}"
+echo "  prefix caching: ${ENABLE_PREFIX_CACHING}"
+echo "  disable custom all-reduce: ${DISABLE_CUSTOM_ALL_REDUCE}"
 echo "  启动方式: $VLLM_LAUNCH_MODE"
 
 # 设置环境变量
@@ -170,6 +176,15 @@ if [ "$ENABLE_AUTO_TOOL_CHOICE" = "1" ]; then
 fi
 if [ -n "$REASONING_PARSER" ]; then
     VLLM_ARGS+=(--reasoning-parser "$REASONING_PARSER")
+fi
+if [ -n "$GDN_PREFILL_BACKEND" ]; then
+    VLLM_ARGS+=(--gdn-prefill-backend "$GDN_PREFILL_BACKEND")
+fi
+if [ "$ENABLE_PREFIX_CACHING" = "1" ]; then
+    VLLM_ARGS+=(--enable-prefix-caching)
+fi
+if [ "$DISABLE_CUSTOM_ALL_REDUCE" = "1" ]; then
+    VLLM_ARGS+=(--disable-custom-all-reduce)
 fi
 "${VLLM_ARGS[@]}" > "$VLLM_LOG" 2>&1 &
 

@@ -94,7 +94,7 @@ asset_manager:
   hssd_vlm_fallback_on_transient_error: true
   # HSSD assets are already upright; avoid fragile VLM image-index parsing.
   hssd_physics_analysis_mode: deterministic
-  hssd_vlm_timeout_seconds: 90
+  hssd_vlm_timeout_seconds: 300
   hssd_vlm_max_retries: 0
   # Prefer curated SceneBenchmark asset-library front annotations over VLM picks.
   # Missing or malformed annotations fall back to the analyzed front axis.
@@ -272,7 +272,7 @@ collision_geometry:
     find_best_plane: false        # Find best plane
 
 # Maximum number of agent turns before stopping (applies to all agent interactions)
-max_turns: 120
+max_turns: 500
 
 # Maximum number of critique-and-improve rounds before stopping.
 # When auto_score_after_design_attempts=true, this is the maximum number of
@@ -290,7 +290,7 @@ auto_score_after_design_attempts: true
 # deterministic constraints after all configured repair attempts. Keep this on
 # for producing usable scenes; turn it off only when intentionally collecting
 # failed trajectories for analysis.
-fail_stage_on_unresolved_hard_constraints: true
+fail_stage_on_unresolved_hard_constraints: false
 
 # Critic fast path: deterministic hard checks run before expensive VLM scoring.
 # If missing required objects, hard collisions, door blockage, or fallen objects

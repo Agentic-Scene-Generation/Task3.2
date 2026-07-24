@@ -80,7 +80,11 @@ prompt: |
   PRIORITY 2 - Articulated furniture (only if NOT branded/themed):
   - ["articulated", "generated"]: Furniture with doors, drawers, hinges, or moving parts
     BUT ONLY if description is generic (no brand/franchise theming).
-    Examples: "wardrobe", "cabinet", "dresser", "fridge", "wooden toy box with hinged lid"
+    Examples: "nightstand", "bedside table", "wardrobe", "cabinet", "dresser",
+    "fridge", "wooden toy box with hinged lid"
+
+    Nightstands and bedside tables MUST use ["articulated", "generated"] so the
+    router tries a library asset with prebuilt drawers/collision geometry first.
 
     EXCEPTION - Use ["generated"] only if description includes:
     - Brand/franchise themes: "Frozen-themed", "Disney", "Star Wars", "Marvel", "Pixar"

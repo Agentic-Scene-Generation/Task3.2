@@ -210,7 +210,7 @@ collision_geometry:
     find_best_plane: false
 
 # Maximum number of agent turns before stopping.
-max_turns: 80
+max_turns: 500
 
 # Maximum number of critique-and-improve rounds before stopping.
 max_critique_rounds: 1

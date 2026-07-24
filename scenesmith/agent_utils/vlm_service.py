@@ -53,6 +53,7 @@ class VLMService:
         vision_detail: str = "auto",
         timeout_seconds: float | None = None,
         max_retries: int | None = None,
+        enable_thinking: bool | None = None,
     ) -> str:
         """Create completion using appropriate API based on model type.
 
@@ -68,6 +69,8 @@ class VLMService:
             vision_detail: Image resolution detail ("low", "high", "auto").
             timeout_seconds: Optional request timeout override.
             max_retries: Optional OpenAI client retry override.
+            enable_thinking: Optional Qwen chat-template override. ``None`` uses
+                the reasoning-effort directive; ``False`` hard-disables thinking.
 
         Returns:
             Response content as string.
@@ -130,9 +133,12 @@ class VLMService:
             messages = self._add_vision_detail_to_messages(
                 messages=messages, vision_detail=vision_detail
             )
+            thinking_directive = thinking_directive_from_effort(reasoning_effort)
+            if enable_thinking is not None:
+                thinking_directive = "/think" if enable_thinking else "/no_think"
             messages = self._prepend_thinking_directive(
                 messages=messages,
-                directive=thinking_directive_from_effort(reasoning_effort),
+                directive=thinking_directive,
             )
             kwargs = {
                 "model": model,
@@ -147,6 +153,11 @@ class VLMService:
             # Add service tier if configured.
             if self.service_tier:
                 kwargs["service_tier"] = self.service_tier
+
+            if enable_thinking is not None:
+                kwargs["extra_body"] = {
+                    "chat_template_kwargs": {"enable_thinking": enable_thinking}
+                }
 
             response = client.chat.completions.create(**kwargs)
             content = response.choices[0].message.content

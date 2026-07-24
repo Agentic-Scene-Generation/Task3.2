@@ -54,6 +54,8 @@ ENFORCE_EAGER="${SCENEEXPERT_VLLM_ENFORCE_EAGER:-0}"
 ENABLE_AUTO_TOOL_CHOICE="${SCENEEXPERT_ENABLE_AUTO_TOOL_CHOICE:-1}"
 TOOL_CALL_PARSER="${SCENEEXPERT_TOOL_CALL_PARSER:-qwen3_xml}"
 REASONING_PARSER="${SCENEEXPERT_REASONING_PARSER:-qwen3}"
+GDN_PREFILL_BACKEND="${SCENEEXPERT_GDN_PREFILL_BACKEND:-triton}"
+ENABLE_PREFIX_CACHING="${SCENEEXPERT_VLLM_ENABLE_PREFIX_CACHING:-1}"
 START_VLLM="${SCENEEXPERT_START_VLLM:-1}"
 DISABLE_ARTICULATED="${SCENEEXPERT_DISABLE_ARTICULATED:-0}"
 DISABLE_MATERIALS="${SCENEEXPERT_DISABLE_MATERIALS:-0}"
@@ -324,6 +326,8 @@ if [ "$START_VLLM" = "1" ]; then
     echo "  engine ready timeout: ${VLLM_ENGINE_READY_TIMEOUT_S}s"
     echo "  DeepGEMM: use=${USE_DEEP_GEMM}, moe_use=${MOE_USE_DEEP_GEMM}, warmup=${DEEP_GEMM_WARMUP}"
     echo "  enforce eager: ${ENFORCE_EAGER}"
+    echo "  GDN prefill backend: ${GDN_PREFILL_BACKEND:-default}"
+    echo "  prefix caching: ${ENABLE_PREFIX_CACHING}"
     echo "  启动方式: $VLLM_LAUNCH_MODE"
     if [ "$VLLM_LAUNCH_MODE" = "cli" ]; then
         VLLM_ARGS=(
@@ -369,6 +373,12 @@ if [ "$START_VLLM" = "1" ]; then
     fi
     if [ -n "$REASONING_PARSER" ]; then
         VLLM_ARGS+=(--reasoning-parser "$REASONING_PARSER")
+    fi
+    if [ -n "$GDN_PREFILL_BACKEND" ]; then
+        VLLM_ARGS+=(--gdn-prefill-backend "$GDN_PREFILL_BACKEND")
+    fi
+    if [ "$ENABLE_PREFIX_CACHING" = "1" ]; then
+        VLLM_ARGS+=(--enable-prefix-caching)
     fi
     "${VLLM_ARGS[@]}" > "$VLLM_LOG" 2>&1 &
 

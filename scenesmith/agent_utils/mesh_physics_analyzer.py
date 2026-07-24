@@ -349,6 +349,7 @@ def analyze_mesh_orientation_and_material(
         vision_detail = openai_config.vision_detail
         hssd_timeout_seconds = None
         hssd_max_retries = None
+        hssd_enable_thinking = None
         if prompt_type == "hssd":
             hssd_timeout_seconds = float(
                 getattr(cfg.asset_manager, "hssd_vlm_timeout_seconds", 90.0)
@@ -356,6 +357,7 @@ def analyze_mesh_orientation_and_material(
             hssd_max_retries = int(
                 getattr(cfg.asset_manager, "hssd_vlm_max_retries", 0)
             )
+            hssd_enable_thinking = False
 
         response_text = vlm_service.create_completion(
             model=model,
@@ -366,6 +368,7 @@ def analyze_mesh_orientation_and_material(
             vision_detail=vision_detail,
             timeout_seconds=hssd_timeout_seconds,
             max_retries=hssd_max_retries,
+            enable_thinking=hssd_enable_thinking,
         )
 
         try:
