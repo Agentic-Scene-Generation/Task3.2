@@ -676,13 +676,33 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         if shelf_transform is not None:
             changed |= self._move_if_changed(bookshelf, shelf_transform)
 
-        chairs = sorted(chairs, key=lambda item: str(item.object_id))
+        office_chairs = self._matching_furniture(("office", "chair"))
+        primary_chair = office_chairs[0] if office_chairs else chairs[0]
+        guest_chair_candidates = [
+            chair
+            for chair in chairs
+            if chair.object_id != primary_chair.object_id
+            and any(
+                token in self._furniture_identity(chair)
+                for token in ("guest", "armchair")
+            )
+        ]
+        guest_chairs = guest_chair_candidates + [
+            chair
+            for chair in chairs
+            if chair.object_id != primary_chair.object_id
+            and chair.object_id
+            not in {guest.object_id for guest in guest_chair_candidates}
+        ]
+        guest_chairs = guest_chairs[:2]
+        if len(guest_chairs) != 2:
+            return False
+
         desk_size = self._local_size(desk, [1.10, 0.60, 0.75])
         desk_yaw = math.degrees(RollPitchYaw(desk.transform.rotation()).yaw_angle())
         desk_front = np.asarray(
             desk.transform.rotation().matrix(), dtype=float
         ) @ np.array([0.0, 1.0, 0.0])
-        primary_chair = chairs[0]
         chair_size = self._local_size(primary_chair, [0.50, 0.50, 0.90])
         desk_center = np.asarray(desk.transform.translation(), dtype=float)
         primary_center = desk_center + desk_front * (
@@ -700,7 +720,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         changed |= self._move_if_changed(primary_chair, primary_transform)
 
         desk_xy = np.asarray(desk.transform.translation(), dtype=float)[:2]
-        for chair, fraction in zip(chairs[1:3], (-0.32, 0.05)):
+        for chair, fraction in zip(guest_chairs, (-0.32, 0.05)):
             tangent = fraction * self._wall_span(guest_wall)
             base = self._wall_anchor_transform(chair, guest_wall, tangent=tangent)
             if base is None:
@@ -719,6 +739,15 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             )
             guest_transform = self._fit_transform_inside_room(chair, guest_transform)
             changed |= self._move_if_changed(chair, guest_transform)
+
+        selected_chair_ids = {
+            primary_chair.object_id,
+            *(chair.object_id for chair in guest_chairs),
+        }
+        for chair in chairs:
+            if chair.object_id not in selected_chair_ids:
+                self.scene.remove_object(chair.object_id)
+                changed = True
         return changed
 
     def _restore_four_seat_dining_layout(self) -> bool:
@@ -796,17 +825,20 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 or getattr(obj, "object_type", None) != ObjectType.FURNITURE
             ):
                 continue
-            identity = (
-                " ".join(
-                    str(value or "")
-                    for value in (obj.object_id, obj.name, obj.description)
-                )
-                .lower()
-                .replace("_", " ")
-            )
+            identity = self._furniture_identity(obj)
             if all(token in identity for token in required_tokens):
                 matches.append(obj)
         return sorted(matches, key=lambda item: str(item.object_id))
+
+    @staticmethod
+    def _furniture_identity(obj: SceneObject) -> str:
+        return (
+            " ".join(
+                str(value or "") for value in (obj.object_id, obj.name, obj.description)
+            )
+            .lower()
+            .replace("_", " ")
+        )
 
     def _best_wall(self, walls: tuple[str, ...]) -> str | None:
         if self.scene is None:
