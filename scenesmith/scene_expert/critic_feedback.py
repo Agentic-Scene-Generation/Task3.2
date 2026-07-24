@@ -133,6 +133,36 @@ Never invent object IDs or coordinates. A PASS may contain zero findings.
 """
 
 
+def direct_critic_scoring_instructions(instructions: str) -> str:
+    """Make the framework-driven scoring mode explicit and non-contradictory.
+
+    SceneSmith's native critic instructions require the model to collect evidence
+    with tools.  SceneExpert's direct path has already collected and attached that
+    evidence, then deliberately removes all tools from the scoring agent.  This
+    authoritative mode override keeps the stage-specific rubric while preventing
+    the model from attempting an impossible tool workflow or emitting a narrated
+    checklist instead of the structured score object.
+    """
+
+    return (
+        str(instructions or "").rstrip()
+        + """
+
+# SceneExpert Direct Evidence Scoring Mode - Authoritative Override
+
+For this scoring request only, the framework has already completed every required
+observation, scene-state, validation, physics, and orientation-evidence step and
+has attached the resulting evidence to the user message. This mode OVERRIDES any
+earlier instruction to call or narrate tools. No tools are available or required.
+
+Evaluate only the supplied candidate and return the final structured output in one
+response. Do not emit a checklist, tool call, Markdown, code fence, or prose outside
+the output schema. Keep every category comment to one evidence-based sentence and
+follow the SceneExpert Compact Repair-Brief Contract inside the `critique` field.
+"""
+    ).strip()
+
+
 def parse_critic_feedback(text: str) -> CriticFeedback:
     """Parse the compact contract, preserving legacy prose as a safe fallback."""
 

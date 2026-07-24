@@ -31,6 +31,10 @@ def _load_budget_compatibility_agent() -> type:
     )
     method_names = {
         "_refresh_asset_runtime_budget",
+        "_stage_budget_value",
+        "_begin_critic_evaluation",
+        "_critic_score_call_timeout",
+        "_remaining_stage_seconds",
         "configure_stage_runtime_budget",
     }
     methods = [
@@ -108,15 +112,10 @@ class StageRuntimeReserveTest(unittest.TestCase):
             required_objects=["bed", "wardrobe"],
         )
 
-    @unittest.skipIf(
-        BaseStatefulAgent is None,
-        f"requires stateful agent dependencies: {_IMPORT_ERROR}",
-    )
     def test_role_reserves_protect_critic_and_fallback_time(self) -> None:
         budget = {
             "max_wall_clock_seconds": 100.0,
             "critic_reserve_fraction": 0.25,
-            "final_critic_reserve_fraction": 0.10,
             "fallback_reserve_fraction": 0.10,
             "finalization_reserve_fraction": 0.05,
         }
@@ -128,24 +127,24 @@ class StageRuntimeReserveTest(unittest.TestCase):
         )
 
         with patch(
-            "scenesmith.agent_utils.base_stateful_agent.time.monotonic",
+            "time.monotonic",
             return_value=140.0,
         ):
-            designer_remaining = BaseStatefulAgent._remaining_stage_seconds(
+            designer_remaining = BudgetCompatibilityAgent._remaining_stage_seconds(
                 agent, "designer"
             )
-            planner_remaining = BaseStatefulAgent._remaining_stage_seconds(
+            planner_remaining = BudgetCompatibilityAgent._remaining_stage_seconds(
                 agent, "planner"
             )
-            critic_remaining = BaseStatefulAgent._remaining_stage_seconds(
+            critic_remaining = BudgetCompatibilityAgent._remaining_stage_seconds(
                 agent, "critic"
             )
             agent._stage_runtime_phase = "fallback"
             fallback_designer_remaining = (
-                BaseStatefulAgent._remaining_stage_seconds(agent, "designer")
+                BudgetCompatibilityAgent._remaining_stage_seconds(agent, "designer")
             )
-            fallback_critic_remaining = BaseStatefulAgent._remaining_stage_seconds(
-                agent, "critic"
+            fallback_critic_remaining = (
+                BudgetCompatibilityAgent._remaining_stage_seconds(agent, "critic")
             )
 
         self.assertAlmostEqual(designer_remaining, 20.0)
@@ -156,11 +155,7 @@ class StageRuntimeReserveTest(unittest.TestCase):
         self.assertGreater(planner_remaining, designer_remaining)
         self.assertGreater(planner_remaining, critic_remaining)
 
-    @unittest.skipIf(
-        BaseStatefulAgent is None,
-        f"requires stateful agent dependencies: {_IMPORT_ERROR}",
-    )
-    def test_critic_evaluation_is_bounded_by_total_stage_window(self) -> None:
+    def test_critic_evaluation_has_an_isolated_quality_window(self) -> None:
         budget = {
             "max_wall_clock_seconds": 100.0,
             "critic_evaluation_max_seconds": 360.0,
@@ -173,12 +168,33 @@ class StageRuntimeReserveTest(unittest.TestCase):
         )
 
         with patch(
-            "scenesmith.agent_utils.base_stateful_agent.time.monotonic",
+            "time.monotonic",
             return_value=280.0,
         ):
-            remaining = BaseStatefulAgent._remaining_stage_seconds(agent, "critic")
+            remaining = BudgetCompatibilityAgent._remaining_stage_seconds(
+                agent, "critic"
+            )
 
-        self.assertAlmostEqual(remaining, -95.0)
+        self.assertAlmostEqual(remaining, 300.0)
+
+    def test_sceneexpert_scoring_uses_one_transaction_deadline(self) -> None:
+        agent = BudgetCompatibilityAgent()
+        agent._stage_runtime_budget = {"critic_evaluation_max_seconds": 240.0}
+        agent._stage_role_active_consumed = {"critic": 139.0, "designer": 20.0}
+
+        with patch(
+            "time.monotonic",
+            return_value=500.0,
+        ):
+            agent._begin_critic_evaluation()
+
+        self.assertEqual(500.0, agent._critic_evaluation_started_at)
+        self.assertNotIn("critic", agent._stage_role_active_consumed)
+        self.assertEqual(20.0, agent._stage_role_active_consumed["designer"])
+        self.assertIsNone(agent._critic_score_call_timeout(120.0))
+
+        agent._stage_runtime_budget = {}
+        self.assertEqual(120.0, agent._critic_score_call_timeout(120.0))
 
     @unittest.skipIf(
         BaseStatefulAgent is None,

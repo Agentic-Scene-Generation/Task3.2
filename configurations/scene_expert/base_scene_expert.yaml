@@ -94,27 +94,28 @@ stage_budget:
     max_critic_turns: 6
     max_wall_clock_seconds: 600
     # Exclusive role-active leases. Planner time pauses while its nested
-    # designer/critic tools run; max_wall_clock_seconds remains the hard stage cap.
+    # designer/critic tools run. max_wall_clock_seconds bounds planning/design;
+    # required visual scoring uses the isolated quality transaction below.
     planner_active_max_seconds: 120
     designer_active_max_seconds: 360
     critic_active_max_seconds: 300
-    # Compact response caps and the normal critic attempt live here so pure
-    # SceneSmith/disabled ablations preserve their original runtime behavior.
+    # Compact response caps live here so pure SceneSmith/disabled ablations
+    # preserve their original runtime behavior.
     planner_max_output_tokens: 768
     designer_max_output_tokens: 1536
     critic_max_output_tokens: 1536
     critic_max_attempts: 1
-    critic_attempt_timeout_seconds: 150
+    # This is the sole SceneExpert deadline for one candidate's visual-scoring
+    # transaction. It includes SDK structured-output recovery turns, but starts
+    # only after deterministic render/state evidence has been collected.
     critic_evaluation_max_seconds: 240
     # Preserve role-specific tails instead of allowing design work to consume
     # the whole stage deadline before visual verification and finalization.
     critic_reserve_fraction: 0.25
-    # Reserve enough time for one compact multimodal score plus one retry.
-    final_critic_reserve_fraction: 0.35
     fallback_reserve_fraction: 0.10
     finalization_reserve_fraction: 0.05
-    # One compact retry may exceed the normal per-call allowance when the only
-    # failure is transport latency or an exhausted role deadline.
+    # A single isolated retry expands the quality transaction when the only
+    # failure is transport latency or structured-output recovery latency.
     critical_retry_budget_multiplier: 1.5
     max_asset_requests: 4
     max_optional_object_families: 3
@@ -151,7 +152,6 @@ stage_budget:
     # Furniture quality gates must not inherit a nearly exhausted designer
     # deadline. Each distinct rendered candidate gets one bounded VLM window.
     critic_evaluation_max_seconds: 360
-    final_critic_reserve_fraction: 0.20
     fallback_reserve_fraction: 0.15
     max_asset_requests: 4
     max_optional_object_families: 2
@@ -208,7 +208,6 @@ stage_budget:
     planner_active_max_seconds: 120
     designer_active_max_seconds: 360
     critic_active_max_seconds: 300
-    final_critic_reserve_fraction: 0.25
     max_asset_requests: 4
     max_optional_object_families: 4
     max_assets_per_request: 6

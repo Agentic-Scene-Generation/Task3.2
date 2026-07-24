@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from scenesmith.scene_expert.critic_feedback import (
     critic_feedback_contract,
+    direct_critic_scoring_instructions,
     feedback_repair_text,
     parse_critic_feedback,
 )
@@ -67,6 +68,17 @@ END_FINDING
         self.assertIn("have no count limit", contract)
         self.assertIn("at most three major/refinement", contract)
 
+    def test_direct_scoring_contract_overrides_impossible_tool_workflow(self) -> None:
+        instructions = direct_critic_scoring_instructions(
+            "You MUST call observe_scene before scoring."
+        )
+
+        self.assertIn("This mode OVERRIDES any", instructions)
+        self.assertIn("earlier instruction to call or narrate tools", instructions)
+        self.assertIn("No tools are available or required", instructions)
+        self.assertIn("return the final structured output in one", instructions)
+        self.assertIn("response. Do not emit a checklist", instructions)
+
     def test_legacy_critic_text_remains_available_as_fallback(self) -> None:
         feedback = parse_critic_feedback(
             "The sofa faces the wall. Rotate it toward the conversation area."
@@ -86,7 +98,6 @@ END_FINDING
                     designer_max_output_tokens=1536,
                     critic_max_output_tokens=1536,
                     critic_max_attempts=1,
-                    critic_attempt_timeout_seconds=150,
                 ),
                 wall_mounted=SimpleNamespace(
                     designer_active_max_seconds=240,
@@ -102,7 +113,6 @@ END_FINDING
         self.assertEqual(768, budget.planner_max_output_tokens)
         self.assertEqual(1536, budget.critic_max_output_tokens)
         self.assertEqual(1, budget.critic_max_attempts)
-        self.assertEqual(150, budget.critic_attempt_timeout_seconds)
 
     def test_retryable_pause_persists_candidate_without_success_marker(self) -> None:
         with TemporaryDirectory() as tmp:

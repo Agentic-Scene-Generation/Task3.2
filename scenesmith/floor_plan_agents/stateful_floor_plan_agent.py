@@ -66,6 +66,9 @@ from scenesmith.floor_plan_agents.tools.wall_geometry import (
 )
 from scenesmith.floor_plan_agents.tools.window_geometry import create_window_mesh
 from scenesmith.prompts.registry import FloorPlanAgentPrompts
+from scenesmith.scene_expert.critic_feedback import (
+    direct_critic_scoring_instructions,
+)
 from scenesmith.utils.gltf_generation import create_floor_gltf, get_zup_to_yup_matrix
 from scenesmith.utils.logging import BaseLogger
 from scenesmith.utils.material import Material
@@ -427,8 +430,14 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
                 ModelSettings(tool_choice="observe_scene", parallel_tool_calls=False)
             ),
         )
+        score_instructions = self.critic.instructions
+        if self._stage_runtime_budget and isinstance(score_instructions, str):
+            score_instructions = direct_critic_scoring_instructions(
+                score_instructions
+            )
         critic_score = self.critic.clone(
             tools=[],
+            instructions=score_instructions,
             model_settings=base_settings.resolve(
                 ModelSettings(tool_choice="none", parallel_tool_calls=False)
             ),
@@ -516,6 +525,9 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
                 }
             ]
             score_session = None
+        # Evidence rendering is deterministic preparation, not model reasoning.
+        # Begin the quality transaction only when the structured VLM score starts.
+        self._begin_critic_evaluation()
         try:
             result = None
             configured_attempts = int(
@@ -553,23 +565,14 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
                     configured_max_turns=self.cfg.agents.critic_agent.max_turns,
                     run_config=run_config,
                     call_timeout_seconds=(
-                        float(
-                            self._stage_budget_value(
-                                "critic_attempt_timeout_seconds",
-                                float(
-                                    self._critic_fast_path_value(
-                                        "direct_multimodal_attempt_timeout_seconds",
-                                        120.0,
-                                    )
-                                    or 120.0
-                                ),
+                        self._critic_score_call_timeout(
+                            float(
+                                self._critic_fast_path_value(
+                                    "direct_multimodal_attempt_timeout_seconds",
+                                    120.0,
+                                )
+                                or 120.0
                             )
-                            if self._stage_runtime_budget
-                            else self._critic_fast_path_value(
-                                "direct_multimodal_attempt_timeout_seconds",
-                                120.0,
-                            )
-                            or 120.0
                         )
                         if direct_multimodal
                         else None

@@ -70,6 +70,7 @@ from scenesmith.scene_expert.context_bundle import build_stage_context_bundle
 from scenesmith.scene_expert.critic_feedback import (
     CriticFeedback,
     critic_feedback_contract,
+    direct_critic_scoring_instructions,
     parse_critic_feedback,
 )
 from scenesmith.scene_expert.exceptions import StageValidationError
@@ -358,23 +359,6 @@ class BaseStatefulAgent(ABC):
                 if key.startswith("max_") and not key.endswith("_seconds")
                 else expanded
             )
-        wall_clock = float(
-            self._stage_runtime_budget.get("max_wall_clock_seconds", 0.0) or 0.0
-        )
-        final_fraction = float(
-            self._stage_runtime_budget.get("final_critic_reserve_fraction", 0.0)
-            or 0.0
-        )
-        if wall_clock > 0 and final_fraction > 0:
-            self._stage_runtime_budget["critic_evaluation_max_seconds"] = max(
-                float(
-                    self._stage_runtime_budget.get(
-                        "critic_evaluation_max_seconds", 0.0
-                    )
-                    or 0.0
-                ),
-                wall_clock * min(0.9, max(0.0, final_fraction)),
-            )
         self._critical_retry_budget_expanded = True
 
     def configure_stage_runtime_budget(self, raw_budget: Any) -> None:
@@ -544,6 +528,42 @@ class BaseStatefulAgent(ABC):
         consumed = float(self._stage_role_active_consumed.get(role, 0.0))
         return limit - consumed
 
+    def _begin_critic_evaluation(self) -> None:
+        """Start one isolated visual-scoring transaction for this candidate.
+
+        Critic evidence rendering happens before this boundary.  Resetting the
+        critic's active lease here prevents earlier candidates in SceneSmith's
+        native planner loop from starving the final candidate of its configured
+        evaluation window.
+        """
+
+        self._critic_evaluation_started_at = time.monotonic()
+        self._stage_role_active_consumed.pop("critic", None)
+
+    def _critic_score_call_timeout(
+        self,
+        provider_default_seconds: float,
+    ) -> float | None:
+        """Return the provider fallback timeout for a visual score request.
+
+        SceneExpert has one authoritative transaction deadline:
+        ``critic_evaluation_max_seconds``.  Applying a second, shorter per-call
+        timeout caused structured-output recovery turns to be cancelled even
+        after the first backend request completed successfully.  Disabled
+        SceneExpert paths retain their provider-specific legacy timeout.
+        """
+
+        evaluation_limit = float(
+            self._stage_budget_value("critic_evaluation_max_seconds", 0.0) or 0.0
+        )
+        if self._stage_runtime_budget and evaluation_limit > 0:
+            return None
+        return (
+            float(provider_default_seconds)
+            if float(provider_default_seconds) > 0
+            else None
+        )
+
     @staticmethod
     def _minimum_positive_seconds(*values: float | None) -> float | None:
         positive = [float(value) for value in values if value is not None]
@@ -572,23 +592,22 @@ class BaseStatefulAgent(ABC):
     def _remaining_stage_seconds(self, role: str | None = None) -> float | None:
         """Return phase-aware time without letting design consume verification.
 
-        Designer calls stop before the critic and fallback reserves. The planner
-        wraps nested designer/critic tool calls, so its parent deadline must be
-        later than every nested normal-phase deadline; the nested calls enforce
-        their own reserves. During explicit fallback comparison, the critic may
-        consume the fallback reserve while finalization remains protected.
+        Designer calls stop before the critic and fallback reserves. Once visual
+        evidence is ready, critic scoring is a required quality transaction with
+        its own deadline; it must not inherit a nearly exhausted design-stage
+        wall clock. The bounded planner loop still controls how many such
+        candidate evaluations can occur.
         """
         critic_evaluation_started_at = getattr(
             self, "_critic_evaluation_started_at", None
         )
-        evaluation_remaining: float | None = None
         if role == "critic" and critic_evaluation_started_at is not None:
             evaluation_limit = float(
                 self._stage_budget_value("critic_evaluation_max_seconds", 0.0)
                 or 0.0
             )
             if evaluation_limit > 0:
-                evaluation_remaining = evaluation_limit - (
+                return evaluation_limit - (
                     time.monotonic() - critic_evaluation_started_at
                 )
 
@@ -623,9 +642,7 @@ class BaseStatefulAgent(ABC):
         reserve_fraction = max(0.0, min(0.9, reserve_fraction))
         elapsed = time.monotonic() - self._stage_runtime_started_at
         stage_remaining = wall_clock_limit * (1.0 - reserve_fraction) - elapsed
-        if evaluation_remaining is None:
-            return stage_remaining
-        return min(stage_remaining, evaluation_remaining)
+        return stage_remaining
 
     @staticmethod
     def _is_agent_budget_error(error: BaseException) -> bool:
@@ -654,11 +671,12 @@ class BaseStatefulAgent(ABC):
         run_config: RunConfig | None = None,
         call_timeout_seconds: float | None = None,
     ) -> RunResult | None:
-        """Run one Agents SDK call under the stage turn and wall-clock SLA.
+        """Run one Agents SDK call under the role and phase-specific SLA.
 
-        Budget exhaustion is an execution outcome, not a process failure. The
-        caller keeps the current candidate and proceeds to deterministic
-        validation, repair, and best-checkpoint selection.
+        Planning/design observe the stage clock and their exclusive active-time
+        leases. Required structured critic scoring observes its isolated quality
+        transaction instead. Budget exhaustion is an execution outcome, not a
+        process failure; callers preserve the current candidate for validation.
         """
         if role == "planner" and isinstance(input, str):
             input += self._planner_completion_contract()
@@ -3400,11 +3418,6 @@ class BaseStatefulAgent(ABC):
             self._pending_hard_repair_hint = ""
             self._hard_repair_design_change_calls = 0
 
-        # Visual scoring is a required decision boundary for quality
-        # regeneration, deterministic fallback selection, and positive memory.
-        # Give each distinct candidate one bounded evaluation window instead of
-        # whatever time happens to remain after asset acquisition and design.
-        self._critic_evaluation_started_at = time.monotonic()
         if self._critic_fast_path_enabled("fresh_session_per_evaluation", True):
             clear_session = getattr(self.critic_session, "clear_session", None)
             if callable(clear_session):
@@ -3476,8 +3489,14 @@ class BaseStatefulAgent(ABC):
         # tools or resolving tool_choice=None can preserve the forced
         # observe_scene choice and creates an invalid tools + response_format
         # request for vLLM's Qwen tool parser.
+        score_instructions = self.critic.instructions
+        if self._stage_runtime_budget and isinstance(score_instructions, str):
+            score_instructions = direct_critic_scoring_instructions(
+                score_instructions
+            )
         critic_score = self.critic.clone(
             tools=[],
+            instructions=score_instructions,
             model_settings=base_settings.resolve(
                 ModelSettings(tool_choice="none", parallel_tool_calls=False)
             ),
@@ -3614,6 +3633,11 @@ class BaseStatefulAgent(ABC):
             # A fresh one-shot multimodal request avoids carrying old images and
             # tool traces through SQLite session history.
             score_session = None
+        # Visual scoring is a required decision boundary for quality
+        # regeneration, deterministic fallback selection, and positive memory.
+        # Start its sole transaction deadline only after deterministic render and
+        # exact scene-state evidence have been collected.
+        self._begin_critic_evaluation()
         try:
             configured_max_attempts = int(
                 _cfg_get(
@@ -3648,14 +3672,7 @@ class BaseStatefulAgent(ABC):
                 )
                 or 120.0
             )
-            attempt_timeout = float(
-                self._stage_budget_value(
-                    "critic_attempt_timeout_seconds",
-                    configured_attempt_timeout,
-                )
-                if self._stage_runtime_budget
-                else configured_attempt_timeout
-            )
+            attempt_timeout = float(configured_attempt_timeout)
             result = None
             for attempt in range(1, max_attempts + 1):
                 result = await self._run_agent_with_stage_sla(
@@ -3667,7 +3684,9 @@ class BaseStatefulAgent(ABC):
                     configured_max_turns=self.cfg.agents.critic_agent.max_turns,
                     run_config=run_config,
                     call_timeout_seconds=(
-                        attempt_timeout if direct_multimodal else None
+                        self._critic_score_call_timeout(attempt_timeout)
+                        if direct_multimodal
+                        else None
                     ),
                 )
                 if result is not None:
