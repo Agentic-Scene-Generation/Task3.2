@@ -1,8 +1,10 @@
+import ast
 import asyncio
 import unittest
 
+from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 try:
     from scenesmith.agent_utils.base_stateful_agent import BaseStatefulAgent
@@ -13,7 +15,94 @@ else:
     _IMPORT_ERROR = None
 
 
+def _load_budget_compatibility_agent() -> type:
+    """Load the two budget methods without importing optional ACP dependencies."""
+    source_path = (
+        Path(__file__).resolve().parents[2]
+        / "scenesmith"
+        / "agent_utils"
+        / "base_stateful_agent.py"
+    )
+    tree = ast.parse(source_path.read_text(encoding="utf-8"))
+    base_class = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "BaseStatefulAgent"
+    )
+    method_names = {
+        "_refresh_asset_runtime_budget",
+        "configure_stage_runtime_budget",
+    }
+    methods = [
+        node
+        for node in base_class.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name in method_names
+    ]
+    compatibility_class = ast.ClassDef(
+        name="_BudgetCompatibilityAgent",
+        bases=[],
+        keywords=[],
+        body=methods,
+        decorator_list=[],
+    )
+    module = ast.Module(
+        body=[
+            ast.ImportFrom(
+                module="__future__",
+                names=[ast.alias(name="annotations")],
+                level=0,
+            ),
+            ast.Import(names=[ast.alias(name="time")]),
+            compatibility_class,
+        ],
+        type_ignores=[],
+    )
+    ast.fix_missing_locations(module)
+    namespace: dict[str, object] = {}
+    exec(compile(module, str(source_path), "exec"), namespace)
+    return namespace["_BudgetCompatibilityAgent"]
+
+
+BudgetCompatibilityAgent = _load_budget_compatibility_agent()
+
+
 class StageRuntimeReserveTest(unittest.TestCase):
+    def test_floor_plan_budget_configuration_does_not_require_scene(self) -> None:
+        agent = BudgetCompatibilityAgent()
+
+        agent.configure_stage_runtime_budget(
+            {"max_wall_clock_seconds": 900.0},
+        )
+
+        self.assertEqual(
+            agent._stage_runtime_budget,
+            {"max_wall_clock_seconds": 900.0},
+        )
+        self.assertEqual(agent._stage_runtime_phase, "agent")
+        self.assertFalse(agent._stage_runtime_exhausted)
+
+    def test_placement_budget_configuration_refreshes_asset_manager(self) -> None:
+        configure_runtime_budget = Mock()
+        agent = BudgetCompatibilityAgent()
+        agent.scene = SimpleNamespace(
+            scene_expert_stage="furniture",
+            scene_expert_required_objects=["bed", "wardrobe"],
+        )
+        agent.asset_manager = SimpleNamespace(
+            configure_runtime_budget=configure_runtime_budget,
+        )
+        agent.agent_type = SimpleNamespace(value="furniture")
+        budget = {"max_asset_requests": 8}
+
+        agent.configure_stage_runtime_budget(budget)
+
+        configure_runtime_budget.assert_called_once_with(
+            stage="furniture",
+            budget=budget,
+            required_objects=["bed", "wardrobe"],
+        )
+
     @unittest.skipIf(
         BaseStatefulAgent is None,
         f"requires stateful agent dependencies: {_IMPORT_ERROR}",

@@ -250,7 +250,13 @@ class BaseStatefulAgent(ABC):
 
     def _refresh_asset_runtime_budget(self) -> None:
         """Reset the per-attempt asset gate for a critical completion retry."""
-        if self.scene is None:
+        # Floor-plan agents deliberately operate on ``self.layout`` and never
+        # define ``self.scene``.  ``configure_stage_runtime_budget()`` is also
+        # their public budget entry point, so asset-budget refresh must remain a
+        # placement-only no-op instead of assuming every stateful agent owns a
+        # RoomScene.
+        scene = getattr(self, "scene", None)
+        if scene is None:
             return
         asset_manager = getattr(self, "asset_manager", None)
         configure_asset_budget = getattr(
@@ -259,11 +265,11 @@ class BaseStatefulAgent(ABC):
         if callable(configure_asset_budget):
             configure_asset_budget(
                 stage=str(
-                    getattr(self.scene, "scene_expert_stage", self.agent_type.value)
+                    getattr(scene, "scene_expert_stage", self.agent_type.value)
                 ),
                 budget=self._stage_runtime_budget,
                 required_objects=list(
-                    getattr(self.scene, "scene_expert_required_objects", []) or []
+                    getattr(scene, "scene_expert_required_objects", []) or []
                 ),
             )
 
