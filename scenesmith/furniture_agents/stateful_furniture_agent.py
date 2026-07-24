@@ -34,6 +34,7 @@ from scenesmith.agent_utils.furniture_layout_planning import (
 from scenesmith.agent_utils.furniture_placement_order import (
     build_furniture_placement_order_reference,
 )
+from scenesmith.agent_utils.furniture_safety import furniture_category_matches
 from scenesmith.agent_utils.mesh_physics_analyzer import MeshPhysicsAnalysis
 from scenesmith.agent_utils.placement_noise import PlacementNoiseMode
 from scenesmith.agent_utils.reachability import (
@@ -548,10 +549,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             actions.append("cleared deterministic door/opening forbidden zones")
 
         if not is_bedroom_scene(self.scene):
-            if (
-                "collisions" in reasons
-                and self._repair_generic_wall_collisions()
-            ):
+            if "collisions" in reasons and self._repair_generic_wall_collisions():
                 actions.append(
                     "moved generic furniture away from room walls to the deterministic margin"
                 )
@@ -747,7 +745,14 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             value = getattr(object_type, "value", object_type)
             if str(value).lower() != "furniture":
                 continue
-            if self._category_for_object(object_id, obj) == category:
+            object_text = (
+                f"{object_id} {getattr(obj, 'name', '')} "
+                f"{getattr(obj, 'description', '')}"
+            )
+            object_category = self._category_for_object(object_id, obj)
+            if object_category == category or furniture_category_matches(
+                object_text, category
+            ):
                 result.append(obj)
         return result
 

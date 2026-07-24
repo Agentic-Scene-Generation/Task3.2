@@ -100,9 +100,7 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
             text_description="A living room with a sofa.",
             scene_expert_original_description="A living room with a sofa.",
         )
-        agent.furniture_safety_controller = SimpleNamespace(
-            required_counts={"sofa": 1}
-        )
+        agent.furniture_safety_controller = SimpleNamespace(required_counts={"sofa": 1})
         repaired_categories: list[str] = []
         agent._ensure_required_furniture_asset = lambda category: (
             repaired_categories.append(category) or 1
@@ -119,6 +117,38 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         self.assertTrue(repaired)
         self.assertEqual(repaired_categories, ["sofa"])
         self.assertTrue(any("missing sofa" in action for action in actions))
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
+    def test_broad_chair_repair_count_includes_armchairs(self) -> None:
+        agent = object.__new__(StatefulFurnitureAgent)
+        furniture_type = SimpleNamespace(value="furniture")
+        agent.scene = SimpleNamespace(
+            objects={
+                "office_chair_0": SimpleNamespace(
+                    name="office_chair",
+                    description="task chair",
+                    object_type=furniture_type,
+                    immutable=False,
+                ),
+                "guest_armchair_0": SimpleNamespace(
+                    name="guest_armchair",
+                    description="armchair",
+                    object_type=furniture_type,
+                    immutable=False,
+                ),
+                "guest_armchair_1": SimpleNamespace(
+                    name="guest_armchair",
+                    description="armchair",
+                    object_type=furniture_type,
+                    immutable=False,
+                ),
+            }
+        )
+
+        self.assertEqual(3, len(agent._furniture_by_category("chair")))
 
     @unittest.skipIf(
         StatefulFurnitureAgent is None,

@@ -56,6 +56,13 @@ DEFAULT_ALIASES = {
     "sideboard": ["sideboard", "sideboards", "buffet cabinet"],
 }
 
+# Keep specific categories for asset selection and repair, while allowing a
+# concrete subtype to satisfy an explicitly broader inventory requirement.
+FURNITURE_CATEGORY_PARENTS: dict[str, frozenset[str]] = {
+    "twin_bed": frozenset({"bed"}),
+    "armchair": frozenset({"chair"}),
+}
+
 NUMBER_WORDS = {
     "a": 1,
     "an": 1,
@@ -147,6 +154,32 @@ def _contains_alias(
         ):
             continue
         return True
+    return False
+
+
+def infer_furniture_category(text: str) -> str | None:
+    """Return the most specific configured category found in object text."""
+    for canonical, aliases in DEFAULT_ALIASES.items():
+        if any(
+            _contains_alias(text, alias, category=canonical)
+            for alias in [canonical, *aliases]
+        ):
+            return canonical
+    return None
+
+
+def furniture_category_matches(text: str, required_category: str) -> bool:
+    """Return whether object text satisfies a canonical inventory category."""
+    object_category = infer_furniture_category(text)
+    required_category = str(required_category).lower()
+    if object_category is not None:
+        return object_category == required_category or required_category in (
+            FURNITURE_CATEGORY_PARENTS.get(object_category, frozenset())
+        )
+    if required_category not in DEFAULT_ALIASES:
+        return _contains_alias(
+            text, required_category.replace("_", " "), category=required_category
+        )
     return False
 
 
@@ -466,13 +499,23 @@ class FurnitureSafetyController:
                         break
 
     def _infer_category(self, text: str) -> str | None:
-        for canonical, aliases in DEFAULT_ALIASES.items():
-            if any(
-                _contains_alias(text, alias, category=canonical)
-                for alias in [canonical, *aliases]
-            ):
-                return canonical
-        return None
+        return infer_furniture_category(text)
+
+    @staticmethod
+    def _required_category_for_text(
+        text: str, required_counts: dict[str, int]
+    ) -> str | None:
+        exact_category = infer_furniture_category(text)
+        if exact_category in required_counts:
+            return exact_category
+        return next(
+            (
+                category
+                for category in required_counts
+                if furniture_category_matches(text, category)
+            ),
+            None,
+        )
 
     def infer_object_category(self, text: str) -> str | None:
         """Return the canonical configured furniture category for object text."""
@@ -484,11 +527,7 @@ class FurnitureSafetyController:
             return False
         text = f"{object_id} {object_text}".lower().replace("_", " ")
         for term in self.required_terms:
-            aliases = DEFAULT_ALIASES.get(term, [term])
-            if any(
-                _contains_alias(text, alias, category=term)
-                for alias in [term, *aliases]
-            ):
+            if furniture_category_matches(text, term):
                 return True
         return False
 
@@ -502,7 +541,7 @@ class FurnitureSafetyController:
                 f"{object_id} {getattr(obj, 'name', '')} "
                 f"{getattr(obj, 'description', '')}"
             )
-            if self._infer_category(object_text) == category:
+            if furniture_category_matches(object_text, category):
                 count += 1
         return count
 
@@ -705,8 +744,8 @@ class FurnitureSafetyController:
         }
         if not required_counts:
             return True, ""
-        category = self._infer_category(asset_text)
-        if category is None or category not in required_counts:
+        category = self._required_category_for_text(asset_text, required_counts)
+        if category is None:
             return True, ""
         current_count = self._count_category_in_scene(scene, category)
         required_count = required_counts[category]
@@ -733,10 +772,12 @@ class FurnitureSafetyController:
         stop_message = self._designer_stop_message()
         if stop_message:
             return False, stop_message
-        category = self._infer_category(f"{object_id} {object_text}")
         required_counts = self.required_counts or {
             term: 1 for term in self.required_terms
         }
+        category = self._required_category_for_text(
+            f"{object_id} {object_text}", required_counts
+        )
         if (
             scene is not None
             and category is not None
@@ -923,16 +964,10 @@ class FurnitureSafetyController:
             term: 1 for term in self.required_terms
         }
         if required_counts:
-            observed_counts = {term: 0 for term in required_counts}
-            for object_id, obj in getattr(scene, "objects", {}).items():
-                if getattr(obj, "immutable", False):
-                    continue
-                category = self._infer_category(
-                    f"{object_id} {getattr(obj, 'name', '')} "
-                    f"{getattr(obj, 'description', '')}"
-                )
-                if category in observed_counts:
-                    observed_counts[category] += 1
+            observed_counts = {
+                term: self._count_category_in_scene(scene, term)
+                for term in required_counts
+            }
             for term, required_count in required_counts.items():
                 if observed_counts.get(term, 0) < required_count:
                     hard_reasons.append(

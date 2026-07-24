@@ -146,6 +146,49 @@ class FurnitureSafetyControllerTest(unittest.TestCase):
         self.assertEqual(controller.required_counts["sideboard"], 1)
         self.assertEqual(controller.required_counts["chair"], 4)
 
+    def test_chair_requirement_accepts_armchair_subtypes(self) -> None:
+        controller = FurnitureSafetyController({"enabled": True})
+        controller.reset_for_scene(
+            "A study with one office chair and two guest chairs around a desk."
+        )
+        scene = SimpleNamespace(
+            room_type="study",
+            text_description=controller.scene_description,
+            room_geometry=None,
+            objects={
+                "desk_0": SimpleNamespace(
+                    name="desk",
+                    description="work desk",
+                    immutable=False,
+                ),
+                "office_chair_0": SimpleNamespace(
+                    name="office_chair",
+                    description="ergonomic task chair",
+                    immutable=False,
+                ),
+                "guest_armchair_0": SimpleNamespace(
+                    name="guest_armchair",
+                    description="upholstered armchair",
+                    immutable=False,
+                ),
+                "guest_armchair_1": SimpleNamespace(
+                    name="guest_armchair",
+                    description="upholstered armchair",
+                    immutable=False,
+                ),
+            },
+        )
+
+        self.assertEqual(controller.required_counts["chair"], 3)
+        self.assertTrue(controller.evaluate_scene_state(scene).hard_valid)
+
+        allowed, message = controller.record_add(
+            scene=scene,
+            asset_text="another upholstered armchair",
+        )
+        self.assertFalse(allowed)
+        self.assertIn("requires 3 chair", message)
+
     def test_table_lamp_is_not_required_furniture_table(self) -> None:
         controller = FurnitureSafetyController({"enabled": True})
         controller.reset_for_scene(
