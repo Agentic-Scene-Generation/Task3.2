@@ -548,10 +548,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             actions.append("cleared deterministic door/opening forbidden zones")
 
         if not is_bedroom_scene(self.scene):
-            if (
-                "collisions" in reasons
-                and self._repair_generic_wall_collisions()
-            ):
+            if "collisions" in reasons and self._repair_generic_wall_collisions():
                 actions.append(
                     "moved generic furniture away from room walls to the deterministic margin"
                 )
@@ -582,6 +579,281 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             actions.append("moved wardrobe to a deterministic wall/corner anchor")
 
         return bool(actions), actions
+
+    def enforce_prompt_layout_contracts(self) -> list[str]:
+        """Restore narrow, prompt-explicit furniture relationships post projection.
+
+        The furniture designer and the physics projection can both preserve object
+        inventory while losing a relationship that is visually obvious in the
+        prompt.  Keep this intentionally limited to the two complete layouts for
+        which we have deterministic geometry: a study workstation with two guest
+        chairs, and a four-chair rectangular dining table.
+        """
+        if self.scene is None:
+            return []
+
+        actions: list[str] = []
+        if self._study_workstation_contract_requested():
+            if self._restore_study_workstation_layout():
+                actions.append(
+                    "restored desk, workstation chair, guest-chair, and bookshelf anchors"
+                )
+        if self._four_seat_dining_contract_requested():
+            if self._restore_four_seat_dining_layout():
+                actions.append("centered one dining chair on each table edge")
+        return actions
+
+    def _study_workstation_contract_requested(self) -> bool:
+        text = self._original_scene_description()
+        return all(
+            phrase in text
+            for phrase in ("study", "desk", "office chair", "guest chair", "bookshelf")
+        )
+
+    def _four_seat_dining_contract_requested(self) -> bool:
+        text = self._original_scene_description()
+        return (
+            "dining table" in text
+            and "dining chair" in text
+            and bool(re.search(r"\b(?:four|4)\s+dining chairs?\b", text))
+        )
+
+    def _original_scene_description(self) -> str:
+        if self.scene is None:
+            return ""
+        return str(
+            getattr(self.scene, "scene_expert_original_description", "")
+            or getattr(self.scene, "text_description", "")
+            or ""
+        ).lower()
+
+    def _restore_study_workstation_layout(self) -> bool:
+        """Anchor the explicit study desk/chair/shelf arrangement to room walls."""
+        if self.scene is None or self._room_bounds_xy() is None:
+            return False
+        desks = self._matching_furniture(("desk",))
+        shelves = sorted(
+            [
+                *self._matching_furniture(("bookshelf",)),
+                *self._matching_furniture(("bookcase",)),
+            ],
+            key=lambda item: str(item.object_id),
+        )
+        chairs = self._matching_furniture(("chair",))
+        if not desks or not shelves or len(chairs) < 3:
+            return False
+
+        desk = desks[0]
+        bookshelf = shelves[0]
+        desk_wall = self._best_wall(("north", "south", "east", "west"))
+        if desk_wall is None:
+            return False
+        side_walls = (
+            ("east", "west") if desk_wall in {"north", "south"} else ("north", "south")
+        )
+        shelf_wall = self._best_wall(side_walls)
+        guest_wall = next(
+            (wall for wall in side_walls if wall != shelf_wall), shelf_wall
+        )
+        if shelf_wall is None or guest_wall is None:
+            return False
+
+        changed = False
+        desk_transform = self._wall_anchor_transform(desk, desk_wall, tangent=0.0)
+        if desk_transform is None:
+            return False
+        changed |= self._move_if_changed(desk, desk_transform)
+
+        shelf_transform = self._wall_anchor_transform(
+            bookshelf,
+            shelf_wall,
+            tangent=-0.2 * self._wall_span(shelf_wall),
+        )
+        if shelf_transform is not None:
+            changed |= self._move_if_changed(bookshelf, shelf_transform)
+
+        chairs = sorted(chairs, key=lambda item: str(item.object_id))
+        desk_size = self._local_size(desk, [1.10, 0.60, 0.75])
+        desk_yaw = math.degrees(RollPitchYaw(desk.transform.rotation()).yaw_angle())
+        desk_front = np.asarray(
+            desk.transform.rotation().matrix(), dtype=float
+        ) @ np.array([0.0, 1.0, 0.0])
+        primary_chair = chairs[0]
+        chair_size = self._local_size(primary_chair, [0.50, 0.50, 0.90])
+        desk_center = np.asarray(desk.transform.translation(), dtype=float)
+        primary_center = desk_center + desk_front * (
+            desk_size[1] / 2.0 + chair_size[1] / 2.0 + 0.10
+        )
+        primary_transform = self._grounded_transform(
+            primary_chair,
+            x=float(primary_center[0]),
+            y=float(primary_center[1]),
+            yaw_deg=desk_yaw,
+        )
+        primary_transform = self._fit_transform_inside_room(
+            primary_chair, primary_transform
+        )
+        changed |= self._move_if_changed(primary_chair, primary_transform)
+
+        desk_xy = np.asarray(desk.transform.translation(), dtype=float)[:2]
+        for chair, fraction in zip(chairs[1:3], (-0.32, 0.05)):
+            tangent = fraction * self._wall_span(guest_wall)
+            base = self._wall_anchor_transform(chair, guest_wall, tangent=tangent)
+            if base is None:
+                continue
+            center = np.asarray(base.translation(), dtype=float)
+            target = desk_xy - center[:2]
+            yaw_deg = math.degrees(math.atan2(-float(target[0]), float(target[1])))
+            guest_transform = self._grounded_transform(
+                chair,
+                x=float(center[0]),
+                y=float(center[1]),
+                yaw_deg=yaw_deg,
+            )
+            guest_transform = self._snap_transform_to_wall(
+                chair, guest_transform, guest_wall
+            )
+            guest_transform = self._fit_transform_inside_room(chair, guest_transform)
+            changed |= self._move_if_changed(chair, guest_transform)
+        return changed
+
+    def _restore_four_seat_dining_layout(self) -> bool:
+        """Center four discrete dining chairs on the four rectangular table edges."""
+        if self.scene is None:
+            return False
+        tables = self._matching_furniture(("dining", "table"))
+        chairs = self._matching_furniture(("dining", "chair"))
+        if len(tables) != 1 or len(chairs) != 4:
+            return False
+
+        table = tables[0]
+        table_center = np.asarray(table.transform.translation(), dtype=float)
+        table_size = self._local_size(table, [1.40, 0.80, 0.75])
+        table_yaw = math.degrees(RollPitchYaw(table.transform.rotation()).yaw_angle())
+        rotation = np.asarray(table.transform.rotation().matrix(), dtype=float)
+        axis_x = rotation @ np.array([1.0, 0.0, 0.0])
+        axis_y = rotation @ np.array([0.0, 1.0, 0.0])
+        gap = 0.12
+        edge_specs = (
+            (axis_y, 180.0),
+            (-axis_y, 0.0),
+            (axis_x, -90.0),
+            (-axis_x, 90.0),
+        )
+
+        remaining = list(chairs)
+        changed = False
+        for normal, yaw_offset in edge_specs:
+
+            def target_center(candidate: SceneObject) -> np.ndarray:
+                candidate_size = self._local_size(candidate, [0.50, 0.50, 0.90])
+                table_extent = (
+                    table_size[1] / 2.0
+                    if abs(float(np.dot(normal, axis_y))) > 0.5
+                    else table_size[0] / 2.0
+                )
+                chair_extent = (
+                    candidate_size[1] / 2.0
+                    if abs(float(np.dot(normal, axis_y))) > 0.5
+                    else candidate_size[0] / 2.0
+                )
+                return table_center + normal * (table_extent + chair_extent + gap)
+
+            chair = min(
+                remaining,
+                key=lambda item: float(
+                    np.linalg.norm(
+                        np.asarray(item.transform.translation(), dtype=float)[:2]
+                        - target_center(item)[:2]
+                    )
+                ),
+            )
+            remaining.remove(chair)
+            center = target_center(chair)
+            transform = self._grounded_transform(
+                chair,
+                x=float(center[0]),
+                y=float(center[1]),
+                yaw_deg=table_yaw + yaw_offset,
+            )
+            transform = self._fit_transform_inside_room(chair, transform)
+            changed |= self._move_if_changed(chair, transform)
+        return changed
+
+    def _matching_furniture(
+        self, required_tokens: tuple[str, ...]
+    ) -> list[SceneObject]:
+        if self.scene is None:
+            return []
+        matches: list[SceneObject] = []
+        for obj in self.scene.objects.values():
+            if (
+                getattr(obj, "immutable", False)
+                or getattr(obj, "object_type", None) != ObjectType.FURNITURE
+            ):
+                continue
+            identity = (
+                " ".join(
+                    str(value or "")
+                    for value in (obj.object_id, obj.name, obj.description)
+                )
+                .lower()
+                .replace("_", " ")
+            )
+            if all(token in identity for token in required_tokens):
+                matches.append(obj)
+        return sorted(matches, key=lambda item: str(item.object_id))
+
+    def _best_wall(self, walls: tuple[str, ...]) -> str | None:
+        if self.scene is None:
+            return None
+        opening_counts = {wall: 0 for wall in walls}
+        for opening in getattr(self.scene.room_geometry, "openings", []) or []:
+            direction = getattr(opening, "wall_direction", "")
+            direction = getattr(direction, "value", direction)
+            direction = str(direction).lower()
+            if direction in opening_counts:
+                opening_counts[direction] += 1
+        preference = {"north": 0, "east": 1, "west": 2, "south": 3}
+        return min(
+            walls,
+            key=lambda wall: (
+                opening_counts[wall],
+                -self._wall_span(wall),
+                preference.get(wall, 99),
+            ),
+        )
+
+    def _wall_span(self, wall: str) -> float:
+        bounds = self._room_bounds_xy()
+        if bounds is None:
+            return 0.0
+        min_x, min_y, max_x, max_y = bounds
+        return max_x - min_x if wall in {"north", "south"} else max_y - min_y
+
+    def _wall_anchor_transform(
+        self, obj: SceneObject, wall: str, *, tangent: float
+    ) -> RigidTransform | None:
+        if self._room_bounds_xy() is None:
+            return None
+        if wall in {"north", "south"}:
+            x, y = tangent, 0.0
+        else:
+            x, y = 0.0, tangent
+        transform = self._grounded_transform(
+            obj,
+            x=float(x),
+            y=float(y),
+            yaw_deg=self._yaw_for_inward_wall(wall),
+        )
+        transform = self._snap_transform_to_wall(obj, transform, wall)
+        return self._fit_transform_inside_room(obj, transform)
+
+    def _move_if_changed(self, obj: SceneObject, transform: RigidTransform) -> bool:
+        if self.scene is None or self._transform_close(obj.transform, transform):
+            return False
+        self.scene.move_object(obj.object_id, transform)
+        return True
 
     def _repair_generic_wall_collisions(self) -> bool:
         """Move non-bedroom furniture back inside a conservative wall margin.
