@@ -55,6 +55,9 @@ _THIN_COVERING_CATEGORIES = {
     "mat",
     "rug",
 }
+# Ceiling-mounted fixtures above this height do not obstruct floor-level
+# approach, operating, or seating clearance.  Low pendants remain blockers.
+_OVERHEAD_FIXTURE_CLEAR_HEIGHT_M = 2.1
 _DISPLAY_CLEARANCE_CATEGORIES = {
     "display",
     "laptop",
@@ -712,6 +715,26 @@ def _is_intended_display_seating_intrusion(
     )
 
 
+def _is_high_ceiling_fixture_intrusion(
+    subject_record: dict[str, Any], blocker: dict[str, Any] | None
+) -> bool:
+    """Ignore high fixtures for horizontal human-use clearance zones."""
+    if blocker is None or subject_record.get("clearance_type") in _VERTICAL_TYPES:
+        return False
+    if blocker.get("scene_object_type") != "ceiling_mounted":
+        return False
+    bbox = blocker.get("bbox")
+    if not isinstance(bbox, dict):
+        return False
+    lower = bbox.get("min")
+    if not isinstance(lower, (list, tuple)) or len(lower) < 3:
+        return False
+    try:
+        return float(lower[2]) >= _OVERHEAD_FIXTURE_CLEAR_HEIGHT_M
+    except (TypeError, ValueError):
+        return False
+
+
 def build_clearance_checks(objects: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
     """Build one clearance check per object that reserves a keep-clear region.
 
@@ -780,6 +803,10 @@ def build_clearance_checks(objects: dict[str, dict[str, Any]]) -> list[dict[str,
             )
             and not _is_intended_display_seating_intrusion(
                 obj,
+                world_box_by_id.get(str(hit.get("object_id") or "")),
+            )
+            and not _is_high_ceiling_fixture_intrusion(
+                record,
                 world_box_by_id.get(str(hit.get("object_id") or "")),
             )
             and not _is_intended_tabletop_setting_intrusion(
