@@ -246,7 +246,7 @@ def test_prompt_facing_guest_chairs_override_cached_orientation_contracts(
         tmp_path,
         desk,
         *chairs,
-        text="A study with two guest chairs against the side wall.",
+        text="A study with a desk and two guest chairs.",
     )
     config = CriticConfig(enabled=True, metrics=("functional_dependency",))
 
@@ -289,6 +289,107 @@ def test_prompt_facing_guest_chairs_override_cached_orientation_contracts(
     assert context.count("result=pass") >= 2
     assert "A deterministic `result=pass` is authoritative" in context
     assert "`guest_chair_0`: `furniture_faces_furniture` -> `study_desk_0`" in context
+
+
+def test_prompt_wall_backed_guest_chairs_stay_free_of_study_desk(
+    tmp_path: Path,
+) -> None:
+    desk = _object(
+        "study_desk_0",
+        "study_desk",
+        (0.0, 1.79, 0.4),
+        (1.46, 0.8, 0.8),
+        yaw_deg=180.0,
+    )
+    office_chair = _object(
+        "office_chair_0",
+        "office_chair",
+        (0.0, 0.915, 0.45),
+        (0.6, 0.6, 0.9),
+        yaw_deg=0.0,
+    )
+    guest_positions = ((1.35, 0.55), (1.35, -0.55))
+    guests = [
+        _object(
+            f"guest_chair_{index}",
+            "guest_chair",
+            (position[0], position[1], 0.45),
+            (0.55, 0.66, 0.9),
+            yaw_deg=_facing_yaw(position, (0.0, 1.79)),
+        )
+        for index, position in enumerate(guest_positions)
+    ]
+    scene = _scene(
+        tmp_path,
+        desk,
+        office_chair,
+        *guests,
+        text=(
+            "A study with a desk centered against the back wall, an office chair "
+            "tucked under the desk, and two guest chairs against the side wall "
+            "with their usable fronts perpendicular to the wall and facing into "
+            "the room."
+        ),
+    )
+    config = CriticConfig(enabled=True, metrics=("functional_dependency",))
+
+    payload = evaluate_room_scene(scene, config=config, stage="prompt_wall_backed")
+    contracts = {
+        check.get("subject_id"): check
+        for check in payload["case_pack"]["checks"]
+        if check.get("check_source") == "scenesmith_orientation_contract"
+    }
+    guest_ids = {str(guest.object_id) for guest in guests}
+
+    assert contracts["office_chair_0"]["relation_type"] == "seating_to_work_surface"
+    assert contracts["office_chair_0"]["target_ids"] == ["study_desk_0"]
+    for guest_id in guest_ids:
+        contract = contracts[guest_id]
+        assert contract["relation_type"] == "back_against_wall"
+        assert contract["target_ids"] == ["east_wall"]
+        assert contract["evidence"]["prompt_explicit_wall"] is True
+    assert not any(
+        check.get("subject_id") in guest_ids
+        and check.get("relation_type")
+        in {"seating_to_work_surface", "furniture_faces_furniture"}
+        and "study_desk_0" in {str(item) for item in check.get("target_ids") or []}
+        for check in payload["case_pack"]["checks"]
+    )
+
+    fixes = improve_furniture_relations(scene, config=config)
+    assert guest_ids <= {fix.object_id for fix in fixes}
+    assert {fix.relation_type for fix in fixes if fix.object_id in guest_ids} == {
+        "back_against_wall"
+    }
+
+    east_wall = next(
+        wall for wall in scene.room_geometry.walls if str(wall.object_id) == "east_wall"
+    )
+    east_bounds = east_wall.compute_world_bounds()
+    assert east_bounds is not None
+    for guest in guests:
+        front = guest.transform.rotation().matrix() @ np.array([0.0, 1.0, 0.0])
+        np.testing.assert_allclose(front[:2], [-1.0, 0.0], atol=1e-7)
+        guest_bounds = guest.compute_world_bounds()
+        assert guest_bounds is not None
+        assert abs(east_bounds[0][0] - guest_bounds[1][0] - 0.03) < 1e-7
+
+    repaired_payload = evaluate_room_scene(
+        scene, config=config, stage="prompt_wall_backed_repaired"
+    )
+    result_by_check = {
+        result["check_id"]: result for result in repaired_payload["results"]
+    }
+    repaired_contracts = {
+        check.get("subject_id"): check
+        for check in repaired_payload["case_pack"]["checks"]
+        if check.get("check_source") == "scenesmith_orientation_contract"
+    }
+    assert {
+        result_by_check[repaired_contracts[guest_id]["check_id"]]["label"]
+        for guest_id in guest_ids
+    } == {"pass"}
+    assert repaired_contracts["office_chair_0"]["target_ids"] == ["study_desk_0"]
 
 
 def test_prompt_guest_facing_does_not_apply_to_earlier_office_chair(

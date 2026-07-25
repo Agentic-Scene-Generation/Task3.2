@@ -492,7 +492,7 @@ def _repair_targets(scene: RoomScene, payload: dict[str, Any]) -> list[_RepairTa
                 (
                     candidate_id
                     for candidate_id in wall_ids
-                    if _is_wall(scene.objects.get(UniqueID(candidate_id)))
+                    if _scene_wall(scene, candidate_id) is not None
                 ),
                 None,
             )
@@ -623,6 +623,25 @@ def _is_wall(obj: SceneObject | None) -> bool:
     return obj is not None and obj.object_type == ObjectType.WALL
 
 
+def _scene_wall(scene: RoomScene, wall_id: str) -> SceneObject | None:
+    """Resolve an architectural wall whether or not it is a scene object.
+
+    Furniture-only stages normally keep walls in ``room_geometry.walls``.  The
+    critic serializes those walls into scene geometry, so a relation result can
+    correctly name a wall that is absent from ``scene.objects``.  Repair must
+    use the same source or it cannot materialize a valid wall-backed pose.
+    """
+    if not wall_id:
+        return None
+    wall = scene.objects.get(UniqueID(wall_id))
+    if _is_wall(wall):
+        return wall
+    for candidate in getattr(scene.room_geometry, "walls", ()) or ():
+        if str(candidate.object_id) == wall_id and _is_wall(candidate):
+            return candidate
+    return None
+
+
 def _wall_backed_target(
     scene: RoomScene, object_id: str, wall_id: str | None
 ) -> tuple[tuple[float, float], float] | None:
@@ -630,7 +649,7 @@ def _wall_backed_target(
     if not object_id or not wall_id:
         return None
     seat = scene.objects.get(UniqueID(object_id))
-    wall = scene.objects.get(UniqueID(wall_id))
+    wall = _scene_wall(scene, wall_id)
     if (
         seat is None
         or wall is None
