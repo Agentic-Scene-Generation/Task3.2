@@ -63,3 +63,51 @@ def test_storage_at_wall_with_front_parallel_to_wall_fails() -> None:
 
     assert result["label"] == "fail"
     assert result["diagnostics"]["front_error_deg"] == 90.0
+
+
+def test_dining_sideboard_prefers_wall_parallel_to_table_long_axis() -> None:
+    case_pack = _case_pack(-2.05)
+    objects = case_pack["scene_geometry"]["objects"]
+    objects[1]["category"] = "sideboard"
+    objects.extend(
+        [
+            {
+                "id": "north_boundary",
+                "category": "wall",
+                "bbox_world": _bbox((0.0, 2.0), (5.0, 0.1, 2.7)),
+            },
+            {
+                "id": "south_boundary",
+                "category": "wall",
+                "bbox_world": _bbox((0.0, -2.0), (5.0, 0.1, 2.7)),
+            },
+            {
+                "id": "dining_table_0",
+                "object_type": "furniture",
+                "category": "dining_table",
+                "yaw_deg": 0.0,
+                "bbox_world": _bbox((0.0, 0.0), (1.8, 0.9, 0.75)),
+                "footprint_world": [
+                    [-0.9, -0.45],
+                    [0.9, -0.45],
+                    [0.9, 0.45],
+                    [-0.9, 0.45],
+                ],
+            },
+        ]
+    )
+
+    result = evaluate_wall_backed_storage_alignment(case_pack)[0]
+
+    assert result["label"] == "fail"
+    candidates = result["diagnostics"]["candidate_poses"]
+    assert [candidate["wall_id"] for candidate in candidates[:2]] == [
+        "north_boundary",
+        "south_boundary",
+    ]
+    assert all(
+        candidate["target_center_xy_m"][0] == 0.0 for candidate in candidates[:2]
+    )
+    assert all(
+        candidate["dining_table_wall_error_deg"] == 0.0 for candidate in candidates[:2]
+    )

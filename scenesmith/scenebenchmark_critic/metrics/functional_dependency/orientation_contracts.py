@@ -14,11 +14,6 @@ from scenesmith.scenebenchmark_critic.core.geometry import (
     object_affordances,
     object_category,
 )
-from scenesmith.scenebenchmark_critic.metrics.functional_dependency.semantics import (
-    _classroom_student_role,
-    _is_classroom_student_pair,
-    _is_actionable_seating_surface_pair,
-)
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.profiles import (
     object_function_profile,
 )
@@ -26,7 +21,13 @@ from scenesmith.scenebenchmark_critic.metrics.functional_dependency.seat_surface
     ASSIGNMENT_SOURCE,
     SeatSurfaceAssignment,
     assign_work_seats_to_surfaces,
+    room_bounds_from_case_pack,
     work_seat_candidates,
+)
+from scenesmith.scenebenchmark_critic.metrics.functional_dependency.semantics import (
+    _classroom_student_role,
+    _is_actionable_seating_surface_pair,
+    _is_classroom_student_pair,
 )
 
 console_logger = logging.getLogger(__name__)
@@ -86,7 +87,14 @@ WORK_SURFACE_CATEGORIES = {
 }
 # 2026-07-12 修改原因：墙边独立座椅判定应随资产尺寸缩放，避免用 guest/visitor
 # 名称和单个书房回放标定的绝对米制阈值决定功能关系。
-WALL_ANCHOR_GAP_RATIO = 0.45
+# Keep this proportional to the seat's shortest footprint axis.  Rendered HSSD
+# seats often have a small collision/annotation offset from the wall; a fixed
+# absolute threshold would drop otherwise valid wall-backed seating.
+# Initial LLM layouts can leave an independent seat about one seat-depth from
+# its intended wall.  Treat that as the same wall-backed topology and let the
+# deterministic repair snap it to the wall; the separate surface-separation
+# and wall-preference checks prevent ordinary table seating from matching.
+WALL_ANCHOR_GAP_RATIO = 1.0
 SURFACE_SEPARATION_RATIO = 0.5
 WALL_PREFERENCE_MARGIN_RATIO = 0.2
 
@@ -138,6 +146,7 @@ def stabilize_orientation_contracts(
         task_instruction=task_text,
         room_type=room_type,
         fixed_pairs=fixed_pairs,
+        room_bounds=room_bounds_from_case_pack(case_pack),
     )
     work_assignment_by_seat = {
         assignment.seat_id: assignment for assignment in work_assignments
@@ -243,19 +252,17 @@ def _contract_is_usable(
         return False
 
     if work_assignment is not None:
-        return (
-            relation_type == "seating_to_work_surface"
-            and target_ids == [work_assignment.surface_id]
-        )
+        return relation_type == "seating_to_work_surface" and target_ids == [
+            work_assignment.surface_id
+        ]
     if work_cohort_member:
         return False
 
     classroom_target = _classroom_student_partner(subject, objects)
     if classroom_target is not None:
-        return (
-            relation_type == "seating_to_work_surface"
-            and target_ids == [str(classroom_target.get("id") or "")]
-        )
+        return relation_type == "seating_to_work_surface" and target_ids == [
+            str(classroom_target.get("id") or "")
+        ]
 
     # 2026-07-14 修改原因：dining_chair 被门净空或桌椅碰撞推到墙边后，旧逻辑
     # 会把它重新识别为 back_against_wall，覆盖“餐椅属于餐桌”的功能依赖，导致
@@ -268,10 +275,9 @@ def _contract_is_usable(
     # 否则稳定目标会持续强迫空闲椅朝向书桌，破坏背靠墙且相互平行的布局。
     if relation_type == "seating_to_work_surface":
         target = objects_by_id[target_ids[0]]
-        if (
-            _nearest_dining_table(subject, objects) is None
-            and _is_wall_anchored_standalone_seating(subject, target, objects)
-        ):
+        if _nearest_dining_table(
+            subject, objects
+        ) is None and _is_wall_anchored_standalone_seating(subject, target, objects):
             return False
     elif relation_type == "back_against_wall":
         wall = _standalone_wall_target(subject, objects)
@@ -291,9 +297,8 @@ def _contract_is_usable(
     )
     if uses_nearest_living_focus and nearest_focus is not None:
         preferred_target, preferred_relation = nearest_focus
-        if (
-            relation_type != preferred_relation
-            or target_ids[0] != str(preferred_target.get("id") or "")
+        if relation_type != preferred_relation or target_ids[0] != str(
+            preferred_target.get("id") or ""
         ):
             return False
 
@@ -440,11 +445,7 @@ def _classroom_student_partner(
     role = _classroom_student_role(subject)
     if role is None or role[0] != "chair":
         return None
-    candidates = [
-        obj
-        for obj in objects
-        if _is_classroom_student_pair(subject, obj)
-    ]
+    candidates = [obj for obj in objects if _is_classroom_student_pair(subject, obj)]
     candidates.sort(key=lambda obj: str(obj.get("id") or ""))
     return candidates[0] if candidates else None
 
@@ -466,7 +467,11 @@ def _nearest_dining_table(
     ]
     candidates.sort(
         key=lambda obj: (
-            distance_xy(subject, obj) if distance_xy(subject, obj) is not None else 999.0,
+            (
+                distance_xy(subject, obj)
+                if distance_xy(subject, obj) is not None
+                else 999.0
+            ),
             str(obj.get("id") or ""),
         )
     )
@@ -672,9 +677,7 @@ def _nearest_living_seat_focus(
         and object_category(obj) == "coffee_table"
         and _is_actionable_seating_surface_pair(subject, obj)
     ]
-    candidates = [
-        (obj, "seating_to_work_surface") for obj in surfaces
-    ]
+    candidates = [(obj, "seating_to_work_surface") for obj in surfaces]
     if media_focus is not None:
         candidates.append((media_focus, "seating_to_media"))
     if not candidates:
@@ -683,12 +686,16 @@ def _nearest_living_seat_focus(
     # 已朝外的椅子会因角度惩罚换目标，critic 无法稳定修回最近活动区。
     candidates.sort(
         key=lambda item: (
-            bbox_gap_xy(subject, item[0])
-            if bbox_gap_xy(subject, item[0]) is not None
-            else 999.0,
-            distance_xy(subject, item[0])
-            if distance_xy(subject, item[0]) is not None
-            else 999.0,
+            (
+                bbox_gap_xy(subject, item[0])
+                if bbox_gap_xy(subject, item[0]) is not None
+                else 999.0
+            ),
+            (
+                distance_xy(subject, item[0])
+                if distance_xy(subject, item[0]) is not None
+                else 999.0
+            ),
             str(item[0].get("id") or ""),
         )
     )
@@ -744,7 +751,15 @@ def _is_wall_anchored_standalone_seating(
     if wall_gap is None or surface_gap is None:
         return False
     category = object_category(subject)
-    if category not in {"armchair", "chair", "dining_chair", "office_chair"}:
+    if category not in {
+        "armchair",
+        "bar_stool",
+        "bench",
+        "chair",
+        "dining_chair",
+        "office_chair",
+        "stool",
+    }:
         return False
     footprint_scale = _seat_footprint_scale(subject)
     if footprint_scale is None:
@@ -793,9 +808,12 @@ def _standalone_wall_target(
 def _is_wall_anchor_candidate(subject: dict[str, Any]) -> bool:
     return object_category(subject) in {
         "armchair",
+        "bar_stool",
+        "bench",
         "chair",
         "dining_chair",
         "office_chair",
+        "stool",
     }
 
 

@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 import math
 
-from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
@@ -13,6 +12,9 @@ import numpy as np
 
 from pydrake.math import RigidTransform, RollPitchYaw
 
+from scenesmith.agent_utils.furniture_accessibility_guard import (
+    improve_storage_front_access,
+)
 from scenesmith.agent_utils.room import ObjectType, RoomScene, SceneObject, UniqueID
 from scenesmith.scenebenchmark_critic.api import evaluate_room_scene
 from scenesmith.scenebenchmark_critic.config import CriticConfig, critic_config_from_any
@@ -21,7 +23,9 @@ console_logger = logging.getLogger(__name__)
 
 _ISSUE_LABELS = {"fail", "degraded"}
 _REPAIRABLE_RELATIONS = {
+    "back_against_wall",
     "dining_seat_distribution",
+    "room_center_alignment",
     "seating_to_work_surface",
     "wall_backed_storage_alignment",
     "workstation_focal_alignment",
@@ -46,6 +50,7 @@ class _RepairTarget:
     check_id: str
     target_center_xy: tuple[float, float]
     target_yaw_deg: float | None
+    group_object_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -63,12 +68,71 @@ class _PayloadScore:
         return self.fail_ids | self.degraded_ids
 
 
+@dataclass
+class _ScenePoseSnapshot:
+    """Reversible pose-only snapshot used while scoring one repair candidate.
+
+    A ``RoomScene`` can contain large trimesh objects inside support surfaces.
+    Copying the scene therefore copies geometry, not just the pose being tested.
+    Relation repair only mutates transforms, so retain pose-sized transform
+    snapshots and surface references instead of cloning the complete scene.
+    """
+
+    object_transforms: dict[UniqueID, RigidTransform]
+    surface_states: dict[
+        UniqueID,
+        tuple[list[Any], tuple[tuple[Any, RigidTransform], ...]],
+    ]
+
+    @classmethod
+    def capture(cls, scene: RoomScene) -> "_ScenePoseSnapshot":
+        surface_states: dict[
+            UniqueID,
+            tuple[list[Any], tuple[tuple[Any, RigidTransform], ...]],
+        ] = {}
+        object_transforms: dict[UniqueID, RigidTransform] = {}
+        for object_id, obj in scene.objects.items():
+            object_transforms[object_id] = RigidTransform(
+                R=obj.transform.rotation(), p=obj.transform.translation()
+            )
+            surfaces = obj.support_surfaces
+            surface_states[object_id] = (
+                surfaces,
+                tuple(
+                    (
+                        surface,
+                        RigidTransform(
+                            R=surface.transform.rotation(),
+                            p=surface.transform.translation(),
+                        ),
+                    )
+                    for surface in surfaces
+                ),
+            )
+        return cls(object_transforms, surface_states)
+
+    def restore(self, scene: RoomScene) -> None:
+        for object_id, transform in self.object_transforms.items():
+            obj = scene.objects.get(object_id)
+            if obj is None:
+                continue
+            obj.transform = transform
+            surfaces, states = self.surface_states[object_id]
+            # Preserve the original list identity, but also restore its
+            # contents in case an evaluator mutated the container in place.
+            surfaces[:] = [surface for surface, _ in states]
+            obj.support_surfaces = surfaces
+            for surface, surface_transform in states:
+                surface.transform = surface_transform
+
+
 def improve_furniture_relations(
     scene: RoomScene,
     *,
     config: CriticConfig | Any | None = None,
     max_repairs: int = 8,
-    max_translation_m: float = 1.5,
+    max_translation_m: float = 3.0,
+    max_candidate_evaluations: int = 64,
 ) -> list[FurnitureRelationFix]:
     """Apply critic targets only when the whole-scene evaluation improves."""
     critic_config = (
@@ -79,12 +143,25 @@ def improve_furniture_relations(
     ):
         return []
 
+    try:
+        configured_budget = int(
+            critic_config.extra.get(
+                "relation_repair_max_candidate_evaluations",
+                max_candidate_evaluations,
+            )
+        )
+    except (TypeError, ValueError):
+        configured_budget = max_candidate_evaluations
+    candidate_budget = max(1, configured_budget)
+    candidate_evaluations = 0
     fixes: list[FurnitureRelationFix] = []
     for _ in range(max_repairs):
         baseline_payload = _evaluate(scene, critic_config)
         baseline_score = _score_payload(baseline_payload)
         accepted = False
         for target in _repair_targets(scene, baseline_payload):
+            if candidate_evaluations >= candidate_budget:
+                break
             obj = scene.objects.get(UniqueID(target.object_id))
             if obj is None or obj.object_type != ObjectType.FURNITURE:
                 continue
@@ -99,48 +176,64 @@ def improve_furniture_relations(
                 > max_translation_m
             ):
                 continue
-            candidate_scene = deepcopy(scene)
-            candidate_obj = candidate_scene.objects[UniqueID(target.object_id)]
-            new_transform = _transform_for_target(candidate_obj, target)
-            if new_transform is None or not _within_floor_bounds(
-                candidate_scene, candidate_obj, new_transform
-            ):
-                continue
-            _move_object_with_surfaces(
-                candidate_scene, candidate_obj.object_id, new_transform
-            )
-            candidate_payload = _evaluate(candidate_scene, critic_config)
-            if not _candidate_improves(
-                baseline_payload,
-                candidate_payload,
-                baseline_score=baseline_score,
-                check_id=target.check_id,
-            ):
-                continue
-
-            old_rpy = RollPitchYaw(obj.transform.rotation())
-            old_xy = tuple(float(value) for value in obj.transform.translation()[:2])
-            moved_obj = candidate_scene.objects[obj.object_id]
-            new_rpy = RollPitchYaw(moved_obj.transform.rotation())
-            new_xy = tuple(
-                float(value) for value in moved_obj.transform.translation()[:2]
-            )
-            _copy_scene_object_poses_and_surfaces(
-                source_scene=candidate_scene, target_scene=scene
-            )
-            fixes.append(
-                FurnitureRelationFix(
-                    object_id=target.object_id,
-                    relation_type=target.relation_type,
+            snapshot = _ScenePoseSnapshot.capture(scene)
+            keep_candidate = False
+            try:
+                candidate_obj = scene.objects[UniqueID(target.object_id)]
+                new_transform = _transform_for_target(candidate_obj, target)
+                if new_transform is None:
+                    continue
+                if not _apply_repair_target(scene, target, new_transform):
+                    continue
+                if target.relation_type == "room_center_alignment":
+                    # Centering a dining group can narrow the wall-side service
+                    # aisle.  Resolve that secondary effect inside this same
+                    # rollback scope so the strict whole-scene gate evaluates
+                    # the coordinated layout, not an intentionally temporary
+                    # accessibility regression.
+                    improve_storage_front_access(
+                        scene,
+                        config=critic_config,
+                        max_candidate_evaluations=16,
+                        repair_degraded=True,
+                    )
+                candidate_evaluations += 1
+                candidate_payload = _evaluate(scene, critic_config)
+                if not _candidate_improves(
+                    baseline_payload,
+                    candidate_payload,
+                    baseline_score=baseline_score,
                     check_id=target.check_id,
-                    old_xy=old_xy,
-                    new_xy=new_xy,
-                    old_yaw_deg=math.degrees(old_rpy.yaw_angle()),
-                    new_yaw_deg=math.degrees(new_rpy.yaw_angle()),
+                ):
+                    continue
+
+                old_transform = snapshot.object_transforms[obj.object_id]
+                old_rpy = RollPitchYaw(old_transform.rotation())
+                old_xy = tuple(
+                    float(value) for value in old_transform.translation()[:2]
                 )
-            )
-            accepted = True
-            break
+                moved_obj = scene.objects[obj.object_id]
+                new_rpy = RollPitchYaw(moved_obj.transform.rotation())
+                new_xy = tuple(
+                    float(value) for value in moved_obj.transform.translation()[:2]
+                )
+                fixes.append(
+                    FurnitureRelationFix(
+                        object_id=target.object_id,
+                        relation_type=target.relation_type,
+                        check_id=target.check_id,
+                        old_xy=old_xy,
+                        new_xy=new_xy,
+                        old_yaw_deg=math.degrees(old_rpy.yaw_angle()),
+                        new_yaw_deg=math.degrees(new_rpy.yaw_angle()),
+                    )
+                )
+                keep_candidate = True
+                accepted = True
+                break
+            finally:
+                if not keep_candidate:
+                    snapshot.restore(scene)
         if not accepted:
             break
 
@@ -155,6 +248,11 @@ def improve_furniture_relations(
                 for fix in fixes
             ),
         )
+    console_logger.info(
+        "Furniture relation repair evaluated %d candidate pose(s) (budget=%d)",
+        candidate_evaluations,
+        candidate_budget,
+    )
     return fixes
 
 
@@ -234,6 +332,13 @@ def _result_severity(result: dict[str, Any]) -> tuple[int, float]:
                 float(slot.get("deviation_m") or 0.0)
                 - float(slot.get("allowed_deviation_m") or 0.0),
             )
+            normal_deviation = slot.get("normal_deviation_m")
+            if normal_deviation is not None:
+                magnitude += max(
+                    0.0,
+                    float(normal_deviation)
+                    - float(slot.get("allowed_normal_deviation_m") or 0.0),
+                )
             facing = slot.get("facing_error_deg")
             if facing is not None:
                 magnitude += max(
@@ -261,6 +366,12 @@ def _result_severity(result: dict[str, Any]) -> tuple[int, float]:
                 - float(diagnostics.get("allowed_front_error_deg") or 0.0)
             )
             / 90.0,
+        )
+    elif relation == "room_center_alignment":
+        magnitude = max(
+            0.0,
+            float(diagnostics.get("offset_m") or 0.0)
+            - float(diagnostics.get("allowed_offset_m") or 0.0),
         )
     return _label_severity(label), round(magnitude, 9)
 
@@ -293,6 +404,7 @@ def _repair_targets(scene: RoomScene, payload: dict[str, Any]) -> list[_RepairTa
                 )
                 if target is not None:
                     targets.append(target)
+                    targets.extend(_dining_clearance_targets(target, slot))
         elif relation == "workstation_focal_alignment":
             target = _target_from_facing_diagnostics(
                 scene,
@@ -313,6 +425,46 @@ def _repair_targets(scene: RoomScene, payload: dict[str, Any]) -> list[_RepairTa
                 targets.append(
                     _RepairTarget(object_id, relation, check_id, center, yaw)
                 )
+        elif relation == "room_center_alignment":
+            object_id = str(result.get("primary_object") or "")
+            center = _xy(diagnostics.get("room_center_xy"))
+            if object_id and center is not None:
+                group_ids = [object_id]
+                for related_id in (
+                    result.get("related_objects")
+                    or result.get("selected_related_objects")
+                    or []
+                ):
+                    related_id = str(related_id or "")
+                    if related_id and related_id not in group_ids:
+                        group_ids.append(related_id)
+                for candidate in scene.objects.values():
+                    if candidate.object_type != ObjectType.FURNITURE:
+                        continue
+                    if not _is_seating_object(candidate):
+                        continue
+                    candidate_center = _world_center_xy(candidate)
+                    if candidate_center is None:
+                        continue
+                    if (
+                        math.hypot(
+                            candidate_center[0] - center[0],
+                            candidate_center[1] - center[1],
+                        )
+                        <= 2.5
+                        and str(candidate.object_id) not in group_ids
+                    ):
+                        group_ids.append(str(candidate.object_id))
+                targets.append(
+                    _RepairTarget(
+                        object_id,
+                        relation,
+                        check_id,
+                        center,
+                        None,
+                        tuple(group_ids),
+                    )
+                )
         elif relation == "wall_backed_storage_alignment":
             object_id = str(
                 diagnostics.get("object_id") or result.get("primary_object") or ""
@@ -324,6 +476,37 @@ def _repair_targets(scene: RoomScene, payload: dict[str, Any]) -> list[_RepairTa
                     targets.append(
                         _RepairTarget(object_id, relation, check_id, center, yaw)
                     )
+        elif relation == "back_against_wall":
+            object_id = str(result.get("primary_object") or "")
+            wall_ids = [
+                str(item)
+                for item in (
+                    result.get("selected_related_objects")
+                    or result.get("related_objects")
+                    or diagnostics.get("selected_target_ids")
+                    or []
+                )
+                if str(item)
+            ]
+            wall_id = next(
+                (
+                    candidate_id
+                    for candidate_id in wall_ids
+                    if _is_wall(scene.objects.get(UniqueID(candidate_id)))
+                ),
+                None,
+            )
+            target = _wall_backed_target(scene, object_id, wall_id)
+            if target is not None:
+                targets.append(
+                    _RepairTarget(
+                        object_id,
+                        relation,
+                        check_id,
+                        target[0],
+                        target[1],
+                    )
+                )
     targets.sort(
         key=lambda target: (
             0 if _result_by_id(payload, target.check_id).get("label") == "fail" else 1,
@@ -365,6 +548,47 @@ def _target_from_facing_diagnostics(
     return _RepairTarget(object_id, relation_type, check_id, center, yaw)
 
 
+def _dining_clearance_targets(
+    target: _RepairTarget,
+    diagnostics: dict[str, Any],
+) -> list[_RepairTarget]:
+    """Add table-relative poses that use the slot's allowed outward tolerance."""
+    facing_target = _xy(diagnostics.get("facing_target_xy_m"))
+    allowed_deviation = _float_or_none(diagnostics.get("allowed_normal_deviation_m"))
+    if facing_target is None or allowed_deviation is None or allowed_deviation <= 0.0:
+        return []
+
+    outward = (
+        target.target_center_xy[0] - facing_target[0],
+        target.target_center_xy[1] - facing_target[1],
+    )
+    outward_length = math.hypot(*outward)
+    if outward_length <= 1e-6:
+        return []
+    outward_unit = (outward[0] / outward_length, outward[1] / outward_length)
+
+    # The exact functional-dependency slot can leave only a narrow table gap.
+    # Try progressively more aisle space while remaining within the evaluator's
+    # own normal-deviation allowance. The whole-scene gate retains only a pose
+    # that also preserves accessibility and the other critic checks.
+    return [
+        _RepairTarget(
+            target.object_id,
+            target.relation_type,
+            target.check_id,
+            (
+                target.target_center_xy[0]
+                + outward_unit[0] * allowed_deviation * ratio,
+                target.target_center_xy[1]
+                + outward_unit[1] * allowed_deviation * ratio,
+            ),
+            target.target_yaw_deg,
+            target.group_object_ids,
+        )
+        for ratio in (0.5, 0.9)
+    ]
+
+
 def _xy(value: Any) -> tuple[float, float] | None:
     if not isinstance(value, (list, tuple)) or len(value) < 2:
         return None
@@ -379,6 +603,97 @@ def _float_or_none(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _is_seating_object(obj: SceneObject) -> bool:
+    text = " ".join(
+        str(value or "").lower()
+        for value in (
+            obj.object_id,
+            obj.name,
+            obj.description,
+            obj.metadata.get("category"),
+            obj.metadata.get("category_norm"),
+        )
+    )
+    return any(token in text for token in ("chair", "seat", "stool", "bench"))
+
+
+def _is_wall(obj: SceneObject | None) -> bool:
+    return obj is not None and obj.object_type == ObjectType.WALL
+
+
+def _wall_backed_target(
+    scene: RoomScene, object_id: str, wall_id: str | None
+) -> tuple[tuple[float, float], float] | None:
+    """Return a wall-normal pose for a seat without using asset-specific IDs."""
+    if not object_id or not wall_id:
+        return None
+    seat = scene.objects.get(UniqueID(object_id))
+    wall = scene.objects.get(UniqueID(wall_id))
+    if (
+        seat is None
+        or wall is None
+        or not _is_seating_object(seat)
+        or not _is_wall(wall)
+    ):
+        return None
+    seat_bounds = seat.compute_world_bounds()
+    wall_bounds = wall.compute_world_bounds()
+    if seat_bounds is None or wall_bounds is None:
+        return None
+
+    wall_min, wall_max = wall_bounds
+    wall_span = np.asarray(wall_max - wall_min, dtype=float)
+    normal_axis = 0 if float(wall_span[0]) < float(wall_span[1]) else 1
+    tangent_axis = 1 - normal_axis
+    seat_center = np.asarray(_world_center_xy(seat), dtype=float)
+    wall_center = (np.asarray(wall_min, dtype=float) + wall_max) / 2.0
+    direction = float(seat_center[normal_axis] - wall_center[normal_axis])
+    if abs(direction) < 1e-6:
+        return None
+    inward = 1.0 if direction > 0.0 else -1.0
+    desired_front = np.zeros(2, dtype=float)
+    desired_front[normal_axis] = inward
+    # RigidTransform yaw maps local +Y to (-sin(yaw), cos(yaw)).
+    yaw_deg = math.degrees(math.atan2(-desired_front[0], desired_front[1]))
+    yaw = math.radians(yaw_deg)
+    axis_x = np.array([math.cos(yaw), math.sin(yaw)])
+    axis_y = np.array([-math.sin(yaw), math.cos(yaw)])
+    local_min = np.asarray(seat.bbox_min, dtype=float)
+    local_max = np.asarray(seat.bbox_max, dtype=float)
+    corners = np.array(
+        [
+            [local_min[0], local_min[1]],
+            [local_min[0], local_max[1]],
+            [local_max[0], local_min[1]],
+            [local_max[0], local_max[1]],
+        ]
+    )
+    # Project the local footprint directly into world axes after the yaw change.
+    world_corners = np.outer(corners[:, 0], axis_x) + np.outer(corners[:, 1], axis_y)
+    normal_projection = world_corners[:, normal_axis]
+    tangent_projection = world_corners[:, tangent_axis]
+    normal_half = (
+        float(normal_projection.max()) - float(normal_projection.min())
+    ) / 2.0
+    tangent_half = (
+        float(tangent_projection.max()) - float(tangent_projection.min())
+    ) / 2.0
+    target = seat_center.copy()
+    target[normal_axis] = float((wall_min + wall_max)[normal_axis]) / 2.0 + inward * (
+        float(wall_span[normal_axis]) / 2.0 + normal_half + 0.03
+    )
+    wall_tangent_center = float((wall_min + wall_max)[tangent_axis]) / 2.0
+    tangent_limit = max(
+        0.0,
+        float(wall_span[tangent_axis]) / 2.0 - tangent_half - 0.05,
+    )
+    target[tangent_axis] = min(
+        max(float(target[tangent_axis]), wall_tangent_center - tangent_limit),
+        wall_tangent_center + tangent_limit,
+    )
+    return (float(target[0]), float(target[1])), yaw_deg
 
 
 def _world_center_xy(obj: SceneObject) -> tuple[float, float] | None:
@@ -418,6 +733,33 @@ def _transform_for_target(
         local_center
     )
     return RigidTransform(rpy=new_rpy, p=translation)
+
+
+def _apply_repair_target(
+    scene: RoomScene, target: _RepairTarget, anchor_transform: RigidTransform
+) -> bool:
+    """Apply an anchor pose, optionally translating its associated furniture group."""
+    object_ids = target.group_object_ids or (target.object_id,)
+    anchor = scene.objects.get(UniqueID(target.object_id))
+    if anchor is None or anchor.object_type != ObjectType.FURNITURE:
+        return False
+    delta = anchor_transform @ anchor.transform.inverse()
+    transforms: dict[UniqueID, RigidTransform] = {}
+    for object_id in object_ids:
+        obj = scene.objects.get(UniqueID(object_id))
+        if obj is None or obj.object_type != ObjectType.FURNITURE:
+            continue
+        transform = (
+            anchor_transform if object_id == target.object_id else delta @ obj.transform
+        )
+        if not _within_floor_bounds(scene, obj, transform):
+            return False
+        transforms[obj.object_id] = transform
+    if target.object_id not in {str(object_id) for object_id in transforms}:
+        return False
+    for object_id, transform in transforms.items():
+        _move_object_with_surfaces(scene, object_id, transform)
+    return True
 
 
 def _within_floor_bounds(
@@ -461,14 +803,3 @@ def _move_object_with_surfaces(
         child.transform = delta @ child.transform
         for surface in child.support_surfaces:
             surface.transform = delta @ surface.transform
-
-
-def _copy_scene_object_poses_and_surfaces(
-    *, source_scene: RoomScene, target_scene: RoomScene
-) -> None:
-    for object_id, source_obj in source_scene.objects.items():
-        target_obj = target_scene.objects.get(object_id)
-        if target_obj is None:
-            continue
-        target_obj.transform = source_obj.transform
-        target_obj.support_surfaces = deepcopy(source_obj.support_surfaces)

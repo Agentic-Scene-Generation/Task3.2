@@ -1,11 +1,13 @@
 import unittest
-from typing import Any
+
 from types import SimpleNamespace
+from typing import Any
 
 import numpy as np
 
 try:
     from pydrake.all import RigidTransform
+
     from scenesmith.furniture_agents.stateful_furniture_agent import (
         StatefulFurnitureAgent,
     )
@@ -149,6 +151,129 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         )
 
         self.assertEqual(3, len(agent._furniture_by_category("chair")))
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
+    def test_counted_inventory_removes_placeholder_duplicate(self) -> None:
+        agent = object.__new__(StatefulFurnitureAgent)
+        furniture_type = SimpleNamespace(value="furniture")
+        normal = SimpleNamespace(
+            object_id="sideboard_0",
+            name="sideboard",
+            description="solid wood sideboard",
+            object_type=furniture_type,
+            immutable=False,
+            metadata={},
+        )
+        placeholder = SimpleNamespace(
+            object_id="sideboard_repair_placeholder_0",
+            name="sideboard",
+            description="deterministic placeholder sideboard",
+            object_type=furniture_type,
+            immutable=False,
+            metadata={"repair_placeholder": True},
+        )
+        agent.scene = SimpleNamespace(
+            objects={normal.object_id: normal, placeholder.object_id: placeholder}
+        )
+        agent.scene.remove_object = lambda object_id: agent.scene.objects.pop(object_id)
+        agent.furniture_safety_controller = SimpleNamespace(
+            infer_object_category=lambda _text: "sideboard"
+        )
+        agent._nearest_room_boundary_distance = lambda obj: (
+            0.02 if obj is normal else 0.5
+        )
+
+        removed = agent._remove_excess_required_furniture({"sideboard": 1})
+
+        self.assertEqual(removed, 1)
+        self.assertEqual(set(agent.scene.objects), {"sideboard_0"})
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
+    def test_inventory_convergence_removes_normal_duplicate_without_hard_failure(
+        self,
+    ) -> None:
+        agent = object.__new__(StatefulFurnitureAgent)
+        furniture_type = SimpleNamespace(value="furniture")
+        wall_backed = SimpleNamespace(
+            object_id="sideboard_0",
+            name="sideboard",
+            description="compact sideboard",
+            object_type=furniture_type,
+            immutable=False,
+            metadata={},
+        )
+        duplicate = SimpleNamespace(
+            object_id="sideboard_1",
+            name="sideboard",
+            description="second compact sideboard",
+            object_type=furniture_type,
+            immutable=False,
+            metadata={},
+        )
+        agent.scene = SimpleNamespace(
+            objects={
+                wall_backed.object_id: wall_backed,
+                duplicate.object_id: duplicate,
+            }
+        )
+        agent.scene.remove_object = lambda object_id: agent.scene.objects.pop(object_id)
+        agent.furniture_safety_controller = SimpleNamespace(
+            required_counts={"sideboard": 1},
+            infer_object_category=lambda _text: "sideboard",
+        )
+        agent._nearest_room_boundary_distance = lambda obj: (
+            0.02 if obj is wall_backed else 0.7
+        )
+        agent.rendering_manager = SimpleNamespace(clear_cache=lambda: None)
+        agent._reset_critic_candidate_cache = lambda: None
+
+        removed = agent._converge_prompt_required_inventory(source="test")
+
+        self.assertEqual(removed, 1)
+        self.assertEqual(set(agent.scene.objects), {"sideboard_0"})
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
+    def test_dining_inventory_prefers_sideboard_on_table_long_side_wall(self) -> None:
+        agent = object.__new__(StatefulFurnitureAgent)
+        table = SimpleNamespace(
+            object_id="dining_table_0",
+            name="dining_table",
+            description="rectangular dining table",
+            bbox_min=np.array([-0.9, -0.45, 0.0]),
+            bbox_max=np.array([0.9, 0.45, 0.75]),
+            transform=RigidTransform(),
+        )
+        north_sideboard = SimpleNamespace(
+            compute_world_bounds=lambda: (
+                np.array([-0.7, 1.70, 0.0]),
+                np.array([0.7, 2.17, 0.8]),
+            )
+        )
+        west_sideboard = SimpleNamespace(
+            compute_world_bounds=lambda: (
+                np.array([-2.43, -0.7, 0.0]),
+                np.array([-1.96, 0.7, 0.8]),
+            )
+        )
+        agent.scene = SimpleNamespace(
+            room_geometry=SimpleNamespace(length=5.0, width=4.5),
+            objects={table.object_id: table},
+        )
+
+        north_penalty = agent._dining_sideboard_wall_penalty(north_sideboard)
+        west_penalty = agent._dining_sideboard_wall_penalty(west_sideboard)
+
+        self.assertEqual(north_penalty, 0.0)
+        self.assertEqual(west_penalty, 1.0)
 
     @unittest.skipIf(
         StatefulFurnitureAgent is None,

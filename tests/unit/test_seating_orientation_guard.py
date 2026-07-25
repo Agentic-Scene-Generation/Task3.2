@@ -115,6 +115,63 @@ def test_wall_chairs_just_outside_old_ratio_are_backed_and_face_inward() -> None
         assert abs(chair_bounds[0][0] - wall_bounds[1][0] - 0.03) < 1e-7
 
 
+def test_stool_at_wall_is_backed_and_faces_inward() -> None:
+    stool = _object(
+        "stool_0", ObjectType.FURNITURE, (-2.0, 0.0, 0.45), (0.55, 0.55, 0.9)
+    )
+    west_wall = _object(
+        "west_wall", ObjectType.WALL, (-2.5, 0.0, 1.35), (0.05, 4.5, 2.7)
+    )
+
+    fixes = align_seating_to_nearest_surface(_scene(stool, west_wall))
+
+    assert [(fix.subject_id, fix.target_id) for fix in fixes] == [
+        ("stool_0", "west_wall")
+    ]
+    front = stool.transform.rotation().matrix() @ np.array([0.0, 1.0, 0.0])
+    np.testing.assert_allclose(front[:2], [1.0, 0.0], atol=1e-7)
+
+
+def test_edge_stool_with_one_footprint_gap_is_snapped_to_wall() -> None:
+    stool = _object(
+        "stool_0", ObjectType.FURNITURE, (-1.9, 0.0, 0.45), (0.55, 0.55, 0.9)
+    )
+    west_wall = _object(
+        "west_wall", ObjectType.WALL, (-2.5, 0.0, 1.35), (0.05, 4.5, 2.7)
+    )
+
+    fixes = align_seating_to_nearest_surface(_scene(stool, west_wall))
+
+    assert [(fix.subject_id, fix.target_id) for fix in fixes] == [
+        ("stool_0", "west_wall")
+    ]
+    stool_bounds = stool.compute_world_bounds()
+    wall_bounds = west_wall.compute_world_bounds()
+    assert stool_bounds is not None and wall_bounds is not None
+    assert abs(stool_bounds[0][0] - wall_bounds[1][0] - 0.03) < 1e-7
+    front = stool.transform.rotation().matrix() @ np.array([0.0, 1.0, 0.0])
+    np.testing.assert_allclose(front[:2], [1.0, 0.0], atol=1e-7)
+
+
+def test_dining_chair_near_wall_remains_table_relative() -> None:
+    chair = _object(
+        "dining_chair_0", ObjectType.FURNITURE, (-1.9, 0.0, 0.45), (0.6, 0.6, 0.9)
+    )
+    table = _object(
+        "dining_table_0", ObjectType.FURNITURE, (-0.9, 0.0, 0.4), (1.6, 0.9, 0.8)
+    )
+    west_wall = _object(
+        "west_wall", ObjectType.WALL, (-2.5, 0.0, 1.35), (0.05, 4.5, 2.7)
+    )
+
+    fixes = align_seating_to_nearest_surface(_scene(chair, table, west_wall))
+
+    assert [(fix.subject_id, fix.target_id) for fix in fixes] == [
+        ("dining_chair_0", "dining_table_0")
+    ]
+    assert _front_angle_to_target_deg(chair, table) < 1e-6
+
+
 def test_seat_within_forty_five_degrees_is_unchanged() -> None:
     chair = _object(
         "armchair_0",

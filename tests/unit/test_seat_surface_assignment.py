@@ -62,7 +62,9 @@ def _object(
     }
 
 
-def _case(objects: list[dict], task: str = "A classroom with work desks and chairs") -> dict:
+def _case(
+    objects: list[dict], task: str = "A classroom with work desks and chairs"
+) -> dict:
     return {
         "task_instruction": task,
         "room_type": "classroom" if "classroom" in task else "office",
@@ -184,6 +186,59 @@ def test_desk_slot_side_comes_from_semantic_front_not_bad_chair_position() -> No
     assert assignment.target_yaw_deg == 0.0
 
 
+def test_desk_slot_respects_room_boundary_when_front_side_is_outside() -> None:
+    objects = [
+        _object("desk_north", "desk", (0.0, 1.6), (1.2, 0.7), yaw=0.0),
+        _object("office_seat", "office_chair", (0.0, 1.0), (0.5, 0.5), yaw=0.0),
+        {
+            "id": "wall_west",
+            "category": "wall",
+            "category_norm": "wall",
+            "bbox_world": {
+                "center": [-2.4, 0.0, 1.25],
+                "size": [0.2, 4.8, 2.5],
+            },
+        },
+        {
+            "id": "wall_east",
+            "category": "wall",
+            "category_norm": "wall",
+            "bbox_world": {
+                "center": [2.4, 0.0, 1.25],
+                "size": [0.2, 4.8, 2.5],
+            },
+        },
+        {
+            "id": "wall_south",
+            "category": "wall",
+            "category_norm": "wall",
+            "bbox_world": {
+                "center": [0.0, -2.4, 1.25],
+                "size": [4.8, 0.2, 2.5],
+            },
+        },
+        {
+            "id": "wall_north",
+            "category": "wall",
+            "category_norm": "wall",
+            "bbox_world": {
+                "center": [0.0, 2.4, 1.25],
+                "size": [4.8, 0.2, 2.5],
+            },
+        },
+    ]
+
+    assignment = assign_work_seats_to_surfaces(
+        objects,
+        task_instruction="An office workstation",
+        room_type="office",
+    )[0]
+
+    assert assignment.side == "back"
+    assert assignment.target_center_xy[1] < 1.6
+    assert assignment.target_yaw_deg == 0.0
+
+
 def test_assignment_check_fails_far_pair_and_passes_exact_slot() -> None:
     objects = [
         _object("desk_alpha", "desk", (0.0, 0.0), (1.2, 0.7)),
@@ -191,7 +246,9 @@ def test_assignment_check_fails_far_pair_and_passes_exact_slot() -> None:
     ]
     case = _case(objects)
     checks = build_functional_dependency_checks(case)
-    check = next(item for item in checks if item.get("check_source") == ASSIGNMENT_SOURCE)
+    check = next(
+        item for item in checks if item.get("check_source") == ASSIGNMENT_SOURCE
+    )
     case["checks"] = checks
     store = load_geometry(case)
     assert store is not None
@@ -242,3 +299,24 @@ def test_unmatched_work_seat_does_not_reuse_an_assigned_surface() -> None:
 
     assert len(seating_checks) == 2
     assert len({check["target_ids"][0] for check in seating_checks}) == 2
+
+
+def test_dining_task_chairs_are_not_work_seats() -> None:
+    objects = [
+        _object("table_0", "table", (0.0, 0.0), (1.4, 0.8)),
+        _object(
+            "task_chair_0",
+            "chair",
+            (0.0, -1.0),
+            (0.5, 0.5),
+            target_relations=["table"],
+        ),
+    ]
+    case = _case(objects, task="A dining room with one table and one chair")
+    case["room_type"] = "dining_room"
+
+    checks = build_functional_dependency_checks(case)
+
+    assert not any(
+        check.get("relation_type") == "seating_to_work_surface" for check in checks
+    )

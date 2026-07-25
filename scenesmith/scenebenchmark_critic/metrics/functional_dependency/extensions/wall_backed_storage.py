@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+
 from typing import Any
 
 from scenesmith.scenebenchmark_critic.core.geometry import (
@@ -42,10 +43,21 @@ def evaluate_wall_backed_storage_alignment(
         if not _is_wall_backed_storage(obj):
             continue
         center = bbox_center_xy(obj)
-        candidates = _candidate_poses(obj, walls, room_center)
+        dining_context = _dining_sideboard_context(obj, objects)
+        candidates = _candidate_poses(
+            obj,
+            walls,
+            room_center,
+            dining_context=dining_context,
+        )
         if center is None or not candidates:
             continue
-        nearest = min(candidates, key=lambda item: item["translation_m"])
+        preferred = [
+            item
+            for item in candidates
+            if float(item.get("dining_table_wall_error_deg", 0.0)) <= 20.0
+        ]
+        nearest = min(preferred or candidates, key=lambda item: item["translation_m"])
         gap = float(nearest["wall_gap_m"])
         front_error = float(nearest["front_error_deg"])
         if gap <= 0.1 and front_error <= 20.0:
@@ -122,6 +134,8 @@ def _candidate_poses(
     obj: dict[str, Any],
     walls: list[dict[str, Any]],
     room_center: tuple[float, float],
+    *,
+    dining_context: tuple[tuple[float, float], tuple[float, float]] | None = None,
 ) -> list[dict[str, Any]]:
     center = bbox_center_xy(obj)
     polygon = object_footprint_polygon(obj) or []
@@ -162,6 +176,11 @@ def _candidate_poses(
         axis_y = (-math.sin(candidate_yaw), math.cos(candidate_yaw))
         normal = (1.0, 0.0) if normal_index == 0 else (0.0, 1.0)
         tangent = (0.0, 1.0) if normal_index == 0 else (1.0, 0.0)
+        dining_wall_error = (
+            _axis_alignment_error_deg(tangent, dining_context[1])
+            if dining_context is not None
+            else 0.0
+        )
         normal_half = (
             abs(_dot(axis_x, normal)) * width + abs(_dot(axis_y, normal)) * depth
         ) / 2.0
@@ -171,9 +190,14 @@ def _candidate_poses(
         target = [float(center[0]), float(center[1])]
         target[normal_index] = wall_coord + inward * (wall_half + normal_half + 0.02)
         tangent_limit = max(0.0, wall_tangent_half - tangent_half - 0.05)
+        desired_tangent = (
+            dining_context[0][tangent_index]
+            if dining_context is not None and dining_wall_error <= 20.0
+            else target[tangent_index]
+        )
         target[tangent_index] = min(
             max(
-                target[tangent_index],
+                desired_tangent,
                 float(wall_center[tangent_index]) - tangent_limit,
             ),
             float(wall_center[tangent_index]) + tangent_limit,
@@ -190,16 +214,51 @@ def _candidate_poses(
                 ),
                 "wall_gap_m": round(current_gap, 6),
                 "translation_m": round(translation, 6),
+                "dining_table_wall_error_deg": round(dining_wall_error, 6),
             }
         )
     candidates.sort(
         key=lambda item: (
+            float(item["dining_table_wall_error_deg"]) > 20.0,
             item["translation_m"],
             abs((float(item["target_yaw_deg"]) - yaw_deg + 180.0) % 360.0 - 180.0),
             item["wall_id"],
         )
     )
     return candidates[:8]
+
+
+def _dining_sideboard_context(
+    storage: dict[str, Any],
+    objects: list[dict[str, Any]],
+) -> tuple[tuple[float, float], tuple[float, float]] | None:
+    """Return the dining-table center and long axis for sideboard wall selection."""
+    if object_category(storage) not in {"credenza", "sideboard"}:
+        return None
+    table = next(
+        (obj for obj in objects if object_category(obj) == "dining_table"),
+        None,
+    )
+    if table is None:
+        return None
+    center = bbox_center_xy(table)
+    polygon = object_footprint_polygon(table) or []
+    if center is None or len(polygon) < 3:
+        return None
+    yaw = math.radians(float(table.get("yaw_deg") or 0.0))
+    local_x = (math.cos(yaw), math.sin(yaw))
+    local_y = (-math.sin(yaw), math.cos(yaw))
+    long_axis = (
+        local_x if _extent(polygon, local_x) >= _extent(polygon, local_y) else local_y
+    )
+    return center, long_axis
+
+
+def _axis_alignment_error_deg(
+    first: tuple[float, float], second: tuple[float, float]
+) -> float:
+    dot = abs(_dot(first, second))
+    return math.degrees(math.acos(max(-1.0, min(1.0, dot))))
 
 
 def _extent(points: list[tuple[float, float]], axis: tuple[float, float]) -> float:

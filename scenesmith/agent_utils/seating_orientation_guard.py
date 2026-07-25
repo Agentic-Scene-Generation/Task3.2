@@ -54,7 +54,10 @@ def align_seating_to_nearest_surface(
     *,
     max_target_distance_m: float = 2.0,
     repair_angle_threshold_deg: float = 45.0,
-    wall_anchor_gap_ratio: float = 0.55,
+    # Generated furniture can start roughly one seat-depth away from its
+    # intended wall.  Keep this relative to the asset rather than using a
+    # case-specific absolute gap, then snap the final pose to the wall.
+    wall_anchor_gap_ratio: float = 1.0,
     standalone_surface_gap_ratio: float = 0.5,
     wall_preference_margin_ratio: float = 0.2,
 ) -> list[SeatingOrientationFix]:
@@ -76,8 +79,13 @@ def align_seating_to_nearest_surface(
             peer_seating=seating,
         )
         target = _nearest_surface(seat, surfaces, max_distance_m=max_target_distance_m)
+        # Dining-table seats remain table-relative even when an outer slot is
+        # close to a room wall.  A wall-backed pose would destroy the complete
+        # one-seat-per-edge arrangement repaired by the critic.
+        target_is_dining_table = target is not None and _is_dining_table(target)
         if target is None or (
             wall_target is not None
+            and not target_is_dining_table
             and _is_standalone_wall_seating(
                 seat,
                 wall_target,
@@ -357,7 +365,18 @@ def _aabb_gap_xy(
 
 def _is_wall_anchor_candidate(obj: SceneObject) -> bool:
     tokens = _object_tokens(obj)
-    return bool(tokens & {"armchair", "chair", "dining_chair", "office_chair"})
+    return bool(
+        tokens
+        & {
+            "armchair",
+            "bar_stool",
+            "bench",
+            "chair",
+            "dining_chair",
+            "office_chair",
+            "stool",
+        }
+    )
 
 
 def _nearest_surface(
@@ -408,6 +427,11 @@ def _is_seating(obj: SceneObject) -> bool:
 def _is_functional_surface(obj: SceneObject) -> bool:
     tokens = _object_tokens(obj)
     return bool(tokens & SURFACE_TOKENS)
+
+
+def _is_dining_table(obj: SceneObject) -> bool:
+    tokens = _object_tokens(obj)
+    return "dining_table" in tokens or ("dining" in tokens and "table" in tokens)
 
 
 def _object_tokens(obj: SceneObject) -> set[str]:

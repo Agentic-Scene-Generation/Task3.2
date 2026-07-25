@@ -4,9 +4,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from scenesmith.scenebenchmark_critic.metrics.interaction_clearance import (
-    evaluator as clearance_source,
-)
 from scenesmith.scenebenchmark_critic.core.geometry import (
     bbox_gap_xy,
     distance_xy,
@@ -19,6 +16,9 @@ from scenesmith.scenebenchmark_critic.metrics.functional_dependency.constants im
     DINING_TABLES,
     LAMP_SUBJECT_REJECT_HINTS,
 )
+from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.manipuland_completeness import (
+    _is_dining_seat,
+)
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.relations import (
     _infer_relation_type,
     _relation_target_is_valid,
@@ -26,6 +26,8 @@ from scenesmith.scenebenchmark_critic.metrics.functional_dependency.relations im
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.seat_surface_assignment import (
     ASSIGNMENT_SOURCE,
     assign_work_seats_to_surfaces,
+    is_dining_context,
+    room_bounds_from_case_pack,
     work_seat_candidates,
 )
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.semantics import (
@@ -36,6 +38,9 @@ from scenesmith.scenebenchmark_critic.metrics.functional_dependency.semantics im
 )
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.support import (
     evaluate_support_relation,
+)
+from scenesmith.scenebenchmark_critic.metrics.interaction_clearance import (
+    evaluator as clearance_source,
 )
 
 ACCESS_AFFORDANCES = {"sittable", "openable", "supportable", "sleepable", "graspable"}
@@ -213,6 +218,17 @@ def build_checks(
                 room_type=str(case_pack.get("room_type") or ""),
             )
         }
+        if is_dining_context(
+            task_instruction=str(case_pack.get("task_instruction") or ""),
+            room_type=str(case_pack.get("room_type") or ""),
+        ):
+            # Dining seats can carry generic/task-chair metadata from the asset
+            # library. Do not let that metadata turn them into work seats.
+            work_cohort_ids.update(
+                str(obj.get("id") or "")
+                for obj in objects.values()
+                if _is_dining_seat(obj)
+            )
         checks.extend(
             _build_explicit_target_relation_checks(
                 objects,
@@ -683,6 +699,7 @@ def _build_seat_surface_assignment_checks(
         objects,
         task_instruction=str(case_pack.get("task_instruction") or ""),
         room_type=str(case_pack.get("room_type") or ""),
+        room_bounds=room_bounds_from_case_pack(case_pack),
     )
     for assignment in assignments:
         chair = objects.get(assignment.seat_id)

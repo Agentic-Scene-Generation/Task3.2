@@ -41,10 +41,6 @@ from scenesmith.agent_utils.reachability import (
     compute_reachability,
     format_reachability_for_critic,
 )
-from scenesmith.scene_expert.repair_taxonomy import (
-    FailureCategory,
-    build_repair_plan,
-)
 from scenesmith.agent_utils.room import (
     AgentType,
     ObjectType,
@@ -60,6 +56,9 @@ from scenesmith.agent_utils.sdf_generator import generate_drake_sdf
 from scenesmith.agent_utils.stage_placement_order_config import (
     append_placement_order_reference,
 )
+from scenesmith.agent_utils.seating_orientation_guard import (
+    align_seating_to_nearest_surface,
+)
 from scenesmith.agent_utils.thin_covering_generator import generate_thin_covering_sdf
 from scenesmith.agent_utils.workflow_tools import WorkflowTools
 from scenesmith.furniture_agents.base_furniture_agent import BaseFurnitureAgent
@@ -67,6 +66,7 @@ from scenesmith.furniture_agents.tools.furniture_tools import FurnitureTools
 from scenesmith.furniture_agents.tools.scene_tools import SceneTools
 from scenesmith.furniture_agents.tools.vision_tools import VisionTools
 from scenesmith.prompts.registry import FurnitureAgentPrompts
+from scenesmith.scene_expert.repair_taxonomy import FailureCategory, build_repair_plan
 from scenesmith.utils.logging import BaseLogger
 
 console_logger = logging.getLogger(__name__)
@@ -96,6 +96,15 @@ REPAIR_ASSET_SPECS: dict[str, tuple[str, list[float]]] = {
     "floor_lamp": ("Slim standing floor lamp", [0.40, 0.40, 1.60]),
     "tv_stand": ("Low media console TV stand", [1.60, 0.45, 0.65]),
     "sideboard": ("Compact dining room sideboard", [1.40, 0.45, 0.80]),
+}
+
+_WALL_BACKED_STORAGE_CATEGORIES = {
+    "bookshelf",
+    "cabinet",
+    "dresser",
+    "sideboard",
+    "tv_stand",
+    "wardrobe",
 }
 
 
@@ -400,6 +409,16 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 "Deterministic furniture repair before final critique: %s",
                 "; ".join(pre_final_actions),
             )
+        self._converge_prompt_required_inventory(source="before final critique")
+
+        seating_fixes = align_seating_to_nearest_surface(scene)
+        if seating_fixes:
+            console_logger.info(
+                "Deterministic seating orientation guard before final critique: %s",
+                "; ".join(
+                    f"{fix.subject_id}->{fix.target_id}" for fix in seating_fixes
+                ),
+            )
 
         # Compute final critique and scores for completed scene.
         # Check if scene changed since last checkpoint to avoid redundant critique.
@@ -430,6 +449,10 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
 
         # Validate final scene and save scores.
         await self._finalize_scene_and_scores()
+        # Finalization may restore an earlier best-scoring checkpoint. Enforce
+        # requested inventory once more so a checkpoint with an unpenalized
+        # duplicate cannot become the persisted furniture-stage scene.
+        self._converge_prompt_required_inventory(source="after finalization")
 
     def _get_final_scores_directory(self) -> Path:
         """Get the directory path for saving final furniture placement state.
@@ -553,6 +576,11 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 actions.append(
                     "moved generic furniture away from room walls to the deterministic margin"
                 )
+            removed_excess = self._remove_excess_required_furniture(required_counts)
+            if removed_excess:
+                actions.append(
+                    f"removed {removed_excess} duplicate prompt-required furniture asset(s)"
+                )
             return bool(actions), actions
 
         if self._anchor_existing_bed():
@@ -579,7 +607,140 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         ):
             actions.append("moved wardrobe to a deterministic wall/corner anchor")
 
+        removed_excess = self._remove_excess_required_furniture(required_counts)
+        if removed_excess:
+            actions.append(
+                f"removed {removed_excess} duplicate prompt-required furniture asset(s)"
+            )
+
         return bool(actions), actions
+
+    def _remove_excess_required_furniture(self, required_counts: dict[str, int]) -> int:
+        """Converge prompt-counted inventory after repair/fallback asset creation."""
+        if self.scene is None or not hasattr(self.scene, "objects"):
+            return 0
+        removed = 0
+        for category, required in required_counts.items():
+            objects = self._furniture_by_category(category)
+            excess = len(objects) - int(required or 0)
+            if excess <= 0:
+                continue
+            objects.sort(key=lambda obj: self._duplicate_keep_key(category, obj))
+            for obj in objects[-excess:]:
+                self.scene.remove_object(obj.object_id)
+                removed += 1
+                console_logger.info(
+                    "Deterministic inventory repair removed excess %s asset %s",
+                    category,
+                    obj.object_id,
+                )
+        return removed
+
+    def _converge_prompt_required_inventory(self, *, source: str) -> int:
+        """Remove prompt-counted duplicates independently of hard-check status."""
+        controller = getattr(self, "furniture_safety_controller", None)
+        required_counts = getattr(controller, "required_counts", {}) or {}
+        removed = self._remove_excess_required_furniture(required_counts)
+        if removed:
+            console_logger.info(
+                "Deterministic inventory convergence %s removed %d duplicate "
+                "prompt-required furniture asset(s)",
+                source,
+                removed,
+            )
+            self.rendering_manager.clear_cache()
+            self._reset_critic_candidate_cache()
+        return removed
+
+    def _duplicate_keep_key(self, category: str, obj: SceneObject) -> tuple[Any, ...]:
+        """Prefer normal, wall-backed storage when a counted category is duplicated."""
+        metadata = getattr(obj, "metadata", {}) or {}
+        placeholder = bool(metadata.get("repair_placeholder"))
+        dining_wall_penalty = (
+            self._dining_sideboard_wall_penalty(obj)
+            if category in {"credenza", "sideboard"}
+            else 0.0
+        )
+        wall_distance = (
+            self._nearest_room_boundary_distance(obj)
+            if category in _WALL_BACKED_STORAGE_CATEGORIES
+            else 0.0
+        )
+        return (placeholder, dining_wall_penalty, wall_distance, str(obj.object_id))
+
+    def _dining_sideboard_wall_penalty(self, obj: SceneObject) -> float:
+        """Prefer the wall parallel to the dining table's long axis."""
+        if self.scene is None or getattr(self.scene, "room_geometry", None) is None:
+            return 0.0
+        table = next(
+            (
+                candidate
+                for candidate in self.scene.objects.values()
+                if "dining"
+                in (
+                    f"{candidate.object_id} {candidate.name} "
+                    f"{candidate.description}"
+                ).lower()
+                and "table"
+                in (
+                    f"{candidate.object_id} {candidate.name} "
+                    f"{candidate.description}"
+                ).lower()
+            ),
+            None,
+        )
+        bounds = self._room_bounds_xy()
+        object_bounds = obj.compute_world_bounds()
+        if (
+            table is None
+            or bounds is None
+            or object_bounds is None
+            or table.bbox_min is None
+            or table.bbox_max is None
+        ):
+            return 0.0
+
+        min_x, min_y, max_x, max_y = bounds
+        lower, upper = object_bounds
+        boundary_gaps = {
+            "west": abs(float(lower[0]) - min_x),
+            "east": abs(max_x - float(upper[0])),
+            "south": abs(float(lower[1]) - min_y),
+            "north": abs(max_y - float(upper[1])),
+        }
+        nearest_wall = min(boundary_gaps, key=boundary_gaps.get)
+        wall_tangent = (
+            np.array([0.0, 1.0])
+            if nearest_wall in {"west", "east"}
+            else np.array([1.0, 0.0])
+        )
+
+        local_size = np.asarray(table.bbox_max) - np.asarray(table.bbox_min)
+        local_long_axis = (
+            np.array([1.0, 0.0, 0.0])
+            if float(local_size[0]) >= float(local_size[1])
+            else np.array([0.0, 1.0, 0.0])
+        )
+        world_long_axis = table.transform.rotation().matrix() @ local_long_axis
+        alignment = abs(float(np.dot(world_long_axis[:2], wall_tangent)))
+        return round(1.0 - min(1.0, alignment), 6)
+
+    def _nearest_room_boundary_distance(self, obj: SceneObject) -> float:
+        bounds = self._room_bounds_xy()
+        object_bounds = obj.compute_world_bounds()
+        if bounds is None or object_bounds is None:
+            return float("inf")
+        min_x, min_y, max_x, max_y = bounds
+        lower, upper = object_bounds
+        return max(
+            0.0,
+            min(
+                float(lower[0]) - min_x,
+                max_x - float(upper[0]),
+                float(lower[1]) - min_y,
+                max_y - float(upper[1]),
+            ),
+        )
 
     def _repair_generic_wall_collisions(self) -> bool:
         """Move non-bedroom furniture back inside a conservative wall margin.

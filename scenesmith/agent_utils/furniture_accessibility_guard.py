@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 import math
 
-from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
@@ -52,7 +51,6 @@ class FurnitureAccessibilityFix:
 
 @dataclass(frozen=True)
 class _CandidateScore:
-    scene: RoomScene
     xy: tuple[float, float]
     fail_count: int
     degraded_count: int
@@ -61,18 +59,78 @@ class _CandidateScore:
     subject_ratio: float
 
 
+@dataclass
+class _ScenePoseSnapshot:
+    """Pose-only rollback state; never clone meshes or support-surface data."""
+
+    object_transforms: dict[UniqueID, RigidTransform]
+    surface_states: dict[
+        UniqueID,
+        tuple[list[Any], tuple[tuple[Any, RigidTransform], ...]],
+    ]
+
+    @classmethod
+    def capture(cls, scene: RoomScene) -> "_ScenePoseSnapshot":
+        object_transforms: dict[UniqueID, RigidTransform] = {}
+        surface_states: dict[
+            UniqueID,
+            tuple[list[Any], tuple[tuple[Any, RigidTransform], ...]],
+        ] = {}
+        for object_id, obj in scene.objects.items():
+            object_transforms[object_id] = RigidTransform(
+                R=obj.transform.rotation(), p=obj.transform.translation()
+            )
+            surfaces = obj.support_surfaces
+            surface_states[object_id] = (
+                surfaces,
+                tuple(
+                    (
+                        surface,
+                        RigidTransform(
+                            R=surface.transform.rotation(),
+                            p=surface.transform.translation(),
+                        ),
+                    )
+                    for surface in surfaces
+                ),
+            )
+        return cls(object_transforms, surface_states)
+
+    def restore(self, scene: RoomScene) -> None:
+        for object_id, transform in self.object_transforms.items():
+            obj = scene.objects.get(object_id)
+            if obj is None:
+                continue
+            obj.transform = transform
+            surfaces, states = self.surface_states[object_id]
+            surfaces[:] = [surface for surface, _ in states]
+            obj.support_surfaces = surfaces
+            for surface, surface_transform in states:
+                surface.transform = surface_transform
+
+
 def improve_storage_front_access(
     scene: RoomScene,
     *,
     config: CriticConfig | Any | None = None,
     max_translation_m: float = 1.0,
     step_m: float = 0.2,
+    max_candidate_evaluations: int = 32,
+    repair_degraded: bool = False,
 ) -> list[FurnitureAccessibilityFix]:
-    """Move storage-like furniture laterally when SceneBenchmark front access fails."""
+    """Move storage-like furniture laterally when front access is insufficient.
+
+    Degraded access remains accepted by default.  Coordinated relation repairs
+    can opt in to improving it when moving an anchor creates a new bottleneck.
+    """
     critic_config = _spatial_config(config)
     baseline_payload = _evaluate(scene, critic_config)
     baseline_score = _score_scene(baseline_payload)
-    failing_subjects = _failing_storage_subjects(scene, baseline_payload)
+    failing_subjects = _failing_storage_subjects(
+        scene,
+        baseline_payload,
+        include_degraded=repair_degraded,
+    )
     if not failing_subjects:
         return []
 
@@ -80,6 +138,18 @@ def improve_storage_front_access(
     working_scene = scene
     working_payload = baseline_payload
     working_score = baseline_score
+    try:
+        candidate_budget = max(
+            1,
+            int(
+                critic_config.extra.get(
+                    "accessibility_max_candidate_evaluations",
+                    max_candidate_evaluations,
+                )
+            ),
+        )
+    except (TypeError, ValueError):
+        candidate_budget = max(1, max_candidate_evaluations)
 
     for subject_id in failing_subjects:
         subject = working_scene.objects.get(UniqueID(subject_id))
@@ -92,15 +162,18 @@ def improve_storage_front_access(
             config=critic_config,
             max_translation_m=max_translation_m,
             step_m=step_m,
+            max_candidate_evaluations=candidate_budget,
         )
         if best is None:
             continue
         old_xy = tuple(float(v) for v in subject.transform.translation()[:2])
-        moved_subject = best.scene.objects[UniqueID(subject_id)]
-        new_xy = tuple(float(v) for v in moved_subject.transform.translation()[:2])
-        _copy_scene_object_poses_and_surfaces(
-            source_scene=best.scene,
-            target_scene=working_scene,
+        new_xy = best.xy
+        new_position = subject.transform.translation().copy()
+        new_position[:2] = np.asarray(new_xy, dtype=float)
+        _move_object_with_surfaces(
+            working_scene,
+            subject.object_id,
+            new_position,
         )
         fixes.append(
             FurnitureAccessibilityFix(
@@ -169,14 +242,18 @@ def _score_scene(payload: dict[str, Any]) -> tuple[int, int, float]:
 
 
 def _failing_storage_subjects(
-    scene: RoomScene, payload: dict[str, Any]
+    scene: RoomScene,
+    payload: dict[str, Any],
+    *,
+    include_degraded: bool = False,
 ) -> list[str]:
     subjects: list[str] = []
     seen: set[str] = set()
     for result in payload.get("results", []):
         if result.get("metric") != "spatial_accessibility":
             continue
-        if result.get("label") != "fail":
+        issue_labels = {"fail", "degraded"} if include_degraded else {"fail"}
+        if result.get("label") not in issue_labels:
             continue
         subject_id = str(result.get("primary_object") or result.get("subject_id") or "")
         if not subject_id or subject_id in seen:
@@ -198,38 +275,54 @@ def _best_candidate(
     config: CriticConfig,
     max_translation_m: float,
     step_m: float,
+    max_candidate_evaluations: int = 32,
 ) -> _CandidateScore | None:
     directions = _candidate_directions(scene, subject)
     if not directions:
         return None
 
     best: _CandidateScore | None = None
+    candidate_evaluations = 0
     for direction in directions:
         for distance in _candidate_distances(max_translation_m, step_m):
-            candidate_scene = deepcopy(scene)
-            candidate = candidate_scene.objects[subject.object_id]
-            old_pos = candidate.transform.translation()
-            new_pos = old_pos.copy()
-            new_pos[:2] = old_pos[:2] + direction * distance
-            if not _within_floor_bounds(candidate_scene, candidate, new_pos):
-                continue
-            _move_object_with_surfaces(candidate_scene, candidate.object_id, new_pos)
-            payload = _evaluate(candidate_scene, config)
-            fail_count, degraded_count, score = _score_scene(payload)
-            subject_label, subject_ratio = _subject_access_result(
-                payload, str(subject.object_id)
-            )
-            candidate_score = _CandidateScore(
-                scene=candidate_scene,
-                xy=(float(new_pos[0]), float(new_pos[1])),
-                fail_count=fail_count,
-                degraded_count=degraded_count,
-                score=score,
-                subject_label=subject_label,
-                subject_ratio=subject_ratio,
-            )
-            if _candidate_is_better(candidate_score, best, current_score):
-                best = candidate_score
+            if candidate_evaluations >= max_candidate_evaluations:
+                break
+            snapshot = _ScenePoseSnapshot.capture(scene)
+            try:
+                candidate = scene.objects[subject.object_id]
+                old_pos = candidate.transform.translation()
+                new_pos = old_pos.copy()
+                new_pos[:2] = old_pos[:2] + direction * distance
+                if not _within_floor_bounds(scene, candidate, new_pos):
+                    continue
+                _move_object_with_surfaces(scene, candidate.object_id, new_pos)
+                candidate_evaluations += 1
+                payload = _evaluate(scene, config)
+                fail_count, degraded_count, score = _score_scene(payload)
+                subject_label, subject_ratio = _subject_access_result(
+                    payload, str(subject.object_id)
+                )
+                candidate_score = _CandidateScore(
+                    xy=(float(new_pos[0]), float(new_pos[1])),
+                    fail_count=fail_count,
+                    degraded_count=degraded_count,
+                    score=score,
+                    subject_label=subject_label,
+                    subject_ratio=subject_ratio,
+                )
+                if _candidate_is_better(candidate_score, best, current_score):
+                    best = candidate_score
+            finally:
+                snapshot.restore(scene)
+        if candidate_evaluations >= max_candidate_evaluations:
+            break
+
+    console_logger.debug(
+        "Furniture accessibility candidate search evaluated %d pose(s) for %s (budget=%d)",
+        candidate_evaluations,
+        subject.object_id,
+        max_candidate_evaluations,
+    )
 
     if best is None:
         return None
@@ -365,8 +458,12 @@ def _within_floor_bounds(
     half_extent = _world_half_extent_xy(obj)
     margin = 0.05
     return (
-        min_x + half_extent[0] + margin <= new_position[0] <= max_x - half_extent[0] - margin
-        and min_y + half_extent[1] + margin <= new_position[1] <= max_y - half_extent[1] - margin
+        min_x + half_extent[0] + margin
+        <= new_position[0]
+        <= max_x - half_extent[0] - margin
+        and min_y + half_extent[1] + margin
+        <= new_position[1]
+        <= max_y - half_extent[1] - margin
     )
 
 
@@ -415,17 +512,6 @@ def _move_children_on_surfaces(
         child.transform = delta @ child.transform
         for surface in child.support_surfaces:
             surface.transform = delta @ surface.transform
-
-
-def _copy_scene_object_poses_and_surfaces(
-    *, source_scene: RoomScene, target_scene: RoomScene
-) -> None:
-    for object_id, source_obj in source_scene.objects.items():
-        target_obj = target_scene.objects.get(object_id)
-        if target_obj is None:
-            continue
-        target_obj.transform = source_obj.transform
-        target_obj.support_surfaces = deepcopy(source_obj.support_surfaces)
 
 
 def _is_storage_like(obj: SceneObject) -> bool:

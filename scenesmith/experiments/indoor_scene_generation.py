@@ -11,7 +11,10 @@ import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 from threading import Lock
-from typing import Callable
+
+# SceneExpert hook runner (imported lazily to avoid circular imports at module level)
+# TYPE_CHECKING block keeps the type hint available without a hard import.
+from typing import TYPE_CHECKING, Callable
 
 from agents import custom_span, trace
 from omegaconf import DictConfig, OmegaConf
@@ -56,10 +59,6 @@ from scenesmith.utils.openai import configure_reasoning_persistence
 from scenesmith.utils.parallel import run_parallel_isolated
 from scenesmith.utils.print_utils import bold_green, yellow
 from scenesmith.wall_agents.stateful_wall_agent import StatefulWallAgent
-
-# SceneExpert hook runner (imported lazily to avoid circular imports at module level)
-# TYPE_CHECKING block keeps the type hint available without a hard import.
-from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from scenesmith.scene_expert.hooks import SceneExpertHookRunner
@@ -868,6 +867,12 @@ def _generate_room(
         if critic_config_from_any(cfg_dict).enabled:
             improve_storage_front_access(scene, config=cfg_dict)
             improve_furniture_relations(scene, config=cfg_dict)
+
+        # Relation repair may move or rotate a standalone wall seat while
+        # evaluating a candidate. Re-apply the geometry invariant last so the
+        # persisted furniture checkpoint cannot regress to a seat facing the
+        # wall or floating away from it.
+        align_seating_to_nearest_surface(scene)
 
         # Always save state after furniture stage (unconditional for resumability).
         logger.log_scene(scene=scene, name="scene_after_furniture")

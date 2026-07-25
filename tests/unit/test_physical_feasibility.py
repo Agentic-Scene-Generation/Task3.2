@@ -14,6 +14,7 @@ from scenesmith.agent_utils.house import RoomGeometry
 from scenesmith.agent_utils.physical_feasibility import (
     _apply_floor_penetration_fallback,
     _get_colliding_object_ids,
+    _restore_collectively_unstable_instances,
     apply_forward_simulation,
     apply_non_penetration_projection,
     apply_physical_feasibility_postprocessing,
@@ -826,6 +827,47 @@ class TestFallenFurnitureRemoval(PhysicalFeasibilityTestCase):
             # Object should NOT be removed (feature disabled).
             self.assertEqual(len(removed_ids), 0)
             self.assertIsNotNone(simulated_scene.get_object(UniqueID("tilted_box")))
+
+    def test_repeated_asset_group_is_restored_when_all_instances_tip(self) -> None:
+        """A shared broken proxy must not erase every originally upright copy."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            scene = RoomScene(
+                room_geometry=self.room_geometry,
+                scene_dir=Path(tmp_dir),
+                text_description="Repeated furniture group",
+            )
+            box_sdf_path = TEST_DATA_DIR / "simple_box.sdf"
+            upright: dict[UniqueID, RigidTransform] = {}
+            object_ids = [UniqueID("chair_0"), UniqueID("chair_1")]
+            for index, object_id in enumerate(object_ids):
+                transform = RigidTransform(p=[float(index), 0.0, 0.25])
+                scene.add_object(
+                    SceneObject(
+                        object_id=object_id,
+                        object_type=ObjectType.FURNITURE,
+                        name="chair",
+                        description="Repeated test chair",
+                        transform=transform,
+                        sdf_path=box_sdf_path,
+                    )
+                )
+                upright[object_id] = transform
+                scene.get_object(object_id).transform = RigidTransform(
+                    R=RotationMatrix(RollPitchYaw(0.0, np.pi / 2.0, 0.0)),
+                    p=transform.translation(),
+                )
+
+            restored = _restore_collectively_unstable_instances(
+                scene, upright, object_ids, tilt_threshold_degrees=45.0
+            )
+
+            self.assertEqual(restored, object_ids)
+            for object_id in object_ids:
+                self.assertAlmostEqual(
+                    compute_tilt_angle_degrees(scene.get_object(object_id).transform),
+                    0.0,
+                    places=5,
+                )
 
 
 class TestFallenManipulandRemoval(PhysicalFeasibilityTestCase):

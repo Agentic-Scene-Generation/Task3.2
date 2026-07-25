@@ -25,7 +25,12 @@ OUTPUT_ROOT="${OUTPUT_ROOT:-$PROJECT_ROOT/outputs/critic_probe/$RUN_ID}"
 SCENE_BATCH_SIZE="${SCENE_BATCH_SIZE:-1}"
 SCENE_WORKERS_PER_PROCESS="${SCENE_WORKERS_PER_PROCESS:-1}"
 CRITIC_PROBE_PARALLEL="${CRITIC_PROBE_PARALLEL:-true}"
-CRITIC_PROBE_INNER_PARALLELISM="${CRITIC_PROBE_INNER_PARALLELISM:-2}"
+# A Qwen llama-server already reserves tens of GiB in the ACP cgroup.  Keep
+# one Python scene process by default; callers can opt into more concurrency
+# explicitly after checking the allocation budget.
+CRITIC_PROBE_INNER_PARALLELISM="${CRITIC_PROBE_INNER_PARALLELISM:-1}"
+CRITIC_PROBE_MAX_SAFE_INNER_PARALLELISM="${CRITIC_PROBE_MAX_SAFE_INNER_PARALLELISM:-1}"
+CRITIC_PROBE_ALLOW_UNSAFE_PARALLELISM="${CRITIC_PROBE_ALLOW_UNSAFE_PARALLELISM:-false}"
 CRITIC_PROBE_PORT_BASE="${CRITIC_PROBE_PORT_BASE:-9000}"
 CRITIC_PROBE_PORT_BLOCK_SIZE="${CRITIC_PROBE_PORT_BLOCK_SIZE:-400}"
 CRITIC_PROBE_SHUTDOWN_GRACE_SECONDS="${CRITIC_PROBE_SHUTDOWN_GRACE_SECONDS:-30}"
@@ -52,10 +57,15 @@ DISABLE_MATERIALS="${SCENEEXPERT_DISABLE_MATERIALS:-false}"
 DISABLE_BWRAP="${SCENEEXPERT_DISABLE_BWRAP:-false}"
 HSSD_RETRIEVAL_BACKEND="${HSSD_RETRIEVAL_BACKEND:-clip}"
 HSSD_RENDERED_ASSET_CHOICE="${HSSD_RENDERED_ASSET_CHOICE:-false}"
-# os.cpu_count() sees the host's 192 logical CPUs in the CCI container, while
-# the job is limited to roughly 22 CPU cores.  Allow the caller to cap each
-# isolated convex-decomposition server without changing the stable defaults.
-CONVEX_MAX_OMP_THREADS="${SCENEEXPERT_CONVEX_MAX_OMP_THREADS:-}"
+# os.cpu_count() sees the host's 192 logical CPUs in the CCI container.  A
+# critic replay should never inherit the 32-thread YAML default implicitly:
+# each isolated decomposition server gets a small explicit cap.
+CONVEX_MAX_OMP_THREADS="${SCENEEXPERT_CONVEX_MAX_OMP_THREADS:-2}"
+
+INTERNAL_RUN_BATCH="false"
+if [ "${1:-}" = "--internal-run-batch" ]; then
+    INTERNAL_RUN_BATCH="true"
+fi
 
 # Match the classmate's vLLM run. The agent code maps these values to Qwen
 # directives: none/minimal -> /no_think, all other values -> /think.
@@ -131,11 +141,17 @@ csv_quote() {
 require_positive_integer SCENE_BATCH_SIZE "$SCENE_BATCH_SIZE"
 require_positive_integer SCENE_WORKERS_PER_PROCESS "$SCENE_WORKERS_PER_PROCESS"
 require_positive_integer CRITIC_PROBE_INNER_PARALLELISM "$CRITIC_PROBE_INNER_PARALLELISM"
+require_positive_integer CRITIC_PROBE_MAX_SAFE_INNER_PARALLELISM "$CRITIC_PROBE_MAX_SAFE_INNER_PARALLELISM"
 require_positive_integer CRITIC_PROBE_PORT_BASE "$CRITIC_PROBE_PORT_BASE"
 require_positive_integer CRITIC_PROBE_PORT_BLOCK_SIZE "$CRITIC_PROBE_PORT_BLOCK_SIZE"
 require_positive_integer CRITIC_PROBE_SHUTDOWN_GRACE_SECONDS "$CRITIC_PROBE_SHUTDOWN_GRACE_SECONDS"
 if [ -n "$CONVEX_MAX_OMP_THREADS" ]; then
     require_positive_integer SCENEEXPERT_CONVEX_MAX_OMP_THREADS "$CONVEX_MAX_OMP_THREADS"
+fi
+
+if ! CRITIC_PROBE_ALLOW_UNSAFE_PARALLELISM="$(normalize_bool "$CRITIC_PROBE_ALLOW_UNSAFE_PARALLELISM")"; then
+    echo "ERROR: CRITIC_PROBE_ALLOW_UNSAFE_PARALLELISM must be true or false" >&2
+    exit 1
 fi
 
 if [ "$CRITIC_PROBE_PORT_BLOCK_SIZE" -lt 375 ]; then
@@ -199,6 +215,13 @@ if [ "$SCENE_WORKERS_PER_PROCESS" -ne 1 ]; then
     echo "ERROR: use one worker per process to avoid fork-after-bpy-import." >&2
     exit 1
 fi
+if [ "$CRITIC_PROBE_PARALLEL" = "true" ] \
+    && [ "$CRITIC_PROBE_INNER_PARALLELISM" -gt "$CRITIC_PROBE_MAX_SAFE_INNER_PARALLELISM" ] \
+    && [ "$CRITIC_PROBE_ALLOW_UNSAFE_PARALLELISM" != "true" ]; then
+    echo "ERROR: refusing unsafe critic batch concurrency: inner=$CRITIC_PROBE_INNER_PARALLELISM (safe default max=$CRITIC_PROBE_MAX_SAFE_INNER_PARALLELISM)." >&2
+    echo "       Set CRITIC_PROBE_INNER_PARALLELISM=1, or explicitly opt in with CRITIC_PROBE_ALLOW_UNSAFE_PARALLELISM=true." >&2
+    exit 1
+fi
 if [ "$CRITIC_PROBE_PARALLEL" = "true" ] && ! command -v setsid >/dev/null 2>&1; then
     echo "ERROR: setsid is required for isolated parallel batch cleanup" >&2
     exit 1
@@ -243,6 +266,7 @@ export SCENEEXPERT_EXPERIMENT="$EXPERIMENT"
 export PYTHON_BIN MODEL_NAME RUN_ID OUTPUT_ROOT
 export SCENE_BATCH_SIZE SCENE_WORKERS_PER_PROCESS
 export CRITIC_PROBE_PARALLEL CRITIC_PROBE_INNER_PARALLELISM
+export CRITIC_PROBE_MAX_SAFE_INNER_PARALLELISM CRITIC_PROBE_ALLOW_UNSAFE_PARALLELISM
 export CRITIC_PROBE_PORT_BASE CRITIC_PROBE_PORT_BLOCK_SIZE
 export CRITIC_PROBE_SHUTDOWN_GRACE_SECONDS
 export CRITIC_PROBE_CONTINUE_ON_BATCH_FAILURE
@@ -262,6 +286,65 @@ export MANIPULAND_DESIGNER_THINKING MANIPULAND_CRITIC_THINKING
 
 mkdir -p "$OUTPUT_ROOT"
 
+read_cgroup_memory_value() {
+    local path value
+    for path in /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory/memory.limit_in_bytes; do
+        if [ -r "$path" ]; then
+            value=$(tr -d '[:space:]' < "$path")
+            if [ -n "$value" ] && [ "$value" != "max" ]; then
+                printf '%s\n' "$value"
+                return 0
+            fi
+        fi
+    done
+    return 1
+}
+
+read_cgroup_memory_current() {
+    local path value
+    for path in /sys/fs/cgroup/memory.current /sys/fs/cgroup/memory/memory.usage_in_bytes; do
+        if [ -r "$path" ]; then
+            value=$(tr -d '[:space:]' < "$path")
+            if [[ "$value" =~ ^[0-9]+$ ]]; then
+                printf '%s\n' "$value"
+                return 0
+            fi
+        fi
+    done
+    return 1
+}
+
+if [ "$INTERNAL_RUN_BATCH" = "false" ]; then
+    # Prevent two top-level probes from sharing one llama-server/cgroup.  The
+    # descriptor stays locked until this script exits, while internal batch
+    # children inherit the lock owner and do not try to acquire it again.
+    LOCK_FILE="${CRITIC_PROBE_LOCK_FILE:-${TMPDIR:-/tmp}/scenesmith_critic_probe.lock}"
+    mkdir -p "$(dirname "$LOCK_FILE")"
+    if ! command -v flock >/dev/null 2>&1; then
+        echo "ERROR: flock is required to prevent overlapping critic probes" >&2
+        exit 1
+    fi
+    exec 9>"$LOCK_FILE"
+    if ! flock -n 9; then
+        echo "ERROR: another critic probe already owns $LOCK_FILE" >&2
+        echo "       Wait for it to finish or inspect its process/log before retrying." >&2
+        exit 1
+    fi
+
+    if memory_limit_bytes=$(read_cgroup_memory_value) \
+        && memory_current_bytes=$(read_cgroup_memory_current); then
+        # Refuse a new run when less than 15% of the cgroup remains.  This is
+        # intentionally a startup guard; an explicit override is available for
+        # allocations whose memory is accounted outside this cgroup.
+        if [ "${CRITIC_PROBE_ALLOW_HIGH_MEMORY_START:-0}" != "1" ] \
+            && [ "$memory_current_bytes" -gt $((memory_limit_bytes * 85 / 100)) ]; then
+            echo "ERROR: cgroup memory is already at ${memory_current_bytes}/${memory_limit_bytes} bytes; refusing a new critic probe." >&2
+            echo "       Set CRITIC_PROBE_ALLOW_HIGH_MEMORY_START=1 only after verifying stale processes are gone." >&2
+            exit 1
+        fi
+    fi
+fi
+
 echo "========== PARALLEL CRITIC-ON PROBE =========="
 echo "project: $PROJECT_ROOT"
 echo "experiment: $EXPERIMENT"
@@ -277,6 +360,11 @@ echo "fail unresolved furniture hard constraints: $FAIL_STAGE_ON_UNRESOLVED_HARD
 echo "HSSD retrieval: backend=$HSSD_RETRIEVAL_BACKEND rendered_asset_choice=$HSSD_RENDERED_ASSET_CHOICE"
 if [ -n "$CONVEX_MAX_OMP_THREADS" ]; then
     echo "convex decomposition max OMP threads: $CONVEX_MAX_OMP_THREADS"
+fi
+if [ "$INTERNAL_RUN_BATCH" = "false" ] \
+    && memory_limit_bytes=$(read_cgroup_memory_value) \
+    && memory_current_bytes=$(read_cgroup_memory_current); then
+    echo "cgroup memory: current=$memory_current_bytes limit=$memory_limit_bytes"
 fi
 echo "thinking profile: floor_plan=${FLOOR_PLAN_DESIGNER_THINKING}/${FLOOR_PLAN_CRITIC_THINKING}, furniture=${FURNITURE_DESIGNER_THINKING}/${FURNITURE_CRITIC_THINKING}, wall=${WALL_DESIGNER_THINKING}/${WALL_CRITIC_THINKING}, ceiling=${CEILING_DESIGNER_THINKING}/${CEILING_CRITIC_THINKING}, manipuland=${MANIPULAND_DESIGNER_THINKING}/${MANIPULAND_CRITIC_THINKING}"
 echo "shared base: $BRANCH_FROM_SHARED_BASE (generate=$GENERATE_SHARED_BASE)"

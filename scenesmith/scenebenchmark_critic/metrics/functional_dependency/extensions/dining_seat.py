@@ -2,9 +2,17 @@
 
 from __future__ import annotations
 
+import itertools
 import math
+import re
+
 from typing import Any
 
+from scenesmith.scenebenchmark_critic.core.geometry import (
+    bbox_center_xy,
+    front_vector,
+    object_footprint_polygon,
+)
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.manipuland_completeness import (
     _bbox_gap_xy,
     _footprint_short_side,
@@ -12,13 +20,12 @@ from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.m
     _is_dining_table,
     _object_identity_text,
 )
-from scenesmith.scenebenchmark_critic.core.geometry import (
-    bbox_center_xy,
-    front_vector,
-    object_footprint_polygon,
+from scenesmith.scenebenchmark_critic.metrics.functional_dependency.seat_surface_assignment import (
+    is_dining_context,
 )
 
 RELATION_TYPE = "dining_seat_distribution"
+_ONE_PER_EDGE_TABLE_GAP_M = 0.05
 
 
 def evaluate_dining_seat_distribution(
@@ -31,14 +38,28 @@ def evaluate_dining_seat_distribution(
         if isinstance(obj, dict) and obj.get("id")
     ]
     objects_by_id = {str(obj["id"]): obj for obj in objects}
+    dining_context = is_dining_context(
+        task_instruction=str(case_pack.get("task_instruction") or ""),
+        room_type=str(case_pack.get("room_type") or ""),
+    )
+    one_per_edge = dining_context and _requests_one_seat_per_edge(
+        str(case_pack.get("task_instruction") or "")
+    )
     tables = [
-        obj for obj in objects if _is_dining_table(obj) and not _is_round_table(obj)
+        obj
+        for obj in objects
+        if (_is_dining_table(obj) or (dining_context and _is_generic_table(obj)))
+        and not _is_round_table(obj)
     ]
-    seats_by_table = _positionally_associated_seats(tables, objects_by_id)
+    seats_by_table = _positionally_associated_seats(
+        tables, objects_by_id, include_unassociated=one_per_edge
+    )
     results: list[dict[str, Any]] = []
     for table in tables:
         result = _evaluate_table(
-            table, seats_by_table.get(str(table["id"]), [])
+            table,
+            seats_by_table.get(str(table["id"]), []),
+            enforce_one_per_edge=one_per_edge,
         )
         if result is not None:
             results.append(result)
@@ -46,7 +67,10 @@ def evaluate_dining_seat_distribution(
 
 
 def _evaluate_table(
-    table: dict[str, Any], seats: list[dict[str, Any]]
+    table: dict[str, Any],
+    seats: list[dict[str, Any]],
+    *,
+    enforce_one_per_edge: bool = False,
 ) -> dict[str, Any] | None:
     center = bbox_center_xy(table)
     seats = [seat for seat in seats if "bench" not in _object_identity_text(seat)]
@@ -59,23 +83,48 @@ def _evaluate_table(
     depth = _footprint_extent(table, tangent_y)
     if width is None or depth is None or min(width, depth) <= 1e-6:
         return None
-    grouped: dict[str, list[tuple[dict[str, Any], float]]] = {
-        "left": [], "right": [], "front": [], "back": []
-    }
+    seat_local_positions: list[tuple[dict[str, Any], float, float]] = []
     for seat in seats:
         seat_center = bbox_center_xy(seat)
         if seat_center is None:
             continue
         dx, dy = seat_center[0] - center[0], seat_center[1] - center[1]
-        local_x = dx * tangent_x[0] + dy * tangent_x[1]
-        local_y = dx * tangent_y[0] + dy * tangent_y[1]
-        # 2026-07-15 修改原因：座椅因碰撞或净空向外拉开后，按“到无限延长
-        # 桌边直线的距离”会把短边椅误归到长边。改用有限桌边线段距离，确保
-        # 桌角之外的座椅仍由其实际相邻桌边负责，且不依赖某个场景的绝对尺寸。
-        edge, tangent_position = _nearest_table_edge(
-            local_x, local_y, width=width, depth=depth
+        seat_local_positions.append(
+            (
+                seat,
+                dx * tangent_x[0] + dy * tangent_x[1],
+                dx * tangent_y[0] + dy * tangent_y[1],
+            )
         )
-        grouped[edge].append((seat, tangent_position))
+
+    grouped: dict[str, list[tuple[dict[str, Any], float]]] = {
+        "left": [],
+        "right": [],
+        "front": [],
+        "back": [],
+    }
+    if enforce_one_per_edge and len(seat_local_positions) == 4:
+        edges = ("left", "right", "front", "back")
+        assignment = min(
+            itertools.permutations(edges),
+            key=lambda candidate: sum(
+                _edge_distance(local_x, local_y, edge, width=width, depth=depth)
+                for (_, local_x, local_y), edge in zip(seat_local_positions, candidate)
+            ),
+        )
+        for (seat, local_x, local_y), edge in zip(seat_local_positions, assignment):
+            grouped[edge].append(
+                (seat, local_y if edge in {"left", "right"} else local_x)
+            )
+    else:
+        for seat, local_x, local_y in seat_local_positions:
+            # 2026-07-15 修改原因：座椅因碰撞或净空向外拉开后，按“到无限延长
+            # 桌边直线的距离”会把短边椅误归到长边。改用有限桌边线段距离，确保
+            # 桌角之外的座椅仍由其实际相邻桌边负责，且不依赖某个场景的绝对尺寸。
+            edge, tangent_position = _nearest_table_edge(
+                local_x, local_y, width=width, depth=depth
+            )
+            grouped[edge].append((seat, tangent_position))
 
     diagnostics: list[dict[str, Any]] = []
     failures: list[str] = []
@@ -109,30 +158,101 @@ def _evaluate_table(
                 seat_center[0] + (slot - position) * edge_tangent[0],
                 seat_center[1] + (slot - position) * edge_tangent[1],
             )
-            seat_front = front_vector(seat)
-            diagnostics.append({
-                "seat_id": str(seat["id"]), "edge": edge,
-                "segment_index": segment_index,
-                "segment_count": count,
-                "segment_length_m": round(edge_length / count, 4),
-                "tangent_position_m": round(position, 4),
-                "target_position_m": round(slot, 4),
-                "deviation_m": round(deviation, 4),
-                "allowed_deviation_m": round(allowed, 4), "aligned": passed,
-                "target_center_xy_m": [round(value, 6) for value in target_xy],
-                "edge_tangent_xy": [round(value, 6) for value in edge_tangent],
-                "current_front_xy": [round(value, 6) for value in seat_front],
-                "facing_target_xy_m": [round(value, 6) for value in center],
-                "facing_error_deg": round(facing_error, 2) if facing_error is not None else None,
-                "facing_allowed_error_deg": 10.0,
-                "facing_aligned": facing_passed,
-            })
-            if not passed:
-                direction = "positive" if slot > position else "negative"
-                failures.append(
-                    f"`{seat['id']}` on the {edge} edge is {deviation:.2f}m from "
-                    f"its equal-segment slot; move it in the {direction} edge direction"
+            normal_deviation: float | None = None
+            target_normal_position: float | None = None
+            allowed_normal_deviation: float | None = None
+            if enforce_one_per_edge:
+                # A "one on each side" arrangement has one unambiguous slot per
+                # edge.  Its target must include the outward normal as well as the
+                # along-edge coordinate; otherwise a remote chair is only slid
+                # parallel to a table edge and can remain against a wall or land
+                # on the tabletop.
+                target_local_x, target_local_y = _one_per_edge_target_local(
+                    seat,
+                    edge,
+                    slot,
+                    width=width,
+                    depth=depth,
+                    tangent_x=tangent_x,
+                    tangent_y=tangent_y,
                 )
+                target_xy = (
+                    center[0]
+                    + target_local_x * tangent_x[0]
+                    + target_local_y * tangent_y[0],
+                    center[1]
+                    + target_local_x * tangent_x[1]
+                    + target_local_y * tangent_y[1],
+                )
+                current_dx = seat_center[0] - center[0]
+                current_dy = seat_center[1] - center[1]
+                current_local_x = current_dx * tangent_x[0] + current_dy * tangent_x[1]
+                current_local_y = current_dx * tangent_y[0] + current_dy * tangent_y[1]
+                current_normal_position = (
+                    current_local_x if edge in {"left", "right"} else current_local_y
+                )
+                target_normal_position = (
+                    target_local_x if edge in {"left", "right"} else target_local_y
+                )
+                normal_deviation = abs(current_normal_position - target_normal_position)
+                allowed_normal_deviation = max(0.08, 0.2 * chair_span)
+                passed = passed and normal_deviation <= allowed_normal_deviation
+            seat_front = front_vector(seat)
+            diagnostics.append(
+                {
+                    "seat_id": str(seat["id"]),
+                    "edge": edge,
+                    "segment_index": segment_index,
+                    "segment_count": count,
+                    "segment_length_m": round(edge_length / count, 4),
+                    "tangent_position_m": round(position, 4),
+                    "target_position_m": round(slot, 4),
+                    "deviation_m": round(deviation, 4),
+                    "allowed_deviation_m": round(allowed, 4),
+                    "normal_deviation_m": (
+                        round(normal_deviation, 4)
+                        if normal_deviation is not None
+                        else None
+                    ),
+                    "target_normal_position_m": (
+                        round(target_normal_position, 4)
+                        if target_normal_position is not None
+                        else None
+                    ),
+                    "allowed_normal_deviation_m": (
+                        round(allowed_normal_deviation, 4)
+                        if allowed_normal_deviation is not None
+                        else None
+                    ),
+                    "aligned": passed,
+                    "target_center_xy_m": [round(value, 6) for value in target_xy],
+                    "edge_tangent_xy": [round(value, 6) for value in edge_tangent],
+                    "current_front_xy": [round(value, 6) for value in seat_front],
+                    "facing_target_xy_m": [round(value, 6) for value in center],
+                    "facing_error_deg": (
+                        round(facing_error, 2) if facing_error is not None else None
+                    ),
+                    "facing_allowed_error_deg": 10.0,
+                    "facing_aligned": facing_passed,
+                }
+            )
+            if not passed:
+                if deviation > allowed:
+                    direction = "positive" if slot > position else "negative"
+                    failures.append(
+                        f"`{seat['id']}` on the {edge} edge is {deviation:.2f}m from "
+                        f"its equal-segment slot; move it in the {direction} edge direction"
+                    )
+                if (
+                    normal_deviation is not None
+                    and allowed_normal_deviation is not None
+                    and normal_deviation > allowed_normal_deviation
+                ):
+                    failures.append(
+                        f"`{seat['id']}` on the {edge} edge is {normal_deviation:.2f}m "
+                        "away from its table-edge clearance slot; move it perpendicular "
+                        "to that edge, outside the table footprint"
+                    )
             if not facing_passed:
                 failures.append(
                     f"`{seat['id']}` on the {edge} edge is rotated {facing_error:.1f}° "
@@ -154,24 +274,28 @@ def _evaluate_table(
         "center snapping or shift the chair along the edge normal to resolve a "
         "door conflict; move the table or door-compatible layout instead. "
         + "; ".join(failures)
-        if failed else
-        "Dining chairs are centered when alone and centered in equal segments along their respective table edges."
+        if failed
+        else "Dining chairs are centered when alone and centered in equal segments along their respective table edges."
     )
     return {
         "check_id": f"fd_{table_id}_{RELATION_TYPE}",
-        "metric": "functional_dependency", "label": "fail" if failed else "pass",
-        "confidence": 0.93 if failed else 0.89, "primary_object": table_id,
-        "related_objects": related, "selected_related_objects": related,
-        "blocking_objects": [], "relation_type": RELATION_TYPE, "reason": reason,
+        "metric": "functional_dependency",
+        "label": "fail" if failed else "pass",
+        "confidence": 0.93 if failed else 0.89,
+        "primary_object": table_id,
+        "related_objects": related,
+        "selected_related_objects": related,
+        "blocking_objects": [],
+        "relation_type": RELATION_TYPE,
+        "reason": reason,
         "diagnostics": {"seat_slots": diagnostics},
         "evidence": {"distribution": "table_local_equal_edge_segments"},
-        "evaluation_source": "scenesmith_dining_seat_distribution", "scoring_tier": "core",
+        "evaluation_source": "scenesmith_dining_seat_distribution",
+        "scoring_tier": "core",
     }
 
 
-def _footprint_extent(
-    obj: dict[str, Any], axis: tuple[float, float]
-) -> float | None:
+def _footprint_extent(obj: dict[str, Any], axis: tuple[float, float]) -> float | None:
     polygon = object_footprint_polygon(obj) or []
     if polygon:
         projections = [x * axis[0] + y * axis[1] for x, y in polygon]
@@ -188,8 +312,7 @@ def _equal_edge_segment_slots(edge_length: float, count: int) -> list[float]:
         return []
     segment_length = edge_length / count
     return [
-        -edge_length / 2.0 + (index + 0.5) * segment_length
-        for index in range(count)
+        -edge_length / 2.0 + (index + 0.5) * segment_length for index in range(count)
     ]
 
 
@@ -197,13 +320,44 @@ def _seat_tangent_span(seat: dict[str, Any], edge: str, table_yaw: float) -> flo
     size = (seat.get("bbox_world") or {}).get("size") or []
     if len(size) < 2:
         return 0.45
-    axis = (math.cos(table_yaw), math.sin(table_yaw)) if edge in {"front", "back"} else (-math.sin(table_yaw), math.cos(table_yaw))
+    axis = (
+        (math.cos(table_yaw), math.sin(table_yaw))
+        if edge in {"front", "back"}
+        else (-math.sin(table_yaw), math.cos(table_yaw))
+    )
     return max(0.2, abs(axis[0]) * float(size[0]) + abs(axis[1]) * float(size[1]))
+
+
+def _one_per_edge_target_local(
+    seat: dict[str, Any],
+    edge: str,
+    tangent_slot: float,
+    *,
+    width: float,
+    depth: float,
+    tangent_x: tuple[float, float],
+    tangent_y: tuple[float, float],
+) -> tuple[float, float]:
+    """Return the complete table-local center for a one-seat edge slot."""
+    normal_axis = tangent_x if edge in {"left", "right"} else tangent_y
+    seat_normal_span = _footprint_extent(seat, normal_axis)
+    if seat_normal_span is None:
+        seat_normal_span = 0.5
+    outward_offset = seat_normal_span / 2.0 + _ONE_PER_EDGE_TABLE_GAP_M
+    if edge == "left":
+        return -width / 2.0 - outward_offset, tangent_slot
+    if edge == "right":
+        return width / 2.0 + outward_offset, tangent_slot
+    if edge == "front":
+        return tangent_slot, -depth / 2.0 - outward_offset
+    return tangent_slot, depth / 2.0 + outward_offset
 
 
 def _positionally_associated_seats(
     tables: list[dict[str, Any]],
     objects_by_id: dict[str, dict[str, Any]],
+    *,
+    include_unassociated: bool = False,
 ) -> dict[str, list[dict[str, Any]]]:
     """Associate nearby dining seats without using their current facing."""
     associated = {str(table["id"]): [] for table in tables}
@@ -230,6 +384,8 @@ def _positionally_associated_seats(
         if candidates:
             _, _, table_id = min(candidates)
             associated[table_id].append(seat)
+        elif include_unassociated and len(tables) == 1:
+            associated[str(tables[0]["id"])].append(seat)
     for seats in associated.values():
         seats.sort(key=lambda item: str(item.get("id") or ""))
     return associated
@@ -281,6 +437,50 @@ def _nearest_table_edge(
     return edge, tangent_position
 
 
+def _edge_distance(
+    local_x: float,
+    local_y: float,
+    edge: str,
+    *,
+    width: float,
+    depth: float,
+) -> float:
+    half_width = width / 2.0
+    half_depth = depth / 2.0
+    if edge == "left":
+        return math.hypot(
+            local_x + half_width,
+            local_y - min(max(local_y, -half_depth), half_depth),
+        )
+    if edge == "right":
+        return math.hypot(
+            local_x - half_width,
+            local_y - min(max(local_y, -half_depth), half_depth),
+        )
+    if edge == "front":
+        return math.hypot(
+            local_x - min(max(local_x, -half_width), half_width),
+            local_y + half_depth,
+        )
+    return math.hypot(
+        local_x - min(max(local_x, -half_width), half_width),
+        local_y - half_depth,
+    )
+
+
+def _requests_one_seat_per_edge(prompt: str) -> bool:
+    text = prompt.lower().replace("_", " ")
+    return bool(
+        re.search(
+            r"\b(?:one|1)\s+"
+            r"(?:(?:chair|seat|stool)\s+)?"
+            r"on\s+each(?:\s+of\s+the)?\s+"
+            r"(?:(?:four|4)\s+)?(?:side|edge)s?\b",
+            text,
+        )
+    )
+
+
 def _seat_facing_error_deg(
     seat: dict[str, Any], table_center: tuple[float, float] | None
 ) -> float | None:
@@ -326,3 +526,22 @@ def _seat_facing_error_deg(
 def _is_round_table(table: dict[str, Any]) -> bool:
     text = _object_identity_text(table)
     return any(token in text for token in ("round", "circular", "oval", "ellipse"))
+
+
+def _is_generic_table(obj: dict[str, Any]) -> bool:
+    """Recognize a plain table only after the prompt establishes dining context."""
+    text = _object_identity_text(obj)
+    if "table" not in text:
+        return False
+    return not any(
+        token in text
+        for token in (
+            "bar table",
+            "coffee table",
+            "console table",
+            "desk",
+            "end table",
+            "nightstand",
+            "side table",
+        )
+    )
