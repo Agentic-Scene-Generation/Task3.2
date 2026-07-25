@@ -1079,13 +1079,15 @@ class AssetManager:
             object_type=request.object_type,
         )
 
-        final_gltf_path, bbox_min, bbox_max, _ = self._scale_and_measure_canonical_mesh(
-            canonical_path=canonical_path,
-            final_path=config.sdf_dir / f"{config.short_name}.gltf",
-            desired_dimensions=request.desired_dimensions[index],
-            uniform_fit_min_ratio=self._hssd_uniform_fit_min_ratio(
-                request.object_descriptions[index]
-            ),
+        final_gltf_path, bbox_min, bbox_max, applied_scale = (
+            self._scale_and_measure_canonical_mesh(
+                canonical_path=canonical_path,
+                final_path=config.sdf_dir / f"{config.short_name}.gltf",
+                desired_dimensions=request.desired_dimensions[index],
+                uniform_fit_min_ratio=self._hssd_uniform_fit_min_ratio(
+                    request.object_descriptions[index]
+                ),
+            )
         )
         collision_pieces = self._generate_collision_geometry(final_gltf_path)
         sdf_path = config.sdf_dir / f"{config.short_name}.sdf"
@@ -1106,7 +1108,12 @@ class AssetManager:
             additional_metadata={
                 "asset_source": "hssd",
                 "hssd_mesh_id": mesh_id,
+                "requested_dimensions": list(request.desired_dimensions[index]),
+                "actual_dimensions": (bbox_max - bbox_min).tolist(),
             },
+            # HSSD support-surface annotations use the source mesh frame. Keep
+            # the baked uniform scale so those surfaces match the final SDF.
+            scale_factor=applied_scale,
         )
 
     def _retrieve_objaverse_assets(

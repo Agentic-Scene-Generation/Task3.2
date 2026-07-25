@@ -248,6 +248,93 @@ class TestAssetManager(unittest.TestCase):
         self.assertEqual(result.successful_assets, [recovered])
         self.assertEqual(result.failed_assets, [])
 
+    def test_direct_hssd_candidate_preserves_baked_scale_for_support_surfaces(self):
+        """Direct retries must keep the scale used by HSSD surface annotations."""
+        request = AssetGenerationRequest(
+            object_descriptions=["Dining room sideboard"],
+            short_names=["sideboard"],
+            object_type=ObjectType.FURNITURE,
+            desired_dimensions=[[1.36, 0.53, 0.85]],
+        )
+        candidate = HssdRetrievalResult(
+            mesh_path=str(self.temp_dir / "sideboard.gltf"),
+            hssd_id="sideboard_mesh",
+            object_name="sideboard",
+            similarity_score=0.9,
+            size=(1.2, 0.47, 0.75),
+            category="sideboard",
+        )
+        config = self.asset_manager._create_asset_paths(
+            request.object_descriptions, request.short_names
+        )[0]
+        physics = MeshPhysicsAnalysis(
+            up_axis="+Y",
+            front_axis="+Z",
+            material="wood",
+            mass_kg=20.0,
+            mass_range_kg=[15.0, 25.0],
+            friction_coefficient=0.4,
+        )
+        bbox_min = np.array([-0.68, -0.265, 0.0])
+        bbox_max = np.array([0.68, 0.265, 0.85])
+        applied_scale = 1.135
+        created = SceneObject(
+            object_id="sideboard_0",
+            object_type=ObjectType.FURNITURE,
+            name="sideboard",
+            description="Dining room sideboard",
+            transform=MagicMock(),
+        )
+
+        with (
+            patch.object(
+                self.asset_manager, "_analyze_mesh_physics", return_value=physics
+            ),
+            patch.object(
+                self.asset_manager,
+                "_override_hssd_asset_annotations",
+                return_value=physics,
+            ),
+            patch(
+                "scenesmith.agent_utils.asset_manager.canonicalize_mesh"
+            ),
+            patch.object(
+                self.asset_manager,
+                "_scale_and_measure_canonical_mesh",
+                return_value=(
+                    config.sdf_dir / "sideboard.gltf",
+                    bbox_min,
+                    bbox_max,
+                    applied_scale,
+                ),
+            ),
+            patch.object(
+                self.asset_manager, "_generate_collision_geometry", return_value=[]
+            ),
+            patch("scenesmith.agent_utils.asset_manager.generate_drake_sdf"),
+            patch.object(
+                self.asset_manager, "_create_scene_object", return_value=created
+            ) as create_scene_object,
+        ):
+            result = self.asset_manager._process_direct_hssd_candidate(
+                request=request,
+                index=0,
+                config=config,
+                candidate=candidate,
+            )
+
+        self.assertIs(result, created)
+        kwargs = create_scene_object.call_args.kwargs
+        self.assertEqual(kwargs["scale_factor"], applied_scale)
+        self.assertEqual(
+            kwargs["additional_metadata"]["requested_dimensions"],
+            request.desired_dimensions[0],
+        )
+        self.assertEqual(
+            kwargs["additional_metadata"]["actual_dimensions"],
+            [1.36, 0.53, 0.85],
+        )
+
     def test_plant_uniform_fit_relaxation_is_targeted(self):
         """Plant envelopes may use 0.45; other assets retain the 0.50 floor."""
         actual = np.array([0.6, 0.754861, 0.556976])

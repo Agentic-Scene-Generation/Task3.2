@@ -241,6 +241,71 @@ class SceneExpertMemoryTest(unittest.TestCase):
             self.assertIn("missing_object", issue_types)
             self.assertIn("physics_collision", issue_types)
 
+    def test_manipuland_verifier_normalizes_names_and_enforces_counts(self) -> None:
+        task_spec = SceneTaskSpec(
+            room_type="bedroom",
+            style="standard",
+            required_small_objects=[
+                "table lamp",
+                "table lamp",
+                "alarm clock",
+                "book",
+                "magazines",
+            ],
+        )
+
+        issues = (
+            StageVerifier(pass_threshold=0.6)
+            .verify(
+                stage="manipuland",
+                stage_output_dir="/path/that/does/not/exist",
+                task_spec=task_spec,
+                scene_state_info={
+                    "object_names": [
+                        "table_lamp",
+                        "table_lamp",
+                        "alarm_clock",
+                        "book",
+                        "magazine",
+                    ]
+                },
+            )
+            .issues
+        )
+
+        self.assertEqual([], issues)
+
+        missing_one_lamp = (
+            StageVerifier(pass_threshold=0.6)
+            .verify(
+                stage="manipuland",
+                stage_output_dir="/path/that/does/not/exist",
+                task_spec=task_spec,
+                scene_state_info={
+                    "object_names": ["table_lamp", "alarm_clock", "book", "magazine"]
+                },
+            )
+            .issues
+        )
+
+        self.assertEqual(
+            ["table lamp"], [issue.object_name for issue in missing_one_lamp]
+        )
+
+    def test_wall_verifier_matches_tv_display_to_television(self) -> None:
+        report = StageVerifier(pass_threshold=0.6).verify(
+            stage="wall_mounted",
+            stage_output_dir="/path/that/does/not/exist",
+            task_spec=SceneTaskSpec(
+                room_type="living room",
+                style="standard",
+                required_wall_objects=["television"],
+            ),
+            scene_state_info={"object_names": ["tv_display"]},
+        )
+
+        self.assertEqual([], report.issues)
+
     def test_layout_plausibility_maps_to_scene_expert_category(self) -> None:
         mapped = _map_scenesmith_scores(
             {

@@ -144,9 +144,37 @@ class FurnitureSafetyControllerTest(unittest.TestCase):
         )
 
         self.assertEqual(controller.required_counts["sideboard"], 1)
+        self.assertEqual(controller.required_counts["dining_chair"], 4)
         self.assertEqual(controller.required_counts["chair"], 4)
 
-    def test_chair_requirement_accepts_armchair_subtypes(self) -> None:
+    def test_sideboard_identity_wins_over_cabinet_door_description(self) -> None:
+        controller = FurnitureSafetyController({"enabled": True})
+        controller.reset_for_scene("A dining room with a sideboard.")
+        scene = SimpleNamespace(
+            room_type="dining_room",
+            text_description=controller.scene_description,
+            room_geometry=None,
+            objects={
+                "sideboard_0": SimpleNamespace(
+                    name="sideboard",
+                    description=(
+                        "Traditional wooden sideboard with drawers and cabinet doors "
+                        "for dining room storage"
+                    ),
+                    immutable=False,
+                )
+            },
+        )
+
+        evaluation = controller.evaluate_scene_state(scene)
+
+        self.assertTrue(evaluation.hard_valid)
+        self.assertNotIn(
+            "missing required sideboard: expected 1, found 0",
+            evaluation.hard_reasons,
+        )
+
+    def test_chair_requirements_preserve_explicit_subtype_counts(self) -> None:
         controller = FurnitureSafetyController({"enabled": True})
         controller.reset_for_scene(
             "A study with one office chair and two guest chairs around a desk."
@@ -179,7 +207,10 @@ class FurnitureSafetyControllerTest(unittest.TestCase):
             },
         )
 
-        self.assertEqual(controller.required_counts["chair"], 3)
+        self.assertEqual(
+            controller.required_counts,
+            {"office_chair": 1, "guest_chair": 2, "desk": 1, "chair": 3},
+        )
         self.assertTrue(controller.evaluate_scene_state(scene).hard_valid)
 
         allowed, message = controller.record_add(
@@ -188,6 +219,47 @@ class FurnitureSafetyControllerTest(unittest.TestCase):
         )
         self.assertFalse(allowed)
         self.assertIn("requires 3 chair", message)
+
+    def test_extra_office_chair_does_not_satisfy_guest_chair_count(self) -> None:
+        controller = FurnitureSafetyController({"enabled": True})
+        controller.reset_for_scene(
+            "A study with one office chair and two guest chairs around a desk."
+        )
+        scene = SimpleNamespace(
+            room_type="study",
+            text_description=controller.scene_description,
+            room_geometry=None,
+            objects={
+                "desk_0": SimpleNamespace(
+                    name="desk",
+                    description="work desk",
+                    immutable=False,
+                ),
+                "office_chair_0": SimpleNamespace(
+                    name="office_chair",
+                    description="ergonomic task chair",
+                    immutable=False,
+                ),
+                "office_chair_1": SimpleNamespace(
+                    name="office_chair",
+                    description="ergonomic task chair",
+                    immutable=False,
+                ),
+                "guest_chair_0": SimpleNamespace(
+                    name="guest_chair",
+                    description="upholstered visitor chair",
+                    immutable=False,
+                ),
+            },
+        )
+
+        evaluation = controller.evaluate_scene_state(scene)
+
+        self.assertFalse(evaluation.hard_valid)
+        self.assertIn(
+            "missing required guest_chair: expected 2, found 1",
+            evaluation.hard_reasons,
+        )
 
     def test_table_lamp_is_not_required_furniture_table(self) -> None:
         controller = FurnitureSafetyController({"enabled": True})

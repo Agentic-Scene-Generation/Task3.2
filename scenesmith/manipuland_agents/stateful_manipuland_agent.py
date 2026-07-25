@@ -50,9 +50,13 @@ from scenesmith.manipuland_agents.base_manipuland_agent import BaseManipulandAge
 from scenesmith.manipuland_agents.tools.manipuland_tools import ManipulandTools
 from scenesmith.manipuland_agents.tools.vision_tools import ManipulandVisionTools
 from scenesmith.prompts.registry import ManipulandAgentPrompts
+from scenesmith.scenebenchmark_critic import room_scene_to_case_pack
 from scenesmith.scenebenchmark_critic.manipuland_targets import (
     classify_manipuland_furniture,
     infer_prompt_manipuland_obligations,
+)
+from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.dining_place_setting import (
+    evaluate_dining_place_setting_alignment,
 )
 from scenesmith.utils.logging import BaseLogger
 
@@ -670,6 +674,11 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
                 response=result.final_output, agent_name="PLANNER (MANIPULAND)"
             )
 
+        # The final critic can identify a bad one-to-one dining assignment even
+        # when the planner does not execute its repair recommendation. Enforce the
+        # same deterministic contract before the final scored critique.
+        self._enforce_dining_place_setting_alignment(furniture_id)
+
         # Compute final critique and scores for completed furniture.
         # Check if scene changed since last checkpoint to avoid redundant critique.
         current_scene_hash = self.scene.content_hash()
@@ -691,6 +700,51 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
         console_logger.info(
             f"Completed manipuland placement for furniture {furniture_id}"
         )
+
+    def _enforce_dining_place_setting_alignment(
+        self, furniture_id: UniqueID
+    ) -> bool:
+        """Repair a failed dining place-setting contract before final scoring."""
+        table_id = str(furniture_id)
+
+        def current_result() -> dict[str, Any] | None:
+            case_pack = room_scene_to_case_pack(
+                self.scene, stage="dining_place_setting_final_repair"
+            )
+            return next(
+                (
+                    result
+                    for result in evaluate_dining_place_setting_alignment(case_pack)
+                    if str(result.get("primary_object") or "") == table_id
+                ),
+                None,
+            )
+
+        before = current_result()
+        if before is None or before.get("label") != "fail":
+            return False
+
+        console_logger.info(
+            "Applying deterministic dining place-setting alignment for %s",
+            table_id,
+        )
+        self.manipuland_tools._align_dining_place_settings_impl(table_id=table_id)
+
+        after = current_result()
+        if after is not None and after.get("label") == "pass":
+            console_logger.info(
+                "Deterministic dining place-setting alignment passed for %s",
+                table_id,
+            )
+            return True
+
+        unresolved = "metric produced no result" if after is None else after.get("reason")
+        console_logger.warning(
+            "Dining place-setting alignment remains unresolved for %s: %s",
+            table_id,
+            unresolved,
+        )
+        return False
 
     def _get_final_scores_directory(self) -> Path:
         """Get the directory path for saving per-furniture manipuland placement state.

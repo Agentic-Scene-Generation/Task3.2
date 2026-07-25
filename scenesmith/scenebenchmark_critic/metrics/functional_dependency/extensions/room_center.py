@@ -27,6 +27,10 @@ _RELATIVE_CENTER_RE = re.compile(
 )
 _CLAUSE_SPLIT_RE = re.compile(r"\s*(?:[,;]|\band\b)\s*", re.IGNORECASE)
 _ROOM_CONTEXT_RE = re.compile(r"\b(?:room|space|area)\b")
+_ROOM_CENTER_PLACEMENT_RE = re.compile(
+    r"\b(?:contains?|holds?|features?|includes?|has|houses?|"
+    r"is\s+(?:occupied|anchored)\s+by)\b"
+)
 _ANCHOR_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("dining_table", ("dining table", "dining_table")),
     ("table", ("table",)),
@@ -82,8 +86,7 @@ def evaluate_room_center_alignment(case_pack: dict[str, Any]) -> list[dict[str, 
         candidates = [
             obj
             for obj in objects
-            if str(obj.get("id")) not in used_anchor_ids
-            and _matches_alias(obj, alias)
+            if str(obj.get("id")) not in used_anchor_ids and _matches_alias(obj, alias)
         ]
         if not candidates:
             continue
@@ -210,7 +213,10 @@ def _has_room_center_anchor(clause: str, aliases: tuple[str, ...]) -> bool:
             # Support natural wording such as ``the center of the room
             # contains a dining table`` where the anchor follows the center
             # phrase.
-            if _ROOM_CONTEXT_RE.search(clause[center.end() : alias.start()]):
+            between = clause[center.end() : alias.start()]
+            if _ROOM_CONTEXT_RE.search(between) and _ROOM_CENTER_PLACEMENT_RE.search(
+                between
+            ):
                 return True
 
             # ``central dining table`` and ``centrally positioned dining table``

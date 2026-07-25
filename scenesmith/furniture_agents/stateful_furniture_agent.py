@@ -34,7 +34,10 @@ from scenesmith.agent_utils.furniture_layout_planning import (
 from scenesmith.agent_utils.furniture_placement_order import (
     build_furniture_placement_order_reference,
 )
-from scenesmith.agent_utils.furniture_safety import furniture_category_matches
+from scenesmith.agent_utils.furniture_safety import (
+    furniture_object_category_matches,
+    infer_furniture_object_category,
+)
 from scenesmith.agent_utils.mesh_physics_analyzer import MeshPhysicsAnalysis
 from scenesmith.agent_utils.placement_noise import PlacementNoiseMode
 from scenesmith.agent_utils.reachability import (
@@ -85,6 +88,15 @@ REPAIR_ASSET_SPECS: dict[str, tuple[str, list[float]]] = {
     "wardrobe": ("Compact wardrobe closet with simple doors", [0.90, 0.55, 2.00]),
     "dresser": ("Low dresser chest with storage drawers", [1.10, 0.48, 0.85]),
     "desk": ("Practical rectangular work desk", [1.10, 0.60, 0.75]),
+    "office_chair": (
+        "Ergonomic office task chair with an adjustable back",
+        [0.60, 0.60, 1.05],
+    ),
+    "guest_chair": (
+        "Compact upholstered guest chair with a fixed wooden frame",
+        [0.60, 0.65, 0.90],
+    ),
+    "dining_chair": ("Simple upright dining chair", [0.50, 0.55, 0.90]),
     "chair": ("Simple upright task chair", [0.50, 0.50, 0.90]),
     "sofa": ("Compact upholstered two-seat sofa", [1.70, 0.85, 0.90]),
     "table": ("Practical rectangular table", [1.20, 0.80, 0.75]),
@@ -878,13 +890,19 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             return getattr(repair_cfg, key, default)
 
     def _category_for_object(self, object_id: Any, obj: SceneObject) -> str | None:
-        text = (
-            f"{object_id} {getattr(obj, 'name', '')} "
-            f"{getattr(obj, 'description', '')}"
-        ).lower()
+        name = getattr(obj, "name", "")
+        description = getattr(obj, "description", "")
+        text = f"{object_id} {name} {description}".lower()
         controller = getattr(self, "furniture_safety_controller", None)
-        if controller is not None:
-            category = controller.infer_object_category(text)
+        infer_category = getattr(controller, "infer_object_category", None)
+        if callable(infer_category):
+            category = infer_category(f"{object_id} {name}")
+            if category is None:
+                category = infer_category(str(description or ""))
+            if category:
+                return category
+        else:
+            category = infer_furniture_object_category(object_id, name, description)
             if category:
                 return category
         if "nightstand" in text or "bedside" in text:
@@ -906,13 +924,12 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             value = getattr(object_type, "value", object_type)
             if str(value).lower() != "furniture":
                 continue
-            object_text = (
-                f"{object_id} {getattr(obj, 'name', '')} "
-                f"{getattr(obj, 'description', '')}"
-            )
             object_category = self._category_for_object(object_id, obj)
-            if object_category == category or furniture_category_matches(
-                object_text, category
+            if object_category == category or furniture_object_category_matches(
+                object_id,
+                getattr(obj, "name", ""),
+                getattr(obj, "description", ""),
+                category,
             ):
                 result.append(obj)
         return result

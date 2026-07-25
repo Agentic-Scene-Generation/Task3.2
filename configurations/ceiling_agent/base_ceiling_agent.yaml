@@ -88,7 +88,7 @@ asset_manager:
   backend: "sam3d"
 
   router:
-    enabled: true
+    enabled: false
     parallel_workers: 10
     # Max retries for VLM analysis if parsing fails (e.g., invalid object_type)
     analysis_max_retries: 3

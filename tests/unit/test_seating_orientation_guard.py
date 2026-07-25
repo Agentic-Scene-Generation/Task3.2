@@ -85,6 +85,42 @@ def test_standalone_wall_chair_keeps_wall_normal_priority() -> None:
     assert abs(wall_bounds[0][0] - chair_bounds[1][0] - 0.03) < 1e-7
 
 
+def test_wall_guest_chairs_already_facing_desk_keep_diagonal_yaws() -> None:
+    chairs = [
+        _object(
+            "guest_chair_0",
+            ObjectType.FURNITURE,
+            (1.85, 0.7, 0.5),
+            (0.55, 0.66, 1.0),
+            yaw_deg=45.0,
+        ),
+        _object(
+            "guest_chair_1",
+            ObjectType.FURNITURE,
+            (1.85, -0.6, 0.5),
+            (0.55, 0.66, 1.0),
+            yaw_deg=30.0,
+        ),
+    ]
+    desk = _object(
+        "study_desk_0",
+        ObjectType.FURNITURE,
+        (0.0, 1.86, 0.4),
+        (1.6, 0.66, 0.8),
+    )
+    east_wall = _object(
+        "east_wall", ObjectType.WALL, (2.475, 0.0, 1.4), (0.05, 4.5, 2.8)
+    )
+    old_transforms = [chair.transform.GetAsMatrix4().copy() for chair in chairs]
+
+    fixes = align_seating_to_nearest_surface(_scene(*chairs, desk, east_wall))
+
+    assert fixes == []
+    for chair, old_transform in zip(chairs, old_transforms, strict=True):
+        np.testing.assert_allclose(chair.transform.GetAsMatrix4(), old_transform)
+        assert _front_angle_to_target_deg(chair, desk) <= 45.0
+
+
 def test_wall_chairs_just_outside_old_ratio_are_backed_and_face_inward() -> None:
     chairs = [
         _object(

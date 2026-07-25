@@ -60,6 +60,7 @@ def align_seating_to_nearest_surface(
     wall_anchor_gap_ratio: float = 1.0,
     standalone_surface_gap_ratio: float = 0.5,
     wall_preference_margin_ratio: float = 0.2,
+    wall_inward_angle_threshold_deg: float = 75.0,
 ) -> list[SeatingOrientationFix]:
     """Rotate misaligned seating toward its nearest functional surface."""
     furniture = [
@@ -79,24 +80,46 @@ def align_seating_to_nearest_surface(
             peer_seating=seating,
         )
         target = _nearest_surface(seat, surfaces, max_distance_m=max_target_distance_m)
+        angle = (
+            _front_angle_to_target_deg(seat, target) if target is not None else None
+        )
+        already_faces_surface = (
+            angle is not None and angle <= repair_angle_threshold_deg
+        )
+        wall_inward_angle = None
+        if wall_target is not None:
+            wall_inward_point = _wall_away_target_point(seat, wall_target)
+            if wall_inward_point is not None:
+                wall_inward_angle = _front_angle_to_point_deg(
+                    seat, wall_inward_point
+                )
+        already_faces_wall_interior = (
+            wall_inward_angle is not None
+            and wall_inward_angle <= wall_inward_angle_threshold_deg
+        )
         # Dining-table seats remain table-relative even when an outer slot is
         # close to a room wall.  A wall-backed pose would destroy the complete
         # one-seat-per-edge arrangement repaired by the critic.
         target_is_dining_table = target is not None and _is_dining_table(target)
-        if target is None or (
+        if (
             wall_target is not None
-            and not target_is_dining_table
-            and _is_standalone_wall_seating(
-                seat,
-                wall_target,
-                target,
-                surface_gap_ratio=standalone_surface_gap_ratio,
-                wall_margin_ratio=wall_preference_margin_ratio,
-            )
             and _is_wall_anchor_candidate(seat)
+            and not already_faces_surface
+            and not already_faces_wall_interior
+            and (
+                target is None
+                or (
+                    not target_is_dining_table
+                    and _is_standalone_wall_seating(
+                        seat,
+                        wall_target,
+                        target,
+                        surface_gap_ratio=standalone_surface_gap_ratio,
+                        wall_margin_ratio=wall_preference_margin_ratio,
+                    )
+                )
+            )
         ):
-            if wall_target is None:
-                continue
             old_rpy = RollPitchYaw(seat.transform.rotation())
             seat_center = seat.transform.translation()
             target_point = _wall_away_target_point(seat, wall_target)
@@ -126,7 +149,6 @@ def align_seating_to_nearest_surface(
                 )
             )
             continue
-        angle = _front_angle_to_target_deg(seat, target)
         if angle is None or angle <= repair_angle_threshold_deg:
             continue
         old_rpy = RollPitchYaw(seat.transform.rotation())
@@ -403,8 +425,14 @@ def _nearest_surface(
 def _front_angle_to_target_deg(
     subject: SceneObject, target: SceneObject
 ) -> float | None:
+    return _front_angle_to_point_deg(subject, target.transform.translation())
+
+
+def _front_angle_to_point_deg(
+    subject: SceneObject, target_point: np.ndarray
+) -> float | None:
     origin = subject.transform.translation()
-    target_vec = target.transform.translation() - origin
+    target_vec = target_point - origin
     target_xy = target_vec[:2]
     norm = float(np.linalg.norm(target_xy))
     if norm < 1e-6:

@@ -274,12 +274,21 @@ def _check_required_objects(
         return issues
 
     present_objects = scene_state_info.get("object_names", [])
-    present_lower = [o.lower() for o in present_objects]
+    unmatched_present = [str(name) for name in present_objects]
 
     for required in stage_required:
-        req_lower = required.lower()
-        # Fuzzy: check if any present object contains the required name as substring
-        if not any(req_lower in p or p in req_lower for p in present_lower):
+        match_index = next(
+            (
+                index
+                for index, present in enumerate(unmatched_present)
+                if _object_labels_match(required, present)
+            ),
+            None,
+        )
+        if match_index is not None:
+            # Consume one scene instance so repeated requirements enforce cardinality.
+            unmatched_present.pop(match_index)
+        else:
             issues.append(
                 VerifyIssue(
                     issue_type="missing_object",
@@ -289,6 +298,42 @@ def _check_required_objects(
             )
 
     return issues
+
+
+_OBJECT_LABEL_ALIASES = {
+    "tv": "television",
+    "tv display": "television",
+    "television display": "television",
+}
+
+
+def _normalize_object_label(label: str) -> str:
+    """Normalize human labels and scene identifiers to a comparable phrase."""
+    words = re.sub(r"[^a-z0-9]+", " ", str(label).lower()).split()
+    while words and words[-1].isdigit():
+        words.pop()
+    if not words:
+        return ""
+    last = words[-1]
+    if last.endswith("ies") and len(last) > 3:
+        words[-1] = f"{last[:-3]}y"
+    elif last.endswith("s") and not last.endswith("ss") and len(last) > 3:
+        words[-1] = last[:-1]
+    normalized = " ".join(words)
+    return _OBJECT_LABEL_ALIASES.get(normalized, normalized)
+
+
+def _object_labels_match(required: str, present: str) -> bool:
+    required_label = _normalize_object_label(required)
+    present_label = _normalize_object_label(present)
+    if not required_label or not present_label:
+        return False
+    if required_label == present_label:
+        return True
+    return (
+        f" {required_label} " in f" {present_label} "
+        or f" {present_label} " in f" {required_label} "
+    )
 
 
 def _check_floor_plan_layout(scene_state_info: dict) -> list[VerifyIssue]:

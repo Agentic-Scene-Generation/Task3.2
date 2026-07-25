@@ -673,6 +673,17 @@ def _copy_checkpoint_for_stage(
     )
 
 
+def _add_manipulands_with_cleanup(
+    manipuland_agent: StatefulManipulandAgent,
+    scene: RoomScene,
+) -> None:
+    """Run the manipuland stage without leaking its native server processes."""
+    try:
+        asyncio.run(manipuland_agent.add_manipulands(scene=scene))
+    finally:
+        manipuland_agent.cleanup()
+
+
 def _generate_room(
     room_id: str,
     room_prompt: str,
@@ -1072,7 +1083,7 @@ def _generate_room(
             logger=logger,
             render_gpu_id=render_gpu_id,
         )
-        asyncio.run(manipuland_agent.add_manipulands(scene=scene))
+        _add_manipulands_with_cleanup(manipuland_agent, scene)
         end_time = time.time()
         console_logger.info(
             f"Manipulands added to room {room_id} in "

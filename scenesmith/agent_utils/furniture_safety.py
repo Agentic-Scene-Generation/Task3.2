@@ -42,6 +42,27 @@ DEFAULT_ALIASES = {
     "nightstand": ["nightstand", "nightstands", "bedside table", "bedside tables"],
     "wardrobe": ["wardrobe", "wardrobes", "closet", "closets"],
     "dresser": ["dresser", "dressers", "chest of drawers"],
+    "office_chair": [
+        "office chair",
+        "office chairs",
+        "desk chair",
+        "desk chairs",
+        "task chair",
+        "task chairs",
+        "swivel chair",
+        "swivel chairs",
+    ],
+    "guest_chair": [
+        "guest chair",
+        "guest chairs",
+        "visitor chair",
+        "visitor chairs",
+        "guest armchair",
+        "guest armchairs",
+        "visitor armchair",
+        "visitor armchairs",
+    ],
+    "dining_chair": ["dining chair", "dining chairs"],
     "armchair": ["armchair", "armchairs", "arm chair", "arm chairs"],
     "desk": ["desk", "desks"],
     "chair": ["chair", "chairs"],
@@ -60,6 +81,9 @@ DEFAULT_ALIASES = {
 # concrete subtype to satisfy an explicitly broader inventory requirement.
 FURNITURE_CATEGORY_PARENTS: dict[str, frozenset[str]] = {
     "twin_bed": frozenset({"bed"}),
+    "office_chair": frozenset({"chair"}),
+    "guest_chair": frozenset({"chair"}),
+    "dining_chair": frozenset({"chair"}),
     "armchair": frozenset({"chair"}),
 }
 
@@ -181,6 +205,39 @@ def furniture_category_matches(text: str, required_category: str) -> bool:
             text, required_category.replace("_", " "), category=required_category
         )
     return False
+
+
+def infer_furniture_object_category(
+    object_id: object,
+    name: object,
+    description: object,
+) -> str | None:
+    """Classify structured identity before free-form asset description.
+
+    Asset descriptions often mention related furniture parts, such as a sideboard
+    with ``cabinet doors``.  The explicit object ID/name is the stronger signal and
+    must not be overwritten by an incidental alias in the description.
+    """
+    identity_category = infer_furniture_category(f"{object_id} {name}")
+    if identity_category is not None:
+        return identity_category
+    return infer_furniture_category(str(description or ""))
+
+
+def furniture_object_category_matches(
+    object_id: object,
+    name: object,
+    description: object,
+    required_category: str,
+) -> bool:
+    """Return whether a structured scene object satisfies an inventory category."""
+    object_category = infer_furniture_object_category(object_id, name, description)
+    required_category = str(required_category).lower()
+    if object_category is not None:
+        return object_category == required_category or required_category in (
+            FURNITURE_CATEGORY_PARENTS.get(object_category, frozenset())
+        )
+    return furniture_category_matches(str(description or ""), required_category)
 
 
 def _is_non_furniture_table_reference(text: str, end: int) -> bool:
@@ -388,7 +445,7 @@ class FurnitureSafetyController:
                 escaped_alias = re.escape(alias.lower())
                 pattern = (
                     rf"(^|[^a-z0-9])(?:(?P<count>{number_pattern})\s+)?"
-                    rf"(?:\w+\s+){{0,2}}{escaped_alias}"
+                    rf"(?:(?!(?:{number_pattern})\b)\w+\s+){{0,2}}{escaped_alias}"
                     rf"([^a-z0-9]|$)"
                 )
                 for match in re.finditer(pattern, text):
@@ -537,11 +594,12 @@ class FurnitureSafetyController:
         for object_id, obj in getattr(scene, "objects", {}).items():
             if getattr(obj, "immutable", False):
                 continue
-            object_text = (
-                f"{object_id} {getattr(obj, 'name', '')} "
-                f"{getattr(obj, 'description', '')}"
-            )
-            if furniture_category_matches(object_text, category):
+            if furniture_object_category_matches(
+                object_id,
+                getattr(obj, "name", ""),
+                getattr(obj, "description", ""),
+                category,
+            ):
                 count += 1
         return count
 

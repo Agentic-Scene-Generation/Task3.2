@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 from scenesmith.agent_utils.room import UniqueID
 from scenesmith.agent_utils.scene_analyzer import FurnitureSelection
@@ -68,6 +69,69 @@ def test_recovery_adds_missing_dining_table_without_duplicate_sideboard() -> Non
         sideboard.object_id,
         table.object_id,
     ]
+
+
+def test_final_dining_alignment_runs_when_planner_ignored_failed_contract() -> None:
+    agent = object.__new__(StatefulManipulandAgent)
+    agent.scene = Mock()
+    agent.manipuland_tools = Mock()
+    failed = {
+        "primary_object": "dining_table_0",
+        "label": "fail",
+        "reason": "plates are not assigned to seat-facing lanes",
+    }
+    passed = {
+        "primary_object": "dining_table_0",
+        "label": "pass",
+        "reason": "all settings are aligned",
+    }
+
+    with (
+        patch(
+            "scenesmith.manipuland_agents.stateful_manipuland_agent.room_scene_to_case_pack",
+            return_value={"scene_geometry": {}},
+        ),
+        patch(
+            "scenesmith.manipuland_agents.stateful_manipuland_agent.evaluate_dining_place_setting_alignment",
+            side_effect=[[failed], [passed]],
+        ),
+    ):
+        repaired = agent._enforce_dining_place_setting_alignment(
+            UniqueID("dining_table_0")
+        )
+
+    assert repaired
+    agent.manipuland_tools._align_dining_place_settings_impl.assert_called_once_with(
+        table_id="dining_table_0"
+    )
+
+
+def test_final_dining_alignment_leaves_passing_contract_unchanged() -> None:
+    agent = object.__new__(StatefulManipulandAgent)
+    agent.scene = Mock()
+    agent.manipuland_tools = Mock()
+    passed = {
+        "primary_object": "dining_table_0",
+        "label": "pass",
+        "reason": "all settings are aligned",
+    }
+
+    with (
+        patch(
+            "scenesmith.manipuland_agents.stateful_manipuland_agent.room_scene_to_case_pack",
+            return_value={"scene_geometry": {}},
+        ),
+        patch(
+            "scenesmith.manipuland_agents.stateful_manipuland_agent.evaluate_dining_place_setting_alignment",
+            return_value=[passed],
+        ),
+    ):
+        repaired = agent._enforce_dining_place_setting_alignment(
+            UniqueID("dining_table_0")
+        )
+
+    assert not repaired
+    agent.manipuland_tools._align_dining_place_settings_impl.assert_not_called()
 
 
 def test_bilateral_bedside_prompt_recovers_both_nightstands() -> None:

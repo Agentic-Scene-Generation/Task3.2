@@ -262,7 +262,12 @@ def _format_orientation_contract_context(
 ) -> str:
     if _agent_value(agent_type) != AgentType.FURNITURE.value:
         return ""
-    rows: list[tuple[str, str, tuple[str, ...]]] = []
+    results_by_check_id = {
+        str(result.get("check_id") or ""): result
+        for result in payload.get("results") or []
+        if isinstance(result, dict) and result.get("check_id")
+    }
+    rows: list[tuple[str, str, tuple[str, ...], str, str]] = []
     for check in (payload.get("case_pack") or {}).get("checks") or []:
         if not isinstance(check, dict):
             continue
@@ -271,19 +276,35 @@ def _format_orientation_contract_context(
         subject_id = str(check.get("subject_id") or "").strip()
         relation_type = str(check.get("relation_type") or "").strip()
         target_ids = tuple(
-            str(item).strip() for item in check.get("target_ids") or [] if str(item).strip()
+            str(item).strip()
+            for item in check.get("target_ids") or []
+            if str(item).strip()
         )
         if subject_id and relation_type and target_ids:
-            rows.append((subject_id, relation_type, target_ids))
+            result = results_by_check_id.get(str(check.get("check_id") or ""), {})
+            label = str(result.get("label") or "unavailable").strip()
+            reason = " ".join(str(result.get("reason") or "").split())
+            rows.append((subject_id, relation_type, target_ids, label, reason))
     if not rows:
         return ""
     lines = [
-        "Active stable seating orientation contracts (authoritative directional topology):"
+        "Active stable seating orientation contracts (authoritative directional topology):",
+        "A deterministic `result=pass` is authoritative: do not claim that pair "
+        "fails or recommend rotating it based only on visual interpretation or an "
+        "unverified tool result.",
     ]
-    for subject_id, relation_type, target_ids in sorted(rows):
+    for subject_id, relation_type, target_ids, label, reason in sorted(rows):
         targets = ", ".join(target_ids)
-        lines.append(f"- `{subject_id}`: `{relation_type}` -> `{targets}`")
-        if relation_type in {"seating_to_media", "seating_to_work_surface"}:
+        result_suffix = f"; reason={reason}" if reason else ""
+        lines.append(
+            f"- `{subject_id}`: `{relation_type}` -> `{targets}`; "
+            f"result={label}{result_suffix}"
+        )
+        if relation_type in {
+            "furniture_faces_furniture",
+            "seating_to_media",
+            "seating_to_work_surface",
+        }:
             # 2026-07-16 修改原因：客厅椅按就近原则可绑定茶几或 TV；提示 critic
             # 修复当前 contract 选中的室内焦点，避免用宽松 is_facing 结果忽略反向 yaw。
             lines.append(

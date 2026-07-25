@@ -9,6 +9,7 @@ from pydrake.math import RigidTransform, RollPitchYaw
 
 from scenesmith.agent_utils.house import RoomGeometry
 from scenesmith.agent_utils.room import (
+    AgentType,
     ObjectType,
     PlacementInfo,
     RoomScene,
@@ -24,6 +25,7 @@ from scenesmith.scenebenchmark_critic.furniture_relation_repair import (
     _score_payload,
     improve_furniture_relations,
 )
+from scenesmith.scenebenchmark_critic.prompt_context import format_agent_prompt_context
 from scenesmith.utils.geometry_utils import compute_optimal_facing_yaw
 
 
@@ -217,6 +219,126 @@ def test_repairs_multiple_wall_backed_stools_with_wall_normal_orientation(
         stool_bounds = stool.compute_world_bounds()
         assert stool_bounds is not None
         assert abs(stool_bounds[0][0] - wall_bounds[1][0] - 0.03) < 1e-7
+
+
+def test_prompt_facing_guest_chairs_override_cached_orientation_contracts(
+    tmp_path: Path,
+) -> None:
+    desk = _object(
+        "study_desk_0",
+        "study_desk",
+        (0.0, 1.79, 0.4),
+        (1.46, 0.8, 0.8),
+        yaw_deg=180.0,
+    )
+    chair_positions = ((2.05, 0.5), (2.05, -0.5))
+    chairs = [
+        _object(
+            f"guest_chair_{index}",
+            "guest_chair",
+            (position[0], position[1], 0.45),
+            (0.55, 0.66, 0.9),
+            yaw_deg=_facing_yaw(position, (0.0, 1.79)),
+        )
+        for index, position in enumerate(chair_positions)
+    ]
+    scene = _scene(
+        tmp_path,
+        desk,
+        *chairs,
+        text="A study with two guest chairs against the side wall.",
+    )
+    config = CriticConfig(enabled=True, metrics=("functional_dependency",))
+
+    initial_payload = evaluate_room_scene(
+        scene, config=config, stage="before_prompt_face"
+    )
+    initial_contracts = {
+        check.get("subject_id"): check
+        for check in initial_payload["case_pack"]["checks"]
+        if check.get("check_source") == "scenesmith_orientation_contract"
+    }
+    assert (
+        initial_contracts["guest_chair_0"]["relation_type"] == "seating_to_work_surface"
+    )
+
+    scene.text_description = (
+        "A study with a desk centered against the back wall and two guest chairs "
+        "against the side wall facing the desk."
+    )
+    payload = evaluate_room_scene(scene, config=config, stage="after_prompt_face")
+    contracts = {
+        check.get("subject_id"): check
+        for check in payload["case_pack"]["checks"]
+        if check.get("check_source") == "scenesmith_orientation_contract"
+    }
+    expected_ids = {str(chair.object_id) for chair in chairs}
+    assert expected_ids <= contracts.keys()
+    for chair_id in expected_ids:
+        assert contracts[chair_id]["relation_type"] == "furniture_faces_furniture"
+        assert contracts[chair_id]["target_ids"] == ["study_desk_0"]
+
+    result_by_check = {result["check_id"]: result for result in payload["results"]}
+    contract_results = [
+        result_by_check[contracts[chair_id]["check_id"]] for chair_id in expected_ids
+    ]
+    assert {result["label"] for result in contract_results} == {"pass"}
+    assert all("angle 0deg" in result["reason"] for result in contract_results)
+
+    context = format_agent_prompt_context(payload, agent_type=AgentType.FURNITURE)
+    assert context.count("result=pass") >= 2
+    assert "A deterministic `result=pass` is authoritative" in context
+    assert "`guest_chair_0`: `furniture_faces_furniture` -> `study_desk_0`" in context
+
+
+def test_prompt_guest_facing_does_not_apply_to_earlier_office_chair(
+    tmp_path: Path,
+) -> None:
+    desk = _object("study_desk_0", "study_desk", (0.0, 1.79, 0.4), (1.46, 0.8, 0.8))
+    office_chair = _object(
+        "office_chair_0",
+        "office_chair",
+        (0.0, 1.15, 0.45),
+        (0.6, 0.6, 0.9),
+        yaw_deg=_facing_yaw((0.0, 1.15), (0.0, 1.79)),
+    )
+    guests = [
+        _object(
+            f"guest_chair_{index}",
+            "guest_chair",
+            (1.95, y, 0.45),
+            (0.55, 0.66, 0.9),
+            yaw_deg=_facing_yaw((1.95, y), (0.0, 1.79)),
+        )
+        for index, y in enumerate((0.5, -0.5))
+    ]
+    scene = _scene(
+        tmp_path,
+        desk,
+        office_chair,
+        *guests,
+        text=(
+            "A study with a desk centered against the back wall, an office chair "
+            "tucked under the desk, a computer monitor on the desk, two guest "
+            "chairs against the side wall facing the desk."
+        ),
+    )
+
+    payload = evaluate_room_scene(
+        scene,
+        config=CriticConfig(enabled=True, metrics=("functional_dependency",)),
+        stage="role_scoped_prompt_face",
+    )
+    contracts = {
+        check.get("subject_id"): check
+        for check in payload["case_pack"]["checks"]
+        if check.get("check_source") == "scenesmith_orientation_contract"
+    }
+
+    assert contracts["office_chair_0"]["relation_type"] == "seating_to_work_surface"
+    assert {contracts[str(guest.object_id)]["relation_type"] for guest in guests} == {
+        "furniture_faces_furniture"
+    }
 
 
 def test_repairs_work_seat_to_in_room_side_when_other_side_is_outside(

@@ -195,6 +195,53 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         StatefulFurnitureAgent is None,
         f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
     )
+    def test_inventory_prefers_explicit_sideboard_name_over_cabinet_description(
+        self,
+    ) -> None:
+        agent = object.__new__(StatefulFurnitureAgent)
+        furniture_type = SimpleNamespace(value="furniture")
+        original = SimpleNamespace(
+            object_id="sideboard_0",
+            name="sideboard",
+            description=(
+                "Traditional wooden sideboard with drawers and cabinet doors for "
+                "dining room storage"
+            ),
+            object_type=furniture_type,
+            immutable=False,
+            metadata={},
+        )
+        repair = SimpleNamespace(
+            object_id="sideboard_1",
+            name="sideboard",
+            description="Compact dining room sideboard",
+            object_type=furniture_type,
+            immutable=False,
+            metadata={},
+        )
+        agent.scene = SimpleNamespace(
+            objects={original.object_id: original, repair.object_id: repair}
+        )
+        agent.scene.remove_object = lambda object_id: agent.scene.objects.pop(object_id)
+        agent.furniture_safety_controller = SimpleNamespace(
+            required_counts={"sideboard": 1}
+        )
+        agent._nearest_room_boundary_distance = lambda obj: (
+            0.02 if obj is original else 0.7
+        )
+
+        self.assertEqual(agent._category_for_object(original.object_id, original), "sideboard")
+        self.assertEqual(
+            {obj.object_id for obj in agent._furniture_by_category("sideboard")},
+            {"sideboard_0", "sideboard_1"},
+        )
+        self.assertEqual(agent._remove_excess_required_furniture({"sideboard": 1}), 1)
+        self.assertEqual(set(agent.scene.objects), {"sideboard_0"})
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
     def test_inventory_convergence_removes_normal_duplicate_without_hard_failure(
         self,
     ) -> None:
