@@ -30,6 +30,8 @@ _REPAIRABLE_RELATIONS = {
     "wall_backed_storage_alignment",
     "workstation_focal_alignment",
 }
+_WINDOW_CLEARANCE_RELATION = "window_clearance"
+_WINDOW_CLEARANCE_MARGIN_M = 0.03
 
 
 @dataclass(frozen=True)
@@ -383,13 +385,17 @@ def _label_severity(label: str) -> int:
 def _repair_targets(scene: RoomScene, payload: dict[str, Any]) -> list[_RepairTarget]:
     targets: list[_RepairTarget] = []
     for result in payload.get("results") or []:
-        relation = str(result.get("relation_type") or "")
-        if (
-            result.get("label") not in _ISSUE_LABELS
-            or relation not in _REPAIRABLE_RELATIONS
-        ):
+        if result.get("label") not in _ISSUE_LABELS:
             continue
         check_id = str(result.get("check_id") or "")
+        window_targets = _window_clearance_targets(scene, result, check_id)
+        if window_targets:
+            targets.extend(window_targets)
+            continue
+
+        relation = str(result.get("relation_type") or "")
+        if relation not in _REPAIRABLE_RELATIONS:
+            continue
         diagnostics = result.get("diagnostics") or {}
         if relation == "dining_seat_distribution":
             for slot in diagnostics.get("seat_slots") or []:
@@ -713,6 +719,195 @@ def _wall_backed_target(
         wall_tangent_center + tangent_limit,
     )
     return (float(target[0]), float(target[1])), yaw_deg
+
+
+def _window_clearance_targets(
+    scene: RoomScene,
+    result: dict[str, Any],
+    check_id: str,
+) -> list[_RepairTarget]:
+    """Return same-wall lateral moves that clear a blocked window opening.
+
+    Furniture staging already has a deterministic post-agent repair pass.  A
+    wall-backed bookshelf can satisfy its orientation contract while still
+    hiding a window, so include window clearance failures in that pass rather
+    than relying on a later LLM critique to notice and repair the conflict.
+    """
+    if str(
+        result.get("metric") or ""
+    ) != "interaction_clearance" or not check_id.startswith("window_clearance__"):
+        return []
+
+    opening_id = check_id.removeprefix("window_clearance__")
+    opening = _window_opening(scene, opening_id)
+    if opening is None:
+        return []
+
+    targets: list[_RepairTarget] = []
+    for object_id in _window_clearance_blocker_ids(result):
+        obj = scene.objects.get(UniqueID(object_id))
+        if obj is None or obj.object_type != ObjectType.FURNITURE:
+            continue
+        targets.extend(
+            _same_wall_window_clearance_targets(
+                scene=scene,
+                obj=obj,
+                opening=opening,
+                check_id=check_id,
+            )
+        )
+    return targets
+
+
+def _window_opening(scene: RoomScene, opening_id: str) -> Any | None:
+    geometry = scene.room_geometry
+    if geometry is None or not opening_id:
+        return None
+    for opening in getattr(geometry, "openings", ()) or ():
+        if str(getattr(opening, "opening_id", "")) != opening_id:
+            continue
+        opening_type = getattr(opening, "opening_type", "")
+        if hasattr(opening_type, "value"):
+            opening_type = opening_type.value
+        if str(opening_type).lower() == "window":
+            return opening
+    return None
+
+
+def _window_clearance_blocker_ids(result: dict[str, Any]) -> list[str]:
+    diagnostics = result.get("diagnostics") or {}
+    candidates = (
+        result.get("related_objects") or [],
+        result.get("blocking_objects") or [],
+        diagnostics.get("blocking_objects") or [],
+    )
+    seen: set[str] = set()
+    blocker_ids: list[str] = []
+    for values in candidates:
+        for value in values:
+            object_id = str(value or "")
+            if object_id and object_id not in seen:
+                seen.add(object_id)
+                blocker_ids.append(object_id)
+    return blocker_ids
+
+
+def _same_wall_window_clearance_targets(
+    *,
+    scene: RoomScene,
+    obj: SceneObject,
+    opening: Any,
+    check_id: str,
+) -> list[_RepairTarget]:
+    bounds = obj.compute_world_bounds()
+    zone_min = getattr(opening, "clearance_bbox_min", None)
+    zone_max = getattr(opening, "clearance_bbox_max", None)
+    if bounds is None or zone_min is None or zone_max is None:
+        return []
+    try:
+        obj_min = np.asarray(bounds[0], dtype=float)
+        obj_max = np.asarray(bounds[1], dtype=float)
+        clearance_min = np.asarray(zone_min, dtype=float)
+        clearance_max = np.asarray(zone_max, dtype=float)
+        sill_height = float(getattr(opening, "sill_height", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return []
+    if (
+        obj_max[2] <= sill_height
+        or obj_min[0] >= clearance_max[0]
+        or obj_max[0] <= clearance_min[0]
+        or obj_min[1] >= clearance_max[1]
+        or obj_max[1] <= clearance_min[1]
+    ):
+        return []
+
+    wall = _window_wall(scene, opening, obj)
+    wall_bounds = wall.compute_world_bounds() if wall is not None else None
+    if wall_bounds is None:
+        return []
+    wall_min = np.asarray(wall_bounds[0], dtype=float)
+    wall_max = np.asarray(wall_bounds[1], dtype=float)
+    wall_span = wall_max - wall_min
+    normal_axis = 0 if float(wall_span[0]) < float(wall_span[1]) else 1
+    tangent_axis = 1 - normal_axis
+    center = (obj_min + obj_max) / 2.0
+    tangent_half = float(obj_max[tangent_axis] - obj_min[tangent_axis]) / 2.0
+    tangent_min = (
+        float(wall_min[tangent_axis]) + tangent_half + _WINDOW_CLEARANCE_MARGIN_M
+    )
+    tangent_max = (
+        float(wall_max[tangent_axis]) - tangent_half - _WINDOW_CLEARANCE_MARGIN_M
+    )
+
+    candidate_values = (
+        float(clearance_min[tangent_axis]) - tangent_half - _WINDOW_CLEARANCE_MARGIN_M,
+        float(clearance_max[tangent_axis]) + tangent_half + _WINDOW_CLEARANCE_MARGIN_M,
+    )
+    targets: list[_RepairTarget] = []
+    for tangent_value in sorted(
+        candidate_values,
+        key=lambda value: (abs(value - float(center[tangent_axis])), value),
+    ):
+        if tangent_value < tangent_min or tangent_value > tangent_max:
+            continue
+        target_center = center[:2].copy()
+        target_center[tangent_axis] = tangent_value
+        targets.append(
+            _RepairTarget(
+                str(obj.object_id),
+                _WINDOW_CLEARANCE_RELATION,
+                check_id,
+                (float(target_center[0]), float(target_center[1])),
+                None,
+            )
+        )
+    return targets
+
+
+def _window_wall(
+    scene: RoomScene, opening: Any, obj: SceneObject
+) -> SceneObject | None:
+    geometry = scene.room_geometry
+    if geometry is None:
+        return None
+    walls: dict[str, SceneObject] = {}
+    for candidate in [*scene.objects.values(), *(geometry.walls or [])]:
+        if _is_wall(candidate):
+            walls.setdefault(str(candidate.object_id), candidate)
+    if not walls:
+        return None
+
+    direction = str(getattr(opening, "wall_direction", "") or "").lower()
+    directional = [
+        wall
+        for wall_id, wall in walls.items()
+        if direction and direction in wall_id.lower()
+    ]
+    candidates = directional or list(walls.values())
+    obj_bounds = obj.compute_world_bounds()
+    if obj_bounds is None:
+        return None
+    return min(
+        candidates,
+        key=lambda wall: _xy_aabb_gap(obj_bounds, wall.compute_world_bounds()),
+    )
+
+
+def _xy_aabb_gap(
+    first: tuple[np.ndarray, np.ndarray],
+    second: tuple[np.ndarray, np.ndarray] | None,
+) -> float:
+    if second is None:
+        return float("inf")
+    first_min, first_max = first
+    second_min, second_max = second
+    dx = max(
+        float(first_min[0] - second_max[0]), float(second_min[0] - first_max[0]), 0.0
+    )
+    dy = max(
+        float(first_min[1] - second_max[1]), float(second_min[1] - first_max[1]), 0.0
+    )
+    return math.hypot(dx, dy)
 
 
 def _world_center_xy(obj: SceneObject) -> tuple[float, float] | None:

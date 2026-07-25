@@ -7,7 +7,7 @@ import numpy as np
 
 from pydrake.math import RigidTransform, RollPitchYaw
 
-from scenesmith.agent_utils.house import RoomGeometry
+from scenesmith.agent_utils.house import ClearanceOpeningData, RoomGeometry
 from scenesmith.agent_utils.room import (
     AgentType,
     ObjectType,
@@ -176,6 +176,55 @@ def test_repairs_generic_storage_to_wall(tmp_path: Path) -> None:
     assert storage.transform.translation()[0] < -1.8
     front = storage.transform.rotation().matrix() @ np.array([0.0, 1.0, 0.0])
     np.testing.assert_allclose(front[:2], [1.0, 0.0], atol=1e-7)
+
+
+def test_repairs_window_blocking_wall_backed_bookshelf(tmp_path: Path) -> None:
+    bookshelf = _object(
+        "bookshelf_0",
+        "bookshelf",
+        (0.0, -1.78, 0.92),
+        (1.0, 0.36, 1.84),
+    )
+    bookshelf.metadata["category"] = "bookshelf"
+    scene = _scene(tmp_path, bookshelf, text="A study with a bookshelf.")
+    scene.room_geometry.openings = [
+        ClearanceOpeningData(
+            opening_id="window_0",
+            opening_type="window",
+            wall_direction="south",
+            center_world=[0.0, -2.0, 1.5],
+            width=1.5,
+            sill_height=0.9,
+            height=1.2,
+            clearance_bbox_min=[-0.75, -2.1, 0.0],
+            clearance_bbox_max=[0.75, -1.65, 2.1],
+            wall_start=[-2.5, -2.0],
+            wall_end=[2.5, -2.0],
+            position_along_wall=2.5,
+        )
+    ]
+    config = CriticConfig(enabled=True)
+
+    before = evaluate_room_scene(scene, config=config, stage="window_before")
+    assert (
+        next(
+            result
+            for result in before["results"]
+            if result["check_id"] == "window_clearance__window_0"
+        )["label"]
+        == "fail"
+    )
+
+    fixes = improve_furniture_relations(scene, config=config)
+
+    assert [(fix.object_id, fix.relation_type) for fix in fixes] == [
+        ("bookshelf_0", "window_clearance")
+    ]
+    assert abs(float(bookshelf.transform.translation()[0])) >= 1.27
+    after = evaluate_room_scene(scene, config=config, stage="window_after")
+    result_by_id = {result["check_id"]: result for result in after["results"]}
+    assert result_by_id["window_clearance__window_0"]["label"] == "pass"
+    assert result_by_id["wall_backed_storage__bookshelf_0"]["label"] == "pass"
 
 
 def test_repairs_multiple_wall_backed_stools_with_wall_normal_orientation(
