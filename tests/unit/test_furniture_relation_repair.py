@@ -24,6 +24,7 @@ from scenesmith.scenebenchmark_critic.furniture_relation_repair import (
     _candidate_improves,
     _score_payload,
     improve_furniture_relations,
+    unresolved_furniture_relation_failures,
 )
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.orientation_contracts import (
     CONTRACT_ATTR,
@@ -149,6 +150,11 @@ def test_repairs_rotated_dining_slots_without_moving_unrelated_furniture(
     scene = _scene(tmp_path, table, *seats, unrelated)
     config = CriticConfig(enabled=True, metrics=("functional_dependency",))
 
+    unresolved_before = unresolved_furniture_relation_failures(scene, config=config)
+    assert {result.get("relation_type") for result in unresolved_before} == {
+        "dining_seat_distribution"
+    }
+
     fixes = improve_furniture_relations(scene, config=config)
 
     assert {fix.object_id for fix in fixes} == {"seat_variant_0", "seat_variant_1"}
@@ -160,6 +166,7 @@ def test_repairs_rotated_dining_slots_without_moving_unrelated_furniture(
         if item.get("relation_type") == "dining_seat_distribution"
     )
     assert result["label"] == "pass"
+    assert unresolved_furniture_relation_failures(scene, config=config) == []
 
 
 def test_one_per_edge_dining_repair_is_atomic_and_table_local(tmp_path: Path) -> None:
@@ -219,9 +226,7 @@ def test_one_per_edge_dining_repair_is_atomic_and_table_local(tmp_path: Path) ->
 def test_sideboard_wall_phrase_does_not_bind_dining_chairs_to_wall(
     tmp_path: Path,
 ) -> None:
-    table = _object(
-        "dining_table_0", "dining_table", (0.0, 0.0, 0.4), (2.0, 0.8, 0.8)
-    )
+    table = _object("dining_table_0", "dining_table", (0.0, 0.0, 0.4), (2.0, 0.8, 0.8))
     seats = [
         _object(
             f"dining_chair_{index}",
@@ -230,13 +235,9 @@ def test_sideboard_wall_phrase_does_not_bind_dining_chairs_to_wall(
             (0.5, 0.5, 0.9),
             yaw_deg=_facing_yaw(xy),
         )
-        for index, xy in enumerate(
-            ((0.0, -0.9), (0.0, 0.9), (-1.3, 0.0), (1.3, 0.0))
-        )
+        for index, xy in enumerate(((0.0, -0.9), (0.0, 0.9), (-1.3, 0.0), (1.3, 0.0)))
     ]
-    sideboard = _object(
-        "sideboard_0", "sideboard", (0.0, -1.7, 0.4), (1.2, 0.4, 0.8)
-    )
+    sideboard = _object("sideboard_0", "sideboard", (0.0, -1.7, 0.4), (1.2, 0.4, 0.8))
     scene = _scene(
         tmp_path,
         table,
@@ -256,9 +257,9 @@ def test_sideboard_wall_phrase_does_not_bind_dining_chairs_to_wall(
     assert {contracts[seat.object_id]["relation_type"] for seat in seats} == {
         "seating_to_work_surface"
     }
-    assert {
-        contracts[seat.object_id]["target_ids"][0] for seat in seats
-    } == {"dining_table_0"}
+    assert {contracts[seat.object_id]["target_ids"][0] for seat in seats} == {
+        "dining_table_0"
+    }
 
 
 def test_repairs_generic_classroom_as_atomic_student_grid(tmp_path: Path) -> None:
@@ -693,6 +694,82 @@ def test_later_stage_brief_overrides_earlier_guest_desk_facing(tmp_path: Path) -
     for guest in guests:
         front = guest.transform.rotation().matrix() @ np.array([0.0, 1.0, 0.0])
         np.testing.assert_allclose(front[:2], [-1.0, 0.0], atol=1e-7)
+
+
+def test_repairs_study_as_coordinated_opposite_wall_layout(tmp_path: Path) -> None:
+    desk = _object("desk_0", "desk", (-1.0, -1.45, 0.4), (1.4, 0.8, 0.8), yaw_deg=90.0)
+    office_chair = _object(
+        "office_chair_0",
+        "office_chair",
+        (-1.9, -1.7, 0.45),
+        (0.6, 0.62, 0.9),
+        yaw_deg=-78.0,
+    )
+    guests = [
+        _object(
+            f"guest_chair_{index}",
+            "guest_chair",
+            (-2.0, -0.9 + 0.9 * index, 0.4),
+            (0.55, 0.72, 0.8),
+            yaw_deg=yaw,
+        )
+        for index, yaw in enumerate((-90.0, -145.0))
+    ]
+    bookshelf = _object(
+        "bookshelf_0",
+        "bookshelf",
+        (-2.15, 0.0, 1.0),
+        (1.0, 0.5, 2.0),
+        yaw_deg=-90.0,
+    )
+    scene = _scene(
+        tmp_path,
+        desk,
+        office_chair,
+        *guests,
+        bookshelf,
+        text=(
+            "A study with a desk centered against the back wall, an office chair "
+            "tucked under the desk, two guest chairs against the side wall with "
+            "their usable fronts perpendicular to the wall and facing into the "
+            "room, and a bookshelf on the adjacent wall."
+        ),
+    )
+    config = CriticConfig(enabled=True, metrics=("functional_dependency",))
+
+    before = evaluate_room_scene(scene, config=config, stage="study_before")
+    before_result = next(
+        result
+        for result in before["results"]
+        if result.get("relation_type") == "study_furniture_layout"
+    )
+    assert before_result["label"] == "fail"
+
+    fixes = improve_furniture_relations(scene, config=config)
+
+    group_ids = {
+        "desk_0",
+        "office_chair_0",
+        "guest_chair_0",
+        "guest_chair_1",
+        "bookshelf_0",
+    }
+    assert group_ids <= {fix.object_id for fix in fixes}
+    assert desk.transform.translation()[1] > 1.0
+    assert abs(desk.transform.translation()[0]) < 1e-7
+    assert bookshelf.transform.translation()[0] < -1.5
+    for guest in guests:
+        assert guest.transform.translation()[0] > 1.5
+        front = guest.transform.rotation().matrix() @ np.array([0.0, 1.0, 0.0])
+        np.testing.assert_allclose(front[:2], [-1.0, 0.0], atol=1e-7)
+
+    after = evaluate_room_scene(scene, config=config, stage="study_after")
+    after_result = next(
+        result
+        for result in after["results"]
+        if result.get("relation_type") == "study_furniture_layout"
+    )
+    assert after_result["label"] == "pass"
 
 
 def test_prompt_guest_facing_does_not_apply_to_earlier_office_chair(

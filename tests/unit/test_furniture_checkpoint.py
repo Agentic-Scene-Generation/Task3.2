@@ -1,16 +1,196 @@
 """Unit tests for furniture checkpoint branching workflow."""
 
+import asyncio
 import json
 import shutil
 import tempfile
 import unittest
 
+from contextlib import nullcontext
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from scenesmith.experiments.indoor_scene_generation import (
+    _apply_and_rescore_final_furniture_state,
     _copy_checkpoint_for_stage,
     _fix_paths_in_json_file,
+    _raise_for_unresolved_furniture_relations,
+    _rescore_furniture_after_postprocessing,
 )
+
+
+class TestFinalFurnitureRescore(unittest.TestCase):
+    """Verify relation guards run before the canonical furniture render."""
+
+    def test_rescore_explicitly_renders_canonical_state_before_critique(self):
+        events: list[str] = []
+        scene = object()
+        canonical_render_dir = Path("/tmp/canonical-furniture-render")
+        rendering_manager = MagicMock()
+        rendering_manager.use_render_profile.return_value = nullcontext()
+        rendering_manager.render_scene.side_effect = lambda **_kwargs: (
+            events.append("render") or canonical_render_dir
+        )
+
+        critic_vision_tools = SimpleNamespace(
+            _get_room_bounds=MagicMock(return_value=(-2.5, -2.25, 2.5, 2.25))
+        )
+        safety_controller = SimpleNamespace(
+            enabled=True,
+            reset_best_checkpoint=MagicMock(
+                side_effect=lambda: events.append("reset_checkpoint")
+            ),
+        )
+        agent = SimpleNamespace(
+            scene=None,
+            critic=None,
+            furniture_safety_controller=safety_controller,
+            rendering_manager=rendering_manager,
+            blender_server=object(),
+            _critic_vision_tools=critic_vision_tools,
+            _create_critic_tools=MagicMock(return_value=["observe_scene"]),
+            _create_critic_agent=MagicMock(return_value="critic"),
+            _critic_render_profile_name=MagicMock(return_value="final"),
+            _request_critique_impl=AsyncMock(
+                side_effect=lambda **_kwargs: events.append("critique")
+            ),
+            _finalize_scene_and_scores=AsyncMock(
+                side_effect=lambda: events.append("finalize")
+            ),
+        )
+
+        asyncio.run(
+            _rescore_furniture_after_postprocessing(
+                furniture_agent=agent,
+                scene=scene,
+            )
+        )
+
+        self.assertIs(agent.scene, scene)
+        self.assertEqual(events, ["reset_checkpoint", "render", "critique", "finalize"])
+        safety_controller.reset_best_checkpoint.assert_called_once_with()
+        rendering_manager.clear_cache.assert_called_once_with()
+        rendering_manager.use_render_profile.assert_called_once_with("final")
+        rendering_manager.render_scene.assert_called_once_with(
+            scene=scene,
+            blender_server=agent.blender_server,
+            room_bounds=(-2.5, -2.25, 2.5, 2.25),
+        )
+        agent._request_critique_impl.assert_awaited_once_with(update_checkpoint=False)
+        agent._finalize_scene_and_scores.assert_awaited_once_with()
+
+    def test_rescore_observes_state_after_all_final_guards(self):
+        events: list[tuple[str, str]] = []
+
+        class FakeScene:
+            version = 0
+
+            def content_hash(self) -> str:
+                return str(self.version)
+
+        scene = FakeScene()
+
+        def mutate(label: str):
+            def apply(target, **_kwargs):
+                target.version += 1
+                events.append((label, target.content_hash()))
+
+            return apply
+
+        async def record_rescore(*, furniture_agent, scene):
+            self.assertIs(furniture_agent, agent)
+            events.append(("rescore", scene.content_hash()))
+
+        agent = object()
+        rescore = AsyncMock(side_effect=record_rescore)
+        module = "scenesmith.experiments.indoor_scene_generation"
+        with (
+            patch(f"{module}.align_seating_to_nearest_surface", mutate("align")),
+            patch(f"{module}.improve_storage_front_access", mutate("storage")),
+            patch(f"{module}.improve_furniture_relations", mutate("relations")),
+            patch(
+                f"{module}._raise_for_unresolved_furniture_relations",
+                side_effect=lambda **_kwargs: events.append(
+                    ("validate_relations", scene.content_hash())
+                ),
+            ),
+            patch(
+                f"{module}.critic_config_from_any",
+                return_value=SimpleNamespace(enabled=True),
+            ),
+            patch(f"{module}._rescore_furniture_after_postprocessing", rescore),
+        ):
+            changed = asyncio.run(
+                _apply_and_rescore_final_furniture_state(
+                    furniture_agent=agent,
+                    scene=scene,
+                    cfg_dict={},
+                    previous_scene_hash="0",
+                )
+            )
+
+        self.assertTrue(changed)
+        self.assertEqual(
+            events,
+            [
+                ("align", "1"),
+                ("storage", "2"),
+                ("relations", "3"),
+                ("align", "4"),
+                ("validate_relations", "4"),
+                ("rescore", "4"),
+                ("validate_relations", "4"),
+            ],
+        )
+        rescore.assert_awaited_once()
+
+    def test_unresolved_core_relation_blocks_furniture_stage(self):
+        module = "scenesmith.experiments.indoor_scene_generation"
+        failures = [
+            {
+                "label": "fail",
+                "primary_object": "dining_table_0",
+                "relation_type": "room_center_alignment",
+            },
+            {
+                "label": "fail",
+                "primary_object": "dining_table_0",
+                "relation_type": "dining_seat_distribution",
+            },
+        ]
+        with patch(
+            f"{module}.unresolved_furniture_relation_failures",
+            return_value=failures,
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "room_center_alignment:dining_table_0, "
+                "dining_seat_distribution:dining_table_0",
+            ):
+                _raise_for_unresolved_furniture_relations(
+                    scene=object(),
+                    cfg_dict={
+                        "furniture_agent": {
+                            "fail_stage_on_unresolved_hard_constraints": True
+                        }
+                    },
+                )
+
+    def test_relation_gate_can_be_disabled_for_failed_trajectory_collection(self):
+        module = "scenesmith.experiments.indoor_scene_generation"
+        with patch(
+            f"{module}.unresolved_furniture_relation_failures"
+        ) as evaluate_relations:
+            _raise_for_unresolved_furniture_relations(
+                scene=object(),
+                cfg_dict={
+                    "furniture_agent": {
+                        "fail_stage_on_unresolved_hard_constraints": False
+                    }
+                },
+            )
+        evaluate_relations.assert_not_called()
 
 
 class TestPathFixing(unittest.TestCase):

@@ -180,6 +180,18 @@ class TestAssetManager(unittest.TestCase):
         self.assertEqual(self.asset_manager.output_dir, self.output_dir)
         self.assertEqual(self.asset_manager.logger, self.mock_logger)
 
+    def test_upright_seating_requires_stricter_uniform_dimension_fit(self):
+        self.assertEqual(
+            self.asset_manager._hssd_uniform_fit_min_ratio(
+                "Classic dining chair with upholstered seat"
+            ),
+            0.65,
+        )
+        self.assertEqual(
+            self.asset_manager._hssd_uniform_fit_min_ratio("Wooden sideboard"),
+            0.5,
+        )
+
     def test_direct_hssd_requests_top_n_and_retries_failed_candidate(self):
         """Direct HSSD path should request and try rendered-choice candidates."""
         request = AssetGenerationRequest(
@@ -408,6 +420,23 @@ class TestAssetManager(unittest.TestCase):
         self.assertEqual(metadata["asset_source"], "thin_covering")
         self.assertEqual(metadata["retrieval_source"], "hssd")
         self.assertEqual(metadata["hssd_mesh_id"], "rug_mesh")
+
+    def test_square_hssd_rug_is_exactly_fitted_on_both_planar_axes(self):
+        canonical_path = self.temp_dir / "square_rug_canonical.gltf"
+        final_path = self.temp_dir / "square_rug.gltf"
+        trimesh.creation.box(extents=[3.0, 0.01, 2.0]).export(canonical_path)
+
+        _, bbox_min, bbox_max, _ = self.asset_manager._scale_and_measure_canonical_mesh(
+            canonical_path=canonical_path,
+            final_path=final_path,
+            desired_dimensions=[2.0, 2.0, 0.05],
+            fit_axes=(0, 1),
+            exact_fit_axes=(0, 1),
+        )
+
+        np.testing.assert_allclose(
+            (bbox_max - bbox_min)[:2], [2.0, 2.0], rtol=1e-5, atol=1e-5
+        )
 
     def test_plant_uniform_fit_relaxation_is_targeted(self):
         """Plant envelopes may use 0.45; other assets retain the 0.50 floor."""

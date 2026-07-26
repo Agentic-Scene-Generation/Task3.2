@@ -2,6 +2,7 @@
 
 import logging
 import os
+import re
 import time
 
 from dataclasses import dataclass
@@ -30,12 +31,40 @@ _FLOOR_COVERING_TOKENS = {
     "runner",
 }
 
+_ROUND_FOOTPRINT_TOKENS = {"circle", "circular", "oval", "round"}
+_SQUARE_FOOTPRINT_MAX_ASPECT_RATIO = 1.30
+
+
+def _normalized_tokens(*values: str | None) -> set[str]:
+    return set(
+        re.findall(r"[a-z0-9]+", " ".join(str(value or "").lower() for value in values))
+    )
+
 
 def is_floor_covering_request(*values: str | None) -> bool:
     """Recognize semantic floor coverings without matching unrelated substrings."""
-    normalized = "_".join(str(value or "").lower() for value in values)
-    tokens = {token for token in normalized.replace("-", "_").split("_") if token}
-    return bool(tokens & _FLOOR_COVERING_TOKENS)
+    return bool(_normalized_tokens(*values) & _FLOOR_COVERING_TOKENS)
+
+
+def infer_floor_covering_footprint_shape(*values: str | None) -> str:
+    """Infer the requested visual footprint without changing collision semantics."""
+    tokens = _normalized_tokens(*values)
+    if "square" in tokens:
+        return "square"
+    if tokens & _ROUND_FOOTPRINT_TOKENS:
+        return "circular"
+    return "rectangular"
+
+
+def _planar_aspect_ratio(candidate: "HssdRetrievalResult") -> float:
+    """Return the larger-to-smaller ratio of a SceneSmith-frame footprint."""
+    try:
+        width, depth = (abs(float(axis)) for axis in candidate.size[:2])
+    except (TypeError, ValueError):
+        return float("inf")
+    if width <= 0.0 or depth <= 0.0:
+        return float("inf")
+    return max(width, depth) / min(width, depth)
 
 
 def hssd_rendered_choice_options(cfg: object) -> tuple[bool, int, Path]:
@@ -155,9 +184,11 @@ def choose_hssd_candidate_from_iso_renders(
         + "\n\nChoose exactly one candidate that best matches the requested "
         "object type and likely has usable proportions. Penalize wrong object "
         "types, bunk/loft beds unless explicitly requested, partial objects, "
-        "and assets whose front/usable side is visually unclear."
-        + covering_guidance
-        + "\n"
+        "and assets whose front/usable side is visually unclear. Treat the "
+        "reported size as [width, depth, height] and reject visibly incompatible "
+        "relative proportions rather than assuming later scaling can fix them. "
+        "In particular, an upright dining, desk, or task chair must not be "
+        "replaced by a low lounge chair or armchair." + covering_guidance + "\n"
         'Return JSON only: {"selected_index": <index number>, '
         '"selected_hssd_id": "<hssd_id>", "reason": "<short reason>"}'
     )
@@ -234,6 +265,30 @@ def choose_hssd_candidate_from_iso_renders(
         return RenderedAssetChoice(
             candidates=candidates, used_image_count=len(image_records)
         )
+
+    if str(requested_shape or "").strip().lower() == "square":
+        square_candidates = [
+            candidate
+            for _, candidate, _ in image_records
+            if _planar_aspect_ratio(candidate) <= _SQUARE_FOOTPRINT_MAX_ASPECT_RATIO
+        ]
+        if square_candidates and selected_candidate not in square_candidates:
+            rejected_candidate = selected_candidate
+            selected_candidate = square_candidates[0]
+            reason = (
+                "square footprint guard overrode rendered choice "
+                f"{rejected_candidate.hssd_id} "
+                f"(aspect={_planar_aspect_ratio(rejected_candidate):.3f})"
+            )
+            console_logger.warning(
+                "Rendered HSSD choice for '%s' selected non-square candidate %s "
+                "(aspect=%.3f); using %s (aspect=%.3f)",
+                object_description,
+                rejected_candidate.hssd_id,
+                _planar_aspect_ratio(rejected_candidate),
+                selected_candidate.hssd_id,
+                _planar_aspect_ratio(selected_candidate),
+            )
 
     reordered = [selected_candidate] + [
         candidate

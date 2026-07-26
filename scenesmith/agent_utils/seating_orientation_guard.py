@@ -60,7 +60,7 @@ def align_seating_to_nearest_surface(
     wall_anchor_gap_ratio: float = 1.0,
     standalone_surface_gap_ratio: float = 0.5,
     wall_preference_margin_ratio: float = 0.2,
-    wall_inward_angle_threshold_deg: float = 75.0,
+    wall_inward_angle_threshold_deg: float = 5.0,
 ) -> list[SeatingOrientationFix]:
     """Rotate misaligned seating toward its nearest functional surface."""
     furniture = [
@@ -83,9 +83,6 @@ def align_seating_to_nearest_surface(
         angle = (
             _front_angle_to_target_deg(seat, target) if target is not None else None
         )
-        already_faces_surface = (
-            angle is not None and angle <= repair_angle_threshold_deg
-        )
         wall_inward_angle = None
         if wall_target is not None:
             wall_inward_point = _wall_away_target_point(seat, wall_target)
@@ -101,10 +98,13 @@ def align_seating_to_nearest_surface(
         # close to a room wall.  A wall-backed pose would destroy the complete
         # one-seat-per-edge arrangement repaired by the critic.
         target_is_dining_table = target is not None and _is_dining_table(target)
+        # 2026-07-26 修改原因：当前 yaw 恰好斜对书桌不能证明墙边空闲椅属于
+        # 书桌；仅当 critic 已记录 prompt 的显式朝向约束时，才让桌面朝向优先。
+        prompt_requires_surface_facing = _has_explicit_surface_facing_contract(scene, seat)
         if (
             wall_target is not None
             and _is_wall_anchor_candidate(seat)
-            and not already_faces_surface
+            and not prompt_requires_surface_facing
             and not already_faces_wall_interior
             and (
                 target is None
@@ -291,6 +291,23 @@ def _is_standalone_wall_seating(
         surface_gap >= footprint_scale * surface_gap_ratio
         and wall_gap + footprint_scale * wall_margin_ratio < surface_gap
     )
+
+
+def _has_explicit_surface_facing_contract(
+    scene: RoomScene, seat: SceneObject
+) -> bool:
+    """Return whether the active critic contract explicitly binds this seat."""
+    contracts = getattr(scene, "_scenebenchmark_orientation_contracts", None)
+    if not isinstance(contracts, dict):
+        return False
+    contract = contracts.get(str(seat.object_id))
+    if not isinstance(contract, dict) or not contract.get("prompt_explicit_facing"):
+        return False
+    return str(contract.get("relation_type") or "") in {
+        "furniture_faces_furniture",
+        "seat_faces_surface",
+        "seating_to_work_surface",
+    }
 
 
 def _seat_footprint_scale(seat: SceneObject) -> float | None:

@@ -53,6 +53,7 @@ from scenesmith.manipuland_agents.stateful_manipuland_agent import (
 from scenesmith.scenebenchmark_critic.config import critic_config_from_any
 from scenesmith.scenebenchmark_critic.furniture_relation_repair import (
     improve_furniture_relations,
+    unresolved_furniture_relation_failures,
 )
 from scenesmith.utils.logging import ConsoleLogger, FileLoggingContext
 from scenesmith.utils.openai import configure_reasoning_persistence
@@ -411,13 +412,106 @@ async def _rescore_furniture_after_postprocessing(
         scene=scene,
         tools=critic_tools,
     )
+
+    # Projection and final deterministic relation guards define the state that
+    # later stages will consume.  An earlier best-scoring checkpoint must not
+    # silently roll this authoritative state back during the canonical rescore.
+    safety_controller = getattr(furniture_agent, "furniture_safety_controller", None)
+    if safety_controller is not None and safety_controller.enabled:
+        safety_controller.reset_best_checkpoint()
+        console_logger.info(
+            "Reset pre-postprocessing furniture checkpoint before canonical rescore"
+        )
+
     try:
         furniture_agent.rendering_manager.clear_cache()
     except Exception:
         console_logger.debug("Could not clear furniture render cache", exc_info=True)
 
+    # Do not rely on the critic model to execute its forced observe_scene tool.
+    # A skipped tool call leaves last_render_dir empty and makes the persisted
+    # furniture images describe the pre-projection state.  Render explicitly
+    # with the same profile and room bounds so the critic call can reuse it.
+    render_profile = furniture_agent._critic_render_profile_name(False)
+    with furniture_agent.rendering_manager.use_render_profile(render_profile):
+        canonical_render_dir = furniture_agent.rendering_manager.render_scene(
+            scene=scene,
+            blender_server=furniture_agent.blender_server,
+            room_bounds=furniture_agent._critic_vision_tools._get_room_bounds(),
+        )
+    if canonical_render_dir is None:
+        raise RuntimeError("Canonical furniture render returned no output directory")
+
     await furniture_agent._request_critique_impl(update_checkpoint=False)
     await furniture_agent._finalize_scene_and_scores()
+
+
+async def _apply_and_rescore_final_furniture_state(
+    furniture_agent: StatefulFurnitureAgent,
+    scene: RoomScene,
+    cfg_dict: dict,
+    previous_scene_hash: str,
+) -> bool:
+    """Apply final furniture guards before rendering the canonical stage state."""
+    align_seating_to_nearest_surface(scene)
+    if critic_config_from_any(cfg_dict).enabled:
+        improve_storage_front_access(scene, config=cfg_dict)
+        improve_furniture_relations(scene, config=cfg_dict)
+
+    # Candidate evaluation can move a wall seat while testing a relation repair.
+    align_seating_to_nearest_surface(scene)
+
+    _raise_for_unresolved_furniture_relations(scene=scene, cfg_dict=cfg_dict)
+
+    if scene.content_hash() == previous_scene_hash:
+        return False
+
+    await _rescore_furniture_after_postprocessing(
+        furniture_agent=furniture_agent,
+        scene=scene,
+    )
+    # Finalization can restore a scored checkpoint. Validate the state that will
+    # actually be persisted, not only the pre-critique canonical candidate.
+    _raise_for_unresolved_furniture_relations(scene=scene, cfg_dict=cfg_dict)
+    return True
+
+
+def _furniture_stage_hard_gate_enabled(cfg_dict: dict) -> bool:
+    furniture_cfg = cfg_dict.get("furniture_agent") or {}
+    if hasattr(furniture_cfg, "get"):
+        value = furniture_cfg.get("fail_stage_on_unresolved_hard_constraints", True)
+    else:
+        value = getattr(
+            furniture_cfg,
+            "fail_stage_on_unresolved_hard_constraints",
+            True,
+        )
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def _raise_for_unresolved_furniture_relations(
+    *,
+    scene: RoomScene,
+    cfg_dict: dict,
+) -> None:
+    """Prevent downstream stages from consuming a known-bad furniture layout."""
+    if not _furniture_stage_hard_gate_enabled(cfg_dict):
+        return
+
+    failures = unresolved_furniture_relation_failures(scene, config=cfg_dict)
+    if not failures:
+        return
+
+    details = []
+    for result in failures:
+        relation = str(result.get("relation_type") or "unknown_relation")
+        object_id = str(result.get("primary_object") or "unknown_object")
+        details.append(f"{relation}:{object_id}")
+    raise RuntimeError(
+        "Furniture stage failed with unresolved core relations: " + ", ".join(details)
+    )
 
 
 def _sync_scene_room_geometry_from_layout(
@@ -852,38 +946,30 @@ def _generate_room(
                             "seconds"
                         )
 
-                if scene.content_hash() != pre_postprocess_hash:
-                    try:
-                        asyncio.run(
-                            _rescore_furniture_after_postprocessing(
-                                furniture_agent=furniture_agent,
-                                scene=scene,
-                            )
+                # Run every deterministic furniture guard before the canonical
+                # render. This also catches relation-only changes when physical
+                # projection itself was a no-op.
+                try:
+                    asyncio.run(
+                        _apply_and_rescore_final_furniture_state(
+                            furniture_agent=furniture_agent,
+                            scene=scene,
+                            cfg_dict=cfg_dict,
+                            previous_scene_hash=pre_postprocess_hash,
                         )
-                    except Exception as e:
-                        console_logger.error(
-                            "Failed to re-score post-processed furniture layout: %s",
-                            e,
-                            exc_info=True,
-                        )
+                    )
+                except Exception as e:
+                    console_logger.error(
+                        "Failed to re-score post-processed furniture layout: %s",
+                        e,
+                        exc_info=True,
+                    )
+                    if _furniture_stage_hard_gate_enabled(cfg_dict):
+                        raise
             finally:
                 # Always cleanup server subprocesses after all furniture-stage
                 # scoring/rendering that depends on the agent's Blender server.
                 furniture_agent.cleanup()
-
-        # LLM furniture repairs can restore a checkpoint with a seat facing away
-        # from its functional surface. Apply deterministic geometry guards before
-        # persisting the checkpoint used by later stages.
-        align_seating_to_nearest_surface(scene)
-        if critic_config_from_any(cfg_dict).enabled:
-            improve_storage_front_access(scene, config=cfg_dict)
-            improve_furniture_relations(scene, config=cfg_dict)
-
-        # Relation repair may move or rotate a standalone wall seat while
-        # evaluating a candidate. Re-apply the geometry invariant last so the
-        # persisted furniture checkpoint cannot regress to a seat facing the
-        # wall or floating away from it.
-        align_seating_to_nearest_surface(scene)
 
         # Always save state after furniture stage (unconditional for resumability).
         logger.log_scene(scene=scene, name="scene_after_furniture")

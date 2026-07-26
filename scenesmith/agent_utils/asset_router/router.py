@@ -26,6 +26,7 @@ from scenesmith.agent_utils.asset_router.dataclasses import (
 from scenesmith.agent_utils.asset_router.rendered_asset_choice import (
     choose_hssd_candidate_from_iso_renders,
     hssd_rendered_choice_options,
+    infer_floor_covering_footprint_shape,
     is_floor_covering_request,
 )
 from scenesmith.agent_utils.blender.constants import (
@@ -1625,14 +1626,7 @@ class AssetRouter:
             object_short_name=item.short_name,
             requested_dimensions=item.dimensions,
             requested_shape=(
-                (
-                    "circular"
-                    if any(
-                        token in item.description.lower()
-                        for token in ("round", "circular", "oval")
-                    )
-                    else "rectangular"
-                )
+                infer_floor_covering_footprint_shape(item.description, item.short_name)
                 if is_floor_covering_request(item.description, item.short_name)
                 else None
             ),

@@ -16,6 +16,7 @@ import numpy as np
 
 from scenesmith.agent_utils.clip_embeddings import warmup_clip_model
 from scenesmith.agent_utils.hssd_retrieval.retrieval import HssdRetriever
+from scenesmith.agent_utils.mesh_frame import gltf_y_up_dimensions_to_scene_z_up
 from scenesmith.agent_utils.retrieval_errors import FatalRetrievalError
 from scenesmith.agent_utils.scheduler import QueuedRequest, StrictRoundRobinScheduler
 
@@ -96,9 +97,7 @@ class HssdRetrievalApp(flask.Flask):
             if self._hssd_retrieval_backend == "clip":
                 warmup_clip_model(device=self._clip_device)
             load_time = time.time() - start_time
-            console_logger.info(
-                f"HSSD retriever preloaded in {load_time:.2f}s"
-            )
+            console_logger.info(f"HSSD retriever preloaded in {load_time:.2f}s")
 
         # Setup routes.
         self.add_url_rule("/health", "health", self._health_endpoint, methods=["GET"])
@@ -335,7 +334,7 @@ class HssdRetrievalApp(flask.Flask):
                 hssd_id=candidate.mesh_id,
                 object_name=request.object_description,
                 similarity_score=float(candidate.clip_score),
-                size=tuple(candidate.mesh.extents.tolist()),
+                size=tuple(gltf_y_up_dimensions_to_scene_z_up(candidate.mesh.extents)),
                 category=category,
             )
             results.append(result)

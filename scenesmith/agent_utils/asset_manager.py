@@ -28,6 +28,7 @@ from scenesmith.agent_utils.asset_router.dataclasses import (
 from scenesmith.agent_utils.asset_router.rendered_asset_choice import (
     choose_hssd_candidate_from_iso_renders,
     hssd_rendered_choice_options,
+    infer_floor_covering_footprint_shape,
     is_floor_covering_request,
 )
 from scenesmith.agent_utils.convex_decomposition_server import ConvexDecompositionClient
@@ -479,6 +480,7 @@ class AssetManager:
         desired_dimensions: list[float] | tuple[float, ...] | None,
         uniform_fit_min_ratio: float = 0.5,
         fit_axes: tuple[int, ...] = (0, 1, 2),
+        exact_fit_axes: tuple[int, ...] = (),
     ) -> tuple[Path, np.ndarray, np.ndarray, float]:
         """Scale canonical Y-up glTF and expose SceneSmith-frame bounds."""
         applied_scale = 1.0
@@ -493,6 +495,32 @@ class AssetManager:
                 relative_threshold=self.mesh_relative_dimension_threshold,
                 fit_axes=gltf_fit_axes,
             )
+            if exact_fit_axes:
+                gltf_exact_axes = tuple(
+                    scene_to_gltf_axis[axis] for axis in exact_fit_axes
+                )
+                mesh = load_mesh_as_trimesh(final_path, force_merge=True)
+                current_dimensions = mesh.bounds[1] - mesh.bounds[0]
+                desired_gltf_dimensions = np.asarray(
+                    scene_dimensions_to_gltf_y_up(desired_dimensions), dtype=float
+                )
+                axis_scales = np.ones(3, dtype=float)
+                for axis in gltf_exact_axes:
+                    if current_dimensions[axis] <= 0.0:
+                        raise ValueError(
+                            "Cannot exactly fit a degenerate mesh axis: "
+                            f"axis={axis}, dimensions={current_dimensions.tolist()}"
+                        )
+                    axis_scales[axis] = (
+                        desired_gltf_dimensions[axis] / current_dimensions[axis]
+                    )
+                mesh.apply_transform(np.diag([*axis_scales, 1.0]))
+                mesh.export(final_path)
+                console_logger.info(
+                    "Exactly fitted mesh axes %s with scale factors %s",
+                    gltf_exact_axes,
+                    axis_scales.round(4).tolist(),
+                )
         else:
             canonical_path.replace(final_path)
         mesh = load_mesh_as_trimesh(final_path, force_merge=True)
@@ -507,9 +535,13 @@ class AssetManager:
         return final_path, bbox_min, bbox_max, applied_scale
 
     def _hssd_uniform_fit_min_ratio(self, description: str) -> float:
-        """Use a narrowly relaxed uniform-fit floor for plant assets only."""
+        """Choose a semantic floor for uniformly fitted HSSD proportions."""
         normalized = re.sub(r"[^a-z0-9]+", "_", description.lower())
         tokens = {token for token in normalized.split("_") if token}
+        if "chair" in tokens or "seat" in tokens:
+            # Uniform scaling cannot turn a low lounge seat into an upright
+            # dining or task chair.
+            return 0.65
         if "plant" not in tokens:
             return 0.5
         hssd_cfg = self.cfg.asset_manager.get("hssd", {}) or {}
@@ -997,7 +1029,9 @@ class AssetManager:
             object_short_name=request.short_names[index],
             requested_dimensions=request.desired_dimensions[index],
             requested_shape=(
-                infer_thin_covering_shape(request.object_descriptions[index])
+                infer_floor_covering_footprint_shape(
+                    request.object_descriptions[index], request.short_names[index]
+                )
                 if is_floor_covering_request(
                     request.object_descriptions[index], request.short_names[index]
                 )
@@ -1106,6 +1140,15 @@ class AssetManager:
                     request.object_descriptions[index]
                 ),
                 fit_axes=(0, 1) if floor_covering else (0, 1, 2),
+                exact_fit_axes=(
+                    (0, 1)
+                    if floor_covering
+                    and infer_floor_covering_footprint_shape(
+                        request.object_descriptions[index], request.short_names[index]
+                    )
+                    == "square"
+                    else ()
+                ),
             )
         )
         sdf_path = config.sdf_dir / f"{config.short_name}.sdf"
@@ -1136,8 +1179,8 @@ class AssetManager:
                     "retrieval_source": "hssd",
                     "width_m": float((bbox_max - bbox_min)[0]),
                     "depth_m": float((bbox_max - bbox_min)[1]),
-                    "shape": infer_thin_covering_shape(
-                        request.object_descriptions[index]
+                    "shape": infer_floor_covering_footprint_shape(
+                        request.object_descriptions[index], request.short_names[index]
                     ),
                     "is_wall_covering": False,
                 }

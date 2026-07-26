@@ -55,3 +55,25 @@ def test_room_center_supports_contains_wording() -> None:
 
     assert len(results) == 1
     assert results[0]["primary_object"] == "bed_0"
+
+
+def test_room_center_ignores_stage_brief_failure_examples() -> None:
+    prompt = (
+        "A bedroom with a bed against the wall. "
+        "Known failure patterns to avoid: Placing the bed in the middle of the "
+        "room without wall support."
+    )
+
+    assert evaluate_room_center_alignment(_case(prompt)) == []
+
+
+def test_room_center_ignores_off_center_counterexample_but_keeps_request() -> None:
+    results = evaluate_room_center_alignment(
+        _case(
+            "Place the bed in the center of the room. "
+            "Avoid leaving the bed off-center."
+        )
+    )
+
+    assert len(results) == 1
+    assert results[0]["primary_object"] == "bed_0"

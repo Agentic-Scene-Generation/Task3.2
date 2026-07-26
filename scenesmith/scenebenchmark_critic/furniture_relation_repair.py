@@ -28,6 +28,7 @@ _REPAIRABLE_RELATIONS = {
     "dining_seat_distribution",
     "room_center_alignment",
     "seating_to_work_surface",
+    "study_furniture_layout",
     "wall_backed_storage_alignment",
     "workstation_focal_alignment",
 }
@@ -182,7 +183,11 @@ def improve_furniture_relations(
             translation_limit = (
                 max_translation_m * 3.0
                 if target.relation_type == "classroom_workstation_distribution"
-                else max_translation_m
+                else (
+                    max_translation_m * 2.0
+                    if target.relation_type == "study_furniture_layout"
+                    else max_translation_m
+                )
             )
             if _target_max_translation(scene, target) > translation_limit:
                 continue
@@ -279,6 +284,30 @@ def improve_furniture_relations(
         candidate_budget,
     )
     return fixes
+
+
+def unresolved_furniture_relation_failures(
+    scene: RoomScene,
+    *,
+    config: CriticConfig | Any | None = None,
+) -> list[dict[str, Any]]:
+    """Return unresolved core furniture-relation failures after final repair."""
+    critic_config = (
+        config if isinstance(config, CriticConfig) else critic_config_from_any(config)
+    )
+    if not critic_config.enabled or not critic_config.metric_enabled(
+        "functional_dependency"
+    ):
+        return []
+
+    payload = _evaluate(scene, critic_config)
+    return [
+        result
+        for result in payload.get("results") or []
+        if str(result.get("label") or "").lower() == "fail"
+        and str(result.get("scoring_tier") or "").lower() != "ignored"
+        and str(result.get("relation_type") or "") in _REPAIRABLE_RELATIONS
+    ]
 
 
 def _evaluate(scene: RoomScene, config: CriticConfig) -> dict[str, Any]:
@@ -475,6 +504,31 @@ def _repair_targets(scene: RoomScene, payload: dict[str, Any]) -> list[_RepairTa
                         check_id,
                         teacher_center,
                         teacher_yaw,
+                        member_poses=unique_poses,
+                    )
+                )
+        elif relation == "study_furniture_layout":
+            poses: list[_RepairPose] = []
+            for member in diagnostics.get("member_poses") or []:
+                object_id = str(member.get("object_id") or "")
+                center = _xy(member.get("target_center_xy_m"))
+                yaw = _float_or_none(member.get("target_yaw_deg"))
+                if object_id and center is not None and yaw is not None:
+                    poses.append(_RepairPose(object_id, center, yaw))
+            unique_poses = tuple({pose.object_id: pose for pose in poses}.values())
+            anchor_id = str(result.get("primary_object") or "")
+            anchor_pose = next(
+                (pose for pose in unique_poses if pose.object_id == anchor_id),
+                None,
+            )
+            if anchor_pose is not None and len(unique_poses) >= 4:
+                targets.append(
+                    _RepairTarget(
+                        anchor_id,
+                        relation,
+                        check_id,
+                        anchor_pose.target_center_xy,
+                        anchor_pose.target_yaw_deg,
                         member_poses=unique_poses,
                     )
                 )

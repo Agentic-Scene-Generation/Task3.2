@@ -15,6 +15,16 @@ def scene_dimensions_to_gltf_y_up(dimensions: Sequence[float]) -> list[float]:
     return [width, height, depth]
 
 
+def gltf_y_up_dimensions_to_scene_z_up(
+    dimensions: Sequence[float],
+) -> list[float]:
+    """Map glTF Y-up extents to SceneSmith ``[width, depth, height]``."""
+    if len(dimensions) != 3:
+        raise ValueError(f"Expected three dimensions, got {dimensions}")
+    width, height, depth = (float(value) for value in dimensions)
+    return [width, depth, height]
+
+
 def gltf_y_up_bounds_to_scene_z_up(
     bounds: Sequence[Sequence[float]],
 ) -> tuple[np.ndarray, np.ndarray]:

@@ -31,6 +31,10 @@ _ROOM_CENTER_PLACEMENT_RE = re.compile(
     r"\b(?:contains?|holds?|features?|includes?|has|houses?|"
     r"is\s+(?:occupied|anchored)\s+by)\b"
 )
+_NEGATIVE_CENTER_CONTEXT_RE = re.compile(
+    r"\b(?:avoid|avoiding|failure\s+patterns?|do\s+not|don't|must\s+not|"
+    r"should\s+not|off[-\s]?center)\b"
+)
 _ANCHOR_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("dining_table", ("dining table", "dining_table")),
     ("table", ("table",)),
@@ -167,6 +171,11 @@ def _prompt_center_sentences(prompt: str) -> list[tuple[str, list[str]]]:
             clause = clause.strip()
             lower = clause.lower()
             if not clause or not _CENTER_RE.search(lower):
+                continue
+            # Stage briefs include counterexamples such as "Avoid placing the
+            # sofa in the middle" and "Leaving the table off-center". They are
+            # constraints against a pose, not positive room-center requests.
+            if _NEGATIVE_CENTER_CONTEXT_RE.search(lower):
                 continue
             if _RELATIVE_CENTER_RE.search(lower):
                 continue

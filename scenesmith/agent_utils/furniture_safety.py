@@ -388,6 +388,15 @@ class FurnitureSafetyController:
         self.best_reasons: list[str] = []
         self.best_plausibility_report: dict[str, Any] | None = None
 
+    def reset_best_checkpoint(self) -> None:
+        """Discard only candidate-ranking state for a new authoritative baseline."""
+        self.best_scene_state = None
+        self.best_scores = None
+        self.best_render_dir = None
+        self.best_weighted_score = -1.0
+        self.best_reasons = []
+        self.best_plausibility_report = None
+
     def reset_for_scene(self, scene_description: str) -> None:
         """Reset counters and infer required objects for a new scene."""
         self.scene_description = scene_description or ""
@@ -412,12 +421,7 @@ class FurnitureSafetyController:
         self.generate_asset_calls = 0
         self.rescale_counts = {}
         self.should_finish = False
-        self.best_scene_state = None
-        self.best_scores = None
-        self.best_render_dir = None
-        self.best_weighted_score = -1.0
-        self.best_reasons = []
-        self.best_plausibility_report = None
+        self.reset_best_checkpoint()
         console_logger.info(
             "Furniture safety controller reset: required_terms=%s",
             sorted(self.required_terms),

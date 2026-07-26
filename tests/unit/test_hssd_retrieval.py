@@ -24,6 +24,7 @@ from scenesmith.agent_utils.hssd_retrieval.data_loader import (
     construct_hssd_mesh_path,
     load_preprocessed_data,
 )
+from scenesmith.agent_utils.hssd_retrieval.retrieval import HssdRetriever
 
 
 class TestHssdConfig(unittest.TestCase):
@@ -194,6 +195,18 @@ class TestAlignment(unittest.TestCase):
         np.testing.assert_array_almost_equal(
             original_vertices, aligned.vertices, decimal=6
         )
+
+
+class TestDimensionRanking(unittest.TestCase):
+    def test_bbox_score_maps_gltf_y_up_extents_to_scene_dimensions(self):
+        retriever = object.__new__(HssdRetriever)
+
+        score = retriever._calculate_bbox_score(
+            target_dimensions=np.array([0.45, 0.50, 0.95]),
+            mesh_extents=np.array([0.45, 0.95, 0.50]),
+        )
+
+        self.assertAlmostEqual(score, 0.0)
 
 
 class TestClipSimilarity(unittest.TestCase):

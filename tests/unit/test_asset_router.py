@@ -11,6 +11,7 @@ from scenesmith.agent_utils.asset_router import AssetRouter
 from scenesmith.agent_utils.asset_router.dataclasses import AnalysisResult, AssetItem
 from scenesmith.agent_utils.asset_router.rendered_asset_choice import (
     choose_hssd_candidate_from_iso_renders,
+    infer_floor_covering_footprint_shape,
 )
 from scenesmith.agent_utils.hssd_retrieval_server.dataclasses import HssdRetrievalResult
 from scenesmith.agent_utils.room import AgentType, ObjectType
@@ -160,13 +161,19 @@ class TestRenderedHssdAssetChoice(unittest.TestCase):
         "x8AAwMCAO+/p9sAAAAASUVORK5CYII="
     )
 
-    def _candidate(self, hssd_id: str, name: str, score: float) -> HssdRetrievalResult:
+    def _candidate(
+        self,
+        hssd_id: str,
+        name: str,
+        score: float,
+        size: tuple[float, float, float] = (1.0, 0.5, 0.6),
+    ) -> HssdRetrievalResult:
         return HssdRetrievalResult(
             mesh_path=f"/tmp/{hssd_id}.glb",
             hssd_id=hssd_id,
             object_name=name,
             similarity_score=score,
-            size=(1.0, 0.5, 0.6),
+            size=size,
             category="bedroom",
         )
 
@@ -290,6 +297,57 @@ class TestRenderedHssdAssetChoice(unittest.TestCase):
         self.assertIn("(2.4, 1.6, 0.02)", prompt)
         self.assertIn("Requested footprint shape: rectangular", prompt)
         self.assertIn("near-zero visual thickness is expected", prompt)
+
+    def test_square_floor_covering_rejects_incompatible_vlm_choice(self) -> None:
+        candidates = [
+            self._candidate(
+                "rectangular_rug", "patterned rug", 0.91, size=(1.6, 2.5, 0.01)
+            ),
+            self._candidate("square_rug", "woven rug", 0.89, size=(2.0, 2.2, 0.01)),
+            self._candidate("runner", "rug runner", 0.87, size=(0.8, 2.4, 0.01)),
+        ]
+        vlm_service = MagicMock()
+        vlm_service.create_completion.return_value = (
+            '{"selected_index": 1, "selected_hssd_id": "rectangular_rug", '
+            '"reason": "best visible pattern"}'
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            for candidate in candidates:
+                self._write_iso(root, candidate.hssd_id)
+            choice = choose_hssd_candidate_from_iso_renders(
+                candidates=candidates,
+                object_description="geometric square rug",
+                object_short_name="area_rug",
+                requested_dimensions=[2.0, 2.0, 0.02],
+                requested_shape="square",
+                scene_context="A living room with a square rug.",
+                vlm_service=vlm_service,
+                model="test-model",
+                reasoning_effort="low",
+                verbosity="low",
+                vision_detail="low",
+                rendered_assets_dir=root,
+                top_n=3,
+            )
+
+        self.assertEqual(choice.selected_hssd_id, "square_rug")
+        self.assertEqual(choice.selected_index, 2)
+        self.assertEqual(choice.candidates[0].hssd_id, "square_rug")
+        self.assertIn("square footprint guard", choice.reason)
+        vlm_service.create_completion.assert_called_once()
+
+    def test_infers_explicit_square_floor_covering_shape(self) -> None:
+        self.assertEqual(
+            infer_floor_covering_footprint_shape(
+                "Geometric patterned square rug", "area_rug"
+            ),
+            "square",
+        )
+        self.assertEqual(
+            infer_floor_covering_footprint_shape("Round bath mat"), "circular"
+        )
 
 
 class TestAnalysisResponseParsing(unittest.TestCase):

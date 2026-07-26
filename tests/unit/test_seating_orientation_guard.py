@@ -85,7 +85,7 @@ def test_standalone_wall_chair_keeps_wall_normal_priority() -> None:
     assert abs(wall_bounds[0][0] - chair_bounds[1][0] - 0.03) < 1e-7
 
 
-def test_wall_guest_chairs_already_facing_desk_keep_diagonal_yaws() -> None:
+def test_wall_guest_chairs_already_facing_desk_use_wall_normal_priority() -> None:
     chairs = [
         _object(
             "guest_chair_0",
@@ -111,14 +111,59 @@ def test_wall_guest_chairs_already_facing_desk_keep_diagonal_yaws() -> None:
     east_wall = _object(
         "east_wall", ObjectType.WALL, (2.475, 0.0, 1.4), (0.05, 4.5, 2.8)
     )
-    old_transforms = [chair.transform.GetAsMatrix4().copy() for chair in chairs]
-
     fixes = align_seating_to_nearest_surface(_scene(*chairs, desk, east_wall))
 
+    assert {fix.subject_id for fix in fixes} == {
+        "guest_chair_0",
+        "guest_chair_1",
+    }
+    assert {fix.target_id for fix in fixes} == {"east_wall"}
+    wall_bounds = east_wall.compute_world_bounds()
+    assert wall_bounds is not None
+    for chair in chairs:
+        front = chair.transform.rotation().matrix() @ np.array([0.0, 1.0, 0.0])
+        np.testing.assert_allclose(front[:2], [-1.0, 0.0], atol=1e-7)
+        chair_bounds = chair.compute_world_bounds()
+        assert chair_bounds is not None
+        assert abs(wall_bounds[0][0] - chair_bounds[1][0] - 0.03) < 1e-7
+
+
+def test_explicit_prompt_facing_contract_keeps_wall_guest_chairs_desk_relative() -> None:
+    chair = _object(
+        "guest_chair_0",
+        ObjectType.FURNITURE,
+        (1.85, 0.7, 0.5),
+        (0.55, 0.66, 1.0),
+        yaw_deg=45.0,
+    )
+    desk = _object(
+        "study_desk_0",
+        ObjectType.FURNITURE,
+        (0.0, 1.86, 0.4),
+        (1.6, 0.66, 0.8),
+    )
+    east_wall = _object(
+        "east_wall", ObjectType.WALL, (2.475, 0.0, 1.4), (0.05, 4.5, 2.8)
+    )
+    scene = _scene(chair, desk, east_wall)
+    setattr(
+        scene,
+        "_scenebenchmark_orientation_contracts",
+        {
+            "guest_chair_0": {
+                "relation_type": "furniture_faces_furniture",
+                "target_ids": ["study_desk_0"],
+                "prompt_explicit_facing": True,
+            }
+        },
+    )
+    old_transform = chair.transform.GetAsMatrix4().copy()
+
+    fixes = align_seating_to_nearest_surface(scene)
+
     assert fixes == []
-    for chair, old_transform in zip(chairs, old_transforms, strict=True):
-        np.testing.assert_allclose(chair.transform.GetAsMatrix4(), old_transform)
-        assert _front_angle_to_target_deg(chair, desk) <= 45.0
+    np.testing.assert_allclose(chair.transform.GetAsMatrix4(), old_transform)
+    assert _front_angle_to_target_deg(chair, desk) <= 45.0
 
 
 def test_wall_chairs_just_outside_old_ratio_are_backed_and_face_inward() -> None:

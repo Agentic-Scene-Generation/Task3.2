@@ -401,17 +401,13 @@ def snap_with_iterative_collision_check(
     )
     obj_vertices_world = (obj_matrix @ obj_vertices_homogeneous.T).T[:, :3]
 
-    # Project object vertices onto movement direction to find both edges.
+    # Project object vertices onto movement direction to find its leading edge.
     obj_projections = np.dot(obj_vertices_world, direction_unit)
     obj_max_projection = np.max(
         obj_projections
     )  # Leading edge (furthest along direction).
-    obj_min_projection = np.min(
-        obj_projections
-    )  # Trailing edge (closest along direction).
     current_position_projection = np.dot(current_position, direction_unit)
     obj_leading_edge_offset = obj_max_projection - current_position_projection
-    obj_trailing_edge_offset = obj_min_projection - current_position_projection
 
     # Compute target's leading edge projection (closest point to object along direction).
     target_vertices_local = np.vstack([m.vertices for m in target_collision_meshes])
@@ -424,7 +420,6 @@ def snap_with_iterative_collision_check(
 
     console_logger.debug(
         f"AABB safety check setup: obj_leading_edge_offset={obj_leading_edge_offset:.3f}m, "
-        f"obj_trailing_edge_offset={obj_trailing_edge_offset:.3f}m, "
         f"target_leading_edge={target_leading_edge:.3f}m"
     )
 
@@ -433,20 +428,20 @@ def snap_with_iterative_collision_check(
         current_position += direction_unit * step_size
         total_movement += step_size
 
-        # AABB-based safety check: has object's trailing edge passed target's leading edge?
-        # This catches "sliding through" cases (e.g., chair under table) efficiently.
+        # Stop as soon as the moving object's front reaches the target footprint.
+        # Waiting for its trailing edge permits a chair to slide completely under
+        # a table when their collision meshes differ in height.
         current_position_projection = np.dot(current_position, direction_unit)
-        object_trailing_edge = current_position_projection + obj_trailing_edge_offset
+        object_leading_edge = current_position_projection + obj_leading_edge_offset
 
-        if object_trailing_edge >= target_leading_edge:
-            # Object passed through target - stop to prevent runaway snapping.
+        if object_leading_edge >= target_leading_edge:
             total_movement -= step_size
             total_movement = max(0.0, total_movement)
             movement_vector = direction_unit * total_movement
 
             console_logger.info(
                 f"Iterative snap: AABB safety check triggered at step {i + 1}, "
-                f"object_trailing_edge={object_trailing_edge:.3f}m >= "
+                f"object_leading_edge={object_leading_edge:.3f}m >= "
                 f"target_leading_edge={target_leading_edge:.3f}m, "
                 f"final distance={total_movement:.3f}m"
             )

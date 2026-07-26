@@ -21,6 +21,7 @@ from scenesmith.agent_utils.hssd_retrieval.data_loader import (
     load_preprocessed_data,
 )
 from scenesmith.agent_utils.hssd_retrieval.zvec_similarity import HssdZvecSearcher
+from scenesmith.agent_utils.mesh_frame import gltf_y_up_dimensions_to_scene_z_up
 
 console_logger = logging.getLogger(__name__)
 
@@ -93,16 +94,19 @@ class HssdRetriever:
     def _calculate_bbox_score(
         self, target_dimensions: np.ndarray, mesh_extents: np.ndarray
     ) -> float:
-        """Calculate bounding box score (L1 distance).
+        """Calculate SceneSmith-frame bounding box score (L1 distance).
 
         Args:
             target_dimensions: Desired dimensions (3,).
-            mesh_extents: Actual mesh extents (3,).
+            mesh_extents: Actual glTF Y-up mesh extents ``[X, Y, Z]``.
 
         Returns:
             L1 distance score (lower is better).
         """
-        return float(np.sum(np.abs(target_dimensions - mesh_extents)))
+        scene_extents = np.asarray(
+            gltf_y_up_dimensions_to_scene_z_up(mesh_extents), dtype=float
+        )
+        return float(np.sum(np.abs(target_dimensions - scene_extents)))
 
     def _load_and_process_mesh(
         self, mesh_id: str, metadata: HssdMeshMetadata
