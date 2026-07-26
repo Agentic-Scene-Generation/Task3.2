@@ -26,6 +26,7 @@ from scenesmith.agent_utils.asset_router.dataclasses import (
 from scenesmith.agent_utils.asset_router.rendered_asset_choice import (
     choose_hssd_candidate_from_iso_renders,
     hssd_rendered_choice_options,
+    is_floor_covering_request,
 )
 from scenesmith.agent_utils.blender.constants import (
     ARTICULATED_LIGHT_ENERGY,
@@ -1621,6 +1622,20 @@ class AssetRouter:
             vision_detail=openai_config.vision_detail,
             rendered_assets_dir=rendered_assets_dir,
             top_n=top_n,
+            object_short_name=item.short_name,
+            requested_dimensions=item.dimensions,
+            requested_shape=(
+                (
+                    "circular"
+                    if any(
+                        token in item.description.lower()
+                        for token in ("round", "circular", "oval")
+                    )
+                    else "rectangular"
+                )
+                if is_floor_covering_request(item.description, item.short_name)
+                else None
+            ),
         )
         if choice.selected_hssd_id:
             console_logger.info(

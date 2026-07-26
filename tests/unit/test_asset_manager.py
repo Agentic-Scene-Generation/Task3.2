@@ -295,9 +295,7 @@ class TestAssetManager(unittest.TestCase):
                 "_override_hssd_asset_annotations",
                 return_value=physics,
             ),
-            patch(
-                "scenesmith.agent_utils.asset_manager.canonicalize_mesh"
-            ),
+            patch("scenesmith.agent_utils.asset_manager.canonicalize_mesh"),
             patch.object(
                 self.asset_manager,
                 "_scale_and_measure_canonical_mesh",
@@ -334,6 +332,82 @@ class TestAssetManager(unittest.TestCase):
             kwargs["additional_metadata"]["actual_dimensions"],
             [1.36, 0.53, 0.85],
         )
+
+    def test_direct_hssd_rug_uses_planar_fit_and_static_covering_sdf(self):
+        request = AssetGenerationRequest(
+            object_descriptions=["Rectangular low-pile area rug"],
+            short_names=["area_rug"],
+            object_type=ObjectType.FURNITURE,
+            desired_dimensions=[[2.4, 1.6, 0.02]],
+        )
+        candidate = HssdRetrievalResult(
+            mesh_path=str(self.temp_dir / "rug.gltf"),
+            hssd_id="rug_mesh",
+            object_name="patterned rug",
+            similarity_score=0.91,
+            size=(2.0, 1.3, 0.006),
+            category="rug",
+        )
+        config = self.asset_manager._create_asset_paths(
+            request.object_descriptions, request.short_names
+        )[0]
+        physics = MeshPhysicsAnalysis(
+            up_axis="+Y",
+            front_axis="+Z",
+            material="fabric",
+            mass_kg=2.0,
+            mass_range_kg=[1.0, 3.0],
+            friction_coefficient=0.5,
+        )
+        bbox_min = np.array([-1.2, -0.8, 0.0])
+        bbox_max = np.array([1.2, 0.8, 0.008])
+        created = MagicMock(spec=SceneObject)
+
+        with (
+            patch.object(
+                self.asset_manager, "_analyze_mesh_physics", return_value=physics
+            ),
+            patch.object(
+                self.asset_manager,
+                "_override_hssd_asset_annotations",
+                return_value=physics,
+            ),
+            patch("scenesmith.agent_utils.asset_manager.canonicalize_mesh"),
+            patch.object(
+                self.asset_manager,
+                "_scale_and_measure_canonical_mesh",
+                return_value=(
+                    config.sdf_dir / "area_rug.gltf",
+                    bbox_min,
+                    bbox_max,
+                    1.2,
+                ),
+            ) as scale_mesh,
+            patch.object(
+                self.asset_manager, "_generate_collision_geometry"
+            ) as collision,
+            patch(
+                "scenesmith.agent_utils.asset_manager.generate_thin_covering_sdf"
+            ) as generate_covering,
+            patch.object(
+                self.asset_manager, "_create_scene_object", return_value=created
+            ) as create_scene_object,
+        ):
+            result = self.asset_manager._process_direct_hssd_candidate(
+                request=request,
+                index=0,
+                config=config,
+                candidate=candidate,
+            )
+
+        self.assertIs(result, created)
+        self.assertEqual(scale_mesh.call_args.kwargs["fit_axes"], (0, 1))
+        collision.assert_not_called()
+        generate_covering.assert_called_once()
+        metadata = create_scene_object.call_args.kwargs["additional_metadata"]
+        self.assertEqual(metadata["asset_source"], "thin_covering")
+        self.assertEqual(metadata["retrieval_source"], "hssd")
+        self.assertEqual(metadata["hssd_mesh_id"], "rug_mesh")
 
     def test_plant_uniform_fit_relaxation_is_targeted(self):
         """Plant envelopes may use 0.45; other assets retain the 0.50 floor."""

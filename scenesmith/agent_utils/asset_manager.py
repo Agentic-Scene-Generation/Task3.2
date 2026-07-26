@@ -28,6 +28,7 @@ from scenesmith.agent_utils.asset_router.dataclasses import (
 from scenesmith.agent_utils.asset_router.rendered_asset_choice import (
     choose_hssd_candidate_from_iso_renders,
     hssd_rendered_choice_options,
+    is_floor_covering_request,
 )
 from scenesmith.agent_utils.convex_decomposition_server import ConvexDecompositionClient
 from scenesmith.agent_utils.geometry_generation_server.client import (
@@ -477,16 +478,20 @@ class AssetManager:
         final_path: Path,
         desired_dimensions: list[float] | tuple[float, ...] | None,
         uniform_fit_min_ratio: float = 0.5,
+        fit_axes: tuple[int, ...] = (0, 1, 2),
     ) -> tuple[Path, np.ndarray, np.ndarray, float]:
         """Scale canonical Y-up glTF and expose SceneSmith-frame bounds."""
         applied_scale = 1.0
         if desired_dimensions is not None:
+            scene_to_gltf_axis = {0: 0, 1: 2, 2: 1}
+            gltf_fit_axes = tuple(scene_to_gltf_axis[axis] for axis in fit_axes)
             final_path, applied_scale = scale_mesh_uniformly_to_dimensions(
                 mesh_path=canonical_path,
                 desired_dimensions=scene_dimensions_to_gltf_y_up(desired_dimensions),
                 output_path=final_path,
                 min_dimension_meters=self.min_mesh_dimension_meters,
                 relative_threshold=self.mesh_relative_dimension_threshold,
+                fit_axes=gltf_fit_axes,
             )
         else:
             canonical_path.replace(final_path)
@@ -497,6 +502,7 @@ class AssetManager:
                 bbox_max - bbox_min,
                 desired_dimensions,
                 min_ratio=uniform_fit_min_ratio,
+                fit_axes=fit_axes,
             )
         return final_path, bbox_min, bbox_max, applied_scale
 
@@ -988,6 +994,15 @@ class AssetManager:
             vision_detail=openai_config.vision_detail,
             rendered_assets_dir=rendered_assets_dir,
             top_n=top_n,
+            object_short_name=request.short_names[index],
+            requested_dimensions=request.desired_dimensions[index],
+            requested_shape=(
+                infer_thin_covering_shape(request.object_descriptions[index])
+                if is_floor_covering_request(
+                    request.object_descriptions[index], request.short_names[index]
+                )
+                else None
+            ),
         )
         if choice.selected_hssd_id:
             console_logger.info(
@@ -1011,6 +1026,9 @@ class AssetManager:
     ) -> SceneObject:
         """Convert one direct HSSD candidate, allowing the caller to retry."""
         short_name = request.short_names[index]
+        floor_covering = is_floor_covering_request(
+            request.object_descriptions[index], short_name
+        )
         server_mesh_path = Path(candidate.mesh_path)
         mesh_id = candidate.hssd_id
 
@@ -1087,17 +1105,43 @@ class AssetManager:
                 uniform_fit_min_ratio=self._hssd_uniform_fit_min_ratio(
                     request.object_descriptions[index]
                 ),
+                fit_axes=(0, 1) if floor_covering else (0, 1, 2),
             )
         )
-        collision_pieces = self._generate_collision_geometry(final_gltf_path)
         sdf_path = config.sdf_dir / f"{config.short_name}.sdf"
-        generate_drake_sdf(
-            visual_mesh_path=final_gltf_path,
-            collision_pieces=collision_pieces,
-            physics_analysis=physics_analysis,
-            output_path=sdf_path,
-            asset_name=config.short_name,
-        )
+        if floor_covering:
+            generate_thin_covering_sdf(
+                visual_mesh_path=final_gltf_path,
+                output_path=sdf_path,
+                model_name=config.short_name,
+            )
+        else:
+            collision_pieces = self._generate_collision_geometry(final_gltf_path)
+            generate_drake_sdf(
+                visual_mesh_path=final_gltf_path,
+                collision_pieces=collision_pieces,
+                physics_analysis=physics_analysis,
+                output_path=sdf_path,
+                asset_name=config.short_name,
+            )
+        metadata = {
+            "asset_source": "thin_covering" if floor_covering else "hssd",
+            "hssd_mesh_id": mesh_id,
+            "requested_dimensions": list(request.desired_dimensions[index]),
+            "actual_dimensions": (bbox_max - bbox_min).tolist(),
+        }
+        if floor_covering:
+            metadata.update(
+                {
+                    "retrieval_source": "hssd",
+                    "width_m": float((bbox_max - bbox_min)[0]),
+                    "depth_m": float((bbox_max - bbox_min)[1]),
+                    "shape": infer_thin_covering_shape(
+                        request.object_descriptions[index]
+                    ),
+                    "is_wall_covering": False,
+                }
+            )
         return self._create_scene_object(
             config=config,
             object_type=request.object_type,
@@ -1105,12 +1149,7 @@ class AssetManager:
             final_gltf_path=final_gltf_path,
             bbox_min=bbox_min,
             bbox_max=bbox_max,
-            additional_metadata={
-                "asset_source": "hssd",
-                "hssd_mesh_id": mesh_id,
-                "requested_dimensions": list(request.desired_dimensions[index]),
-                "actual_dimensions": (bbox_max - bbox_min).tolist(),
-            },
+            additional_metadata=metadata,
             # HSSD support-surface annotations use the source mesh frame. Keep
             # the baked uniform scale so those surfaces match the final SDF.
             scale_factor=applied_scale,
@@ -1874,6 +1913,12 @@ class AssetManager:
         )
         config.sdf_dir.mkdir(parents=True, exist_ok=True)
 
+        retrieved_floor_covering = (
+            generated.asset_source == "hssd"
+            and request.object_type == ObjectType.FURNITURE
+            and is_floor_covering_request(item.description, item.short_name)
+        )
+
         # Thin coverings use simplified conversion: no VLM analysis.
         # Wall thin coverings (paintings, posters) get collision geometry.
         if generated.asset_source == "thin_covering":
@@ -1909,13 +1954,29 @@ class AssetManager:
                     desired_dimensions=item.dimensions,
                     asset_source=generated.asset_source,
                     hssd_id=generated.hssd_id,
+                    floor_covering=retrieved_floor_covering,
                 )
             )
 
         # Build additional metadata using explicit asset_source from GeneratedGeometry.
-        additional_metadata = {"asset_source": generated.asset_source}
+        additional_metadata = {
+            "asset_source": (
+                "thin_covering" if retrieved_floor_covering else generated.asset_source
+            )
+        }
         if generated.hssd_id is not None:
             additional_metadata["hssd_mesh_id"] = generated.hssd_id
+        if retrieved_floor_covering:
+            actual_dimensions = bbox_max - bbox_min
+            additional_metadata.update(
+                {
+                    "retrieval_source": "hssd",
+                    "width_m": float(actual_dimensions[0]),
+                    "depth_m": float(actual_dimensions[1]),
+                    "shape": infer_thin_covering_shape(item.description),
+                    "is_wall_covering": False,
+                }
+            )
 
         # Add thin_covering-specific metadata for physics validation.
         if generated.asset_source == "thin_covering":
@@ -2274,6 +2335,7 @@ class AssetManager:
         desired_dimensions: list[float] | None = None,
         asset_source: str = "generated",
         hssd_id: str | None = None,
+        floor_covering: bool = False,
     ) -> tuple[Path, Path, np.ndarray, np.ndarray, float]:
         """Convert mesh to a simulatable Drake SDF.
 
@@ -2307,7 +2369,7 @@ class AssetManager:
             (1.0 if no scaling was applied). This is needed to correctly scale
             HSSD pre-computed support surfaces.
         """
-        if self.collision_client is None:
+        if self.collision_client is None and not floor_covering:
             raise RuntimeError(
                 "Collision client not available. Cannot generate collision geometry."
             )
@@ -2327,12 +2389,13 @@ class AssetManager:
         )
 
         # Remove floaters from mesh before VLM analysis.
-        console_logger.info("Removing disconnected mesh floaters")
-        remove_mesh_floaters(
-            mesh_path=gltf_path,
-            output_path=gltf_path,
-            distance_threshold=self.cfg.asset_manager.floater_distance_threshold,
-        )
+        if not floor_covering:
+            console_logger.info("Removing disconnected mesh floaters")
+            remove_mesh_floaters(
+                mesh_path=gltf_path,
+                output_path=gltf_path,
+                distance_threshold=self.cfg.asset_manager.floater_distance_threshold,
+            )
 
         # VLM analysis for orientation, material, mass.
         # Create debug directory for saving multi-view physics analysis images.
@@ -2389,22 +2452,29 @@ class AssetManager:
                 canonical_path=canonical_path,
                 final_path=config.sdf_dir / f"{config.short_name}.gltf",
                 desired_dimensions=desired_dimensions,
+                fit_axes=(0, 1) if floor_covering else (0, 1, 2),
             )
         )
         initial_scale = applied_scale if is_hssd else 1.0
 
         # Generate collision geometry via convex decomposition server.
-        collision_pieces = self._generate_collision_geometry(final_gltf_path)
-
         # Generate Drake SDF.
         sdf_path = config.sdf_dir / f"{config.short_name}.sdf"
-        generate_drake_sdf(
-            visual_mesh_path=final_gltf_path,
-            collision_pieces=collision_pieces,
-            physics_analysis=physics_analysis,
-            output_path=sdf_path,
-            asset_name=config.short_name,
-        )
+        if floor_covering:
+            generate_thin_covering_sdf(
+                visual_mesh_path=final_gltf_path,
+                output_path=sdf_path,
+                model_name=config.short_name,
+            )
+        else:
+            collision_pieces = self._generate_collision_geometry(final_gltf_path)
+            generate_drake_sdf(
+                visual_mesh_path=final_gltf_path,
+                collision_pieces=collision_pieces,
+                physics_analysis=physics_analysis,
+                output_path=sdf_path,
+                asset_name=config.short_name,
+            )
 
         console_logger.info(
             f"Drake SDF complete: SDF at {sdf_path}, bounds: {bbox_min} to {bbox_max}"

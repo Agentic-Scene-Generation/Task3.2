@@ -44,6 +44,7 @@ CONTRACT_RELATIONS = SEATING_RELATIONS | {
 CONFLICTING_ORIENTATION_RELATIONS = CONTRACT_RELATIONS | {
     "furniture_faces_furniture",
     "seat_faces_surface",
+    "workstation",
 }
 MEDIA_CATEGORIES = {
     "display",
@@ -181,6 +182,10 @@ def stabilize_orientation_contracts(
             task_text=task_text,
             explicit_facing_target=explicit_facing_target,
         )
+        if explicit_wall_target is not None:
+            # A later stage brief can refine an earlier one-line summary from
+            # desk-facing to wall-normal inward-facing seating.
+            explicit_facing_target = None
         existing = memory.get(subject_id)
         if _contract_is_usable(
             existing,
@@ -196,6 +201,17 @@ def stabilize_orientation_contracts(
         ):
             contract = dict(existing)
             contract["stage_last_seen"] = stage
+            assignment = work_assignment_by_seat.get(subject_id)
+            if (
+                assignment is not None
+                and contract.get("assignment_source") == ASSIGNMENT_SOURCE
+            ):
+                # Keep the stable surface identity, but recompute its local slot
+                # after a coordinated repair moves or rotates the desk.
+                evidence = assignment.evidence()
+                contract["target_slot"] = evidence["target_slot"]
+                contract["assignment_cost"] = evidence["assignment_cost"]
+                contract["annotation_sources"] = evidence["annotation_sources"]
         else:
             contract = _plan_contract(
                 subject,
@@ -395,6 +411,11 @@ def _plan_contract(
                 "task instruction explicitly places this seating role against a "
                 "wall, with its front normal to the wall and facing into the room"
             ),
+            dependency={
+                "subject_face": "back",
+                "max_angle_deg": 10.0,
+                "max_distance_m": 0.25,
+            },
             prompt_explicit_wall=True,
         )
 
@@ -461,6 +482,11 @@ def _plan_contract(
                 "wall-anchored standalone seating keeps its back at the "
                 "wall and its front normal to the wall"
             ),
+            dependency={
+                "subject_face": "back",
+                "max_angle_deg": 10.0,
+                "max_distance_m": 0.25,
+            },
         )
 
     nearest_focus = _nearest_living_seat_focus(
@@ -583,11 +609,11 @@ def _explicit_prompt_wall_target(
     """Resolve an explicitly wall-backed seating role from the task text.
 
     Prompt topology takes priority over a proximity-based work-seat assignment.
-    A direct instruction to face a work surface remains stronger, so a phrase such
-    as "guest chairs against the side wall facing the desk" keeps its explicit
-    desk-facing contract rather than silently changing the task semantics.
+    A direct instruction to face a work surface remains stronger unless a later
+    stage constraint explicitly changes the same seating role to inward-facing,
+    wall-normal placement.
     """
-    if explicit_facing_target is not None or not task_text.strip():
+    if not task_text.strip():
         return None
     subject_aliases = _prompt_subject_aliases(subject)
     if not subject_aliases:
@@ -604,11 +630,14 @@ def _explicit_prompt_wall_target(
         )
     )
     normalized_task = _normalize_prompt_text(task_text)
-    matches: list[tuple[int, str]] = []
+    matches: list[tuple[int, int, str]] = []
     for subject_alias in subject_aliases:
         pattern = re.compile(
             rf"\b{re.escape(subject_alias)}\b"
-            rf"(?P<between>[^.!?;\n]{{0,160}}?)\b"
+            # A comma commonly starts the next furniture noun phrase, e.g.
+            # "four dining chairs ..., a sideboard against the wall". Do not
+            # transfer that later object's wall relation back to the seats.
+            rf"(?P<between>[^,.!?;\n]{{0,160}}?)\b"
             rf"(?:(?:are|is)\s+)?"
             rf"(?:(?:placed|positioned|arranged|set|located|kept)\s+)?"
             rf"(?:against|along|by|beside|near|at)\s+"
@@ -628,11 +657,27 @@ def _explicit_prompt_wall_target(
             specificity = len(subject_alias.split()) + (
                 1 if descriptor != "wall" else 0
             )
-            matches.append((specificity, descriptor))
+            matches.append((specificity, match.start(), descriptor))
     if not matches:
         return None
-    matches.sort(key=lambda item: (-item[0], item[1]))
-    return _prompt_wall_target(subject, objects, descriptor=matches[0][1])
+    if explicit_facing_target is not None:
+        latest_facing = _latest_explicit_facing_pair_position(
+            normalized_task,
+            subject_aliases,
+            _prompt_target_aliases(explicit_facing_target),
+            other_seating_aliases=other_seating_aliases,
+        )
+        latest_inward = _latest_inward_facing_position(
+            normalized_task,
+            subject_aliases,
+            other_seating_aliases=other_seating_aliases,
+        )
+        if latest_inward is None or (
+            latest_facing is not None and latest_inward <= latest_facing
+        ):
+            return None
+    matches.sort(key=lambda item: (-item[0], -item[1], item[2]))
+    return _prompt_wall_target(subject, objects, descriptor=matches[0][2])
 
 
 def _prompt_wall_target(
@@ -776,6 +821,66 @@ def _prompt_facing_match_is_negated(task_text: str, match: re.Match[str]) -> boo
     )
 
 
+def _latest_explicit_facing_pair_position(
+    task_text: str,
+    subject_aliases: tuple[str, ...],
+    target_aliases: tuple[str, ...],
+    *,
+    other_seating_aliases: tuple[str, ...],
+) -> int | None:
+    latest: int | None = None
+    for subject_alias in subject_aliases:
+        for target_alias in target_aliases:
+            pattern = re.compile(
+                rf"\b{re.escape(subject_alias)}\b"
+                rf"(?P<between>[^.!?;\n]{{0,160}}?)\b"
+                rf"(?P<facing>(?:are\s+|is\s+)?"
+                rf"(?:oriented\s+(?:to\s+)?)?(?:face|faces|facing))\s+"
+                rf"(?!away(?:\s+from)?\b)"
+                rf"(?:directly\s+)?(?:(?:toward|towards)\s+)?"
+                rf"(?:the\s+|an?\s+)?\b{re.escape(target_alias)}\b"
+            )
+            for match in pattern.finditer(task_text):
+                if _prompt_facing_match_is_negated(task_text, match):
+                    continue
+                between = match.group("between")
+                if any(
+                    re.search(rf"\b{re.escape(alias)}\b", between)
+                    for alias in other_seating_aliases
+                ):
+                    continue
+                latest = match.start() if latest is None else max(latest, match.start())
+    return latest
+
+
+def _latest_inward_facing_position(
+    task_text: str,
+    subject_aliases: tuple[str, ...],
+    *,
+    other_seating_aliases: tuple[str, ...],
+) -> int | None:
+    latest: int | None = None
+    for subject_alias in subject_aliases:
+        pattern = re.compile(
+            rf"\b{re.escape(subject_alias)}\b"
+            rf"(?P<between>[^.!?;\n]{{0,220}}?)\b"
+            rf"(?:fronts?\s+)?"
+            rf"(?:are\s+|is\s+)?"
+            rf"(?:oriented\s+(?:with\s+(?:their|its)\s+fronts?\s+)?)?"
+            rf"(?:face|faces|facing|point|pointing)\s+"
+            rf"(?:inward|inwards|into\s+(?:the\s+)?room|toward\s+(?:the\s+)?room\s+center)\b"
+        )
+        for match in pattern.finditer(task_text):
+            between = match.group("between")
+            if any(
+                re.search(rf"\b{re.escape(alias)}\b", between)
+                for alias in other_seating_aliases
+            ):
+                continue
+            latest = match.start() if latest is None else max(latest, match.start())
+    return latest
+
+
 def _prompt_subject_aliases(obj: dict[str, Any]) -> tuple[str, ...]:
     identity_aliases = {
         alias
@@ -821,7 +926,9 @@ def _normalize_prompt_object_identity(value: Any) -> str:
 
 def _normalize_prompt_text(value: str) -> str:
     text = value.lower().replace("_", " ").replace("-", " ")
-    text = re.sub(r"[^a-z0-9.!?;\n]+", " ", text)
+    # Preserve commas so relation parsers can distinguish adjacent furniture
+    # noun phrases instead of treating the whole sentence as one subject.
+    text = re.sub(r"[^a-z0-9,.!?;\n]+", " ", text)
     return re.sub(r"[ \t\r\f\v]+", " ", text).strip()
 
 
@@ -910,7 +1017,9 @@ def _replace_contract_check(
                     check.get("check_source") == CONTRACT_CHECK_SOURCE
                     and str(check.get("subject_id") or "") == subject_id
                 )
-                or _check_conflicts_with_orientation_contract(check, subject_id)
+                or _check_conflicts_with_orientation_contract(
+                    check, subject_id, relation_type
+                )
             )
         )
     ]
@@ -951,7 +1060,9 @@ def _replace_contract_check(
 
 
 def _check_conflicts_with_orientation_contract(
-    check: dict[str, Any], contract_subject_id: str
+    check: dict[str, Any],
+    contract_subject_id: str,
+    contract_relation_type: str,
 ) -> bool:
     relation_type = str(check.get("relation_type") or "")
     if relation_type not in CONFLICTING_ORIENTATION_RELATIONS:
@@ -963,6 +1074,8 @@ def _check_conflicts_with_orientation_contract(
     )
     if not involved:
         return False
+    if relation_type == "workstation":
+        return contract_relation_type == "back_against_wall"
     # 2026-07-11 修改原因：稳定 wall contract 不能与资产标注/模板残留的
     # guest-chair<->desk 朝向 FD 并存；否则远端椅仍会被计作 desk companion，
     # 后续 critic/SA 又可能把它拉回书桌。稳定 contract 应替换冲突拓扑。

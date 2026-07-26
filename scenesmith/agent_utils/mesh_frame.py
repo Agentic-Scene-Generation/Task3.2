@@ -34,6 +34,7 @@ def validate_uniform_dimension_fit(
     *,
     min_ratio: float = 0.5,
     max_ratio: float = 1.75,
+    fit_axes: Sequence[int] = (0, 1, 2),
 ) -> None:
     """Reject a retrieved mesh whose proportions cannot fit uniformly."""
     actual = np.asarray(actual_dimensions, dtype=float)
@@ -44,7 +45,12 @@ def validate_uniform_dimension_fit(
         raise ValueError(
             f"Dimensions must be positive, got actual={actual}, requested={requested}"
         )
-    ratios = actual / requested
+    normalized_fit_axes = tuple(dict.fromkeys(int(axis) for axis in fit_axes))
+    if not normalized_fit_axes or any(
+        axis not in {0, 1, 2} for axis in normalized_fit_axes
+    ):
+        raise ValueError(f"fit_axes must contain axes 0, 1, or 2, got {fit_axes}")
+    ratios = (actual / requested)[list(normalized_fit_axes)]
     if np.any(ratios < min_ratio) or np.any(ratios > max_ratio):
         raise ValueError(
             "Uniformly scaled asset does not fit requested proportions: "

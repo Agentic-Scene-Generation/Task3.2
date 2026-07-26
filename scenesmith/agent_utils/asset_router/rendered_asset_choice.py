@@ -20,6 +20,23 @@ if TYPE_CHECKING:
 
 console_logger = logging.getLogger(__name__)
 
+_FLOOR_COVERING_TOKENS = {
+    "bathmat",
+    "carpet",
+    "doormat",
+    "floor_mat",
+    "mat",
+    "rug",
+    "runner",
+}
+
+
+def is_floor_covering_request(*values: str | None) -> bool:
+    """Recognize semantic floor coverings without matching unrelated substrings."""
+    normalized = "_".join(str(value or "").lower() for value in values)
+    tokens = {token for token in normalized.replace("-", "_").split("_") if token}
+    return bool(tokens & _FLOOR_COVERING_TOKENS)
+
 
 def hssd_rendered_choice_options(cfg: object) -> tuple[bool, int, Path]:
     """Read shared config and environment options for rendered HSSD choice."""
@@ -72,6 +89,9 @@ def choose_hssd_candidate_from_iso_renders(
     vision_detail: str,
     rendered_assets_dir: Path,
     top_n: int,
+    object_short_name: str | None = None,
+    requested_dimensions: list[float] | tuple[float, ...] | None = None,
+    requested_shape: str | None = None,
 ) -> RenderedAssetChoice:
     """Optionally reorder candidates using their pre-rendered iso images."""
     if top_n <= 1 or len(candidates) <= 1:
@@ -106,9 +126,28 @@ def choose_hssd_candidate_from_iso_renders(
         )
         for original_index, candidate, _ in image_records
     ]
+    floor_covering = is_floor_covering_request(object_description, object_short_name)
+    request_details = []
+    if object_short_name:
+        request_details.append(f"Requested short name: {object_short_name}")
+    if requested_dimensions:
+        request_details.append(
+            "Requested size [width, depth, height] m: "
+            + str(tuple(round(float(axis), 3) for axis in requested_dimensions))
+        )
+    if requested_shape:
+        request_details.append(f"Requested footprint shape: {requested_shape}")
+    covering_guidance = (
+        " For rugs, carpets, mats, and runners, near-zero visual thickness is "
+        "expected and must not be penalized; prioritize semantic appearance, "
+        "footprint shape, and planar width-to-depth aspect ratio."
+        if floor_covering
+        else ""
+    )
     prompt = (
         "You are choosing the best HSSD asset for a 3D indoor scene.\n"
         f"Requested object: {object_description}\n"
+        + ("\n".join(request_details) + "\n" if request_details else "")
         + (f"Original scene prompt: {scene_context}\n" if scene_context else "")
         + "\nInspect the attached iso render images. The images are attached in the "
         "same order as these candidate lines:\n"
@@ -116,7 +155,9 @@ def choose_hssd_candidate_from_iso_renders(
         + "\n\nChoose exactly one candidate that best matches the requested "
         "object type and likely has usable proportions. Penalize wrong object "
         "types, bunk/loft beds unless explicitly requested, partial objects, "
-        "and assets whose front/usable side is visually unclear.\n"
+        "and assets whose front/usable side is visually unclear."
+        + covering_guidance
+        + "\n"
         'Return JSON only: {"selected_index": <index number>, '
         '"selected_hssd_id": "<hssd_id>", "reason": "<short reason>"}'
     )

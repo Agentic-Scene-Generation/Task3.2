@@ -251,6 +251,46 @@ class TestRenderedHssdAssetChoice(unittest.TestCase):
         self.assertEqual(choice.used_image_count, 1)
         vlm_service.create_completion.assert_not_called()
 
+    def test_floor_covering_prompt_keeps_planar_shape_and_thickness_semantics(
+        self,
+    ) -> None:
+        candidates = [
+            self._candidate("asset_a", "rectangular rug", 0.91),
+            self._candidate("asset_b", "round carpet", 0.89),
+        ]
+        vlm_service = MagicMock()
+        vlm_service.create_completion.return_value = (
+            '{"selected_index": 1, "selected_hssd_id": "asset_a", '
+            '"reason": "rectangular aspect ratio"}'
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            for candidate in candidates:
+                self._write_iso(root, candidate.hssd_id)
+            choose_hssd_candidate_from_iso_renders(
+                candidates=candidates,
+                object_description="low-pile patterned area rug",
+                object_short_name="area_rug",
+                requested_dimensions=[2.4, 1.6, 0.02],
+                requested_shape="rectangular",
+                scene_context="A living room with a rug under the coffee table.",
+                vlm_service=vlm_service,
+                model="test-model",
+                reasoning_effort="low",
+                verbosity="low",
+                vision_detail="low",
+                rendered_assets_dir=root,
+                top_n=2,
+            )
+
+        prompt = vlm_service.create_completion.call_args.kwargs["messages"][0][
+            "content"
+        ][0]["text"]
+        self.assertIn("(2.4, 1.6, 0.02)", prompt)
+        self.assertIn("Requested footprint shape: rectangular", prompt)
+        self.assertIn("near-zero visual thickness is expected", prompt)
+
 
 class TestAnalysisResponseParsing(unittest.TestCase):
     """Test parsing of VLM analysis responses."""

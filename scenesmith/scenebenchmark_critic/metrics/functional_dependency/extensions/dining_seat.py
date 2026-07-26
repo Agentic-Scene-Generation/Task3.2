@@ -288,7 +288,10 @@ def _evaluate_table(
         "blocking_objects": [],
         "relation_type": RELATION_TYPE,
         "reason": reason,
-        "diagnostics": {"seat_slots": diagnostics},
+        "diagnostics": {
+            "seat_slots": diagnostics,
+            "coordinated_one_per_edge": enforce_one_per_edge,
+        },
         "evidence": {"distribution": "table_local_equal_edge_segments"},
         "evaluation_source": "scenesmith_dining_seat_distribution",
         "scoring_tier": "core",

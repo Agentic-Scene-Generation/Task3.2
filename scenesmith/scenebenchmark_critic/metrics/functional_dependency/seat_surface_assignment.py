@@ -102,6 +102,15 @@ class SeatSurfaceAssignment:
         }
 
 
+@dataclass(frozen=True)
+class ClassroomSurfaceCohort:
+    """Student surfaces plus the distinct focal desk and inferred room front."""
+
+    student_surfaces: tuple[dict[str, Any], ...]
+    teacher_surface: dict[str, Any]
+    front_vector_xy: tuple[float, float]
+
+
 def assign_work_seats_to_surfaces(
     objects: list[dict[str, Any]] | dict[str, dict[str, Any]],
     *,
@@ -129,7 +138,14 @@ def assign_work_seats_to_surfaces(
     if not seats:
         return []
 
-    surfaces = _surface_cohort(all_surfaces, seat_count=len(seats))
+    context = f"{room_type} {task_instruction}".lower()
+    classroom_context = any(hint in context for hint in _CLASSROOM_CONTEXT_HINTS)
+    surfaces = _surface_cohort(
+        all_surfaces,
+        seat_count=len(seats),
+        classroom_context=classroom_context,
+        room_bounds=resolved_room_bounds,
+    )
     if not surfaces:
         return []
     seats.sort(key=_object_id)
@@ -280,9 +296,21 @@ def _seat_has_work_intent(
 
 
 def _surface_cohort(
-    surfaces: list[dict[str, Any]], *, seat_count: int
+    surfaces: list[dict[str, Any]],
+    *,
+    seat_count: int,
+    classroom_context: bool = False,
+    room_bounds: tuple[float, float, float, float] | None = None,
 ) -> list[dict[str, Any]]:
     """Keep repeated workstation families ahead of singleton focal desks."""
+    if classroom_context:
+        classroom = classroom_surface_cohort(
+            surfaces,
+            seat_count=seat_count,
+            room_bounds=room_bounds,
+        )
+        if classroom is not None:
+            return list(classroom.student_surfaces)
     if seat_count < 2 or len(surfaces) < 2:
         return surfaces
     family_counts: dict[str, int] = {}
@@ -295,6 +323,67 @@ def _surface_cohort(
         if family_counts.get(_instance_family(surface), 0) >= 2
     ]
     return repeated or surfaces
+
+
+def classroom_surface_cohort(
+    surfaces: list[dict[str, Any]],
+    *,
+    seat_count: int,
+    room_bounds: tuple[float, float, float, float] | None,
+) -> ClassroomSurfaceCohort | None:
+    """Separate one front-zone teacher desk from repeated student desks.
+
+    Generic agents often instantiate every requested desk from one asset family, so
+    names and categories cannot distinguish the teacher desk. The teacher desk is
+    instead the desk closest to a room boundary and closest to that wall's lateral
+    centerline. This remains stable after the student grid is spread through the room.
+    """
+    if seat_count < 2 or len(surfaces) != seat_count + 1 or room_bounds is None:
+        return None
+    min_x, min_y, max_x, max_y = room_bounds
+    span_x, span_y = max_x - min_x, max_y - min_y
+    if min(span_x, span_y) <= 1e-6:
+        return None
+    room_center = ((min_x + max_x) / 2.0, (min_y + max_y) / 2.0)
+    boundary_specs = (
+        (0, -1.0, min_x, span_y),
+        (0, 1.0, max_x, span_y),
+        (1, -1.0, min_y, span_x),
+        (1, 1.0, max_y, span_x),
+    )
+    explicit = [
+        surface
+        for surface in surfaces
+        if any(token in _identity(surface) for token in ("teacher", "instructor"))
+    ]
+    ranked: list[tuple[float, float, str, dict[str, Any], tuple[float, float]]] = []
+    candidates = explicit or surfaces
+    for surface in candidates:
+        center = bbox_center_xy(surface)
+        if center is None:
+            continue
+        for axis, sign, boundary, lateral_span in boundary_specs:
+            normal_span = span_x if axis == 0 else span_y
+            lateral_axis = 1 - axis
+            boundary_gap = abs(float(center[axis]) - boundary)
+            lateral_offset = abs(
+                float(center[lateral_axis]) - room_center[lateral_axis]
+            )
+            score = boundary_gap / normal_span + 0.35 * lateral_offset / lateral_span
+            front = (sign, 0.0) if axis == 0 else (0.0, sign)
+            ranked.append((score, boundary_gap, _object_id(surface), surface, front))
+    if not ranked:
+        return None
+    _, _, teacher_id, teacher, front = min(ranked, key=lambda item: item[:3])
+    students = tuple(
+        sorted(
+            (surface for surface in surfaces if _object_id(surface) != teacher_id),
+            key=_object_id,
+        )
+    )
+    if len(students) != seat_count:
+        return None
+    return ClassroomSurfaceCohort(students, teacher, front)
 
 
 def _minimum_cost_pairs(

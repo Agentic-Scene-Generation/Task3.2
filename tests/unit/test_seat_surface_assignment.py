@@ -112,6 +112,50 @@ def test_singleton_teacher_surface_does_not_take_repeated_student_cohort_seat() 
     }
 
 
+def test_generic_classroom_family_excludes_front_center_teacher_desk() -> None:
+    desk_positions = [
+        (-3.04, -3.8),
+        (-3.04, -2.0),
+        (-3.04, 0.0),
+        (-3.04, 2.0),
+        (-1.6, -3.8),
+        (-1.6, -2.0),
+        (-1.6, 0.0),
+    ]
+    chair_positions = [
+        (-1.6, 2.0),
+        (-1.6, 3.8),
+        (0.0, -3.8),
+        (0.0, -2.0),
+        (0.0, 0.0),
+        (0.0, 2.0),
+    ]
+    objects = [
+        *[
+            _object(f"desk_{index}", "desk", center, (1.13, 0.6))
+            for index, center in enumerate(desk_positions)
+        ],
+        *[
+            _object(f"chair_{index}", "chair", center, (0.51, 0.5))
+            for index, center in enumerate(chair_positions)
+        ],
+    ]
+
+    assignments = assign_work_seats_to_surfaces(
+        objects,
+        task_instruction=(
+            "A classroom with six student desks, each with a chair, and a "
+            "teacher's desk at the front."
+        ),
+        room_type="classroom",
+        room_bounds=(-4.0, -5.0, 4.0, 5.0),
+    )
+
+    assert len(assignments) == 6
+    assert "desk_2" not in {assignment.surface_id for assignment in assignments}
+    assert "desk_6" in {assignment.surface_id for assignment in assignments}
+
+
 def test_plain_office_chair_uses_function_annotations_without_student_label() -> None:
     objects = [
         _object("writing_surface", "desk", (0.0, 0.0), (1.4, 0.8)),
