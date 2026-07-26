@@ -106,6 +106,31 @@ scenebenchmark_critic:
   max_fd_relation_proposals: 8
   stable_orientation_contracts: true
 
+# Optional soft placement-order references. Both stages are opt-in; set each
+# stage's enabled flag to true when validating the reference-guided flow.
+stage_placement_order:
+  # Legacy furniture-only aliases. Keep null unless an older run command sets
+  # experiment.stage_placement_order.enabled/cache/etc.
+  enabled: null
+  cache: null
+  fallback_enabled: null
+  max_items_per_stage: null
+  enable_thinking: null
+
+  furniture:
+    enabled: null
+    cache: true
+    fallback_enabled: true
+    max_items: 20
+    enable_thinking: false
+
+  manipuland:
+    enabled: null
+    cache: true
+    fallback_enabled: true
+    max_items_per_surface: 8
+    enable_thinking: false
+
 # Geometry generation server settings
 geometry_generation_server:
   host: "127.0.0.1"

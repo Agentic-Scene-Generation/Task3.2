@@ -1,5 +1,6 @@
 """Tests for fault-tolerant parallel execution utilities."""
 
+import logging
 import multiprocessing
 import os
 import unittest
@@ -32,8 +33,26 @@ def _crashing_task() -> None:
     os._exit(99)
 
 
+def _get_root_log_level() -> int:
+    """Return the effective root log level from inside an isolated worker."""
+    return logging.getLogger().getEffectiveLevel()
+
+
 class TestRunParallelIsolated(unittest.TestCase):
     """Tests for run_parallel_isolated function."""
+
+    def test_clean_worker_logging_defaults_to_info(self):
+        """An actual isolated worker restores INFO when LOGLEVEL is unset."""
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("LOGLEVEL", None)
+            results = run_parallel_isolated(
+                tasks=[("log_level", _get_root_log_level, {})],
+                max_workers=1,
+                return_values=True,
+            )
+
+        self.assertTrue(results["log_level"][0])
+        self.assertEqual(results["log_level"][1], logging.INFO)
 
     def test_all_tasks_succeed(self):
         """All tasks complete successfully."""
