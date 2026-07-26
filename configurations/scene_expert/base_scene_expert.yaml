@@ -104,10 +104,12 @@ stage_budget:
     planner_max_output_tokens: 768
     designer_max_output_tokens: 1536
     critic_max_output_tokens: 1536
-    critic_max_attempts: 1
+    # Two explicit direct requests share the transaction budget. The second is
+    # used only for transport, truncation, empty-content, JSON, or schema recovery.
+    critic_max_attempts: 2
     # This is the sole SceneExpert deadline for one candidate's visual-scoring
-    # transaction. It includes SDK structured-output recovery turns, but starts
-    # only after deterministic render/state evidence has been collected.
+    # transaction and starts only after deterministic render/state evidence has
+    # been collected.
     critic_evaluation_max_seconds: 240
     # Preserve role-specific tails instead of allowing design work to consume
     # the whole stage deadline before visual verification and finalization.

@@ -130,7 +130,7 @@ class StageBudget(BaseModel):
     planner_max_output_tokens: int = 0
     designer_max_output_tokens: int = 0
     critic_max_output_tokens: int = 0
-    critic_max_attempts: int = 1
+    critic_max_attempts: int = 2
     critic_evaluation_max_seconds: float = 0.0
     critic_reserve_fraction: float = 0.25
     fallback_reserve_fraction: float = 0.10

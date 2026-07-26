@@ -1,10 +1,12 @@
 import json
 import unittest
+
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 
 from pydantic import BaseModel
 
+from scenesmith.agent_utils.scoring import FloorPlanCritiqueWithScores
 from scenesmith.scene_expert.global_planner import GlobalPlanner, _format_task_spec
 from scenesmith.scene_expert.schemas import (
     FullVerifyReport,
@@ -104,6 +106,47 @@ class SceneExpertStructuredLLMTest(unittest.TestCase):
         )
         self.assertTrue(call["messages"][0]["content"].startswith("/no_think\n"))
         self.assertEqual("json_schema", call["response_format"]["type"])
+
+    def test_dataclass_response_uses_the_same_structured_contract(self):
+        payload = {
+            "critique": "STATUS: PASS\nSUMMARY: The floor plan is usable.",
+            **{
+                category: {
+                    "name": category,
+                    "grade": 8,
+                    "comment": "The evidence supports a strong score.",
+                }
+                for category in (
+                    "room_proportions",
+                    "spatial_flow",
+                    "natural_lighting",
+                    "material_consistency",
+                    "prompt_following",
+                )
+            },
+        }
+        client, fake, profile = self._client(
+            [_response(content=json.dumps(payload))]
+        )
+
+        result = client.complete(
+            role="test",
+            stage="floor_plan",
+            event="critic_score",
+            messages=[{"role": "user", "content": "Return scores."}],
+            response_model=FloorPlanCritiqueWithScores,
+            profile=profile,
+        )
+
+        self.assertTrue(result.success)
+        self.assertIsInstance(result.value, FloorPlanCritiqueWithScores)
+        self.assertEqual(
+            [8, 8, 8, 8, 8],
+            [score.grade for score in result.value.get_scores()],
+        )
+        schema = fake.calls[0]["response_format"]["json_schema"]
+        self.assertEqual("FloorPlanCritiqueWithScores", schema["name"])
+        self.assertEqual("object", schema["schema"]["type"])
 
     def test_reasoning_only_response_retries_without_parsing_reasoning(self):
         profile = StructuredLLMProfile(

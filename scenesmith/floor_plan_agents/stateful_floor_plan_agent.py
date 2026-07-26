@@ -66,9 +66,6 @@ from scenesmith.floor_plan_agents.tools.wall_geometry import (
 )
 from scenesmith.floor_plan_agents.tools.window_geometry import create_window_mesh
 from scenesmith.prompts.registry import FloorPlanAgentPrompts
-from scenesmith.scene_expert.critic_feedback import (
-    direct_critic_scoring_instructions,
-)
 from scenesmith.utils.gltf_generation import create_floor_gltf, get_zup_to_yup_matrix
 from scenesmith.utils.logging import BaseLogger
 from scenesmith.utils.material import Material
@@ -421,8 +418,8 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
         run_config = self._create_run_config()
         base_settings = self.critic.model_settings or ModelSettings()
 
-        # Keep the visual observation as a forced single-tool turn so its images
-        # persist in the critic session, then score in a tool-free JSON-only turn.
+        # Build native compatibility agents. SceneExpert collects the same visual
+        # evidence directly and uses the shared structured scorer below.
         critic_observe = self.critic.clone(
             output_type=None,
             tool_use_behavior="stop_on_first_tool",
@@ -431,9 +428,9 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
             ),
         )
         score_instructions = self.critic.instructions
-        if self._stage_runtime_budget and isinstance(score_instructions, str):
-            score_instructions = direct_critic_scoring_instructions(
-                score_instructions
+        if self._stage_runtime_budget:
+            score_instructions = self._direct_critic_system_instructions(
+                FloorPlanCritiqueWithScores
             )
         critic_score = self.critic.clone(
             tools=[],
@@ -511,14 +508,22 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
         response: FloorPlanCritiqueWithScores
         score_input: Any = score_prompt
         score_session = self.critic_session
+        direct_text = ""
         if direct_multimodal:
+            direct_text = (
+                "Evaluate this floor-plan candidate using the attached render(s) "
+                "and deterministic evidence. Return the complete structured score "
+                "object.\n\n"
+                f"VALIDATION RESULT:\n{validation_text}\n\n"
+                f"ASCII FLOOR PLAN:\n{ascii_layout}"
+            )
             score_input = [
                 {
                     "role": "user",
                     "content": [
                         {
                             "type": "input_text",
-                            "text": critique_instruction + "\n\n" + score_prompt,
+                            "text": direct_text,
                         },
                         *direct_images,
                     ],
@@ -529,6 +534,17 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
         # Begin the quality transaction only when the structured VLM score starts.
         self._begin_critic_evaluation()
         try:
+            use_sceneexpert_direct = bool(
+                self._stage_runtime_budget and direct_multimodal and direct_images
+            )
+            direct_response = None
+            if use_sceneexpert_direct:
+                direct_response = await self._run_sceneexpert_direct_critic_score(
+                    evidence_text=direct_text,
+                    image_parts=direct_images,
+                    response_type=FloorPlanCritiqueWithScores,
+                    event="floor_plan_score_direct_structured",
+                )
             result = None
             configured_attempts = int(
                 self._critic_fast_path_value(
@@ -537,7 +553,7 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
                 )
                 or 2
             )
-            if self._stage_runtime_budget:
+            if self._stage_runtime_budget and not use_sceneexpert_direct:
                 configured_attempts = int(
                     self._stage_budget_value(
                         "critic_max_attempts",
@@ -546,12 +562,9 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
                     or configured_attempts
                 )
             attempts = (
-                max(
-                    1,
-                    configured_attempts,
-                )
-                if direct_images
-                else 0
+                0
+                if use_sceneexpert_direct
+                else (max(1, configured_attempts) if direct_images else 0)
             )
             if not direct_multimodal:
                 attempts = 1
@@ -580,7 +593,17 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
                 )
                 if result is not None:
                     break
-            if result is None:
+            if use_sceneexpert_direct:
+                response = direct_response or (
+                    self._make_floor_plan_critic_fallback_scores(
+                        error=TimeoutError(
+                            "direct floor-plan critic did not produce valid scores"
+                        ),
+                        validation_layout=validation.layout,
+                        validation_connectivity=validation.connectivity,
+                    )
+                )
+            elif result is None:
                 response = self._make_floor_plan_critic_fallback_scores(
                     error=TimeoutError("floor-plan critic budget exhausted"),
                     validation_layout=validation.layout,

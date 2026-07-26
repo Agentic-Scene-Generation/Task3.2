@@ -14,7 +14,7 @@ import shutil
 import time
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any
 
@@ -74,6 +74,10 @@ from scenesmith.scene_expert.critic_feedback import (
     parse_critic_feedback,
 )
 from scenesmith.scene_expert.exceptions import StageValidationError
+from scenesmith.scene_expert.structured_llm import (
+    SceneExpertStructuredLLMClient,
+    StructuredLLMProfile,
+)
 from scenesmith.utils.logging import BaseLogger
 from scenesmith.utils.openai import encode_image_to_base64
 
@@ -564,6 +568,156 @@ class BaseStatefulAgent(ABC):
             else None
         )
 
+    def _direct_critic_system_instructions(
+        self,
+        response_type: type[CritiqueWithScores],
+    ) -> str:
+        """Return a tool-free scoring prompt for the current stage."""
+
+        category_names = [
+            field.name for field in fields(response_type) if field.name != "critique"
+        ]
+        scene_context = ""
+        scene = getattr(self, "scene", None)
+        if scene is not None:
+            scene_context = str(getattr(scene, "text_description", "") or "")
+        if not scene_context:
+            scene_context = str(getattr(self, "house_prompt", "") or "")
+        return direct_critic_scoring_instructions(
+            stage=str(self.agent_type.value),
+            scene_context=scene_context,
+            category_names=category_names,
+        )
+
+    def _sceneexpert_critic_llm_client(self) -> SceneExpertStructuredLLMClient:
+        """Return the direct structured client used only for final scoring."""
+
+        client = getattr(self, "_direct_critic_llm_client", None)
+        if client is None:
+            debug_path = os.environ.get("SCENEEXPERT_LLM_DEBUG_PATH", "").strip()
+            client = SceneExpertStructuredLLMClient(
+                model=str(self.cfg.openai.model),
+                debug_path=debug_path or None,
+            )
+            self._direct_critic_llm_client = client
+        return client
+
+    @staticmethod
+    def _chat_completion_image_parts(
+        image_parts: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Convert Agents SDK image inputs to Chat Completions image inputs."""
+
+        converted: list[dict[str, Any]] = []
+        for part in image_parts:
+            image_url = part.get("image_url")
+            if isinstance(image_url, dict):
+                image_url = image_url.get("url")
+            if not image_url:
+                continue
+            converted.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": str(image_url)},
+                }
+            )
+        return converted
+
+    async def _run_sceneexpert_direct_critic_score(
+        self,
+        *,
+        evidence_text: str,
+        image_parts: list[dict[str, Any]],
+        response_type: type[CritiqueWithScores],
+        event: str,
+    ) -> CritiqueWithScores | None:
+        """Run one-shot multimodal scoring without an agentic Runner loop.
+
+        Tool-using designer/critic orchestration remains inside SceneSmith's
+        native planner. Only the terminal, tool-free structured score uses the
+        direct client, which exposes each bounded response and validation retry
+        instead of hiding them inside Agents SDK turns.
+        """
+
+        max_attempts = max(
+            1,
+            int(self._stage_budget_value("critic_max_attempts", 2) or 2),
+        )
+        evaluation_seconds = float(
+            self._stage_budget_value("critic_evaluation_max_seconds", 240.0) or 240.0
+        )
+        attempt_seconds = max(30.0, evaluation_seconds / max_attempts)
+        configured_tokens = max(
+            256,
+            int(self._stage_budget_value("critic_max_output_tokens", 1536) or 1536),
+        )
+        profile = StructuredLLMProfile(
+            thinking_mode="none",
+            max_tokens=min(1024, configured_tokens),
+            retry_max_tokens=configured_tokens,
+            timeout_seconds=attempt_seconds,
+            temperature=0.1,
+            max_attempts=max_attempts,
+            response_format="json_schema",
+        )
+        content: list[dict[str, Any]] = [
+            {"type": "text", "text": evidence_text},
+            *self._chat_completion_image_parts(image_parts),
+        ]
+        messages = [
+            {
+                "role": "system",
+                "content": self._direct_critic_system_instructions(response_type),
+            },
+            {"role": "user", "content": content},
+        ]
+        parent_lease = self._pause_parent_execution_lease("critic")
+        started = time.monotonic()
+        try:
+            result = await asyncio.to_thread(
+                self._sceneexpert_critic_llm_client().complete,
+                role="visual_critic",
+                stage=str(self.agent_type.value),
+                event=event,
+                messages=messages,
+                response_model=response_type,
+                profile=profile,
+            )
+        finally:
+            elapsed = time.monotonic() - started
+            self._stage_role_active_consumed["critic"] = (
+                float(self._stage_role_active_consumed.get("critic", 0.0)) + elapsed
+            )
+            self._resume_parent_execution_lease(parent_lease)
+
+        if result.success and isinstance(result.value, CritiqueWithScores):
+            self._record_llm_call_debug(
+                agent_role="critic",
+                event=event,
+                prompt=evidence_text,
+                output=repr(result.value),
+            )
+            return result.value
+
+        status = result.status_dict()
+        console_logger.warning(
+            "Direct structured visual critic failed after %d explicit attempt(s): "
+            "%s: %s",
+            status["attempt_count"],
+            status["final_error_kind"],
+            status["final_error"],
+        )
+        self._record_llm_call_debug(
+            agent_role="critic",
+            event=f"{event}_failed",
+            prompt=evidence_text,
+            error=(
+                f"{status['final_error_kind']}: {status['final_error']} "
+                f"attempts={status['attempt_count']}"
+            ),
+        )
+        return None
+
     @staticmethod
     def _minimum_positive_seconds(*values: float | None) -> float | None:
         positive = [float(value) for value in values if value is not None]
@@ -615,7 +769,7 @@ class BaseStatefulAgent(ABC):
             self._stage_budget_value("max_wall_clock_seconds", 0.0) or 0.0
         )
         if wall_clock_limit <= 0 or self._stage_runtime_started_at is None:
-            return evaluation_remaining
+            return None
         reserve_fraction = 0.0
         critic_reserve = float(
             self._stage_budget_value("critic_reserve_fraction", 0.25) or 0.0
@@ -3490,9 +3644,9 @@ class BaseStatefulAgent(ABC):
         # observe_scene choice and creates an invalid tools + response_format
         # request for vLLM's Qwen tool parser.
         score_instructions = self.critic.instructions
-        if self._stage_runtime_budget and isinstance(score_instructions, str):
-            score_instructions = direct_critic_scoring_instructions(
-                score_instructions
+        if self._stage_runtime_budget:
+            score_instructions = self._direct_critic_system_instructions(
+                self._critic_output_type
             )
         critic_score = self.critic.clone(
             tools=[],
@@ -3602,9 +3756,9 @@ class BaseStatefulAgent(ABC):
                 output=direct_scene_state,
             )
 
-        # Step 3: free evaluation with structured output. The critic now has
-        # the observation images and the scene-state JSON in its session
-        # history and can run STEPS 3-6 of the YAML workflow.
+        # Step 3: structured evaluation. SceneExpert sends the collected evidence
+        # through its direct client; the compatibility path retains the native
+        # agent session and YAML workflow.
         console_logger.info("[CRITIC harness] Step 3: evaluate and score")
         score_start = time.time()
         score_prompt = (
@@ -3617,8 +3771,26 @@ class BaseStatefulAgent(ABC):
         )
         score_input: Any = score_prompt
         score_session: Session | None = self.critic_session
+        direct_text = ""
         if direct_multimodal:
-            direct_text = critique_instruction + "\n\n" + score_prompt
+            direct_text = (
+                "Evaluate this candidate using the attached render(s) and exact "
+                "evidence. Return the complete structured score object.\n\n"
+                "DETERMINISTIC PHYSICS VALIDATION:\n"
+                f"{physics_context or 'No hard physics violation was reported.'}"
+                f"{scene_state_block}"
+            )
+            if hard_state is not None and hard_state.soft_reasons:
+                direct_text += (
+                    "\n\nSOFT DIAGNOSTICS (verify visually; these are not hard "
+                    "failures):\n- " + "\n- ".join(hard_state.soft_reasons[:8])
+                )
+            if self.agent_type == AgentType.FURNITURE:
+                direct_text += (
+                    "\n\nORIENTATION CONTRACT: Asset preprocessing canonicalizes "
+                    "the visual front to local +Y. Evaluate each object's world "
+                    "facing from that local +Y direction transformed by its yaw."
+                )
             if direct_observation_note:
                 direct_text += "\n\nRender result: " + direct_observation_note
             score_input = [
@@ -3639,80 +3811,80 @@ class BaseStatefulAgent(ABC):
         # exact scene-state evidence have been collected.
         self._begin_critic_evaluation()
         try:
-            configured_max_attempts = int(
-                _cfg_get(
-                    self._critic_fast_path_cfg(),
-                    "direct_multimodal_max_attempts",
-                    2,
-                )
-                or 2
-            )
-            if self._stage_runtime_budget:
-                configured_max_attempts = int(
-                    self._stage_budget_value(
-                        "critic_max_attempts",
-                        configured_max_attempts,
-                    )
-                    or configured_max_attempts
-                )
-            max_attempts = (
-                max(1, configured_max_attempts) if direct_multimodal else 1
-            )
             if direct_multimodal and not direct_image_parts:
                 console_logger.warning(
                     "Direct visual critic render produced no images; recording the "
                     "candidate as unscored instead of issuing a text-only score"
                 )
-                max_attempts = 0
-            configured_attempt_timeout = float(
-                _cfg_get(
-                    self._critic_fast_path_cfg(),
-                    "direct_multimodal_attempt_timeout_seconds",
-                    120.0,
-                )
-                or 120.0
-            )
-            attempt_timeout = float(configured_attempt_timeout)
-            result = None
-            for attempt in range(1, max_attempts + 1):
-                result = await self._run_agent_with_stage_sla(
-                    starting_agent=critic_score,
-                    input=score_input,
-                    role="critic",
-                    event=f"score_scene_attempt_{attempt}",
-                    session=score_session,
-                    configured_max_turns=self.cfg.agents.critic_agent.max_turns,
-                    run_config=run_config,
-                    call_timeout_seconds=(
-                        self._critic_score_call_timeout(attempt_timeout)
-                        if direct_multimodal
-                        else None
-                    ),
-                )
-                if result is not None:
-                    break
-                if attempt < max_attempts:
-                    console_logger.warning(
-                        "Compact visual critic attempt %d/%d did not complete; "
-                        "retrying the same rendered candidate with fresh context",
-                        attempt,
-                        max_attempts,
-                    )
-            self._record_module_timing("critic", "score_scene", score_start)
-            if result is None:
                 response = self._make_transient_critic_fallback_scores(
-                    error=TimeoutError("critic stage execution budget exhausted")
+                    error=RuntimeError("visual critic render produced no images")
                 )
+            elif self._stage_runtime_budget and direct_multimodal:
+                response = await self._run_sceneexpert_direct_critic_score(
+                    evidence_text=direct_text,
+                    image_parts=direct_image_parts,
+                    response_type=self._critic_output_type,
+                    event="score_scene_direct_structured",
+                )
+                if response is None:
+                    response = self._make_transient_critic_fallback_scores(
+                        error=TimeoutError(
+                            "direct structured critic did not produce valid scores"
+                        )
+                    )
             else:
-                log_agent_usage(result=result, agent_name="CRITIC (score)")
-                self._record_llm_call_debug(
-                    agent_role="critic",
-                    event="score_scene",
-                    prompt=score_prompt,
-                    output=result.final_output or "",
-                    result=result,
+                configured_max_attempts = int(
+                    _cfg_get(
+                        self._critic_fast_path_cfg(),
+                        "direct_multimodal_max_attempts",
+                        2,
+                    )
+                    or 2
                 )
-                response = result.final_output
+                max_attempts = (
+                    max(1, configured_max_attempts) if direct_multimodal else 1
+                )
+                configured_attempt_timeout = float(
+                    _cfg_get(
+                        self._critic_fast_path_cfg(),
+                        "direct_multimodal_attempt_timeout_seconds",
+                        120.0,
+                    )
+                    or 120.0
+                )
+                result = None
+                for attempt in range(1, max_attempts + 1):
+                    result = await self._run_agent_with_stage_sla(
+                        starting_agent=critic_score,
+                        input=score_input,
+                        role="critic",
+                        event=f"score_scene_attempt_{attempt}",
+                        session=score_session,
+                        configured_max_turns=self.cfg.agents.critic_agent.max_turns,
+                        run_config=run_config,
+                        call_timeout_seconds=(
+                            self._critic_score_call_timeout(configured_attempt_timeout)
+                            if direct_multimodal
+                            else None
+                        ),
+                    )
+                    if result is not None:
+                        break
+                if result is None:
+                    response = self._make_transient_critic_fallback_scores(
+                        error=TimeoutError("critic stage execution budget exhausted")
+                    )
+                else:
+                    log_agent_usage(result=result, agent_name="CRITIC (score)")
+                    self._record_llm_call_debug(
+                        agent_role="critic",
+                        event="score_scene",
+                        prompt=score_prompt,
+                        output=result.final_output or "",
+                        result=result,
+                    )
+                    response = result.final_output
+            self._record_module_timing("critic", "score_scene", score_start)
         except Exception as exc:
             if not self._is_transient_model_error(exc):
                 raise

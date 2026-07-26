@@ -133,34 +133,79 @@ Never invent object IDs or coordinates. A PASS may contain zero findings.
 """
 
 
-def direct_critic_scoring_instructions(instructions: str) -> str:
-    """Make the framework-driven scoring mode explicit and non-contradictory.
+_DIRECT_STAGE_RUBRICS = {
+    "floor_plan": (
+        "Judge architectural room proportions, circulation and connectivity, "
+        "window/daylight provision, material suitability, and adherence to the "
+        "requested architectural brief. Ignore furniture that belongs to later stages."
+    ),
+    "furniture": (
+        "Judge real-world plausibility, functionality, anchor and secondary-object "
+        "relationships, orientation, completeness, prompt adherence, and reachability."
+    ),
+    "wall_mounted": (
+        "Judge realistic mounting height, functional accessibility, spacing from "
+        "openings/furniture, visual balance, completeness, and prompt adherence."
+    ),
+    "ceiling_mounted": (
+        "Judge realistic fixture placement, functional coverage, spacing and "
+        "clearance, visual balance, and prompt adherence."
+    ),
+    "manipuland": (
+        "Judge realistic support relationships, usability, local arrangement, "
+        "appropriate completeness, and prompt adherence."
+    ),
+}
 
-    SceneSmith's native critic instructions require the model to collect evidence
-    with tools.  SceneExpert's direct path has already collected and attached that
-    evidence, then deliberately removes all tools from the scoring agent.  This
-    authoritative mode override keeps the stage-specific rubric while preventing
-    the model from attempting an impossible tool workflow or emitting a narrated
-    checklist instead of the structured score object.
+
+def direct_critic_scoring_instructions(
+    *,
+    stage: str,
+    scene_context: str,
+    category_names: list[str],
+) -> str:
+    """Build the clean system contract for one-shot structured visual scoring.
+
+    The native SceneSmith critic prompt is intentionally not embedded here: it
+    requires an agentic tool workflow, while this scorer receives evidence
+    directly and has no tools. Keeping these two protocols separate removes the
+    contradictory instructions that caused Agents SDK recovery loops.
     """
 
-    return (
-        str(instructions or "").rstrip()
-        + """
+    categories = ", ".join(category_names)
+    rubric = _DIRECT_STAGE_RUBRICS.get(
+        stage,
+        "Judge realism, functionality, layout quality, completeness, and prompt adherence.",
+    )
+    context = str(scene_context or "").strip()
+    if len(context) > 8000:
+        context = context[:8000].rstrip() + "\n...[scene context truncated]..."
+    return f"""\
+/no_think
+You are the final visual quality critic for the `{stage}` stage.
+The framework has already collected and attached all render, exact-state,
+validation, physics, reachability, and orientation evidence available for this
+candidate. No tools are available or required. Never request, call, or narrate
+tools, and never emit a checklist.
 
-# SceneExpert Direct Evidence Scoring Mode - Authoritative Override
+Evaluation rubric:
+{rubric}
 
-For this scoring request only, the framework has already completed every required
-observation, scene-state, validation, physics, and orientation-evidence step and
-has attached the resulting evidence to the user message. This mode OVERRIDES any
-earlier instruction to call or narrate tools. No tools are available or required.
+Required score categories: {categories}
+Score every category from 0 through 10 using a stable scale: 0-2 unusable,
+3-5 major repair required, 6-7 acceptable with issues, 8-9 strong, 10 exceptional.
+Deterministic validation is authoritative for actual collision/connectivity facts;
+use visual evidence for semantic, functional, relational, and aesthetic quality.
+Each category comment must be one concise evidence-based sentence.
 
-Evaluate only the supplied candidate and return the final structured output in one
-response. Do not emit a checklist, tool call, Markdown, code fence, or prose outside
-the output schema. Keep every category comment to one evidence-based sentence and
-follow the SceneExpert Compact Repair-Brief Contract inside the `critique` field.
-"""
-    ).strip()
+Scene/task context:
+{context or "(no additional scene text)"}
+
+Return exactly the structured object required by the response schema in one
+response. Do not output Markdown, code fences, analysis, or prose outside it.
+
+{critic_feedback_contract()}
+""".strip()
 
 
 def parse_critic_feedback(text: str) -> CriticFeedback:

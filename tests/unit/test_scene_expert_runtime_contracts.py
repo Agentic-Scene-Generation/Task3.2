@@ -70,14 +70,20 @@ END_FINDING
 
     def test_direct_scoring_contract_overrides_impossible_tool_workflow(self) -> None:
         instructions = direct_critic_scoring_instructions(
-            "You MUST call observe_scene before scoring."
+            stage="floor_plan",
+            scene_context="A modern bedroom with natural light.",
+            category_names=[
+                "room_proportions",
+                "spatial_flow",
+                "natural_lighting",
+            ],
         )
 
-        self.assertIn("This mode OVERRIDES any", instructions)
-        self.assertIn("earlier instruction to call or narrate tools", instructions)
+        self.assertNotIn("MUST call observe_scene", instructions)
         self.assertIn("No tools are available or required", instructions)
-        self.assertIn("return the final structured output in one", instructions)
-        self.assertIn("response. Do not emit a checklist", instructions)
+        self.assertIn("Required score categories: room_proportions", instructions)
+        self.assertIn("Return exactly the structured object", instructions)
+        self.assertIn("modern bedroom", instructions)
 
     def test_legacy_critic_text_remains_available_as_fallback(self) -> None:
         feedback = parse_critic_feedback(
@@ -97,7 +103,7 @@ END_FINDING
                     planner_max_output_tokens=768,
                     designer_max_output_tokens=1536,
                     critic_max_output_tokens=1536,
-                    critic_max_attempts=1,
+                    critic_max_attempts=2,
                 ),
                 wall_mounted=SimpleNamespace(
                     designer_active_max_seconds=240,
@@ -112,7 +118,7 @@ END_FINDING
         self.assertEqual(300, budget.critic_active_max_seconds)
         self.assertEqual(768, budget.planner_max_output_tokens)
         self.assertEqual(1536, budget.critic_max_output_tokens)
-        self.assertEqual(1, budget.critic_max_attempts)
+        self.assertEqual(2, budget.critic_max_attempts)
 
     def test_retryable_pause_persists_candidate_without_success_marker(self) -> None:
         with TemporaryDirectory() as tmp:

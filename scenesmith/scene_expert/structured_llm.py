@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Generic, Mapping, TypeVar
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 
 from scenesmith.agent_utils.thinking import prepend_text_thinking_directive
 from scenesmith.scene_expert.context_bundle import (
@@ -30,7 +30,7 @@ from scenesmith.scene_expert.context_bundle import (
 
 console_logger = logging.getLogger(__name__)
 
-T = TypeVar("T", bound=BaseModel)
+T = TypeVar("T")
 
 
 @dataclass(frozen=True)
@@ -209,6 +209,9 @@ class SceneExpertStructuredLLMClient:
         previous_error = ""
         previous_content = ""
         last_reasoning = ""
+        response_adapter = TypeAdapter(response_model)
+        response_schema = response_adapter.json_schema()
+        response_name = getattr(response_model, "__name__", "StructuredResponse")
 
         for attempt_number in range(1, active_profile.max_attempts + 1):
             thinking_enabled = active_profile.thinking_enabled
@@ -252,7 +255,8 @@ class SceneExpertStructuredLLMClient:
             try:
                 response = self._request(
                     messages=request_messages,
-                    response_model=response_model,
+                    response_name=response_name,
+                    response_schema=response_schema,
                     profile=active_profile,
                     response_format=response_format,
                     max_tokens=max_tokens,
@@ -289,7 +293,7 @@ class SceneExpertStructuredLLMClient:
                         response=response,
                     ) from exc
                 try:
-                    value = response_model.model_validate(payload)
+                    value = response_adapter.validate_python(payload)
                 except ValidationError as exc:
                     raise _StructuredFailure(
                         "schema_validation",
@@ -382,7 +386,8 @@ class SceneExpertStructuredLLMClient:
         self,
         *,
         messages: list[dict[str, Any]],
-        response_model: type[BaseModel],
+        response_name: str,
+        response_schema: dict[str, Any],
         profile: StructuredLLMProfile,
         response_format: str,
         max_tokens: int,
@@ -407,8 +412,8 @@ class SceneExpertStructuredLLMClient:
             kwargs["response_format"] = {
                 "type": "json_schema",
                 "json_schema": {
-                    "name": response_model.__name__,
-                    "schema": response_model.model_json_schema(),
+                    "name": response_name,
+                    "schema": response_schema,
                     "strict": True,
                 },
             }
