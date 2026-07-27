@@ -33,28 +33,24 @@ from scenesmith.scene_expert.schemas import (
 
 console_logger = logging.getLogger(__name__)
 
-# Maps SceneSmith score keys (from scores.yaml) to SceneExpert categories.
-# Handles both actual Title Case keys and legacy snake_case variants.
-# Matching is substring-based on the lowercased key (e.g. "realism" in "realism").
+# Maps canonical SceneSmith score IDs to SceneExpert categories.  Legacy score
+# files are normalized before lookup, so Title Case and snake_case remain
+# readable while new files have one stable contract.
 _SCENESMITH_SCORE_MAPPING = {
-    # Actual keys written by SceneSmith critics (Title Case, lowercased for matching)
     "realism": "aesthetic",
     "functionality": "semantic",
-    # Keep specific keys before generic "layout" because matching is substring-based.
-    "layout plausibility": "plausibility",
     "layout_plausibility": "plausibility",
-    "human likeness": "plausibility",
-    "human-likeness": "plausibility",
-    "professional arrangement": "plausibility",
+    "human_likeness": "plausibility",
+    "professional_arrangement": "plausibility",
     "layout": "aesthetic",
-    "holistic completeness": "semantic",
-    "prompt following": "semantic",
+    "holistic_completeness": "semantic",
+    "prompt_following": "semantic",
     "reachability": "interaction",
     # Floor plan specific
-    "room proportions": "semantic",
-    "spatial flow": "semantic",
-    "natural lighting": "aesthetic",
-    "material consistency": "aesthetic",
+    "room_proportions": "semantic",
+    "spatial_flow": "semantic",
+    "natural_lighting": "aesthetic",
+    "material_consistency": "aesthetic",
     # Legacy snake_case variants (kept for backwards compatibility)
     "object_placement_quality": "semantic",
     "functional_arrangement": "semantic",
@@ -67,6 +63,11 @@ _SCENESMITH_SCORE_MAPPING = {
     "room_layout_quality": "semantic",
     "space_utilization": "semantic",
 }
+
+
+def _canonical_score_key(value: str) -> str:
+    """Normalize legacy display labels to the canonical score artifact key."""
+    return re.sub(r"_+", "_", re.sub(r"[^a-z0-9]+", "_", value.lower())).strip("_")
 
 
 def _load_scores_yaml(scores_yaml_path: Path) -> tuple[dict[str, float], str]:
@@ -93,7 +94,9 @@ def _load_scores_yaml(scores_yaml_path: Path) -> tuple[dict[str, float], str]:
             flat[k] = float(v)
         elif isinstance(v, dict):
             # Nested dict: extract "grade" sub-key if present (SceneSmith format)
-            grade = v.get("grade") or v.get("score")
+            grade = v.get("grade")
+            if grade is None:
+                grade = v.get("score")
             if grade is not None and isinstance(grade, (int, float)):
                 flat[k] = float(grade)
             else:
@@ -258,11 +261,21 @@ def _map_scenesmith_scores(
         # artifacts remain supported when provenance says 0-1.
         normalized = value / 10.0 if ten_point_scale else value
         normalized = max(0.0, min(1.0, normalized))
-        # Try exact match first, then partial match
-        for sm_key, se_cat in _SCENESMITH_SCORE_MAPPING.items():
-            if sm_key in key.lower():
-                mapped.setdefault(se_cat, []).append(normalized)
-                break
+        canonical_key = _canonical_score_key(key)
+        se_cat = _SCENESMITH_SCORE_MAPPING.get(canonical_key)
+        if se_cat is None:
+            # Preserve compatibility with older compound keys such as
+            # ``critic.room_proportions`` without allowing generic ``layout``
+            # to steal ``layout_plausibility``.
+            matches = [
+                (sm_key, mapped_category)
+                for sm_key, mapped_category in _SCENESMITH_SCORE_MAPPING.items()
+                if sm_key in canonical_key
+            ]
+            if matches:
+                _, se_cat = max(matches, key=lambda item: len(item[0]))
+        if se_cat is not None:
+            mapped.setdefault(se_cat, []).append(normalized)
     # Average within each category
     return {cat: sum(vals) / len(vals) for cat, vals in mapped.items()}
 

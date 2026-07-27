@@ -38,7 +38,12 @@ from scenesmith.scene_expert.schemas import (
     SceneTaskSpec,
     StageVerifyReport,
 )
-from scenesmith.agent_utils.scoring import CategoryScore, FurnitureCritiqueWithScores
+from scenesmith.agent_utils.scoring import (
+    CategoryScore,
+    FloorPlanCritiqueWithScores,
+    FurnitureCritiqueWithScores,
+    scores_to_dict,
+)
 from scenesmith.agent_utils.stage_working_memory import StageWorkingMemory
 from scenesmith.scene_expert.task_compiler import _fallback_spec_from_prompt
 from scenesmith.scene_expert.prompt_context import strip_sceneexpert_injected_blocks
@@ -308,6 +313,40 @@ class SceneExpertMemoryTest(unittest.TestCase):
         )
 
         self.assertAlmostEqual(0.4, mapped["plausibility"])
+        self.assertAlmostEqual(0.85, mapped["aesthetic"])
+
+    def test_floor_plan_score_contract_ignores_model_display_names(self) -> None:
+        critique = FloorPlanCritiqueWithScores(
+            critique="Compact structured assessment.",
+            room_proportions=CategoryScore("Room Proportions", 8, "Good scale."),
+            spatial_flow=CategoryScore("Spatial flow quality", 7, "Usable."),
+            natural_lighting=CategoryScore("采光", 9, "Bright."),
+            material_consistency=CategoryScore("materials", 8, "Coherent."),
+            prompt_following=CategoryScore("Requirement compliance", 10, "Complete."),
+        )
+
+        serialized = scores_to_dict(critique)
+        mapped = _map_scenesmith_scores(
+            {
+                key: value["grade"]
+                for key, value in serialized.items()
+                if isinstance(value, dict)
+            },
+            score_scale="0-10",
+        )
+
+        self.assertEqual(
+            {
+                "room_proportions",
+                "spatial_flow",
+                "natural_lighting",
+                "material_consistency",
+                "prompt_following",
+                "summary",
+            },
+            set(serialized),
+        )
+        self.assertAlmostEqual(25 / 30, mapped["semantic"])
         self.assertAlmostEqual(0.85, mapped["aesthetic"])
 
     def test_hard_check_synthetic_grades_are_not_visual_quality_scores(self) -> None:

@@ -1160,8 +1160,29 @@ class FurnitureTools:
             scale_factor=scale_factor,
             object_type_name="furniture",
             asset_registry=self.asset_manager.registry,
+            post_validate=self._validate_rescaled_furniture,
         )
         return result.to_json()
+
+    def _validate_rescaled_furniture(
+        self, affected_objects: list[SceneObject]
+    ) -> tuple[bool, str]:
+        """Reject a scale mutation if any shared instance leaves the room."""
+        failures: list[str] = []
+        for affected in affected_objects:
+            is_valid, message = self._check_object_bounds_for_transform(
+                affected,
+                affected.transform,
+            )
+            if not is_valid:
+                failures.append(f"{affected.object_id}: {message}")
+        if failures:
+            return (
+                False,
+                "Rescale transaction rolled back because the resulting geometry "
+                "is infeasible: " + " | ".join(failures),
+            )
+        return True, ""
 
     def _add_duplicate_warning(self, message_parts: list[str]) -> None:
         """Add duplicate warning to message if duplicates were detected."""

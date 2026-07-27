@@ -193,6 +193,8 @@ class StageWorkingMemoryTest(unittest.TestCase):
             self.assertEqual(quality["observed_counts"]["teacher_desk"], 1)
             self.assertEqual(record["score_source"], "deterministic_hard_check")
             self.assertFalse(quality["hard_valid"])
+            self.assertEqual({}, record["visual_scores"])
+            self.assertIsNone(record["score_total"])
 
     def test_generic_classroom_render_reconstructs_prompt_requirements(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -216,7 +218,40 @@ class StageWorkingMemoryTest(unittest.TestCase):
             quality = record["deterministic_quality"]
             self.assertEqual(quality["required_counts"]["student_desk"], 6)
             self.assertEqual(quality["required_counts"]["teacher_desk"], 1)
-            self.assertTrue(quality["hard_valid"])
+            self.assertIsNone(quality["hard_valid"])
+            self.assertEqual("unverified", quality["hard_check_status"])
+
+    def test_vlm_and_hard_evidence_remain_separate(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root_dir = Path(tmp)
+            render_dir = root_dir / "scene_renders" / "furniture" / "renders_004"
+            render_dir.mkdir(parents=True)
+            scores = FurnitureCritiqueWithScores(
+                critique="The required arrangement is visually coherent.",
+                realism=_score("display realism", 8),
+                functionality=_score("functional score", 8),
+                layout=_score("composition", 7),
+                layout_plausibility=_score("professional use", 8),
+                holistic_completeness=_score("completeness", 8),
+                prompt_following=_score("requirements", 9),
+                reachability=_score("paths", 8),
+            )
+            memory = StageWorkingMemory(root_dir, "furniture", enabled=True)
+
+            record = memory.save_render_record(
+                render_dir=render_dir,
+                role="critic",
+                event="critique",
+                scene=_DummyScene(),
+                scores=scores,
+                critique=scores.critique,
+                score_source="vlm_critic",
+                extra={"hard_check_passed": True, "hard_issues": []},
+            )
+
+            self.assertTrue(record["deterministic_quality"]["hard_valid"])
+            self.assertEqual({}, record["hard_decision_scores"])
+            self.assertEqual(56.0, record["score_total"])
 
 
 if __name__ == "__main__":

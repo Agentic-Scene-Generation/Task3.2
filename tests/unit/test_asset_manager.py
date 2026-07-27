@@ -182,6 +182,7 @@ class TestAssetManager(unittest.TestCase):
                         "semantic_validation": {
                             "enabled": True,
                             "families": ["bed"],
+                            "critical_families": ["bed"],
                             "max_candidates": 2,
                             "use_lenient": False,
                         }
@@ -235,6 +236,7 @@ class TestAssetManager(unittest.TestCase):
                         "semantic_validation": {
                             "enabled": True,
                             "families": ["sofa"],
+                            "critical_families": ["sofa"],
                             "max_candidates": 1,
                             "use_lenient": True,
                             "timeout_seconds": 42,
@@ -272,8 +274,8 @@ class TestAssetManager(unittest.TestCase):
         manager._thin_covering_router.validate_asset.assert_called_once()
         call_kwargs = manager._thin_covering_router.validate_asset.call_args.kwargs
         self.assertTrue(call_kwargs["use_lenient"])
-        self.assertEqual(call_kwargs["timeout_seconds"], 42)
-        self.assertEqual(call_kwargs["max_retries"], 0)
+        self.assertAlmostEqual(call_kwargs["timeout_seconds"], 42, delta=0.1)
+        self.assertEqual(call_kwargs["max_retries"], 1)
         self.assertEqual(manager._calibrated_hssd_front_axis("sofa_asset"), "-X")
 
     def test_direct_hssd_validation_is_not_spent_on_unconfigured_family(self):
@@ -285,6 +287,7 @@ class TestAssetManager(unittest.TestCase):
                         "semantic_validation": {
                             "enabled": True,
                             "families": ["bed"],
+                            "critical_families": ["bed"],
                             "max_candidates": 2,
                         }
                     }
@@ -320,6 +323,7 @@ class TestAssetManager(unittest.TestCase):
                         "semantic_validation": {
                             "enabled": True,
                             "families": ["bed"],
+                            "critical_families": ["bed"],
                             "max_candidates": 1,
                         }
                     }
@@ -347,6 +351,105 @@ class TestAssetManager(unittest.TestCase):
                 description="upholstered bed",
                 short_name="bed",
             )
+
+    def test_optional_clear_hssd_match_skips_vlm(self):
+        manager = object.__new__(AssetManager)
+        manager.cfg = OmegaConf.create(
+            {
+                "asset_manager": {
+                    "hssd": {
+                        "semantic_validation": {
+                            "enabled": True,
+                            "families": ["wall_art"],
+                            "validate_ambiguous_optional": True,
+                            "optional_min_similarity_score": 0.28,
+                            "optional_min_similarity_margin": 0.04,
+                        }
+                    }
+                }
+            }
+        )
+        manager.debug_dir = self.temp_dir / "debug"
+        manager._thin_covering_router = MagicMock()
+        candidates = [
+            HssdRetrievalResult(
+                mesh_path=str(self.temp_dir / "clear_art.glb"),
+                hssd_id="clear_art",
+                object_name="wall art",
+                similarity_score=0.91,
+                size=(0.8, 0.05, 0.6),
+                category="wall_objects",
+            ),
+            HssdRetrievalResult(
+                mesh_path=str(self.temp_dir / "weak_art.glb"),
+                hssd_id="weak_art",
+                object_name="wall art",
+                similarity_score=0.62,
+                size=(0.8, 0.05, 0.6),
+                category="wall_objects",
+            ),
+        ]
+
+        selected = manager._select_direct_hssd_candidate(
+            candidates=candidates,
+            description="framed wall art",
+            short_name="wall_art",
+        )
+
+        self.assertEqual("clear_art", selected.hssd_id)
+        manager._thin_covering_router.validate_asset.assert_not_called()
+
+    def test_hssd_validation_cache_persists_across_manager_instances(self):
+        cache_dir = self.temp_dir / "semantic_cache"
+        cfg = OmegaConf.create(
+            {
+                "asset_manager": {
+                    "hssd": {
+                        "semantic_validation": {
+                            "enabled": True,
+                            "families": ["bed"],
+                            "critical_families": ["bed"],
+                            "cache_dir": str(cache_dir),
+                            "max_candidates": 1,
+                        }
+                    }
+                }
+            }
+        )
+        candidate = HssdRetrievalResult(
+            mesh_path=str(self.temp_dir / "cached_bed.glb"),
+            hssd_id="cached_bed",
+            object_name="bed",
+            similarity_score=0.9,
+            size=(1.6, 2.05, 0.8),
+            category="large_objects",
+        )
+        first = object.__new__(AssetManager)
+        first.cfg = cfg
+        first.debug_dir = self.temp_dir / "debug_first"
+        first._thin_covering_router = MagicMock()
+        first._thin_covering_router.validate_asset.return_value = ValidationResult(
+            True,
+            "Recognizable complete bed",
+        )
+        second = object.__new__(AssetManager)
+        second.cfg = cfg
+        second.debug_dir = self.temp_dir / "debug_second"
+        second._thin_covering_router = MagicMock()
+
+        first._select_direct_hssd_candidate(
+            candidates=[candidate],
+            description="upholstered bed",
+            short_name="bed",
+        )
+        selected = second._select_direct_hssd_candidate(
+            candidates=[candidate],
+            description="upholstered bed",
+            short_name="bed",
+        )
+
+        self.assertEqual("cached_bed", selected.hssd_id)
+        second._thin_covering_router.validate_asset.assert_not_called()
 
     def test_create_asset_paths_disambiguates_duplicate_short_names(self):
         """Duplicate requested objects must not share intermediate asset paths."""

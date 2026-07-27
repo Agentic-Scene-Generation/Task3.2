@@ -1,4 +1,7 @@
+import hashlib
+import json
 import logging
+import os
 import re
 import shutil
 import threading
@@ -747,6 +750,159 @@ class AssetManager:
             max(0.0, min(1.0, min_orientation_confidence)),
         )
 
+    def _hssd_validation_config_value(self, key: str, default: object) -> object:
+        hssd_cfg = getattr(self.cfg.asset_manager, "hssd", None)
+        validation_cfg = getattr(hssd_cfg, "semantic_validation", None)
+        if validation_cfg is None:
+            return default
+        try:
+            return validation_cfg.get(key, default)
+        except Exception:
+            return getattr(validation_cfg, key, default)
+
+    def _is_required_hssd_family(self, family: str) -> bool:
+        required_families = getattr(
+            getattr(self, "_runtime_gate", None),
+            "required_families",
+            set(),
+        )
+        return family in set(required_families or set())
+
+    def _is_critical_hssd_family(self, family: str) -> bool:
+        configured = {
+            str(value).lower()
+            for value in list(
+                self._hssd_validation_config_value("critical_families", []) or []
+            )
+        }
+        return self._is_required_hssd_family(family) or family in configured
+
+    def _optional_hssd_candidate_is_ambiguous(
+        self,
+        candidates: list[HssdRetrievalResult],
+        *,
+        proportion_match_found: bool,
+    ) -> bool:
+        if not candidates or not proportion_match_found:
+            return True
+        minimum_score = float(
+            self._hssd_validation_config_value(
+                "optional_min_similarity_score",
+                0.28,
+            )
+            or 0.28
+        )
+        minimum_margin = float(
+            self._hssd_validation_config_value(
+                "optional_min_similarity_margin",
+                0.04,
+            )
+            or 0.04
+        )
+        selected_score = float(candidates[0].similarity_score)
+        competing_scores = sorted(
+            (
+                float(candidate.similarity_score)
+                for candidate in candidates[1:]
+            ),
+            reverse=True,
+        )
+        return selected_score < minimum_score or (
+            bool(competing_scores)
+            and selected_score - competing_scores[0] < minimum_margin
+        )
+
+    def _hssd_validation_cache_path(
+        self,
+        *,
+        candidate_id: str,
+        family: str,
+        use_lenient: bool,
+    ) -> Path | None:
+        configured_dir = str(
+            self._hssd_validation_config_value("cache_dir", "") or ""
+        ).strip()
+        cache_dir_value = os.environ.get(
+            "SCENEEXPERT_ASSET_VALIDATION_CACHE_DIR",
+            configured_dir,
+        ).strip()
+        if not cache_dir_value:
+            return None
+        cache_dir = Path(cache_dir_value).expanduser()
+        cache_key = hashlib.sha256(
+            (
+                f"hssd-semantic-v2|{candidate_id}|{family}|"
+                f"lenient={int(use_lenient)}"
+            ).encode("utf-8")
+        ).hexdigest()
+        return cache_dir / f"{cache_key}.json"
+
+    def _load_persistent_hssd_validation(
+        self,
+        *,
+        candidate_id: str,
+        family: str,
+        use_lenient: bool,
+    ) -> ValidationResult | None:
+        cache_path = self._hssd_validation_cache_path(
+            candidate_id=candidate_id,
+            family=family,
+            use_lenient=use_lenient,
+        )
+        if cache_path is None or not cache_path.exists():
+            return None
+        try:
+            payload = json.loads(cache_path.read_text(encoding="utf-8"))
+            return ValidationResult(
+                is_acceptable=bool(payload["is_acceptable"]),
+                reason=str(payload.get("reason", "cached validation")),
+                suggestions=list(payload.get("suggestions", []) or []),
+                front_view_image_index=payload.get("front_view_image_index"),
+                orientation_confidence=payload.get("orientation_confidence"),
+            )
+        except Exception as exc:
+            console_logger.warning(
+                "Ignoring unreadable HSSD semantic cache %s: %s",
+                cache_path,
+                exc,
+            )
+            return None
+
+    def _save_persistent_hssd_validation(
+        self,
+        *,
+        candidate_id: str,
+        family: str,
+        use_lenient: bool,
+        validation: ValidationResult,
+    ) -> None:
+        cache_path = self._hssd_validation_cache_path(
+            candidate_id=candidate_id,
+            family=family,
+            use_lenient=use_lenient,
+        )
+        if cache_path is None:
+            return
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "schema_version": "2.0",
+            "candidate_id": candidate_id,
+            "family": family,
+            "is_acceptable": validation.is_acceptable,
+            "reason": validation.reason,
+            "suggestions": validation.suggestions,
+            "front_view_image_index": validation.front_view_image_index,
+            "orientation_confidence": validation.orientation_confidence,
+        }
+        temporary = cache_path.with_name(
+            f".{cache_path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+        )
+        temporary.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        temporary.replace(cache_path)
+
     def _calibrated_hssd_front_axis(self, mesh_id: str) -> str | None:
         """Return a trusted front axis from the already-paid semantic VLM call."""
         validation = getattr(self, "_direct_hssd_validation_results", {}).get(mesh_id)
@@ -800,6 +956,7 @@ class AssetManager:
         if not candidates:
             raise ValueError("No results returned from HSSD server")
 
+        proportion_match_found = True
         if desired_dimensions is not None:
             # Retrieval extents use the SceneSmith semantic order
             # [width, depth, height]. Axis conversion belongs only at the
@@ -836,6 +993,7 @@ class AssetManager:
             if proportion_compatible:
                 candidates = proportion_compatible
             else:
+                proportion_match_found = False
                 console_logger.warning(
                     "No retrieved HSSD candidate for '%s' fully matches the "
                     "requested proportions; trying the best scale-invariant shape",
@@ -850,7 +1008,29 @@ class AssetManager:
             max_retries,
             _,
         ) = self._hssd_semantic_validation_settings(description, short_name)
-        if not enabled:
+        family = semantic_asset_family(description, short_name)
+        critical_family = self._is_critical_hssd_family(family)
+        validate_ambiguous_optional = bool(
+            self._hssd_validation_config_value(
+                "validate_ambiguous_optional",
+                False,
+            )
+        )
+        if not enabled and not critical_family and not validate_ambiguous_optional:
+            return candidates[0]
+        if (
+            not critical_family
+            and not self._optional_hssd_candidate_is_ambiguous(
+                candidates,
+                proportion_match_found=proportion_match_found,
+            )
+        ):
+            console_logger.info(
+                "Accepted optional HSSD candidate %s for '%s' from deterministic "
+                "dimension/CLIP evidence; VLM validation was not required",
+                candidates[0].hssd_id,
+                description,
+            )
             return candidates[0]
 
         validation_router = getattr(
@@ -868,14 +1048,32 @@ class AssetManager:
 
         infrastructure_failures = 0
         considered = candidates[:max_candidates]
+        validation_started = time.monotonic()
+        total_validation_seconds = max(
+            timeout_seconds,
+            float(
+                self._hssd_validation_config_value(
+                    "total_timeout_seconds",
+                    timeout_seconds * (2 if critical_family else 1),
+                )
+                or timeout_seconds
+            ),
+        )
         for candidate_index, candidate in enumerate(considered):
             validation_cache = getattr(self, "_direct_hssd_semantic_cache", None)
             if validation_cache is None:
                 validation_cache = {}
                 self._direct_hssd_semantic_cache = validation_cache
-            family = semantic_asset_family(description, short_name)
             validation_cache_key = f"{candidate.hssd_id}|{family}"
             validation = validation_cache.get(validation_cache_key)
+            if validation is None:
+                validation = self._load_persistent_hssd_validation(
+                    candidate_id=candidate.hssd_id,
+                    family=family,
+                    use_lenient=use_lenient,
+                )
+                if validation is not None:
+                    validation_cache[validation_cache_key] = validation
             mesh_path = Path(candidate.mesh_path)
             validation_dir = (
                 self.debug_dir
@@ -883,13 +1081,40 @@ class AssetManager:
                 / f"hssd_{candidate_index:02d}_{candidate.hssd_id[:12]}_validation"
             )
             if validation is None:
+                allowed_retries = (
+                    max(1, max_retries)
+                    if critical_family
+                    else max(
+                        0,
+                        int(
+                            self._hssd_validation_config_value(
+                                "optional_max_retries",
+                                0,
+                            )
+                            or 0
+                        ),
+                    )
+                )
+                remaining_seconds = total_validation_seconds - (
+                    time.monotonic() - validation_started
+                )
+                if remaining_seconds <= 1.0:
+                    raise TimeoutError(
+                        "HSSD semantic validation exhausted its shared "
+                        f"{total_validation_seconds:.0f}s deadline for "
+                        f"'{description}'"
+                    )
+                per_attempt_timeout = min(
+                    timeout_seconds,
+                    remaining_seconds / (allowed_retries + 1),
+                )
                 validation = validation_router.validate_asset(
                     mesh_path=mesh_path,
                     description=description,
                     output_dir=validation_dir,
                     use_lenient=use_lenient,
-                    timeout_seconds=timeout_seconds,
-                    max_retries=max_retries,
+                    timeout_seconds=max(1.0, per_attempt_timeout),
+                    max_retries=allowed_retries,
                 )
                 validation_reason = str(validation.reason or "")
                 if not validation_reason.startswith(
@@ -898,6 +1123,12 @@ class AssetManager:
                     # Infrastructure outcomes are retryable and must not poison
                     # the semantic cache for a later isolated stage retry.
                     validation_cache[validation_cache_key] = validation
+                    self._save_persistent_hssd_validation(
+                        candidate_id=candidate.hssd_id,
+                        family=family,
+                        use_lenient=use_lenient,
+                        validation=validation,
+                    )
             if validation.is_acceptable:
                 orientation_results = getattr(
                     self, "_direct_hssd_validation_results", None
@@ -1209,6 +1440,7 @@ class AssetManager:
                     physics_analysis=physics_analysis,
                     output_path=sdf_path,
                     asset_name=config.short_name,
+                    mesh_frame="gltf_y_up",
                 )
 
                 # Create SceneObject using shared helper.
@@ -1242,8 +1474,11 @@ class AssetManager:
                         ),
                         "requested_dimensions": list(request.desired_dimensions[index]),
                         "actual_dimensions": (bbox_max - bbox_min).tolist(),
+                        "source_to_canonical_scale": float(applied_scale),
                     },
-                    scale_factor=applied_scale,
+                    # The final glTF and SDF already contain applied_scale.
+                    # SceneObject.scale_factor is reserved for later mutations.
+                    scale_factor=1.0,
                 )
 
                 successful_objects.append(scene_obj)
@@ -1441,6 +1676,7 @@ class AssetManager:
                     physics_analysis=physics_analysis,
                     output_path=sdf_path,
                     asset_name=config.short_name,
+                    mesh_frame="gltf_y_up",
                 )
 
                 # Create SceneObject using shared helper.
@@ -2226,6 +2462,10 @@ class AssetManager:
         additional_metadata = {"asset_source": generated.asset_source}
         if generated.hssd_id is not None:
             additional_metadata["hssd_mesh_id"] = generated.hssd_id
+        if generated.asset_source == "hssd":
+            # HSSD support-surface annotations use source-asset coordinates.
+            # Runtime geometry is already canonicalized and scaled.
+            additional_metadata["source_to_canonical_scale"] = float(initial_scale)
 
         # Add thin_covering-specific metadata for physics validation.
         if generated.asset_source == "thin_covering":
@@ -2251,7 +2491,7 @@ class AssetManager:
             bbox_min=bbox_min,
             bbox_max=bbox_max,
             additional_metadata=additional_metadata,
-            scale_factor=initial_scale,
+            scale_factor=1.0,
         )
 
     def _convert_articulated_to_scene_object(
@@ -2521,7 +2761,7 @@ class AssetManager:
                 )
 
                 # Process mesh: VLM → canonicalize → scale → collision → SDF.
-                sdf_path, final_gltf_path, bbox_min, bbox_max, initial_scale = (
+                sdf_path, final_gltf_path, bbox_min, bbox_max, _ = (
                     self._convert_mesh_to_simulation_asset(
                         geometry_path=server_geometry_path,
                         config=config,
@@ -2539,7 +2779,7 @@ class AssetManager:
                     bbox_min=bbox_min,
                     bbox_max=bbox_max,
                     additional_metadata={"asset_source": "generated"},
-                    scale_factor=initial_scale,
+                    scale_factor=1.0,
                 )
 
                 scene_objects.append(scene_obj)
@@ -2683,11 +2923,9 @@ class AssetManager:
             object_type=object_type,
         )
 
-        # Scale mesh to desired dimensions (if provided).
-        # For generated assets: scale_factor=1.0 because support surface extraction runs
-        # on the already-scaled mesh, so surfaces are at correct dimensions.
-        # For HSSD assets: scale_factor=applied_scale because pre-computed surfaces
-        # are at original HSSD dimensions and need scaling.
+        # Scale mesh to desired dimensions (if provided). The returned source
+        # scale is provenance for precomputed HSSD support surfaces only; it is
+        # already baked into the final visual and collision geometry.
         final_gltf_path, bbox_min, bbox_max, applied_scale = (
             self._scale_and_measure_canonical_mesh(
                 canonical_path=canonical_path,
@@ -2708,6 +2946,7 @@ class AssetManager:
             physics_analysis=physics_analysis,
             output_path=sdf_path,
             asset_name=config.short_name,
+            mesh_frame="gltf_y_up",
         )
 
         console_logger.info(
@@ -2828,8 +3067,9 @@ class AssetManager:
             bbox_max: Maximum corner of object-frame bounding box.
             additional_metadata: Optional metadata to merge into the object's
                 metadata dict. Useful for HSSD assets to add {"asset_source": "hssd"}.
-            scale_factor: Initial uniform scale factor applied during mesh scaling.
-                This is needed to correctly scale HSSD pre-computed support surfaces.
+            scale_factor: Runtime-only scale not already baked into the final
+                glTF/SDF. HSSD source scaling belongs in
+                ``metadata['source_to_canonical_scale']``.
 
         Returns:
             Complete SceneObject ready for scene placement.

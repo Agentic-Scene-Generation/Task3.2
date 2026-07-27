@@ -102,7 +102,9 @@ def _extract_grade(scores: dict[str, Any], *name_parts: str) -> float | None:
         if not all(part.lower().replace("_", " ") in key_lower for part in name_parts):
             continue
         if isinstance(value, dict):
-            grade = value.get("grade") or value.get("score")
+            grade = value.get("grade")
+            if grade is None:
+                grade = value.get("score")
             if isinstance(grade, (int, float)):
                 return float(grade)
         if isinstance(value, (int, float)):
@@ -117,6 +119,8 @@ def _deterministic_quality(
     scores: dict[str, Any],
     critique: str,
     invalid_assets: list[str] | None = None,
+    hard_check_passed: bool | None = None,
+    hard_issues: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     required_counts = {
         str(key).lower(): int(value)
@@ -147,7 +151,16 @@ def _deterministic_quality(
     )
     invalid_assets = list(invalid_assets or [])
     deterministic_hard_fail = "deterministic hard-check failed" in critique_lower
-    hard_valid = not missing and not invalid_assets and not deterministic_hard_fail
+    hard_failure = bool(missing or invalid_assets or deterministic_hard_fail)
+    hard_valid: bool | None
+    if hard_failure or hard_check_passed is False:
+        hard_valid = False
+    elif hard_check_passed is True:
+        hard_valid = True
+    else:
+        # Absence of a missing-object failure does not prove collision, support,
+        # opening-clearance, or physics validity.
+        hard_valid = None
     note = ""
     if missing:
         note = (
@@ -173,6 +186,14 @@ def _deterministic_quality(
         "missing_required_objects": missing,
         "invalid_asset_objects": invalid_assets,
         "hard_valid": hard_valid,
+        "hard_check_status": (
+            "passed"
+            if hard_valid is True
+            else "failed"
+            if hard_valid is False
+            else "unverified"
+        ),
+        "hard_issues": list(hard_issues or []),
         "deterministic_hard_fail": deterministic_hard_fail,
         "critic_inconsistent_with_state": inconsistent,
         "deterministic_note": note,
@@ -309,19 +330,36 @@ class StageWorkingMemory:
         images = sorted(str(path) for path in render_dir.glob("*.png"))
         score_data = _score_dict(scores)
         object_names = _object_names(scene)
-        deterministic_quality = _deterministic_quality(
-            object_names=object_names,
-            required_counts=self.required_counts,
-            scores=score_data,
-            critique=critique or text,
-            invalid_assets=_invalid_asset_names(scene),
-        )
         resolved_score_source = str(score_source or "none")
         if not score_source:
             if event == "deterministic_hard_fail":
                 resolved_score_source = "deterministic_hard_check"
             elif score_data and role == "critic":
                 resolved_score_source = "vlm_critic"
+        extra_payload = extra or {}
+        hard_check_passed = extra_payload.get("hard_check_passed")
+        if hard_check_passed not in (True, False):
+            hard_check_passed = (
+                False if resolved_score_source == "deterministic_hard_check" else None
+            )
+        deterministic_quality = _deterministic_quality(
+            object_names=object_names,
+            required_counts=self.required_counts,
+            scores=score_data,
+            critique=critique or text,
+            invalid_assets=_invalid_asset_names(scene),
+            hard_check_passed=hard_check_passed,
+            hard_issues=extra_payload.get("hard_issues", []),
+        )
+        visual_score_data = (
+            score_data if resolved_score_source == "vlm_critic" else {}
+        )
+        hard_decision_scores = (
+            score_data
+            if resolved_score_source == "deterministic_hard_check"
+            else {}
+        )
+        decision_score_total = _score_total(scores)
         record = {
             "schema_version": "1.0",
             "created_at": _now(),
@@ -335,8 +373,22 @@ class StageWorkingMemory:
                 if (render_dir / "scores.yaml").exists()
                 else ""
             ),
-            "scores": score_data,
-            "score_total": _score_total(scores),
+            # Backwards-compatible ``scores`` now has one unambiguous meaning:
+            # VLM quality only. Synthetic hard-check decision grades live in a
+            # separate namespace and never rank or seed success memory.
+            "scores": visual_score_data,
+            "visual_scores": visual_score_data,
+            "hard_decision_scores": hard_decision_scores,
+            "score_total": (
+                decision_score_total
+                if resolved_score_source == "vlm_critic"
+                else None
+            ),
+            "hard_decision_score_total": (
+                decision_score_total
+                if resolved_score_source == "deterministic_hard_check"
+                else None
+            ),
             "score_source": resolved_score_source,
             "critique": _compact(critique, max_chars=900),
             "text": _compact(text, max_chars=900),
@@ -344,7 +396,7 @@ class StageWorkingMemory:
             "object_names": object_names,
             "object_count": len(object_names),
             "deterministic_quality": deterministic_quality,
-            "extra": extra or {},
+            "extra": extra_payload,
         }
         _write_json(render_dir / "render_memory.json", record)
         _append_jsonl(self.memory_path, record)
@@ -454,18 +506,27 @@ class StageWorkingMemory:
                 ]
             ).lower()
             overlap = sum(1 for token in query_tokens if token and token in text)
-            has_scores = 1.0 if record.get("scores") else 0.0
+            has_scores = (
+                1.0
+                if record.get("score_source") == "vlm_critic"
+                and record.get("visual_scores", record.get("scores"))
+                else 0.0
+            )
             is_critic = 1.0 if record.get("role") == "critic" else 0.0
             invalid_penalty = (
                 4.0 if quality.get("critic_inconsistent_with_state") else 0.0
             )
-            hard_valid_bonus = 0.5 if quality.get("hard_valid", True) else 0.0
+            hard_valid_bonus = 0.5 if quality.get("hard_valid") is True else 0.0
             # Invalid records with high hallucinated scores must not outrank
             # deterministic failure notes.
             score_total = (
                 0.0
                 if quality.get("critic_inconsistent_with_state")
-                else (record.get("score_total") or 0.0)
+                else (
+                    record.get("score_total") or 0.0
+                    if record.get("score_source") == "vlm_critic"
+                    else 0.0
+                )
             )
             return (
                 overlap + has_scores + is_critic + hard_valid_bonus - invalid_penalty,

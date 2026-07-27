@@ -145,6 +145,21 @@ asset_manager:
     preprocessed_path: "${paths.hssd_data_dir}/preprocessed"
     use_top_k: 5  # Number of top CLIP candidates before size ranking
     use_lenient_validation: true  # Use lenient validation for retrieved assets
+    semantic_validation:
+      enabled: true
+      families: [plant, rug]
+      critical_families: []
+      max_candidates: 3
+      use_lenient: true
+      timeout_seconds: 180
+      total_timeout_seconds: 300
+      max_retries: 1
+      optional_max_retries: 0
+      validate_ambiguous_optional: true
+      optional_min_similarity_score: 0.28
+      optional_min_similarity_margin: 0.04
+      cache_dir: "${oc.env:SCENEEXPERT_ASSET_VALIDATION_CACHE_DIR,outputs/scene_expert_asset_cache}"
+      min_orientation_confidence: 0.55
     object_type_mapping:
       FURNITURE: "large_objects"
       MANIPULAND: "small_objects"

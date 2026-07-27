@@ -15,11 +15,16 @@ import unittest
 import xml.etree.ElementTree as ET
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import trimesh
+import numpy as np
 
 from scenesmith.agent_utils.mesh_physics_analyzer import MeshPhysicsAnalysis
+from scenesmith.agent_utils.rescale_helpers import rescale_object_common
+from scenesmith.agent_utils.room import ObjectType, SceneObject
 from scenesmith.agent_utils.sdf_generator import generate_drake_sdf, rescale_sdf
+from scenesmith.utils.mesh_loading import load_object_collision_geometry
 
 
 class TestRescaleSdfBasic(unittest.TestCase):
@@ -90,6 +95,60 @@ class TestRescaleSdfBasic(unittest.TestCase):
         scale_values = [float(v) for v in scale_elem.text.split()]
         for val in scale_values:
             self.assertAlmostEqual(val, 0.8, places=5)
+
+    def test_collision_loader_does_not_apply_runtime_scale_twice(self):
+        sdf_path = self._create_test_sdf("single_scale_contract")
+        rescale_sdf(sdf_path, scale_factor=2.0)
+        obj = SceneObject(
+            object_id="scaled_0",
+            object_type=ObjectType.FURNITURE,
+            name="scaled",
+            description="scaled box",
+            sdf_path=sdf_path,
+            scale_factor=2.0,
+        )
+
+        meshes = load_object_collision_geometry(obj)
+
+        self.assertEqual(1, len(meshes))
+        self.assertTrue(
+            all(abs(value - 2.0) < 0.01 for value in meshes[0].extents)
+        )
+
+    def test_rescale_transaction_restores_file_and_object_on_rejection(self):
+        sdf_path = self._create_test_sdf("rollback_scale")
+        original_sdf = sdf_path.read_bytes()
+        obj = SceneObject(
+            object_id="rollback_0",
+            object_type=ObjectType.FURNITURE,
+            name="rollback",
+            description="rollback box",
+            sdf_path=sdf_path,
+            bbox_min=np.array([-0.5, -0.5, -0.5]),
+            bbox_max=np.array([0.5, 0.5, 0.5]),
+        )
+        scene = SimpleNamespace(
+            objects={obj.object_id: obj},
+            get_object=lambda object_id: obj if object_id == obj.object_id else None,
+        )
+
+        result = rescale_object_common(
+            scene=scene,
+            object_id=obj.object_id,
+            scale_factor=2.0,
+            object_type_name="furniture",
+            post_validate=lambda _: (False, "outside room"),
+        )
+
+        self.assertFalse(result.success)
+        self.assertEqual(original_sdf, sdf_path.read_bytes())
+        self.assertEqual(1.0, obj.scale_factor)
+        self.assertTrue(
+            all(
+                abs(value - 1.0) < 0.01
+                for value in obj.bbox_max - obj.bbox_min
+            )
+        )
 
     def test_rescale_multiplies_existing_scale(self):
         """Test that rescale_sdf multiplies existing scale elements."""

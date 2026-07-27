@@ -571,6 +571,7 @@ class SceneExpertHookRunner:
             if (
                 verify_report.pass_stage
                 and verify_report.score_source == "vlm_critic"
+                and verify_report.hard_check_report.get("hard_check_passed") is True
                 and quality >= 0.75
             ):
                 success_summary = (

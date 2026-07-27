@@ -165,12 +165,21 @@ asset_manager:
       families:
         [bed, sofa, wardrobe, nightstand, dresser, desk, student_desk,
          teacher_desk, chair]
+      critical_families:
+        [bed, sofa, wardrobe, nightstand, dresser, desk, student_desk,
+         teacher_desk, chair]
       # Search beyond CLIP rank 1/2 for category-critical assets; stop at the
       # first dimension-compatible, semantically admitted real HSSD mesh.
       max_candidates: 4
       use_lenient: true
       timeout_seconds: 180
-      max_retries: 0
+      total_timeout_seconds: 360
+      max_retries: 1
+      optional_max_retries: 0
+      validate_ambiguous_optional: true
+      optional_min_similarity_score: 0.28
+      optional_min_similarity_margin: 0.04
+      cache_dir: "${oc.env:SCENEEXPERT_ASSET_VALIDATION_CACHE_DIR,outputs/scene_expert_asset_cache}"
       min_orientation_confidence: 0.55
     object_type_mapping:
       FURNITURE: "large_objects"

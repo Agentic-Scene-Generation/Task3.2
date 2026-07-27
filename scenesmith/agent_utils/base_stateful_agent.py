@@ -1272,12 +1272,35 @@ class BaseStatefulAgent(ABC):
         critique: str,
         physics_context: str,
         score_source: str,
+        hard_check_passed: bool | None,
     ) -> None:
         """Attach critic scores and critique text to the current render memory."""
         if render_dir is None:
             return
         try:
             feedback = parse_critic_feedback(critique)
+            hard_issues: list[dict[str, Any]] = []
+            controller = getattr(self, "furniture_safety_controller", None)
+            if (
+                controller is not None
+                and getattr(controller, "enabled", False)
+                and self.scene is not None
+            ):
+                hard_evaluation = controller.evaluate_scene_state(
+                    self.scene,
+                    physics_context=physics_context,
+                )
+                hard_check_passed = hard_evaluation.hard_valid
+                hard_issues = [
+                    {
+                        "issue_type": issue.issue_type,
+                        "object_a_id": issue.object_a_id,
+                        "object_b_id": issue.object_b_id,
+                        "penetration_depth_m": issue.penetration_depth_m,
+                        "details": issue.details,
+                    }
+                    for issue in hard_evaluation.issues
+                ]
             self.stage_working_memory.save_render_record(
                 render_dir=render_dir,
                 role="critic",
@@ -1289,6 +1312,8 @@ class BaseStatefulAgent(ABC):
                 extra={
                     "physics_context": physics_context[:1500],
                     "critic_feedback": feedback.model_dump(),
+                    "hard_check_passed": hard_check_passed,
+                    "hard_issues": hard_issues,
                 },
             )
         except Exception as e:
@@ -1540,6 +1565,7 @@ class BaseStatefulAgent(ABC):
                 critique=response.critique,
                 physics_context=physics_context,
                 score_source=str(provenance.get("score_source", "unknown")),
+                hard_check_passed=provenance.get("hard_check_passed"),
             )
         else:
             console_logger.error(
@@ -1903,6 +1929,35 @@ class BaseStatefulAgent(ABC):
         if hard_state is None or hard_state.hard_valid:
             return ""
         reasons = hard_state.hard_reasons or ["unknown deterministic hard failure"]
+        issue_instructions: list[str] = []
+        for issue in hard_state.issues:
+            issue_type = str(issue.issue_type or "").lower()
+            object_a = str(issue.object_a_id or "unknown object")
+            object_b = str(issue.object_b_id or "")
+            if issue_type == "collision_or_overlap":
+                clearance = max(
+                    0.02,
+                    float(issue.penetration_depth_m or 0.0) + 0.01,
+                )
+                issue_instructions.append(
+                    f"separate '{object_a}' from '{object_b}' by at least "
+                    f"{clearance:.3f}m beyond their current overlap"
+                )
+            elif issue_type == "out_of_bounds":
+                issue_instructions.append(
+                    f"move the full bounding box of '{object_a}' inside the "
+                    "reported room limits"
+                )
+            elif issue_type == "missing_required_object":
+                issue_instructions.append(
+                    f"generate and place the required '{object_a}'"
+                )
+            elif issue_type == "door_or_opening_clearance":
+                issue_instructions.append(
+                    f"move '{object_a}' away from the blocked opening"
+                )
+            elif issue.details:
+                issue_instructions.append(f"repair '{object_a}': {issue.details}")
         missing = [
             reason
             for reason in reasons
@@ -1953,6 +2008,13 @@ class BaseStatefulAgent(ABC):
         if not hints:
             hints.append(
                 "Repair the listed hard violations first, then request another critique."
+            )
+        if issue_instructions:
+            hints.insert(
+                0,
+                "Object-level hard evidence (use these IDs in the next tool calls): "
+                + "; ".join(issue_instructions)
+                + ".",
             )
         return " ".join(hints)
 

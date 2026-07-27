@@ -431,8 +431,8 @@ class TestStackingEndToEnd(unittest.TestCase):
             f"unscaled {unscaled_height:.4f}m (expected {expected_height:.4f}m)",
         )
 
-    def test_load_collision_bounds_applies_scale_factor(self):
-        """Collision bounds should apply SceneObject.scale_factor for runtime scaling."""
+    def test_load_collision_bounds_does_not_double_apply_scale_factor(self):
+        """SDF scale is authoritative; metadata scale is not applied a second time."""
         # Load unscaled asset.
         plate_unscaled = self._create_plate_scene_object(0)
         z_min_unscaled, z_max_unscaled = load_collision_bounds_for_scene_object(
@@ -440,7 +440,8 @@ class TestStackingEndToEnd(unittest.TestCase):
         )
         unscaled_height = z_max_unscaled - z_min_unscaled
 
-        # Create object with scale_factor=0.8 (runtime scaling).
+        # A legacy/runtime metadata factor alone must not rescale SDF collision
+        # geometry again. The rescale transaction writes the matching SDF scale.
         plate_scaled = SceneObject(
             object_id=UniqueID("scaled_plate"),
             object_type=ObjectType.MANIPULAND,
@@ -455,14 +456,13 @@ class TestStackingEndToEnd(unittest.TestCase):
         )
         scaled_height = z_max_scaled - z_min_scaled
 
-        # Scaled height should be 0.8x of unscaled.
-        expected_height = unscaled_height * 0.8
+        expected_height = unscaled_height
         self.assertAlmostEqual(
             scaled_height,
             expected_height,
             delta=0.0005,
-            msg=f"Scaled height {scaled_height:.4f}m should be 0.8x of "
-            f"unscaled {unscaled_height:.4f}m (expected {expected_height:.4f}m)",
+            msg=f"Collision height {scaled_height:.4f}m should not reapply "
+            f"metadata scale to SDF geometry (expected {expected_height:.4f}m)",
         )
 
 

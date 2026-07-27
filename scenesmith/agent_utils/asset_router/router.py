@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import numpy as np
 from omegaconf import DictConfig
 from PIL import Image, ImageDraw
 
@@ -78,6 +79,26 @@ if TYPE_CHECKING:
     )
 
 console_logger = logging.getLogger(__name__)
+
+
+def _validation_render_has_visible_content(image_paths: list[Path]) -> bool:
+    """Reject near-uniform multiview renders before spending a VLM request."""
+    for image_path in image_paths:
+        try:
+            with Image.open(image_path) as image:
+                rgb = np.asarray(image.convert("RGB").resize((128, 128)), dtype=float)
+        except Exception:
+            continue
+        border = np.concatenate(
+            (rgb[0], rgb[-1], rgb[:, 0], rgb[:, -1]),
+            axis=0,
+        )
+        background = np.median(border, axis=0)
+        foreground_distance = np.max(np.abs(rgb - background), axis=2)
+        foreground_ratio = float(np.mean(foreground_distance > 18.0))
+        if foreground_ratio >= 0.003 and float(np.std(rgb)) >= 2.0:
+            return True
+    return False
 
 
 class AssetRouter:
@@ -314,6 +335,10 @@ class AssetRouter:
                 taa_samples=self.validation_taa_samples,
             )
             console_logger.debug(f"Rendered {len(image_paths)} images for validation")
+            if not _validation_render_has_visible_content(image_paths):
+                raise RuntimeError(
+                    "all multiview images are blank or contain no visible asset"
+                )
         except Exception as e:
             console_logger.error(f"Failed to render mesh for validation: {e}")
             return ValidationResult(

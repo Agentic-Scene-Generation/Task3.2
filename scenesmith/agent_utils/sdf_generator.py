@@ -13,6 +13,7 @@ import logging
 import xml.etree.ElementTree as ET
 
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 import trimesh
@@ -20,6 +21,7 @@ import trimesh
 from scenesmith.agent_utils.materials import get_friction
 from scenesmith.agent_utils.mesh_utils import load_mesh_as_trimesh
 from scenesmith.agent_utils.mesh_physics_analyzer import MeshPhysicsAnalysis
+from scenesmith.utils.geometry_utils import convert_mesh_yup_to_zup
 from scenesmith.utils.inertia_utils import fix_sdf_file_inertia
 from scenesmith.utils.sdf_utils import (
     parse_pose,
@@ -39,6 +41,7 @@ def generate_drake_sdf(
     physics_analysis: MeshPhysicsAnalysis,
     output_path: Path,
     asset_name: str | None = None,
+    mesh_frame: Literal["scene_z_up", "gltf_y_up"] = "scene_z_up",
 ) -> Path:
     """Generate Drake SDF file for a simulation asset with visual geometry, collision
     geometry, and physics properties.
@@ -51,6 +54,9 @@ def generate_drake_sdf(
         physics_analysis: Physics properties from VLM analysis (mass, material).
         output_path: Path where SDF file will be saved.
         asset_name: Optional name for the asset (defaults to visual mesh stem).
+        mesh_frame: Coordinate frame shared by the loaded visual mesh and convex
+            pieces. Production canonical glTF assets use ``gltf_y_up``; direct
+            Z-up callers may keep the backwards-compatible default.
 
     Returns:
         Path to the generated SDF file.
@@ -72,11 +78,20 @@ def generate_drake_sdf(
         f"collision pieces"
     )
 
-    # Apply GLTF scene-graph transforms while loading. The resulting mesh is in
-    # the same Z-up working frame used by Drake and convex decomposition.
+    # Apply GLTF scene-graph transforms while loading. Standard glTF remains
+    # Y-up in trimesh, whereas Drake converts only the referenced visual glTF to
+    # Z-up. OBJ collision files receive no such implicit conversion, so convert
+    # all derived geometry explicitly at this single SDF boundary.
     visual_mesh = load_mesh_as_trimesh(visual_mesh_path, force_merge=True)
+    collision_inputs = [piece.copy() for piece in collision_pieces]
+    if mesh_frame == "gltf_y_up":
+        convert_mesh_yup_to_zup(visual_mesh)
+        for piece in collision_inputs:
+            convert_mesh_yup_to_zup(piece)
+    elif mesh_frame != "scene_z_up":
+        raise ValueError(f"Unsupported mesh_frame: {mesh_frame}")
     collision_meshes = _filter_full_dimensional_collision_pieces(
-        [piece.copy() for piece in collision_pieces],
+        collision_inputs,
         asset_name=asset_name,
     )
     _validate_collision_geometry(
