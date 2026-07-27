@@ -159,7 +159,10 @@ def _score_payload(payload: dict[str, Any]) -> _PayloadScore:
     all_fail = all_degraded = visual_fail = visual_degraded = 0
     severity = 0.0
     for result in payload.get("results") or []:
-        if str(result.get("scoring_tier") or "").lower() == "ignored":
+        if str(result.get("scoring_tier") or "").lower() in {
+            "ignored",
+            "auxiliary",
+        }:
             continue
         label = str(result.get("label") or "")
         if label == "fail":
@@ -192,6 +195,11 @@ def _repairable_object_ids(payload: dict[str, Any]) -> list[str]:
     seen: set[str] = set()
     for result in payload.get("results") or []:
         if result.get("metric") != "visual_clearance":
+            continue
+        if str(result.get("scoring_tier") or "").lower() in {
+            "ignored",
+            "auxiliary",
+        }:
             continue
         if result.get("label") not in _ISSUE_LABELS:
             continue

@@ -281,6 +281,11 @@ loop_detection:
   max_repeated_attempts: 25
   tracking_window: 30
 
+# Stop semantic rephrasing loops after repeated ceiling-asset retrieval misses.
+# This is stage-local and resets as soon as any ceiling asset is acquired.
+asset_generation_safety:
+  max_consecutive_complete_failures: 2
+
 # Physics validation configuration.
 physics_validation:
   wall_thickness: 0.05

@@ -154,12 +154,12 @@ def _normalize_scoring_tier(value: Any) -> str:
 
 def _check_scoring_tier_payload(value: Any) -> dict[str, str]:
     tier = _normalize_scoring_tier(value)
-    return {"scoring_tier": "ignored"} if tier == "ignored" else {}
+    return {"scoring_tier": tier} if tier != "core" else {}
 
 
 def _result_scoring_tier_payload(value: Any) -> dict[str, str]:
     tier = _normalize_scoring_tier(value)
-    return {"scoring_tier": "ignored"} if tier == "ignored" else {}
+    return {"scoring_tier": tier} if tier != "core" else {}
 
 
 def _scoring_tier_rank(scoring_tier: str) -> int:

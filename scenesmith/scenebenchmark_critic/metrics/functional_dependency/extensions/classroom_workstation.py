@@ -19,6 +19,7 @@ from scenesmith.scenebenchmark_critic.metrics.functional_dependency.seat_surface
     room_bounds_from_case_pack,
     work_seat_candidates,
 )
+from scenesmith.scenebenchmark_critic.intent_contract import contract_relation_requested
 
 RELATION_TYPE = "classroom_workstation_distribution"
 _CLASSROOM_HINTS = ("classroom", "school", "student desk", "student chair")
@@ -30,6 +31,18 @@ def evaluate_classroom_workstation_distribution(
     """Require an N-desk student grid plus one distinct front-zone teacher desk."""
     task = str(case_pack.get("task_instruction") or "")
     room_type = str(case_pack.get("room_type") or "")
+    contract_mode = str(case_pack.get("intent_contract_mode") or "legacy")
+    if contract_mode == "contract":
+        # Do not turn a count coincidence (N chairs / N+1 desks) into a
+        # teacher-zone requirement.  In contract mode this layout exists only
+        # when the prompt explicitly requested the student cohort and teacher.
+        if not contract_relation_requested(case_pack, "distributed_evenly"):
+            return []
+        if (
+            "teacher" not in f"{room_type} {task}".lower()
+            and "instructor" not in f"{room_type} {task}".lower()
+        ):
+            return []
     if not any(hint in f"{room_type} {task}".lower() for hint in _CLASSROOM_HINTS):
         return []
     geometry = case_pack.get("scene_geometry") or {}
@@ -76,6 +89,7 @@ def evaluate_classroom_workstation_distribution(
         cohort.teacher_surface,
         assignment_by_surface,
         objects_by_id,
+        objects=objects,
         room_bounds=room_bounds,
         front=cohort.front_vector_xy,
     )
@@ -150,6 +164,7 @@ def _layout_targets(
     assignment_by_surface: dict[str, Any],
     objects_by_id: dict[str, dict[str, Any]],
     *,
+    objects: list[dict[str, Any]],
     room_bounds: tuple[float, float, float, float],
     front: tuple[float, float],
 ) -> tuple[list[dict[str, Any]], dict[str, Any]] | None:
@@ -181,12 +196,33 @@ def _layout_targets(
     chair_half_depth = max(_local_depth(seat) / 2.0 for _, seat in student_pairs)
     chair_offset = max(desk_half_depth + chair_half_depth + 0.08, 0.45)
     teacher_half_depth = _local_depth(teacher_surface) / 2.0
-    teacher_p = p_max - teacher_half_depth - max(0.45, 0.07 * room_depth)
+    grid_front_p = p_max - teacher_half_depth - max(0.45, 0.07 * room_depth)
+    teacher_p = grid_front_p
+
+    # A classroom's instructional board is a usable focal surface, not a wall
+    # decoration.  The teacher desk belongs in the front teaching zone, but it
+    # must stay on the student side of the board's standing/reading clearance.
+    # Without this bound, a room-relative "front-zone" target can incorrectly
+    # place the desk behind (or directly against) a blackboard.
+    instructional_surface = _front_instructional_surface(objects, front)
+    if instructional_surface is not None:
+        board_center = bbox_center_xy(instructional_surface)
+        if board_center is not None:
+            board_p = front[0] * board_center[0] + front[1] * board_center[1]
+            board_half_depth = _extent_along(instructional_surface, front) / 2.0
+            access_clearance = min(1.0, max(0.65, 0.10 * room_depth))
+            teacher_p = min(
+                teacher_p,
+                board_p - board_half_depth - teacher_half_depth - access_clearance,
+            )
     student_p_min = (
         p_min + max(0.55, 0.06 * room_depth) + chair_offset + chair_half_depth
     )
     student_p_max = (
-        teacher_p - teacher_half_depth - desk_half_depth - max(0.65, 0.08 * room_depth)
+        grid_front_p
+        - teacher_half_depth
+        - desk_half_depth
+        - max(0.65, 0.08 * room_depth)
     )
     if student_p_max <= student_p_min:
         return None
@@ -275,7 +311,33 @@ def _layout_targets(
         "allowed_facing_error_deg": 15.0,
         "aligned": teacher_distance <= tolerance and teacher_yaw_error <= 15.0,
     }
+    if instructional_surface is not None:
+        teacher_slot["instructional_surface_id"] = str(instructional_surface["id"])
+        teacher_slot["instructional_access_clearance_m"] = round(
+            max(0.0, grid_front_p - teacher_p), 4
+        )
     return diagnostics, teacher_slot
+
+
+def _front_instructional_surface(
+    objects: list[dict[str, Any]], front: tuple[float, float]
+) -> dict[str, Any] | None:
+    """Return the front-most usable blackboard/whiteboard-like classroom object."""
+    candidates: list[tuple[float, dict[str, Any]]] = []
+    for obj in objects:
+        text = " ".join(
+            str(obj.get(key) or "")
+            for key in ("id", "name", "description", "category", "type")
+        ).lower()
+        if not any(
+            token in text for token in ("chalkboard", "blackboard", "whiteboard")
+        ):
+            continue
+        center = bbox_center_xy(obj)
+        if center is None:
+            continue
+        candidates.append((front[0] * center[0] + front[1] * center[1], obj))
+    return max(candidates, key=lambda item: item[0])[1] if candidates else None
 
 
 def _segment_centers(lower: float, upper: float, count: int) -> list[float]:

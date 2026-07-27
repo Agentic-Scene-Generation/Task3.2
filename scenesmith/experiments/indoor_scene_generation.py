@@ -51,6 +51,7 @@ from scenesmith.manipuland_agents.stateful_manipuland_agent import (
     StatefulManipulandAgent,
 )
 from scenesmith.scenebenchmark_critic.config import critic_config_from_any
+from scenesmith.scenebenchmark_critic.api import seating_orientation_targets
 from scenesmith.scenebenchmark_critic.furniture_relation_repair import (
     improve_furniture_relations,
     unresolved_furniture_relation_failures,
@@ -453,13 +454,19 @@ async def _apply_and_rescore_final_furniture_state(
     previous_scene_hash: str,
 ) -> bool:
     """Apply final furniture guards before rendering the canonical stage state."""
-    align_seating_to_nearest_surface(scene)
+    align_seating_to_nearest_surface(
+        scene,
+        allowed_targets_by_seat=seating_orientation_targets(scene, config=cfg_dict),
+    )
     if critic_config_from_any(cfg_dict).enabled:
         improve_storage_front_access(scene, config=cfg_dict)
         improve_furniture_relations(scene, config=cfg_dict)
 
     # Candidate evaluation can move a wall seat while testing a relation repair.
-    align_seating_to_nearest_surface(scene)
+    align_seating_to_nearest_surface(
+        scene,
+        allowed_targets_by_seat=seating_orientation_targets(scene, config=cfg_dict),
+    )
 
     _raise_for_unresolved_furniture_relations(scene=scene, cfg_dict=cfg_dict)
 
@@ -765,6 +772,40 @@ def _copy_checkpoint_for_stage(
         f"Copied checkpoint for {start_stage}: "
         f"checkpoint={checkpoint_name}, assets={asset_dirs}"
     )
+
+
+def _apply_runtime_task_prompt(
+    house_layout: HouseLayout,
+    prompt: str,
+) -> bool:
+    """Keep user-task provenance out of persisted StageBrief text.
+
+    The floor-plan agent may receive a StageBrief-enhanced prompt, and its
+    resulting ``RoomSpec.prompt`` is persisted with the reusable geometry.
+    That text is useful while planning the floor plan, but it is not the
+    immutable user task for later stage critics.  A single-room layout has an
+    unambiguous mapping, so restore the current run's raw task there.  For a
+    multi-room layout, preserve the individual room prompts rather than guess
+    how a top-level prompt should be split across rooms.
+    """
+    task_prompt = str(prompt or "").strip()
+    if not task_prompt:
+        return False
+
+    changed = False
+    if house_layout.house_prompt != task_prompt:
+        house_layout.house_prompt = task_prompt
+        changed = True
+
+    room_ids = list(house_layout.room_ids)
+    if len(room_ids) != 1:
+        return changed
+
+    room_spec = house_layout.get_room_spec(room_ids[0])
+    if room_spec is not None and room_spec.prompt != task_prompt:
+        room_spec.prompt = task_prompt
+        changed = True
+    return changed
 
 
 def _add_manipulands_with_cleanup(
@@ -2190,6 +2231,21 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                             house_layout_dict = json.load(f)
                         house_layout = HouseLayout.from_dict(
                             house_layout_dict, house_dir=scene_dir
+                        )
+
+                    # A floor-plan StageBrief may have been serialized into
+                    # ``house_layout.room_specs[*].prompt``.  Restore the raw
+                    # task for an unambiguous single-room run before any
+                    # downstream stage or critic reads that text.
+                    if _apply_runtime_task_prompt(house_layout, prompt):
+                        with open(house_layout_path, "w", encoding="utf-8") as f:
+                            json.dump(
+                                house_layout.to_dict(scene_dir=scene_dir),
+                                f,
+                                indent=2,
+                            )
+                        console_logger.info(
+                            "Restored runtime task prompt in house layout provenance"
                         )
 
                     # Check if we should stop after floor_plan stage.

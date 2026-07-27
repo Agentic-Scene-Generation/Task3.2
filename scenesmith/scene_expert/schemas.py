@@ -6,6 +6,8 @@ type safety and easy JSON serialization across the pipeline.
 
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 
@@ -50,6 +52,17 @@ class SceneTaskSpec(BaseModel):
     aesthetic_constraints: list[str] = Field(
         default_factory=list,
         description="Visual / style constraints: material palette, density, symmetry, etc.",
+    )
+    # Constraint rows are deliberately permissive at this boundary because the
+    # model compiler is best-effort.  The critic normalizes them into its
+    # versioned, finite intent-contract schema and refuses malformed/inferred
+    # hard constraints there.
+    intent_constraints: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description=(
+            "Prompt-originated spatial relations with relation, subjects, targets, "
+            "source, confidence, and evidence_span."
+        ),
     )
 
 
@@ -142,6 +155,11 @@ class StageBrief(BaseModel):
         lines = [
             f"=== SceneExpert Stage Brief: {self.stage} ===",
             f"Objective: {self.stage_objective}",
+            (
+                "Priority: The original user task is authoritative. This brief is "
+                "advisory and must not contradict explicit object, position, or facing "
+                "relations from that task."
+            ),
         ]
         if self.constraints_for_designer:
             lines.append("Designer constraints:")

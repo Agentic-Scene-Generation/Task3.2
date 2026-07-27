@@ -24,6 +24,7 @@ console_logger = logging.getLogger(__name__)
 _ISSUE_LABELS = {"fail", "degraded"}
 _REPAIRABLE_RELATIONS = {
     "back_against_wall",
+    "centered_on_wall",
     "classroom_workstation_distribution",
     "dining_seat_distribution",
     "room_center_alignment",
@@ -34,6 +35,7 @@ _REPAIRABLE_RELATIONS = {
 }
 _WINDOW_CLEARANCE_RELATION = "window_clearance"
 _WINDOW_CLEARANCE_MARGIN_M = 0.03
+_PAIRED_SURFACE_RELATION = "furniture_faces_furniture"
 
 
 @dataclass(frozen=True)
@@ -182,7 +184,11 @@ def improve_furniture_relations(
                 continue
             translation_limit = (
                 max_translation_m * 3.0
-                if target.relation_type == "classroom_workstation_distribution"
+                if target.relation_type
+                in {
+                    "classroom_workstation_distribution",
+                    "seating_to_work_surface",
+                }
                 else (
                     max_translation_m * 2.0
                     if target.relation_type == "study_furniture_layout"
@@ -305,8 +311,12 @@ def unresolved_furniture_relation_failures(
         result
         for result in payload.get("results") or []
         if str(result.get("label") or "").lower() == "fail"
-        and str(result.get("scoring_tier") or "").lower() != "ignored"
-        and str(result.get("relation_type") or "") in _REPAIRABLE_RELATIONS
+        and str(result.get("scoring_tier") or "").lower()
+        not in {"ignored", "auxiliary"}
+        and (
+            str(result.get("relation_type") or "") in _REPAIRABLE_RELATIONS
+            or _is_paired_surface_facing_result(payload, result)
+        )
     ]
 
 
@@ -324,7 +334,7 @@ def _score_payload(payload: dict[str, Any]) -> _PayloadScore:
     fail_ids: set[str] = set()
     degraded_ids: set[str] = set()
     for index, result in enumerate(payload.get("results") or []):
-        if str(result.get("scoring_tier") or "").lower() == "ignored":
+        if str(result.get("scoring_tier") or "").lower() in {"ignored", "auxiliary"}:
             continue
         check_id = str(result.get("check_id") or f"result_{index}")
         label = str(result.get("label") or "unknown")
@@ -427,6 +437,12 @@ def _result_severity(result: dict[str, Any]) -> tuple[int, float]:
             float(diagnostics.get("offset_m") or 0.0)
             - float(diagnostics.get("allowed_offset_m") or 0.0),
         )
+    elif relation == "centered_on_wall":
+        magnitude = max(
+            0.0,
+            float(diagnostics.get("tangent_error_m") or 0.0)
+            - float(diagnostics.get("allowed_tangent_error_m") or 0.0),
+        ) + max(0.0, float(diagnostics.get("normal_error_m") or 0.0) - 0.10)
     return _label_severity(label), round(magnitude, 9)
 
 
@@ -439,6 +455,8 @@ def _repair_targets(scene: RoomScene, payload: dict[str, Any]) -> list[_RepairTa
     for result in payload.get("results") or []:
         if result.get("label") not in _ISSUE_LABELS:
             continue
+        if str(result.get("scoring_tier") or "").lower() in {"ignored", "auxiliary"}:
+            continue
         check_id = str(result.get("check_id") or "")
         window_targets = _window_clearance_targets(scene, result, check_id)
         if window_targets:
@@ -446,6 +464,42 @@ def _repair_targets(scene: RoomScene, payload: dict[str, Any]) -> list[_RepairTa
             continue
 
         relation = str(result.get("relation_type") or "")
+        if relation == _PAIRED_SURFACE_RELATION:
+            if not _is_paired_surface_facing_result(payload, result):
+                continue
+            object_id = str(result.get("primary_object") or "")
+            target_id = next(
+                (
+                    str(item)
+                    for item in (
+                        result.get("selected_related_objects")
+                        or result.get("related_objects")
+                        or []
+                    )
+                    if str(item)
+                ),
+                "",
+            )
+            subject = scene.objects.get(UniqueID(object_id))
+            target = scene.objects.get(UniqueID(target_id))
+            subject_center = _world_center_xy(subject) if subject is not None else None
+            target_center = _world_center_xy(target) if target is not None else None
+            if subject_center is None or target_center is None:
+                continue
+            dx = target_center[0] - subject_center[0]
+            dy = target_center[1] - subject_center[1]
+            if math.hypot(dx, dy) <= 1e-6:
+                continue
+            targets.append(
+                _RepairTarget(
+                    object_id,
+                    relation,
+                    check_id,
+                    subject_center,
+                    math.degrees(math.atan2(-dx, dy)),
+                )
+            )
+            continue
         if relation not in _REPAIRABLE_RELATIONS:
             continue
         diagnostics = result.get("diagnostics") or {}
@@ -592,6 +646,14 @@ def _repair_targets(scene: RoomScene, payload: dict[str, Any]) -> list[_RepairTa
                         tuple(group_ids),
                     )
                 )
+        elif relation == "centered_on_wall":
+            object_id = str(result.get("primary_object") or "")
+            center = _xy(diagnostics.get("target_center_xy_m"))
+            yaw = _float_or_none(diagnostics.get("target_yaw_deg"))
+            if object_id and center is not None and yaw is not None:
+                targets.append(
+                    _RepairTarget(object_id, relation, check_id, center, yaw)
+                )
         elif relation == "wall_backed_storage_alignment":
             object_id = str(
                 diagnostics.get("object_id") or result.get("primary_object") or ""
@@ -641,7 +703,82 @@ def _repair_targets(scene: RoomScene, payload: dict[str, Any]) -> list[_RepairTa
             target.object_id,
         )
     )
-    return targets
+    return _prioritize_coordinated_seating_targets(targets)
+
+
+def _is_paired_surface_facing_result(
+    payload: dict[str, Any], result: dict[str, Any]
+) -> bool:
+    """Require exact prompt-contract provenance before rotating a work surface."""
+    if str(result.get("relation_type") or "") != _PAIRED_SURFACE_RELATION:
+        return False
+    check_id = str(result.get("check_id") or "")
+    checks = (payload.get("case_pack") or {}).get("checks") or []
+    check = next(
+        (
+            item
+            for item in checks
+            if isinstance(item, dict) and str(item.get("check_id") or "") == check_id
+        ),
+        None,
+    )
+    if not isinstance(check, dict) or check.get("check_source") != "intent_contract":
+        return False
+    evidence = check.get("evidence") or {}
+    constraint = evidence.get("intent_constraint") or {}
+    return bool(
+        evidence.get("paired_surface_facing")
+        and str(constraint.get("relation") or "") == "paired_with"
+        and str(constraint.get("strength") or "").lower() == "hard"
+        and str(constraint.get("source") or "").lower()
+        in {"explicit_prompt", "room_ontology"}
+    )
+
+
+def _prioritize_coordinated_seating_targets(
+    targets: list[_RepairTarget],
+) -> list[_RepairTarget]:
+    """Try mutually dependent seat repairs as one reversible candidate first.
+
+    A partially generated classroom can leave several chairs at room edges.
+    Moving one chair at a time may keep the aggregate seating rule failed and
+    therefore fail the whole-scene improvement gate, even though the complete
+    set of assigned seat slots is valid.  Group only the already-failing,
+    deterministic seat-to-surface targets; the normal individual candidates
+    remain as a fallback and the existing whole-scene gate still decides
+    whether any candidate is accepted.
+    """
+    seating_targets = [
+        target
+        for target in targets
+        if target.relation_type == "seating_to_work_surface"
+        and not target.member_poses
+        and target.object_id
+    ]
+    if len(seating_targets) < 2:
+        return targets
+    unique_poses = tuple(
+        {
+            target.object_id: _RepairPose(
+                target.object_id,
+                target.target_center_xy,
+                target.target_yaw_deg,
+            )
+            for target in seating_targets
+        }.values()
+    )
+    if len(unique_poses) < 2:
+        return targets
+    anchor = seating_targets[0]
+    coordinated = _RepairTarget(
+        anchor.object_id,
+        anchor.relation_type,
+        anchor.check_id,
+        anchor.target_center_xy,
+        anchor.target_yaw_deg,
+        member_poses=unique_poses,
+    )
+    return [coordinated, *targets]
 
 
 def _target_from_facing_diagnostics(
@@ -836,7 +973,7 @@ def _scene_wall(scene: RoomScene, wall_id: str) -> SceneObject | None:
 def _wall_backed_target(
     scene: RoomScene, object_id: str, wall_id: str | None
 ) -> tuple[tuple[float, float], float] | None:
-    """Return a wall-normal pose for a seat without using asset-specific IDs."""
+    """Return a wall-normal pose for contracted furniture without asset IDs."""
     if not object_id or not wall_id:
         return None
     seat = scene.objects.get(UniqueID(object_id))
@@ -844,7 +981,7 @@ def _wall_backed_target(
     if (
         seat is None
         or wall is None
-        or not _is_seating_object(seat)
+        or seat.object_type != ObjectType.FURNITURE
         or not _is_wall(wall)
     ):
         return None

@@ -22,6 +22,9 @@ from scenesmith.scenebenchmark_critic.asset_library_annotations import (
     get_hssd_asset_annotations,
 )
 from scenesmith.scenebenchmark_critic.evaluator import build_all_checks
+from scenesmith.scenebenchmark_critic.intent_contract import (
+    attach_intent_contract_to_case_pack,
+)
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.constants import (
     BEDS,
     MEDIA,
@@ -328,6 +331,10 @@ def room_scene_to_case_pack(
         "scene_geometry": scene_geometry,
         "checks": [],
     }
+    # Preserve the original task separately from the mutable stage prompt.
+    # SceneExpert may append memory and a StageBrief to ``text_description``;
+    # those instructions must never become critic hard constraints.
+    attach_intent_contract_to_case_pack(scene, case_pack)
     case_pack["checks"] = build_all_checks(case_pack, metrics=metrics)
     return case_pack
 
@@ -731,9 +738,7 @@ def _semantic_yaw_deg(obj: SceneObject, *, scene: RoomScene | None = None) -> fl
     placement_info = getattr(obj, "placement_info", None)
     if obj.object_type == ObjectType.MANIPULAND and placement_info is not None:
         local_yaw = float(placement_info.rotation_2d)
-        world_yaw = _parent_surface_world_yaw(
-            obj, scene=scene, local_yaw=local_yaw
-        )
+        world_yaw = _parent_surface_world_yaw(obj, scene=scene, local_yaw=local_yaw)
         if world_yaw is not None:
             return math.degrees(world_yaw)
         # 2026-07-17 修改原因：父 surface 可能来自被裁剪的 scene 或铰接 link，

@@ -34,10 +34,18 @@ def evaluate_workstation_focal_alignment(
         if isinstance(region, dict) and region.get("region_id")
     }
     results: list[dict[str, Any]] = []
+    contract_mode = str(case_pack.get("intent_contract_mode") or "legacy")
     for check in case_pack.get("checks") or []:
         if check.get("metric") != "functional_dependency":
             continue
         if check.get("relation_type") != WORK_RELATION:
+            continue
+        if (
+            contract_mode == "contract"
+            and check.get("check_source") != "intent_contract"
+        ):
+            # Do not promote a nearest desk inferred from the current layout
+            # into a focal-alignment hard requirement.
             continue
         seat = objects.get(str(check.get("subject_id") or ""))
         if seat is None:
@@ -70,8 +78,10 @@ def _evaluate_pair(
     seat_center = bbox_center_xy(seat)
     desk_center = bbox_center_xy(desk)
     focus_centers = [bbox_center_xy(obj) for obj in focus]
-    if seat_center is None or desk_center is None or any(
-        center is None for center in focus_centers
+    if (
+        seat_center is None
+        or desk_center is None
+        or any(center is None for center in focus_centers)
     ):
         return None
     focus_center = (
@@ -85,7 +95,9 @@ def _evaluate_pair(
     lateral_offset = abs(seat_lateral - focus_lateral)
     seat_half = _extent_along(seat, desk_side) / 2.0
     focus_half = max(_extent_along(obj, desk_side) for obj in focus) / 2.0
-    desk_long_span = max(_extent_along(desk, desk_side), _extent_along(desk, desk_front))
+    desk_long_span = max(
+        _extent_along(desk, desk_side), _extent_along(desk, desk_front)
+    )
     lateral_tolerance = max(seat_half, focus_half, 0.15 * desk_long_span)
     lateral_delta = focus_lateral - seat_lateral
     target_center = (

@@ -23,6 +23,7 @@ from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.m
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.seat_surface_assignment import (
     is_dining_context,
 )
+from scenesmith.scenebenchmark_critic.intent_contract import contract_relation_requested
 
 RELATION_TYPE = "dining_seat_distribution"
 _ONE_PER_EDGE_TABLE_GAP_M = 0.05
@@ -38,12 +39,23 @@ def evaluate_dining_seat_distribution(
         if isinstance(obj, dict) and obj.get("id")
     ]
     objects_by_id = {str(obj["id"]): obj for obj in objects}
+    contract_mode = str(case_pack.get("intent_contract_mode") or "legacy")
+    if contract_mode == "contract" and not contract_relation_requested(
+        case_pack, "one_per_side"
+    ):
+        # Dining chairs are not universally required to occupy every table
+        # edge; only an explicit one-per-side request gives that topology a
+        # hard semantic meaning.
+        return []
     dining_context = is_dining_context(
         task_instruction=str(case_pack.get("task_instruction") or ""),
         room_type=str(case_pack.get("room_type") or ""),
     )
-    one_per_edge = dining_context and _requests_one_seat_per_edge(
-        str(case_pack.get("task_instruction") or "")
+    one_per_edge = (
+        contract_relation_requested(case_pack, "one_per_side")
+        if contract_mode == "contract"
+        else dining_context
+        and _requests_one_seat_per_edge(str(case_pack.get("task_instruction") or ""))
     )
     tables = [
         obj

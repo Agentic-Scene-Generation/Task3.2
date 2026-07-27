@@ -52,6 +52,9 @@ CASE_FILTER="${CASE_FILTER:-}"
 DRY_RUN="${DRY_RUN:-false}"
 CRITIC_PROBE_RENDER_FINAL_VIEWS="${CRITIC_PROBE_RENDER_FINAL_VIEWS:-false}"
 CRITIC_PROBE_FINAL_VIEW_PARALLELISM="${CRITIC_PROBE_FINAL_VIEW_PARALLELISM:-1}"
+# First run the prompt-originated system in shadow mode. Set to ``contract``
+# only after reviewing the comparison report and holdout replay.
+CRITIC_CONSTRAINT_MODE="${CRITIC_CONSTRAINT_MODE:-shadow}"
 FINAL_VIEW_PYTHON_BIN="${FINAL_VIEW_PYTHON_BIN:-$PYTHON_BIN}"
 DISABLE_ARTICULATED="${SCENEEXPERT_DISABLE_ARTICULATED:-false}"
 DISABLE_MATERIALS="${SCENEEXPERT_DISABLE_MATERIALS:-false}"
@@ -273,6 +276,7 @@ export CRITIC_PROBE_PORT_BASE CRITIC_PROBE_PORT_BLOCK_SIZE
 export CRITIC_PROBE_SHUTDOWN_GRACE_SECONDS
 export CRITIC_PROBE_CONTINUE_ON_BATCH_FAILURE
 export CRITIC_PROBE_FINAL_VIEW_PARALLELISM
+export CRITIC_CONSTRAINT_MODE
 export PIPELINE_STOP_STAGE BRANCH_FROM_SHARED_BASE SHARED_BASE_STOP_STAGE
 export SHARED_BASE_ROOT GENERATE_SHARED_BASE MAX_CASES CASE_FILTER DRY_RUN
 export SCENEEXPERT_DISABLE_ARTICULATED="$DISABLE_ARTICULATED"
@@ -397,6 +401,7 @@ COMMON_ARGS=(
     "experiment.scenebenchmark_critic.inject_into_llm_critic=true"
     "experiment.scenebenchmark_critic.fd_relation_proposer_mode=template"
     "experiment.scenebenchmark_critic.max_fd_relation_proposals=8"
+    "experiment.scenebenchmark_critic.constraint_mode=${CRITIC_CONSTRAINT_MODE}"
     "floor_plan_agent.openai.reasoning_effort.designer=${FLOOR_PLAN_DESIGNER_THINKING}"
     "floor_plan_agent.openai.reasoning_effort.critic=${FLOOR_PLAN_CRITIC_THINKING}"
     "furniture_agent.openai.reasoning_effort.designer=${FURNITURE_DESIGNER_THINKING}"
@@ -760,7 +765,11 @@ if [ "$GENERATE_SHARED_BASE" = "true" ]; then
 fi
 run_batches critic_on
 if [ "${CRITIC_PROBE_RENDER_FINAL_VIEWS,,}" = "true" ] || [ "${CRITIC_PROBE_RENDER_FINAL_VIEWS}" = "1" ]; then
-    "$FINAL_VIEW_PYTHON_BIN" "$SCRIPT_DIR/render_critic_final_views.py" \
-        --parallelism "$CRITIC_PROBE_FINAL_VIEW_PARALLELISM" -- "$OUTPUT_ROOT"
+    if [ "$PIPELINE_STOP_STAGE" = "manipuland" ]; then
+        "$FINAL_VIEW_PYTHON_BIN" "$SCRIPT_DIR/render_critic_final_views.py" \
+            --parallelism "$CRITIC_PROBE_FINAL_VIEW_PARALLELISM" -- "$OUTPUT_ROOT"
+    else
+        echo "skipping final combined-house views: pipeline stops at $PIPELINE_STOP_STAGE"
+    fi
 fi
 echo "critic-on probe complete: $OUTPUT_ROOT"

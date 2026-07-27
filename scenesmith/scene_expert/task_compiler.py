@@ -15,6 +15,7 @@ from pathlib import Path
 from scenesmith.scene_expert.context_bundle import build_llm_call_debug_record
 from scenesmith.scene_expert.schemas import SceneTaskSpec
 from scenesmith.agent_utils.thinking import chat_template_kwargs_from_effort
+from scenesmith.utils.llm_json import parse_llm_json_object
 
 console_logger = logging.getLogger(__name__)
 
@@ -53,6 +54,16 @@ You MUST output valid JSON matching this exact schema:
   "aesthetic_constraints": [
     "visual and style constraints",
     "e.g. 'modern material palette', 'balanced visual density', 'avoid overcrowding'"
+  ],
+  "intent_constraints": [
+    {
+      "relation": "against_wall | centered_on_wall | centered_in_room | faces | on_top_of | near | aligned_with | flanking | distributed_evenly | one_per_side | clear_access",
+      "subjects": {"category": "canonical object category", "count": 1},
+      "targets": {"category": "canonical target category"},
+      "source": "model_inferred",
+      "confidence": 0.0,
+      "evidence_span": "exact supporting words copied from the input prompt"
+    }
   ]
 }
 
@@ -61,6 +72,18 @@ Rules:
 - Infer reasonable functional zones based on the room type and objects.
 - Infer reachability constraints for any small objects placed on furniture surfaces.
 - Keep object names concise (e.g. "bed" not "a large king-sized bed").
+- Always include "intent_constraints". Add only spatial relations explicitly
+  stated in the input; use [] when there are none.
+- Every intent constraint MUST use source "model_inferred". It is auxiliary
+  evidence only, never a hard requirement.
+- Use only the relation names listed in the schema. Do not invent coordinates,
+  room sides, nearest-object relations, or relations based on design convention.
+- Keep every selector minimal: use category and count only when a count is
+  explicit. Omit role, quantifier, and stage fields.
+- Emit at most eight intent constraints, preferring complete relations over
+  redundant restatements.
+- Copy evidence_span verbatim from the input prompt. Do not use StageBrief,
+  retrieved memory, or current object positions as evidence.
 - Output ONLY the JSON object, no other text.
 
 Example input: "A bedroom with a bed, two nightstands, and a wardrobe."
@@ -74,7 +97,8 @@ Example output:
   "required_small_objects": [],
   "functional_zones": ["sleeping_zone", "storage_zone"],
   "interaction_constraints": ["nightstands should be accessible from both sides of the bed"],
-  "aesthetic_constraints": ["balanced furniture placement", "clear walking paths"]
+  "aesthetic_constraints": ["balanced furniture placement", "clear walking paths"],
+  "intent_constraints": []
 }
 """
 
@@ -176,19 +200,14 @@ def _extract_required_objects_from_prompt(prompt_lower: str) -> dict[str, list[s
 
 
 def _extract_json_from_text(text: str) -> dict:
-    """Extract JSON from model output, handling markdown code fences."""
-    if not text:
-        raise ValueError("Empty response text")
-    # Strip markdown code fences if present
-    text = text.strip()
-    fence_match = re.search(r"```(?:json)?\s*([\s\S]+?)\s*```", text)
-    if fence_match:
-        text = fence_match.group(1)
-    # Find first { ... } block
-    brace_match = re.search(r"\{[\s\S]+\}", text)
-    if brace_match:
-        text = brace_match.group(0)
-    return json.loads(text)
+    """Extract a top-level object and repair common local-model JSON drift.
+
+    TaskCompiler must use the shared parser rather than strict ``json.loads``:
+    local model output is occasionally fenced, has a trailing comma, or is
+    cut off after a complete nested object.  Schema validation below remains
+    the authority on whether the recovered payload is usable.
+    """
+    return parse_llm_json_object(text)
 
 
 def _fallback_spec_from_prompt(prompt: str) -> SceneTaskSpec:
@@ -254,7 +273,7 @@ class TaskCompiler:
         model: str,
         api_base_url: str | None = None,
         api_key: str | None = None,
-        max_tokens: int = 1024,
+        max_tokens: int = 1536,
         temperature: float = 0.1,
     ) -> None:
         from openai import OpenAI

@@ -26,9 +26,19 @@ _SIDE_WALL_SEATING_RE = re.compile(
 
 
 def evaluate_study_furniture_layout(case_pack: dict[str, Any]) -> list[dict[str, Any]]:
-    """Require a desk-backed study with storage and guests on opposite side walls."""
+    """Evaluate the legacy coordinated study wall-layout heuristic.
+
+    Contract mode evaluates each prompt-originated relation through the generic
+    intent-contract extensions instead.  This legacy layout encodes implicit
+    tangential wall slots for storage and guest seating; those positions are not
+    authorized by phrases such as ``against the wall`` and must not become hard
+    requirements or repair targets.
+    """
     task = str(case_pack.get("task_instruction") or "")
     lowered = task.lower()
+    contract_mode = str(case_pack.get("intent_contract_mode") or "legacy")
+    if contract_mode == "contract":
+        return []
     if not (
         _STUDY_RE.search(lowered)
         and _BACK_WALL_DESK_RE.search(lowered)
@@ -149,6 +159,12 @@ def evaluate_study_furniture_layout(case_pack: dict[str, Any]) -> list[dict[str,
         if float(pose["deviation_m"]) > tolerance
         or float(pose["facing_error_deg"]) > 10.0
     ]
+    # ``shadow`` is a migration/observation mode: keep the historical
+    # coordinated-wall diagnosis visible in reports, but do not let its
+    # unprompted tangential slots reject an otherwise valid study.  Only the
+    # explicit contract may become authoritative in that mode.  ``legacy``
+    # remains available for reproducibility of the former behaviour.
+    scoring_tier = "auxiliary" if contract_mode == "shadow" else "core"
     return [
         {
             "check_id": f"fd_study_{RELATION_TYPE}",
@@ -189,7 +205,7 @@ def evaluate_study_furniture_layout(case_pack: dict[str, Any]) -> list[dict[str,
                 "zone_separation": "storage_opposite_guest_seating",
             },
             "evaluation_source": "scenesmith_study_furniture_layout",
-            "scoring_tier": "core",
+            "scoring_tier": scoring_tier,
         }
     ]
 

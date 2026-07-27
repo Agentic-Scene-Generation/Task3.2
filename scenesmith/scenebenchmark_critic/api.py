@@ -18,6 +18,11 @@ from scenesmith.scenebenchmark_critic.config import CriticConfig, critic_config_
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.orientation_contracts import (
     stabilize_orientation_contracts,
 )
+from scenesmith.scenebenchmark_critic.intent_contract import constraint_mode
+from scenesmith.scenebenchmark_critic.intent_contract import (
+    contract_seating_targets,
+    set_contract_mode,
+)
 from scenesmith.scenebenchmark_critic.evaluator import run_case_pack_checks
 from scenesmith.scenebenchmark_critic.reports import (
     build_evaluation_payload,
@@ -47,12 +52,16 @@ def evaluate_room_scene(
     case_pack = room_scene_to_case_pack(
         scene, stage=stage, metrics=list(critic_config.metrics)
     )
-    stabilize_orientation_contracts(
-        case_pack,
-        scene,
-        critic_config,
-        stage=stage,
-    )
+    # The historical orientation contract infers a target from the current
+    # geometry.  It remains available while shadowing legacy behavior, but a
+    # contract-mode run must only use prompt-originated targets.
+    if constraint_mode(critic_config) != "contract":
+        stabilize_orientation_contracts(
+            case_pack,
+            scene,
+            critic_config,
+            stage=stage,
+        )
     results = run_case_pack_checks(case_pack, config=critic_config)
     return build_evaluation_payload(
         case_pack=case_pack,
@@ -139,6 +148,26 @@ def format_prompt_context(
     if max_issues is None:
         max_issues = 8
     return _format_prompt_context(payload, max_issues=max_issues)
+
+
+def seating_orientation_targets(
+    scene: RoomScene,
+    *,
+    config: CriticConfig | Any | None = None,
+) -> dict[str, set[str]] | None:
+    """Return prompt-authorized direct seating targets in contract mode.
+
+    The final furniture guard executes before a normal critic pass, so it
+    cannot inspect an already-built payload.  Build only the local semantic
+    case pack here; this makes a direct yaw change subject to the same original
+    prompt contract as later geometry evaluation.
+    """
+    critic_config = _coerce_config(config)
+    if constraint_mode(critic_config) != "contract":
+        return None
+    case_pack = room_scene_to_case_pack(scene, metrics=("functional_dependency",))
+    set_contract_mode(case_pack, "contract")
+    return contract_seating_targets(case_pack)
 
 
 def _coerce_config(config: CriticConfig | Any | None) -> CriticConfig:

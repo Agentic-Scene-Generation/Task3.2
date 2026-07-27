@@ -700,11 +700,10 @@ def _prompt_wall_target(
         side_walls = _side_walls_for_work_surface(subject, objects, walls)
         if side_walls:
             walls = side_walls
-    elif direction in {"back", "rear"}:
-        backing_wall = _primary_work_surface_backing_wall(subject, objects, walls)
-        if backing_wall is not None:
-            walls = [backing_wall]
-
+    # "Back" and "rear" are relative to the intended seating composition,
+    # not a compass direction. Keep every wall eligible: deriving a target
+    # from a coffee table or TV stand selects the wall opposite a correctly
+    # wall-backed sofa. The geometry rank below binds the adjacent wall.
     walls.sort(key=lambda wall: _prompt_wall_rank(subject, wall))
     return walls[0] if walls else None
 

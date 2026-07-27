@@ -193,14 +193,24 @@ class SceneExpertPipeline:
                 se_cfg.verifier.stage_pass_threshold
                 if se_cfg and hasattr(se_cfg, "verifier")
                 else 0.6
-            )
+            ),
+            visual_score_hard_gate=(
+                bool(getattr(se_cfg.verifier, "visual_score_hard_gate", False))
+                if se_cfg and hasattr(se_cfg, "verifier")
+                else False
+            ),
         )
         self._full_verifier = FullVerifier(
             pass_threshold=(
                 se_cfg.verifier.full_pass_threshold
                 if se_cfg and hasattr(se_cfg, "verifier")
                 else 0.7
-            )
+            ),
+            visual_score_hard_gate=(
+                bool(getattr(se_cfg.verifier, "visual_score_hard_gate", False))
+                if se_cfg and hasattr(se_cfg, "verifier")
+                else False
+            ),
         )
         self._repair_controller = RepairController(memory_store=self._memory_store)
 
@@ -291,7 +301,9 @@ class SceneExpertPipeline:
                         stage=stage, task_spec=task_spec, memory_pack=memory_pack
                     )
                     stage_brief = self._global_planner.generate_stage_brief(
-                        context=context, scene_state_summary=scene_state_summary
+                        context=context,
+                        scene_state_summary=scene_state_summary,
+                        original_task=prompt,
                     )
                     qwen_call_count += 1
                     context = self._harness.build_context(

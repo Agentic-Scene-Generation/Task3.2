@@ -96,7 +96,7 @@ def format_agent_prompt_context(
         counted = [
             result
             for result in payload.get("results") or []
-            if not _is_ignored_scoring_tier(result)
+            if not _is_non_authoritative_scoring_tier(result)
         ]
         context = (
             "SceneBenchmark geometry critic: no degraded or failed checks relevant "
@@ -104,7 +104,9 @@ def format_agent_prompt_context(
             f"{len(counted)} counted rule checks."
         )
     else:
-        context = format_full_prompt_context({"results": filtered}, max_issues=max_issues)
+        context = format_full_prompt_context(
+            {"results": filtered}, max_issues=max_issues
+        )
 
     # 2026-07-11 修改原因：仅注入 failed/degraded 结果时，已经通过的稳定朝向
     # contract 对 LLM 不可见，critic 会重新解释原始 prompt，把靠墙 guest chair
@@ -211,7 +213,7 @@ def _format_manipuland_orientation_context(
             continue
         if result.get("relation_type") != "display_faces_user":
             continue
-        if _is_ignored_scoring_tier(result):
+        if _is_non_authoritative_scoring_tier(result):
             continue
 
         display_id = str(result.get("primary_object") or "")
@@ -434,9 +436,7 @@ def _format_wall_media_window_context(
             # ID（如 living_room_south / south_wall）；prompt 必须使用 critic
             # 解析出的目标墙和真实窗口，而不是让模型再次选择任意侧墙。
             diagnostics = result.get("diagnostics") or {}
-            target_surface_id = str(
-                diagnostics.get("target_wall_surface_id") or ""
-            )
+            target_surface_id = str(diagnostics.get("target_wall_surface_id") or "")
             target_window_ids = [
                 str(item)
                 for item in diagnostics.get("target_wall_window_ids") or []
@@ -450,16 +450,16 @@ def _format_wall_media_window_context(
                     "`list_windows()` and repair the target opening in this order: "
                     "shrink it, move it on the same wall, then remove it only if "
                     "necessary; afterward call "
-                    f"`align_wall_object_over_support(object_id=\"{media_id}\", "
-                    f"support_object_id=\"{support_id}\")`. Do not move the TV "
+                    f'`align_wall_object_over_support(object_id="{media_id}", '
+                    f'support_object_id="{support_id}")`. Do not move the TV '
                     "to an arbitrary side wall to avoid the window."
                 )
             elif target_surface_id:
                 rows.append(
                     f"- `{media_id}` must be on support `{support_id}`'s wall "
                     f"(`{target_surface_id}`), centered above it. Call "
-                    f"`align_wall_object_over_support(object_id=\"{media_id}\", "
-                    f"support_object_id=\"{support_id}\")`; do not leave the TV "
+                    f'`align_wall_object_over_support(object_id="{media_id}", '
+                    f'support_object_id="{support_id}")`; do not leave the TV '
                     "on an arbitrary side wall."
                 )
             matching_windows = [
@@ -482,8 +482,8 @@ def _format_wall_media_window_context(
                     f"the {direction} wall with window `{window.get('id')}`. Use the "
                     "wall designer tools in this exact order: `list_windows()`; "
                     f"`resize_window(window_id=\"{window.get('id')}\", width=0.6)`; "
-                    "then `align_wall_object_over_support(object_id=\""
-                    f"{media_id}\", support_object_id=\"{support_id}\")`. "
+                    'then `align_wall_object_over_support(object_id="'
+                    f'{media_id}", support_object_id="{support_id}")`. '
                     "If the resized opening still blocks the alignment, use "
                     "`move_window` on the same wall, and only then `remove_window`. "
                     "Never leave the TV shifted sideways merely to avoid the window."
@@ -544,9 +544,7 @@ def _objects_share_wall(media: dict[str, Any], window: dict[str, Any]) -> bool:
         return False
     wall_axis = 1 if window_direction in {"north", "south"} else 0
     wall_coord = float(
-        wmax[wall_axis]
-        if window_direction in {"north", "east"}
-        else wmin[wall_axis]
+        wmax[wall_axis] if window_direction in {"north", "east"} else wmin[wall_axis]
     )
     distance_to_wall = max(
         float(omin[wall_axis]) - wall_coord,
@@ -778,7 +776,7 @@ def _result_rank(result: dict[str, Any]) -> tuple[int, float]:
 
 
 def _objects_by_id(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    geometry = ((payload.get("case_pack") or {}).get("scene_geometry") or {})
+    geometry = (payload.get("case_pack") or {}).get("scene_geometry") or {}
     return {
         str(obj.get("id") or ""): obj
         for obj in geometry.get("objects") or []
@@ -787,14 +785,16 @@ def _objects_by_id(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
 
 def _is_prompt_issue(result: dict[str, Any]) -> bool:
-    return (
-        result.get("label") in ISSUE_LABELS
-        and not _is_ignored_scoring_tier(result)
-    )
+    return result.get(
+        "label"
+    ) in ISSUE_LABELS and not _is_non_authoritative_scoring_tier(result)
 
 
-def _is_ignored_scoring_tier(result: dict[str, Any]) -> bool:
-    return str(result.get("scoring_tier") or "").strip().lower() == "ignored"
+def _is_non_authoritative_scoring_tier(result: dict[str, Any]) -> bool:
+    return str(result.get("scoring_tier") or "").strip().lower() in {
+        "ignored",
+        "auxiliary",
+    }
 
 
 def _is_self_relation(result: dict[str, Any]) -> bool:
@@ -833,9 +833,11 @@ def _is_wall_mounted_object(obj: dict[str, Any] | None) -> bool:
 
 
 def _category(obj: dict[str, Any] | None) -> str:
-    return str(
-        (obj or {}).get("category_norm") or (obj or {}).get("category") or ""
-    ).strip().lower()
+    return (
+        str((obj or {}).get("category_norm") or (obj or {}).get("category") or "")
+        .strip()
+        .lower()
+    )
 
 
 def _category_text(obj: dict[str, Any] | None) -> str:

@@ -387,6 +387,11 @@ furniture_safety_controller:
     enabled: true
     max_attempts: ${oc.env:SCENEEXPERT_DETERMINISTIC_REPAIR_MAX_ATTEMPTS,2}
     wall_margin_m: 0.08
+    # Only resolve small mesh interpenetrations mechanically. Larger layout
+    # mistakes remain planner work so generic repair does not rewrite intent.
+    collision_separation_max_penetration_m: 0.08
+    collision_separation_margin_m: 0.025
+    wall_anchor_preservation_distance_m: 0.16
     nightstand_gap_m: 0.08
     storage_pair_gap_m: 0.08
   required_object_names: []

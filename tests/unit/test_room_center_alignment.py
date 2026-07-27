@@ -67,6 +67,26 @@ def test_room_center_ignores_stage_brief_failure_examples() -> None:
     assert evaluate_room_center_alignment(_case(prompt)) == []
 
 
+def test_room_center_uses_original_task_not_injected_stage_brief() -> None:
+    case_pack = _case(
+        "A bedroom with a bed against the wall.\n\n"
+        "=== SceneExpert Stage Brief: furniture ===\n"
+        "Use the bed as the central anchor for this arrangement."
+    )
+    case_pack["original_task_instruction"] = "A bedroom with a bed against the wall."
+
+    assert evaluate_room_center_alignment(case_pack) == []
+
+
+def test_room_center_does_not_treat_central_anchor_as_room_center() -> None:
+    assert (
+        evaluate_room_center_alignment(
+            _case("Use the bed as the central anchor of the sleeping zone.")
+        )
+        == []
+    )
+
+
 def test_room_center_ignores_off_center_counterexample_but_keeps_request() -> None:
     results = evaluate_room_center_alignment(
         _case(

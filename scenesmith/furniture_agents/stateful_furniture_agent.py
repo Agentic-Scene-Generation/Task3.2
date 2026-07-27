@@ -70,6 +70,12 @@ from scenesmith.furniture_agents.tools.scene_tools import SceneTools
 from scenesmith.furniture_agents.tools.vision_tools import VisionTools
 from scenesmith.prompts.registry import FurnitureAgentPrompts
 from scenesmith.scene_expert.repair_taxonomy import FailureCategory, build_repair_plan
+from scenesmith.scenebenchmark_critic.api import seating_orientation_targets
+from scenesmith.scenebenchmark_critic.config import critic_config_from_any
+from scenesmith.scenebenchmark_critic.furniture_relation_repair import (
+    improve_furniture_relations,
+)
+from scenesmith.scenebenchmark_critic.intent_contract import constraint_mode
 from scenesmith.utils.logging import BaseLogger
 
 console_logger = logging.getLogger(__name__)
@@ -118,6 +124,13 @@ _WALL_BACKED_STORAGE_CATEGORIES = {
     "tv_stand",
     "wardrobe",
 }
+
+_SHALLOW_FURNITURE_COLLISION_RE = re.compile(
+    r"^\s*-\s*(?P<first>[^\s]+)\s+collides with\s+"
+    r"(?P<second>[^\s]+)\s+\((?P<depth>\d+(?:\.\d+)?)\s*"
+    r"(?P<unit>mm|cm|m)\s+penetration\)",
+    re.IGNORECASE | re.MULTILINE,
+)
 
 
 class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
@@ -234,11 +247,15 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         """
         critic_config = self.cfg.agents.critic_agent
         critic_prompt_enum = FurnitureAgentPrompts[critic_config.prompt]
+        # The planner's StageBrief and memory are useful designer guidance but
+        # are mutable, model-produced text.  They must not become the critic's
+        # statement of prompt truth or authorize a visual failure.
+        original_task = getattr(scene, "scene_expert_original_description", "")
         return super()._create_critic_agent(
             tools=tools,
             prompt_enum=critic_prompt_enum,
             output_type=FurnitureCritiqueWithScores,
-            scene_description=scene.text_description,
+            scene_description=original_task or scene.text_description,
         )
 
     def _create_planner_agent(
@@ -423,7 +440,10 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             )
         self._converge_prompt_required_inventory(source="before final critique")
 
-        seating_fixes = align_seating_to_nearest_surface(scene)
+        seating_fixes = align_seating_to_nearest_surface(
+            scene,
+            allowed_targets_by_seat=seating_orientation_targets(scene, config=self.cfg),
+        )
         if seating_fixes:
             console_logger.info(
                 "Deterministic seating orientation guard before final critique: %s",
@@ -521,6 +541,64 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             )
         return super()._build_initial_design_input(instruction)
 
+    async def _request_initial_design_impl(self) -> str:
+        """Run the initial designer, then repair only prompt-authorized relations.
+
+        The planner auto-scores the result immediately after this method returns.
+        Performing an eligible deterministic repair here therefore prevents the
+        first critic render from observing a known-bad, but otherwise complete,
+        LLM layout.  This remains deliberately inactive for legacy/shadow
+        rollout: only hard constraints compiled from the immutable prompt may
+        move furniture before that first critique.
+        """
+        result = await super()._request_initial_design_impl()
+        self._repair_initial_contract_layout()
+        return result
+
+    def _repair_initial_contract_layout(self) -> list[str]:
+        """Repair contract-authorized furniture relations before first critique.
+
+        Both repair mechanisms are geometry-only and retain their own
+        whole-scene acceptance/rollback checks.  In particular, this does not
+        ask an LLM or VLM to infer a pose, and it never activates from a
+        StageBrief, current layout, or legacy prompt heuristic.
+        """
+        critic_config = critic_config_from_any(self.cfg)
+        if (
+            not critic_config.enabled
+            or not critic_config.metric_enabled("functional_dependency")
+            or constraint_mode(critic_config) != "contract"
+        ):
+            return []
+
+        relation_fixes = improve_furniture_relations(
+            self.scene,
+            config=critic_config,
+        )
+        seating_fixes = align_seating_to_nearest_surface(
+            self.scene,
+            allowed_targets_by_seat=seating_orientation_targets(
+                self.scene,
+                config=critic_config,
+            ),
+        )
+        if not relation_fixes and not seating_fixes:
+            return []
+
+        # The next automatic critic request must render and evaluate the pose
+        # just accepted above rather than use the designer's pre-repair cache.
+        self.rendering_manager.clear_cache()
+        self._reset_critic_candidate_cache()
+        actions = [f"{fix.object_id}:{fix.relation_type}" for fix in relation_fixes] + [
+            f"{fix.subject_id}->{fix.target_id}:seating_orientation"
+            for fix in seating_fixes
+        ]
+        console_logger.info(
+            "Initial prompt-contract furniture repair before first critique: %s",
+            "; ".join(actions),
+        )
+        return actions
+
     def _get_context_image_path(self) -> Path | None:
         """Get the AI-generated context image for initial design.
 
@@ -584,10 +662,12 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             actions.append("cleared deterministic door/opening forbidden zones")
 
         if not is_bedroom_scene(self.scene):
-            if "collisions" in reasons and self._repair_generic_wall_collisions():
-                actions.append(
-                    "moved generic furniture away from room walls to the deterministic margin"
-                )
+            if "collisions" in reasons:
+                if self._repair_generic_wall_collisions():
+                    actions.append(
+                        "moved generic furniture away from room walls to the deterministic margin"
+                    )
+                actions.extend(self._repair_shallow_furniture_collisions())
             removed_excess = self._remove_excess_required_furniture(required_counts)
             if removed_excess:
                 actions.append(
@@ -785,6 +865,216 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 obj.name,
             )
         return changed
+
+    def _repair_shallow_furniture_collisions(self) -> list[str]:
+        """Separate one reported shallow furniture collision without a layout guess.
+
+        This is deliberately a narrow geometry fallback for small mesh
+        penetrations introduced by asset placement or snapping.  It never uses
+        object categories, room names, or a VLM judgement.  Deep collisions are
+        left for the planner because automatically moving them risks changing a
+        meaningful prompt relationship.
+        """
+        if self.scene is None:
+            return []
+
+        max_penetration = max(
+            0.0,
+            float(
+                self._repair_cfg_value("collision_separation_max_penetration_m", 0.08)
+            ),
+        )
+        clearance = max(
+            0.005,
+            float(self._repair_cfg_value("collision_separation_margin_m", 0.025)),
+        )
+        reported = self._reported_shallow_furniture_collisions(
+            self._get_cached_physics_context(),
+            max_penetration_m=max_penetration,
+        )
+        if not reported:
+            return []
+
+        objects_by_id = {
+            str(object_id): obj for object_id, obj in self.scene.objects.items()
+        }
+        before_pairs = self._furniture_aabb_overlap_pairs()
+        for first_id, second_id, penetration in reported:
+            first = objects_by_id.get(first_id)
+            second = objects_by_id.get(second_id)
+            if first is None or second is None:
+                continue
+            candidates = [
+                obj
+                for obj in (first, second)
+                if not getattr(obj, "immutable", False)
+                and getattr(obj, "object_type", None) == ObjectType.FURNITURE
+            ]
+            if not candidates:
+                continue
+            candidates.sort(key=self._collision_repair_candidate_key)
+            for moving in candidates:
+                other = second if moving is first else first
+                transform = self._safe_shallow_collision_transform(
+                    moving,
+                    other,
+                    penetration=penetration,
+                    clearance=clearance,
+                    before_pairs=before_pairs,
+                )
+                if transform is None:
+                    continue
+                self.scene.move_object(moving.object_id, transform)
+                return [
+                    "separated shallow collision "
+                    f"{first_id}<->{second_id} by moving {moving.object_id}"
+                ]
+        return []
+
+    def _reported_shallow_furniture_collisions(
+        self,
+        physics_context: str,
+        *,
+        max_penetration_m: float,
+    ) -> list[tuple[str, str, float]]:
+        """Parse only bounded, object-addressable collisions from physics output."""
+        scale = {"mm": 0.001, "cm": 0.01, "m": 1.0}
+        result: list[tuple[str, str, float]] = []
+        for match in _SHALLOW_FURNITURE_COLLISION_RE.finditer(
+            str(physics_context or "")
+        ):
+            penetration = (
+                float(match.group("depth")) * scale[match.group("unit").lower()]
+            )
+            if 0.0 < penetration <= max_penetration_m:
+                result.append(
+                    (
+                        match.group("first"),
+                        match.group("second"),
+                        penetration,
+                    )
+                )
+        return result
+
+    def _collision_repair_candidate_key(self, obj: SceneObject) -> tuple[float, str]:
+        """Prefer moving the smaller object when both are equally modifiable."""
+        bounds = obj.compute_world_bounds()
+        area = float("inf")
+        if bounds is not None:
+            lower, upper = bounds
+            area = max(0.0, float(upper[0] - lower[0])) * max(
+                0.0, float(upper[1] - lower[1])
+            )
+        return area, str(obj.object_id)
+
+    def _safe_shallow_collision_transform(
+        self,
+        moving: SceneObject,
+        other: SceneObject,
+        *,
+        penetration: float,
+        clearance: float,
+        before_pairs: set[frozenset[str]],
+    ) -> RigidTransform | None:
+        moving_bounds = moving.compute_world_bounds()
+        other_bounds = other.compute_world_bounds()
+        if moving_bounds is None or other_bounds is None:
+            return None
+
+        allowed_axes = self._collision_separation_axes(moving)
+        if not allowed_axes:
+            return None
+        overlap_x, overlap_y = self._xy_overlap_depths(moving_bounds, other_bounds)
+        axes = sorted(allowed_axes, key=lambda axis: (overlap_x, overlap_y)[axis])
+        old_translation = np.asarray(moving.transform.translation(), dtype=float)
+        other_translation = np.asarray(other.transform.translation(), dtype=float)
+        separation = penetration + clearance
+
+        for axis in axes:
+            delta = old_translation[axis] - other_translation[axis]
+            signs = (-1.0, 1.0) if abs(delta) < 1e-4 else (1.0 if delta > 0 else -1.0,)
+            for sign in signs:
+                translation = old_translation.copy()
+                translation[axis] += sign * separation
+                candidate = RigidTransform(R=moving.transform.rotation(), p=translation)
+                candidate = self._fit_transform_inside_room(moving, candidate)
+                actual_shift = float(
+                    candidate.translation()[axis] - old_translation[axis]
+                )
+                if abs(actual_shift) < separation * 0.5:
+                    continue
+                after_pairs = self._furniture_aabb_overlap_pairs(
+                    overrides={str(moving.object_id): candidate}
+                )
+                if after_pairs - before_pairs:
+                    continue
+                return candidate
+        return None
+
+    def _collision_separation_axes(self, obj: SceneObject) -> tuple[int, ...]:
+        """Keep wall-backed objects on their wall by moving along its tangent."""
+        bounds = obj.compute_world_bounds()
+        room_bounds = self._room_bounds_xy()
+        if bounds is None or room_bounds is None:
+            return (0, 1)
+        lower, upper = bounds
+        min_x, min_y, max_x, max_y = room_bounds
+        anchor_distance = max(
+            0.0,
+            float(self._repair_cfg_value("wall_anchor_preservation_distance_m", 0.16)),
+        )
+        x_wall = min(abs(float(lower[0]) - min_x), abs(max_x - float(upper[0])))
+        y_wall = min(abs(float(lower[1]) - min_y), abs(max_y - float(upper[1])))
+        if x_wall <= anchor_distance and y_wall > anchor_distance:
+            return (1,)
+        if y_wall <= anchor_distance and x_wall > anchor_distance:
+            return (0,)
+        if x_wall <= anchor_distance and y_wall <= anchor_distance:
+            return ()
+        return (0, 1)
+
+    def _furniture_aabb_overlap_pairs(
+        self,
+        *,
+        overrides: dict[str, RigidTransform] | None = None,
+    ) -> set[frozenset[str]]:
+        """Return AABB-overlap pairs for rejecting candidates with new conflicts."""
+        if self.scene is None:
+            return set()
+        overrides = overrides or {}
+        furniture: list[tuple[str, SceneObject, tuple[np.ndarray, np.ndarray]]] = []
+        for object_id, obj in self.scene.objects.items():
+            if (
+                getattr(obj, "immutable", False)
+                or getattr(obj, "object_type", None) != ObjectType.FURNITURE
+            ):
+                continue
+            transform = overrides.get(str(object_id))
+            bounds = (
+                self._bounds_for_transform(obj, transform)
+                if transform is not None
+                else obj.compute_world_bounds()
+            )
+            if bounds is not None:
+                furniture.append((str(object_id), obj, bounds))
+        pairs: set[frozenset[str]] = set()
+        for index, (first_id, _first, first_bounds) in enumerate(furniture):
+            for second_id, _second, second_bounds in furniture[index + 1 :]:
+                overlap_x, overlap_y = self._xy_overlap_depths(
+                    first_bounds, second_bounds
+                )
+                first_lower, first_upper = first_bounds
+                second_lower, second_upper = second_bounds
+                overlap_z = max(
+                    0.0,
+                    float(
+                        min(first_upper[2], second_upper[2])
+                        - max(first_lower[2], second_lower[2])
+                    ),
+                )
+                if overlap_x > 1e-4 and overlap_y > 1e-4 and overlap_z > 1e-4:
+                    pairs.add(frozenset((first_id, second_id)))
+        return pairs
 
     def _replace_geometry_failed_furniture_assets(self, reasons: str) -> int:
         """Replace required furniture whose SDF/mesh cannot be loaded by Drake."""
@@ -1283,16 +1573,22 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         if room_bounds is None:
             return False
         candidates = self._wardrobe_candidate_transforms(wardrobe)
+        forbidden_zones = self._opening_forbidden_zones(include_windows=False)
         obstacles = self._furniture_by_category("bed") + self._furniture_by_category(
             "nightstand"
         )
         best_transform = None
         best_score = -1e9
-        fallback_transform = None
-        fallback_score = -1e9
         for transform, wall_opening_penalty in candidates:
             bounds = self._bounds_for_transform(wardrobe, transform)
             if bounds is None:
+                continue
+            # A coarse wall-level opening penalty is insufficient near corners:
+            # furniture anchored to an adjacent wall can still intersect the
+            # actual door/open-connection clearance volume.  Treat that geometry
+            # as a hard candidate filter so this repair cannot undo the generic
+            # forbidden-zone repair that runs immediately before it.
+            if self._zone_overlap_penalty(bounds, forbidden_zones) > 1e-6:
                 continue
             overlap_penalty = 0.0
             for obstacle in obstacles:
@@ -1309,20 +1605,15 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             )
             distance_score = float(np.linalg.norm(center[:2] - bed_center[:2]))
             score = distance_score - overlap_penalty - wall_opening_penalty
-            if score > fallback_score:
-                fallback_score = score
-                fallback_transform = transform
-            # A hard collision must never win merely because it is farther from
-            # the bed. Keep a fallback only for pathological rooms where every
-            # candidate overlaps an existing object.
+            # Hard collisions must never win merely because the candidate is
+            # farther from the bed. If no fully valid wall candidate exists,
+            # retain the current pose for a later generic repair instead of
+            # introducing a known hard failure.
             if overlap_penalty > 1e-5:
                 continue
             if score > best_score:
                 best_score = score
                 best_transform = transform
-
-        if best_transform is None:
-            best_transform = fallback_transform
 
         if best_transform is None or self._transform_close(
             wardrobe.transform, best_transform

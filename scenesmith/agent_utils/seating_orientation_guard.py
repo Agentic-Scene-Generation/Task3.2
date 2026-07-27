@@ -52,6 +52,7 @@ class SeatingOrientationFix:
 def align_seating_to_nearest_surface(
     scene: RoomScene,
     *,
+    allowed_targets_by_seat: dict[str, set[str]] | None = None,
     max_target_distance_m: float = 2.0,
     repair_angle_threshold_deg: float = 45.0,
     # Generated furniture can start roughly one seat-depth away from its
@@ -62,7 +63,12 @@ def align_seating_to_nearest_surface(
     wall_preference_margin_ratio: float = 0.2,
     wall_inward_angle_threshold_deg: float = 5.0,
 ) -> list[SeatingOrientationFix]:
-    """Rotate misaligned seating toward its nearest functional surface."""
+    """Rotate seating only toward an allowed or legacy-nearest target.
+
+    ``allowed_targets_by_seat`` is supplied by intent-contract mode.  An empty
+    mapping entry means the prompt did not establish a facing/wall relation, so
+    this direct pre-critic guard must leave the seat untouched.
+    """
     furniture = [
         obj for obj in scene.objects.values() if obj.object_type == ObjectType.FURNITURE
     ]
@@ -73,23 +79,38 @@ def align_seating_to_nearest_surface(
         return fixes
 
     for seat in seating:
+        allowed_targets = (
+            allowed_targets_by_seat.get(str(seat.object_id), set())
+            if allowed_targets_by_seat is not None
+            else None
+        )
+        if allowed_targets_by_seat is not None and not allowed_targets:
+            continue
+        walls = scene.get_objects_by_type(ObjectType.WALL)
+        if allowed_targets is not None:
+            walls = [wall for wall in walls if str(wall.object_id) in allowed_targets]
+        candidate_surfaces = surfaces
+        if allowed_targets is not None:
+            candidate_surfaces = [
+                surface
+                for surface in surfaces
+                if str(surface.object_id) in allowed_targets
+            ]
         wall_target = _nearest_wall_anchor(
             seat,
-            scene.get_objects_by_type(ObjectType.WALL),
+            walls,
             max_gap_ratio=wall_anchor_gap_ratio,
             peer_seating=seating,
         )
-        target = _nearest_surface(seat, surfaces, max_distance_m=max_target_distance_m)
-        angle = (
-            _front_angle_to_target_deg(seat, target) if target is not None else None
+        target = _nearest_surface(
+            seat, candidate_surfaces, max_distance_m=max_target_distance_m
         )
+        angle = _front_angle_to_target_deg(seat, target) if target is not None else None
         wall_inward_angle = None
         if wall_target is not None:
             wall_inward_point = _wall_away_target_point(seat, wall_target)
             if wall_inward_point is not None:
-                wall_inward_angle = _front_angle_to_point_deg(
-                    seat, wall_inward_point
-                )
+                wall_inward_angle = _front_angle_to_point_deg(seat, wall_inward_point)
         already_faces_wall_interior = (
             wall_inward_angle is not None
             and wall_inward_angle <= wall_inward_angle_threshold_deg
@@ -98,9 +119,12 @@ def align_seating_to_nearest_surface(
         # close to a room wall.  A wall-backed pose would destroy the complete
         # one-seat-per-edge arrangement repaired by the critic.
         target_is_dining_table = target is not None and _is_dining_table(target)
-        # 2026-07-26 修改原因：当前 yaw 恰好斜对书桌不能证明墙边空闲椅属于
-        # 书桌；仅当 critic 已记录 prompt 的显式朝向约束时，才让桌面朝向优先。
-        prompt_requires_surface_facing = _has_explicit_surface_facing_contract(scene, seat)
+        # A current yaw that happens to point diagonally toward a desk is not
+        # evidence that a wall-side seat belongs to that desk. Prefer the work
+        # surface only when the prompt explicitly authorizes that relation.
+        prompt_requires_surface_facing = _has_explicit_surface_facing_contract(
+            scene, seat
+        ) or bool(target is not None and allowed_targets is not None)
         if (
             wall_target is not None
             and _is_wall_anchor_candidate(seat)
@@ -293,9 +317,7 @@ def _is_standalone_wall_seating(
     )
 
 
-def _has_explicit_surface_facing_contract(
-    scene: RoomScene, seat: SceneObject
-) -> bool:
+def _has_explicit_surface_facing_contract(scene: RoomScene, seat: SceneObject) -> bool:
     """Return whether the active critic contract explicitly binds this seat."""
     contracts = getattr(scene, "_scenebenchmark_orientation_contracts", None)
     if not isinstance(contracts, dict):

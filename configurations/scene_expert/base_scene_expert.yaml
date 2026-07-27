@@ -71,3 +71,7 @@ verifier:
   stage_pass_threshold: 0.6
   # Minimum overall score (0-1) to consider the full scene passing
   full_pass_threshold: 0.7
+  # scores.yaml is VLM/LLM feedback. Keep it as an audit/ranking signal; only
+  # deterministic scene facts may block normal generation or create failures.
+  # Enable this only for a controlled offline visual-quality ablation.
+  visual_score_hard_gate: false

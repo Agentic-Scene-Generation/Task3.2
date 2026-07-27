@@ -71,6 +71,10 @@ Guidelines:
 - Be specific and actionable. Vague guidance is useless for small models.
 - Derive constraints from: the task spec, the current scene state, AND the retrieved memory.
 - Prioritize failure patterns from memory — they encode hard-won lessons.
+- When an Immutable User Task is supplied, its explicit object, topology, and
+  facing relations are authoritative. Memory and current-scene observations may
+  refine only non-conflicting details. Omit a suggestion instead of replacing an
+  explicit user relation with a design convention.
 - Keep constraints_for_designer to 3-6 items max. More is not better.
 - The designer will read this brief directly — write for it, not for humans.
 - Output ONLY the JSON object, no other text.
@@ -171,6 +175,7 @@ class GlobalPlanner:
         self,
         context: HarnessContext,
         scene_state_summary: str = "",
+        original_task: str = "",
     ) -> StageBrief:
         """Generate expert planning hints for a single stage.
 
@@ -185,7 +190,11 @@ class GlobalPlanner:
         stage = context.stage
         console_logger.info(f"GlobalPlanner: generating StageBrief for stage '{stage}'")
 
-        user_message = self._build_user_message(context, scene_state_summary)
+        user_message = self._build_user_message(
+            context,
+            scene_state_summary,
+            original_task=original_task,
+        )
 
         try:
             response = self._client.chat.completions.create(
@@ -239,7 +248,11 @@ class GlobalPlanner:
             return self._fallback_brief(context)
 
     def _build_user_message(
-        self, context: HarnessContext, scene_state_summary: str
+        self,
+        context: HarnessContext,
+        scene_state_summary: str,
+        *,
+        original_task: str = "",
     ) -> str:
         stage_desc = _STAGE_DESCRIPTIONS.get(context.stage, "")
         task_spec_text = _format_task_spec(context.task_spec, context.stage)
@@ -252,6 +265,17 @@ class GlobalPlanner:
             "## Task Specification",
             task_spec_text,
         ]
+
+        if original_task.strip():
+            parts += [
+                "",
+                "## Immutable User Task",
+                original_task.strip(),
+                (
+                    "Every explicit spatial relation in this task takes priority over "
+                    "memory, current-scene conventions, and new planner suggestions."
+                ),
+            ]
 
         if scene_state_summary:
             parts += [

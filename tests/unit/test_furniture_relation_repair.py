@@ -21,7 +21,9 @@ from scenesmith.scenebenchmark_critic import furniture_relation_repair
 from scenesmith.scenebenchmark_critic.api import evaluate_room_scene
 from scenesmith.scenebenchmark_critic.config import CriticConfig
 from scenesmith.scenebenchmark_critic.furniture_relation_repair import (
+    _RepairTarget,
     _candidate_improves,
+    _prioritize_coordinated_seating_targets,
     _score_payload,
     improve_furniture_relations,
     unresolved_furniture_relation_failures,
@@ -356,6 +358,96 @@ def test_repairs_generic_classroom_as_atomic_student_grid(tmp_path: Path) -> Non
     assert len(lateral_centers) == 3
 
 
+def test_paired_work_surfaces_rotate_toward_their_assigned_seats(
+    tmp_path: Path,
+) -> None:
+    desk_positions = (
+        (-1.5, 0.8),
+        (0.0, 0.8),
+        (1.5, 0.8),
+        (-1.5, -0.5),
+        (0.0, -0.5),
+        (1.5, -0.5),
+    )
+    desks = [
+        _object(
+            f"student_desk_{index}",
+            "student_desk",
+            (*position, 0.375),
+            (1.05, 0.5, 0.75),
+            yaw_deg=0.0,
+        )
+        for index, position in enumerate(desk_positions)
+    ]
+    chairs = [
+        _object(
+            f"student_chair_{index}",
+            "student_chair",
+            (position[0], position[1] - 0.585, 0.45),
+            (0.5, 0.51, 0.9),
+            yaw_deg=0.0,
+        )
+        for index, position in enumerate(desk_positions)
+    ]
+    scene = _scene(
+        tmp_path,
+        *desks,
+        *chairs,
+        text=(
+            "A classroom with six student desks, each with a chair. A teacher's "
+            "desk sits at the front near the chalkboard."
+        ),
+    )
+    config = CriticConfig(
+        enabled=True,
+        metrics=("functional_dependency",),
+        constraint_mode="contract",
+    )
+
+    before = evaluate_room_scene(scene, config=config, stage="paired_surface_before")
+    paired_surface_checks = {
+        check["check_id"]
+        for check in before["case_pack"]["checks"]
+        if check.get("relation_type") == "furniture_faces_furniture"
+        and (check.get("evidence") or {}).get("paired_surface_facing")
+    }
+    before_results = [
+        result
+        for result in before["results"]
+        if result.get("check_id") in paired_surface_checks
+    ]
+    assert len(paired_surface_checks) == 6
+    assert {result["label"] for result in before_results} == {"fail"}
+    assert not any(
+        result.get("relation_type") == "classroom_workstation_distribution"
+        for result in before["results"]
+    )
+
+    fixes = improve_furniture_relations(scene, config=config)
+
+    assert {fix.object_id for fix in fixes} == {
+        f"student_desk_{index}" for index in range(6)
+    }
+    assert {fix.relation_type for fix in fixes} == {"furniture_faces_furniture"}
+    for desk in desks:
+        yaw = math.degrees(RollPitchYaw(desk.transform.rotation()).yaw_angle())
+        assert abs(abs(yaw) - 180.0) < 1e-6
+
+    after = evaluate_room_scene(scene, config=config, stage="paired_surface_after")
+    pair_results = [
+        result
+        for result in after["results"]
+        if result.get("check_id") in paired_surface_checks
+        or (
+            result.get("relation_type") == "seating_to_work_surface"
+            and str(result.get("check_id") or "").startswith("intent_contract__")
+        )
+    ]
+    assert len(pair_results) == 12
+    assert {result["label"] for result in pair_results} == {"pass"}
+    assert unresolved_furniture_relation_failures(scene, config=config) == []
+
+
 def test_repairs_generic_storage_to_wall(tmp_path: Path) -> None:
     storage = _object(
         "storage_piece_alpha",
@@ -642,6 +734,42 @@ def test_prompt_wall_backed_guest_chairs_stay_free_of_study_desk(
     assert repaired_contracts["office_chair_0"]["target_ids"] == ["study_desk_0"]
 
 
+def test_back_wall_sofa_uses_adjacent_wall_not_coffee_table_wall(
+    tmp_path: Path,
+) -> None:
+    sofa = _object("sofa_0", "sofa", (0.0, -1.5, 0.4), (2.2, 0.9, 0.8), yaw_deg=0.0)
+    tv_stand = _object(
+        "tv_stand_0", "tv_stand", (0.0, 1.65, 0.5), (1.7, 0.45, 1.0), yaw_deg=180.0
+    )
+    coffee_table = _object(
+        "coffee_table_0", "coffee_table", (0.0, 0.1, 0.25), (1.2, 0.7, 0.5)
+    )
+    scene = _scene(
+        tmp_path,
+        sofa,
+        tv_stand,
+        coffee_table,
+        text=(
+            "A living room with a sofa against the back wall facing a TV stand "
+            "on the opposite wall, and a coffee table between them."
+        ),
+    )
+    config = CriticConfig(enabled=True, metrics=("functional_dependency",))
+
+    payload = evaluate_room_scene(scene, config=config, stage="back_wall_sofa")
+    contract = next(
+        check
+        for check in payload["case_pack"]["checks"]
+        if check.get("check_source") == "scenesmith_orientation_contract"
+        and check.get("subject_id") == "sofa_0"
+    )
+    results_by_id = {result["check_id"]: result for result in payload["results"]}
+
+    assert contract["relation_type"] == "back_against_wall"
+    assert contract["target_ids"] == ["south_wall"]
+    assert results_by_id[contract["check_id"]]["label"] == "pass"
+
+
 def test_later_stage_brief_overrides_earlier_guest_desk_facing(tmp_path: Path) -> None:
     desk = _object(
         "study_desk_0",
@@ -735,7 +863,13 @@ def test_repairs_study_as_coordinated_opposite_wall_layout(tmp_path: Path) -> No
             "room, and a bookshelf on the adjacent wall."
         ),
     )
-    config = CriticConfig(enabled=True, metrics=("functional_dependency",))
+    config = CriticConfig(
+        enabled=True,
+        metrics=("functional_dependency",),
+        # This test preserves the historical coordinated-wall repair. Contract
+        # mode intentionally suppresses this scene-specific legacy extension.
+        constraint_mode="legacy",
+    )
 
     before = evaluate_room_scene(scene, config=config, stage="study_before")
     before_result = next(
@@ -872,6 +1006,30 @@ def test_candidate_score_rejects_new_issue() -> None:
         baseline_score=_score_payload(baseline),
         check_id="target",
     )
+
+
+def test_multiple_failed_work_seats_get_atomic_candidate_before_individuals() -> None:
+    targets = [
+        _RepairTarget(
+            f"student_chair_{index}",
+            "seating_to_work_surface",
+            f"seat_{index}",
+            (float(index), 1.0),
+            0.0,
+        )
+        for index in range(3)
+    ]
+
+    candidates = _prioritize_coordinated_seating_targets(targets)
+
+    assert len(candidates) == 4
+    assert candidates[0].object_id == "student_chair_0"
+    assert {pose.object_id for pose in candidates[0].member_poses} == {
+        "student_chair_0",
+        "student_chair_1",
+        "student_chair_2",
+    }
+    assert candidates[1:] == targets
 
 
 class _NonCopyableMesh:
