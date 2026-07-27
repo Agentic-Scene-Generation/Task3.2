@@ -34,9 +34,7 @@ def _classroom_student_role(obj: dict[str, Any]) -> tuple[str, int] | None:
     return None
 
 
-def _is_classroom_student_pair(
-    subject: dict[str, Any], target: dict[str, Any]
-) -> bool:
+def _is_classroom_student_pair(subject: dict[str, Any], target: dict[str, Any]) -> bool:
     """Whether a student chair and desk share the same explicit instance index."""
     subject_role = _classroom_student_role(subject)
     target_role = _classroom_student_role(target)
@@ -347,6 +345,12 @@ def _is_directional_facing_subject(subject: dict[str, Any]) -> bool:
     if _scene_object_type(subject) == "ceiling_mounted":
         return False
     if _is_seating_subject(subject) or _is_media_target(subject):
+        return True
+    # ``semantic_name`` intentionally preserves role identity (for example,
+    # ``student_desk`` versus ``teachers_desk``).  A desk still has a usable
+    # front for a paired-seat contract even when its generic functional hint
+    # describes the top surface rather than front access.
+    if _semantic_name_has_family(subject, "desk"):
         return True
     if (
         profile.source == "explicit"
@@ -665,6 +669,14 @@ def _normalized_category_phrases(obj: dict[str, Any]) -> list[str]:
         if normalized:
             phrases.append(normalized)
     return phrases
+
+
+def _semantic_name_has_family(obj: dict[str, Any], family: str) -> bool:
+    """Match a controlled semantic identity by whole snake-case token."""
+    metadata = obj.get("metadata") or {}
+    value = str(metadata.get("semantic_name") or "").strip().lower()
+    tokens = [token for token in re.split(r"[_\s-]+", value) if token]
+    return family in tokens
 
 
 def _category_surface_family_match(obj: dict[str, Any]) -> bool:

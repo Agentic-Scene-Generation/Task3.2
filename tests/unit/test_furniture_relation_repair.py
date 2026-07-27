@@ -389,6 +389,11 @@ def test_paired_work_surfaces_rotate_toward_their_assigned_seats(
         )
         for index, position in enumerate(desk_positions)
     ]
+    # Rendered asset choice keeps these role-level names for exact selector
+    # binding. Functional dependency evaluation must still recognize their
+    # desk/chair families rather than treating the names as opaque categories.
+    for obj in (*desks, *chairs):
+        obj.metadata["semantic_name"] = obj.name
     scene = _scene(
         tmp_path,
         *desks,
