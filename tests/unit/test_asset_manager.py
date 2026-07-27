@@ -311,6 +311,43 @@ class TestAssetManager(unittest.TestCase):
         self.assertIs(selected, chair)
         manager._thin_covering_router.validate_asset.assert_not_called()
 
+    def test_direct_hssd_validation_outage_does_not_admit_unverified_asset(self):
+        manager = object.__new__(AssetManager)
+        manager.cfg = OmegaConf.create(
+            {
+                "asset_manager": {
+                    "hssd": {
+                        "semantic_validation": {
+                            "enabled": True,
+                            "families": ["bed"],
+                            "max_candidates": 1,
+                        }
+                    }
+                }
+            }
+        )
+        manager.debug_dir = self.temp_dir / "debug"
+        manager._thin_covering_router = MagicMock()
+        manager._thin_covering_router.validate_asset.return_value = ValidationResult(
+            False,
+            "Validation call failed: upstream timeout",
+        )
+        candidate = HssdRetrievalResult(
+            mesh_path=str(self.temp_dir / "unverified.glb"),
+            hssd_id="unverified_bed",
+            object_name="bed",
+            similarity_score=0.9,
+            size=(1.6, 2.05, 0.8),
+            category="large_objects",
+        )
+
+        with self.assertRaisesRegex(TimeoutError, "infrastructure was unavailable"):
+            manager._select_direct_hssd_candidate(
+                candidates=[candidate],
+                description="upholstered bed",
+                short_name="bed",
+            )
+
     def test_create_asset_paths_disambiguates_duplicate_short_names(self):
         """Duplicate requested objects must not share intermediate asset paths."""
         paths = self.asset_manager._create_asset_paths(

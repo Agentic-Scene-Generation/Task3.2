@@ -258,6 +258,92 @@ def _pause_unscored_scene_candidate(
     raise ScenePausedError(stage, reason, str(manifest_path))
 
 
+def _pause_incomplete_placement_stage(
+    *,
+    stage: str,
+    agent: Any,
+    scene: RoomScene,
+    reasons: list[str],
+    runtime_events: list[str],
+) -> None:
+    """Pause before committing a stage that lacks a real placed output."""
+    available_assets_fn = getattr(agent, "admitted_stage_assets", None)
+    available_assets = (
+        list(available_assets_fn()) if callable(available_assets_fn) else []
+    )
+    asset_ids = [
+        str(getattr(asset, "object_id", "")) for asset in available_assets
+    ]
+    unavailable_families_fn = getattr(
+        agent, "unavailable_required_asset_families", None
+    )
+    unavailable_families = (
+        list(unavailable_families_fn())
+        if callable(unavailable_families_fn)
+        else []
+    )
+    if unavailable_families or not available_assets:
+        failure_code = "asset_unavailable"
+        role = "asset"
+        resume_action = "retry_stage_asset_acquisition"
+    else:
+        failure_code = "placement_incomplete"
+        role = "designer"
+        resume_action = "retry_stage_placement"
+
+    runtime_events.append(f"paused_retryable_{failure_code}")
+    setattr(scene, "scene_expert_runtime_repair_events", runtime_events)
+    details = "; ".join(str(item) for item in reasons if str(item).strip())
+    reason = f"{failure_code}: {details}"
+    working_memory = getattr(agent, "stage_working_memory", None)
+    scene_root_dir = getattr(
+        working_memory,
+        "scene_root_dir",
+        getattr(scene, "scene_dir", Path.cwd()),
+    )
+    content_hash = getattr(scene, "content_hash", None)
+    manifest_path = persist_retryable_pause(
+        scene_root_dir=scene_root_dir,
+        stage=stage,
+        role=role,
+        reason=reason,
+        resume_action=resume_action,
+        candidate_state=scene.to_state_dict(),
+        candidate_hash=(content_hash() if callable(content_hash) else ""),
+        attempt_count=1,
+        metadata={
+            "room_id": str(getattr(scene, "room_id", "")),
+            "room_dir": str(getattr(scene, "scene_dir", "")),
+            "available_admitted_asset_ids": asset_ids,
+            "unavailable_required_asset_families": unavailable_families,
+            "runtime_events": list(runtime_events),
+        },
+    )
+    raise ScenePausedError(stage, reason, str(manifest_path))
+
+
+def _raise_if_required_assets_unavailable(*, stage: str, agent: Any) -> None:
+    """Reject a stage before commit when a required semantic family has no asset."""
+    unavailable_families_fn = getattr(
+        agent, "unavailable_required_asset_families", None
+    )
+    unavailable_families = (
+        list(unavailable_families_fn())
+        if callable(unavailable_families_fn)
+        else []
+    )
+    if not unavailable_families:
+        return
+    raise StageValidationError(
+        stage=stage,
+        reasons=[
+            "required asset unavailable: no semantically admitted real HSSD asset "
+            f"for family '{family}'"
+            for family in unavailable_families
+        ],
+    )
+
+
 def _score_postprocessed_candidate_or_pause(
     *,
     stage: str,
@@ -308,7 +394,7 @@ def _run_sceneexpert_placement_stage(
     scene: RoomScene,
     run_once: Callable[[], Any],
 ) -> int:
-    """Run a placement stage with bounded agent-led recovery and degradation."""
+    """Run a placement stage transaction with bounded agent-led recovery."""
     baseline_state = copy.deepcopy(scene.to_state_dict())
     stage_prompt = str(scene.text_description or "")
     budget = getattr(scene, "scene_expert_stage_budget", {}) or {}
@@ -316,11 +402,13 @@ def _run_sceneexpert_placement_stage(
     recovery_enabled = bool(budget)
     regeneration_attempt = 0
     critic_retry_attempted = False
+    placement_continuation_attempted = False
     runtime_events: list[str] = []
 
     while True:
         try:
             asyncio.run(run_once())
+            _raise_if_required_assets_unavailable(stage=stage, agent=agent)
             setattr(scene, "scene_expert_runtime_repair_events", runtime_events)
             return regeneration_attempt
         except StageValidationError as exc:
@@ -382,32 +470,57 @@ def _run_sceneexpert_placement_stage(
             if failure_kind == "structural_unavailable":
                 regeneration_attempt = max_regenerations
 
+            missing_output = any(
+                marker in " ".join(exc.reasons).lower()
+                for marker in (
+                    "missing required stage output",
+                    "produced 0 objects",
+                    "requires at least 1",
+                )
+            )
+            admitted_assets = getattr(agent, "admitted_stage_assets", None)
+            available_assets = (
+                list(admitted_assets()) if callable(admitted_assets) else []
+            )
+            if (
+                missing_output
+                and available_assets
+                and not placement_continuation_attempted
+            ):
+                placement_continuation_attempted = True
+                runtime_events.append("placement_only_continuation")
+                console_logger.warning(
+                    "%s acquired %d real asset(s) but placed none; restoring the "
+                    "stage input and running one compact placement-only continuation",
+                    stage,
+                    len(available_assets),
+                )
+                scene.restore_from_state_dict(copy.deepcopy(baseline_state))
+                scene.text_description = stage_prompt
+                prepare_placement = getattr(
+                    agent, "prepare_placement_continuation", None
+                )
+                if callable(prepare_placement):
+                    asyncio.run(prepare_placement(list(exc.reasons)))
+                    continue
+
             if regeneration_attempt >= max_regenerations:
                 if not recovery_enabled:
                     raise
-                console_logger.warning(
-                    "%s stage exhausted %d full planner/designer/critic "
-                    "regeneration(s). Persisting an explicitly degraded stage "
-                    "and continuing ACP: %s",
+                console_logger.error(
+                    "%s stage exhausted %d regeneration(s) without a valid real "
+                    "placed output; pausing this scene before downstream commit: %s",
                     stage,
                     regeneration_attempt,
                     "; ".join(exc.reasons),
                 )
-                complete_degraded = getattr(
-                    agent, "complete_repair_exhausted_stage", None
+                _pause_incomplete_placement_stage(
+                    stage=stage,
+                    agent=agent,
+                    scene=scene,
+                    reasons=list(exc.reasons),
+                    runtime_events=runtime_events,
                 )
-                if callable(complete_degraded):
-                    runtime_events.append(
-                        f"degraded_after_{failure_kind}"
-                    )
-                    asyncio.run(complete_degraded(list(exc.reasons)))
-                    setattr(
-                        scene,
-                        "scene_expert_runtime_repair_events",
-                        runtime_events,
-                    )
-                    return regeneration_attempt
-                raise
 
             regeneration_attempt += 1
             runtime_events.append(
@@ -1161,6 +1274,8 @@ def _generate_room(
                 stage_prompt = scene.text_description
                 regeneration_attempt = 0
                 critic_only_retry_attempted = False
+                placement_continuation_attempted = False
+                furniture_runtime_events: list[str] = []
                 best_agent_candidate = None
                 repairable_hard_exhausted = False
                 capture_agent_candidate = getattr(
@@ -1175,6 +1290,10 @@ def _generate_room(
                 while True:
                     try:
                         asyncio.run(furniture_agent.add_furniture(scene=scene))
+                        _raise_if_required_assets_unavailable(
+                            stage="furniture",
+                            agent=furniture_agent,
+                        )
                         candidate = (
                             capture_agent_candidate()
                             if callable(capture_agent_candidate)
@@ -1260,6 +1379,50 @@ def _generate_room(
                             )
 
                         repairable = _is_repairable_stage_validation(exc)
+                        missing_output = any(
+                            marker in " ".join(exc.reasons).lower()
+                            for marker in (
+                                "missing required",
+                                "produced 0 objects",
+                                "placeholder furniture",
+                            )
+                        )
+                        admitted_assets_fn = getattr(
+                            furniture_agent, "admitted_stage_assets", None
+                        )
+                        admitted_assets = (
+                            list(admitted_assets_fn())
+                            if callable(admitted_assets_fn)
+                            else []
+                        )
+                        if (
+                            repairable
+                            and missing_output
+                            and admitted_assets
+                            and not placement_continuation_attempted
+                        ):
+                            placement_continuation_attempted = True
+                            furniture_runtime_events.append(
+                                "placement_only_continuation"
+                            )
+                            console_logger.warning(
+                                "Furniture acquired %d admitted real asset(s) but "
+                                "did not commit a valid layout; running one compact "
+                                "placement-only continuation before any reacquisition",
+                                len(admitted_assets),
+                            )
+                            scene.restore_from_state_dict(empty_stage_state)
+                            scene.text_description = stage_prompt
+                            prepare_placement = getattr(
+                                furniture_agent,
+                                "prepare_placement_continuation",
+                                None,
+                            )
+                            if callable(prepare_placement):
+                                asyncio.run(
+                                    prepare_placement(list(exc.reasons))
+                                )
+                                continue
                         if (
                             repairable
                             and regeneration_attempt < max_stage_regenerations
@@ -1293,8 +1456,10 @@ def _generate_room(
                         if repairable and continue_after_exhaustion:
                             console_logger.warning(
                                 "Furniture repair and stage regeneration were "
-                                "exhausted. Persisting the diagnosed candidate and "
-                                "continuing downstream instead of hard-failing ACP: %s",
+                                "exhausted. Persisting the diagnosed agent candidate "
+                                "for the final deterministic comparison; an invalid "
+                                "selected candidate will pause before downstream "
+                                "commit: %s",
                                 "; ".join(exc.reasons),
                             )
                             asyncio.run(
@@ -1376,6 +1541,26 @@ def _generate_room(
                             scene, "scene_expert_stage_budget", None
                         ):
                             persist_agent_best(comparison_candidate)
+
+                evaluate_hard_state = getattr(
+                    furniture_agent, "_evaluate_current_hard_state", None
+                )
+                selected_hard_state = (
+                    evaluate_hard_state()
+                    if callable(evaluate_hard_state)
+                    else None
+                )
+                if (
+                    selected_hard_state is not None
+                    and not selected_hard_state.hard_valid
+                ):
+                    _pause_incomplete_placement_stage(
+                        stage="furniture",
+                        agent=furniture_agent,
+                        scene=scene,
+                        reasons=list(selected_hard_state.hard_reasons),
+                        runtime_events=furniture_runtime_events,
+                    )
                 end_time = time.time()
                 console_logger.info(
                     f"Furniture added to room {room_id} in "
@@ -1879,27 +2064,20 @@ def _generate_room(
                 except ScenePausedError:
                     raise
                 except Exception as rescue_exc:
-                    degraded_reasons = list(
-                        getattr(
-                            scene,
-                            "scene_expert_degraded_stage_reasons",
-                            [],
-                        )
-                        or []
-                    )
-                    degraded_reasons.append(
-                        reason
-                        + "; focused rescue failed: "
-                        + f"{type(rescue_exc).__name__}: {rescue_exc}"
-                    )
-                    setattr(
-                        scene,
-                        "scene_expert_degraded_stage_reasons",
-                        degraded_reasons,
-                    )
                     console_logger.exception(
                         "Manipuland post-processing rescue did not produce a "
-                        "verified minimum-output scene; continuing as degraded"
+                        "verified minimum-output scene; pausing before final commit"
+                    )
+                    _pause_incomplete_placement_stage(
+                        stage="manipuland",
+                        agent=manipuland_agent,
+                        scene=scene,
+                        reasons=[
+                            reason
+                            + "; focused rescue failed: "
+                            + f"{type(rescue_exc).__name__}: {rescue_exc}"
+                        ],
+                        runtime_events=runtime_events,
                     )
             final_manipuland_count = len(
                 scene.get_objects_by_type(ObjectType.MANIPULAND)

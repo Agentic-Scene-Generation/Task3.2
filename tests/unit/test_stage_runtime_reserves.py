@@ -110,6 +110,7 @@ class StageRuntimeReserveTest(unittest.TestCase):
             stage="furniture",
             budget=budget,
             required_objects=["bed", "wardrobe"],
+            execution_clock=agent,
         )
 
     def test_role_reserves_protect_critic_and_fallback_time(self) -> None:
@@ -154,6 +155,29 @@ class StageRuntimeReserveTest(unittest.TestCase):
         self.assertAlmostEqual(fallback_critic_remaining, 55.0)
         self.assertGreater(planner_remaining, designer_remaining)
         self.assertGreater(planner_remaining, critic_remaining)
+
+    def test_external_asset_time_is_not_charged_to_stage_inference(self) -> None:
+        budget = {
+            "max_wall_clock_seconds": 100.0,
+            "critic_reserve_fraction": 0.25,
+            "fallback_reserve_fraction": 0.10,
+            "finalization_reserve_fraction": 0.05,
+        }
+        agent = SimpleNamespace(
+            _stage_runtime_started_at=100.0,
+            _stage_external_paused_seconds=30.0,
+            _critic_evaluation_started_at=None,
+            _stage_runtime_phase="agent",
+            _stage_budget_value=lambda key, default: budget.get(key, default),
+        )
+
+        with patch("time.monotonic", return_value=150.0):
+            remaining = BudgetCompatibilityAgent._remaining_stage_seconds(
+                agent, "designer"
+            )
+
+        # 60-second designer window minus 20 seconds of actual inference.
+        self.assertAlmostEqual(remaining, 40.0)
 
     def test_critic_evaluation_has_an_isolated_quality_window(self) -> None:
         budget = {

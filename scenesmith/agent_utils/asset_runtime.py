@@ -23,6 +23,7 @@ _FAMILY_ALIASES: dict[str, tuple[str, ...]] = {
     "wall_art": ("painting", "artwork", "canvas print", "poster", "wall art", "挂画"),
     "mirror": ("mirror", "镜子", "镜面"),
     "wall_clock": ("wall clock", "clock", "挂钟"),
+    "blackboard": ("blackboard", "chalkboard", "whiteboard"),
     "bed": ("bed", "床"),
     "sofa": ("sofa", "couch", "沙发"),
     # Classroom roles must not share one cache entry: a cached student desk is
@@ -87,7 +88,18 @@ def semantic_asset_family(description: str, short_name: str = "") -> str:
     text = " ".join(f"{short_name} {description}".lower().replace("_", " ").split())
     for family, aliases in _FAMILY_ALIASES.items():
         for alias in aliases:
-            if re.search(rf"(?<![a-z0-9]){re.escape(alias)}(?![a-z0-9])", text):
+            plural_suffix = (
+                r"(?:s|es)?"
+                if alias
+                and alias[-1].isascii()
+                and alias[-1].isalpha()
+                and not alias.endswith("s")
+                else ""
+            )
+            if re.search(
+                rf"(?<![a-z0-9]){re.escape(alias)}{plural_suffix}(?![a-z0-9])",
+                text,
+            ):
                 return family
 
     tokens = [
@@ -126,6 +138,12 @@ class AssetRuntimeGate:
         budget: dict[str, Any],
         required_objects: list[str],
     ) -> None:
+        # A stage regeneration rebuilds request counters but deliberately keeps
+        # already admitted real assets.  Dropping this cache made the replacement
+        # designer reacquire identical HSSD assets and consume the time intended
+        # for placement and critique.
+        previous_stage = getattr(self, "stage", "")
+        previous_success_cache = getattr(self, "success_cache", {})
         self.stage = stage
         self.configured = bool(budget)
         self.max_asset_requests = max(0, int(budget.get("max_asset_requests", 0) or 0))
@@ -144,7 +162,34 @@ class AssetRuntimeGate:
         self.request_count = 0
         self.family_attempts: dict[str, int] = {}
         self.optional_families: set[str] = set()
-        self.success_cache: dict[str, list[Any]] = {}
+        self.success_cache = (
+            {
+                family: list(assets)
+                for family, assets in previous_success_cache.items()
+                if any(
+                    not bool(
+                        (getattr(asset, "metadata", {}) or {}).get(
+                            "repair_placeholder", False
+                        )
+                    )
+                    for asset in assets
+                )
+            }
+            if stage and stage == previous_stage
+            else {}
+        )
+        for family, assets in list(self.success_cache.items()):
+            self.success_cache[family] = [
+                asset
+                for asset in assets
+                if not bool(
+                    (getattr(asset, "metadata", {}) or {}).get(
+                        "repair_placeholder", False
+                    )
+                )
+            ]
+            if not self.success_cache[family]:
+                del self.success_cache[family]
 
     @property
     def enabled(self) -> bool:
@@ -250,6 +295,12 @@ class AssetRuntimeGate:
         return plan
 
     def remember_success(self, family: str, asset: Any) -> None:
+        if bool(
+            (getattr(asset, "metadata", {}) or {}).get(
+                "repair_placeholder", False
+            )
+        ):
+            return
         cached = self.success_cache.setdefault(family, [])
         asset_id = str(getattr(asset, "object_id", ""))
         if all(str(getattr(existing, "object_id", "")) != asset_id for existing in cached):

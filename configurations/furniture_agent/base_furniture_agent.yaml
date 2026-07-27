@@ -162,8 +162,12 @@ asset_manager:
       # Validate each unique high-impact family once, then reuse that asset for
       # repeated instances. Classroom roles stay separate so a low work table or
       # student desk cannot silently stand in for the teacher desk.
-      families: [bed, sofa, wardrobe, desk, student_desk, teacher_desk, chair]
-      max_candidates: 2
+      families:
+        [bed, sofa, wardrobe, nightstand, dresser, desk, student_desk,
+         teacher_desk, chair]
+      # Search beyond CLIP rank 1/2 for category-critical assets; stop at the
+      # first dimension-compatible, semantically admitted real HSSD mesh.
+      max_candidates: 4
       use_lenient: true
       timeout_seconds: 180
       max_retries: 0
@@ -467,8 +471,9 @@ furniture_safety_controller:
       max: [2.50, 0.80, 2.70]
 
 # Recoverable deterministic failures first restart the complete furniture
-# designer/critic stage from the empty-room checkpoint. If both layouts fail,
-# preserve diagnostics and continue downstream instead of aborting the ACP batch.
+# designer/critic stage from the empty-room checkpoint. The legacy flag allows
+# the named deterministic comparison to be produced after exhaustion; an invalid
+# selected candidate is then paused and never committed to downstream stages.
 hard_constraint_recovery:
   max_stage_regenerations: 1
   continue_after_repairable_exhaustion: true

@@ -243,6 +243,34 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         StatefulFurnitureAgent is None,
         f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
     )
+    def test_sceneexpert_agent_candidate_is_not_deterministically_mutated(self) -> None:
+        agent = object.__new__(StatefulFurnitureAgent)
+        agent.scene = SimpleNamespace()
+        agent._stage_runtime_budget = {"max_stage_regenerations": 1}
+        agent.furniture_safety_controller = SimpleNamespace(
+            required_counts={"bed": 1}
+        )
+        calls: list[str] = []
+        agent._ensure_required_furniture_asset = (
+            lambda category: calls.append(category) or 1
+        )
+
+        repaired, actions = agent._attempt_deterministic_repair(
+            SimpleNamespace(
+                hard_valid=False,
+                hard_reasons=["missing required bed"],
+                issues=[],
+            )
+        )
+
+        self.assertFalse(repaired)
+        self.assertEqual(actions, [])
+        self.assertEqual(calls, [])
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
     def test_bedroom_is_dispatched_to_deterministic_fallback_operator(self) -> None:
         agent = object.__new__(StatefulFurnitureAgent)
         agent.scene = SimpleNamespace(

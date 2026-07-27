@@ -137,6 +137,7 @@ class StageBudget(BaseModel):
     finalization_reserve_fraction: float = 0.05
     critical_retry_budget_multiplier: float = 1.5
     max_asset_requests: int = 0
+    asset_acquisition_timeout_seconds: int = 300
     max_optional_object_families: int = 0
     max_assets_per_request: int = 0
     max_semantic_retries_per_family: int = 2

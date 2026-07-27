@@ -32,6 +32,10 @@ class AssetRuntimeGateTest(unittest.TestCase):
         )
         self.assertEqual(semantic_asset_family("writing desk"), "desk")
 
+    def test_required_family_matching_accepts_plural_object_names(self) -> None:
+        self.assertEqual(semantic_asset_family("two nightstands"), "nightstand")
+        self.assertEqual(semantic_asset_family("built-in wardrobes"), "wardrobe")
+
     def test_required_family_survives_optional_budget(self) -> None:
         gate = AssetRuntimeGate()
         gate.configure(
@@ -86,6 +90,27 @@ class AssetRuntimeGateTest(unittest.TestCase):
         self.assertEqual(first.allowed_indices, [0])
         self.assertFalse(second.allowed_indices)
         self.assertIn("exhausted", second.failures[0].reason)
+
+    def test_stage_regeneration_keeps_only_admitted_real_assets(self) -> None:
+        gate = AssetRuntimeGate()
+        budget = {"max_semantic_retries_per_family": 1}
+        gate.configure(stage="furniture", budget=budget, required_objects=["bed"])
+        real_asset = SimpleNamespace(object_id="bed_asset", metadata={})
+        placeholder = SimpleNamespace(
+            object_id="fake_bed",
+            metadata={"repair_placeholder": True},
+        )
+        gate.remember_success("bed", real_asset)
+        gate.remember_success("bed", placeholder)
+
+        gate.configure(stage="furniture", budget=budget, required_objects=["bed"])
+        plan = gate.plan(["double bed"], ["bed"])
+
+        self.assertFalse(plan.allowed_indices)
+        self.assertEqual(
+            [asset.object_id for asset in plan.cached_assets],
+            ["bed_asset"],
+        )
 
 
 if __name__ == "__main__":

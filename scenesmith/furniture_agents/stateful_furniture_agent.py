@@ -9,13 +9,11 @@ import copy
 import json
 import logging
 import math
-import time
 
 from pathlib import Path
 from typing import Any
 
 import numpy as np
-import trimesh
 
 from agents import Agent, FunctionTool
 from omegaconf import DictConfig
@@ -41,7 +39,6 @@ from scenesmith.agent_utils.furniture_layout_planning import (
     format_bedroom_anchor_guidance,
     is_bedroom_scene,
 )
-from scenesmith.agent_utils.mesh_physics_analyzer import MeshPhysicsAnalysis
 from scenesmith.agent_utils.placement_noise import PlacementNoiseMode
 from scenesmith.agent_utils.reachability import (
     compute_reachability,
@@ -62,7 +59,6 @@ from scenesmith.agent_utils.scoring import (
     FurnitureCritiqueWithScores,
     log_agent_response,
 )
-from scenesmith.agent_utils.sdf_generator import generate_drake_sdf
 from scenesmith.agent_utils.workflow_tools import WorkflowTools
 from scenesmith.furniture_agents.base_furniture_agent import BaseFurnitureAgent
 from scenesmith.furniture_agents.tools.furniture_tools import FurnitureTools
@@ -515,6 +511,13 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         self, hard_state: HardStateEvaluation
     ) -> tuple[bool, list[str]]:
         if not self.scene:
+            return False, []
+        if getattr(self, "_stage_runtime_budget", {}) and not getattr(
+            self, "_allow_deterministic_fallback_repair", False
+        ):
+            # SceneExpert's agent candidate must remain the result of the nested
+            # SceneSmith planner/designer/critic loop. Deterministic mutation is
+            # allowed exactly once, in the named fallback comparison below.
             return False, []
 
         actions: list[str] = []
@@ -1035,14 +1038,18 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             deterministic_hard_state is not None
             and not deterministic_hard_state.hard_valid
         ):
-            (
-                deterministic_hard_state,
-                _,
-                hard_repair_actions,
-            ) = self._try_deterministic_repair_for_hard_state(
-                deterministic_hard_state,
-                source="fallback_asset_preparation",
-            )
+            self._allow_deterministic_fallback_repair = True
+            try:
+                (
+                    deterministic_hard_state,
+                    _,
+                    hard_repair_actions,
+                ) = self._try_deterministic_repair_for_hard_state(
+                    deterministic_hard_state,
+                    source="fallback_asset_preparation",
+                )
+            finally:
+                self._allow_deterministic_fallback_repair = False
             deterministic_actions.extend(hard_repair_actions)
 
         self._allow_functional_layout_repair = True
@@ -1058,14 +1065,18 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             deterministic_hard_state is not None
             and not deterministic_hard_state.hard_valid
         ):
-            (
-                deterministic_hard_state,
-                _,
-                hard_repair_actions,
-            ) = self._try_deterministic_repair_for_hard_state(
-                deterministic_hard_state,
-                source="fallback_candidate",
-            )
+            self._allow_deterministic_fallback_repair = True
+            try:
+                (
+                    deterministic_hard_state,
+                    _,
+                    hard_repair_actions,
+                ) = self._try_deterministic_repair_for_hard_state(
+                    deterministic_hard_state,
+                    source="fallback_candidate",
+                )
+            finally:
+                self._allow_deterministic_fallback_repair = False
             deterministic_actions.extend(hard_repair_actions)
             # Collision/bounds repair can move members of a functional group.
             # Reassert the relation contract once, after all asset replacement,
@@ -2023,78 +2034,27 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                     asset.object_id,
                 )
                 continue
+            if self._category_for_object(
+                getattr(asset, "object_id", ""), asset
+            ) != category:
+                console_logger.warning(
+                    "Deterministic repair rejected asset %s because it does not "
+                    "satisfy requested semantic family %s",
+                    asset.object_id,
+                    category,
+                )
+                continue
             return asset
-        return self._create_placeholder_repair_asset(category, dimensions)
-
-    def _create_placeholder_repair_asset(
-        self,
-        category: str,
-        dimensions: list[float],
-    ) -> SceneObject | None:
-        if self.scene is None:
-            return None
-        try:
-            repair_root = (
-                self.scene.scene_dir
-                / "generated_assets"
-                / "furniture"
-                / "repair_placeholders"
-                / f"{category}_{int(time.time() * 1000)}"
-            )
-            repair_root.mkdir(parents=True, exist_ok=True)
-            width, depth, height = [float(v) for v in dimensions]
-            mesh = trimesh.creation.box(extents=[width, depth, height])
-            mesh.apply_translation([0.0, 0.0, height / 2.0])
-            gltf_path = repair_root / f"{category}_placeholder.gltf"
-            sdf_path = repair_root / f"{category}_placeholder.sdf"
-            mesh.export(gltf_path)
-            physics = MeshPhysicsAnalysis(
-                up_axis="+Z",
-                front_axis="+Y",
-                material="wood",
-                mass_kg=max(1.0, width * depth * height * 35.0),
-                mass_range_kg=(1.0, max(1.0, width * depth * height * 50.0)),
-            )
-            generate_drake_sdf(
-                visual_mesh_path=gltf_path,
-                collision_pieces=[mesh.copy()],
-                physics_analysis=physics,
-                output_path=sdf_path,
-                asset_name=f"{category}_placeholder",
-            )
-            object_id = self.asset_manager.registry.generate_unique_id(
-                f"{category}_repair_placeholder"
-            )
-            placeholder = SceneObject(
-                object_id=object_id,
-                object_type=ObjectType.FURNITURE,
-                name=category,
-                description=f"deterministic placeholder {category}",
-                transform=RigidTransform(),
-                geometry_path=gltf_path,
-                sdf_path=sdf_path,
-                bbox_min=np.asarray([-width / 2.0, -depth / 2.0, 0.0], dtype=float),
-                bbox_max=np.asarray([width / 2.0, depth / 2.0, height], dtype=float),
-                metadata={
-                    "asset_source": "deterministic_placeholder",
-                    "repair_placeholder": True,
-                    "generation_timestamp": time.time(),
-                },
-            )
-            self.asset_manager.registry.register(placeholder)
-            console_logger.warning(
-                "Deterministic repair created placeholder %s asset %s after "
-                "available assets were missing or geometry-failed",
-                category,
-                placeholder.object_id,
-            )
-            return placeholder
-        except Exception:
-            console_logger.exception(
-                "Deterministic repair failed creating placeholder %s asset",
-                category,
-            )
-            return None
+        failure_details = "; ".join(
+            f"{failure.description}: {failure.error_message}"
+            for failure in result.failed_assets
+        )
+        console_logger.error(
+            "No admitted real HSSD asset is available for required family %s%s",
+            category,
+            f" ({failure_details})" if failure_details else "",
+        )
+        return None
 
     def _place_repair_asset(self, category: str, asset: SceneObject) -> bool:
         if self.scene is None:

@@ -371,6 +371,29 @@ class AssetManager:
                 cfg=cfg,
                 blender_server=blender_server,
             )
+        # Direct HSSD semantic admission is independent from request routing and
+        # the thin-covering/materials service. ACP commonly disables both; tying
+        # validation to either one silently admitted category-mismatched assets.
+        semantic_validation_cfg = getattr(
+            getattr(cfg.asset_manager, "hssd", None),
+            "semantic_validation",
+            None,
+        )
+        self._asset_validation_router = self.router
+        if (
+            self.general_asset_source == "hssd"
+            and bool(getattr(semantic_validation_cfg, "enabled", False))
+            and self._asset_validation_router is None
+        ):
+            console_logger.info(
+                "Initializing independent HSSD semantic validation router"
+            )
+            self._asset_validation_router = AssetRouter(
+                agent_type=agent_type,
+                vlm_service=vlm_service,
+                cfg=cfg,
+                blender_server=blender_server,
+            )
 
         # Track duplicate requests from the last generate_assets call.
         self.last_duplicate_info: dict[str, list[int]] | None = None
@@ -383,6 +406,9 @@ class AssetManager:
         # the selected asset's calibration by dataset ID for canonicalization.
         self._direct_hssd_validation_results: dict[str, ValidationResult] = {}
         self._direct_hssd_semantic_cache: dict[str, ValidationResult] = {}
+        self._execution_clock: object | None = None
+        self._asset_acquisition_timeout_seconds = 300
+        self._reuse_only = False
 
     def configure_runtime_budget(
         self,
@@ -390,8 +416,14 @@ class AssetManager:
         stage: str,
         budget: dict,
         required_objects: list[str],
+        execution_clock: object | None = None,
     ) -> None:
         """Configure per-stage acquisition limits supplied by SceneExpert."""
+        self._execution_clock = execution_clock
+        self._asset_acquisition_timeout_seconds = max(
+            30,
+            int(budget.get("asset_acquisition_timeout_seconds", 300) or 300),
+        )
         self._runtime_gate.configure(
             stage=stage,
             budget=budget,
@@ -407,6 +439,10 @@ class AssetManager:
             self._runtime_gate.max_assets_per_request,
             self._runtime_gate.max_retries_per_family,
         )
+
+    def set_reuse_only(self, enabled: bool) -> None:
+        """Restrict a placement continuation to already admitted assets."""
+        self._reuse_only = bool(enabled)
 
     @staticmethod
     def _sanitize_filename(name: str, max_length: int = 50) -> str:
@@ -765,8 +801,16 @@ class AssetManager:
             raise ValueError("No results returned from HSSD server")
 
         if desired_dimensions is not None:
-            target = np.asarray(
-                scene_dimensions_to_gltf_y_up(desired_dimensions), dtype=float
+            # Retrieval extents use the SceneSmith semantic order
+            # [width, depth, height]. Axis conversion belongs only at the
+            # exported glTF file boundary.
+            target = np.asarray(desired_dimensions, dtype=float)
+            target_variants = (
+                target,
+                np.asarray(
+                    scene_dimensions_to_gltf_y_up(desired_dimensions),
+                    dtype=float,
+                ),
             )
             min_ratio, max_ratio = self._uniform_dimension_fit_bounds()
             proportion_compatible: list[HssdRetrievalResult] = []
@@ -774,17 +818,21 @@ class AssetManager:
                 extents = np.asarray(candidate.size, dtype=float)
                 if np.any(extents <= 0):
                     continue
-                predicted = extents * float(np.median(target / extents))
-                try:
-                    validate_uniform_dimension_fit(
-                        predicted,
-                        target,
-                        min_ratio=min_ratio,
-                        max_ratio=max_ratio,
+                for target_variant in target_variants:
+                    predicted = extents * float(
+                        np.median(target_variant / extents)
                     )
-                except ValueError:
-                    continue
-                proportion_compatible.append(candidate)
+                    try:
+                        validate_uniform_dimension_fit(
+                            predicted,
+                            target_variant,
+                            min_ratio=min_ratio,
+                            max_ratio=max_ratio,
+                        )
+                    except ValueError:
+                        continue
+                    proportion_compatible.append(candidate)
+                    break
             if proportion_compatible:
                 candidates = proportion_compatible
             else:
@@ -805,7 +853,11 @@ class AssetManager:
         if not enabled:
             return candidates[0]
 
-        validation_router = self._thin_covering_router
+        validation_router = getattr(
+            self,
+            "_asset_validation_router",
+            getattr(self, "_thin_covering_router", None),
+        )
         if validation_router is None:
             console_logger.warning(
                 "Direct HSSD semantic validation is enabled for '%s' but no "
@@ -839,7 +891,13 @@ class AssetManager:
                     timeout_seconds=timeout_seconds,
                     max_retries=max_retries,
                 )
-                validation_cache[validation_cache_key] = validation
+                validation_reason = str(validation.reason or "")
+                if not validation_reason.startswith(
+                    ("Rendering failed", "Validation call failed")
+                ):
+                    # Infrastructure outcomes are retryable and must not poison
+                    # the semantic cache for a later isolated stage retry.
+                    validation_cache[validation_cache_key] = validation
             if validation.is_acceptable:
                 orientation_results = getattr(
                     self, "_direct_hssd_validation_results", None
@@ -866,16 +924,10 @@ class AssetManager:
             )
 
         if infrastructure_failures == len(considered):
-            # A temporary VLM/rendering outage must not erase required furniture.
-            # The candidate is still protected by corrected axis-aware size ranking
-            # and the downstream uniform-proportion check.
-            console_logger.warning(
-                "All semantic validation attempts for '%s' failed at the "
-                "infrastructure layer; falling back to the top dimension-ranked HSSD "
-                "candidate",
-                description,
+            raise TimeoutError(
+                "HSSD semantic validation infrastructure was unavailable for "
+                f"all {len(considered)} candidate(s) of '{description}'"
             )
-            return candidates[0]
 
         raise ValueError(
             f"All {len(considered)} HSSD candidates failed visual semantic "
@@ -1022,7 +1074,10 @@ class AssetManager:
 
         # Submit batch to server and process streaming responses.
         retrieval_responses = (
-            self.hssd_client.retrieve_objects(retrieval_requests)
+            self.hssd_client.retrieve_objects(
+                retrieval_requests,
+                timeout_s=self._asset_acquisition_timeout_seconds,
+            )
             if retrieval_requests
             else []
         )
@@ -1533,6 +1588,26 @@ class AssetManager:
         )
 
     def generate_assets(self, request: AssetGenerationRequest) -> AssetGenerationResult:
+        """Acquire assets under a service deadline, outside LLM active time.
+
+        HSSD queueing, canonicalization, collision decomposition, and SDF
+        generation are blocking tool work. They must remain bounded, but must
+        not consume the designer/planner inference lease needed to place the
+        admitted assets afterwards.
+        """
+        clock = self._execution_clock
+        pause = getattr(clock, "pause_for_external_operation", None)
+        resume = getattr(clock, "resume_from_external_operation", None)
+        pause_token = pause("asset_acquisition") if callable(pause) else None
+        try:
+            return self._generate_assets_impl(request)
+        finally:
+            if callable(resume):
+                resume(pause_token)
+
+    def _generate_assets_impl(
+        self, request: AssetGenerationRequest
+    ) -> AssetGenerationResult:
         """Generate scene assets using configured source (generated or hssd).
 
         If router is enabled, analyzes requests to split composites and filter
@@ -1553,6 +1628,37 @@ class AssetManager:
 
         if self._fatal_asset_error:
             return self._fatal_generation_result(request, self._fatal_asset_error)
+
+        if self._reuse_only:
+            successful_assets: list[SceneObject] = []
+            failed_assets: list[FailedAsset] = []
+            seen_families: set[str] = set()
+            for index, description in enumerate(request.object_descriptions):
+                short_name = (
+                    request.short_names[index]
+                    if index < len(request.short_names)
+                    else ""
+                )
+                family = semantic_asset_family(description, short_name)
+                cached = self._runtime_gate.success_cache.get(family, [])
+                if cached and family not in seen_families:
+                    successful_assets.append(cached[0])
+                    seen_families.add(family)
+                elif not cached:
+                    failed_assets.append(
+                        FailedAsset(
+                            index=index,
+                            description=description,
+                            error_message=(
+                                "Placement continuation is reuse-only and has no "
+                                f"admitted real asset for family '{family}'."
+                            ),
+                        )
+                    )
+            return AssetGenerationResult(
+                successful_assets=successful_assets,
+                failed_assets=failed_assets,
+            )
 
         original_request = request
         gate_plan = None
@@ -2772,7 +2878,15 @@ class AssetManager:
         Returns:
             List of all registered SceneObjects.
         """
-        return self.registry.list_all()
+        return [
+            asset
+            for asset in self.registry.list_all()
+            if not bool(
+                (getattr(asset, "metadata", {}) or {}).get(
+                    "repair_placeholder", False
+                )
+            )
+        ]
 
     def _extract_bounds_from_visual_mesh(
         self, sdf_path: Path

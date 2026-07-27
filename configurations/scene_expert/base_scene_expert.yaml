@@ -120,6 +120,9 @@ stage_budget:
     # failure is transport latency or structured-output recovery latency.
     critical_retry_budget_multiplier: 1.5
     max_asset_requests: 4
+    # Blocking retrieval/canonicalization has its own service deadline and is
+    # excluded from planner/designer active inference time.
+    asset_acquisition_timeout_seconds: 300
     max_optional_object_families: 3
     max_assets_per_request: 6
     max_semantic_retries_per_family: 2
@@ -156,6 +159,7 @@ stage_budget:
     critic_evaluation_max_seconds: 360
     fallback_reserve_fraction: 0.15
     max_asset_requests: 4
+    asset_acquisition_timeout_seconds: 360
     max_optional_object_families: 2
     max_assets_per_request: 6
     max_semantic_retries_per_family: 2
@@ -174,6 +178,7 @@ stage_budget:
     designer_active_max_seconds: 240
     critic_active_max_seconds: 240
     max_asset_requests: 2
+    asset_acquisition_timeout_seconds: 300
     max_optional_object_families: 3
     max_assets_per_request: 4
     max_semantic_retries_per_family: 1
@@ -193,6 +198,7 @@ stage_budget:
     designer_active_max_seconds: 210
     critic_active_max_seconds: 240
     max_asset_requests: 2
+    asset_acquisition_timeout_seconds: 300
     max_optional_object_families: 1
     max_assets_per_request: 2
     max_semantic_retries_per_family: 1
@@ -211,6 +217,7 @@ stage_budget:
     designer_active_max_seconds: 360
     critic_active_max_seconds: 300
     max_asset_requests: 4
+    asset_acquisition_timeout_seconds: 300
     max_optional_object_families: 4
     max_assets_per_request: 6
     max_semantic_retries_per_family: 2

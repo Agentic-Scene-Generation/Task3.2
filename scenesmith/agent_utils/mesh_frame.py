@@ -45,6 +45,7 @@ def validate_uniform_dimension_fit(
     *,
     min_ratio: float = 0.5,
     max_ratio: float = 1.75,
+    epsilon: float = 1e-6,
 ) -> None:
     """Reject a semantically unsuitable mesh after uniform scaling.
 
@@ -62,7 +63,12 @@ def validate_uniform_dimension_fit(
         )
 
     ratios = actual / requested
-    if np.any(ratios < min_ratio) or np.any(ratios > max_ratio):
+    # Mesh export/import and float32 bounds can move an exact boundary by a few
+    # ULPs (for example 0.5 -> 0.49999997).  Treat that as numerical noise,
+    # while preserving the semantic proportion gate itself.
+    if np.any(ratios < min_ratio - epsilon) or np.any(
+        ratios > max_ratio + epsilon
+    ):
         raise ValueError(
             "Uniformly scaled asset does not fit requested proportions: "
             f"actual={actual.tolist()}, requested={requested.tolist()}, "
@@ -83,3 +89,23 @@ def uniform_scale_shape_error(
     uniform_scale = float(np.median(requested / actual))
     scaled = actual * uniform_scale
     return float(np.sum(np.abs(np.log(scaled / requested))))
+
+
+def hssd_dimension_shape_error(
+    mesh_extents: Sequence[float],
+    requested_scene_dimensions: Sequence[float],
+) -> float:
+    """Score HSSD extents across its mixed evaluated coordinate frames.
+
+    ``trimesh`` may expose an HSSD glTF's evaluated scene transform as Z-up,
+    while aligned/exported candidates can remain in raw glTF Y-up.  Dataset
+    metadata is sparse, so a single unconditional depth/height swap is not a
+    valid corpus-wide contract.  Rank against both interpretations and let
+    semantic admission plus post-canonical dimension validation decide.
+    """
+    scene_target = [float(value) for value in requested_scene_dimensions]
+    gltf_target = scene_dimensions_to_gltf_y_up(scene_target)
+    return min(
+        uniform_scale_shape_error(mesh_extents, scene_target),
+        uniform_scale_shape_error(mesh_extents, gltf_target),
+    )

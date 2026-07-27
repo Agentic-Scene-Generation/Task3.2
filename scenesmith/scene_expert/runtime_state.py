@@ -66,8 +66,10 @@ def persist_retryable_pause(
     render_dir: str | Path | None = None,
     attempt_count: int = 0,
     metadata: dict[str, Any] | None = None,
+    role: str = "critic",
+    resume_action: str = "retry_critic_only",
 ) -> Path:
-    """Atomically persist a critic-only resume checkpoint for one scene."""
+    """Atomically persist a stage-specific resume checkpoint for one scene."""
 
     scene_root = Path(scene_root_dir)
     pause_dir = scene_root / "scene_expert" / "resume"
@@ -81,7 +83,9 @@ def persist_retryable_pause(
 
     manifest = ScenePauseManifest(
         stage=stage,
+        role=role,
         reason=reason,
+        resume_action=resume_action,
         candidate_hash=candidate_hash,
         candidate_state_path=(
             str(candidate_state_path) if candidate_state is not None else ""

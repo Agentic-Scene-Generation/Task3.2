@@ -122,6 +122,14 @@ asset_manager:
     preprocessed_path: "${paths.hssd_data_dir}/preprocessed"
     use_top_k: 5
     use_lenient_validation: true  # Use lenient validation for retrieved assets
+    semantic_validation:
+      enabled: true
+      families: [blackboard, mirror, wall_art]
+      max_candidates: 3
+      use_lenient: true
+      timeout_seconds: 180
+      max_retries: 0
+      min_orientation_confidence: 0.55
     object_type_mapping:
       FURNITURE: "large_objects"
       MANIPULAND: "small_objects"

@@ -153,6 +153,25 @@ END_FINDING
             resolved = json.loads(resolved_path.read_text(encoding="utf-8"))
             self.assertEqual("RESOLVED", resolved["status"])
 
+    def test_asset_pause_persists_stage_resume_contract(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest_path = persist_retryable_pause(
+                scene_root_dir=root,
+                stage="furniture",
+                role="asset",
+                reason="asset_unavailable: no admitted bed",
+                resume_action="retry_stage_asset_acquisition",
+                candidate_state={"objects": []},
+            )
+
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual("asset", manifest["role"])
+            self.assertEqual(
+                "retry_stage_asset_acquisition",
+                manifest["resume_action"],
+            )
+
 
 class NestedPlannerBudgetTest(unittest.IsolatedAsyncioTestCase):
     @unittest.skipIf(

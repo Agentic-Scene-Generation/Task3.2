@@ -282,6 +282,11 @@ class BaseStatefulAgent(ABC):
         self._critical_retry_budget_expanded = False
         self._stage_role_active_consumed: dict[str, float] = {}
         self._agent_execution_leases: list[_AgentExecutionLease] = []
+        self._stage_external_paused_seconds = 0.0
+        self._external_operation_depth = 0
+        self._external_operation_started_at: float | None = None
+        self._external_paused_lease: _AgentExecutionLease | None = None
+        self._placement_continuation_context = ""
         self._last_critic_feedback = CriticFeedback()
 
     def _configure_stage_runtime(self, scene: Any) -> None:
@@ -302,6 +307,7 @@ class BaseStatefulAgent(ABC):
                 required_objects=list(
                     getattr(scene, "scene_expert_required_objects", []) or []
                 ),
+                execution_clock=self,
             )
 
     def _refresh_asset_runtime_budget(self) -> None:
@@ -327,6 +333,7 @@ class BaseStatefulAgent(ABC):
                 required_objects=list(
                     getattr(scene, "scene_expert_required_objects", []) or []
                 ),
+                execution_clock=self,
             )
 
     def _expand_critical_retry_budget(self) -> None:
@@ -387,6 +394,10 @@ class BaseStatefulAgent(ABC):
         self._last_trusted_critic_candidate = None
         self._stage_role_active_consumed = {}
         self._agent_execution_leases = []
+        self._stage_external_paused_seconds = 0.0
+        self._external_operation_depth = 0
+        self._external_operation_started_at = None
+        self._external_paused_lease = None
         self._last_critic_feedback = CriticFeedback()
 
     async def prepare_stage_regeneration(self, reasons: list[str]) -> None:
@@ -412,6 +423,18 @@ class BaseStatefulAgent(ABC):
         self._stage_runtime_exhausted = False
         self._stage_role_active_consumed = {}
         self._agent_execution_leases = []
+        self._stage_external_paused_seconds = 0.0
+        self._external_operation_depth = 0
+        self._external_operation_started_at = None
+        self._external_paused_lease = None
+        self._placement_continuation_context = ""
+        asset_manager = getattr(self, "asset_manager", None)
+        set_reuse_only = getattr(asset_manager, "set_reuse_only", None)
+        if callable(set_reuse_only):
+            set_reuse_only(False)
+        # Reset acquisition attempts for the genuinely new stage proposal while
+        # AssetRuntimeGate preserves only semantically admitted real assets.
+        self._refresh_asset_runtime_budget()
         rendering_manager = getattr(self, "rendering_manager", None)
         if rendering_manager is not None:
             rendering_manager.clear_cache()
@@ -423,10 +446,104 @@ class BaseStatefulAgent(ABC):
             "; ".join(reasons),
         )
 
+    def admitted_stage_assets(self) -> list[Any]:
+        """Return real registry assets usable by this placement stage."""
+        asset_manager = getattr(self, "asset_manager", None)
+        list_assets = getattr(asset_manager, "list_available_assets", None)
+        if not callable(list_assets):
+            return []
+        target_type = self.agent_type.to_object_type()
+        return [
+            asset
+            for asset in list_assets()
+            if getattr(asset, "object_type", None) == target_type
+            and not bool(
+                (getattr(asset, "metadata", {}) or {}).get(
+                    "repair_placeholder", False
+                )
+            )
+        ]
+
+    def unavailable_required_asset_families(self) -> list[str]:
+        """Return required semantic families with no admitted cached asset."""
+        asset_manager = getattr(self, "asset_manager", None)
+        runtime_gate = getattr(asset_manager, "_runtime_gate", None)
+        if runtime_gate is None:
+            return []
+        required = set(getattr(runtime_gate, "required_families", set()) or set())
+        cache = getattr(runtime_gate, "success_cache", {}) or {}
+        return sorted(
+            family for family in required if not list(cache.get(family, []) or [])
+        )
+
+    async def prepare_placement_continuation(self, reasons: list[str]) -> None:
+        """Start a compact placement-only retry with admitted assets preserved."""
+        for session_name in ("designer_session", "critic_session"):
+            session = getattr(self, session_name, None)
+            clear_session = getattr(session, "clear_session", None)
+            if callable(clear_session):
+                await clear_session()
+        initialize_checkpoint_attributes(self)
+        self._reset_planner_budget_tracking()
+        self._reset_critic_candidate_cache()
+        self._stage_runtime_started_at = time.monotonic()
+        self._critic_evaluation_started_at = None
+        self._stage_runtime_exhausted = False
+        self._stage_role_active_consumed = {}
+        self._agent_execution_leases = []
+        self._stage_external_paused_seconds = 0.0
+        self._external_operation_depth = 0
+        self._external_operation_started_at = None
+        self._external_paused_lease = None
+        rendering_manager = getattr(self, "rendering_manager", None)
+        if rendering_manager is not None:
+            rendering_manager.clear_cache()
+
+        assets = self.admitted_stage_assets()
+        asset_lines: list[str] = []
+        for asset in assets:
+            metadata = getattr(asset, "metadata", {}) or {}
+            dimensions = metadata.get("actual_dimensions")
+            bbox_min = getattr(asset, "bbox_min", None)
+            bbox_max = getattr(asset, "bbox_max", None)
+            if dimensions is None and bbox_min is not None and bbox_max is not None:
+                dimensions = (bbox_max - bbox_min).round(4).tolist()
+            asset_lines.append(
+                f"- asset_id={getattr(asset, 'object_id', '')}; "
+                f"name={getattr(asset, 'name', '')}; "
+                f"description={getattr(asset, 'description', '')}; "
+                f"dimensions={dimensions}"
+            )
+        self._placement_continuation_context = (
+            "# Placement-Only Continuation\n"
+            "Asset acquisition already completed successfully. Do not generate or "
+            "retrieve assets in this continuation. Call list_available_assets, "
+            "then place at least one appropriate stage-native asset using its exact "
+            "asset_id. Preserve semantic roles, keep objects inside the room, and "
+            "finish only after placement succeeds.\n"
+            "Available admitted assets:\n"
+            + ("\n".join(asset_lines) if asset_lines else "- none")
+            + "\nResolve these rejected-output reasons:\n- "
+            + "\n- ".join(str(reason) for reason in reasons)
+        )
+        asset_manager = getattr(self, "asset_manager", None)
+        set_reuse_only = getattr(asset_manager, "set_reuse_only", None)
+        if callable(set_reuse_only):
+            set_reuse_only(True)
+        console_logger.warning(
+            "Prepared %s placement-only continuation with %d admitted asset(s)",
+            self.agent_type.value,
+            len(assets),
+        )
+
     async def retry_final_critic_evaluation(self) -> None:
         """Retry only the final visual decision for an otherwise valid scene."""
         self._expand_critical_retry_budget()
         self._stage_runtime_started_at = time.monotonic()
+        self._stage_external_paused_seconds = 0.0
+        self._external_operation_depth = 0
+        self._external_operation_started_at = None
+        self._external_paused_lease = None
         self._critic_evaluation_started_at = None
         self._stage_runtime_exhausted = False
         self._stage_role_active_consumed.pop("critic", None)
@@ -743,6 +860,49 @@ class BaseStatefulAgent(ABC):
         stage_remaining = self._remaining_stage_seconds(parent.role)
         parent.resume(maximum_seconds=stage_remaining)
 
+    def pause_for_external_operation(self, label: str) -> object:
+        """Pause agent and stage inference clocks during blocking tool work."""
+        self._external_operation_depth += 1
+        if self._external_operation_depth > 1:
+            return {"owner": False, "label": label}
+        lease = (
+            self._agent_execution_leases[-1]
+            if self._agent_execution_leases
+            else None
+        )
+        if lease is not None:
+            lease.pause()
+        self._external_paused_lease = lease
+        self._external_operation_started_at = time.monotonic()
+        console_logger.info(
+            "Paused %s inference lease for external operation: %s",
+            lease.role if lease is not None else "stage",
+            label,
+        )
+        return {"owner": True, "label": label}
+
+    def resume_from_external_operation(self, token: object) -> None:
+        """Resume the inference clocks after one blocking tool operation."""
+        if self._external_operation_depth <= 0:
+            return
+        owner = bool(
+            isinstance(token, dict) and token.get("owner", False)
+        )
+        self._external_operation_depth -= 1
+        if not owner:
+            return
+        started_at = self._external_operation_started_at
+        if started_at is not None:
+            self._stage_external_paused_seconds += max(
+                0.0, time.monotonic() - started_at
+            )
+        lease = self._external_paused_lease
+        self._external_operation_started_at = None
+        self._external_paused_lease = None
+        self._external_operation_depth = 0
+        if lease is not None:
+            lease.resume(maximum_seconds=self._remaining_stage_seconds(lease.role))
+
     def _remaining_stage_seconds(self, role: str | None = None) -> float | None:
         """Return phase-aware time without letting design consume verification.
 
@@ -794,7 +954,11 @@ class BaseStatefulAgent(ABC):
             if self._stage_runtime_phase != "fallback":
                 reserve_fraction += fallback_reserve
         reserve_fraction = max(0.0, min(0.9, reserve_fraction))
-        elapsed = time.monotonic() - self._stage_runtime_started_at
+        elapsed = (
+            time.monotonic()
+            - self._stage_runtime_started_at
+            - float(getattr(self, "_stage_external_paused_seconds", 0.0) or 0.0)
+        )
         stage_remaining = wall_clock_limit * (1.0 - reserve_fraction) - elapsed
         return stage_remaining
 
@@ -4186,6 +4350,9 @@ class BaseStatefulAgent(ABC):
         memory_context = self._retrieve_working_memory_for_designer("initial design")
         if memory_context:
             instruction += "\n\n" + memory_context
+        placement_context = getattr(self, "_placement_continuation_context", "")
+        if placement_context:
+            instruction += "\n\n" + placement_context
         context_block = self._prepare_stage_context_for_llm(
             agent_role="designer",
             event="request_initial_design",

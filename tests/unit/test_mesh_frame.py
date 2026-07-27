@@ -4,6 +4,7 @@ import numpy as np
 
 from scenesmith.agent_utils.mesh_frame import (
     gltf_y_up_bounds_to_scene_z_up,
+    hssd_dimension_shape_error,
     scene_dimensions_to_gltf_y_up,
     uniform_scale_shape_error,
     validate_uniform_dimension_fit,
@@ -18,6 +19,15 @@ class MeshFrameTest(unittest.TestCase):
         wrong_shape = uniform_scale_shape_error([1.4, 1.2, 1.0], target)
 
         self.assertLess(shape_match, wrong_shape)
+
+    def test_hssd_shape_error_accepts_scene_and_gltf_extent_orders(self) -> None:
+        target = [0.9, 0.55, 2.0]
+
+        scene_order = hssd_dimension_shape_error([0.9, 0.55, 2.0], target)
+        gltf_order = hssd_dimension_shape_error([0.9, 2.0, 0.55], target)
+
+        self.assertAlmostEqual(scene_order, 0.0)
+        self.assertAlmostEqual(gltf_order, 0.0)
 
     def test_scene_dimensions_are_reordered_for_gltf_scaling(self) -> None:
         self.assertEqual(
@@ -37,6 +47,13 @@ class MeshFrameTest(unittest.TestCase):
         validate_uniform_dimension_fit(
             actual_dimensions=[1.6, 1.788, 0.982],
             requested_dimensions=[1.6, 2.05, 0.8],
+        )
+
+    def test_uniform_fit_accepts_float_roundoff_at_boundary(self) -> None:
+        validate_uniform_dimension_fit(
+            actual_dimensions=[0.7, 0.3 - 3e-8, 2.2],
+            requested_dimensions=[0.7, 0.6, 2.2],
+            min_ratio=0.5,
         )
 
     def test_uniform_fit_rejects_freestanding_mesh_for_rug(self) -> None:

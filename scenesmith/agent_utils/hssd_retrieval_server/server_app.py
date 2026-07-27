@@ -16,7 +16,6 @@ import numpy as np
 
 from scenesmith.agent_utils.clip_embeddings import warmup_clip_model
 from scenesmith.agent_utils.hssd_retrieval.retrieval import HssdRetriever
-from scenesmith.agent_utils.mesh_frame import scene_dimensions_to_gltf_y_up
 from scenesmith.agent_utils.retrieval_errors import FatalRetrievalError
 from scenesmith.agent_utils.scheduler import QueuedRequest, StrictRoundRobinScheduler
 
@@ -247,15 +246,13 @@ class HssdRetrievalApp(flask.Flask):
             raise FatalRetrievalError(self._fatal_error)
         retriever = self._get_retriever()
 
-        # Requests use SceneSmith's [width, depth, height] convention, while
-        # candidate meshes are standard glTF Y-up [X width, Y height, Z depth].
-        # Ranking without this conversion favors tall wall-like meshes for beds.
+        # Preserve the SceneSmith [width, depth, height] request contract here.
+        # The retriever handles both evaluated Z-up and raw glTF Y-up candidate
+        # extents because HSSD's sparse orientation metadata leaves both forms
+        # present in the corpus.
         desired_dimensions = None
         if request.desired_dimensions:
-            desired_dimensions = np.asarray(
-                scene_dimensions_to_gltf_y_up(request.desired_dimensions),
-                dtype=float,
-            )
+            desired_dimensions = np.asarray(request.desired_dimensions, dtype=float)
 
         # Retrieve candidates sorted by bbox_score, limited by num_candidates.
         candidates = retriever.retrieve_multiple(
