@@ -440,6 +440,45 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         StatefulFurnitureAgent is None,
         f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
     )
+    def test_generic_desk_hard_failure_repairs_task_roles(self) -> None:
+        agent = object.__new__(StatefulFurnitureAgent)
+        agent.scene = SimpleNamespace(
+            room_type="classroom",
+            text_description="A classroom with student and teacher desks.",
+            scene_expert_original_description="A classroom with student and teacher desks.",
+            scene_expert_task_spec={
+                "required_large_objects": [
+                    *["student desk"] * 6,
+                    "teacher's desk",
+                    *["chair"] * 6,
+                ],
+                "intent_constraints": [],
+            },
+            objects={},
+        )
+        agent.furniture_safety_controller = SimpleNamespace(
+            required_counts={"desk": 7, "chair": 6}
+        )
+        repaired_categories: list[str] = []
+        agent._ensure_required_furniture_asset = lambda category: (
+            repaired_categories.append(category) or 1
+        )
+        agent._repair_forbidden_zone_conflicts = lambda include_windows=False: False
+
+        repaired, _ = agent._attempt_deterministic_repair(
+            SimpleNamespace(
+                hard_valid=False,
+                hard_reasons=["missing required desk: expected 7, found 0"],
+            )
+        )
+
+        self.assertTrue(repaired)
+        self.assertEqual(repaired_categories, ["student_desk", "teacher_desk"])
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
     def test_broad_chair_repair_count_includes_armchairs(self) -> None:
         agent = object.__new__(StatefulFurnitureAgent)
         furniture_type = SimpleNamespace(value="furniture")

@@ -150,6 +150,30 @@ class FurnitureSafetyControllerTest(unittest.TestCase):
             )
         )
 
+    def test_role_specific_desks_satisfy_generic_desk_inventory(self) -> None:
+        for object_id, name in (
+            ("student_desk_0", "student_desk"),
+            ("teacher_desk_0", "teacher_desk"),
+        ):
+            self.assertTrue(
+                furniture_object_category_matches(
+                    object_id,
+                    name,
+                    "classroom desk",
+                    "desk",
+                )
+            )
+
+    def test_role_specific_chair_satisfies_generic_chair_inventory(self) -> None:
+        self.assertTrue(
+            furniture_object_category_matches(
+                "student_chair_0",
+                "student_chair",
+                "classroom chair",
+                "chair",
+            )
+        )
+
     def test_dining_room_infers_sideboard(self) -> None:
         controller = FurnitureSafetyController({"enabled": True})
         controller.reset_for_scene(

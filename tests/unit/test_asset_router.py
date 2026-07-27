@@ -354,7 +354,7 @@ class TestRenderedHssdAssetChoice(unittest.TestCase):
             "required_large_objects": [
                 "student desk",
                 "student desk",
-                "teacher desk",
+                "teacher's desk",
             ],
             "intent_constraints": [
                 {"subjects": {"category": "student_chair", "count": 6}}

@@ -62,7 +62,10 @@ DEFAULT_ALIASES = {
         "visitor armchair",
         "visitor armchairs",
     ],
+    "student_desk": ["student desk", "student desks"],
+    "teacher_desk": ["teacher desk", "teacher desks", "teacher's desk"],
     "dining_chair": ["dining chair", "dining chairs"],
+    "student_chair": ["student chair", "student chairs"],
     "armchair": ["armchair", "armchairs", "arm chair", "arm chairs"],
     "desk": ["desk", "desks"],
     "chair": ["chair", "chairs"],
@@ -88,9 +91,12 @@ DEFAULT_ALIASES = {
 # concrete subtype to satisfy an explicitly broader inventory requirement.
 FURNITURE_CATEGORY_PARENTS: dict[str, frozenset[str]] = {
     "twin_bed": frozenset({"bed"}),
+    "student_desk": frozenset({"desk"}),
+    "teacher_desk": frozenset({"desk"}),
     "office_chair": frozenset({"chair"}),
     "guest_chair": frozenset({"chair"}),
     "dining_chair": frozenset({"chair"}),
+    "student_chair": frozenset({"chair"}),
     "armchair": frozenset({"chair"}),
 }
 
@@ -202,15 +208,34 @@ def infer_furniture_category(text: str) -> str | None:
 def furniture_category_matches(text: str, required_category: str) -> bool:
     """Return whether object text satisfies a canonical inventory category."""
     object_category = infer_furniture_category(text)
-    required_category = str(required_category).lower()
     if object_category is not None:
-        return object_category == required_category or required_category in (
-            FURNITURE_CATEGORY_PARENTS.get(object_category, frozenset())
-        )
+        return furniture_category_satisfies(object_category, required_category)
+    required_category = str(required_category).lower()
     if required_category not in DEFAULT_ALIASES:
         return _contains_alias(
             text, required_category.replace("_", " "), category=required_category
         )
+    return False
+
+
+def furniture_category_satisfies(
+    object_category: str | None, required_category: str | None
+) -> bool:
+    """Return whether a category fulfills itself or any transitive parent role."""
+    observed = str(object_category or "").lower()
+    required = str(required_category or "").lower()
+    if not observed or not required:
+        return False
+    pending = [observed]
+    visited: set[str] = set()
+    while pending:
+        current = pending.pop()
+        if current in visited:
+            continue
+        if current == required:
+            return True
+        visited.add(current)
+        pending.extend(FURNITURE_CATEGORY_PARENTS.get(current, ()))
     return False
 
 
@@ -239,11 +264,8 @@ def furniture_object_category_matches(
 ) -> bool:
     """Return whether a structured scene object satisfies an inventory category."""
     object_category = infer_furniture_object_category(object_id, name, description)
-    required_category = str(required_category).lower()
     if object_category is not None:
-        return object_category == required_category or required_category in (
-            FURNITURE_CATEGORY_PARENTS.get(object_category, frozenset())
-        )
+        return furniture_category_satisfies(object_category, required_category)
     return furniture_category_matches(str(description or ""), required_category)
 
 

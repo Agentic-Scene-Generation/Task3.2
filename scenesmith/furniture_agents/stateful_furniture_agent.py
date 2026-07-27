@@ -36,7 +36,9 @@ from scenesmith.agent_utils.furniture_placement_order import (
     build_furniture_placement_order_reference,
 )
 from scenesmith.agent_utils.furniture_safety import (
+    furniture_category_satisfies,
     furniture_object_category_matches,
+    infer_furniture_category,
     infer_furniture_object_category,
 )
 from scenesmith.agent_utils.mesh_physics_analyzer import MeshPhysicsAnalysis
@@ -678,7 +680,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
 
         required_counts = self._repair_required_counts()
         for category in required_counts:
-            if f"missing required {category}" not in reasons:
+            if not self._category_matches_missing_reason(category, reasons):
                 continue
             added = self._ensure_required_furniture_asset(category)
             if added:
@@ -1272,6 +1274,10 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         controller = getattr(self, "furniture_safety_controller", None)
         counts = dict(getattr(controller, "required_counts", {}) or {})
         task_spec = getattr(self.scene, "scene_expert_task_spec", None)
+        if not task_spec:
+            metadata = getattr(self.scene, "metadata", {}) or {}
+            if isinstance(metadata, dict):
+                task_spec = metadata.get("scene_expert_task_spec")
         required = (
             task_spec.get("required_large_objects", [])
             if isinstance(task_spec, dict)
@@ -1279,7 +1285,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         )
         semantic_counts: dict[str, int] = {}
         for item in required or []:
-            category = re.sub(r"[^a-z0-9]+", "_", str(item).lower()).strip("_")
+            category = self._repair_category_for_task_label(item)
             if category in REPAIR_ASSET_SPECS:
                 semantic_counts[category] = semantic_counts.get(category, 0) + 1
         intent_constraints = (
@@ -1293,9 +1299,9 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             selector = constraint.get("subjects") or constraint.get("subject")
             if not isinstance(selector, dict):
                 continue
-            category = re.sub(
-                r"[^a-z0-9]+", "_", str(selector.get("category") or "").lower()
-            ).strip("_")
+            category = self._repair_category_for_task_label(
+                selector.get("category") or ""
+            )
             if category not in REPAIR_ASSET_SPECS:
                 continue
             try:
@@ -1315,6 +1321,27 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                     counts.pop(generic, None)
             counts.update(semantic_counts)
         return counts
+
+    @staticmethod
+    def _repair_category_for_task_label(value: Any) -> str:
+        """Map TaskCompiler text to a repair category without losing role semantics."""
+        text = str(value or "")
+        inferred = infer_furniture_category(text)
+        if inferred in REPAIR_ASSET_SPECS:
+            return inferred
+        normalized = re.sub(r"(?<=[a-z])['\u2019]s\b", "", text.lower())
+        return re.sub(r"[^a-z0-9]+", "_", normalized).strip("_")
+
+    @staticmethod
+    def _category_matches_missing_reason(category: str, reasons: str) -> bool:
+        """Match generic hard failures to role-specific inventory categories."""
+        if f"missing required {category}" in reasons:
+            return True
+        return any(
+            f"missing required {parent}" in reasons
+            for parent in REPAIR_ASSET_SPECS
+            if parent != category and furniture_category_satisfies(category, parent)
+        )
 
     def _ensure_required_furniture_asset(self, category: str) -> int:
         required = self._required_count(category)

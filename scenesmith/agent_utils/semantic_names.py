@@ -11,7 +11,13 @@ from scenesmith.agent_utils.room import ObjectType
 
 def normalize_semantic_name(value: object) -> str:
     """Return a conservative snake_case label, or an empty string."""
-    text = re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().lower())
+    text = str(value or "").strip().lower()
+    # Possessive role labels describe the same object category (for example,
+    # "teacher's desk" and "teacher desk").  Keeping the possessive ``s``
+    # creates a separate vocabulary term that no selector or repair template
+    # owns, so discard it before building the stable snake_case label.
+    text = re.sub(r"(?<=[a-z])['\u2019]s\b", "", text)
+    text = re.sub(r"[^a-z0-9]+", "_", text)
     return text.strip("_")
 
 
