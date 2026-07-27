@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 
 from dataclasses import dataclass
 from typing import Any
@@ -628,32 +629,6 @@ def _repair_targets(scene: RoomScene, payload: dict[str, Any]) -> list[_RepairTa
             object_id = str(result.get("primary_object") or "")
             center = _xy(diagnostics.get("room_center_xy"))
             if object_id and center is not None:
-                group_ids = [object_id]
-                for related_id in (
-                    result.get("related_objects")
-                    or result.get("selected_related_objects")
-                    or []
-                ):
-                    related_id = str(related_id or "")
-                    if related_id and related_id not in group_ids:
-                        group_ids.append(related_id)
-                for candidate in scene.objects.values():
-                    if candidate.object_type != ObjectType.FURNITURE:
-                        continue
-                    if not _is_seating_object(candidate):
-                        continue
-                    candidate_center = _world_center_xy(candidate)
-                    if candidate_center is None:
-                        continue
-                    if (
-                        math.hypot(
-                            candidate_center[0] - center[0],
-                            candidate_center[1] - center[1],
-                        )
-                        <= 2.5
-                        and str(candidate.object_id) not in group_ids
-                    ):
-                        group_ids.append(str(candidate.object_id))
                 targets.append(
                     _RepairTarget(
                         object_id,
@@ -661,7 +636,7 @@ def _repair_targets(scene: RoomScene, payload: dict[str, Any]) -> list[_RepairTa
                         check_id,
                         center,
                         None,
-                        tuple(group_ids),
+                        _room_center_group_ids(scene, result, object_id, center),
                     )
                 )
         elif relation == "centered_on_wall":
@@ -955,17 +930,82 @@ def _float_or_none(value: Any) -> float | None:
 
 
 def _is_seating_object(obj: SceneObject) -> bool:
-    text = " ".join(
-        str(value or "").lower()
-        for value in (
-            obj.object_id,
-            obj.name,
-            obj.description,
-            obj.metadata.get("category"),
-            obj.metadata.get("category_norm"),
-        )
+    return bool(_object_role_tokens(obj) & {"chair", "seat", "stool", "bench"})
+
+
+def _room_center_group_ids(
+    scene: RoomScene,
+    result: dict[str, Any],
+    object_id: str,
+    room_center: tuple[float, float],
+) -> tuple[str, ...]:
+    """Return furniture that should follow a room-center anchor.
+
+    Explicitly related objects always travel with the anchor.  Nearby seating is
+    inferred only for shared work surfaces, where moving the surface alone
+    breaks its functional seating arrangement.  A generic substring check used
+    to classify ``two_seater_sofa`` as a table seat and moved it with an
+    unrelated centered rug, which made the otherwise valid rug repair leave the
+    room bounds.
+    """
+    group_ids = [object_id]
+    for related_id in (
+        result.get("related_objects") or result.get("selected_related_objects") or []
+    ):
+        related_id = str(related_id or "")
+        related = scene.objects.get(UniqueID(related_id))
+        if (
+            related_id
+            and related is not None
+            and related.object_type == ObjectType.FURNITURE
+            and related_id not in group_ids
+        ):
+            group_ids.append(related_id)
+
+    anchor = scene.objects.get(UniqueID(object_id))
+    if anchor is None or not _is_shared_seating_anchor(anchor):
+        return tuple(group_ids)
+
+    for candidate in scene.objects.values():
+        if candidate.object_type != ObjectType.FURNITURE:
+            continue
+        if not _is_seating_object(candidate):
+            continue
+        candidate_center = _world_center_xy(candidate)
+        if candidate_center is None:
+            continue
+        if (
+            math.hypot(
+                candidate_center[0] - room_center[0],
+                candidate_center[1] - room_center[1],
+            )
+            <= 2.5
+            and str(candidate.object_id) not in group_ids
+        ):
+            group_ids.append(str(candidate.object_id))
+    return tuple(group_ids)
+
+
+def _is_shared_seating_anchor(obj: SceneObject) -> bool:
+    return bool(_object_role_tokens(obj) & {"table", "desk", "workbench", "island"})
+
+
+def _object_role_tokens(obj: SceneObject) -> set[str]:
+    values = (
+        obj.object_id,
+        obj.name,
+        obj.description,
+        obj.metadata.get("semantic_name"),
+        obj.metadata.get("asset_short_name"),
+        obj.metadata.get("category"),
+        obj.metadata.get("category_norm"),
     )
-    return any(token in text for token in ("chair", "seat", "stool", "bench"))
+    return {
+        token
+        for value in values
+        for token in re.split(r"[^a-z0-9]+", str(value or "").lower())
+        if token
+    }
 
 
 def _is_wall(obj: SceneObject | None) -> bool:

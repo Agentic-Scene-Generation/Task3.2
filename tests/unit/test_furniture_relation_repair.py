@@ -1540,3 +1540,65 @@ def test_room_center_repair_coordinates_wall_storage_access(
     np.testing.assert_allclose(tableware.transform.translation()[:2], [0.0, 0.0])
     np.testing.assert_allclose(chair.transform.translation()[:2], [0.0, -1.0])
     np.testing.assert_allclose(sideboard.transform.translation()[:2], [0.8, -1.7])
+
+
+def test_room_center_repair_does_not_move_nearby_sofa(
+    tmp_path: Path, monkeypatch
+) -> None:
+    rug = _object("rug_0", "rug", (0.0, 0.4, 0.015), (2.5, 2.5, 0.03))
+    sofa = _object(
+        "two_seater_sofa_0",
+        "two_seater_sofa",
+        (0.0, -1.48, 0.44),
+        (1.54, 0.9, 0.87),
+    )
+    scene = _scene(
+        tmp_path,
+        rug,
+        sofa,
+        text="A living room with a rug in the center of the room.",
+    )
+    evaluations = iter(
+        [
+            {
+                "results": [
+                    {
+                        "check_id": "rug_center",
+                        "label": "fail",
+                        "relation_type": "room_center_alignment",
+                        "primary_object": "rug_0",
+                        "related_objects": [],
+                        "diagnostics": {"room_center_xy": [0.0, 0.0]},
+                    }
+                ]
+            },
+            {
+                "results": [
+                    {
+                        "check_id": "rug_center",
+                        "label": "pass",
+                        "relation_type": "room_center_alignment",
+                        "primary_object": "rug_0",
+                        "related_objects": [],
+                        "diagnostics": {"room_center_xy": [0.0, 0.0]},
+                    }
+                ]
+            },
+        ]
+    )
+    monkeypatch.setattr(
+        furniture_relation_repair,
+        "_evaluate",
+        lambda _scene, _config: next(evaluations),
+    )
+
+    old_sofa_transform = sofa.transform.GetAsMatrix4().copy()
+    fixes = improve_furniture_relations(
+        scene,
+        config=CriticConfig(enabled=True, metrics=("functional_dependency",)),
+        max_repairs=1,
+    )
+
+    assert [fix.object_id for fix in fixes] == ["rug_0"]
+    np.testing.assert_allclose(rug.transform.translation()[:2], [0.0, 0.0])
+    np.testing.assert_allclose(sofa.transform.GetAsMatrix4(), old_sofa_transform)
