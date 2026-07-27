@@ -1,0 +1,6225 @@
+{
+  "schema_version": "hssd_front_fallback_audit@1.0",
+  "lookup_asset_count": 10963,
+  "semantic_front_count": 1047,
+  "fallback_count": 9916,
+  "fallback_with_front_access_policy_count": 3899,
+  "fallback_without_front_access_policy_count": 6017,
+  "front_policy_candidate_render_complete_count": 3899,
+  "candidate_tiers": {
+    "policy_front_review_required": 968,
+    "high_priority_semantic_front": 2931
+  },
+  "category_summaries": [
+    {
+      "category": "wall art",
+      "asset_count": 1091,
+      "fallback_count": 1091,
+      "front_policy_candidate_count": 1091,
+      "high_priority_count": 1091,
+      "render_complete_count": 1091,
+      "sample_ids": [
+        "0039699ff96422d70b73397371664863025d75e8",
+        "0042224f50400c921142bc9777c28823dfc728ab",
+        "00770bbb6345e851e425d78c333c4baababf3729",
+        "0091ed73925f43dda0dd03d8a71b88ccfa65fbb1",
+        "00a843989a32df31a10bc8129fa6801d768855c5"
+      ]
+    },
+    {
+      "category": "rug",
+      "asset_count": 644,
+      "fallback_count": 644,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 644,
+      "sample_ids": [
+        "003949689122adfc2370d64c0615edc1b257db83",
+        "01490a02cbd67eec6e526ef157e7cb14fa15e610",
+        "0164a753999c91217e819b52f8f354b3f60ded96",
+        "0245ea7e27dca7c58b0fbf3f5bfc5eb1de3abd09",
+        "025e4ca9d6fcb78c71b7bb99d608d65fd4c39593"
+      ]
+    },
+    {
+      "category": "throw pillow",
+      "asset_count": 416,
+      "fallback_count": 416,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 416,
+      "sample_ids": [
+        "002f87c8e4e2b870387e095797a2f40b30e7baec",
+        "007ac3dc7a89e1e403c1340a4fd61fdc75ca053d",
+        "00b543e5c1ec525f02523484c372d31fbcc696ea",
+        "012206d2b382d07af6b113f4968003c7d8d70b85",
+        "029320781a2fc9117543a3004e3bf0dd78616470"
+      ]
+    },
+    {
+      "category": "potted plant",
+      "asset_count": 294,
+      "fallback_count": 294,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 294,
+      "sample_ids": [
+        "0125f7747d3e3f85bd4cfb181f9a63b6a8afd6f3",
+        "0196e8210ba3ddbb8e0d61a6ff836da41e5b3f66",
+        "040b3052e52fe415092d1c10d466381b7b63064c",
+        "054a4edb60cf2145e98274ad3fcbfc212e6e2445",
+        "055db798b8756570cc0eec7f8e7d3632cb6173ab"
+      ]
+    },
+    {
+      "category": "wall mirror",
+      "asset_count": 255,
+      "fallback_count": 255,
+      "front_policy_candidate_count": 255,
+      "high_priority_count": 255,
+      "render_complete_count": 255,
+      "sample_ids": [
+        "009f96f4bd369a2294a1b29538c52b14ec792a54",
+        "017ce24cca44d57f292120d0479539ffb133d91a",
+        "0392aac9912e9cc1420355e1c03c89df342c2e39",
+        "03dd9dd0d7ba659a94414118a71378d01463755c",
+        "0408927888d894832d62589d945d600dad793e90"
+      ]
+    },
+    {
+      "category": "table lamp",
+      "asset_count": 251,
+      "fallback_count": 251,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 251,
+      "sample_ids": [
+        "014fab638dc1b20201ac76b8ee36a14e92463c5a",
+        "027d388a46684a3ec06cac714c25d0f131d0e029",
+        "037c2aea5184e56ef6d240fabe3aee458ead4e52",
+        "0573db8343b79322ae386b50233e1dfbf3d3b493",
+        "074f67e54078e7d67afcc490f00e4004bdc73514"
+      ]
+    },
+    {
+      "category": "chest of drawers",
+      "asset_count": 229,
+      "fallback_count": 229,
+      "front_policy_candidate_count": 229,
+      "high_priority_count": 229,
+      "render_complete_count": 229,
+      "sample_ids": [
+        "01495dff5eccd8289fb31fc6df511bf2a043a495",
+        "01d1b7a2c92f97d248ca72d85d828f930e472064",
+        "0463153d9be9a8603ecd0e9af7e7763f42ee6c92",
+        "065ec382b612213e49941b205a074141469eba31",
+        "07b4946baa48b230b224946422be140ff626c328"
+      ]
+    },
+    {
+      "category": "pendant lamp",
+      "asset_count": 191,
+      "fallback_count": 191,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 191,
+      "sample_ids": [
+        "0034b3becda06d5dbecdf52f1842e5069e126af2",
+        "01203626b508361ea3992e1fd995b5e524e92c73",
+        "040270e2325c49cf03c1e0846cede42781d52c23",
+        "049516ae0f5a27903a2ad93bfd992979822736c8",
+        "05a565581b12a422065a58c242bd033b00302d6b"
+      ]
+    },
+    {
+      "category": "end table",
+      "asset_count": 181,
+      "fallback_count": 181,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 181,
+      "sample_ids": [
+        "0110c7ff0e787bf98c9da923554ddea1484e4a3d",
+        "03ee88f8d8feb58ba1714bdfb88093b7469d51c9",
+        "061efc927667529129a76d04993bd6920865eca8",
+        "065f704809e85a8e986e891c39a7cfeb3427fcb6",
+        "08e5115633f4576cadda8a42251ff82b17cdd116"
+      ]
+    },
+    {
+      "category": "desk",
+      "asset_count": 170,
+      "fallback_count": 170,
+      "front_policy_candidate_count": 170,
+      "high_priority_count": 170,
+      "render_complete_count": 170,
+      "sample_ids": [
+        "00f5afbca9f9bb5eadf718e81a66f0973ed67898",
+        "01be253cbfd14b947e9dbe09d0b1959e97d72122",
+        "03f226dd0e012925a8674564c4de19cb786c9a88",
+        "0447294ccfcb2ae3908ef4e09dde75184cbf9f65",
+        "0a5df6da61cd2e78e972690b501452152309e56b"
+      ]
+    },
+    {
+      "category": "nightstand",
+      "asset_count": 169,
+      "fallback_count": 169,
+      "front_policy_candidate_count": 169,
+      "high_priority_count": 0,
+      "render_complete_count": 169,
+      "sample_ids": [
+        "01362ea241206b5668fb03f345c4637fd9386c8a",
+        "030dc7920f6b43d809ddc87281cdd46ffdad2d9f",
+        "03639dab61b6903ff319e047b008cb6abec971c6",
+        "037f34132f162235d80ce46f67c4fa2238d94da0",
+        "038f37d5b8351b29fdc8173d219ca5a503715ccc"
+      ]
+    },
+    {
+      "category": "coffee table",
+      "asset_count": 160,
+      "fallback_count": 160,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 160,
+      "sample_ids": [
+        "0030aabddff541fbd378e38ae2d8597aecbfc757",
+        "016556105b34152b96d7323eed7878bb8c142fbc",
+        "01d9fff2f701af7d5d40a7a5adad5bf40d4c49c8",
+        "0239c03b6896e4e4fad328885cf078995c913046",
+        "02bb48b60ab9477eae9ccbd7653100150d1a75ea"
+      ]
+    },
+    {
+      "category": "kitchen cabinet",
+      "asset_count": 151,
+      "fallback_count": 151,
+      "front_policy_candidate_count": 151,
+      "high_priority_count": 151,
+      "render_complete_count": 151,
+      "sample_ids": [
+        "00e4e059a54461f2a2789abe85d78e5407d4f8e9",
+        "041c06dd0009364a773620e1eb2fd1dc3808222a",
+        "07ed148d60afdc1f9dd475c10f70920400bb910d",
+        "0c42ee5b635c8acdb6bf235ff9420d742a16fd30",
+        "0db565d684b7c6ca584a63184869a4077bbd7155"
+      ]
+    },
+    {
+      "category": "vase",
+      "asset_count": 140,
+      "fallback_count": 140,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 140,
+      "sample_ids": [
+        "00386b5179df69aec660a71fb9c65b344857d016",
+        "0561c92e2635eaaa0ad753cabfb427cfde565ec0",
+        "0875307f7666e4fce7e217849c10c29972d142a7",
+        "0ae9ee903346b3fd69b34228a3340662a173b791",
+        "0b0df80543773a698cd4ddcf76a7c5acfc4a803d"
+      ]
+    },
+    {
+      "category": "bookcase",
+      "asset_count": 135,
+      "fallback_count": 135,
+      "front_policy_candidate_count": 135,
+      "high_priority_count": 135,
+      "render_complete_count": 135,
+      "sample_ids": [
+        "048dc9201fecb8866e67aaae1a35dcfe5bf59024",
+        "071adbd63516406c01906131b0d8da1bb2a5eed9",
+        "087ca4ab0efbee318a9265d5bbfeaf0a6c551a8c",
+        "09bf641c92f5ff9f2ccf9eece94c33ab793130ed",
+        "0a500013049449fc711c82c961cb71620c8fb8a5"
+      ]
+    },
+    {
+      "category": "floor lamp",
+      "asset_count": 135,
+      "fallback_count": 135,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 135,
+      "sample_ids": [
+        "00ff4e2d38b8c28bd0e02607b698ae80ddb497ef",
+        "018f52ea0b259b9134aaa3685171d7ffe624c3dc",
+        "01f1f0ea47cb3046a99ba5d7652f05107fb1f22a",
+        "02d45a27671570055bbc6637b6064f6b45e2921d",
+        "03d3f46d0dc93e092f63774bedf3b5911c87ac70"
+      ]
+    },
+    {
+      "category": "ceiling lamp",
+      "asset_count": 133,
+      "fallback_count": 133,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 133,
+      "sample_ids": [
+        "0113c9f0a2767936709d028b730e5c1867870360",
+        "03a8b87b73fec83efafca897e7084a395f746115",
+        "03e195f8bd27ffb3982ccb69dcab98d53f3f6920",
+        "03ec07ddbb7262844606d7a97d7b6b35d7f6ec00",
+        "051e7613c71593d5d91bac3b3d03a36e51dd0c23"
+      ]
+    },
+    {
+      "category": "cabinet",
+      "asset_count": 128,
+      "fallback_count": 128,
+      "front_policy_candidate_count": 128,
+      "high_priority_count": 128,
+      "render_complete_count": 128,
+      "sample_ids": [
+        "0673c8be2931d0d95d101732908129d9b607bea6",
+        "08c022d1c4603d259da265a9725b24ce8f5fda07",
+        "092e835bb098736815db26efc98cf8ca90c65dc1",
+        "0c2315f49c061def72461bb659cf5af7dd179a21",
+        "0ea4b67131a00b8273dd4ac308aa5d11b840a99c"
+      ]
+    },
+    {
+      "category": "armoire",
+      "asset_count": 118,
+      "fallback_count": 118,
+      "front_policy_candidate_count": 118,
+      "high_priority_count": 118,
+      "render_complete_count": 118,
+      "sample_ids": [
+        "03ba174d13db7f909a79cb64d4319383c6fa99ee",
+        "0435460643f982a6b247ee4cd009c9a56eb133cb",
+        "0486ae7dd0b011240a162dc0ff1d96e2cac23dca",
+        "0546a524f6584d5beeaf8a72b3df494f9ceeec90",
+        "06764d11dcec69878cc762c36482be5ef2865443"
+      ]
+    },
+    {
+      "category": "wall lamp",
+      "asset_count": 118,
+      "fallback_count": 118,
+      "front_policy_candidate_count": 118,
+      "high_priority_count": 118,
+      "render_complete_count": 118,
+      "sample_ids": [
+        "0092599e2477209980084af7df385284843a3ff3",
+        "09a766ff4f118a7f60b80c671bc8662fd6a5cf72",
+        "0a4577674fe517baf226f74c3703732095741f27",
+        "0b75ef863b231ca522257a452ea9a567f39d25ee",
+        "0d8ef9aefb19bc381f12c011535c38c883659e08"
+      ]
+    },
+    {
+      "category": "table",
+      "asset_count": 115,
+      "fallback_count": 115,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 115,
+      "sample_ids": [
+        "006ea4bce9bbe0c73d6d47776b25e76265235722",
+        "0806e947f46c794f33aa87bc34a294008e79dede",
+        "0ee98dcb772d6b95a851a0d536f23e1c0dc64fcf",
+        "107036734c8e21c8a103f7459cd72c9c486068aa",
+        "10a6df1930706aaa2dd13ce2f1ecf1b82c99a21e"
+      ]
+    },
+    {
+      "category": "dining table",
+      "asset_count": 110,
+      "fallback_count": 110,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 110,
+      "sample_ids": [
+        "004315b97305e4c6986491dfc1057ae72b91537e",
+        "00474f62f75a5047b51a4e6f7072a51d0d00afef",
+        "01fd238f3e39659142240fc38ae44796e180597c",
+        "03c07dd9e6d9dc1c1bc7ec045588abbe8fb06605",
+        "06371cc27b123a3f15667e82ae1a257fac893eac"
+      ]
+    },
+    {
+      "category": "chandelier",
+      "asset_count": 101,
+      "fallback_count": 101,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 101,
+      "sample_ids": [
+        "017f76377fbb6c77c47b3eb531ca35be7f114f1e",
+        "0376de3220316ab9bb94f3f930a0a7570316b733",
+        "046d2399c7a068aa44cf509456fa190e07710916",
+        "048843fa0d4d6d5d53639874af6194a0eaa44f27",
+        "064a5d963ba88f70afba5e40d7b172ab8a17799a"
+      ]
+    },
+    {
+      "category": "ashcan",
+      "asset_count": 95,
+      "fallback_count": 95,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 95,
+      "sample_ids": [
+        "0022fa6ee5a44330e765488919803155b1a9e88c",
+        "011089758bc34f947c4862a8e800c51ec221a2b6",
+        "017b17afc6ea4ec7b629aaea6e1103e836e8d3d4",
+        "07b6ff01149584b001980e373c0c47255f33247d",
+        "08abed75d2720f1cf788da009f4c24be910fb73b"
+      ]
+    },
+    {
+      "category": "footstool",
+      "asset_count": 95,
+      "fallback_count": 95,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 95,
+      "sample_ids": [
+        "04aa46b383620e09b40c1bbd68f36cd4d96bf416",
+        "08b5c43d6160e847b526b0a492bc3980b1cc58d8",
+        "0979dd8ecbfdd44753a0f20367c784ddf538aa27",
+        "0b1c9431d85186f86b422270c49228738de6e18a",
+        "0c533a69de82a4fca0a481322deccf7d3c99de0d"
+      ]
+    },
+    {
+      "category": "buffet",
+      "asset_count": 93,
+      "fallback_count": 93,
+      "front_policy_candidate_count": 93,
+      "high_priority_count": 0,
+      "render_complete_count": 93,
+      "sample_ids": [
+        "01eb64cfe0595d98521831a9066e146589d90567",
+        "02d0251f683a3fcd7d5ec09c5a6910ccdb363786",
+        "03c6a0317265df8eeccc9245675fc50af95072d5",
+        "05f80a1f59e03f798ba3941f1a6f2712a0e93583",
+        "075bb144f6398bd53e7d0b16e6edd001763162c5"
+      ]
+    },
+    {
+      "category": "window curtain",
+      "asset_count": 92,
+      "fallback_count": 92,
+      "front_policy_candidate_count": 92,
+      "high_priority_count": 0,
+      "render_complete_count": 92,
+      "sample_ids": [
+        "016e2356defa1d43ec856c0e3f7943fd5363f1e9",
+        "0338775a90793aa9bbc38526c7849569db00a99c",
+        "04ed449bae4986d2fcf17340168a9bdfeeac5084",
+        "051ace1690a6edd02ae82cade929b07f08414251",
+        "0a572c09f2ab89c15314542bae2a6fa5078c5931"
+      ]
+    },
+    {
+      "category": "console table",
+      "asset_count": 88,
+      "fallback_count": 88,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 88,
+      "sample_ids": [
+        "01b65339d622bb9f89eb8fdd753a76cffc7eb8d6",
+        "021a61ef4010ddd21de0343377e044d90e1b54a3",
+        "033774ae209de7a75a61ef44b69e42189f9af358",
+        "058936386adb57586905a14d68fbe70719cff89b",
+        "10980471f15a78a58abfa0188703ad652c862554"
+      ]
+    },
+    {
+      "category": "picture frame",
+      "asset_count": 88,
+      "fallback_count": 88,
+      "front_policy_candidate_count": 88,
+      "high_priority_count": 0,
+      "render_complete_count": 88,
+      "sample_ids": [
+        "01edac706c8e5f84fbfe967d135a85e316577079",
+        "026aed52ad8a3e60e5432fbbc07b03f466541ce0",
+        "029c59012cbc787082f4b8725695730327daf981",
+        "0369f773266cd0aadce9e6ccdaf6d3f321ddab3e",
+        "03f18e41c8808dd0031637e759ac79a388477f52"
+      ]
+    },
+    {
+      "category": "wall clock",
+      "asset_count": 87,
+      "fallback_count": 87,
+      "front_policy_candidate_count": 87,
+      "high_priority_count": 87,
+      "render_complete_count": 87,
+      "sample_ids": [
+        "109afc6efb93da1a724fd47595a3cf5c97debcaa",
+        "14a5d16e99eb93da52f1b528b272d15ac2e81fd7",
+        "1713b7870401f42349f41c6937f55b3986b7edae",
+        "1857e7e42b468aa86d32b4ced3495b3cd4f8d1cf",
+        "20c32bc8e148545c59afd79fdfe8ea3155073179"
+      ]
+    },
+    {
+      "category": "flower in vase",
+      "asset_count": 81,
+      "fallback_count": 81,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 81,
+      "sample_ids": [
+        "00a1a59b75fae9b7e42a128ce2249158dfa7d847",
+        "00c48f069128b3951154aa6e1416de43ae7a602f",
+        "05d2b8c3e805112b21d05d42054c4a9288c7d130",
+        "0621d6e661a29f7fcde7f2328fae37874a91c8e3",
+        "095cf56558ca75b0ab0a4037ce7c8f870085aff9"
+      ]
+    },
+    {
+      "category": "hanging cabinet",
+      "asset_count": 79,
+      "fallback_count": 79,
+      "front_policy_candidate_count": 79,
+      "high_priority_count": 79,
+      "render_complete_count": 79,
+      "sample_ids": [
+        "038ccdca4c91d34febe3f4efc596225a66a11d79",
+        "05ddc6731f34bdbe1aa5cff98cd8fcd1db254a84",
+        "080af6e022a943b0d3e3aeef330776da6136f17b",
+        "08d3332bdb327aa2b5ca2b252063795d72345b86",
+        "186d2c3104f4cc0110c686e2b216c3f20112c63c"
+      ]
+    },
+    {
+      "category": "tv stand",
+      "asset_count": 73,
+      "fallback_count": 73,
+      "front_policy_candidate_count": 73,
+      "high_priority_count": 0,
+      "render_complete_count": 73,
+      "sample_ids": [
+        "0074b6bf5758fd7186157fd3a8d53afe3e200cba",
+        "03c328fccef4975310314838e42b6dff06709b06",
+        "056be15536045e9a6a94b9b93cff62f72d43c326",
+        "08931f704e2f2f9aae4d02134dc2f6894631688c",
+        "09846aa6f8fc996b41075d29111226f326f37e29"
+      ]
+    },
+    {
+      "category": "sink cabinet",
+      "asset_count": 68,
+      "fallback_count": 68,
+      "front_policy_candidate_count": 68,
+      "high_priority_count": 68,
+      "render_complete_count": 68,
+      "sample_ids": [
+        "0356ddbfa55a90611ee1f6ecbf851dd5b8d3cee9",
+        "03ea6472f528d540163f2067c40e832054ed30ab",
+        "048d80c36ddc6ac63785ca08ccf231431195717c",
+        "0a516d39b100499cfde1b2f7071930bbe6c61cea",
+        "0c13523cbbf431a463e07fef9290ba30998557ff"
+      ]
+    },
+    {
+      "category": "basket",
+      "asset_count": 65,
+      "fallback_count": 65,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 65,
+      "sample_ids": [
+        "05da2cb72bdcdc9843fdad1b9dc10450a33e4fba",
+        "0860f0b9d8f2066de5fd896323c57e5d5fb78500",
+        "0beacceb2745b82153ec62fed64b5dc6bc4a4bfb",
+        "0cc7e57f842e239ba5529ce5a19d72144098c76a",
+        "13f59be6cd2d0f811fdfcafb794bde1a513ecbde"
+      ]
+    },
+    {
+      "category": "stool",
+      "asset_count": 63,
+      "fallback_count": 63,
+      "front_policy_candidate_count": 63,
+      "high_priority_count": 0,
+      "render_complete_count": 63,
+      "sample_ids": [
+        "019b16dbb75c196d82d53639d6e987c1b8d95dc2",
+        "0661fe7a6eec6a86f4e62625a60dcadb0ec41bc4",
+        "0c14c132672f293310432d06c89d503657210f0d",
+        "0d972ff8f4fa3b796bc392b5de7931ff6d8c7707",
+        "0ec347ace227bceb95f066f6ef949bed13981ce7"
+      ]
+    },
+    {
+      "category": "bath mat",
+      "asset_count": 61,
+      "fallback_count": 61,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 61,
+      "sample_ids": [
+        "066d889d160db3dd0999a601bfd5df67540f1df5",
+        "0d2c009971e681c8943126c50ae416b50d666577",
+        "13b8c2773fb402778c37e4e118d34f60bd1ec7c9",
+        "15007a0a6debdb7175ff55d33f245764a58a5b79",
+        "15a0ec954a2bcfbd90bee46ef31d1f4d2f78bef6"
+      ]
+    },
+    {
+      "category": "bar stool",
+      "asset_count": 55,
+      "fallback_count": 55,
+      "front_policy_candidate_count": 55,
+      "high_priority_count": 0,
+      "render_complete_count": 55,
+      "sample_ids": [
+        "047b04d3192d8ba22aeeab2c6f9fc63766926cd4",
+        "11784b6fa57207d9f49ee6732224ff7443bb4d02",
+        "126fe05d3f516e671156b15b372704fb6300e6ad",
+        "184382b6dbdf95f4eecaa8ebf14a524ed16cf060",
+        "1c514e4ad1502d8ee2b4eda0052dad9ae2e76e7e"
+      ]
+    },
+    {
+      "category": "letter.n.02,wall decor",
+      "asset_count": 55,
+      "fallback_count": 55,
+      "front_policy_candidate_count": 55,
+      "high_priority_count": 0,
+      "render_complete_count": 55,
+      "sample_ids": [
+        "014a4d0309319f687eec4f5d944af61903d8f71b",
+        "028120d30742df66fc8b68a8cd61fe7664704170",
+        "0a0b9f607345b6cee099d681f28e19e1f0a215c8",
+        "0f313a72bcf3f29c941cf8c32bf9a67fbcf69e62",
+        "14db96768bfde9adf3856c947d0f04b77a4542d5"
+      ]
+    },
+    {
+      "category": "refrigerator",
+      "asset_count": 54,
+      "fallback_count": 54,
+      "front_policy_candidate_count": 54,
+      "high_priority_count": 54,
+      "render_complete_count": 54,
+      "sample_ids": [
+        "01841f449f738c1e24fa15753d1fbc5fe0c6a92c",
+        "0bb1cdb98fbdfda5b41abaa39aa7f82321e58b72",
+        "0c9ff2144462d68fcab6a79e7737b7307e1a32d5",
+        "19b181ef136dd9cbbea4505899f9015c58dca260",
+        "1c33bd447d70d4d22116c434d912f1fae78e02b7"
+      ]
+    },
+    {
+      "category": "bar stool.n.01,chair",
+      "asset_count": 52,
+      "fallback_count": 52,
+      "front_policy_candidate_count": 52,
+      "high_priority_count": 0,
+      "render_complete_count": 52,
+      "sample_ids": [
+        "0b28920a9c0655a6061b47049d7a50d9c4918840",
+        "0bc0075df6300263a1be7a5363688dd42e091ee2",
+        "0f5071c46d79d10cdc0783e1abf514c3bfa94ba2",
+        "11f512fac6afce6db598ad0738397d03cb52ffaf",
+        "1364c0da6821bc2e94fe63406c1032d1b124b1f7"
+      ]
+    },
+    {
+      "category": "kitchen island",
+      "asset_count": 52,
+      "fallback_count": 52,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 52,
+      "sample_ids": [
+        "09b6f703f78d35692bc3e251c75ccdc131b8f55c",
+        "126706d2722745fadf95487644ac678e49b87cf4",
+        "148a13d1dd62547e4fd84e1009f2e9ea1f19076a",
+        "17e4cb6839f400d7caa33dfaa11510ff840247a4",
+        "1929d5de4857ea4efe506b4637a63222e40e3960"
+      ]
+    },
+    {
+      "category": "bathtub",
+      "asset_count": 51,
+      "fallback_count": 51,
+      "front_policy_candidate_count": 51,
+      "high_priority_count": 0,
+      "render_complete_count": 51,
+      "sample_ids": [
+        "08c7c4c8c580d00b822df4ff2bc9e885c136f99d",
+        "12834df5dab70af1770765b09332c455e5050dc4",
+        "17be602f57432ee4d40ae84bcb577584681e9479",
+        "24a960df1ac651a2b4899d4a24c6b9e0443c3958",
+        "271d948742cd9d3144578c7db750b0a9eeae801f"
+      ]
+    },
+    {
+      "category": "cup",
+      "asset_count": 47,
+      "fallback_count": 47,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 47,
+      "sample_ids": [
+        "1a6b779033e0f9f9936970d79af01ed7653e4321",
+        "1bc20d448937a6c0c1936b28486a110f31093947",
+        "22899dfeb3cfe700149f4fbf87f6d443351cee67",
+        "2b895802055054fdce43bb4936cc4ff1ee7597a3",
+        "30414cd6c4eeac82960afb6163bace31f880343e"
+      ]
+    },
+    {
+      "category": "sculpture",
+      "asset_count": 47,
+      "fallback_count": 47,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 47,
+      "sample_ids": [
+        "004db3bd065eb72d8303f33c5bad163326cf1bd9",
+        "0c057c7c527893e8b259b6731f1fca332b2dc4fd",
+        "0c6016f707f138ff3c064308670d4874bf62b651",
+        "0d65e4a8e88bbd6cba57f3ce115e0e85d54da9c3",
+        "1480d369cd003846445b264d412755cbb133627a"
+      ]
+    },
+    {
+      "category": "hamper",
+      "asset_count": 46,
+      "fallback_count": 46,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 46,
+      "sample_ids": [
+        "009f9df21592e289bc08c4562f21dce15fced6fb",
+        "1ac70dacdad73ec3d717c58e748b450f54989b78",
+        "2094d784eabc9e91f31b15f26db12e75b4f58a25",
+        "24bddb8e8ec8e991f20bed58e473f74cb86045f2",
+        "2513b6d8b569298e6eb01c963679feb768575f5a"
+      ]
+    },
+    {
+      "category": "plant",
+      "asset_count": 44,
+      "fallback_count": 44,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 44,
+      "sample_ids": [
+        "01e82787da211d0f5e40f084fe22444c97b41857",
+        "02e5544e1f707bb8a0b5199d4aac1aeaaa8f5f59",
+        "03a1677dcedf2937872cc0da3ce35d52580a75d7",
+        "06b9db1cb9619092ac774c338fe0b50e7bf05487",
+        "08d8d4a26ebd95b6603039cfc2775f38dde80a23"
+      ]
+    },
+    {
+      "category": "china cabinet",
+      "asset_count": 43,
+      "fallback_count": 43,
+      "front_policy_candidate_count": 43,
+      "high_priority_count": 43,
+      "render_complete_count": 43,
+      "sample_ids": [
+        "05be6be9816aef09082349fdd55a24aed992f467",
+        "063e38c2ccedaaa2f0ed59739b30614d2e0d7b29",
+        "166b9cdc66cc71ff63ce40db1050166f2fa45845",
+        "222a445d2cce84b5ad352758634c94962b44153d",
+        "294a6acbbf3830bd40e2427777e36ba54d4df3e5"
+      ]
+    },
+    {
+      "category": "fireplace",
+      "asset_count": 43,
+      "fallback_count": 43,
+      "front_policy_candidate_count": 43,
+      "high_priority_count": 43,
+      "render_complete_count": 43,
+      "sample_ids": [
+        "03ef3bc5dca1c31e308fac0da12f0ad8faa4a3f1",
+        "0417d03c450eb0fff31f32e2999a1b13395ac51b",
+        "165eaf798d531472c34495ad8c975ca5b9bdc69b",
+        "19e21813ec7fbaf9cf4a5c6fdda6e2725c10a70f",
+        "2ba78a798010191fd7b9d8e395c76a9e55d427ac"
+      ]
+    },
+    {
+      "category": "glass",
+      "asset_count": 39,
+      "fallback_count": 39,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 39,
+      "sample_ids": [
+        "036edf04844210dae3f5afc59165ad4955b3510b",
+        "0608b5fe8ccd906911bfc7b38cc3b5128655fa01",
+        "0a75f4c9f12d95998f1e5ceb5399e918ea798233",
+        "0bb625a34e05d6cde6fe76da7535bc5bdc645187",
+        "11abcecb63a82d14a55fc5c31c7aaa0095e65959"
+      ]
+    },
+    {
+      "category": "chaise longue",
+      "asset_count": 37,
+      "fallback_count": 37,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 37,
+      "sample_ids": [
+        "114d2e674be2580ceb19f62f6be25743fd4a21b5",
+        "1475e58f333d92a3a385cbdd34dd14c7d9e99c72",
+        "175c2b4dce31f4f1ea0ce2579a46eb1cc8090299",
+        "1d80d8ccdd14451e52220c700ec4a10789e3328d",
+        "287a1a30a1fe00023b1ada9092a28e027f9c698c"
+      ]
+    },
+    {
+      "category": "lantern",
+      "asset_count": 35,
+      "fallback_count": 35,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 35,
+      "sample_ids": [
+        "02e9b52c3c888654f8048c5a9a84f2666dbadcdf",
+        "04cb03c26e0eba03e16ed2dd48192b5817ac66d1",
+        "09105d8b8d553958346905c3ef6a28d1769f8440",
+        "1d04ad185c04aa63c539897f538002019d1b5d3a",
+        "240aa59fa5ac01d4eb5adb161914e3ab09f853e1"
+      ]
+    },
+    {
+      "category": "window shade",
+      "asset_count": 35,
+      "fallback_count": 35,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 35,
+      "sample_ids": [
+        "06efd10ed434f9c096b434a73511ade1913693e9",
+        "08fe7db083cae9619ffe3791dd8f2e67643a1678",
+        "0b2062936888dc1ba22f93760a4d39e8e3a9d8a7",
+        "24bfc4d27c1e57e3aaad29becfd4f6b9261234db",
+        "287cd339ff9f917647892e3d39377b139580d52c"
+      ]
+    },
+    {
+      "category": "candlestick.n.01,candle",
+      "asset_count": 34,
+      "fallback_count": 34,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 34,
+      "sample_ids": [
+        "03569aed377a86f80ab87191174ae47b5332b77a",
+        "061bbd1e9acde17526053b8f69791d2e79d332b4",
+        "0eed24fb83dbb80236cc6fdcd5cdbe2f4e62d8d4",
+        "21d12df1ca2e07845b591339a29e04e2886848b6",
+        "24b2a73ac2f4d0cb0e921d8d23b47f7a02fb1055"
+      ]
+    },
+    {
+      "category": "toilet",
+      "asset_count": 34,
+      "fallback_count": 34,
+      "front_policy_candidate_count": 34,
+      "high_priority_count": 34,
+      "render_complete_count": 34,
+      "sample_ids": [
+        "0082238889bd1b4ab20d0f9e3a444f5b61664e3a",
+        "0c4ab4d4ccdc801b4093f10a9aa9c0bfd08ab584",
+        "17e3ab9295832bd22e220a7f861580bb5aaeb007",
+        "20efcf0a59e674a60cb79c379bee312cc6575d21",
+        "316d7bc87db3c6ee1fdc26601bcda7d18c5110fb"
+      ]
+    },
+    {
+      "category": "ottoman",
+      "asset_count": 33,
+      "fallback_count": 33,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 33,
+      "sample_ids": [
+        "00e879c11f8273cf5f82e7efd65e4aad5c4c076e",
+        "0401d370f82582f973cb9606076eeda41e90813c",
+        "1185275e5f676381e265d71aa051930a3f4d50bc",
+        "1e78178fcd06e1a22d5fea36605c989e2f58bc18",
+        "2038d2dcf5477908b062eb3e7206fbc7bf8f68fb"
+      ]
+    },
+    {
+      "category": "wall shelf",
+      "asset_count": 33,
+      "fallback_count": 33,
+      "front_policy_candidate_count": 33,
+      "high_priority_count": 33,
+      "render_complete_count": 33,
+      "sample_ids": [
+        "05980eee8561a3ebaf0753a2f14f5871611e693e",
+        "0928513ee59d54e84c3baef6fe2f6daa7c9339b3",
+        "101d572626187c039c62174c0175fa72e8abf42b",
+        "27e6430dd4751ae34f91f82e7a33556888d09472",
+        "3220d21b0885b4f0ac2c044d00a76c2ff7844dca"
+      ]
+    },
+    {
+      "category": "cafeteria tray",
+      "asset_count": 31,
+      "fallback_count": 31,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 31,
+      "sample_ids": [
+        "0f97a7a44f35bbecfdc8eaca31ddc7342c3b0be0",
+        "10d68ecac2698b52ae3d3ba21160f8486e783aa8",
+        "2002118dd15dda65a38edb49ee7808dedadc4a96",
+        "23b5b1fc6feeab3f96891017de6dff09d187ae51",
+        "268356d4dc32f85461c8a475736c94d6239fa523"
+      ]
+    },
+    {
+      "category": "showerhead",
+      "asset_count": 31,
+      "fallback_count": 31,
+      "front_policy_candidate_count": 31,
+      "high_priority_count": 0,
+      "render_complete_count": 31,
+      "sample_ids": [
+        "0001fb06b075a743e6289236cf049df3ad5dfa9c",
+        "00bde034d3d5b08ef952aeba2bd40839d3b8c5e0",
+        "074b112e6d9be8860fce202dd706de49598db82d",
+        "0b7c3e44a3d3cc591a423333383ebe9ab4d949ca",
+        "21c2bf62106154628891d97896a46304f275e1fc"
+      ]
+    },
+    {
+      "category": "storage box",
+      "asset_count": 31,
+      "fallback_count": 31,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 31,
+      "sample_ids": [
+        "31db4fd468ce40de28ea3bf907b1569ef27c9852",
+        "38fd5de657fcd3da13185163b8c66fe4bb260070",
+        "3ce73ecc0fc7bbda8f698dcf339c8112c27eb6e8",
+        "40cb227e26c9274895a33bea0fe7ed2aa4414711",
+        "50d77c22c4ed3848f8888b647ad2614558424552"
+      ]
+    },
+    {
+      "category": "l-shaped couch",
+      "asset_count": 30,
+      "fallback_count": 30,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 30,
+      "sample_ids": [
+        "03e9622ccd358c4a74cb5186b9f2d9691605f1cd",
+        "042102dff37f1a43e06e8ed2eb307738cc1cf882",
+        "0a05d8062456b0a4254a7d86ffbb87d290ff2fc5",
+        "1155fb00112d2bd537940bc46b4612d05a7838a9",
+        "147a4c3bc93ffeaae34b51ee2da840d1ace56d54"
+      ]
+    },
+    {
+      "category": "wall decor",
+      "asset_count": 30,
+      "fallback_count": 30,
+      "front_policy_candidate_count": 30,
+      "high_priority_count": 0,
+      "render_complete_count": 30,
+      "sample_ids": [
+        "01d951c6852a73f811d629107ad2367b73006a6a",
+        "064b3f799af628bf115efb91abd93c4c13196267",
+        "414f3e47c56d40c063b43cfb93305fa43b307ce6",
+        "5ca55136a02d65316485a0faf571a7956b6b9d88",
+        "5dc4a6783c96d68da449ead5a92f9055fd3e8169"
+      ]
+    },
+    {
+      "category": "wall hook rack",
+      "asset_count": 30,
+      "fallback_count": 30,
+      "front_policy_candidate_count": 30,
+      "high_priority_count": 0,
+      "render_complete_count": 30,
+      "sample_ids": [
+        "03260ee4f55865d1cb997ae7a6bbe9b56cda3b84",
+        "09b4ce57a07c2482a14ff95845394467556a94da",
+        "0b12f09e39ee47790d55de8e34c868d8bcd217d9",
+        "17087b7bf76838097e65e2c8c34cc6cae7555bc8",
+        "2195cfddf6ba4842f26c9104c2e2d0290b76938b"
+      ]
+    },
+    {
+      "category": "throw",
+      "asset_count": 29,
+      "fallback_count": 29,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 29,
+      "sample_ids": [
+        "0d372a341cb8c8e69f5dc6d09e5cc8fa94353641",
+        "18345452009b1daa5f9f466697b2b6eeafd21afb",
+        "1bc7b29ad3d8177e70e5e1e9802f361a19dc673f",
+        "1deb8fb234f678ac5e06b4f967011c09eb8714ce",
+        "292f537bec7499b92d44eecbbff46c087a2c1d79"
+      ]
+    },
+    {
+      "category": "book",
+      "asset_count": 28,
+      "fallback_count": 28,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 28,
+      "sample_ids": [
+        "188c1fa84ac72c9d9f17430052459e4cfebc0f81",
+        "18e6fa40bb534fe88001d8a79022fedbdfa58e54",
+        "1ccad6983b2f452110705e8175626fc2760a106a",
+        "2d16bb0da869abae99bb080d54869111fdfa2c67",
+        "2f7ac29a1a7006f169b9a6235de97532c78b03c5"
+      ]
+    },
+    {
+      "category": "mantel clock",
+      "asset_count": 28,
+      "fallback_count": 28,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 28,
+      "sample_ids": [
+        "00258bed0c6e87a14e33c3eebffc48c898135698",
+        "0bf0dd465bd2a3232e11377c0303eae65433aef9",
+        "1f3e6b134f72abf7d3914874957ba7a2857df332",
+        "2667ff4f698140233c3a3ab06686f2bc973d842b",
+        "3b21020881a85d6316b9473259c0d77514c12876"
+      ]
+    },
+    {
+      "category": "railing",
+      "asset_count": 28,
+      "fallback_count": 28,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 28,
+      "sample_ids": [
+        "0677bfbb64af1d34d83b878761110ce57285b9cf",
+        "1103d959bab4d0cc8369c3e35d97e528efa12721",
+        "147da1e14bafbad645213ad47a2d794e4571b08e",
+        "14c21c8ae4f467a828e8af347eedb51a85f68dc3",
+        "1f818c0f00490e53b6c35e676fb2580e3fc76ec6"
+      ]
+    },
+    {
+      "category": "stove.n.01,oven",
+      "asset_count": 28,
+      "fallback_count": 28,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 28,
+      "sample_ids": [
+        "0806be89284e8a4ec7ef7f81100a1d2c99a7d90e",
+        "0e60c694ae2a51c76a182872cbefebf9e7226175",
+        "197a447eb68ba32ab44c50948b3af1e63048e174",
+        "1f6d3a2b8b20f0a07d2f4d02ad79d8697ab15e8e",
+        "239c5c38a53badc24ca6950ee78d8f6c115c3074"
+      ]
+    },
+    {
+      "category": "range hood",
+      "asset_count": 27,
+      "fallback_count": 27,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 27,
+      "sample_ids": [
+        "0a8476cf260729fdb8806cf436754f842d4a96b7",
+        "0c6587d4b297a471073a54c614d2a262ba300a66",
+        "0dfaa44f08fed0a199e31fb64292366140dc410b",
+        "193d97025ef0a2ac10259cda2e74d3fa1b7baca6",
+        "2e67550ebfbba75f09dc42129dbfee02648e56df"
+      ]
+    },
+    {
+      "category": "bowl",
+      "asset_count": 26,
+      "fallback_count": 26,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 26,
+      "sample_ids": [
+        "0391639c95af7b6f37ca6258afe8dd462605d847",
+        "0443db4d501a2ef4f89301f47f4be51a6be97d5f",
+        "11a27304451d7af4d398303cccdfea4d8c26ebb9",
+        "1f5393ad3905262947460bdc0c87a87bf7038221",
+        "55727571c1ad5a8082817f7e49f4239f4d606724"
+      ]
+    },
+    {
+      "category": "toilet brush.n.01,toilet brush holder",
+      "asset_count": 26,
+      "fallback_count": 26,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 26,
+      "sample_ids": [
+        "0459e0ef654e9d3b187af4687e543c5277aec5d5",
+        "04ab559761a405195f9b6fa02e7bbd65c01c2039",
+        "04c311f4468177fe8beb523d75ab7d1a45ead5b9",
+        "0ab6b3173f6426018145b203a60bdbb7abc88992",
+        "0b25f45b3841dbf2dec82dfbc5d493a397514702"
+      ]
+    },
+    {
+      "category": "candle.n.01,candlestick",
+      "asset_count": 25,
+      "fallback_count": 25,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 25,
+      "sample_ids": [
+        "3ce1ea957c711683a11fc821b5595c134f5aed51",
+        "3dd3c4e20bc1af7b4f487fc1d3000c5c2408729a",
+        "4dfd81c72bdc4f1c7dc12766e07f178c625094ae",
+        "559a9bbbacc57fa25c7f0676dfeb689bbbb418e8",
+        "58d89fdcd5ecae5a861a2cb710f72892fdad9646"
+      ]
+    },
+    {
+      "category": "flower",
+      "asset_count": 25,
+      "fallback_count": 25,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 25,
+      "sample_ids": [
+        "16b8266b112b2e599db5e932e46accf75ca9d64d",
+        "1731c33f579e34c18cd381681b8ececfb86574ec",
+        "24e9e44f4851c039291edba2b9fecb8de8a3f267",
+        "27dd34e3164132d860c7f2f642ed87bd82461513",
+        "354cbed11da6c79ff0f6784b9552eeeb0f7b90d9"
+      ]
+    },
+    {
+      "category": "plush toy",
+      "asset_count": 25,
+      "fallback_count": 25,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 25,
+      "sample_ids": [
+        "1a3ab8e3d8569a2a2e2b6f8510af417848b71c6a",
+        "1c1f8cb950c338c7685124f7cfba716c242435c4",
+        "3949c74aa46c2bcd457328a216b97d6e5ab08e80",
+        "42df49592ce3c646bf92368203f520035f62a28f",
+        "4823bfe94520f3df3bb07ab8c5d95c197f68f2c8"
+      ]
+    },
+    {
+      "category": "stairway.n.01,stairs",
+      "asset_count": 25,
+      "fallback_count": 25,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 25,
+      "sample_ids": [
+        "040e26b6afd850d9567eccce83c4347bc8ddd729",
+        "0df3edf2820ff04b51c13e9d6e705600eac7cd47",
+        "28e0ff5e3f1d1b2918986d871c0f66631c918060",
+        "2d67850d2a9609846f008687b1ef972f06dbfe5d",
+        "2fa75eaccb316cfe425443170a4c592ce744150d"
+      ]
+    },
+    {
+      "category": "shoe",
+      "asset_count": 24,
+      "fallback_count": 24,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 24,
+      "sample_ids": [
+        "05424dff4ffe89ee53ea1a6c74d6ed24da66433a",
+        "112675b8a4203aafe0c47dd38ec9002ebd856f07",
+        "394467b057310b24ee40affe51c79784d5d5ad76",
+        "39fff9fecd6ca1a2a5fb4a75b4ad8bd60a557fd1",
+        "3a8febba169aaae3bab7f3c24ea0a154aab91962"
+      ]
+    },
+    {
+      "category": "toiletry",
+      "asset_count": 24,
+      "fallback_count": 24,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 24,
+      "sample_ids": [
+        "14253175da7cf53afa64c928c14bd4b803178bc6",
+        "219f653c1a72d7df0259bd0204cac7952f66ae78",
+        "232b4f785d29e0a11d072fb5c960906a8b5b05bb",
+        "31af0878469759544453aa0414303d93f483f37e",
+        "31f11762cd2a9b156589cce98a562016cf75a8be"
+      ]
+    },
+    {
+      "category": "window blind",
+      "asset_count": 24,
+      "fallback_count": 24,
+      "front_policy_candidate_count": 24,
+      "high_priority_count": 0,
+      "render_complete_count": 24,
+      "sample_ids": [
+        "11ae8789466a51b1120bb987e9e999c701641017",
+        "20726f9af9676f3afa42f0734c13b766fda8a6aa",
+        "374534ce5de6a477da5a6d2c62ce2a974cb475bc",
+        "47ca9c0bf21b4a982b73a84e8d17ee19c309070b",
+        "48691dfae441a1d625e9363342f702ece82d6d79"
+      ]
+    },
+    {
+      "category": "planter",
+      "asset_count": 23,
+      "fallback_count": 23,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 23,
+      "sample_ids": [
+        "0614900c76c99d7781721d3d9053dcf5115ee3d5",
+        "1238d0c37989c4174af201279ad145563f935797",
+        "1c84c0925cebcd6b8a98b12a0dbb2c04c214da37",
+        "23b529869de811e2fd7fae49797e0f3be4b3edad",
+        "29c1cb4bbed04f1fc97d4ed5bdd4f613f5661cc5"
+      ]
+    },
+    {
+      "category": "sink",
+      "asset_count": 22,
+      "fallback_count": 22,
+      "front_policy_candidate_count": 22,
+      "high_priority_count": 22,
+      "render_complete_count": 22,
+      "sample_ids": [
+        "015fa236691b0082e304ffd1f2301cac81d32ad1",
+        "05dfa289f4a5be6a1be7f0882a4d929060242b5d",
+        "0f68ea020457a3f25077bcf14cff107fc9d9e538",
+        "3f0778f68a489d3995e2e3f13d13e4a90fb500a8",
+        "4f1b086633e1b160f09b24a9aad0ec9d1ccb56c0"
+      ]
+    },
+    {
+      "category": "wall mounted screen",
+      "asset_count": 22,
+      "fallback_count": 22,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 22,
+      "sample_ids": [
+        "0d6acbc9f35c8834a605e284167f44c84582a975",
+        "0edf3065ba2b0299d7eafd6fcf2e659176e54160",
+        "17a798d622e72f0fc73d6bebf1aeb04e525c494f",
+        "1d438cf2a0be5706ffdbd1489fbfb27f712589a0",
+        "2ce838c1410d64b891879511cf4610f7e677b3b6"
+      ]
+    },
+    {
+      "category": "wall sign",
+      "asset_count": 22,
+      "fallback_count": 22,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 22,
+      "sample_ids": [
+        "00ab1b2fd45dcfbfdffe36f00fe21a9dddd9f06b",
+        "0ca24f7982f304b74a1ff7e967f2c367ea9a96e4",
+        "15575803971a25fdb2473fb93618a8027cb95470",
+        "1dd7cd0346684af58a789f6f74348127a7fceaca",
+        "2c2b718349456eee382ae364814d5425a0e775a1"
+      ]
+    },
+    {
+      "category": "jar",
+      "asset_count": 21,
+      "fallback_count": 21,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 21,
+      "sample_ids": [
+        "0a03d59304e236ca3888d1db52303bfebb580805",
+        "13d8d7ad96820d3d675eb710644f2f4e21a7178a",
+        "1d3f4e25a0380f82157255087967e40833b8419b",
+        "1dcc33676429b1c8cdef1b4780986001e1bb2625",
+        "273fc31360775931c2a6ae539de7bf152ee0c534"
+      ]
+    },
+    {
+      "category": "television receiver",
+      "asset_count": 21,
+      "fallback_count": 21,
+      "front_policy_candidate_count": 21,
+      "high_priority_count": 21,
+      "render_complete_count": 21,
+      "sample_ids": [
+        "0a8b64354743c9e3f3390f5a1bde2a475628dc56",
+        "117e9c79dc5035c565047b6a39948e8a565046bd",
+        "12ef49da4b0a6272c6bc2bdffc4c34ae381ec4aa",
+        "1efdc3d37dfab1eb9f99117bb84c59003d684811",
+        "2ba524d7f956907d73f0f9f02c3ae00105902a87"
+      ]
+    },
+    {
+      "category": "barbecue",
+      "asset_count": 20,
+      "fallback_count": 20,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 20,
+      "sample_ids": [
+        "0516be93fa8832ae85f42da29177aaf7f3500dcb",
+        "2b08a535c8d8b3353546421c432963c628abb445",
+        "3e89c436ad75242425fbe429e7904e1adfd3a67d",
+        "4c7f0d629c98b1d3ebfed5dc10d49dfdecf0fbe1",
+        "4cc4f6c9c19c6672375d007147cc438d71127e33"
+      ]
+    },
+    {
+      "category": "bottle",
+      "asset_count": 20,
+      "fallback_count": 20,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 20,
+      "sample_ids": [
+        "021a0ba1300490e2e288221a21f4387ce626d1de",
+        "1eb36fba48eb1f378fcbebaf74f30e3dcc5021de",
+        "22c78acc789ce802af372af9dca938a1c08c5f16",
+        "2f3cdc387d8c8e6e4ec9ce174e5f3dbe090933dd",
+        "2f92d709c9e94753a896c065cb62ed33765837c0"
+      ]
+    },
+    {
+      "category": "plate",
+      "asset_count": 20,
+      "fallback_count": 20,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 20,
+      "sample_ids": [
+        "115e795ad1493bd23ae7974184818cd51b937001",
+        "21551881391c2b21c2e1358effa7d6b69cbd435f",
+        "32bc37b3c83ce4c3d61f8e64e62934e1cfe82f94",
+        "3b519761173617ee47ca61e25681279ae9fdaba9",
+        "4087db7d03a368aeb48956f358eeee58e0edd7b3"
+      ]
+    },
+    {
+      "category": "seat cushion",
+      "asset_count": 20,
+      "fallback_count": 20,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 20,
+      "sample_ids": [
+        "07bc2b656ca791517e755ebc30406b00a45724d3",
+        "144f299fdf4bacb8637a38422a8483c554241a8c",
+        "2d53fbbd91b9476e9e2e36c9fbdccf92a4e82a8d",
+        "2fbce70215f78f07b79ac385f6b5f46584bcdd4b",
+        "31ad36f406fcc7439fbd1307c13865daee61d036"
+      ]
+    },
+    {
+      "category": "serving cart",
+      "asset_count": 20,
+      "fallback_count": 20,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 20,
+      "sample_ids": [
+        "131720513e4d71ac6099a11d89586ab001f4a1ac",
+        "1602fcc53f62b409ae18ff2efd809365815dc2a1",
+        "1e720be88c897af140f59ac0e7f63c12db70f144",
+        "2f3f0bede87dd8ebc9a0df0281b3a3b1f97b1128",
+        "3346a053b16ea56b11251b933e6fbc3e54749d10"
+      ]
+    },
+    {
+      "category": "washer",
+      "asset_count": 20,
+      "fallback_count": 20,
+      "front_policy_candidate_count": 20,
+      "high_priority_count": 20,
+      "render_complete_count": 20,
+      "sample_ids": [
+        "031024e00569909d466d87df9fead90355ba29e5",
+        "1517d14509471540add27760fb8b0ae3ee8b61ec",
+        "16c33cffd5b62d0d5df5ed6dd607f690ce2ee7c7",
+        "1c19a987e1bd8c206353d18066b117cc0b21e841",
+        "2c2b2914fc526f6e8bbe65511ecf58bba0027ec0"
+      ]
+    },
+    {
+      "category": "faucet",
+      "asset_count": 19,
+      "fallback_count": 19,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 19,
+      "sample_ids": [
+        "0f6f4f875b0de5a15c87037476eb3f2e33505352",
+        "3d901ff75e41368cf9bfc2aca27e34ed11def9e7",
+        "535a60be8999184dc5e0dfac340fe323ea8077a1",
+        "561974b161ebcd6d02f64be285dfa2a2236bbc77",
+        "66f9cd9d406e6997c93b737dae81191389dbf640"
+      ]
+    },
+    {
+      "category": "floor mirror",
+      "asset_count": 19,
+      "fallback_count": 19,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 19,
+      "sample_ids": [
+        "0ed0c762ec81d3af3069af781aa04abdfca7b914",
+        "1fa0bbe96047aa9c2d923254bf638613dfaa5540",
+        "222364e8fb6c086b9b08c15bcd8bbfa561665e9f",
+        "42cb718b424b95116f73aa35d78236874e3325cd",
+        "46718a0ccdb3b49c1586550961d8869f7975492f"
+      ]
+    },
+    {
+      "category": "clothing rack",
+      "asset_count": 18,
+      "fallback_count": 18,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 18,
+      "sample_ids": [
+        "04f0786c4011462e4b21379744092398632a8389",
+        "08f59d018f87b3d2222ba3135f92f3f6531c9c8c",
+        "19279a6433e47450b7638d0e7dc2ae31c55cbac5",
+        "204b5e24e7582e2efc246669f41d58d487f167fb",
+        "3a6bc80da4ddec21fe1fd9bd76999fd5049b26cc"
+      ]
+    },
+    {
+      "category": "shower stall",
+      "asset_count": 18,
+      "fallback_count": 18,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 18,
+      "sample_ids": [
+        "0491b9ede319cf663bcf2690efb55817be7f2bb6",
+        "177465eafc83071ab64d7e48f6cfaaadec90c86b",
+        "2c0d3b1f712185ebacd6cb5e39e1551e13e6ee60",
+        "5c2a0022e1ed18da28a1f20f632e83650ad9c2e8",
+        "72807de315ae7f20a846e137cf5e755f909a398f"
+      ]
+    },
+    {
+      "category": "umbrella",
+      "asset_count": 18,
+      "fallback_count": 18,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 18,
+      "sample_ids": [
+        "00b94ee7f2a013ffb7b681d19a5769b63c1b8357",
+        "28f28eef179447a2c08eac936ffcc800eed61298",
+        "380aeeceac63fe139dfedc306b077806e4d44fac",
+        "48903341839125373185e0b473fbf26817f677c7",
+        "494e850cf1ea32046e5e5fc8a17f21605e62c32a"
+      ]
+    },
+    {
+      "category": "ceiling fan",
+      "asset_count": 17,
+      "fallback_count": 17,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 17,
+      "sample_ids": [
+        "0097dd7add1d9d8fdc58a446796dcde8c6f80238",
+        "1178f3e77d2ca208971092a4346ba3b3d70df7d8",
+        "14eec36e26211ebb7a14a24a85800ff206c9f4ca",
+        "4acccb343fb900af537f90a594835e02d975e39a",
+        "55e1de5b5ab8291c9c29ecac4395e64dca748f30"
+      ]
+    },
+    {
+      "category": "clothes tree",
+      "asset_count": 17,
+      "fallback_count": 17,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 17,
+      "sample_ids": [
+        "03e2bbe2660b454b1a45cd35ebee6d55ec8ac60d",
+        "08308ea1093bfa3d8c0ba53c8dc49c184f63daed",
+        "3f7921938fbc6bf8089211ea8cbedfaa4edb469e",
+        "51d0e7b1aacc6edc7d00a92180151abba24d5c7f",
+        "534242df83554b57b7de065ffc39c355a0fa7d51"
+      ]
+    },
+    {
+      "category": "coffee maker",
+      "asset_count": 17,
+      "fallback_count": 17,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 17,
+      "sample_ids": [
+        "074f4cf03e1ca49d94bc8e9203429227183ae0f4",
+        "0fb4fb3e055e518de83af6c51bf25ea087635c6b",
+        "154a50fd28359d5d756bb7764ab0dad2e0ffd755",
+        "18a4123fd8ba8cdccf24e2d70c19d601244a0ff7",
+        "20ec59717bc4ad347c77a63d749169f0d2a83e5c"
+      ]
+    },
+    {
+      "category": "gym equipment",
+      "asset_count": 17,
+      "fallback_count": 17,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 17,
+      "sample_ids": [
+        "040c6cf6e1e98037329815a1e3ceb38c505f9523",
+        "1a9c231dc75f2b174f89ce7bd89e0935c99d91a0",
+        "1fa8df7c61ca18ca75b7a8a795048340f91d56db",
+        "5406441590ae50f71a4d5a65d7a427761713e647",
+        "54c7f3d9c3e2f673eac43e9300b505fd60b02ec0"
+      ]
+    },
+    {
+      "category": "shelving",
+      "asset_count": 17,
+      "fallback_count": 17,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 17,
+      "sample_ids": [
+        "0564bb393c0bd2cbb3ef49c14b24828ad6e366f9",
+        "2479fa118c490958b3850a843177d870b2bc6f7a",
+        "51953c616ca97b772b7e1152ed38b300035ceafe",
+        "57346c22693590f256c92ff2ebf04605458a0352",
+        "63e9b3439d5b8768cda71bafed20476f7690a89d"
+      ]
+    },
+    {
+      "category": "soap dispenser",
+      "asset_count": 17,
+      "fallback_count": 17,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 17,
+      "sample_ids": [
+        "13ac0c45a1eb5c63d8749867369e91783827f820",
+        "1a37a31d819e3655556a25c7d36571d2833d79b0",
+        "2c2dd4de57669b50127b3524ca3bace814215bb9",
+        "4ca76191afcbff8cd5b68121a733ffebacd7f588",
+        "5592a6a0b921596a65003a44645beb008b628bac"
+      ]
+    },
+    {
+      "category": "towel",
+      "asset_count": 17,
+      "fallback_count": 17,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 17,
+      "sample_ids": [
+        "064aef085e932d1693de96c3194b259f462b0eef",
+        "0ecb6b6e40ca570701fad5734563fe2a4772e3f6",
+        "1138e5478e93dc0ac6628dfc72fad38f3d763924",
+        "1875f96452590019c3ccb8d3bfc44a2c0bbaf43b",
+        "26a9ccba46b9ab250495d50b2dac289bcf008dd7"
+      ]
+    },
+    {
+      "category": "towel rack",
+      "asset_count": 17,
+      "fallback_count": 17,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 17,
+      "sample_ids": [
+        "0296bcd4a4d00c06ab554b40c63fa2c0534d67e8",
+        "11db6785c680d40b008ebf2a30d2842e36a4fdd4",
+        "1a53d38ac773a8136cda14fcfb82307409dce641",
+        "3bf7999b730cb8624a4071d0bd708411cb947f78",
+        "57b279a58e15f7c4ac63c2c96341df86c48bc505"
+      ]
+    },
+    {
+      "category": "trunk",
+      "asset_count": 17,
+      "fallback_count": 17,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 17,
+      "sample_ids": [
+        "176231135919109c4f5570749623ffae251668d9",
+        "1d61b187e6264d5010ce83d371c4c46c9fadfa45",
+        "3454e69efed1dfcf54b225bf52c5781d62b42de3",
+        "3c08da82e505a0221eb5036cf2237657bc1eff80",
+        "46974629818b492bea090937cc4b541bca7e584a"
+      ]
+    },
+    {
+      "category": "weight",
+      "asset_count": 17,
+      "fallback_count": 17,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 17,
+      "sample_ids": [
+        "2a3ca5b3597cdd4c53f9a7f1f97a50fe59f5d026",
+        "3a954f0464f1407ed92a18dfcb37ba1b9da8e958",
+        "459e0382b276efa6e647963cbc587fe94e3b0c43",
+        "51fe1c2cf1baff7e4f5dd3686bbc432b3e92b0f3",
+        "5ecaf2106bca06f942efccc19dadbee6d2ecf723"
+      ]
+    },
+    {
+      "category": "candle",
+      "asset_count": 16,
+      "fallback_count": 16,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 16,
+      "sample_ids": [
+        "09dfaf285c1d5a5c81a3419b731dd26a7149cc0c",
+        "0bcb338131c6c8157b712d649ccf71ccfbd056d2",
+        "36f46c7b967c8101325848bcf43db07589ae2cc1",
+        "7696a432ae056712d7c12321200c49ff89b5ce32",
+        "8644867d68c8a439cb61d3940a0682ccf2b484e3"
+      ]
+    },
+    {
+      "category": "candlestick",
+      "asset_count": 16,
+      "fallback_count": 16,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 16,
+      "sample_ids": [
+        "000bbe302b53fd2904e7ae92e1516a18f29de02d",
+        "1c8e9441083ef0adc4c79668f757c7d4d6ccfbaa",
+        "1d2f7be2080609eb2e8e1828da2dce5bc1c9028d",
+        "219eee85ec52a62c30f1668b30cdc00722a9926f",
+        "33a80de43725c68020cf34f52f6ff3ce6534e14f"
+      ]
+    },
+    {
+      "category": "loudspeaker",
+      "asset_count": 16,
+      "fallback_count": 16,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 16,
+      "sample_ids": [
+        "06636eadea6038988c28bb2251ed9b465cdb79ca",
+        "185b765e39665c26e8dbe070467bc8b8d5cd9a93",
+        "248e4f2d063e2c64df65a340ac955d43059d1022",
+        "29539d033e10a7afa5fcff6a35a9c52c83447b12",
+        "3a34fe0e9a1abe42d2912e594086d555f20d38d4"
+      ]
+    },
+    {
+      "category": "storage bench",
+      "asset_count": 16,
+      "fallback_count": 16,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 16,
+      "sample_ids": [
+        "063cb879ce734b8ad6367d8a2b0accc69d1b4a7a",
+        "24780dc8506e59cb092990573e783a1fcfac4510",
+        "3cc5cebee40bf8d2bfe4042b1f693e4eeccc54a8",
+        "448a7a6a5a63f9ec692bcc96e29cf9da999dd05e",
+        "66b84f2b11792f135e4f0bc746caf3a6feb4ed27"
+      ]
+    },
+    {
+      "category": "fence",
+      "asset_count": 15,
+      "fallback_count": 15,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 15,
+      "sample_ids": [
+        "04935a19ff917a71458e2550d1b6459119282f63",
+        "04e86791944c981fd6a14d6efe54e67735590e91",
+        "0bcc0bc80f610a0cb428012520b7006d7fcb1ce8",
+        "1370b0fb20e3fb98e25a86c30291ee80177bb20e",
+        "17b9d6c36508399b034d5e0acb0ce5ee81502a0c"
+      ]
+    },
+    {
+      "category": "place mat",
+      "asset_count": 15,
+      "fallback_count": 15,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 15,
+      "sample_ids": [
+        "0040287f3af79d7b02985600e23469d319007792",
+        "0f10a95add8f9ca871fca2393c758f449ae4b302",
+        "1ef4e30dd9fe95b67dbcbdb04867cd765e4e54a9",
+        "2380a3c83cf48dd62fbd2a5c2c96041fce174a10",
+        "4c3ca57881d1103e4b6d52f8cf50198b16f93735"
+      ]
+    },
+    {
+      "category": "shower curtain",
+      "asset_count": 15,
+      "fallback_count": 15,
+      "front_policy_candidate_count": 15,
+      "high_priority_count": 0,
+      "render_complete_count": 15,
+      "sample_ids": [
+        "20ea144d49dc14d432a94b27755ed7c588cb7b18",
+        "2e4e58c29e1afc7443f6eafb25db744775838ca1",
+        "3648d1dda109a672e34c7981552b8cc7c5dc0473",
+        "5846771d5b1c31cc8ceb6771f5fee6ac6b65d5fe",
+        "69e7262f32b7db6feaca5968fc043dc237b7f221"
+      ]
+    },
+    {
+      "category": "casserole",
+      "asset_count": 14,
+      "fallback_count": 14,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 14,
+      "sample_ids": [
+        "089c89c9d166731f737c77be2e9f6d7345324da8",
+        "214f1f476b131b11636fd17e6f8e8d8ec86e2c59",
+        "2e220a72339bd2be92f210affc6adb599e7a297a",
+        "3024a2ac938ec92f5f6e5e62714c5dfd4a73d10c",
+        "37baf0a14c64605c3c68d56dad6e725f1f0eff47"
+      ]
+    },
+    {
+      "category": "alarm clock",
+      "asset_count": 13,
+      "fallback_count": 13,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 13,
+      "sample_ids": [
+        "08c6d474cc07b00fe01be5120f2ed108a0968b29",
+        "2328222911172bbc4db868cde599bfd5c5c39b21",
+        "2503515e4e92100f8d9c1e8fc661c4ff7ba9496a",
+        "2b2f31fee32cb0d073d69fb9bfe373684bbdd465",
+        "2f544490dd555506d20f317e679b252b642a4b2d"
+      ]
+    },
+    {
+      "category": "drawer unit.n.01,file",
+      "asset_count": 13,
+      "fallback_count": 13,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 13,
+      "sample_ids": [
+        "17caf152a2dd87854a20215cbf4652b7933b7cfe",
+        "1c3ffde96647f308130ca9ab026b50136f033071",
+        "21bfbe3638af8f9633091dcc16a5c048ac4cb4a0",
+        "33ed9156fb030e849e11ecca7fe95a239f017dff",
+        "36151274ac573d17f1d89a045986d28c24804934"
+      ]
+    },
+    {
+      "category": "mat",
+      "asset_count": 13,
+      "fallback_count": 13,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 13,
+      "sample_ids": [
+        "0d977f9f28698674a9005d616ce3b567ed532686",
+        "3ab659779c5c3728855e2c421715fbd4795263f5",
+        "4acf4a11fd2e221068f71ded92696a43ef2f38a2",
+        "733ec61b660ef90ad4e97d33943251b04cb4735e",
+        "749120ec317b7599515586f14ebdce6a0c11e8bc"
+      ]
+    },
+    {
+      "category": "mirror",
+      "asset_count": 13,
+      "fallback_count": 13,
+      "front_policy_candidate_count": 13,
+      "high_priority_count": 0,
+      "render_complete_count": 13,
+      "sample_ids": [
+        "0809de73c8ade8f527ad3761a75b373dc3d6b7a4",
+        "0e7559ecfaec3368ec42dc0cc4c4aa66d0886f1b",
+        "1b99ac87378c8d948f2981f9fe423b551e6cbdbe",
+        "2603ceec3f2913a4c4cb9af2855267babd1405a9",
+        "2a800c4dae039c07505cf8474d8c999172e4ef42"
+      ]
+    },
+    {
+      "category": "shoe rack",
+      "asset_count": 13,
+      "fallback_count": 13,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 13,
+      "sample_ids": [
+        "3619ab3ef4115e5a19195b2c4ce2e83e0b56ea70",
+        "3b5c80a964c0e5c6b725d25bea3b3998774a3776",
+        "482351496548bc89258838f6630d0c73afe3a158",
+        "4b5a9d31456eb1585e21d6c35a9b8af440b667f8",
+        "5ae72d0e8fdadc834a6de0b722be6f259c587c96"
+      ]
+    },
+    {
+      "category": "toaster",
+      "asset_count": 13,
+      "fallback_count": 13,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 13,
+      "sample_ids": [
+        "0939dd554b37ffc7b61d1907df24ee5589bbafe4",
+        "1a14c3bf3cb4bf8dac60ca4feebac008ab3260af",
+        "1da192d2174cce1f3f1d7cac276231f443dfece6",
+        "5397863a895b8b24a392257cad02364558957d1d",
+        "712e8b6769bebb2dde5302e3de78d2c28d639759"
+      ]
+    },
+    {
+      "category": "crib",
+      "asset_count": 12,
+      "fallback_count": 12,
+      "front_policy_candidate_count": 12,
+      "high_priority_count": 0,
+      "render_complete_count": 12,
+      "sample_ids": [
+        "0f2a07712dbbb33dcc1393e3d3d14b71a41765a5",
+        "2120e20c4a4bb969c84fef385aafe35bfade6e89",
+        "3522b9e9d7f750bf333b5ed98e33083dc970ab4c",
+        "3ea488fe4637147b9f040a32a825e95eec9069a6",
+        "7ce6c1d2c3b5cb4f733290de27a2d5c59b2c1d24"
+      ]
+    },
+    {
+      "category": "gift box",
+      "asset_count": 12,
+      "fallback_count": 12,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 12,
+      "sample_ids": [
+        "3ab1114ef6786a97e7ad6a0cff617d4f576b33e2",
+        "5faf4424aa60c7cc0c6bbb85393386a745084935",
+        "6c06bb857464db6849d0a8bc39d76cafbbbd8617",
+        "832fb8d94138023fe3ed7fbb790b38b2b9048d09",
+        "85f584652592dafca11dbe4f19f1af0b7033ce2a"
+      ]
+    },
+    {
+      "category": "makeup mirror",
+      "asset_count": 12,
+      "fallback_count": 12,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 12,
+      "sample_ids": [
+        "03b9da6158d9f400ab8842ead21e2644f596ddee",
+        "2fc2e7cbb6059bc61b4ca0d706ea10649cdabf53",
+        "322937108d19988849e2bb6c09268d1920aa0504",
+        "3f4f000ead3ecadaa3aad35d8489182509552154",
+        "6c1ba9752bd62342932d7d80b49773968f03deae"
+      ]
+    },
+    {
+      "category": "notebook",
+      "asset_count": 12,
+      "fallback_count": 12,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 12,
+      "sample_ids": [
+        "0e00b8fa01cc07735378cc1df01619b667af2698",
+        "0e11918fe7eaf8bdee859494e0d3dfe59d5b2d32",
+        "10aad7e8b95a3bc4bf9cc81d416016befad8e737",
+        "21e5c7cabc2047f82439c63c8e5e785d58a67bfc",
+        "2a06baac13fbb8210ccc11325b72b844426c208f"
+      ]
+    },
+    {
+      "category": "telephone",
+      "asset_count": 12,
+      "fallback_count": 12,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 12,
+      "sample_ids": [
+        "09e581831745004f12dfdd5045d4d4d13750a223",
+        "1537b12fde24e7159d2cb7eb5aa71848229a2ba6",
+        "2ed325ad50bf4c2678d623fcd0762a806ae8048e",
+        "3060a8d709671e65252774acb499e90084bf3292",
+        "83cbb93b22e8d31534e828d693505acf3dc670fc"
+      ]
+    },
+    {
+      "category": "wreath",
+      "asset_count": 12,
+      "fallback_count": 12,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 12,
+      "sample_ids": [
+        "24fcece92aedf4b1b7c29f9768437852a5e16dce",
+        "27954882e94f505fec9cc13382bb6348801762f2",
+        "2fdca3e8dca93d0b3f5633e02f422a081f88c5da",
+        "3f701d5185d5024f919e528d6894e4ea4a0d9a44",
+        "577e49ac82f3377c86da9d21f1d36512d33e67f2"
+      ]
+    },
+    {
+      "category": "christmas stocking",
+      "asset_count": 11,
+      "fallback_count": 11,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 11,
+      "sample_ids": [
+        "28df3e9f354298151ae31b5a9e42443478aeb1b7",
+        "2b78339bb76c04eff3bd85661bf5697ad933b543",
+        "2c815ad067f0eedd75c386841b4ec4c2dd75820c",
+        "2d5f9d107b7f4047bc8bc0907afc9514fab95ae1",
+        "425f41a90050fa9071b096c4826d6ad307d541cc"
+      ]
+    },
+    {
+      "category": "exercise bike",
+      "asset_count": 11,
+      "fallback_count": 11,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 11,
+      "sample_ids": [
+        "2eaa2c631f11e1aee40e43e378bff3d3b43630a3",
+        "31e883e6bfcb4567841daa0e92c9c216762eda94",
+        "3560cad88dbc66f40f8e85c1ef07c04ce6a68f50",
+        "3c0ad5f6f71315095857cff92555158156f95d01",
+        "5e1ca8d31450af5d4fd58bd5b3537cf00636df7c"
+      ]
+    },
+    {
+      "category": "jug",
+      "asset_count": 11,
+      "fallback_count": 11,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 11,
+      "sample_ids": [
+        "260b77a7bb7899bbe4665886be2af5e303a6e4f1",
+        "2b429c575b4de6837a9d3ce5472ceb8a918fdbd2",
+        "2f8ce20db01f6f9cff0d3170271f45ef139276ed",
+        "381a128d056d4db0e70276aa918065ca42f89e8f",
+        "51b55165bde866a2c8d74b46843d2f549135b889"
+      ]
+    },
+    {
+      "category": "kettle",
+      "asset_count": 11,
+      "fallback_count": 11,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 11,
+      "sample_ids": [
+        "20dbe8187f7e98eeb7e369e31c6879148f46fb50",
+        "551cfe57a753326c99503bc098e8cce80f80410c",
+        "577ab6846773c22e68a1ead745bba0ac6e60d8b2",
+        "5a2d4315640f464391c6a256818c3c11fdd8f4f6",
+        "689686140b7ab8fd656ce588f10f8c40568da3bf"
+      ]
+    },
+    {
+      "category": "string lights",
+      "asset_count": 11,
+      "fallback_count": 11,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 11,
+      "sample_ids": [
+        "192058f7a2616b43aab4add1e24b40a1d62713f7",
+        "3316b7cd2a7056735b8c473249e2940de9361603",
+        "33f33f18af5677db2b7b783cdfaff4dcdda290dc",
+        "37850333493d45901e8bc36812cceaec7e294caa",
+        "61877e9cc3c98d77503ae8c3e051b82b5e447235"
+      ]
+    },
+    {
+      "category": "blackboard",
+      "asset_count": 10,
+      "fallback_count": 10,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 10,
+      "sample_ids": [
+        "3a39fbaa3a1f5408939395df2f31a92585de0612",
+        "4025a145858714773e51ec13aec5ac9a7ddbae59",
+        "4a569304feaa39b25150216c22e168d907356f8c",
+        "5ed695b237e7c7fc93ad95cdeac30d3a0dd8e418",
+        "80ef517d2de8c908bd54ebb06b9ea8cd95774d7d"
+      ]
+    },
+    {
+      "category": "crate",
+      "asset_count": 10,
+      "fallback_count": 10,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 10,
+      "sample_ids": [
+        "1038f7871d85a9318cf7854eb852f09bed912458",
+        "30cb6ee5d01bc601b98ca02ad708f58bac510a39",
+        "414f1b65ce123c7acc6487d2d73626b819de89ba",
+        "61568b4470f56752bb9e7eddad83f5c12d1dbc75",
+        "6c3daacae760bfd00d602ca4c2a0f94282eb1fc5"
+      ]
+    },
+    {
+      "category": "curtain",
+      "asset_count": 10,
+      "fallback_count": 10,
+      "front_policy_candidate_count": 10,
+      "high_priority_count": 0,
+      "render_complete_count": 10,
+      "sample_ids": [
+        "0f99cf2a7e57657dfbf68a22dbcc36b3bda23ab8",
+        "2205e5a6a05ff9e066f8f64654b91d16b326763d",
+        "2933eed7c2c2fb8ae4cb5a17bd6a166eff91e654",
+        "433213616173b842cee2916a2cb845d64d92af75",
+        "664b0b7e08d711a0462aea8be8463789fa091a26"
+      ]
+    },
+    {
+      "category": "dressing table",
+      "asset_count": 10,
+      "fallback_count": 10,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 10,
+      "sample_ids": [
+        "0862fe8317881f167a0c9654f6e34cd2daaed1b7",
+        "3250fed9cd01e87e35addd30f213df8fae6ae89f",
+        "454daed946130df517b76a1b0a95b873138092de",
+        "73488eee7e7854461134ed9dc369ba39399e2070",
+        "9da8bbd27b90b21dca1beaa505b34d4426881df4"
+      ]
+    },
+    {
+      "category": "firepit",
+      "asset_count": 10,
+      "fallback_count": 10,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 10,
+      "sample_ids": [
+        "0159bbff524170a2ace52cd61a00a573da95fd38",
+        "17badf2b17961a3c129aad04a0738078580c1a07",
+        "1f3435d180b25eb789cf1fc375b0e4097b56f36e",
+        "385e406da2328968e6bec1aa8b018145eebefcad",
+        "61cc1458c209d1bf2dc22e0334b8b5ca61b93138"
+      ]
+    },
+    {
+      "category": "gazebo",
+      "asset_count": 10,
+      "fallback_count": 10,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 10,
+      "sample_ids": [
+        "1208b7c54f5aa7f554dbdb67b8b6cab6efef58da",
+        "20bf31448305ed9661acdfe717da7f84598fa434",
+        "3cee4a54ee95631e8d1ef02d78180d157f2b6ab5",
+        "3d3115c110a8fb78c92aa647bce6826212a47e21",
+        "76a64c43a9ce4617bfec6b8b8fe33ed377fd5177"
+      ]
+    },
+    {
+      "category": "headboard",
+      "asset_count": 10,
+      "fallback_count": 10,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 10,
+      "sample_ids": [
+        "1569d731e084976cdc7df28661717da5563ef057",
+        "321b84daf44464698f7ec130b2a2aa1d5d355c0d",
+        "45ba872ad8508f863762e2aa80107610f4f535ee",
+        "5c35f230ba9892af027bfd9e4cccbe6eebd32395",
+        "8cfda36421727b0685a690f6448ff60395e6f20c"
+      ]
+    },
+    {
+      "category": "kitchen scale",
+      "asset_count": 10,
+      "fallback_count": 10,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 10,
+      "sample_ids": [
+        "0998951356594bd85552866fc5ec3f31c383279a",
+        "14e68d6ffc79d8ecbc7cc9e5598214956b9ac833",
+        "425828a1813c9dacfd6630c307e69234bb54d31a",
+        "49e25f963942169ce4aac9b5aa4e8f8aae330b4f",
+        "57757b395f462c45c4faf103d794331b28199443"
+      ]
+    },
+    {
+      "category": "laptop",
+      "asset_count": 10,
+      "fallback_count": 10,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 10,
+      "sample_ids": [
+        "00b3040d6d75d68ba6d1bdf96e31c6b8432cbc1f",
+        "57d2b6c1b3bb6903c7683cff9ba9016a8c50ff70",
+        "588ddc58a77c05c0a8d92232d30b6b197663dbdf",
+        "5d337cc247d287cf180c19043cf65d2986c43a26",
+        "61304cfe7c7c7c57463ac6297b6e02cf622cbf75"
+      ]
+    },
+    {
+      "category": "printer",
+      "asset_count": 10,
+      "fallback_count": 10,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 10,
+      "sample_ids": [
+        "1c2d22ef7c8cb0f460d3a86a2b4439fad6c9eb9a",
+        "1f82d31cb7c70feb0e85636f022d4e5e6216f58e",
+        "2ad1405f0db1e149724804d2451c63097ecb28f4",
+        "5d31ccaea7b1f7baf7fb8b5c3d4b4e87c1e9865a",
+        "88b3681c5cf5bde9e9dfd799dae9e242813b04fc"
+      ]
+    },
+    {
+      "category": "bulletin board",
+      "asset_count": 9,
+      "fallback_count": 9,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 9,
+      "sample_ids": [
+        "0f58bea68d073b81deb36a8339cd9cac77094ffc",
+        "4a3a223f968472e056e5097be0cd78d347639808",
+        "76f881d9dc0d71dccabff2e80101ab9e1813117d",
+        "7c2940a68cdeac64c0e2d2ccae0905316118076e",
+        "8b6e2cb3c632af9951808faead46d03f80b6e81b"
+      ]
+    },
+    {
+      "category": "camera",
+      "asset_count": 9,
+      "fallback_count": 9,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 9,
+      "sample_ids": [
+        "0590a21b30e10913a5621e3f36becd2feb1ad7ae",
+        "247bc67e54e691a45d0ca752291ec83f4825091c",
+        "55b57e53686184456875ffbca0636ba9467c147c",
+        "6d5c2629c7b850db989fbd29612e451dc1a25f69",
+        "8893a556eb3912f7dbb753fcad9d42f66be1fcb2"
+      ]
+    },
+    {
+      "category": "car",
+      "asset_count": 9,
+      "fallback_count": 9,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 9,
+      "sample_ids": [
+        "11b8d8ec9cadac4e5441eafcde275d4bfe1dc67c",
+        "5cd043b511e3f7031892d1fa56fe309d2896128a",
+        "5f4a14a4e5bc2feb7388b5d18d63350c38600f29",
+        "611d69ee5e8383e70431f634f63f9682861eb2a8",
+        "703dc02d39bf4be233dd614b8bad4cd8363d667c"
+      ]
+    },
+    {
+      "category": "carafe",
+      "asset_count": 9,
+      "fallback_count": 9,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 9,
+      "sample_ids": [
+        "03758534dd2a3a8303e742cf4fc10fedd4c48843",
+        "320f797f7f3936b01c7fb659ddd56c63cc52f85f",
+        "55cc6c146898e7fb1c2ea66ac86b04d6566ad1a5",
+        "6361984802efa59ed8b1b2bafc2ca9aa91d4fe8e",
+        "79590e37b261153df0b50a05e90edf40bc4f13c0"
+      ]
+    },
+    {
+      "category": "espresso maker",
+      "asset_count": 9,
+      "fallback_count": 9,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 9,
+      "sample_ids": [
+        "1180802ad73d02aaf01b9759348008fccdaad30e",
+        "335fc5d250b5f7e424fcb25a26bf001f738ca364",
+        "5bdc6c7f1d61dbdf8fe361997692aa169f3b330f",
+        "90d52340f8ff587224ebf21e60345ea69be72bf3",
+        "94f6526468adbb3b59c2c7435dbd73195a215328"
+      ]
+    },
+    {
+      "category": "guitar",
+      "asset_count": 9,
+      "fallback_count": 9,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 9,
+      "sample_ids": [
+        "43ea3f403dc977aebb0ca5ce4fa71297185c8be7",
+        "4ac9f330dd48b30dfa325a3940f1ce1f918f9128",
+        "4d01ab6feb2e775cf053ed678cfd61fb6820a8d9",
+        "64b387fcf0526f774765aa8cec34754e707dacc2",
+        "ac52643f7db6c4cff086f44c81abb4dcce21797e"
+      ]
+    },
+    {
+      "category": "microwave",
+      "asset_count": 9,
+      "fallback_count": 9,
+      "front_policy_candidate_count": 9,
+      "high_priority_count": 9,
+      "render_complete_count": 9,
+      "sample_ids": [
+        "09b7f888a08a35d64d05e5f94cde9b75715c9a6d",
+        "280d9f458f11b99e075c23943cbfbfd6509ba4cf",
+        "81da9279eae235c3faced51d516e970acdac5e84",
+        "844be43b1c34647e153e9b1c4054bd59a8bb64ed",
+        "93951e48e6f29a5592dd6e8e2c426427707d6496"
+      ]
+    },
+    {
+      "category": "mobile",
+      "asset_count": 9,
+      "fallback_count": 9,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 9,
+      "sample_ids": [
+        "0f05a38ab774b955ac4179c9750d669d61b9dac1",
+        "27cba09ad929c798a0314697f926073b3e85a1ac",
+        "60309561378ae70a2ce226cd23fad2a270102b9a",
+        "848ccd629f9890a53ed8eb980dc8ec3df592050e",
+        "9136a47d954c458ddaaf524fe00d921e4f544be1"
+      ]
+    },
+    {
+      "category": "pathway light",
+      "asset_count": 9,
+      "fallback_count": 9,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 9,
+      "sample_ids": [
+        "0d2bf9bebd1b436e11bd5097d9e32a1244609951",
+        "31aa52edb306a4699a3372c47f859669cafc96c8",
+        "504c62699eb44c6f2bdb2adeb0a4a0e0c1c399f8",
+        "713e949b45c099d34c18cd7a8d93576e0a0cd9e7",
+        "8555d250dc4fd1f2b71df48cfab2a614fdf68444"
+      ]
+    },
+    {
+      "category": "picnic rug",
+      "asset_count": 9,
+      "fallback_count": 9,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 9,
+      "sample_ids": [
+        "120de584445590489ba215e5af87362af7eae4ff",
+        "1e223bea30edd58bcb6240ea9d820cab7d091641",
+        "46459580a9009ad5aef3b8fac14a86edbf31af6a",
+        "84b17c9d5e3d504c959f7ee18b6024bb794e7be7",
+        "8653855b3b368d593143b42994b0d5d467f684f7"
+      ]
+    },
+    {
+      "category": "plaything",
+      "asset_count": 9,
+      "fallback_count": 9,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 9,
+      "sample_ids": [
+        "0add22cc4b991c0b80e94a36eb72687f44ccb3ba",
+        "27a2b942920109d99410ab6f943a5bd87322a018",
+        "2b4287661123d588b12fa8ec0d04c93eef1a6b28",
+        "6352062ae6b416e3502bffc1c720461a99e344c0",
+        "9849af0395972ff84e40f5c1a51db8a25e3ef6f7"
+      ]
+    },
+    {
+      "category": "shoe rack.n.01,cabinet",
+      "asset_count": 9,
+      "fallback_count": 9,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 9,
+      "sample_ids": [
+        "164893a817b66c18cadf1b98ee74c3513bf2efc5",
+        "6027f970cc47e7331043cc22d87f191757557e8f",
+        "6a194b509df258ccbfac747edb2cd5a93aa5d102",
+        "6f3757cad1e03ebf1cd2407b925ebd58e15f8728",
+        "80711e20cd501dd7551f9c0a5cab5f3029358b9b"
+      ]
+    },
+    {
+      "category": "sink stand",
+      "asset_count": 9,
+      "fallback_count": 9,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 9,
+      "sample_ids": [
+        "1e297e295dd1bfac300be5f3de7dece5e68c7230",
+        "30c60647e682cd0bddaa92ba7a31db820129a2a5",
+        "4564412630106b1d1025cc3356b84e6bf79c5795",
+        "611fc9b02118a2cfa0ce1b83b723062a4e6de291",
+        "6cef10bb7d5b957779798987549d382aec6849c6"
+      ]
+    },
+    {
+      "category": "soap dish",
+      "asset_count": 9,
+      "fallback_count": 9,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 9,
+      "sample_ids": [
+        "2f58c5af3b0d694fbcfcbbea28f0ab0a7499b78e",
+        "38de8faf853de33033df925405a03ed703dfb4a7",
+        "47eff5480c4d3ff2ba5ec46cc2de3dc3813fdb64",
+        "84092984ce8a7cd7ad7aec05eb95d2612d3cd209",
+        "99cd589fd208bd497adbbb5f79c424953b474097"
+      ]
+    },
+    {
+      "category": "swing bench",
+      "asset_count": 9,
+      "fallback_count": 9,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 9,
+      "sample_ids": [
+        "115d18dd8fc027f98c3aa5dbf704aeaf279aad81",
+        "4ea578e0c01bdba097b9c163ba05492c1243a9c1",
+        "4ee740b37472cbe4239487e148e2c7ef3bfbeefc",
+        "7ed25854a0888a1aef6e7ed6a421576688778c3d",
+        "bfed8af1880c5607428d0aa8c66d7373098b190b"
+      ]
+    },
+    {
+      "category": "teapot",
+      "asset_count": 9,
+      "fallback_count": 9,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 9,
+      "sample_ids": [
+        "1b8049a707cc4f4b440d7a60b24dcf73065aaa88",
+        "303b98fac9e22c364d2e7770ef586f9c963df7e8",
+        "3e991a6cc8ed46bb9f3b9641e7062ce627fe7ca9",
+        "4db7a1a5377cf18b8a14ab335a2970724ec43f2c",
+        "58b91f6a212bde731f0f3da2cb4fec30d13396d6"
+      ]
+    },
+    {
+      "category": "tissue box",
+      "asset_count": 9,
+      "fallback_count": 9,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 9,
+      "sample_ids": [
+        "1472a0b835223f7c39e850146dbde04d28e99da1",
+        "1d56bfcf213afcbe75c62331cae2b410900de0d3",
+        "480e9319aed841f324f5aa1a324fa82588e0eaa7",
+        "5637420729ce687138e32bad2bd77154b561df36",
+        "584328d2150aea7fe946343cee183497e8b0464f"
+      ]
+    },
+    {
+      "category": "bar",
+      "asset_count": 8,
+      "fallback_count": 8,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 8,
+      "sample_ids": [
+        "10e851b8c7ef80a87aeb5d0821e8164fd57b9e91",
+        "96aa481c97443d17b9946bc68e188bfd877c2ebf",
+        "a39374cea34aea3a858c0da32455933a642125a6",
+        "b04c289889696c7f1940681de877c1eb9d5b9edf",
+        "b1c9d7321512686e02f2d0be978056456479e14c"
+      ]
+    },
+    {
+      "category": "blender",
+      "asset_count": 8,
+      "fallback_count": 8,
+      "front_policy_candidate_count": 8,
+      "high_priority_count": 0,
+      "render_complete_count": 8,
+      "sample_ids": [
+        "1d0796a5e6d504a3cf6f25bbd403eb98dd03f32f",
+        "22940dc4859fd58f2234c7f2d31ef75446a30857",
+        "2f7c1b8e9846d5e8d2696f236a88e7ea27d283b7",
+        "3f08b95d567af8bd3aba29af5b0e47c67dcca59d",
+        "558e1c5b5fb4816be067d3254e803fffed07dbe0"
+      ]
+    },
+    {
+      "category": "bread-bin",
+      "asset_count": 8,
+      "fallback_count": 8,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 8,
+      "sample_ids": [
+        "04f411297e7255eee22742e15995c9d138c41d62",
+        "27584d59cc4fe564020ed5d65dbb5762d0638404",
+        "42105592e35934803a55b6510bb230ccdfe190a1",
+        "646144788153660717192cf8a799c12319e9d117",
+        "8c8df98aa3b25617201f5c40ae09bd20648ee8d7"
+      ]
+    },
+    {
+      "category": "heating system",
+      "asset_count": 8,
+      "fallback_count": 8,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 8,
+      "sample_ids": [
+        "02169c44fd8c796b2be3a5d9e5f01db7a29a4b3d",
+        "0af9732417cdf12a734bd3133f493b18cfe03e91",
+        "1dbe19a8cc620118828f2c7bdf9395afceffcb3c",
+        "268553b9029dd2c3847726a405f0443707efa20e",
+        "2fe9121fc15c7bad2355f8bee69a304e178d788d"
+      ]
+    },
+    {
+      "category": "kitchen appliance",
+      "asset_count": 8,
+      "fallback_count": 8,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 8,
+      "sample_ids": [
+        "0d07adc252041dce26f422e37b146f9bd6ec2881",
+        "10596fe8b052ccdeb6361e418347bc46037c7f2d",
+        "3d6d0ad90bcf11a24a6bf0dc6d56fb03ebfa1ce2",
+        "507324eb1a7679fd53fff3e1bb9e7317ac35e23e",
+        "58074cda1782f1631517f10cebd5eb9fb9edc38d"
+      ]
+    },
+    {
+      "category": "radio receiver",
+      "asset_count": 8,
+      "fallback_count": 8,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 8,
+      "sample_ids": [
+        "041a043cceb0562e06330f15e31e7d266c4bfacc",
+        "1c230ccc009afe40944c518fa5c8513a5791ef5a",
+        "2945518ce0a4e82c22af8d829bb4565f7d7ee544",
+        "45f748f64f23f102e702a40962df2bc367870498",
+        "47f6ac730ad03cb7c53ff966158fea3660c91627"
+      ]
+    },
+    {
+      "category": "swimming pool",
+      "asset_count": 8,
+      "fallback_count": 8,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 8,
+      "sample_ids": [
+        "2368b54bfa73932d5b8d6dcf2183ab8ab57834ea",
+        "49187895ea6213ad565da277b2215bae3f1d27b2",
+        "6bab77acf14c6a3d838587ebb7ebf2e3d0b3906b",
+        "7683c163bea9f07541b6845278cce7ad43fbf099",
+        "8487297e92275655af39f07294832059a0bc0bca"
+      ]
+    },
+    {
+      "category": "table mirror",
+      "asset_count": 8,
+      "fallback_count": 8,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 8,
+      "sample_ids": [
+        "1de3aa8f9a108b8567b0fc1243303bf728d796a9",
+        "28f4b8c17740baf50d8fbb84595eb38bda99f6b2",
+        "5ef3aefc0163cdab3a805b1adac07c0ae89af7d2",
+        "6fd130f536f3fb2ce7c40e762b53ebbe627ee197",
+        "85fb75b609c3846a3aa2a452783a9cb8e743b2d7"
+      ]
+    },
+    {
+      "category": "tray",
+      "asset_count": 8,
+      "fallback_count": 8,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 8,
+      "sample_ids": [
+        "0fc77a15f30f9790d1d0d596d75415be2a33b08c",
+        "3372c3b68c9a2cd4ba9fc36a5763acbfa2d1aac0",
+        "35818cce7c18c59b0419afd6a5cf09c819c50621",
+        "80c54c405990fa27ee1bc763d4c73e80435712ca",
+        "9323253ea70a8b8e07f29e5896a803c463c8107f"
+      ]
+    },
+    {
+      "category": "tumbler",
+      "asset_count": 8,
+      "fallback_count": 8,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 8,
+      "sample_ids": [
+        "08c7b32154bd2be6ca30acd3f36eef83f14093f6",
+        "3ce41cf0b912a259a5b352d5bf1141ee102640d9",
+        "6a16a8ab35222e408cc16e76ceb32d2b6daf3bd9",
+        "6d8cb689ff72a3541b44a4f06522d9af8a2fc849",
+        "952ee2c654a116614574c4407d8182a3d2af656a"
+      ]
+    },
+    {
+      "category": "wall art.n.01,sign",
+      "asset_count": 8,
+      "fallback_count": 8,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 8,
+      "sample_ids": [
+        "1b067ab0618fa063388c3ba661bc6da22075d7eb",
+        "4be27048256e8ab5690b4ba9a17211da0f04eadc",
+        "56c64cd049d0f5f8400b4185dcbcbd5dca25c7c5",
+        "68798cfff215f3be5a27c46b0b1ac8f22b270b01",
+        "72287124d634c4fba4c595ea32c2b0fca82b63b0"
+      ]
+    },
+    {
+      "category": "air conditioner",
+      "asset_count": 7,
+      "fallback_count": 7,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 7,
+      "sample_ids": [
+        "21ce95549835e79027456765d8c06858051dea4b",
+        "571e64a27135494960e739c85eb0027caa16a7be",
+        "6e323609d478ef0965affc7bcfc4b212df304e7c",
+        "b42ca21f552e5ff52fbb7bd7de2955c78bc592a7",
+        "e1f70b4c0af191879fbc3e1a268831c9a9474fd6"
+      ]
+    },
+    {
+      "category": "base cabinet",
+      "asset_count": 7,
+      "fallback_count": 7,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 7,
+      "sample_ids": [
+        "3b3764c8e5286fcf2d922e6af05057af8d3a71da",
+        "9cecc465b663027d4a59020833d33d85af8f0c37",
+        "a19b47699883e5841599452274d671a1bb2c775e",
+        "bfd6cf98dd195c4c70cfa0510fd4eaed99efea6a",
+        "c2b963967c1e817256ce9f72f7e160a9632947bb"
+      ]
+    },
+    {
+      "category": "beam",
+      "asset_count": 7,
+      "fallback_count": 7,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 7,
+      "sample_ids": [
+        "0626afb3eddc7696d194c35d0b0e0686ce7c7174",
+        "3e2f125ae0bce7a56defdc98097ff70214eae0c0",
+        "4c3d4a5d83945abaafbc3bbe75e00d078077b2aa",
+        "5022cde19ae7c8d57c78e47919fa44195d4626f0",
+        "679e3878a0937739c161fec224cb3e7ab9eaf131"
+      ]
+    },
+    {
+      "category": "globe",
+      "asset_count": 7,
+      "fallback_count": 7,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 7,
+      "sample_ids": [
+        "2c8215b16e661762124ca86153e08d9526b7c127",
+        "55c813d9a522cc5e52176d01e75ea53d260c9003",
+        "ab0b3cb143dd3f2921abee437c9cc629bd35887e",
+        "bdee8bf0af5b4ce53fbb26bd56942509459269c8",
+        "ca6176eeba1cae0107bd8cce4905b5422f808b92"
+      ]
+    },
+    {
+      "category": "hammock",
+      "asset_count": 7,
+      "fallback_count": 7,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 7,
+      "sample_ids": [
+        "322f805bb1317db59e4a8415955a442ed621368f",
+        "617078930b5c5ca4ac705910323e66e7c5cc10eb",
+        "6739228132b18b2bc27b7c2966df05b988537ebc",
+        "715a79a163c4e8103e0bb86599e9b874cd603ced",
+        "81fcb3a8a97c57d0b30d24069fed1f35c6fe5500"
+      ]
+    },
+    {
+      "category": "stove",
+      "asset_count": 7,
+      "fallback_count": 7,
+      "front_policy_candidate_count": 7,
+      "high_priority_count": 7,
+      "render_complete_count": 7,
+      "sample_ids": [
+        "14934faf2cae9e4bdaed5a0586d0a86bd866424c",
+        "20c1f9e918e3f5c28ea4012347c6d76a3745eecc",
+        "386b1c39b6ef1de85680350733c1211817e492d9",
+        "44194f226a2e4a200a4ccdb0a781fec286cd1e8b",
+        "6eb0231c611b818290fca01590084d93c2278817"
+      ]
+    },
+    {
+      "category": "table runner",
+      "asset_count": 7,
+      "fallback_count": 7,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 7,
+      "sample_ids": [
+        "402e1a4af01cb6cc3c484f5708277785712c49e1",
+        "66659cc23c130c5188ae92e77ad732afeb00a525",
+        "cf106cb69689e6a38c8a070abb80de39300f3cf1",
+        "d6fbbd2e532ae8be5d00c14c71e9a581cf00fdce",
+        "e5dbb561af98eb3200ef3591b63df0c8dbf7c062"
+      ]
+    },
+    {
+      "category": "track lighting",
+      "asset_count": 7,
+      "fallback_count": 7,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 7,
+      "sample_ids": [
+        "3ab03fd39fa7fe7dd90d0fba725e6e312d9579d9",
+        "50462c9e0d8dc82830282359a92b21d1aa62e2a7",
+        "82e45a038d4661cde412e372a76816cb6c347d10",
+        "a4d8c0459288b97012538a979e88b0fe2f75f345",
+        "bb7b1a64ec2b883d616679dbd3e30e3fe0ef98e1"
+      ]
+    },
+    {
+      "category": "wall panel",
+      "asset_count": 7,
+      "fallback_count": 7,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 7,
+      "sample_ids": [
+        "0680b1340ce0d4256102460bccf800480613e07c",
+        "18211c9f8de13eb6f7360f199b86d36d1fe93401",
+        "409de66b8cc428e3c9c4ecb7cefbd16509d239f2",
+        "42eb8f0888cc794947060525b25c89ef0f49a30f",
+        "43caf51a1ccff2c8708b2b2ee843a8c1ac51cb53"
+      ]
+    },
+    {
+      "category": "canister",
+      "asset_count": 6,
+      "fallback_count": 6,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 6,
+      "sample_ids": [
+        "6315e81945ddae26263f13282cfe85ee36a86205",
+        "6ce0c3e1dea30f0e5775c800900790c39d6069d5",
+        "a022594bf4eb6f8255be8f789015d1af7c93682a",
+        "a622b0ad916c7703b9acc23584174a43137f3efb",
+        "e8d6fdd7c590fec96e683671ce188f4e51a442a7"
+      ]
+    },
+    {
+      "category": "christmas tree",
+      "asset_count": 6,
+      "fallback_count": 6,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 6,
+      "sample_ids": [
+        "00a896b002a685b0366798b1d3a96a20e96cf560",
+        "66dd3f72e4cf06287b0c2b81992451c84f48312d",
+        "7a4be528d660790e604229608dff4b5879544c89",
+        "87ac831ae9463acf6ee6a876de63ed07561aef03",
+        "c194cd9a1d57e52fdf4dfc1aa1c64dbf585e659e"
+      ]
+    },
+    {
+      "category": "cookie sheet",
+      "asset_count": 6,
+      "fallback_count": 6,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 6,
+      "sample_ids": [
+        "0d62c045f07dcb9389cca2b39751ad2cb4c3e438",
+        "454df62b7fb95d85d18c15747f4718e62cb5eb6f",
+        "5ccfbe3af0c475512b5adead9c1ad676e420fe38",
+        "711b48fa4828e8fd73d0386b7ab2e96de8fcf04a",
+        "827ea422557a263f198a98fbecd36ecb0f77b2b5"
+      ]
+    },
+    {
+      "category": "dishwasher",
+      "asset_count": 6,
+      "fallback_count": 6,
+      "front_policy_candidate_count": 6,
+      "high_priority_count": 6,
+      "render_complete_count": 6,
+      "sample_ids": [
+        "03e0a5b0643512a63c10c478fb005fb1228e2ccf",
+        "43b7ea81b8b10840845f7d2551599c5a6d96e3d4",
+        "9f4ddfa2353e1db1588938fbc3dc0a66cb898da7",
+        "aad01c69d7a27a1740e422f5f64b781816bd86fa",
+        "cb3dd8f2c8de396606e0794f6effc921aff7235d"
+      ]
+    },
+    {
+      "category": "medicine chest",
+      "asset_count": 6,
+      "fallback_count": 6,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 6,
+      "sample_ids": [
+        "197d075a8133c29eace426e856c13cfa9cea5b2d",
+        "454ed03a4af5b3a58d23ebf1aaadbe9a4968e15d",
+        "54febf97a3c0ee7e010babe4ae9520fbf8858e87",
+        "8651e8d0018be9844a2471273d17157e5684fd80",
+        "8c3c2d10c8fbf3a1e29030dad0366ca29feaa697"
+      ]
+    },
+    {
+      "category": "monitor",
+      "asset_count": 6,
+      "fallback_count": 6,
+      "front_policy_candidate_count": 6,
+      "high_priority_count": 6,
+      "render_complete_count": 6,
+      "sample_ids": [
+        "159d8241274cdf8c553cf43e636490086a80ca71",
+        "296b43e62a47818108187de2baa6011f06403446",
+        "5b842854c8dd112a18e51922da58267e7ea60d5d",
+        "878fded4b4bc0dcec55d68a662a89ab81c8f0cd5",
+        "ad9fc592f9942a7e3feaa19a697329bd65bb7ed3"
+      ]
+    },
+    {
+      "category": "pet bowl",
+      "asset_count": 6,
+      "fallback_count": 6,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 6,
+      "sample_ids": [
+        "13290d908b9f17712aff2c5a9027a81451ce7905",
+        "23f37264ac6b7a445a6c1be53d464660b8c8b2ec",
+        "2f8836e88a478a38746f7811a705cfe91f8da0db",
+        "3c27194087623f99e782a195b0dc6e29dd070e9e",
+        "48277d16bf13630253d689050996618fb110b343"
+      ]
+    },
+    {
+      "category": "playhouse",
+      "asset_count": 6,
+      "fallback_count": 6,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 6,
+      "sample_ids": [
+        "055b7319d340daf8bb17e2bd492f9b1230da55a0",
+        "2a86b5af07fa9d811338542ea179cf0f6ef202c1",
+        "41474cb8f53d913124f1a84c081b85b7a1358770",
+        "7302d8955dc09edaa698694e11587c018dbc6d4a",
+        "abd4ffa985c6a97751cfe720e55c49daea217762"
+      ]
+    },
+    {
+      "category": "pool table",
+      "asset_count": 6,
+      "fallback_count": 6,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 6,
+      "sample_ids": [
+        "50e291aeafe8993708aa5d2938650a3b17b489ed",
+        "60dfc9911a7efd8e1d9e29f47b1e85037ea4c402",
+        "6287edb34ed3a99e28abce790ed36330f23abef6",
+        "87ec2d5fefc4493289c251c6eb84f1c02371addc",
+        "988e19a926492231c05b5d9b542f6d6cc0c1d3ca"
+      ]
+    },
+    {
+      "category": "poster.n.01,wall art",
+      "asset_count": 6,
+      "fallback_count": 6,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 6,
+      "sample_ids": [
+        "3c06599f701ff76705dbd16e525b879a2dde9dae",
+        "4341e7e9949ab8a6e48dbbeb5b7fdf798e5194fe",
+        "5bd850acd98632f70fd1d843211ab5289ff5857d",
+        "97b06b56729e3457c5786f2a4a4c1fcde04b9cde",
+        "a520be7d8a52777002429df7f7a0e405ab4de80c"
+      ]
+    },
+    {
+      "category": "radiator",
+      "asset_count": 6,
+      "fallback_count": 6,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 6,
+      "sample_ids": [
+        "4614aad798d498626c9ba093c56a382e968d47b5",
+        "6e2b2026ff30bfd8ef9f648b8041d2d2808597d6",
+        "78085a926dc32e87bd3a7cc13645eed9a4621f60",
+        "934614e3babfad4f06c72c363135efbde22f9a5c",
+        "ad6a719fb46f8308b467b8d269f5ffa6dbeafec5"
+      ]
+    },
+    {
+      "category": "rock",
+      "asset_count": 6,
+      "fallback_count": 6,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 6,
+      "sample_ids": [
+        "0ea887c25382031dfad1741679a0626fa02e8f1b",
+        "7c8230f6df88f7fd0e55e09552b5f53eece0a77c",
+        "d291be0a1ac8b87e4fb7cf444849fa3619b0041f",
+        "d513cae1f9aa5168446802b6da7f935a5b316d9f",
+        "e84b5f0fab3668fb80c467e3e4c1837a8eb82f46"
+      ]
+    },
+    {
+      "category": "shopping bag",
+      "asset_count": 6,
+      "fallback_count": 6,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 6,
+      "sample_ids": [
+        "61d9ae3206c84ca47cf0f4df598e6f1339bd1879",
+        "94484eab6ac4350a3d4e3a782ff7246bed3e7d93",
+        "a01fa73a0ee6a3886c5945355e115b8c54d370e8",
+        "a273e452eb4b0a43999b2ec7bfefe4b412d5aa06",
+        "da5b2008622dbad313d0f320c1513841497dc1e2"
+      ]
+    },
+    {
+      "category": "shower faucet",
+      "asset_count": 6,
+      "fallback_count": 6,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 6,
+      "sample_ids": [
+        "1dda03fc75f767049a8ff62a35b7b056faa69a9e",
+        "4796defeed8ec1afd1cf4c0948d48d71fb3c3753",
+        "64d34b36f641bf4ed01b314b058ad997725cc4d0",
+        "b69b9a52e74ddf36212e2277ac871f87fd90b61d",
+        "da563ad88ad4606e27514b55efb1032ccd9fa5b2"
+      ]
+    },
+    {
+      "category": "socket",
+      "asset_count": 6,
+      "fallback_count": 6,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 6,
+      "sample_ids": [
+        "222c9b3e52f81bb06d523720bd0ec8a5d7b899d6",
+        "390b09e0e9a7b3d5908896a6971ad61ee0cb5d8e",
+        "5df3f374065c80dd37a15f2cd1a4ebdf2222c0e8",
+        "8e211df77ce701b47ef83dc1f8841266e12b8942",
+        "9e644adad704ea8bfa75c422b9e6e0144d6ccd04"
+      ]
+    },
+    {
+      "category": "toy box",
+      "asset_count": 6,
+      "fallback_count": 6,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 6,
+      "sample_ids": [
+        "0b05fd5482a51a5a786ff5df9713b07650a62155",
+        "221bfe2bb7f6c70688314df7d495359baeb237e4",
+        "492bff8222880502aa7b9c8fdd204271605ad310",
+        "cc57668f1affa1e9b866ce5af34ee20c7e7a0649",
+        "dd295fef0c5d275a25f80090cbe03d2d729d2b8e"
+      ]
+    },
+    {
+      "category": "umbrella stand",
+      "asset_count": 6,
+      "fallback_count": 6,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 6,
+      "sample_ids": [
+        "2513455ca58d903e191800bfd3e6504e8ed5b59d",
+        "32791fcaa59f53012adcdd5f52540be20aad55b0",
+        "53dfe296a16ce12dd5579e0e2b87e3085c7627ac",
+        "80806f6db5840211f0aa6c4ed93a3180a70ffb4a",
+        "9c7761918e97dae817965df5ca88789082278573"
+      ]
+    },
+    {
+      "category": "wine rack",
+      "asset_count": 6,
+      "fallback_count": 6,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 6,
+      "sample_ids": [
+        "44c93189984690e6d978a2f033b59d2acecc5752",
+        "cb53d7dc4a7ac71cd26c4ac7938d9e990bf404a0",
+        "cfc3a88b73f146fdfdee4bfba8d1398f0d5d4358",
+        "db3caf35f39b02b207b3803e98482e4ef0bdf774",
+        "f0bb593437ae75e3c1d663fd2cf47e353f37bf1a"
+      ]
+    },
+    {
+      "category": "balcony",
+      "asset_count": 5,
+      "fallback_count": 5,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 5,
+      "sample_ids": [
+        "00826491ee9361be3f199d05588c5dfae493f0cd",
+        "7e3a88d6a20fa319b06da4573e0de01dd1370ef8",
+        "ab2c0b0f83e55076e8f5e511b34a5bd8c1f1be54",
+        "f882fd4f125f85643ad8b03f3db42ca556275126",
+        "f927fc27c1c9849c5206f7fc15b4e7296b992572"
+      ]
+    },
+    {
+      "category": "bathroom scale",
+      "asset_count": 5,
+      "fallback_count": 5,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 5,
+      "sample_ids": [
+        "1e2b5f3cb4c6481df7058fb759dd129090253ed9",
+        "3ea376d7921e453ecc8f4fd0da884194347b3b94",
+        "9bb35fc8b2b7c1983d60882948c9f834bdb9faf3",
+        "c92c6f54fc159759c8cfbab35343b611b49cf26b",
+        "f22f4bfdd4be46c5a4e0f84c30cc4c03aec50768"
+      ]
+    },
+    {
+      "category": "board game.n.01,chess",
+      "asset_count": 5,
+      "fallback_count": 5,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 5,
+      "sample_ids": [
+        "07559b782f572517157f075dee04ebe4093a0e54",
+        "09dd24b88725558033430399066b51db5a087bce",
+        "56dbffd3633dd67c09d13cdc307cc0cfa8d2b37b",
+        "5cb98a508c3ea2b9caa345570799d2889d15e64c",
+        "e89da2a180cee8db1e4e81f8bd7b30081d402c1f"
+      ]
+    },
+    {
+      "category": "cabin",
+      "asset_count": 5,
+      "fallback_count": 5,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 5,
+      "sample_ids": [
+        "065e00289e7117a075b985df455e98361ef29fe1",
+        "0da80a815c34620df97055cfc870349b332cda61",
+        "206147dfe9c78a4585ae87ed0124fc8401968419",
+        "2c685e1913b32b31a350a5d7cad083ec4f6bb844",
+        "dd8b4002ae494881c8ba42e06507531ae06d3d3c"
+      ]
+    },
+    {
+      "category": "cake stand",
+      "asset_count": 5,
+      "fallback_count": 5,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 5,
+      "sample_ids": [
+        "351f165d750a156b71eb7df6ee9df679122205a1",
+        "72d82af7231e5c793ab328c202cb0c3df18db59d",
+        "8c08a9e07fb6e8ba259626f114b9cb710a611142",
+        "944c5be068b0c409cb9d95ab77c580b265024d54",
+        "d125841bc86be546c81943dbf7e6e6fb74cc9b04"
+      ]
+    },
+    {
+      "category": "candelabrum",
+      "asset_count": 5,
+      "fallback_count": 5,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 5,
+      "sample_ids": [
+        "126c260c9f413be1369e0de7f06ad9f9d01b0c1b",
+        "267e325e5a6034ff926e8603abe18e9604385913",
+        "288c65b6fb0989b13797005dedf9b80b0afa41bb",
+        "8355b2420aa1fc3b7d21273f6091519021d50e5f",
+        "fcdffc361e210e9f362b697d3e0a679d5b3416ca"
+      ]
+    },
+    {
+      "category": "clock",
+      "asset_count": 5,
+      "fallback_count": 5,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 5,
+      "sample_ids": [
+        "1021231b19fb93469d382fa1faca88cd8891f710",
+        "22f29a2b903f70be993dc569204965ceeb663196",
+        "447966555e37abe4703e22521908351c86c604cf",
+        "dddd1984dc7d6d3214e3a00c4d16953ee4ef1338",
+        "e651abc9be26e612f3e974fc4a21ed88b0666a42"
+      ]
+    },
+    {
+      "category": "cocktail shaker",
+      "asset_count": 5,
+      "fallback_count": 5,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 5,
+      "sample_ids": [
+        "37d43f6771ce67fd566c8fa2c46788b45b147e28",
+        "5f14f2ce115a06697103cebfb005888f89a7ac0e",
+        "9cd6d68ae82653b388711aef9440a22fbc795bd3",
+        "ab69e2f34692335d3b782d82bc5ab0c77b411d3c",
+        "fa8dfbcc33cf12400e2d1b3bd8304cd7981db6b7"
+      ]
+    },
+    {
+      "category": "dollhouse",
+      "asset_count": 5,
+      "fallback_count": 5,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 5,
+      "sample_ids": [
+        "31461f71740d5c13c376383f27fa7e2c75e4851c",
+        "4bcc17fabb87d0b39a32696fad31eaec455a2e53",
+        "7a3e0a25e205a9e7fd61d99b07a139206aa25829",
+        "8760d571a7b8be3666d29b5568c7d458465f80e4",
+        "c5844462115398e25206a58ce202d227fa51f00a"
+      ]
+    },
+    {
+      "category": "flat bench",
+      "asset_count": 5,
+      "fallback_count": 5,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 5,
+      "sample_ids": [
+        "0391f7b149076276d028060971ae3d197619f196",
+        "3143d105c6f7eac4052e1cb4f498c805a7b20f35",
+        "88abb02d43f582b874ca358e829db279c0d20071",
+        "c84ab7b8a498c482026664bb468aea0ef038ede3",
+        "e6b9ed47b137a8ca891f8f8347935ef0eeefcd97"
+      ]
+    },
+    {
+      "category": "hall tree",
+      "asset_count": 5,
+      "fallback_count": 5,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 5,
+      "sample_ids": [
+        "2663142b521e1194c04b39622d66af339feaa34e",
+        "68ff1097f76976c669353c9e85003ebaed75f7b0",
+        "95a115ea85acde3b558b0fa25bfd5965dec18280",
+        "b395c0b27f34bbdf7bfac33bdcb1946daeb2609b",
+        "xxxx9980f374x4ef9x49c2xb14fx1fd1554b3bd1"
+      ]
+    },
+    {
+      "category": "paper organizer",
+      "asset_count": 5,
+      "fallback_count": 5,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 5,
+      "sample_ids": [
+        "5200c51d14127a67f0cc45c5a2d89b40dea4275e",
+        "7ab36bf570b17a24db219da8d1bc4f37b689add4",
+        "8e8fe6014f634b38f80c6bdc63becba90c76635c",
+        "c8e52cc537e216597dde1b7b5fcb753101385ed5",
+        "e4a620eb48a82e173b67521939bbd0c5c59f5359"
+      ]
+    },
+    {
+      "category": "piano",
+      "asset_count": 5,
+      "fallback_count": 5,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 5,
+      "sample_ids": [
+        "97e2497662dccaa2d8bb3445ea20cd9ebd8368a3",
+        "b37b0eb5d85c2b2639233e5ddf9f544a1079234c",
+        "cb143444f831ecf796490c5c9572cdfec841d7dd",
+        "cd5dbde963194db5714c6389bb045cbd9fc980cb",
+        "f51e066d210a34e439921cec1d7b52a339fc298c"
+      ]
+    },
+    {
+      "category": "pitcher",
+      "asset_count": 5,
+      "fallback_count": 5,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 5,
+      "sample_ids": [
+        "2d84575936f6a08fb38b3ad647d25c613fdddad0",
+        "587e5aca5d2e9f6a184b95a16f8da42d8f69b5a1",
+        "59d54ccbb28afc76a3c140ef50eba8a2f65cc850",
+        "f92bb105d2e672da6813a66d5948b28367e91a6f",
+        "xxxx17ca8327xc1f0x41efxb742xaab9cafdfd18"
+      ]
+    },
+    {
+      "category": "purse",
+      "asset_count": 5,
+      "fallback_count": 5,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 5,
+      "sample_ids": [
+        "0e151b05ae166d88914d59461e950f83b5edb11b",
+        "d18433a62ef38aab61189e0a413bd014c0461c9b",
+        "e00628619687958612f02048a9c44e86829b9659",
+        "xxxx58555ed2xb162x4b59xb779x79d9a56f3109",
+        "xxxxb356c2a8x1d93x4c5fxac25x962a276d2dec"
+      ]
+    },
+    {
+      "category": "quilt",
+      "asset_count": 5,
+      "fallback_count": 5,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 5,
+      "sample_ids": [
+        "2ca8ca652a14b01aaadcd2aa65656bebcc12ec81",
+        "e6d2dc407287e861f8847903a659f0d76a9d2839",
+        "xxxx44429329xf583x43a3x9569xf739c2cef2ab",
+        "xxxx9c987c6exb9f1x4848xa85bx6bfcf210554c",
+        "xxxxd72abb5ex5931x42ddx8fc4xb905537e8f8c"
+      ]
+    },
+    {
+      "category": "record player",
+      "asset_count": 5,
+      "fallback_count": 5,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 5,
+      "sample_ids": [
+        "4502ba273eb6a11bbd1722584e44cc6662440ab3",
+        "83e118e066605f3ec25d5d62344a4b411cf24c1c",
+        "b8af904ac858f2431a89ec7b1d3a44c25b444259",
+        "e1a752e5ef276782f79dc6054d4bca6dd22aef40",
+        "xxxx11742d78xf657x445bx9c24x35592b240c2d"
+      ]
+    },
+    {
+      "category": "roof",
+      "asset_count": 5,
+      "fallback_count": 5,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 5,
+      "sample_ids": [
+        "73ce6dfa5079b10e60f215f685675670bb868174",
+        "9d7c240d414768f45a984a4de25e48f9b0a22862",
+        "cd765bd0476ff2a04eb0c6bee77366e0cf11ef1d",
+        "f1e102110798e180df90e6bdd7f570c118e60ee7",
+        "f6e731a6956e06bc91178b1d219c08529e2baec0"
+      ]
+    },
+    {
+      "category": "step stool",
+      "asset_count": 5,
+      "fallback_count": 5,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 5,
+      "sample_ids": [
+        "24b729b6bf2317aff629b7917959845075fd8308",
+        "41211ff4c9664a5f94a7728259a6ae23eb9c86f6",
+        "c4ecfbcaaf89dae847ab4bc4d126c010b82a5dc3",
+        "e7ba564ec743c9317f5be11402d3689a7954eb7f",
+        "f6063bea0305f452aaaf33c0e8d6f671a71b765b"
+      ]
+    },
+    {
+      "category": "surfboard",
+      "asset_count": 5,
+      "fallback_count": 5,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 5,
+      "sample_ids": [
+        "123fcd0a6331640927a4d369b308b2112d001600",
+        "260d22813d2b8ba77a1184cffbbd9d849a0858a2",
+        "958447c95af387c6ba73d0b8e30d315d0f4169ff",
+        "add6ba89a44ace58e20a36248fb932b20205a5f1",
+        "ee2b1c47ba5094e8013f3794d9324fed5c71d16e"
+      ]
+    },
+    {
+      "category": "treadmill",
+      "asset_count": 5,
+      "fallback_count": 5,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 5,
+      "sample_ids": [
+        "0c6381ba9b96c37419f407728b5510b3bf63daaa",
+        "364ff9bf3627be12a05817faa283538fc02de5ad",
+        "6d6886e607c10bb9d4d138e676a3e8292c53e38d",
+        "b077a75a04149e4bd369c92c2be97f101414fd14",
+        "fdd91608c418ead483b7a0bbd78a82a6306f36d0"
+      ]
+    },
+    {
+      "category": "trellis",
+      "asset_count": 5,
+      "fallback_count": 5,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 5,
+      "sample_ids": [
+        "31034065898c4091f109e5a98dbd6451b99dac2d",
+        "5f35fba809dd9b4c06e20515b4ebb56afb66d461",
+        "db34005cb679bf40042c16feef5ee4104f4e5a66",
+        "e014a107c1f020ae48c970064f75606724f946b7",
+        "f0d3570a14bff4ab4fcde493390106905dea9c9a"
+      ]
+    },
+    {
+      "category": "whiteboard",
+      "asset_count": 5,
+      "fallback_count": 5,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 5,
+      "sample_ids": [
+        "1b37271d2d52124cf69fa91a2acb11a6dde262f2",
+        "7097cff803bee5431fe6fe26edb423c5499fb28b",
+        "d48ea55950745a4301f0c3917d8274d6166a7bd3",
+        "e0ba0f943fe851ef01d90bbab215daceccc4ec63",
+        "e59804c7aa6a80c0a474699b47507fae10a082b1"
+      ]
+    },
+    {
+      "category": "bag",
+      "asset_count": 4,
+      "fallback_count": 4,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 4,
+      "sample_ids": [
+        "0684c04a6a19f88a666c2a541593ac73185eb128",
+        "24b7add5097bdf3b71e22f13fc48e60b2dd5039c",
+        "792da1654a2adf3da64a91aa8ef328f98074b82c",
+        "bc8265f0731bea41d5f9c3fe60f8f89b32466f5f"
+      ]
+    },
+    {
+      "category": "bathrobe",
+      "asset_count": 4,
+      "fallback_count": 4,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 4,
+      "sample_ids": [
+        "016740800c9b1834742579705ddfc6899dfceddc",
+        "038b41ad09412325b1d01ef97894be59ca068ab9",
+        "967ad12ca41b821caa61cabebe7606dfb993f774",
+        "973c8db16abb188caa2868a16141b643684e3881"
+      ]
+    },
+    {
+      "category": "bouquet",
+      "asset_count": 4,
+      "fallback_count": 4,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 4,
+      "sample_ids": [
+        "0f26b905fee27370294875f1868203002d90f8f3",
+        "31234c5285243db0d6bc43944457825b173cd879",
+        "762e02786f304286c1a68d3d53365bfa743b4f5f",
+        "f926c93e4a75dfebb9dc4afc1ae2efff644b9620"
+      ]
+    },
+    {
+      "category": "broom",
+      "asset_count": 4,
+      "fallback_count": 4,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 4,
+      "sample_ids": [
+        "419c7545288e80d1045111a5e3ba130175d8830a",
+        "aa09f32e2b308c8d2f6c6aad44da8ca72184dab8",
+        "c1af88a8e45c99a987d56630d3197c29af1a4a66",
+        "d2b4666b2269be4477b0f25a6e59caafb2513d5f"
+      ]
+    },
+    {
+      "category": "chopping board",
+      "asset_count": 4,
+      "fallback_count": 4,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 4,
+      "sample_ids": [
+        "3cde3ef34dd55214ed0653b5aa31cf77a048bd4b",
+        "e928e8bd2f9012623b5a7d73e18f35b8a1df21f5",
+        "f5e9460870ed5da0fe1df653542b4b19a1a7bf6e",
+        "xxxx880851daxf652x40fcx9f16x02736f576c59"
+      ]
+    },
+    {
+      "category": "cruet",
+      "asset_count": 4,
+      "fallback_count": 4,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 4,
+      "sample_ids": [
+        "21527bf23974c98dc7bc88b44ba6b54ed32e676c",
+        "4e58355312c1de13eb2b1b29b4dfbf0a8dbabefd",
+        "867cf3a6f88aa00b97aee772c2349bff732fbac5",
+        "9074d79340ff79a56ec2e1cdcc3aec203ace5e87"
+      ]
+    },
+    {
+      "category": "door",
+      "asset_count": 4,
+      "fallback_count": 4,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 4,
+      "sample_ids": [
+        "1c3e39d4a0d3593c4bcd385c2652e834195f343b",
+        "a99599b49e9cac70023e2061effb70b8500fe138",
+        "cbadc2e21f271fb6e529484d47385de37f8164d9",
+        "ef9b08bbb9663f62e17996599a2f5887906ead5b"
+      ]
+    },
+    {
+      "category": "doormat",
+      "asset_count": 4,
+      "fallback_count": 4,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 4,
+      "sample_ids": [
+        "4359d61391dfee18a7588c321ec0335b320361a2",
+        "52bff7c33fd7e630feb5d9e23f36d3cf93016444",
+        "6931780efdd88a0c00d433f20a0d3418c44a9790",
+        "edd3385b54bd71f78712dd32183fdab902b88f8c"
+      ]
+    },
+    {
+      "category": "drying rack",
+      "asset_count": 4,
+      "fallback_count": 4,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 4,
+      "sample_ids": [
+        "1ea17f6cdc7cee52756bcf34592441814f98adf5",
+        "7ee697a79383d0f515bfd72329bd959c44b2b054",
+        "a55da36088048698a1bebfd9aa7aaa5c17422961",
+        "c563959687e9e7cc78d81c07e1765f9091f517ae"
+      ]
+    },
+    {
+      "category": "gate",
+      "asset_count": 4,
+      "fallback_count": 4,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 4,
+      "sample_ids": [
+        "3a978bdf10d5b64db13cec1f68e9691b62937c2f",
+        "70edacf930043886edc239c55156daa0a782abb1",
+        "8091ae243ecf3291e7cc492a99c1135cee83b813",
+        "b38d9c64c47cea5b7b4eeb58164062ad4f0ae3a0"
+      ]
+    },
+    {
+      "category": "handcart",
+      "asset_count": 4,
+      "fallback_count": 4,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 4,
+      "sample_ids": [
+        "3d7068a83a3bf2eeaf5d623186dd8db1f13b70c8",
+        "40a9189cf3fe6b8984c2b70782ee966063c8bbff",
+        "510409310ef202d40307c868efd758c67e5d26c9",
+        "cc15f4f67e55963a009abe0f4fe10148cb632f2f"
+      ]
+    },
+    {
+      "category": "hook",
+      "asset_count": 4,
+      "fallback_count": 4,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 4,
+      "sample_ids": [
+        "3fef4438cdcaa7995c0f9a5a5ee3f0b3e7efea0f",
+        "8627edd68dd8f756bfb199d20e85a73ff49fa33a",
+        "964474dac59d3aad438fdebb1caf99d26d66aab3",
+        "ae10a12665064ecbd059a846007d7a261257745b"
+      ]
+    },
+    {
+      "category": "ladder bookcase",
+      "asset_count": 4,
+      "fallback_count": 4,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 4,
+      "sample_ids": [
+        "0c3ff0c2512628c34b32c0ab0ae4ec93f712e7c6",
+        "9260cff954cf7a01a0b9b9fdaebe877d9664cafb",
+        "xxxx85e326a7x648ex4042x83f7x447577f1754a",
+        "xxxxe8d612e5xee3dx4fd8xbbf6xc5b0fb7f213c"
+      ]
+    },
+    {
+      "category": "mixer",
+      "asset_count": 4,
+      "fallback_count": 4,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 4,
+      "sample_ids": [
+        "15884b59db8c55f7b3967058d977831c764ad61e",
+        "48f600fa99cd5eb41a636c23cfab5b26adcea928",
+        "e11bc1a6cc288417841efe0269d29fef3db82983",
+        "e1d30ae83996db2ab653f342d27a5b316b762979"
+      ]
+    },
+    {
+      "category": "motorcycle",
+      "asset_count": 4,
+      "fallback_count": 4,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 4,
+      "sample_ids": [
+        "51b2d4ac76604be287034654ef46e8a92e752fa6",
+        "9722ca71ca7decbcaa44d5476d13b701d6370c3f",
+        "d36ceee09705df0153d06a91b00dc59d9fb5d7b5",
+        "fb9d12344952cb2e228fe7a678329f138db2915c"
+      ]
+    },
+    {
+      "category": "napkin",
+      "asset_count": 4,
+      "fallback_count": 4,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 4,
+      "sample_ids": [
+        "4681d7a50b9f9a12acaaeeb06349203ac7235303",
+        "49257a6320209f749c95c2a67ec9016bfda7734d",
+        "d104549e7adc8876c1c19c40a26e9cc092387302",
+        "xxxxd32eb1e2x09a7x45dcx8b7ex16a21c988ef7"
+      ]
+    },
+    {
+      "category": "pedestal sink",
+      "asset_count": 4,
+      "fallback_count": 4,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 4,
+      "sample_ids": [
+        "09495c87c9c7c4ad6ab360f67366274aff274f72",
+        "23ce1d14582bc87f213f3feb32c1e26ebe3f8685",
+        "57cd1ba71ade5db9dda836bc8cf367831f5829ef",
+        "8cc37528ee8ce07d8603fb320e9f591d4771c9ea"
+      ]
+    },
+    {
+      "category": "plant stand",
+      "asset_count": 4,
+      "fallback_count": 4,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 4,
+      "sample_ids": [
+        "30ca67662ca6f2342e9b4e3b1b513b6670adbb7c",
+        "76046a7bd7a4335502da55243e677044f97511bc",
+        "9289f39b65ef0acb1f7413ecc73d83a63ac8e974",
+        "9ae7a2c2307b4d67841a4ed0e2aae7fc8de870ea"
+      ]
+    },
+    {
+      "category": "play area",
+      "asset_count": 4,
+      "fallback_count": 4,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 4,
+      "sample_ids": [
+        "5a2865dc56dc6bd81960e25e978df226feaf7c07",
+        "5c774636463c69cbc9299980001e3b55679848b6",
+        "8752a6a4a4f5458a1b2febb2a1ea03c1cbd0d8f2",
+        "f3f4adf2cb7decf3710b6c304f6da96c4cf2c59f"
+      ]
+    },
+    {
+      "category": "rack",
+      "asset_count": 4,
+      "fallback_count": 4,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 4,
+      "sample_ids": [
+        "2268decc11d7b2ffd1334822cfbb87b79757e70e",
+        "2d12c699b1e1c7d25bca3ef52268bcee7046c407",
+        "7b63630a659de760dd3fd7bea3c7d062f61fdb59",
+        "9b578304805dd2e8dc433d5f7275c4164f9aa1e7"
+      ]
+    },
+    {
+      "category": "room divider",
+      "asset_count": 4,
+      "fallback_count": 4,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 4,
+      "sample_ids": [
+        "1f86a8ec92c644ff07dc448345c33876a61af253",
+        "3d780643626fa80329154d35920d87d0df72d2fc",
+        "780c072398eeedc1f9a10e243bbb436fb31b252a",
+        "9406d991d4c026e8ca08e5583634bed76b4cd9f0"
+      ]
+    },
+    {
+      "category": "safe",
+      "asset_count": 4,
+      "fallback_count": 4,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 4,
+      "sample_ids": [
+        "30b659612c0a6358b5d81da95a6c7599d085e981",
+        "3700414065315caa30b22080b93bd4adf355ada3",
+        "7f99b0422e4d6967cb20ea2b6ab3441d7c1ee774",
+        "fedbb1f00ae06425db033fcccd9d3655717083a8"
+      ]
+    },
+    {
+      "category": "toilet brush",
+      "asset_count": 4,
+      "fallback_count": 4,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 4,
+      "sample_ids": [
+        "3e79880cbe8a52cff5dfbf5e0ce3de0044a8ae77",
+        "9d7a74b3d536925b898281b6fdac176e1041b780",
+        "ae4815db8753a9603d5ff76780625fe334bbfa07",
+        "e73109d574e1da1984c833d2e353fe359a9bcbf0"
+      ]
+    },
+    {
+      "category": "toilet paper holder",
+      "asset_count": 4,
+      "fallback_count": 4,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 4,
+      "sample_ids": [
+        "92290b0f356a3ce3c14b4d4d645c838929454e71",
+        "92dc5048b31ac0a0d246ecf2f55e6d07fba8b8fa",
+        "c1bdd6cef00b9b3e3da93585e0bb64bdd5cd706d",
+        "cf038f1e4d1f373f8a83548608adfaf132d970ec"
+      ]
+    },
+    {
+      "category": "toiletry.n.01,perfume.n.02,bottle",
+      "asset_count": 4,
+      "fallback_count": 4,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 4,
+      "sample_ids": [
+        "08d3dedb3578f8edb25948a69a2b3e0fa0ec4d10",
+        "93f75b708ee955f966c9494a82cab08592246f67",
+        "a5554f1d7f6d6778f3ffa7513f080afbf8cea47f",
+        "d5abcbb09dc457dc655cf0cf71475e6f149e2036"
+      ]
+    },
+    {
+      "category": "vacuum",
+      "asset_count": 4,
+      "fallback_count": 4,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 4,
+      "sample_ids": [
+        "0d1b16fd0c4171d77114e2c262b6d9993565bdeb",
+        "34bd334b91aa80076138650d57efa34832b9acd3",
+        "4972701aa5dd6a43a45791d9246dc46e66f24aa8",
+        "9b80b17824555cccc84b3a528015253eda338bf1"
+      ]
+    },
+    {
+      "category": "valve",
+      "asset_count": 4,
+      "fallback_count": 4,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 4,
+      "sample_ids": [
+        "07f6db56b225622fc0d04ce1a39a7498fec41775",
+        "7dc150f87d704f7b90d79ba114e42450b572c510",
+        "b58557af915835c3a4e98fa4a7fc8aba234145bf",
+        "cb02cc90b207289dfd2ab4deeaddea38c6198d09"
+      ]
+    },
+    {
+      "category": "wall organizer",
+      "asset_count": 4,
+      "fallback_count": 4,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 4,
+      "sample_ids": [
+        "4709da6220902919854037e7e420a9e7dc9c3f7f",
+        "8d72e773ea4e0520488762a6368350b5227733d8",
+        "ae6b6ed1a3860ad3cecd07676acd2f03f2602144",
+        "bdcbe07a519e6dfa6362fa0e6dd916682251a5b8"
+      ]
+    },
+    {
+      "category": "wall sticker",
+      "asset_count": 4,
+      "fallback_count": 4,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 4,
+      "sample_ids": [
+        "12e712ad958cc132ccde4f452c0015fc908cf9ca",
+        "485faac7ab84aa46fd40e259b7a9ae7ca36d9cef",
+        "8b70adf4eba1e30834d817b0f1aab4c4863aa85f",
+        "a0b6c565a79004f1b0d5d883a8986c10dabe132a"
+      ]
+    },
+    {
+      "category": "washbasin",
+      "asset_count": 4,
+      "fallback_count": 4,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 4,
+      "sample_ids": [
+        "21d54098a876f8cc91effa34a0098f87e21944c9",
+        "5bd7084252c7d8b25273c4ebe9b81f230392140f",
+        "a37269f636786fca68f9ed9a32e4c9a6b6e7df40",
+        "c816dc1bb177a739c7c52bbca6097e7e627a2214"
+      ]
+    },
+    {
+      "category": "bicycle",
+      "asset_count": 3,
+      "fallback_count": 3,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 3,
+      "sample_ids": [
+        "323e91a7be4f48ea6f7f451d5f1d22edb030930c",
+        "445e5ad7b8cfd2e1e15e812dbfd511ba4e378a5c",
+        "de69a7b4e62b31f695624352494a14893148eae3"
+      ]
+    },
+    {
+      "category": "curtain rod",
+      "asset_count": 3,
+      "fallback_count": 3,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 3,
+      "sample_ids": [
+        "69635993790f6d8bde07450b03d84faa4393cbb1",
+        "d81799a9c43ba143db89c6bfbeecce8bb3d200f3",
+        "xxxx6c1801faxa665x4b33xbf4cx00e7544ffcb7"
+      ]
+    },
+    {
+      "category": "cushion",
+      "asset_count": 3,
+      "fallback_count": 3,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 3,
+      "sample_ids": [
+        "1e888d9b36c50320b2cd1691d09845e73ce9f97e",
+        "8a77907731383e565cab178f16b0f63c0911ff25",
+        "acea4d7039744a7f453aa6b6c653f26d9762c189"
+      ]
+    },
+    {
+      "category": "desk organizer",
+      "asset_count": 3,
+      "fallback_count": 3,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 3,
+      "sample_ids": [
+        "09b8eb37b36847b2dc4f541943befd88b6e74fc1",
+        "d69b8a31c2f9d1448ca955d4113fa73005f2f31e",
+        "da7f5e58294c0b934e1bccaa03f3694275bc9ffc"
+      ]
+    },
+    {
+      "category": "drawer unit",
+      "asset_count": 3,
+      "fallback_count": 3,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 3,
+      "sample_ids": [
+        "662e1bf92a5ab76e1315a0b61e4dac71a49ac9ac",
+        "79bd7ea173156c5e2581f7c3e7caa2bcee9b289a",
+        "ccd92dda462cb380a92851ccfe000079bc3c82c8"
+      ]
+    },
+    {
+      "category": "easel",
+      "asset_count": 3,
+      "fallback_count": 3,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 3,
+      "sample_ids": [
+        "0da471d87730e8c2ee858d08c5a24d69e14306ed",
+        "5e19cedd75f0bd34807b6ec0d258fa59daaac602",
+        "xxxx529bc1b9x55e7x4eb4xbd22x9f393d72a919"
+      ]
+    },
+    {
+      "category": "file",
+      "asset_count": 3,
+      "fallback_count": 3,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 3,
+      "sample_ids": [
+        "0a66e9d231f702eec5e2e29781a24859b1ffed9f",
+        "da2157ae8ca4a7b67ee6a45988fda2628f9db124",
+        "f70c9cd37e4949edaa532254729fb3153ff6a76f"
+      ]
+    },
+    {
+      "category": "foosball table",
+      "asset_count": 3,
+      "fallback_count": 3,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 3,
+      "sample_ids": [
+        "39f5d89c2a34772a320adac799d9e9fd54adb09f",
+        "819d680058215e4a35dfc4abe61b91ec5901d4ad",
+        "99c1832511c8703634b467fa82a70442eb3040c0"
+      ]
+    },
+    {
+      "category": "garage door",
+      "asset_count": 3,
+      "fallback_count": 3,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 3,
+      "sample_ids": [
+        "556e2dce2ddc10b3941a4c5b3adfbd7364a425a1",
+        "c25995b2c9398c74823c58e069285236f47f8f2a",
+        "cbc0bd4099c9137debcba2d7ce1aa0989ca6439f"
+      ]
+    },
+    {
+      "category": "grab bar",
+      "asset_count": 3,
+      "fallback_count": 3,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 3,
+      "sample_ids": [
+        "368a694d34e1e8c367838ebef4b2d4e6307fa7ca",
+        "479e8fe5599af35ba70e86d2f46e66c778c9c170",
+        "78b6c887f0f3e406200243b1dfd986a9475be416"
+      ]
+    },
+    {
+      "category": "grandfather clock",
+      "asset_count": 3,
+      "fallback_count": 3,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 3,
+      "sample_ids": [
+        "301cbabdb3b78ab99d17c7434712bdcc72c4cbcc",
+        "4796572c1a3f16733e3bb883f5d03248926a482e",
+        "d4d4b5fca698aa8e5edc74f14a0c51bf392741bd"
+      ]
+    },
+    {
+      "category": "hedge",
+      "asset_count": 3,
+      "fallback_count": 3,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 3,
+      "sample_ids": [
+        "17d34f93062191a7fe920a15c58432935e5a902a",
+        "20ba326864f55fdc086275e0249c32763a1260e8",
+        "b2d43c076e6d9faac8c38c145b3908aa7ddd6eb0"
+      ]
+    },
+    {
+      "category": "hot tub",
+      "asset_count": 3,
+      "fallback_count": 3,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 3,
+      "sample_ids": [
+        "09383c48f16d218e88396c71afabdebc5a7b5236",
+        "e456ba18f1afa22b9e77921850248593d4de4022",
+        "e6a532d693d673c9f5ca30fc0836e6c086ea446e"
+      ]
+    },
+    {
+      "category": "jewelry box",
+      "asset_count": 3,
+      "fallback_count": 3,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 3,
+      "sample_ids": [
+        "205c95207c3cdd3e1536d75e01d03fcd4b762c5d",
+        "f94591c6f69e25dab9b3d1dec0a04887cae8b16f",
+        "xxxx7059daa3x72fdx42acxa267x9ee0ad8d6ff6"
+      ]
+    },
+    {
+      "category": "ladder",
+      "asset_count": 3,
+      "fallback_count": 3,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 3,
+      "sample_ids": [
+        "44316e07a528138d47b9ed9636a606290874a258",
+        "71ebfd95532b7bc4eb87ca51f69c97fd4728218c",
+        "f5f539757fefb13f032531561ca079adbe81b468"
+      ]
+    },
+    {
+      "category": "mailbox",
+      "asset_count": 3,
+      "fallback_count": 3,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 3,
+      "sample_ids": [
+        "0a71002e22fa82095f15a49230367da1c28652c9",
+        "1e6795498f065062e0eb70d318cd34337dbcd952",
+        "9de56cff7403949a4c1d94c8cfae74f05f59278b"
+      ]
+    },
+    {
+      "category": "overnighter",
+      "asset_count": 3,
+      "fallback_count": 3,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 3,
+      "sample_ids": [
+        "0e14c016ea81f6f9c67579ab84aea8be9d010497",
+        "8a0afac55af01ffc286c5f6fc9728bfa746ac918",
+        "d9e9413b06f44aaef5190821a2955f528946178d"
+      ]
+    },
+    {
+      "category": "pestle.n.03,mortar",
+      "asset_count": 3,
+      "fallback_count": 3,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 3,
+      "sample_ids": [
+        "39f750b66fd9941a1624ad0cf1e976296510b22f",
+        "a0ba49202e76e8f528d1b3472c1832a86e0874c9",
+        "c73d90cf472ce9ae4e2899812ef72817336b1349"
+      ]
+    },
+    {
+      "category": "pet house",
+      "asset_count": 3,
+      "fallback_count": 3,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 3,
+      "sample_ids": [
+        "7a6def1426f562d3c426c0aa5531b0470cb5fb7a",
+        "ea1565e02e6aeb63328999895bdc151f4e769b16",
+        "f7e970a71d2da31cb78fc933f0db82c1c7ad60b2"
+      ]
+    },
+    {
+      "category": "punching bag",
+      "asset_count": 3,
+      "fallback_count": 3,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 3,
+      "sample_ids": [
+        "0f67a9c1513eea974f4d251f6809cedb074a0b0d",
+        "51198537321b39f1b6e9231d4d033092aebda962",
+        "b98b86e3d373233c18f0f9c2b00119d220db8059"
+      ]
+    },
+    {
+      "category": "roaster",
+      "asset_count": 3,
+      "fallback_count": 3,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 3,
+      "sample_ids": [
+        "13619669d6d62bdab8d04a4b61c2083af5e61819",
+        "3017f3e89e8d40f76e1ef5d10a6c9787ba63e743",
+        "f34f5c491dd0dab687e6090f674c3c4cdec1f888"
+      ]
+    },
+    {
+      "category": "sewing machine",
+      "asset_count": 3,
+      "fallback_count": 3,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 3,
+      "sample_ids": [
+        "1f7ffcff5e5435eb0e2a710bca7948a23ff1b0a0",
+        "9b5abcc360cae5e0b5ca75ff9bae3241ddbbe3ea",
+        "fcfb0f1835ea7bc4381c8744aec2671153dc76fd"
+      ]
+    },
+    {
+      "category": "spectacles",
+      "asset_count": 3,
+      "fallback_count": 3,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 3,
+      "sample_ids": [
+        "74719799dd6db4311fb6cb0a62f9e2892006e2b7",
+        "d2c0aeb28407ba01f6934b50e7078b6a7103f49a",
+        "e903b2fc42ecaa04ba1facfed58e4e7ae4795c51"
+      ]
+    },
+    {
+      "category": "spicemill",
+      "asset_count": 3,
+      "fallback_count": 3,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 3,
+      "sample_ids": [
+        "2d9d75abe73b8926361f892d5404a543a2d5a659",
+        "b0e85675655f936f71c6b47f6bf0bcd09e4e09cb",
+        "eb266a87765e0bc3c3bc80f0cb942f8c4f991109"
+      ]
+    },
+    {
+      "category": "switch",
+      "asset_count": 3,
+      "fallback_count": 3,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 3,
+      "sample_ids": [
+        "0c903eb1943c2df8a175aed4bdec3895af2d1975",
+        "18fdedbda00326005b6dc1690e05a523d8a191ec",
+        "78218988eaa22d4e96fbf13517ec92f8897c5a2d"
+      ]
+    },
+    {
+      "category": "switch.n.01,dimmer",
+      "asset_count": 3,
+      "fallback_count": 3,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 3,
+      "sample_ids": [
+        "10fe98d6dff038606af0875ee5b18f90f5aa9d04",
+        "33b3cf8ec87adf9fae567fdf0d6c88df3e0b88d1",
+        "c1141602bbec5838900a52cf21c42599326b355e"
+      ]
+    },
+    {
+      "category": "thermos",
+      "asset_count": 3,
+      "fallback_count": 3,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 3,
+      "sample_ids": [
+        "6559f3e7b5325e7981d153d288fbb8e54659584a",
+        "aaf1ba3e91ae781751ab5eba22ec2bbd30e05365",
+        "aee86f6cb8551b9601a11062038936fdb927860d"
+      ]
+    },
+    {
+      "category": "toilet flush plate",
+      "asset_count": 3,
+      "fallback_count": 3,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 3,
+      "sample_ids": [
+        "1e53630b8537aaddcc4cb320c470bb9b912b885e",
+        "9bae6e88bde9e921284b14e22699733109ca0358",
+        "a5a5c0c628c77aa02d76c0b5eadeaab0af25be56"
+      ]
+    },
+    {
+      "category": "toilet paper holder.n.01,toilet tissue",
+      "asset_count": 3,
+      "fallback_count": 3,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 3,
+      "sample_ids": [
+        "1b7697ecf802c54584ed04981dd9f450de83a448",
+        "99665804218804022bc87b9e8edf35221a0bb8ee",
+        "f3b9745381984f8f20cb891a647afb531dcfc5d6"
+      ]
+    },
+    {
+      "category": "trampoline",
+      "asset_count": 3,
+      "fallback_count": 3,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 3,
+      "sample_ids": [
+        "9c264d2097be9231cb5daf17024ce84c3c8358a0",
+        "ae3b308de645f08302063392c6585858cbedc6f7",
+        "bc535374502a6afca25a3046379343f1f06e2da4"
+      ]
+    },
+    {
+      "category": "air hockey table",
+      "asset_count": 2,
+      "fallback_count": 2,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 2,
+      "sample_ids": [
+        "0aeaf9f7a9abe99658bb779e0ab9422730429285",
+        "3bacdc45913356e5bbab6f039b44a14864f29dff"
+      ]
+    },
+    {
+      "category": "ashtray",
+      "asset_count": 2,
+      "fallback_count": 2,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 2,
+      "sample_ids": [
+        "81a69cd1ce65fc9d525258027a6030bd777ce514",
+        "affb3a7fe6864768a34b3eb9298b0aa142c34e81"
+      ]
+    },
+    {
+      "category": "blanket",
+      "asset_count": 2,
+      "fallback_count": 2,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 2,
+      "sample_ids": [
+        "50b073c902e5d6bfdeb58a55fe089eadb237612e",
+        "xxxx00d69168xd653x47aex95c8x4e0a56853ba2"
+      ]
+    },
+    {
+      "category": "blanket chest",
+      "asset_count": 2,
+      "fallback_count": 2,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 2,
+      "sample_ids": [
+        "adc2744061c0483d98c1a5121309cb600dd1efd0",
+        "b0a6e1e1f6e8c6603caba52bfa8e3e06469e9eb7"
+      ]
+    },
+    {
+      "category": "board game",
+      "asset_count": 2,
+      "fallback_count": 2,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 2,
+      "sample_ids": [
+        "b950350c1ebc4bba8ced205fd0c920fa0328156b",
+        "d5f0014aa089653a8c5a142ab966d73a9af40298"
+      ]
+    },
+    {
+      "category": "bolster",
+      "asset_count": 2,
+      "fallback_count": 2,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 2,
+      "sample_ids": [
+        "61bb33a7ffa08bce73405ebe7c6d931ae6c6b2d3",
+        "ac515d1bc69ebaa1319ab1fa9f26a94b67827fc2"
+      ]
+    },
+    {
+      "category": "bridge",
+      "asset_count": 2,
+      "fallback_count": 2,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 2,
+      "sample_ids": [
+        "35e009c285a689b0b77401f0cff863b2a53ec366",
+        "94650dc831988688ef0c5cdd67c0cd734e831f56"
+      ]
+    },
+    {
+      "category": "bucket",
+      "asset_count": 2,
+      "fallback_count": 2,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 2,
+      "sample_ids": [
+        "203cb42ac01a1f6a6ccea009408ad4a695998c7c",
+        "712ef8ca280bad8e1f00da9043b74b8f64f992b2"
+      ]
+    },
+    {
+      "category": "butter dish",
+      "asset_count": 2,
+      "fallback_count": 2,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 2,
+      "sample_ids": [
+        "28c8477ba7000e7f0365e7580a69a8b9097abca5",
+        "b92106c5a43cba1b38c5d5367627cc9eb00487fc"
+      ]
+    },
+    {
+      "category": "cellular telephone",
+      "asset_count": 2,
+      "fallback_count": 2,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 2,
+      "sample_ids": [
+        "33216cf986a4e6b03f8417d069daed179661fd80",
+        "77a9494c79e0cbc30ab49127f456c7d7f4a53e64"
+      ]
+    },
+    {
+      "category": "chest",
+      "asset_count": 2,
+      "fallback_count": 2,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 2,
+      "sample_ids": [
+        "480836c9b9499eb97a6d9eba8eeff97def546078",
+        "d983d1c179f32bdb1edb214c941f8b33079fa410"
+      ]
+    },
+    {
+      "category": "clothes dryer.n.01,drying rack",
+      "asset_count": 2,
+      "fallback_count": 2,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 2,
+      "sample_ids": [
+        "5c65f0b168b4f446e5c645cc872136960587141d",
+        "a1698dad046f8b4c4b83ecb6864e296ecb292534"
+      ]
+    },
+    {
+      "category": "coffeepot",
+      "asset_count": 2,
+      "fallback_count": 2,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 2,
+      "sample_ids": [
+        "117aa7d8cb3d9a5d01a80b5a9dfc9f1fd015b591",
+        "a357ff5954739db5c345f16e89a102597d765728"
+      ]
+    },
+    {
+      "category": "computer screen",
+      "asset_count": 2,
+      "fallback_count": 2,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 2,
+      "sample_ids": [
+        "2029bfb9eca4ab612eb6724916cbff472de47d7b",
+        "d294c9a5b9a28083a3bd1af2fc2b5c7b55fe1c7e"
+      ]
+    },
+    {
+      "category": "countertop",
+      "asset_count": 2,
+      "fallback_count": 2,
+      "front_policy_candidate_count": 2,
+      "high_priority_count": 0,
+      "render_complete_count": 2,
+      "sample_ids": [
+        "e1f6b67461b3994599ea96b5f132c2de4c162ea0",
+        "e76fc6fbfe3be64fc2092a113f79920cc290d281"
+      ]
+    },
+    {
+      "category": "cradle",
+      "asset_count": 2,
+      "fallback_count": 2,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 2,
+      "sample_ids": [
+        "55da8d0a696301e21377bdf2719b7bc6f78dde55",
+        "67aca7d38c9389e14b10d2a575d3c7eeca033f54"
+      ]
+    },
+    {
+      "category": "credenza",
+      "asset_count": 2,
+      "fallback_count": 2,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 2,
+      "sample_ids": [
+        "0e4964ef31001f71a18b6c08cf173d0f636fae6b",
+        "67e6eb3d22b09bd2bce2a23fd150ebf234cea76c"
+      ]
+    },
+    {
+      "category": "darts",
+      "asset_count": 2,
+      "fallback_count": 2,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 2,
+      "sample_ids": [
+        "06969dc2e72104a841fa8be14f2aed6b96a0ab4c",
+        "32e14508cae3c49a0c16f419cca358cc890079d5"
+      ]
+    },
+    {
+      "category": "desk calendar",
+      "asset_count": 2,
+      "fallback_count": 2,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 2,
+      "sample_ids": [
+        "0ec2e594b19f85c7c5870c6c8cb20be26cf946c8",
+        "7b04a9d2c4c3eabdcb470a11240688dd853492da"
+      ]
+    },
+    {
+      "category": "doorbell",
+      "asset_count": 2,
+      "fallback_count": 2,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 2,
+      "sample_ids": [
+        "217a4cc8c41ce47c5a3af1c87b665aed5ad5ef84",
+        "a32b295d3151d42cb5809d7ae24f5b7eaad800f2"
+      ]
+    },
+    {
+      "category": "dvd player",
+      "asset_count": 2,
+      "fallback_count": 2,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 2,
+      "sample_ids": [
+        "d7532105066ae5e01e62368c8e3532afd4fbd19f",
+        "f4a3649bf357b03de81d8859ec747eb0c1db1245"
+      ]
+    },
+    {
+      "category": "earphone",
+      "asset_count": 2,
+      "fallback_count": 2,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 2,
+      "sample_ids": [
+        "0996cbb30808bb45854668bdd2d85ffb60a255d8",
+        "4d7c973db4998d579f75b5465e14f1ed45db9bdc"
+      ]
+    },
+    {
+      "category": "electric fan",
+      "asset_count": 2,
+      "fallback_count": 2,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 2,
+      "sample_ids": [
+        "0a79e28d8342e4676958ee606f75bbbfe2df7b1f",
+        "7793a67647bb6f95c2342486ed914afd0d7b7802"
+      ]
+    },
+    {
+      "category": "frying pan",
+      "asset_count": 2,
+      "fallback_count": 2,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 2,
+      "sample_ids": [
+        "7242d1d75427afd2da95c250342b676f2a4ed851",
+        "ef65c930c62e036c22ecbdfd26e4c9e5f052c8f9"
+      ]
+    },
+    {
+      "category": "greenhouse",
+      "asset_count": 2,
+      "fallback_count": 2,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 2,
+      "sample_ids": [
+        "6d5e7efc102179aaa1d3eafc3f8dbc2e0aa4e494",
+        "a4bd43180769b197321a7667af49ebc37d2cfc55"
+      ]
+    },
+    {
+      "category": "hobby",
+      "asset_count": 2,
+      "fallback_count": 2,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 2,
+      "sample_ids": [
+        "7dd5c8c5338cd639765262ab5bdf8ebb84c1c6dd",
+        "a6066a050dcb136cd10e029fec88a32fda0b72b5"
+      ]
+    },
+    {
+      "category": "hourglass",
+      "asset_count": 2,
+      "fallback_count": 2,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 2,
+      "sample_ids": [
+        "211db69d8ea4174a4924c410b27ecd70be3bc06f",
+        "xxxx23a21e73x9c18x4952x8be6xb20ff7b1871a"
+      ]
+    },
+    {
+      "category": "kitchen timer",
+      "asset_count": 2,
+      "fallback_count": 2,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 2,
+      "sample_ids": [
+        "2b3415cae8fbf2b7f15fd2cd1e02934af7fde41e",
+        "c265896268e1d697a6b561db6b709b445f5e60a2"
+      ]
+    },
+    {
+      "category": "lamp",
+      "asset_count": 2,
+      "fallback_count": 2,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 2,
+      "sample_ids": [
+        "2942f66a4ae085fe36956591d319111ddad70ca7",
+        "ed0aa64bada991d110a2a35fda90dadeaec63be4"
+      ]
+    },
+    {
+      "category": "luggage rack",
+      "asset_count": 2,
+      "fallback_count": 2,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 2,
+      "sample_ids": [
+        "228ad1a49a3b5d90334d6c4fc297f68816b5622d",
+        "xxxx4008e213x2fccx48e6xa35ax7b760dc64fa4"
+      ]
+    },
+    {
+      "category": "magazine rack",
+      "asset_count": 2,
+      "fallback_count": 2,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 2,
+      "sample_ids": [
+        "b41e633bea9a1ea9aea95fa6102170157ffe54ca",
+        "ec565b0671596a1104c7204001ad6086bd49e9f4"
+      ]
+    },
+    {
+      "category": "mantel clock.n.01,radio receiver",
+      "asset_count": 2,
+      "fallback_count": 2,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 2,
+      "sample_ids": [
+        "15490370aa12d111f28e84d7a0e597b284e549a7",
+        "568a7d49f3f327c9c8ce5f4b47291a44edbb7aa5"
+      ]
+    },
+    {
+      "category": "mattress",
+      "asset_count": 2,
+      "fallback_count": 2,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 2,
+      "sample_ids": [
+        "1200f6bf858e0f7e8d98f538dcfc895595547401",
+        "2f217ae9c04406f2f7f14dd03def9b9ab7d8760f"
+      ]
+    },
+    {
+      "category": "net",
+      "asset_count": 2,
+      "fallback_count": 2,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 2,
+      "sample_ids": [
+        "7105e78f9396def9255f6144ed2208657fba53ee",
+        "913da0c02b383101f2ee385f7c7f59cc5093ba31"
+      ]
+    },
+    {
+      "category": "oven",
+      "asset_count": 2,
+      "fallback_count": 2,
+      "front_policy_candidate_count": 2,
+      "high_priority_count": 2,
+      "render_complete_count": 2,
+      "sample_ids": [
+        "00b0d5e167ae6b42666de010025efad4506563f1",
+        "1b0e61394bfe15e3f5b414f988b319c3a6c17544"
+      ]
+    },
+    {
+      "category": "pepper mill",
+      "asset_count": 2,
+      "fallback_count": 2,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 2,
+      "sample_ids": [
+        "60ca191abdd4d03733365c6ba4494275aeef9862",
+        "7c490b5d7f1dbf8c98a77c14975344a28eeb7196"
+      ]
+    },
+    {
+      "category": "pinball machine",
+      "asset_count": 2,
+      "fallback_count": 2,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 2,
+      "sample_ids": [
+        "4fc2d23a716a2da81dd098a523e1d2d46362aa19",
+        "84fac755ba6ebb543c8cad61d54a96ca73d52099"
+      ]
+    },
+    {
+      "category": "potholder",
+      "asset_count": 2,
+      "fallback_count": 2,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 2,
+      "sample_ids": [
+        "a939c1e3dfea1f19b83a8af64b980371f3f86e72",
+        "fc4c24323baf711f6a78c9cbd02dd590e8778c8a"
+      ]
+    },
+    {
+      "category": "projector",
+      "asset_count": 2,
+      "fallback_count": 2,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 2,
+      "sample_ids": [
+        "084cdcf12dfa089a861e2817ea3a70af712e65cf",
+        "ef3d2bbe523dc2a99de4caeb0f706fb781bbd70a"
+      ]
+    },
+    {
+      "category": "saucepan",
+      "asset_count": 2,
+      "fallback_count": 2,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 2,
+      "sample_ids": [
+        "0e607f6c2832197973ab6fe479fd92e536f1edf7",
+        "214a993418b4aee37d1b3797e2b6ed2bd2fd73bc"
+      ]
+    },
+    {
+      "category": "scooter",
+      "asset_count": 2,
+      "fallback_count": 2,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 2,
+      "sample_ids": [
+        "24b5d71ee1907f6169b17bc63bc6b605086be64c",
+        "405fe1ec97515864b6a7d02125f27e72022dba61"
+      ]
+    },
+    {
+      "category": "shed",
+      "asset_count": 2,
+      "fallback_count": 2,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 2,
+      "sample_ids": [
+        "4cffc0a56c36212e7bc15bbe26b870316657ef3f",
+        "d29068621d79dfd804706cec522734681a9866f8"
+      ]
+    },
+    {
+      "category": "shower caddy",
+      "asset_count": 2,
+      "fallback_count": 2,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 2,
+      "sample_ids": [
+        "f0ccef0db54849d5d6f5ef2eca07de07830d0c3d",
+        "f28187af5a45ddad0a895b4c2104650665c63a98"
+      ]
+    },
+    {
+      "category": "soccer ball",
+      "asset_count": 2,
+      "fallback_count": 2,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 2,
+      "sample_ids": [
+        "31a47d0ea8268383c39155acd010e8d38edfb6e4",
+        "5063b5239fc589cc5c7da36e87f921901827bcbf"
+      ]
+    },
+    {
+      "category": "spoon",
+      "asset_count": 2,
+      "fallback_count": 2,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 2,
+      "sample_ids": [
+        "3b63f000011404011c4aeb3f19bb04a112535634",
+        "f2973f4839d826120e55c99a9e9c23610f214041"
+      ]
+    },
+    {
+      "category": "streetlight",
+      "asset_count": 2,
+      "fallback_count": 2,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 2,
+      "sample_ids": [
+        "0d62d22254123b4d639ce39b12da4f791f5f910e",
+        "50fe0cc88389060285b4d936ed752680f1ada9e1"
+      ]
+    },
+    {
+      "category": "swing",
+      "asset_count": 2,
+      "fallback_count": 2,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 2,
+      "sample_ids": [
+        "03f10b35c7310988c0002289934c4b78f80950bd",
+        "1fceb732de14f7e85ad6c1b7457e04d79116f000"
+      ]
+    },
+    {
+      "category": "tablet computer",
+      "asset_count": 2,
+      "fallback_count": 2,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 2,
+      "sample_ids": [
+        "e726400daa4521c93b85a0e8e8bb239fcb7635e7",
+        "f046652109824dd1aef179680d7d5c897303b1ff"
+      ]
+    },
+    {
+      "category": "tent",
+      "asset_count": 2,
+      "fallback_count": 2,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 2,
+      "sample_ids": [
+        "987d5b94a7e368a2ae470f6eae9512286e40ecdf",
+        "b857009ea91e30939629303a90af8f9b50a1ffe8"
+      ]
+    },
+    {
+      "category": "timer",
+      "asset_count": 2,
+      "fallback_count": 2,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 2,
+      "sample_ids": [
+        "4cd54a02cf7088346f031f7f941d47e8afc8562e",
+        "7a507f9df041073cb4b607ace2f6ac033995478e"
+      ]
+    },
+    {
+      "category": "toiletry.n.01,bottle",
+      "asset_count": 2,
+      "fallback_count": 2,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 2,
+      "sample_ids": [
+        "ad51f2c0a160cb05bb5376a6f8b2f17412eaf980",
+        "ad7c79a7874289eb70b59fd3e362a657a712d529"
+      ]
+    },
+    {
+      "category": "towel rack.n.01,radiator",
+      "asset_count": 2,
+      "fallback_count": 2,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 2,
+      "sample_ids": [
+        "672b7491a2d8cb443a0803f7bc352e5d443c075b",
+        "93468f8bc4db22f93333a8e8977797273e7fc832"
+      ]
+    },
+    {
+      "category": "towel rail",
+      "asset_count": 2,
+      "fallback_count": 2,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 2,
+      "sample_ids": [
+        "1e304e0bf4394d239b133ed2875760ccfa110295",
+        "d766c690bf1665c69c8dc8aeea0ecfa63e4ab218"
+      ]
+    },
+    {
+      "category": "towel ring",
+      "asset_count": 2,
+      "fallback_count": 2,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 2,
+      "sample_ids": [
+        "42ba54225bc6cfcca8618a5dde7cbd5bb4a954da",
+        "9df21e4c08680b11af0501f324499f493365b61e"
+      ]
+    },
+    {
+      "category": "wall calendar",
+      "asset_count": 2,
+      "fallback_count": 2,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 2,
+      "sample_ids": [
+        "2062844edfe9dd8e787d98762b1f02e636309835",
+        "b7373e45d04526e89b811f317014aaff9857efed"
+      ]
+    },
+    {
+      "category": "wall hook",
+      "asset_count": 2,
+      "fallback_count": 2,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 2,
+      "sample_ids": [
+        "4c9afe4a1e5047ff4201fe47c5a182267c83f72e",
+        "51724dbc3abe73a9163a07d43add0dad6429ed6c"
+      ]
+    },
+    {
+      "category": "water heater",
+      "asset_count": 2,
+      "fallback_count": 2,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 2,
+      "sample_ids": [
+        "0e469ac0e119d1b2307a76fa0ac9611ecf13e6d8",
+        "d6d5f7bfb37f9296d34b712ad4e5091afe53678b"
+      ]
+    },
+    {
+      "category": "water scooter",
+      "asset_count": 2,
+      "fallback_count": 2,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 2,
+      "sample_ids": [
+        "8e646eb3771e8ac5c30d41f802e87069df3bb505",
+        "a701cd337013bc6e8e6d9e209a66bae70f9a56b8"
+      ]
+    },
+    {
+      "category": "watering can",
+      "asset_count": 2,
+      "fallback_count": 2,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 2,
+      "sample_ids": [
+        "8e8089c948738f725830da4294a3c8a1ca40ab4b",
+        "a073de0f4784410a00fbb9061f858829a11bbdfd"
+      ]
+    },
+    {
+      "category": "wind chime",
+      "asset_count": 2,
+      "fallback_count": 2,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 2,
+      "sample_ids": [
+        "746f5315c12ec65958998a6c92999def0e68ecf8",
+        "9c7b272f14314dd28cea748e68eb3e1d10e257d3"
+      ]
+    },
+    {
+      "category": "window",
+      "asset_count": 2,
+      "fallback_count": 2,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 2,
+      "sample_ids": [
+        "99bd91cc63ed4b0a36a06a82d31aaa794451c868",
+        "9ea18076afd8d4be52fff10dd72b732f1e3dedc0"
+      ]
+    },
+    {
+      "category": "wine bucket",
+      "asset_count": 2,
+      "fallback_count": 2,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 2,
+      "sample_ids": [
+        "827ab09e2f5097436bc0304266036bb62e4326a9",
+        "c51b02a7778f072f5b1478635682222b0b4cd8c3"
+      ]
+    },
+    {
+      "category": "wineglass",
+      "asset_count": 2,
+      "fallback_count": 2,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 2,
+      "sample_ids": [
+        "180b7d1568055fbd98a2beea6e4ebf87cc3cc13a",
+        "80b1ffbe7ec9e1a52084d11a4ed6881f0a6c45bb"
+      ]
+    },
+    {
+      "category": "workbench",
+      "asset_count": 2,
+      "fallback_count": 2,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 2,
+      "sample_ids": [
+        "81ad56baea5922cb91f466da624c11903d99d201",
+        "b08ab647aabce4c528d7c1a9e8cfff8b0332f6b8"
+      ]
+    },
+    {
+      "category": "xxxwall shelving",
+      "asset_count": 2,
+      "fallback_count": 2,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 2,
+      "sample_ids": [
+        "2995554eab6121a729ad4060765837c6b0e26f08",
+        "fe60eb8057f11a492d30d1080d6f35a7e6304b2f"
+      ]
+    },
+    {
+      "category": "aquarium",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "fb5398a981d8c151a1186a5558d3cf8a6f7df68f"
+      ]
+    },
+    {
+      "category": "armrest",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "e31d1ccdc0fcc256970b3137834e56371645502e"
+      ]
+    },
+    {
+      "category": "audio system",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "da41d51ec38f1faf445441b6b286f301c16c5d97"
+      ]
+    },
+    {
+      "category": "ball",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "5d18f79ad4ea81c35d781bd9acd29bd7e532c41f"
+      ]
+    },
+    {
+      "category": "barrow",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "a6e3768bbc5b6e8816724feb66dd37c11c073553"
+      ]
+    },
+    {
+      "category": "bath towel",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "xxxxe0773d9ex3a59x44cexaae2x7a9b5fc0d0d7"
+      ]
+    },
+    {
+      "category": "bathtub.n.01,shower stall",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "f542e38053638c71346cc597bf50a9ce650cbfd5"
+      ]
+    },
+    {
+      "category": "bench grinder",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "22c3a81655f3d581aac9c9006d432165e3e6d079"
+      ]
+    },
+    {
+      "category": "bicycle rack",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "912a6053b976943ea273aa6a38fcbde860604456"
+      ]
+    },
+    {
+      "category": "bidet",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "d4e455d57c0a14006668b55dfb35b7973c8a0639"
+      ]
+    },
+    {
+      "category": "binder",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "e529ddcb1306b1177e7caf9862c438ff96fb9994"
+      ]
+    },
+    {
+      "category": "birdcage",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "2ec4a55fa4aee515b1326a711c08db3a9a3b1226"
+      ]
+    },
+    {
+      "category": "birdhouse",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "fe031b5ce89f53f5d8a5cf56196ded4e60a77e4c"
+      ]
+    },
+    {
+      "category": "bookend",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "f7045c2419175307b53c4509deafe4b412cd5afd"
+      ]
+    },
+    {
+      "category": "bottle opener",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "eeb2c878be62e81eb938e7e809efab0747ae8785"
+      ]
+    },
+    {
+      "category": "caddy",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "590f645b879e8261377300a13a0c3e0cda80eb0e"
+      ]
+    },
+    {
+      "category": "cage",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "427308e0e8a2d7bf977d0b95545e1dcbe79d2380"
+      ]
+    },
+    {
+      "category": "cake",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "1c2885ea1bb5a23461ec5561f93dde711ffa8161"
+      ]
+    },
+    {
+      "category": "camcorder",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "a2ca7cc2bcbc16e9503401a895fdd393a7e9396d"
+      ]
+    },
+    {
+      "category": "candle.n.01,candlestick.n.01,wall mirror",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "217ea5ce8dc19fdccc83712dbb61547bae3a0480"
+      ]
+    },
+    {
+      "category": "ceiling lamp.n.01,track lighting",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "2170257242a4feec96eadcf210a3d403104daa72"
+      ]
+    },
+    {
+      "category": "chain saw",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "c9bff5b46ed61531f468e5840373b0506bdff74b"
+      ]
+    },
+    {
+      "category": "chess",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "xxxx32070234x8f71x4e7cx960fxfc5f84776d37"
+      ]
+    },
+    {
+      "category": "chest of drawers.n.01,end table",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "2cdb28938dff1f9ab13aee7630cea51f44f60952"
+      ]
+    },
+    {
+      "category": "coaster",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "cded5a507a3834e1168b4d5da82aec47e969403b"
+      ]
+    },
+    {
+      "category": "coatrack",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "297e92fb37c775f62a93253238c8d0ab364d9e6b"
+      ]
+    },
+    {
+      "category": "coffee table.n.01,aquarium",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "5793d204ef8760794878f1551d8dd17acf4252bb"
+      ]
+    },
+    {
+      "category": "colander",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "6587fc322953b9205dcc9610177f3fe3314e2b9a"
+      ]
+    },
+    {
+      "category": "conference table",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "aee7c3bde9e56a5b7207d7e19f8ad06580e80962"
+      ]
+    },
+    {
+      "category": "cooker.n.01,steamer",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "b23344ca2cd68c5c078df7d87d5caa7fef2c6024"
+      ]
+    },
+    {
+      "category": "dish rack",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "95f6846bf5633c78444d43164a805eee15de3fee"
+      ]
+    },
+    {
+      "category": "double door",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "0d1021de4ced65417a568c62e6ecf169d47b1f85"
+      ]
+    },
+    {
+      "category": "drawer",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "e36ff98ffd950600311ae58c7d1c5be8a03787ef"
+      ]
+    },
+    {
+      "category": "drum",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "01195e5a99e8b8ef231532ab1be8235e26d60b71"
+      ]
+    },
+    {
+      "category": "dryer",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 1,
+      "high_priority_count": 1,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "c2c17462cc5cba5908d12060aaa28efbff652888"
+      ]
+    },
+    {
+      "category": "electric frying pan",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "928c586669ee2cbaf5498301a5dd202baea259d0"
+      ]
+    },
+    {
+      "category": "elevator",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 1,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "c012d44ff03113b5921064c84a95bcb99d433e35"
+      ]
+    },
+    {
+      "category": "fan",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "57e1e602a836bf0f8ec130bd3c9053fc1985823b"
+      ]
+    },
+    {
+      "category": "football",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "bfe9897b7a9f26a1b0b497094031d37497c86890"
+      ]
+    },
+    {
+      "category": "game table.n.01,chessboard",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "632cd14912025515d548618c85f1425952d61c92"
+      ]
+    },
+    {
+      "category": "hand glass",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "xxxx322c56cbxdab6x4103x9cc6xb3682582bf0f"
+      ]
+    },
+    {
+      "category": "handle",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "e955d9e0ec677d4252d2c111542e8e00e40b8790"
+      ]
+    },
+    {
+      "category": "ironing board",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "cc916aa81e794cea2f80fd42864aa66b285334c4"
+      ]
+    },
+    {
+      "category": "kitchen appliance.n.01,slicer",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "ee3e3d88531626aaed09ac7a8e910f7f032bc4c8"
+      ]
+    },
+    {
+      "category": "knocker",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "0c282d1509aace0e7d8734bcb9ab11ca89961f13"
+      ]
+    },
+    {
+      "category": "lawn mower",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "f02ec9e8f331df6f7ab2ed06534dab7cab5cbda3"
+      ]
+    },
+    {
+      "category": "lectern",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "2fa15bc31819eff32a29e592b6a71011266313a3"
+      ]
+    },
+    {
+      "category": "magazine",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "c07d14d8277526628dd08d5e6ce557aaebe55492"
+      ]
+    },
+    {
+      "category": "magnet",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "cfa7b1f2fa4730e9962c7fef97094fab3baccad9"
+      ]
+    },
+    {
+      "category": "mantel",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 1,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "49017ea03a94d58f3972c21b1488508b1d988274"
+      ]
+    },
+    {
+      "category": "media player",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "427ad496e48b0526e2d8dbf3f2b2788c4a59c276"
+      ]
+    },
+    {
+      "category": "microphone",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "799ef1fe60ed2801de60a3e00ab5e11489f312b1"
+      ]
+    },
+    {
+      "category": "mixing bowl",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "dcbb308c375e044129e5e5a8723960b0dafd9c9b"
+      ]
+    },
+    {
+      "category": "mousepad",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "0932e3f2a6ab37e1b1d45933c8015cff589740d2"
+      ]
+    },
+    {
+      "category": "music stand",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "26843d63f8c089664f049143df7b1b301199016e"
+      ]
+    },
+    {
+      "category": "pan",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "c8e109051b6ed7b877d8b7dbfbbf2b2c536490ed"
+      ]
+    },
+    {
+      "category": "paper towel.n.01,paper towel holder",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "fa5104644c1c022b94118ec648bf70a48395fdb2"
+      ]
+    },
+    {
+      "category": "paperweight",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "21dc3a6ae582e6e0f833431f6b8929b86f9ab60a"
+      ]
+    },
+    {
+      "category": "pen holder",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "07b5f9f8af63b743e8a31bb5a8c89004dd3238d5"
+      ]
+    },
+    {
+      "category": "picnic table",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "7aea93a0aac8da337a2f10fbb9c966d42bf21312"
+      ]
+    },
+    {
+      "category": "playhouse.n.01,play area",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "4210a811f2034b5ecd694e6d7730367208d5c7a3"
+      ]
+    },
+    {
+      "category": "playpen",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "bb8b7d7f2701684c7185dec7f64dab3594f5aa14"
+      ]
+    },
+    {
+      "category": "pond",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "33c0e727dec2050f926408631716d7a9c691af1f"
+      ]
+    },
+    {
+      "category": "postbox",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "2e569528f4c01f2e1b5c33f4afbc62041db543cb"
+      ]
+    },
+    {
+      "category": "power saw",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "9b7a1c626add3bfb70494be24d68eff19c8b8fdf"
+      ]
+    },
+    {
+      "category": "punch bowl",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "2807ee5c8ee3939e7d2e19f7b18faad61aeba3ce"
+      ]
+    },
+    {
+      "category": "radio receiver.n.01,alarm clock",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "106fc34235734243b59461a069af413e4d3f5eab"
+      ]
+    },
+    {
+      "category": "reamer",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "b504e204b275fb75b42ea44c69ab16722639d3b3"
+      ]
+    },
+    {
+      "category": "salver",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "5b393e1c1d59d8877df7e84eb8a9e6bfd3ad5e16"
+      ]
+    },
+    {
+      "category": "sauna",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "8a6af29923fe09ec8a7a3f487db904c530b990c9"
+      ]
+    },
+    {
+      "category": "shoebox",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "fd8e6858ced0ffa64b22da9b8e0c5932e706b24a"
+      ]
+    },
+    {
+      "category": "shower pan",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "0d633c68b91f0913dca04bb10f3695e3a6332d70"
+      ]
+    },
+    {
+      "category": "skateboard",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "4afab0a33b857f51d436c1d159b8de718ee88e73"
+      ]
+    },
+    {
+      "category": "slide",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "d26c1dae7b72f89004449d5e87432a12b2911958"
+      ]
+    },
+    {
+      "category": "smoke detector",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "93c69372708aca0d01ac13f43b030f9cb85e42c7"
+      ]
+    },
+    {
+      "category": "soap",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "6b21bd924df8f21c02fb8bb569de93bd887d8f1e"
+      ]
+    },
+    {
+      "category": "soda can",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "3b2bc1d7fb915261a095e2c2935803941b58f546"
+      ]
+    },
+    {
+      "category": "space heater",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "c619270772ebbdf9ecfa9f8c2cf80098aaaec32c"
+      ]
+    },
+    {
+      "category": "spade",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "72a56f85163db6660adda629876c02eb8ab2b081"
+      ]
+    },
+    {
+      "category": "spice holder",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "7b2b25b9c9a4e3c545dcce82ae88a462a6a66658"
+      ]
+    },
+    {
+      "category": "spice rack",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "cf45d6d5a1ab37d5df44d93a9fccb1ff02ec211d"
+      ]
+    },
+    {
+      "category": "step ladder",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "0c4421a67ac3ee2cdb911b8292b919bbaa2c912b"
+      ]
+    },
+    {
+      "category": "strainer",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "df2bb6e9b40f141a109b14313a357d9e4fd62624"
+      ]
+    },
+    {
+      "category": "subwoofer",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "bf5932d522ff9137fe1a85c0bd3e0be140c09da8"
+      ]
+    },
+    {
+      "category": "sugar bowl",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "ad82a663a4c7b88462fb45d96ed8be31966e97bf"
+      ]
+    },
+    {
+      "category": "swing.n.02,play area",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "3e4758de5664722fbdb6d68ad1b4dc580c6ab1d2"
+      ]
+    },
+    {
+      "category": "table-tennis table",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "257119746eb65d96b20231ca5c8b267832d965c4"
+      ]
+    },
+    {
+      "category": "tapestry",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "14a07cf549c39501f508c25a4b4ba0d93cd5f4dc"
+      ]
+    },
+    {
+      "category": "telescope",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "97a4f2492e6b3f3a4ef4563b1d98add89f3c76e4"
+      ]
+    },
+    {
+      "category": "toaster oven",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 1,
+      "high_priority_count": 1,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "678f2105923530a1c11ca1b55b9984a329fb8547"
+      ]
+    },
+    {
+      "category": "toilet bag",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "c7cd117550688ee734436bca9b49d5c7c2217207"
+      ]
+    },
+    {
+      "category": "toilet brush.n.01,toilet paper holder",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "09a2f93855cf636368442f0b36441d0bfac7b80f"
+      ]
+    },
+    {
+      "category": "tureen",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "a67b6d7ab7b6a46e1c347a818dcd19663577fee8"
+      ]
+    },
+    {
+      "category": "urinal",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "d4e8110efaa470026506e73f757f0fae2187ef66"
+      ]
+    },
+    {
+      "category": "video game console",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "45978179bcdb53044ca429d3a74c34b6249de35b"
+      ]
+    },
+    {
+      "category": "videodisk",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "7b68edd684943331d3735730c15f87ca00b38ed9"
+      ]
+    },
+    {
+      "category": "wall socket",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "33d882aa224a49f9f0971862e71d46b452111fd1"
+      ]
+    },
+    {
+      "category": "wall unit",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "1c0ec6429c6a74334aa650008bb59f5acd01cffd"
+      ]
+    },
+    {
+      "category": "washer.n.03,dryer",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "00b285ed70673826ccb6941929a64abfaf5f9239"
+      ]
+    },
+    {
+      "category": "wine bottle",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "e1b703e78962df6a81b81acab566c6a202b17197"
+      ]
+    },
+    {
+      "category": "wok",
+      "asset_count": 1,
+      "fallback_count": 1,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 1,
+      "sample_ids": [
+        "956838c23fc7f521eefe09235d59b9fbbec7c0b1"
+      ]
+    },
+    {
+      "category": "armchair",
+      "asset_count": 225,
+      "fallback_count": 0,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 0,
+      "sample_ids": []
+    },
+    {
+      "category": "ball chair",
+      "asset_count": 7,
+      "fallback_count": 0,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 0,
+      "sample_ids": []
+    },
+    {
+      "category": "beanbag chair",
+      "asset_count": 22,
+      "fallback_count": 0,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 0,
+      "sample_ids": []
+    },
+    {
+      "category": "bed",
+      "asset_count": 21,
+      "fallback_count": 0,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 0,
+      "sample_ids": []
+    },
+    {
+      "category": "bedclothes",
+      "asset_count": 12,
+      "fallback_count": 0,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 0,
+      "sample_ids": []
+    },
+    {
+      "category": "bench",
+      "asset_count": 101,
+      "fallback_count": 0,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 0,
+      "sample_ids": []
+    },
+    {
+      "category": "bunk bed",
+      "asset_count": 6,
+      "fallback_count": 0,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 0,
+      "sample_ids": []
+    },
+    {
+      "category": "chair",
+      "asset_count": 168,
+      "fallback_count": 0,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 0,
+      "sample_ids": []
+    },
+    {
+      "category": "club chair",
+      "asset_count": 23,
+      "fallback_count": 0,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 0,
+      "sample_ids": []
+    },
+    {
+      "category": "daybed",
+      "asset_count": 4,
+      "fallback_count": 0,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 0,
+      "sample_ids": []
+    },
+    {
+      "category": "double bed",
+      "asset_count": 10,
+      "fallback_count": 0,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 0,
+      "sample_ids": []
+    },
+    {
+      "category": "easy chair",
+      "asset_count": 36,
+      "fallback_count": 0,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 0,
+      "sample_ids": []
+    },
+    {
+      "category": "folding chair",
+      "asset_count": 1,
+      "fallback_count": 0,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 0,
+      "sample_ids": []
+    },
+    {
+      "category": "highchair",
+      "asset_count": 4,
+      "fallback_count": 0,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 0,
+      "sample_ids": []
+    },
+    {
+      "category": "king bed",
+      "asset_count": 3,
+      "fallback_count": 0,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 0,
+      "sample_ids": []
+    },
+    {
+      "category": "pet bed",
+      "asset_count": 11,
+      "fallback_count": 0,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 0,
+      "sample_ids": []
+    },
+    {
+      "category": "recliner",
+      "asset_count": 1,
+      "fallback_count": 0,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 0,
+      "sample_ids": []
+    },
+    {
+      "category": "rocking chair",
+      "asset_count": 23,
+      "fallback_count": 0,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 0,
+      "sample_ids": []
+    },
+    {
+      "category": "round daybed",
+      "asset_count": 1,
+      "fallback_count": 0,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 0,
+      "sample_ids": []
+    },
+    {
+      "category": "sofa",
+      "asset_count": 214,
+      "fallback_count": 0,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 0,
+      "sample_ids": []
+    },
+    {
+      "category": "straight chair",
+      "asset_count": 17,
+      "fallback_count": 0,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 0,
+      "sample_ids": []
+    },
+    {
+      "category": "swing chair",
+      "asset_count": 8,
+      "fallback_count": 0,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 0,
+      "sample_ids": []
+    },
+    {
+      "category": "swivel chair",
+      "asset_count": 111,
+      "fallback_count": 0,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 0,
+      "sample_ids": []
+    },
+    {
+      "category": "swivel chair.n.01,ball chair",
+      "asset_count": 1,
+      "fallback_count": 0,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 0,
+      "sample_ids": []
+    },
+    {
+      "category": "wardrobe",
+      "asset_count": 17,
+      "fallback_count": 0,
+      "front_policy_candidate_count": 0,
+      "high_priority_count": 0,
+      "render_complete_count": 0,
+      "sample_ids": []
+    }
+  ],
+  "method": {
+    "front_policy_source": "week27_asset_policy.access_sides",
+    "high_priority_rule": "normalized category contains a functional-face keyword",
+    "render_views_checked": [
+      "front",
+      "back",
+      "left",
+      "right",
+      "iso",
+      "top"
+    ],
+    "not_a_semantic_decision": true,
+    "note": "This audit identifies assets requiring front review; it does not promote fallback axes without per-asset evidence."
+  }
+}
