@@ -354,9 +354,25 @@ def _candidate_improves(
     check_id: str,
 ) -> bool:
     candidate_score = _score_payload(candidate_payload)
-    if candidate_score.issue_ids - baseline_score.issue_ids:
+    # Hard failures are the primary repair objective.  An exact functional
+    # slot can legitimately turn a heuristic accessibility check from pass to
+    # degraded (for example, moving four remote dining chairs back to the four
+    # requested table edges).  Rejecting every new soft degradation before
+    # comparing hard failures leaves the original, unusable layout untouched.
+    #
+    # Never introduce a new hard failure.  When at least one hard failure is
+    # removed, compare scores lexicographically and allow a soft degradation;
+    # later repair rounds can improve it.  Without a hard-failure reduction,
+    # retain the previous strict no-regression behavior.
+    if candidate_score.fail_ids - baseline_score.fail_ids:
         return False
     if candidate_score.global_key > baseline_score.global_key:
+        return False
+    hard_fail_reduced = len(candidate_score.fail_ids) < len(baseline_score.fail_ids)
+    if (
+        not hard_fail_reduced
+        and candidate_score.degraded_ids - baseline_score.degraded_ids
+    ):
         return False
     for existing_id, old_label in baseline_score.labels.items():
         if existing_id == check_id:
@@ -364,7 +380,9 @@ def _candidate_improves(
         new_label = candidate_score.labels.get(existing_id)
         if new_label is None:
             continue
-        if _label_severity(new_label) > _label_severity(old_label):
+        if not hard_fail_reduced and _label_severity(new_label) > _label_severity(
+            old_label
+        ):
             return False
     old_result = _result_by_id(baseline_payload, check_id)
     new_result = _result_by_id(candidate_payload, check_id)
@@ -525,8 +543,8 @@ def _repair_targets(scene: RoomScene, payload: dict[str, Any]) -> list[_RepairTa
                 for target, slot in zip(dining_targets, dining_diagnostics):
                     if slot.get("aligned") and slot.get("facing_aligned") is not False:
                         continue
-                    targets.append(target)
                     targets.extend(_dining_clearance_targets(target, slot))
+                    targets.append(target)
         elif relation == "classroom_workstation_distribution":
             poses: list[_RepairPose] = []
             for slot in diagnostics.get("workstation_slots") or []:
@@ -865,7 +883,10 @@ def _coordinated_dining_targets(
         key=lambda item: item[0].object_id,
     )
     candidates: list[_RepairTarget] = []
-    for ratio in (0.0, 0.5, 0.9):
+    # Prefer the evaluator-authorized outward allowance.  It preserves the
+    # exact table-local edge assignment while giving the accessibility metric
+    # the best chance to keep a usable stance zone around every chair.
+    for ratio in (0.9, 0.5, 0.0):
         poses: list[_RepairPose] = []
         for target, slot in ordered:
             center = target.target_center_xy

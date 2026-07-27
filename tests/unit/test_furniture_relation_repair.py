@@ -1008,6 +1008,92 @@ def test_candidate_score_rejects_new_issue() -> None:
     )
 
 
+def test_candidate_score_allows_soft_degradation_when_hard_failures_drop() -> None:
+    baseline = {
+        "results": [
+            {
+                "check_id": "dining_slots",
+                "label": "fail",
+                "relation_type": "dining_seat_distribution",
+            },
+            {
+                "check_id": "chair_facing",
+                "label": "fail",
+                "relation_type": "furniture_faces_furniture",
+            },
+            {
+                "check_id": "table_access",
+                "label": "pass",
+                "relation_type": "spatial_accessibility",
+            },
+        ]
+    }
+    candidate = {
+        "results": [
+            {
+                "check_id": "dining_slots",
+                "label": "pass",
+                "relation_type": "dining_seat_distribution",
+            },
+            {
+                "check_id": "chair_facing",
+                "label": "pass",
+                "relation_type": "furniture_faces_furniture",
+            },
+            {
+                "check_id": "table_access",
+                "label": "degraded",
+                "relation_type": "spatial_accessibility",
+            },
+        ]
+    }
+
+    assert _candidate_improves(
+        baseline,
+        candidate,
+        baseline_score=_score_payload(baseline),
+        check_id="dining_slots",
+    )
+
+
+def test_candidate_score_rejects_soft_regression_without_hard_fail_reduction() -> None:
+    baseline = {
+        "results": [
+            {
+                "check_id": "dining_slots",
+                "label": "fail",
+                "relation_type": "dining_seat_distribution",
+            },
+            {
+                "check_id": "table_access",
+                "label": "pass",
+                "relation_type": "spatial_accessibility",
+            },
+        ]
+    }
+    candidate = {
+        "results": [
+            {
+                "check_id": "dining_slots",
+                "label": "fail",
+                "relation_type": "dining_seat_distribution",
+            },
+            {
+                "check_id": "table_access",
+                "label": "degraded",
+                "relation_type": "spatial_accessibility",
+            },
+        ]
+    }
+
+    assert not _candidate_improves(
+        baseline,
+        candidate,
+        baseline_score=_score_payload(baseline),
+        check_id="dining_slots",
+    )
+
+
 def test_multiple_failed_work_seats_get_atomic_candidate_before_individuals() -> None:
     targets = [
         _RepairTarget(
