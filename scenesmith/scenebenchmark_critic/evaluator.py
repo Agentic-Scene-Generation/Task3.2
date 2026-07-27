@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 from typing import Any
 
 from scenesmith.scenebenchmark_critic.aggregation import (
@@ -74,22 +76,34 @@ def prepare_case_pack(
 def run_case_pack_checks(
     case_pack: dict[str, Any],
     config: CriticConfig | Any | None = None,
+    timing: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Evaluate per-check rules and scene extensions via the registry."""
+    timing_start = time.perf_counter()
+    prepare_start = time.perf_counter()
     critic_config, plugins = prepare_case_pack(case_pack, config)
+    if timing is not None:
+        timing["prepare_case_pack_sec"] = round(time.perf_counter() - prepare_start, 6)
     enabled = {plugin.name: plugin for plugin in plugins}
     rule_config = _to_rule_config(critic_config)
     results: list[dict[str, Any]] = []
+    rule_times: dict[str, float] = {}
     for check in case_pack.get("checks") or []:
         metric = str(check.get("metric") or "")
         plugin = enabled.get(metric)
         if plugin is None or plugin.rule_evaluator is None:
             continue
+        check_start = time.perf_counter()
         result = plugin.rule_evaluator(case_pack, check, rule_config)
+        rule_times[metric] = rule_times.get(metric, 0.0) + (
+            time.perf_counter() - check_start
+        )
         if result is not None:
             results.append(_normalize_result(result, check))
+    extension_times: dict[str, float] = {}
     for plugin in plugins:
         for extension in plugin.extension_evaluators:
+            extension_start = time.perf_counter()
             for result in extension(case_pack):
                 normalized = _normalize_result(
                     result,
@@ -108,6 +122,19 @@ def run_case_pack_checks(
                         f"{normalized.get('metric')!r}"
                     )
                 results.append(normalized)
+            extension_times[plugin.name] = extension_times.get(plugin.name, 0.0) + (
+                time.perf_counter() - extension_start
+            )
+    if timing is not None:
+        timing["rule_evaluator_sec_by_metric"] = {
+            key: round(value, 6) for key, value in rule_times.items()
+        }
+        timing["extension_evaluator_sec_by_metric"] = {
+            key: round(value, 6) for key, value in extension_times.items()
+        }
+        timing["run_case_pack_checks_sec"] = round(
+            time.perf_counter() - timing_start, 6
+        )
     return results
 
 
