@@ -73,7 +73,14 @@ DEFAULT_ALIASES = {
     "plant": ["plant", "plants", "potted plant", "potted plants"],
     "rug": ["rug", "rugs", "area rug", "area rugs"],
     "floor_lamp": ["floor lamp", "floor lamps", "floorlamp", "floorlamps"],
-    "tv_stand": ["tv stand", "tv stands", "tvstand", "tvstands", "media console"],
+    "tv_stand": [
+        "tv stand",
+        "tv stands",
+        "tvstand",
+        "tvstands",
+        "tv console",
+        "media console",
+    ],
     "sideboard": ["sideboard", "sideboards", "buffet cabinet"],
 }
 
@@ -963,14 +970,17 @@ class FurnitureSafetyController:
         hard_reasons: list[str] = []
         soft_reasons: list[str] = []
 
-        prompt_following = score_by_name.get("prompt_following")
-        if prompt_following and prompt_following.grade < self.prompt_following_hard_min:
-            hard_reasons.append(
-                f"prompt_following={prompt_following.grade} below "
-                f"{self.prompt_following_hard_min}"
-            )
-
         if self.score_thresholds_are_hard:
+            prompt_following = score_by_name.get("prompt_following")
+            if (
+                prompt_following
+                and prompt_following.grade < self.prompt_following_hard_min
+            ):
+                hard_reasons.append(
+                    f"prompt_following={prompt_following.grade} below "
+                    f"{self.prompt_following_hard_min}"
+                )
+
             functionality = score_by_name.get("functionality")
             if functionality and functionality.grade < self.functionality_hard_min:
                 hard_reasons.append(
@@ -1487,11 +1497,24 @@ class FurnitureSafetyController:
                     f"{self.min_accept_delta:.3f}."
                 )
         else:
-            rollback_to_best = self.best_scene_state is not None
-            message = (
-                "Safety controller rejected candidate: hard constraints failed "
-                f"({'; '.join(evaluation.hard_reasons)})."
-            )
+            if self.best_scene_state is not None and self.best_scores is None:
+                # A transaction records a deterministic baseline before the
+                # first critic pass so a physically invalid designer call can
+                # still roll back.  That baseline has not earned acceptance
+                # from the critic, however.  Restoring it and finishing on the
+                # first low-scoring critique prevents the designer from ever
+                # repairing the reported functional issue.
+                message = (
+                    "Safety controller rejected the unscored baseline: hard "
+                    f"constraints failed ({'; '.join(evaluation.hard_reasons)}). "
+                    "Keep the current state and allow a critique-guided repair."
+                )
+            else:
+                rollback_to_best = self.best_scene_state is not None
+                message = (
+                    "Safety controller rejected candidate: hard constraints failed "
+                    f"({'; '.join(evaluation.hard_reasons)})."
+                )
 
         if rollback_to_best:
             self.should_finish = True

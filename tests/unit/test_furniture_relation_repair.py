@@ -568,6 +568,116 @@ def test_repairs_multiple_wall_backed_stools_with_wall_normal_orientation(
         assert abs(stool_bounds[0][0] - wall_bounds[1][0] - 0.03) < 1e-7
 
 
+def test_wall_backed_repair_uses_door_safe_lateral_pose(tmp_path: Path) -> None:
+    sofa = _object("sofa_0", "sofa", (-1.6, -1.1, 0.4), (1.6, 0.9, 0.8), yaw_deg=0.0)
+    scene = _scene(
+        tmp_path,
+        sofa,
+        text="A living room with a sofa against the side wall.",
+    )
+    scene.room_type = "living_room"
+    door = ClearanceOpeningData(
+        opening_id="door_0",
+        opening_type="door",
+        wall_direction="west",
+        center_world=[-2.5, -0.2, 1.05],
+        width=0.9,
+        sill_height=0.0,
+        height=2.1,
+        clearance_bbox_min=[-2.5, -0.65, 0.0],
+        clearance_bbox_max=[-1.7, 0.25, 2.1],
+        wall_start=[-2.5, -2.0],
+        wall_end=[-2.5, 2.0],
+        position_along_wall=1.35,
+    )
+    scene.room_geometry.openings = [door]
+    config = CriticConfig(
+        enabled=True,
+        metrics=("functional_dependency",),
+        constraint_mode="contract",
+    )
+
+    fixes = improve_furniture_relations(scene, config=config)
+
+    assert [(fix.object_id, fix.relation_type) for fix in fixes] == [
+        ("sofa_0", "back_against_wall")
+    ]
+    bounds = sofa.compute_world_bounds()
+    assert bounds is not None
+    # The south side of this doorway is too short for the rotated sofa.  The
+    # repair must choose the remaining north-side wall segment, not put the
+    # object in the door zone and rely on a later physics repair to move it.
+    assert float(bounds[0][1]) >= float(door.clearance_bbox_max[1])
+    result = next(
+        item
+        for item in evaluate_room_scene(scene, config=config, stage="door_safe_after")[
+            "results"
+        ]
+        if item.get("relation_type") == "back_against_wall"
+    )
+    assert result["label"] == "pass"
+
+
+def test_wall_backed_repair_keeps_nearby_required_relation(tmp_path: Path) -> None:
+    sofa = _object(
+        "sofa_0", "sofa", (-1.0, -1.07, 0.38), (1.7, 0.95, 0.76), yaw_deg=90.0
+    )
+    tv_stand = _object(
+        "tv_stand_0", "tv_stand", (0.0, 0.8, 0.255), (1.6, 0.55, 0.51), yaw_deg=90.0
+    )
+    armchair_0 = _object(
+        "armchair_0", "armchair", (-1.9, -1.52, 0.48), (0.7, 0.75, 0.96)
+    )
+    armchair_1 = _object("armchair_1", "armchair", (-1.9, 0.8, 0.48), (0.7, 0.75, 0.96))
+    table = _object(
+        "table_0", "table", (-1.0, 0.8, 0.34), (1.31, 0.8, 0.67), yaw_deg=90.0
+    )
+    rug = _object("rug_0", "rug", (1.0, -1.02, 0.012), (1.8, 1.8, 0.024))
+    floor_lamp = _object(
+        "floor_lamp_0", "floor_lamp", (-1.9, 1.52, 0.63), (0.4, 0.4, 1.27)
+    )
+    scene = _scene(
+        tmp_path,
+        armchair_0,
+        armchair_1,
+        sofa,
+        table,
+        rug,
+        floor_lamp,
+        tv_stand,
+        text=(
+            "A living room with a sofa against the back wall facing a TV stand "
+            "and television on the opposite wall, a coffee table centered "
+            "between the sofa and TV stand, two armchairs flanking the coffee "
+            "table near each end of the sofa, and a floor lamp beside one "
+            "armchair. A small rug lies between the coffee table and TV stand."
+        ),
+    )
+    scene.room_type = "living_room"
+    config = CriticConfig(
+        enabled=True,
+        metrics=("functional_dependency",),
+        constraint_mode="contract",
+    )
+
+    fixes = improve_furniture_relations(scene, config=config)
+
+    assert {fix.object_id for fix in fixes} == {"sofa_0", "tv_stand_0"}
+    # The sofa was already close to the south wall, but rotating it flush would
+    # turn the required armchair-near-sofa relation into a new core failure.
+    # A legal in-tolerance wall gap keeps both prompt relations valid.
+    assert float(sofa.transform.translation()[1]) > -1.3
+    result_by_object = {
+        str(item.get("primary_object")): item
+        for item in evaluate_room_scene(scene, config=config, stage="nearby_after")[
+            "results"
+        ]
+        if item.get("relation_type") == "back_against_wall"
+    }
+    assert result_by_object["sofa_0"]["label"] == "pass"
+    assert result_by_object["tv_stand_0"]["label"] == "pass"
+
+
 def test_prompt_facing_guest_chairs_override_cached_orientation_contracts(
     tmp_path: Path,
 ) -> None:

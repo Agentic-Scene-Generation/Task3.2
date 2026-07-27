@@ -3,7 +3,10 @@ import unittest
 from dataclasses import dataclass
 from types import SimpleNamespace
 
-from scenesmith.agent_utils.furniture_safety import FurnitureSafetyController
+from scenesmith.agent_utils.furniture_safety import (
+    FurnitureSafetyController,
+    furniture_object_category_matches,
+)
 from scenesmith.agent_utils.scoring import CategoryScore, CritiqueWithScores
 
 
@@ -136,6 +139,16 @@ class FurnitureSafetyControllerTest(unittest.TestCase):
         self.assertEqual(controller.required_counts["tv_stand"], 1)
         self.assertEqual(controller.required_counts["armchair"], 2)
         self.assertEqual(controller.required_counts["floor_lamp"], 1)
+
+    def test_tv_console_satisfies_tv_stand_inventory_role(self) -> None:
+        self.assertTrue(
+            furniture_object_category_matches(
+                "tv_console_0",
+                "tv_console",
+                "Modern TV console stand with an integrated television",
+                "tv_stand",
+            )
+        )
 
     def test_dining_room_infers_sideboard(self) -> None:
         controller = FurnitureSafetyController({"enabled": True})
@@ -299,12 +312,56 @@ class FurnitureSafetyControllerTest(unittest.TestCase):
         self.assertTrue(second.should_finish)
         self.assertEqual(controller.best_scene_state, {"state": 1})
 
+    def test_unscored_baseline_allows_first_critic_guided_repair(self) -> None:
+        controller = FurnitureSafetyController(
+            {
+                "enabled": True,
+                "score_thresholds_are_hard": True,
+                "max_critique_design_cycles": 1,
+            }
+        )
+        controller.remember_hard_valid_scene_state(
+            {"state": "deterministic-baseline"},
+            source="pre-initial",
+        )
+
+        decision = controller.consider_candidate(
+            make_scores(prompt_following=5),
+            {"state": "deterministic-baseline"},
+            None,
+        )
+
+        self.assertFalse(decision.accepted)
+        self.assertFalse(decision.rollback_to_best)
+        self.assertFalse(decision.should_finish)
+        self.assertEqual(
+            controller.best_scene_state, {"state": "deterministic-baseline"}
+        )
+        self.assertTrue(controller.record_design_change(has_prior_critique=True)[0])
+
     def test_low_functionality_score_is_not_hard_by_default(self) -> None:
         controller = FurnitureSafetyController({"enabled": True})
 
         evaluation = controller.evaluate_scores(make_scores(functionality=3))
 
         self.assertTrue(evaluation.hard_valid)
+
+    def test_low_prompt_following_score_is_not_hard_by_default(self) -> None:
+        controller = FurnitureSafetyController({"enabled": True})
+
+        evaluation = controller.evaluate_scores(make_scores(prompt_following=5))
+
+        self.assertTrue(evaluation.hard_valid)
+
+    def test_low_prompt_following_score_can_be_configured_as_hard(self) -> None:
+        controller = FurnitureSafetyController(
+            {"enabled": True, "score_thresholds_are_hard": True}
+        )
+
+        evaluation = controller.evaluate_scores(make_scores(prompt_following=5))
+
+        self.assertFalse(evaluation.hard_valid)
+        self.assertIn("prompt_following=5 below 8", evaluation.hard_reasons)
 
     def test_low_functionality_score_can_be_configured_as_hard(self) -> None:
         controller = FurnitureSafetyController(

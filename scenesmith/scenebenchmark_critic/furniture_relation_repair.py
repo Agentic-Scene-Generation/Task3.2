@@ -37,6 +37,12 @@ _REPAIRABLE_RELATIONS = {
 _WINDOW_CLEARANCE_RELATION = "window_clearance"
 _WINDOW_CLEARANCE_MARGIN_M = 0.03
 _PAIRED_SURFACE_RELATION = "furniture_faces_furniture"
+_WALL_BACKED_CONTACT_GAP_M = 0.03
+# ``back_against_wall`` accepts a 0.25 m gap by default.  Retain a small
+# numerical margin when a rotation-only repair needs the less disruptive
+# in-tolerance pose instead of forcing a newly conflicting flush placement.
+_WALL_BACKED_DEFAULT_MAX_GAP_M = 0.25
+_WALL_BACKED_GAP_MARGIN_M = 0.02
 
 
 @dataclass(frozen=True)
@@ -678,8 +684,13 @@ def _repair_targets(scene: RoomScene, payload: dict[str, Any]) -> list[_RepairTa
                 ),
                 None,
             )
-            target = _wall_backed_target(scene, object_id, wall_id)
-            if target is not None:
+            max_gap_m = _wall_backed_max_gap_m(payload, check_id)
+            for target in _wall_backed_targets(
+                scene,
+                object_id,
+                wall_id,
+                max_gap_m=max_gap_m,
+            ):
                 targets.append(
                     _RepairTarget(
                         object_id,
@@ -1031,12 +1042,47 @@ def _scene_wall(scene: RoomScene, wall_id: str) -> SceneObject | None:
     return None
 
 
-def _wall_backed_target(
-    scene: RoomScene, object_id: str, wall_id: str | None
-) -> tuple[tuple[float, float], float] | None:
-    """Return a wall-normal pose for contracted furniture without asset IDs."""
+def _wall_backed_max_gap_m(payload: dict[str, Any], check_id: str) -> float:
+    """Read the evaluator's wall-distance tolerance when the check exposes it."""
+    check = next(
+        (
+            candidate
+            for candidate in (payload.get("case_pack") or {}).get("checks") or []
+            if isinstance(candidate, dict)
+            and str(candidate.get("check_id") or "") == check_id
+        ),
+        {},
+    )
+    evidence = check.get("evidence") if isinstance(check, dict) else None
+    dependency = evidence.get("dependency") if isinstance(evidence, dict) else None
+    value = dependency.get("max_distance_m") if isinstance(dependency, dict) else None
+    try:
+        return max(_WALL_BACKED_CONTACT_GAP_M, float(value))
+    except (TypeError, ValueError):
+        return _WALL_BACKED_DEFAULT_MAX_GAP_M
+
+
+def _wall_backed_targets(
+    scene: RoomScene,
+    object_id: str,
+    wall_id: str | None,
+    *,
+    max_gap_m: float = _WALL_BACKED_DEFAULT_MAX_GAP_M,
+) -> list[tuple[tuple[float, float], float]]:
+    """Return wall-backed poses that preserve openings and nearby relations.
+
+    A pose flush to a wall can intersect a door's swept/clearance region.  The
+    later physics repair then moves the furniture off the wall, which leaves a
+    prompt-core relation invalid.  Enumerate lateral positions on the selected
+    wall before scoring so the normal relation and the doorway both survive.
+
+    When furniture is already within the evaluator's wall-distance tolerance,
+    also offer the largest in-tolerance normal gap.  Rotating a deep asset can
+    otherwise move its center substantially farther from nearby required
+    furniture even though a smaller move remains semantically valid.
+    """
     if not object_id or not wall_id:
-        return None
+        return []
     seat = scene.objects.get(UniqueID(object_id))
     wall = _scene_wall(scene, wall_id)
     if (
@@ -1045,11 +1091,11 @@ def _wall_backed_target(
         or seat.object_type != ObjectType.FURNITURE
         or not _is_wall(wall)
     ):
-        return None
+        return []
     seat_bounds = seat.compute_world_bounds()
     wall_bounds = wall.compute_world_bounds()
     if seat_bounds is None or wall_bounds is None:
-        return None
+        return []
 
     wall_min, wall_max = wall_bounds
     wall_span = np.asarray(wall_max - wall_min, dtype=float)
@@ -1059,7 +1105,7 @@ def _wall_backed_target(
     wall_center = (np.asarray(wall_min, dtype=float) + wall_max) / 2.0
     direction = float(seat_center[normal_axis] - wall_center[normal_axis])
     if abs(direction) < 1e-6:
-        return None
+        return []
     inward = 1.0 if direction > 0.0 else -1.0
     desired_front = np.zeros(2, dtype=float)
     desired_front[normal_axis] = inward
@@ -1088,20 +1134,171 @@ def _wall_backed_target(
     tangent_half = (
         float(tangent_projection.max()) - float(tangent_projection.min())
     ) / 2.0
-    target = seat_center.copy()
-    target[normal_axis] = float((wall_min + wall_max)[normal_axis]) / 2.0 + inward * (
-        float(wall_span[normal_axis]) / 2.0 + normal_half + 0.03
-    )
     wall_tangent_center = float((wall_min + wall_max)[tangent_axis]) / 2.0
     tangent_limit = max(
         0.0,
         float(wall_span[tangent_axis]) / 2.0 - tangent_half - 0.05,
     )
-    target[tangent_axis] = min(
-        max(float(target[tangent_axis]), wall_tangent_center - tangent_limit),
-        wall_tangent_center + tangent_limit,
+    tangent_min = wall_tangent_center - tangent_limit
+    tangent_max = wall_tangent_center + tangent_limit
+    initial_tangent = min(
+        max(float(seat_center[tangent_axis]), tangent_min), tangent_max
     )
-    return (float(target[0]), float(target[1])), yaw_deg
+
+    # A door on this wall is a hard physical exclusion, independent of whether
+    # the critic happened to emit a separate opening-clearance check.  Values
+    # immediately to either side of every door are sufficient candidates for a
+    # one-dimensional wall interval; final whole-scene scoring chooses among
+    # the feasible alternatives.
+    tangent_values = [initial_tangent]
+    for opening in _same_wall_door_openings(scene, wall_id):
+        clearance_min = getattr(opening, "clearance_bbox_min", None)
+        clearance_max = getattr(opening, "clearance_bbox_max", None)
+        if clearance_min is None or clearance_max is None:
+            continue
+        try:
+            tangent_values.extend(
+                (
+                    float(clearance_min[tangent_axis])
+                    - tangent_half
+                    - _WINDOW_CLEARANCE_MARGIN_M,
+                    float(clearance_max[tangent_axis])
+                    + tangent_half
+                    + _WINDOW_CLEARANCE_MARGIN_M,
+                )
+            )
+        except (TypeError, ValueError, IndexError):
+            continue
+
+    current_gap = _xy_aabb_gap(seat_bounds, wall_bounds)
+    gap_values = [_WALL_BACKED_CONTACT_GAP_M]
+    relaxed_gap = max(
+        _WALL_BACKED_CONTACT_GAP_M,
+        float(max_gap_m) - _WALL_BACKED_GAP_MARGIN_M,
+    )
+    if current_gap <= float(max_gap_m) + 1e-6 and relaxed_gap > gap_values[0]:
+        gap_values.append(relaxed_gap)
+
+    candidates: list[tuple[tuple[float, float], float]] = []
+    for gap_m in gap_values:
+        for tangent_value in tangent_values:
+            if tangent_value < tangent_min - 1e-6 or tangent_value > tangent_max + 1e-6:
+                continue
+            target = seat_center.copy()
+            target[normal_axis] = float(
+                (wall_min + wall_max)[normal_axis]
+            ) / 2.0 + inward * (
+                float(wall_span[normal_axis]) / 2.0 + normal_half + gap_m
+            )
+            target[tangent_axis] = tangent_value
+            center = (float(target[0]), float(target[1]))
+            if _wall_backed_pose_blocks_door(
+                scene=scene,
+                obj=seat,
+                center=center,
+                yaw_deg=yaw_deg,
+                wall_id=wall_id,
+            ):
+                continue
+            candidates.append((center, yaw_deg))
+
+    # Prefer the least disruptive legal pose.  This preserves nearby prompt
+    # relations while still allowing a later candidate to take a flush pose if
+    # it scores better for the whole scene.
+    unique_candidates = {
+        (round(center[0], 9), round(center[1], 9), round(yaw, 9)): (center, yaw)
+        for center, yaw in candidates
+    }
+    return sorted(
+        unique_candidates.values(),
+        key=lambda candidate: (
+            math.hypot(
+                candidate[0][0] - float(seat_center[0]),
+                candidate[0][1] - float(seat_center[1]),
+            ),
+            candidate[0],
+        ),
+    )
+
+
+def _wall_backed_target(
+    scene: RoomScene, object_id: str, wall_id: str | None
+) -> tuple[tuple[float, float], float] | None:
+    """Return the first legal wall-backed pose for legacy private callers."""
+    return next(iter(_wall_backed_targets(scene, object_id, wall_id)), None)
+
+
+def _same_wall_door_openings(scene: RoomScene, wall_id: str) -> list[Any]:
+    """Return door openings attached to ``wall_id`` using stable geometry IDs."""
+    geometry = scene.room_geometry
+    if geometry is None:
+        return []
+    normalized_wall_id = str(wall_id).lower()
+    openings: list[Any] = []
+    for opening in getattr(geometry, "openings", ()) or ():
+        opening_type = getattr(opening, "opening_type", "")
+        if hasattr(opening_type, "value"):
+            opening_type = opening_type.value
+        if str(opening_type).lower() != "door":
+            continue
+        direction = str(getattr(opening, "wall_direction", "") or "").lower()
+        if direction and direction not in normalized_wall_id:
+            continue
+        openings.append(opening)
+    return openings
+
+
+def _wall_backed_pose_blocks_door(
+    *,
+    scene: RoomScene,
+    obj: SceneObject,
+    center: tuple[float, float],
+    yaw_deg: float,
+    wall_id: str,
+) -> bool:
+    """Check a proposed wall pose against same-wall door clearance boxes."""
+    target = _RepairTarget(
+        str(obj.object_id),
+        "back_against_wall",
+        "",
+        center,
+        yaw_deg,
+    )
+    transform = _transform_for_target(obj, target)
+    if transform is None:
+        return True
+    old_transform = obj.transform
+    try:
+        obj.transform = transform
+        bounds = obj.compute_world_bounds()
+    finally:
+        obj.transform = old_transform
+    if bounds is None:
+        return True
+    lower, upper = (
+        np.asarray(bounds[0], dtype=float),
+        np.asarray(bounds[1], dtype=float),
+    )
+    for opening in _same_wall_door_openings(scene, wall_id):
+        zone_min = getattr(opening, "clearance_bbox_min", None)
+        zone_max = getattr(opening, "clearance_bbox_max", None)
+        if zone_min is None or zone_max is None:
+            continue
+        try:
+            clearance_min = np.asarray(zone_min, dtype=float)
+            clearance_max = np.asarray(zone_max, dtype=float)
+        except (TypeError, ValueError):
+            continue
+        if (
+            float(lower[0]) < float(clearance_max[0])
+            and float(upper[0]) > float(clearance_min[0])
+            and float(lower[1]) < float(clearance_max[1])
+            and float(upper[1]) > float(clearance_min[1])
+            and float(lower[2]) < float(clearance_max[2])
+            and float(upper[2]) > float(clearance_min[2])
+        ):
+            return True
+    return False
 
 
 def _window_clearance_targets(
