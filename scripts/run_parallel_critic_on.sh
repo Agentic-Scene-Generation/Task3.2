@@ -207,6 +207,15 @@ if ! FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS="$(normalize_bool "$FAIL_STAGE_ON
     echo "ERROR: FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS must be true or false" >&2
     exit 1
 fi
+if ! CRITIC_PROBE_RENDER_FINAL_VIEWS="$(normalize_bool "$CRITIC_PROBE_RENDER_FINAL_VIEWS")"; then
+    echo "ERROR: CRITIC_PROBE_RENDER_FINAL_VIEWS must be true or false" >&2
+    exit 1
+fi
+if [ "$CRITIC_PROBE_RENDER_FINAL_VIEWS" = "true" ] && [ "$SCENE_BATCH_SIZE" -ne 1 ]; then
+    echo "ERROR: immediate per-scene final rendering requires SCENE_BATCH_SIZE=1 (got $SCENE_BATCH_SIZE)" >&2
+    echo "       Set SCENE_BATCH_SIZE=1 so each completed batch maps to exactly one scene." >&2
+    exit 1
+fi
 
 # Some containers expose /usr/bin/bwrap but forbid unprivileged namespaces.
 # Keep the active Python directory available while hiding only bwrap from
@@ -275,7 +284,9 @@ export CRITIC_PROBE_MAX_SAFE_INNER_PARALLELISM CRITIC_PROBE_ALLOW_UNSAFE_PARALLE
 export CRITIC_PROBE_PORT_BASE CRITIC_PROBE_PORT_BLOCK_SIZE
 export CRITIC_PROBE_SHUTDOWN_GRACE_SECONDS
 export CRITIC_PROBE_CONTINUE_ON_BATCH_FAILURE
+export CRITIC_PROBE_RENDER_FINAL_VIEWS
 export CRITIC_PROBE_FINAL_VIEW_PARALLELISM
+export FINAL_VIEW_PYTHON_BIN
 export CRITIC_CONSTRAINT_MODE
 export PIPELINE_STOP_STAGE BRANCH_FROM_SHARED_BASE SHARED_BASE_STOP_STAGE
 export SHARED_BASE_ROOT GENERATE_SHARED_BASE MAX_CASES CASE_FILTER DRY_RUN
@@ -562,6 +573,31 @@ run_batch() {
     else
         "${cmd[@]}"
     fi
+
+    # Render only the scene represented by this completed batch. Immediate
+    # rendering keeps usable views available even when a later batch fails.
+    # Rendering is best-effort: a renderer/Blender failure must not change the
+    # already successful scene-generation result.
+    if [ "$run_kind" = "critic_on" ] \
+        && [ "$CRITIC_PROBE_RENDER_FINAL_VIEWS" = "true" ] \
+        && [ "$PIPELINE_STOP_STAGE" = "manipuland" ]; then
+        for entry in "${batch_entries[@]}"; do
+            IFS='|' read -r scene_index _case_id _critic_goal _prompt <<< "$entry"
+            local scene_dir="$run_root/hydra/scene_$(printf '%03d' "$scene_index")"
+            local blend_path="$scene_dir/combined_house/house.blend"
+            if [ ! -f "$blend_path" ]; then
+                echo "WARNING: completed $run_kind/$batch_label has no final blend; skipping render: $blend_path" >&2
+                continue
+            fi
+            echo "[$run_kind/$batch_label] rendering final views for scene $(printf '%03d' "$scene_index")"
+            if "$FINAL_VIEW_PYTHON_BIN" "$SCRIPT_DIR/render_critic_final_views.py" \
+                --parallelism 1 -- "$blend_path"; then
+                echo "[$run_kind/$batch_label] final views ready: $scene_dir/critic_final_views"
+            else
+                echo "WARNING: final-view rendering failed for $blend_path; continuing" >&2
+            fi
+        done
+    fi
 }
 
 run_batches() {
@@ -764,12 +800,8 @@ if [ "$GENERATE_SHARED_BASE" = "true" ]; then
     run_batches shared_base
 fi
 run_batches critic_on
-if [ "${CRITIC_PROBE_RENDER_FINAL_VIEWS,,}" = "true" ] || [ "${CRITIC_PROBE_RENDER_FINAL_VIEWS}" = "1" ]; then
-    if [ "$PIPELINE_STOP_STAGE" = "manipuland" ]; then
-        "$FINAL_VIEW_PYTHON_BIN" "$SCRIPT_DIR/render_critic_final_views.py" \
-            --parallelism "$CRITIC_PROBE_FINAL_VIEW_PARALLELISM" -- "$OUTPUT_ROOT"
-    else
-        echo "skipping final combined-house views: pipeline stops at $PIPELINE_STOP_STAGE"
-    fi
+if [ "$CRITIC_PROBE_RENDER_FINAL_VIEWS" = "true" ] \
+    && [ "$PIPELINE_STOP_STAGE" != "manipuland" ]; then
+    echo "skipping final combined-house views: pipeline stops at $PIPELINE_STOP_STAGE"
 fi
 echo "critic-on probe complete: $OUTPUT_ROOT"
