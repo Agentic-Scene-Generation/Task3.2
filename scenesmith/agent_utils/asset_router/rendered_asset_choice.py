@@ -1,16 +1,20 @@
 """VLM-assisted choice among rendered HSSD retrieval candidates."""
 
+import base64
+import io
+import json
 import logging
 import os
 import re
 import time
+from datetime import datetime, timezone
 
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from scenesmith.utils.llm_json import parse_llm_json_object
-from scenesmith.utils.openai import encode_image_to_base64
+from PIL import Image, ImageDraw
 
 if TYPE_CHECKING:
     from scenesmith.agent_utils.hssd_retrieval_server.dataclasses import (
@@ -124,6 +128,169 @@ class _CandidateRenderEvidence:
     original_index: int
     candidate: "HssdRetrievalResult"
     views: tuple[tuple[str, Path], ...]
+
+
+def _encode_candidate_views_as_one_image(
+    views: tuple[tuple[str, Path], ...],
+    identity_label: str | None = None,
+) -> str:
+    """Stitch one candidate's views into one labelled image for the VLM.
+
+    Sending one multimodal image per asset keeps the candidate boundary
+    unambiguous.  The original renders are kept at their native resolution
+    (up to a conservative 2048px-wide canvas) and each panel is labelled with
+    its verified/fallback view name directly in the pixels.
+    """
+    if not views:
+        raise ValueError("candidate has no rendered views")
+
+    panels: list[tuple[str, Image.Image]] = []
+    for label, image_path in views:
+        with Image.open(image_path) as source:
+            image = source.convert("RGB").copy()
+        panels.append((label, image))
+
+    panel_height = max(image.height for _, image in panels)
+    panel_header_height = max(28, min(56, panel_height // 8))
+    identity_header_height = panel_header_height if identity_label else 0
+    gap = 4
+    panel_widths = [
+        max(1, round(image.width * panel_height / max(1, image.height)))
+        for _, image in panels
+    ]
+    total_width = sum(panel_widths) + gap * (len(panels) - 1)
+    max_width = 2048
+    if total_width > max_width:
+        scale = max_width / total_width
+        panel_height = max(1, round(panel_height * scale))
+        panel_header_height = max(24, round(panel_header_height * scale))
+        identity_header_height = panel_header_height if identity_label else 0
+        panel_widths = [max(1, round(width * scale)) for width in panel_widths]
+        total_width = sum(panel_widths) + gap * (len(panels) - 1)
+
+    header_height = identity_header_height + panel_header_height
+    canvas = Image.new("RGB", (total_width, panel_height + header_height), "white")
+    draw = ImageDraw.Draw(canvas)
+    if identity_label:
+        draw.rectangle(
+            (0, 0, total_width - 1, identity_header_height - 1),
+            fill=(210, 225, 240),
+            outline=(70, 90, 110),
+        )
+        draw.text(
+            (6, max(2, identity_header_height // 5)), identity_label, fill="black"
+        )
+    x_offset = 0
+    for panel_index, ((label, image), width) in enumerate(zip(panels, panel_widths)):
+        resized = image.resize((width, panel_height), Image.Resampling.LANCZOS)
+        canvas.paste(resized, (x_offset, header_height))
+        draw.rectangle(
+            (
+                x_offset,
+                identity_header_height,
+                x_offset + width - 1,
+                header_height - 1,
+            ),
+            fill=(235, 235, 235),
+            outline=(90, 90, 90),
+        )
+        draw.text(
+            (x_offset + 6, identity_header_height + max(2, panel_header_height // 5)),
+            label,
+            fill="black",
+        )
+        x_offset += width
+        if panel_index < len(panels) - 1:
+            draw.rectangle(
+                (x_offset, 0, x_offset + gap - 1, panel_height + header_height),
+                fill=(70, 70, 70),
+            )
+            x_offset += gap
+
+    output = io.BytesIO()
+    canvas.save(output, format="PNG", optimize=True)
+    return base64.b64encode(output.getvalue()).decode("ascii")
+
+
+def _write_choice_audit(
+    *,
+    object_description: str,
+    scene_context: str | None,
+    object_short_name: str | None,
+    requested_dimensions: list[float] | tuple[float, ...] | None,
+    requested_shape: str | None,
+    candidates: list["HssdRetrievalResult"],
+    evidence_records: list[_CandidateRenderEvidence],
+    top_n: int,
+    model: str,
+    reasoning_effort: str,
+    verbosity: str,
+    vision_detail: str,
+    status: str,
+    **details: object,
+) -> None:
+    """Append a complete rendered-choice decision to the optional JSONL audit."""
+    audit_path_raw = os.environ.get("HSSD_RENDERED_ASSET_CHOICE_AUDIT_PATH", "").strip()
+    if not audit_path_raw:
+        return
+
+    candidate_records = []
+    evidence_by_id = {record.candidate.hssd_id: record for record in evidence_records}
+    for index, candidate in enumerate(candidates, start=1):
+        evidence = evidence_by_id.get(candidate.hssd_id)
+        candidate_records.append(
+            {
+                "original_index": index,
+                "hssd_id": candidate.hssd_id,
+                "object_name": candidate.object_name,
+                "category": candidate.category,
+                "size": [float(axis) for axis in candidate.size],
+                "similarity_score": float(candidate.similarity_score),
+                "evidence_views": (
+                    [
+                        {"label": label, "path": str(path)}
+                        for label, path in evidence.views
+                    ]
+                    if evidence is not None
+                    else []
+                ),
+            }
+        )
+
+    event = {
+        "schema_version": "hssd_rendered_choice_audit.v2",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "pid": os.getpid(),
+        "status": status,
+        "object_description": object_description,
+        "object_short_name": object_short_name,
+        "scene_context": scene_context,
+        "requested_dimensions": (
+            [float(axis) for axis in requested_dimensions]
+            if requested_dimensions is not None
+            else None
+        ),
+        "requested_shape": requested_shape,
+        "top_n": top_n,
+        "model": model,
+        "reasoning_effort": reasoning_effort,
+        "verbosity": verbosity,
+        "vision_detail": vision_detail,
+        "image_policy": "one_composite_per_candidate",
+        "candidates": candidate_records,
+    }
+    event.update(details)
+
+    try:
+        audit_path = Path(audit_path_raw)
+        audit_path.parent.mkdir(parents=True, exist_ok=True)
+        with audit_path.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(event, ensure_ascii=False, default=str) + "\n")
+            stream.flush()
+    except Exception as exc:  # pragma: no cover - audit must never break retrieval
+        console_logger.warning(
+            "Could not write HSSD choice audit %s: %s", audit_path_raw, exc
+        )
 
 
 def _normalize_annotation_front_axis(value: object) -> str | None:
@@ -243,6 +410,22 @@ def choose_hssd_candidate_from_iso_renders(
 ) -> RenderedAssetChoice:
     """Optionally reorder candidates using pre-rendered HSSD visual evidence."""
     if top_n <= 1 or len(candidates) <= 1:
+        _write_choice_audit(
+            object_description=object_description,
+            scene_context=scene_context,
+            object_short_name=object_short_name,
+            requested_dimensions=requested_dimensions,
+            requested_shape=requested_shape,
+            candidates=candidates,
+            evidence_records=[],
+            top_n=top_n,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            verbosity=verbosity,
+            vision_detail=vision_detail,
+            status="skipped",
+            reason="top_n_or_candidate_count_too_small",
+        )
         return RenderedAssetChoice(candidates=candidates)
 
     evidence_records: list[_CandidateRenderEvidence] = []
@@ -263,7 +446,9 @@ def choose_hssd_candidate_from_iso_renders(
             )
         )
 
-    used_image_count = sum(len(record.views) for record in evidence_records)
+    used_view_count = sum(len(record.views) for record in evidence_records)
+    # Keep one multimodal image per asset; multiple views are stitched below.
+    used_image_count = len(evidence_records)
     console_logger.info(
         "Prepared rendered HSSD evidence for '%s': %s",
         object_description,
@@ -273,6 +458,23 @@ def choose_hssd_candidate_from_iso_renders(
         },
     )
     if len(evidence_records) <= 1:
+        _write_choice_audit(
+            object_description=object_description,
+            scene_context=scene_context,
+            object_short_name=object_short_name,
+            requested_dimensions=requested_dimensions,
+            requested_shape=requested_shape,
+            candidates=candidates,
+            evidence_records=evidence_records,
+            top_n=top_n,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            verbosity=verbosity,
+            vision_detail=vision_detail,
+            status="insufficient_evidence",
+            used_image_count=used_image_count,
+            used_view_count=used_view_count,
+        )
         console_logger.debug(
             "Skipping rendered HSSD choice for '%s': only %d/%d iso renders found",
             object_description,
@@ -318,8 +520,10 @@ def choose_hssd_candidate_from_iso_renders(
         f"Requested object: {object_description}\n"
         + ("\n".join(request_details) + "\n" if request_details else "")
         + (f"Original scene prompt: {scene_context}\n" if scene_context else "")
-        + "\nInspect the attached render evidence. Every image is preceded by its "
-        "candidate index and view label. A SceneBenchmark semantic-front view is "
+        + "\nInspect the attached render evidence. Each candidate has exactly one "
+        "composite image; its panels are captioned with view labels and the "
+        "candidate index/HSSD ID text immediately precedes that image. A "
+        "SceneBenchmark semantic-front view is "
         "a verified front hint. A fallback-axis view is only coordinate evidence; "
         "use it together with its opposite view to find doors, drawers, controls, "
         "or other usable surfaces. Named front/back/left/right values describe "
@@ -339,23 +543,28 @@ def choose_hssd_candidate_from_iso_renders(
 
     user_content = [{"type": "text", "text": prompt}]
     for record in evidence_records:
-        for view_label, image_path in record.views:
-            user_content.append(
-                {
-                    "type": "text",
-                    "text": (
-                        f"CANDIDATE_INDEX={record.original_index} "
-                        f"HSSD_ID={record.candidate.hssd_id} VIEW={view_label}"
-                    ),
-                }
-            )
-            encoded = encode_image_to_base64(image_path)
-            user_content.append(
-                {
-                    "type": "image_url",
-                    "image_url": {"url": f"data:image/png;base64,{encoded}"},
-                }
-            )
+        view_labels = "; ".join(label for label, _ in record.views)
+        user_content.append(
+            {
+                "type": "text",
+                "text": (
+                    f"CANDIDATE_INDEX={record.original_index} "
+                    f"HSSD_ID={record.candidate.hssd_id} PANELS={view_labels}"
+                ),
+            }
+        )
+        encoded = _encode_candidate_views_as_one_image(
+            record.views,
+            identity_label=(
+                f"INDEX={record.original_index} " f"HSSD_ID={record.candidate.hssd_id}"
+            ),
+        )
+        user_content.append(
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:image/png;base64,{encoded}"},
+            }
+        )
 
     try:
         start_time = time.time()
@@ -375,6 +584,24 @@ def choose_hssd_candidate_from_iso_renders(
             response_json,
         )
     except Exception as exc:
+        _write_choice_audit(
+            object_description=object_description,
+            scene_context=scene_context,
+            object_short_name=object_short_name,
+            requested_dimensions=requested_dimensions,
+            requested_shape=requested_shape,
+            candidates=candidates,
+            evidence_records=evidence_records,
+            top_n=top_n,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            verbosity=verbosity,
+            vision_detail=vision_detail,
+            status="vlm_error",
+            used_image_count=used_image_count,
+            used_view_count=used_view_count,
+            error=str(exc),
+        )
         console_logger.warning(
             "Rendered HSSD choice failed for '%s'; keeping retrieval order: %s",
             object_description,
@@ -409,6 +636,27 @@ def choose_hssd_candidate_from_iso_renders(
         )
 
     if selected_candidate is None:
+        _write_choice_audit(
+            object_description=object_description,
+            scene_context=scene_context,
+            object_short_name=object_short_name,
+            requested_dimensions=requested_dimensions,
+            requested_shape=requested_shape,
+            candidates=candidates,
+            evidence_records=evidence_records,
+            top_n=top_n,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            verbosity=verbosity,
+            vision_detail=vision_detail,
+            status="invalid_selection",
+            used_image_count=used_image_count,
+            used_view_count=used_view_count,
+            raw_response=response_text,
+            parsed_response=response_json,
+            selected_index=selected_index,
+            selected_hssd_id=selected_hssd_id,
+        )
         console_logger.warning(
             "Rendered HSSD choice for '%s' returned invalid selection %s/%s; "
             "keeping retrieval order",
@@ -445,12 +693,35 @@ def choose_hssd_candidate_from_iso_renders(
                 _planar_aspect_ratio(selected_candidate),
             )
 
+    original_index = candidates.index(selected_candidate) + 1
+    _write_choice_audit(
+        object_description=object_description,
+        scene_context=scene_context,
+        object_short_name=object_short_name,
+        requested_dimensions=requested_dimensions,
+        requested_shape=requested_shape,
+        candidates=candidates,
+        evidence_records=evidence_records,
+        top_n=top_n,
+        model=model,
+        reasoning_effort=reasoning_effort,
+        verbosity=verbosity,
+        vision_detail=vision_detail,
+        status="selected",
+        used_image_count=used_image_count,
+        used_view_count=used_view_count,
+        raw_response=response_text,
+        parsed_response=response_json,
+        selected_index=original_index,
+        selected_hssd_id=selected_candidate.hssd_id,
+        reason=str(reason) if reason is not None else None,
+    )
+
     reordered = [selected_candidate] + [
         candidate
         for candidate in candidates
         if candidate.hssd_id != selected_candidate.hssd_id
     ]
-    original_index = candidates.index(selected_candidate) + 1
     return RenderedAssetChoice(
         candidates=reordered,
         selected_hssd_id=selected_candidate.hssd_id,

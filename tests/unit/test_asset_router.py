@@ -1,6 +1,8 @@
 """Unit tests for the asset router module."""
 
 import base64
+import json
+import os
 import tempfile
 import unittest
 
@@ -234,6 +236,51 @@ class TestRenderedHssdAssetChoice(unittest.TestCase):
         self.assertIn("Original scene prompt", prompt)
         self.assertIn("nightstand with a table lamp", prompt)
 
+    def test_writes_rendered_choice_audit(self) -> None:
+        candidates = [
+            self._candidate("asset_audit_a", "generic wardrobe", 0.91),
+            self._candidate("asset_audit_b", "wood wardrobe", 0.89),
+        ]
+        vlm_service = MagicMock()
+        vlm_service.create_completion.return_value = (
+            '{"selected_index": 2, "selected_hssd_id": "asset_audit_b", '
+            '"reason": "visible doors"}'
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            audit_path = root / "audit.jsonl"
+            for candidate in candidates:
+                self._write_iso(root, candidate.hssd_id)
+
+            with patch.dict(
+                os.environ,
+                {"HSSD_RENDERED_ASSET_CHOICE_AUDIT_PATH": str(audit_path)},
+            ):
+                choice = choose_hssd_candidate_from_iso_renders(
+                    candidates=candidates,
+                    object_description="wardrobe with double doors",
+                    scene_context="bedroom",
+                    vlm_service=vlm_service,
+                    model="test-model",
+                    reasoning_effort="low",
+                    verbosity="low",
+                    vision_detail="low",
+                    rendered_assets_dir=root,
+                    top_n=2,
+                )
+
+            self.assertEqual(choice.selected_hssd_id, "asset_audit_b")
+            event = json.loads(audit_path.read_text(encoding="utf-8"))
+            self.assertEqual(event["image_policy"], "one_composite_per_candidate")
+            self.assertEqual(event["status"], "selected")
+            self.assertEqual(event["selected_index"], 2)
+            self.assertEqual(event["selected_hssd_id"], "asset_audit_b")
+            self.assertEqual(len(event["candidates"]), 2)
+            self.assertEqual(
+                event["candidates"][0]["evidence_views"][0]["label"], "iso"
+            )
+
     @patch(
         "scenesmith.scenebenchmark_critic.asset_library_annotations."
         "get_hssd_asset_annotations"
@@ -282,7 +329,10 @@ class TestRenderedHssdAssetChoice(unittest.TestCase):
         evidence_labels = [
             label for label in labels if label.startswith("CANDIDATE_INDEX=")
         ]
-        self.assertEqual(choice.used_image_count, 4)
+        self.assertEqual(choice.used_image_count, 2)
+        self.assertEqual(
+            len([item for item in content if item["type"] == "image_url"]), 2
+        )
         self.assertTrue(
             any(
                 "SceneBenchmark semantic-front +X (right)" in label
@@ -337,7 +387,10 @@ class TestRenderedHssdAssetChoice(unittest.TestCase):
             "content"
         ]
         labels = [item["text"] for item in content if item["type"] == "text"]
-        self.assertEqual(choice.used_image_count, 6)
+        self.assertEqual(choice.used_image_count, 2)
+        self.assertEqual(
+            len([item for item in content if item["type"] == "image_url"]), 2
+        )
         self.assertTrue(any("fallback-axis -Y (back)" in label for label in labels))
         self.assertTrue(any("fallback-axis +Y (front)" in label for label in labels))
 

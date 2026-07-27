@@ -512,6 +512,7 @@ run_batch() {
     local start_stage=""
     local resume_from=""
     local shared_base_batch_root=""
+    local asset_choice_audit_path="$run_root/hydra/asset_choice_audit.jsonl"
 
     build_port_args "$batch_index"
     mkdir -p "$run_root"
@@ -569,9 +570,10 @@ run_batch() {
         return 0
     fi
     if [ "$DISABLE_BWRAP" = "true" ]; then
-        PATH="$PYTHON_EXEC_DIR:/usr/local/sbin:/usr/local/bin" "${cmd[@]}"
+        HSSD_RENDERED_ASSET_CHOICE_AUDIT_PATH="$asset_choice_audit_path" \
+            PATH="$PYTHON_EXEC_DIR:/usr/local/sbin:/usr/local/bin" "${cmd[@]}"
     else
-        "${cmd[@]}"
+        HSSD_RENDERED_ASSET_CHOICE_AUDIT_PATH="$asset_choice_audit_path" "${cmd[@]}"
     fi
 
     # Render only the scene represented by this completed batch. Immediate
