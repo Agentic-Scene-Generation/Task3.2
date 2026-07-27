@@ -5,7 +5,7 @@ import tempfile
 import unittest
 
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from scenesmith.agent_utils.asset_router import AssetRouter
 from scenesmith.agent_utils.asset_router.dataclasses import AnalysisResult, AssetItem
@@ -182,6 +182,11 @@ class TestRenderedHssdAssetChoice(unittest.TestCase):
         asset_dir.mkdir(parents=True, exist_ok=True)
         (asset_dir / "iso.png").write_bytes(self._PNG_1X1)
 
+    def _write_view(self, root: Path, hssd_id: str, view_name: str) -> None:
+        asset_dir = root / hssd_id
+        asset_dir.mkdir(parents=True, exist_ok=True)
+        (asset_dir / f"{view_name}.png").write_bytes(self._PNG_1X1)
+
     def test_reorders_candidates_when_vlm_selects_rendered_iso(self) -> None:
         candidates = [
             self._candidate("asset_a", "generic bed", 0.91),
@@ -228,6 +233,113 @@ class TestRenderedHssdAssetChoice(unittest.TestCase):
         ][0]["text"]
         self.assertIn("Original scene prompt", prompt)
         self.assertIn("nightstand with a table lamp", prompt)
+
+    @patch(
+        "scenesmith.scenebenchmark_critic.asset_library_annotations."
+        "get_hssd_asset_annotations"
+    )
+    def test_adds_verified_scenebenchmark_front_view(self, mock_annotations) -> None:
+        candidates = [
+            self._candidate("a" * 40, "wardrobe", 0.91),
+            self._candidate("b" * 40, "wardrobe", 0.89),
+        ]
+        mock_annotations.return_value = {
+            "canonical_front": {
+                "asset_local_front_axis": "+X",
+                "canonical_orientation_is_semantic_front": True,
+                "is_strict_front": True,
+            }
+        }
+        vlm_service = MagicMock()
+        vlm_service.create_completion.return_value = (
+            '{"selected_index": 1, "selected_hssd_id": "'
+            + "a" * 40
+            + '", "reason": "visible doors"}'
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            for candidate in candidates:
+                self._write_iso(root, candidate.hssd_id)
+                self._write_view(root, candidate.hssd_id, "right")
+            choice = choose_hssd_candidate_from_iso_renders(
+                candidates=candidates,
+                object_description="modern double-door wardrobe",
+                scene_context="A bedroom with storage furniture.",
+                vlm_service=vlm_service,
+                model="test-model",
+                reasoning_effort="none",
+                verbosity="low",
+                vision_detail="low",
+                rendered_assets_dir=root,
+                top_n=2,
+            )
+
+        content = vlm_service.create_completion.call_args.kwargs["messages"][0][
+            "content"
+        ]
+        labels = [item["text"] for item in content if item["type"] == "text"]
+        evidence_labels = [
+            label for label in labels if label.startswith("CANDIDATE_INDEX=")
+        ]
+        self.assertEqual(choice.used_image_count, 4)
+        self.assertTrue(
+            any(
+                "SceneBenchmark semantic-front +X (right)" in label
+                for label in evidence_labels
+            )
+        )
+        self.assertFalse(any("fallback-axis" in label for label in evidence_labels))
+
+    @patch(
+        "scenesmith.scenebenchmark_critic.asset_library_annotations."
+        "get_hssd_asset_annotations"
+    )
+    def test_adds_both_sides_of_strict_fallback_axis(self, mock_annotations) -> None:
+        candidates = [
+            self._candidate("c" * 40, "wardrobe", 0.91),
+            self._candidate("d" * 40, "wardrobe", 0.89),
+        ]
+        mock_annotations.return_value = {
+            "canonical_front": {
+                "asset_local_front_axis": [0.0, 0.0, 1.0],
+                "canonical_orientation_is_semantic_front": False,
+                "is_strict_front": True,
+            }
+        }
+        vlm_service = MagicMock()
+        vlm_service.create_completion.return_value = (
+            '{"selected_index": 1, "selected_hssd_id": "'
+            + "c" * 40
+            + '", "reason": "doors visible on fallback-axis view"}'
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            for candidate in candidates:
+                self._write_iso(root, candidate.hssd_id)
+                self._write_view(root, candidate.hssd_id, "back")
+                self._write_view(root, candidate.hssd_id, "front")
+            choice = choose_hssd_candidate_from_iso_renders(
+                candidates=candidates,
+                object_description="modern double-door wardrobe",
+                scene_context="A bedroom with storage furniture.",
+                vlm_service=vlm_service,
+                model="test-model",
+                reasoning_effort="none",
+                verbosity="low",
+                vision_detail="low",
+                rendered_assets_dir=root,
+                top_n=2,
+            )
+
+        content = vlm_service.create_completion.call_args.kwargs["messages"][0][
+            "content"
+        ]
+        labels = [item["text"] for item in content if item["type"] == "text"]
+        self.assertEqual(choice.used_image_count, 6)
+        self.assertTrue(any("fallback-axis -Y (back)" in label for label in labels))
+        self.assertTrue(any("fallback-axis +Y (front)" in label for label in labels))
 
     def test_keeps_retrieval_order_when_too_few_iso_images_exist(self) -> None:
         candidates = [

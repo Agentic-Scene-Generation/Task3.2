@@ -33,6 +33,19 @@ _FLOOR_COVERING_TOKENS = {
 
 _ROUND_FOOTPRINT_TOKENS = {"circle", "circular", "oval", "round"}
 _SQUARE_FOOTPRINT_MAX_ASPECT_RATIO = 1.30
+_HSSD_ID_PATTERN = re.compile(r"[0-9a-f]{40}", re.IGNORECASE)
+_AXIS_TO_RENDER_VIEW = {
+    "+X": "right",
+    "-X": "left",
+    "+Y": "front",
+    "-Y": "back",
+}
+_OPPOSITE_HORIZONTAL_AXIS = {
+    "+X": "-X",
+    "-X": "+X",
+    "+Y": "-Y",
+    "-Y": "+Y",
+}
 
 
 def _normalized_tokens(*values: str | None) -> set[str]:
@@ -106,6 +119,112 @@ class RenderedAssetChoice:
     used_image_count: int = 0
 
 
+@dataclass(frozen=True)
+class _CandidateRenderEvidence:
+    original_index: int
+    candidate: "HssdRetrievalResult"
+    views: tuple[tuple[str, Path], ...]
+
+
+def _normalize_annotation_front_axis(value: object) -> str | None:
+    """Convert a SceneBenchmark HSSD front hint to a SceneSmith axis."""
+    text = str(value or "").strip().upper().replace(" ", "")
+    if text in _AXIS_TO_RENDER_VIEW:
+        return text
+    if len(text) == 1 and text in {"X", "Y"}:
+        return f"+{text}"
+
+    if not isinstance(value, (list, tuple)) or len(value) != 3:
+        return None
+    try:
+        x_hsm, y_hsm, z_hsm = (float(axis) for axis in value)
+    except (TypeError, ValueError):
+        return None
+
+    # HSM is X-right/Y-up/Z-forward; SceneSmith is X-right/Y-forward/Z-up.
+    x_scene = x_hsm
+    y_scene = -z_hsm
+    z_scene = y_hsm
+    axis_name, axis_value = max(
+        {"X": x_scene, "Y": y_scene}.items(), key=lambda item: abs(item[1])
+    )
+    if abs(axis_value) < 1e-6 or abs(z_scene) > abs(axis_value):
+        return None
+    return f"{'+' if axis_value >= 0 else '-'}{axis_name}"
+
+
+def _annotation_axis_from_record(record: dict[str, object]) -> str | None:
+    canonical = record.get("canonical_front") or {}
+    if not isinstance(canonical, dict):
+        return None
+    axis_value = canonical.get("asset_local_front_axis")
+    if axis_value is None:
+        axis_value = canonical.get("canonical_orientation_axis")
+    if axis_value is None:
+        hints = record.get("scenebenchmark_functional_hints") or {}
+        if isinstance(hints, dict):
+            axis_value = hints.get("asset_local_front_axis")
+    return _normalize_annotation_front_axis(axis_value)
+
+
+def _annotation_render_views(
+    *, hssd_id: str, asset_dir: Path
+) -> tuple[tuple[str, Path], ...]:
+    """Return useful named views selected from SceneBenchmark front metadata."""
+    if _HSSD_ID_PATTERN.fullmatch(hssd_id) is None:
+        return ()
+
+    try:
+        from scenesmith.scenebenchmark_critic.asset_library_annotations import (
+            get_hssd_asset_annotations,
+        )
+
+        record = get_hssd_asset_annotations(hssd_id)
+    except Exception as exc:
+        console_logger.warning(
+            "Could not load SceneBenchmark HSSD front evidence for %s: %s",
+            hssd_id,
+            exc,
+        )
+        return ()
+    if not record:
+        return ()
+
+    canonical = record.get("canonical_front") or {}
+    if not isinstance(canonical, dict):
+        return ()
+    axis = _annotation_axis_from_record(record)
+    if axis is None:
+        return ()
+
+    semantic_front = canonical.get("canonical_orientation_is_semantic_front") is True
+    strict_front = bool(
+        canonical.get("is_strict_front") or canonical.get("is_strict_positive_front")
+    )
+    if not semantic_front and not strict_front:
+        return ()
+
+    axes = [axis]
+    if strict_front and not semantic_front:
+        # A fallback axis is only a coordinate convention. Include its opposite
+        # so the VLM can find doors or controls without trusting the axis sign.
+        axes.append(_OPPOSITE_HORIZONTAL_AXIS[axis])
+
+    views: list[tuple[str, Path]] = []
+    for view_axis in axes:
+        view_name = _AXIS_TO_RENDER_VIEW[view_axis]
+        image_path = asset_dir / f"{view_name}.png"
+        if not image_path.exists():
+            continue
+        evidence_kind = (
+            "SceneBenchmark semantic-front"
+            if semantic_front
+            else "SceneBenchmark fallback-axis"
+        )
+        views.append((f"{evidence_kind} {view_axis} ({view_name})", image_path))
+    return tuple(views)
+
+
 def choose_hssd_candidate_from_iso_renders(
     *,
     candidates: list["HssdRetrievalResult"],
@@ -122,38 +241,59 @@ def choose_hssd_candidate_from_iso_renders(
     requested_dimensions: list[float] | tuple[float, ...] | None = None,
     requested_shape: str | None = None,
 ) -> RenderedAssetChoice:
-    """Optionally reorder candidates using their pre-rendered iso images."""
+    """Optionally reorder candidates using pre-rendered HSSD visual evidence."""
     if top_n <= 1 or len(candidates) <= 1:
         return RenderedAssetChoice(candidates=candidates)
 
-    image_records: list[tuple[int, "HssdRetrievalResult", Path]] = []
+    evidence_records: list[_CandidateRenderEvidence] = []
     for original_index, candidate in enumerate(candidates[:top_n], start=1):
-        image_path = rendered_assets_dir / candidate.hssd_id / "iso.png"
-        if image_path.exists():
-            image_records.append((original_index, candidate, image_path))
+        asset_dir = rendered_assets_dir / candidate.hssd_id
+        iso_path = asset_dir / "iso.png"
+        if not iso_path.exists():
+            continue
+        views = [("iso", iso_path)]
+        views.extend(
+            _annotation_render_views(hssd_id=candidate.hssd_id, asset_dir=asset_dir)
+        )
+        evidence_records.append(
+            _CandidateRenderEvidence(
+                original_index=original_index,
+                candidate=candidate,
+                views=tuple(views),
+            )
+        )
 
-    if len(image_records) <= 1:
+    used_image_count = sum(len(record.views) for record in evidence_records)
+    console_logger.info(
+        "Prepared rendered HSSD evidence for '%s': %s",
+        object_description,
+        {
+            record.candidate.hssd_id: [label for label, _ in record.views]
+            for record in evidence_records
+        },
+    )
+    if len(evidence_records) <= 1:
         console_logger.debug(
             "Skipping rendered HSSD choice for '%s': only %d/%d iso renders found",
             object_description,
-            len(image_records),
+            len(evidence_records),
             min(top_n, len(candidates)),
         )
         return RenderedAssetChoice(
-            candidates=candidates, used_image_count=len(image_records)
+            candidates=candidates, used_image_count=used_image_count
         )
 
     candidate_lines = [
         "- index {index}: hssd_id={hssd_id}, name={name}, category={category}, "
         "size_m={size}, embedding_score={score:.4f}".format(
-            index=original_index,
-            hssd_id=candidate.hssd_id,
-            name=candidate.object_name or "(unnamed)",
-            category=candidate.category or "(unknown)",
-            size=tuple(round(float(axis), 3) for axis in candidate.size),
-            score=float(candidate.similarity_score),
+            index=record.original_index,
+            hssd_id=record.candidate.hssd_id,
+            name=record.candidate.object_name or "(unnamed)",
+            category=record.candidate.category or "(unknown)",
+            size=tuple(round(float(axis), 3) for axis in record.candidate.size),
+            score=float(record.candidate.similarity_score),
         )
-        for original_index, candidate, _ in image_records
+        for record in evidence_records
     ]
     floor_covering = is_floor_covering_request(object_description, object_short_name)
     request_details = []
@@ -178,8 +318,12 @@ def choose_hssd_candidate_from_iso_renders(
         f"Requested object: {object_description}\n"
         + ("\n".join(request_details) + "\n" if request_details else "")
         + (f"Original scene prompt: {scene_context}\n" if scene_context else "")
-        + "\nInspect the attached iso render images. The images are attached in the "
-        "same order as these candidate lines:\n"
+        + "\nInspect the attached render evidence. Every image is preceded by its "
+        "candidate index and view label. A SceneBenchmark semantic-front view is "
+        "a verified front hint. A fallback-axis view is only coordinate evidence; "
+        "use it together with its opposite view to find doors, drawers, controls, "
+        "or other usable surfaces. Named front/back/left/right values describe "
+        "camera directions and are not themselves semantic labels.\n"
         + "\n".join(candidate_lines)
         + "\n\nChoose exactly one candidate that best matches the requested "
         "object type and likely has usable proportions. Penalize wrong object "
@@ -194,14 +338,24 @@ def choose_hssd_candidate_from_iso_renders(
     )
 
     user_content = [{"type": "text", "text": prompt}]
-    for _, _, image_path in image_records:
-        encoded = encode_image_to_base64(image_path)
-        user_content.append(
-            {
-                "type": "image_url",
-                "image_url": {"url": f"data:image/png;base64,{encoded}"},
-            }
-        )
+    for record in evidence_records:
+        for view_label, image_path in record.views:
+            user_content.append(
+                {
+                    "type": "text",
+                    "text": (
+                        f"CANDIDATE_INDEX={record.original_index} "
+                        f"HSSD_ID={record.candidate.hssd_id} VIEW={view_label}"
+                    ),
+                }
+            )
+            encoded = encode_image_to_base64(image_path)
+            user_content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/png;base64,{encoded}"},
+                }
+            )
 
     try:
         start_time = time.time()
@@ -227,7 +381,7 @@ def choose_hssd_candidate_from_iso_renders(
             exc,
         )
         return RenderedAssetChoice(
-            candidates=candidates, used_image_count=len(image_records)
+            candidates=candidates, used_image_count=used_image_count
         )
 
     selected_index = _coerce_selected_index(response_json.get("selected_index"))
@@ -238,18 +392,18 @@ def choose_hssd_candidate_from_iso_renders(
     if isinstance(selected_hssd_id, str) and selected_hssd_id:
         selected_candidate = next(
             (
-                candidate
-                for _, candidate, _ in image_records
-                if candidate.hssd_id == selected_hssd_id
+                record.candidate
+                for record in evidence_records
+                if record.candidate.hssd_id == selected_hssd_id
             ),
             None,
         )
     if selected_candidate is None and selected_index is not None:
         selected_candidate = next(
             (
-                candidate
-                for original_index, candidate, _ in image_records
-                if original_index == selected_index
+                record.candidate
+                for record in evidence_records
+                if record.original_index == selected_index
             ),
             None,
         )
@@ -263,14 +417,15 @@ def choose_hssd_candidate_from_iso_renders(
             selected_hssd_id,
         )
         return RenderedAssetChoice(
-            candidates=candidates, used_image_count=len(image_records)
+            candidates=candidates, used_image_count=used_image_count
         )
 
     if str(requested_shape or "").strip().lower() == "square":
         square_candidates = [
-            candidate
-            for _, candidate, _ in image_records
-            if _planar_aspect_ratio(candidate) <= _SQUARE_FOOTPRINT_MAX_ASPECT_RATIO
+            record.candidate
+            for record in evidence_records
+            if _planar_aspect_ratio(record.candidate)
+            <= _SQUARE_FOOTPRINT_MAX_ASPECT_RATIO
         ]
         if square_candidates and selected_candidate not in square_candidates:
             rejected_candidate = selected_candidate
@@ -301,7 +456,7 @@ def choose_hssd_candidate_from_iso_renders(
         selected_hssd_id=selected_candidate.hssd_id,
         selected_index=original_index,
         reason=str(reason) if reason is not None else None,
-        used_image_count=len(image_records),
+        used_image_count=used_image_count,
     )
 
 
