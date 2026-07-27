@@ -729,7 +729,16 @@ def _explicit_prompt_constraints(prompt: str, lowered: str) -> list[dict[str, An
         constraints.append(
             _constraint(
                 "against_wall",
-                {"category": "teacher_desk", "role": "teacher", "quantifier": "all"},
+                # A teacher desk is a singleton role.  Keep its cardinality in
+                # the selector so a role-mislabeled student-desk cohort cannot
+                # turn one prompt requirement into a wall constraint for every
+                # desk in the scene.
+                {
+                    "category": "teacher_desk",
+                    "role": "teacher",
+                    "quantifier": "all",
+                    "count": 1,
+                },
                 {"category": "wall", "role": "front"},
                 source="explicit_prompt",
                 evidence_span=_first_sentence_with(lowered, "teacher"),

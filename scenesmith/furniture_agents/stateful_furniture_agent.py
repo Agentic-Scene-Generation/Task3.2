@@ -17,6 +17,7 @@ import numpy as np
 import trimesh
 
 from agents import Agent, FunctionTool, Runner, RunResult
+from agents.exceptions import MaxTurnsExceeded
 from omegaconf import DictConfig
 from pydrake.all import RigidTransform, RollPitchYaw
 
@@ -415,15 +416,21 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         )
 
         # Run the furniture placement workflow.
-        result: RunResult = await Runner.run(
-            starting_agent=self.planner,
-            input=runner_instruction,
-            max_turns=self.cfg.agents.planner_agent.max_turns,
-            run_config=self._create_run_config(),
-        )
-        log_agent_usage(result=result, agent_name="PLANNER (FURNITURE)")
+        result: RunResult | None = None
+        try:
+            result = await Runner.run(
+                starting_agent=self.planner,
+                input=runner_instruction,
+                max_turns=self.cfg.agents.planner_agent.max_turns,
+                run_config=self._create_run_config(),
+            )
+        except MaxTurnsExceeded as error:
+            self._recover_from_planner_turn_limit(error)
 
-        if result.final_output:
+        if result is not None:
+            log_agent_usage(result=result, agent_name="PLANNER (FURNITURE)")
+
+        if result is not None and result.final_output:
             log_agent_response(
                 response=result.final_output, agent_name="PLANNER (FURNITURE)"
             )
@@ -485,6 +492,28 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         # requested inventory once more so a checkpoint with an unpenalized
         # duplicate cannot become the persisted furniture-stage scene.
         self._converge_prompt_required_inventory(source="after finalization")
+
+    def _recover_from_planner_turn_limit(self, error: MaxTurnsExceeded) -> list[str]:
+        """Continue only when bounded deterministic repair restores hard validity.
+
+        The planner may exhaust its conversational turn budget after it has
+        already placed a nearly valid scene.  Preserve the useful partial state
+        only when the existing geometry-only repair closes the remaining hard
+        issue; otherwise keep the original failure behavior.
+        """
+        hard_state = self._evaluate_current_hard_state()
+        repaired_state, _, actions = self._try_deterministic_repair_for_hard_state(
+            hard_state,
+            source="planner_turn_limit",
+        )
+        if repaired_state is None or not repaired_state.hard_valid:
+            raise error
+        console_logger.warning(
+            "Furniture planner exhausted its turn budget; deterministic repair "
+            "restored hard validity: %s",
+            "; ".join(actions) if actions else "no repair was required",
+        )
+        return actions
 
     def _get_final_scores_directory(self) -> Path:
         """Get the directory path for saving final furniture placement state.
@@ -988,9 +1017,12 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         axes = sorted(allowed_axes, key=lambda axis: (overlap_x, overlap_y)[axis])
         old_translation = np.asarray(moving.transform.translation(), dtype=float)
         other_translation = np.asarray(other.transform.translation(), dtype=float)
-        separation = penetration + clearance
+        # Drake reports mesh penetration, while the conservative AABB used to
+        # reject new conflicts can overlap farther along the chosen axis.  The
+        # larger value guarantees that this candidate clears both signals.
 
         for axis in axes:
+            separation = max(penetration, (overlap_x, overlap_y)[axis]) + clearance
             delta = old_translation[axis] - other_translation[axis]
             signs = (-1.0, 1.0) if abs(delta) < 1e-4 else (1.0 if delta > 0 else -1.0,)
             for sign in signs:

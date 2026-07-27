@@ -322,6 +322,47 @@ def test_classroom_each_with_builds_one_to_one_pair_checks_without_grid_gate() -
     assert {result["label"] for result in surface_results} == {"pass"}
 
 
+def test_single_teacher_wall_constraint_skips_mislabeled_desk_cohort() -> None:
+    """One teacher role must not bind every role-mislabeled student desk."""
+    prompt = (
+        "A classroom with six student desks, each with a chair. A teacher's desk "
+        "sits at the front near the chalkboard."
+    )
+    contract = build_intent_contract(prompt, room_type="classroom")
+    teacher_constraint = next(
+        row
+        for row in contract["constraints"]
+        if row["relation"] == "against_wall"
+        and row["subjects"]["category"] == "teacher_desk"
+    )
+    assert teacher_constraint["subjects"]["count"] == 1
+
+    case_pack = {
+        "task_instruction": prompt,
+        "room_type": "classroom",
+        "intent_contract": contract,
+        "intent_contract_mode": "contract",
+        "scene_geometry": {
+            "objects": [
+                _record(
+                    f"teachers_desk_{index}",
+                    "desk",
+                    (float(index), 0.0, 0.4),
+                    name="teacher desk",
+                )
+                for index in range(7)
+            ]
+        },
+        "checks": [],
+    }
+
+    augment_contract_checks(case_pack)
+    assert not any(
+        check.get("relation_type") == "back_against_wall"
+        for check in case_pack["checks"]
+    )
+
+
 def test_explicit_counts_preserve_role_specific_categories() -> None:
     contract = build_intent_contract(
         "A classroom with six student desks, each with a chair. "

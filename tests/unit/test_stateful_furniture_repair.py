@@ -104,6 +104,34 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         StatefulFurnitureAgent is None,
         f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
     )
+    def test_shallow_collision_repair_uses_aabb_depth_when_larger_than_report(
+        self,
+    ) -> None:
+        agent = object.__new__(StatefulFurnitureAgent)
+        chair = _FakeFurniture("guest_chair_1", (-1.57, 0.0, 0.45), (0.70, 0.70, 0.90))
+        shelf = _FakeFurniture("bookshelf_0", (-1.50, 0.55, 0.90), (0.80, 0.70, 1.80))
+        agent.scene = _FakeCollisionScene(chair, shelf)
+        agent.cfg = SimpleNamespace(
+            furniture_safety_controller=SimpleNamespace(
+                deterministic_repair=SimpleNamespace(
+                    collision_separation_max_penetration_m=0.08,
+                    collision_separation_margin_m=0.025,
+                    wall_anchor_preservation_distance_m=0.16,
+                    wall_margin_m=0.08,
+                )
+            )
+        )
+        agent._get_cached_physics_context = lambda: (
+            "- guest_chair_1 collides with bookshelf_0 (3.2cm penetration)"
+        )
+
+        self.assertEqual(len(agent._repair_shallow_furniture_collisions()), 1)
+        self.assertEqual(agent._furniture_aabb_overlap_pairs(), set())
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
     def test_deep_collision_is_left_for_the_planner(self) -> None:
         agent = object.__new__(StatefulFurnitureAgent)
         chair = _FakeFurniture("chair_0", (0.0, 0.0, 0.45), (0.70, 0.70, 0.90))
@@ -126,6 +154,27 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         old_translation = chair.transform.translation().copy()
         self.assertEqual(agent._repair_shallow_furniture_collisions(), [])
         np.testing.assert_allclose(chair.transform.translation(), old_translation)
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
+    def test_planner_turn_limit_recovers_only_after_hard_repair(self) -> None:
+        from agents.exceptions import MaxTurnsExceeded
+
+        agent = object.__new__(StatefulFurnitureAgent)
+        agent._evaluate_current_hard_state = lambda: SimpleNamespace(hard_valid=False)
+        agent._try_deterministic_repair_for_hard_state = lambda _state, source: (
+            SimpleNamespace(hard_valid=True),
+            None,
+            ["separated shallow collision guest_chair_1<->bookshelf_0"],
+        )
+
+        actions = agent._recover_from_planner_turn_limit(MaxTurnsExceeded("limit"))
+
+        self.assertEqual(
+            actions, ["separated shallow collision guest_chair_1<->bookshelf_0"]
+        )
 
     @unittest.skipIf(
         StatefulFurnitureAgent is None,
