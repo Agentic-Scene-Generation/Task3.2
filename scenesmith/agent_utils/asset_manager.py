@@ -26,11 +26,13 @@ from scenesmith.agent_utils.asset_router.dataclasses import (
     ModificationInfo,
 )
 from scenesmith.agent_utils.asset_router.rendered_asset_choice import (
+    RenderedAssetChoice,
     choose_hssd_candidate_from_iso_renders,
     hssd_rendered_choice_options,
     infer_floor_covering_footprint_shape,
     is_floor_covering_request,
 )
+from scenesmith.agent_utils.semantic_names import normalize_semantic_name
 from scenesmith.agent_utils.convex_decomposition_server import ConvexDecompositionClient
 from scenesmith.agent_utils.geometry_generation_server.client import (
     GeometryGenerationClient,
@@ -205,6 +207,9 @@ class AssetGenerationRequest:
     When multiple scenes generate assets concurrently, passing scene_id ensures
     fair GPU time allocation across scenes in the geometry and HSSD servers.
     """
+
+    semantic_name_candidates: list[list[str]] | None = None
+    """TaskCompiler-owned labels that rendered VLM selection may choose from."""
 
 
 @dataclass
@@ -945,7 +950,7 @@ class AssetManager:
                 if not response.results:
                     raise ValueError("No results returned from HSSD server")
 
-                candidates = self._rank_direct_hssd_candidates(
+                choice = self._rank_direct_hssd_candidates(
                     request=request,
                     index=index,
                     candidates=response.results,
@@ -953,6 +958,7 @@ class AssetManager:
                     top_n=rendered_choice_top_n,
                     rendered_assets_dir=rendered_assets_dir,
                 )
+                candidates = choice.candidates
                 candidate_errors: list[str] = []
                 for candidate_number, candidate in enumerate(candidates, start=1):
                     try:
@@ -961,6 +967,7 @@ class AssetManager:
                             index=index,
                             config=config,
                             candidate=candidate,
+                            semantic_name=choice.semantic_name,
                         )
                     except Exception as candidate_error:
                         candidate_errors.append(
@@ -1010,10 +1017,14 @@ class AssetManager:
         enabled: bool,
         top_n: int,
         rendered_assets_dir: Path,
-    ) -> list[HssdRetrievalResult]:
+    ) -> RenderedAssetChoice:
         """Apply rendered-choice ranking to the direct, non-router HSSD path."""
         if not enabled or len(candidates) <= 1:
-            return candidates
+            return RenderedAssetChoice(
+                candidates=candidates,
+                semantic_name=normalize_semantic_name(request.short_names[index])
+                or None,
+            )
         openai_config = self.cfg.openai
         choice = choose_hssd_candidate_from_iso_renders(
             candidates=candidates,
@@ -1037,6 +1048,12 @@ class AssetManager:
                 )
                 else None
             ),
+            semantic_name_candidates=(
+                request.semantic_name_candidates[index]
+                if request.semantic_name_candidates
+                and index < len(request.semantic_name_candidates)
+                else None
+            ),
         )
         if choice.selected_hssd_id:
             console_logger.info(
@@ -1048,7 +1065,7 @@ class AssetManager:
                 choice.selected_hssd_id,
                 choice.reason,
             )
-        return choice.candidates
+        return choice
 
     def _process_direct_hssd_candidate(
         self,
@@ -1057,6 +1074,7 @@ class AssetManager:
         index: int,
         config: AssetPathConfig,
         candidate: HssdRetrievalResult,
+        semantic_name: str | None = None,
     ) -> SceneObject:
         """Convert one direct HSSD candidate, allowing the caller to retry."""
         short_name = request.short_names[index]
@@ -1193,6 +1211,8 @@ class AssetManager:
             bbox_min=bbox_min,
             bbox_max=bbox_max,
             additional_metadata=metadata,
+            semantic_name=semantic_name,
+            semantic_name_source="rendered_asset_choice",
             # HSSD support-surface annotations use the source mesh frame. Keep
             # the baked uniform scale so those surfaces match the final SDF.
             scale_factor=applied_scale,
@@ -1463,6 +1483,11 @@ class AssetManager:
         unique_descriptions = [request.object_descriptions[i] for i in unique_indices]
         unique_short_names = [request.short_names[i] for i in unique_indices]
         unique_dimensions = [request.desired_dimensions[i] for i in unique_indices]
+        unique_semantic_candidates = (
+            [request.semantic_name_candidates[i] for i in unique_indices]
+            if request.semantic_name_candidates is not None
+            else None
+        )
 
         # Create reduced request with only unique items.
         unique_request = AssetGenerationRequest(
@@ -1474,6 +1499,7 @@ class AssetManager:
             scene_prompt_context=request.scene_prompt_context,
             operation_type=request.operation_type,
             scene_id=request.scene_id,
+            semantic_name_candidates=unique_semantic_candidates,
         )
 
         # Create asset path configurations.
@@ -2624,6 +2650,8 @@ class AssetManager:
         bbox_max: np.ndarray | None = None,
         additional_metadata: dict | None = None,
         scale_factor: float = 1.0,
+        semantic_name: str | None = None,
+        semantic_name_source: str = "asset_short_name",
     ) -> SceneObject:
         """Convert assets to SceneObject (supports both generated and HSSD).
 
@@ -2643,7 +2671,15 @@ class AssetManager:
             Complete SceneObject ready for scene placement.
         """
         # Base metadata common to all assets.
-        metadata = {"generation_timestamp": time.time()}
+        resolved_semantic_name = normalize_semantic_name(
+            semantic_name or config.short_name
+        )
+        metadata = {
+            "generation_timestamp": time.time(),
+            "semantic_name": resolved_semantic_name,
+            "semantic_name_source": semantic_name_source,
+            "asset_short_name": config.short_name,
+        }
 
         # Merge additional metadata (for HSSD: {"asset_source": "hssd"}).
         if additional_metadata:
@@ -2652,7 +2688,7 @@ class AssetManager:
         scene_obj = SceneObject(
             object_id=self.registry.generate_unique_id(config.short_name),
             object_type=object_type,
-            name=config.short_name,
+            name=resolved_semantic_name,
             description=config.description,
             transform=RigidTransform(),  # Will be set during placement.
             geometry_path=final_gltf_path,

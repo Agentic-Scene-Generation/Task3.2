@@ -723,27 +723,6 @@ def _explicit_prompt_constraints(prompt: str, lowered: str) -> list[dict[str, An
                     evidence_span=_first_sentence_with(lowered, "student"),
                 )
             )
-    if re.search(r"\bteacher(?:'s)?\s+desk\b", lowered) and re.search(
-        r"\bfront\b", lowered
-    ):
-        constraints.append(
-            _constraint(
-                "against_wall",
-                # A teacher desk is a singleton role.  Keep its cardinality in
-                # the selector so a role-mislabeled student-desk cohort cannot
-                # turn one prompt requirement into a wall constraint for every
-                # desk in the scene.
-                {
-                    "category": "teacher_desk",
-                    "role": "teacher",
-                    "quantifier": "all",
-                    "count": 1,
-                },
-                {"category": "wall", "role": "front"},
-                source="explicit_prompt",
-                evidence_span=_first_sentence_with(lowered, "teacher"),
-            )
-        )
     if (
         re.search(
             r"\b(?:one\s+(?:on|at)\s+each\s+(?:side|edge)|one\s+on\s+each)\b", lowered
@@ -1055,52 +1034,19 @@ def _phrase_mentions_plural(text: str, category: str) -> bool:
     return False
 
 
-def _selector_matches_object(category: str, role: str, obj: dict[str, Any]) -> bool:
-    object_cat = object_category(obj)
-    identity = " ".join(
-        str(obj.get(key) or "").lower().replace("_", " ")
-        for key in ("id", "category", "category_norm", "name", "description")
-    )
-    normalized_category = category.replace("_", " ")
-    category_matches = {
-        "student_desk": object_cat == "desk" and "student" in identity,
-        "teacher_desk": object_cat == "desk"
-        and ("teacher" in identity or "instructor" in identity),
-        "guest_chair": object_cat in {"chair", "armchair", "office_chair"}
-        and ("guest" in identity or "visitor" in identity),
-        "student_chair": object_cat in {"chair", "office_chair", "dining_chair"}
-        and "student" in identity,
-        "dining_chair": object_cat in {"dining_chair", "chair"}
-        and "dining" in identity,
-        "dining_table": object_cat in {"dining_table", "table"}
-        and "dining" in identity,
-        "coffee_table": object_cat in {"coffee_table", "table"}
-        and "coffee" in identity,
-        "tv_stand": object_cat in {"tv_stand", "media_console", "entertainment_center"}
-        or "tv stand" in identity,
-        "television": object_cat in {"television", "tv", "screen", "display"}
-        or "television" in identity
-        or re.search(r"\btv\b", identity) is not None,
-        "office_chair": object_cat in {"office_chair", "chair"}
-        and (
-            "office" in identity
-            or "desk chair" in identity
-            or object_cat == "office_chair"
-        ),
-        "table": object_cat in {"table", "dining_table", "coffee_table", "desk"},
-        "chair": object_cat
-        in {"chair", "office_chair", "dining_chair", "armchair", "stool", "bench"},
-        "wall": object_cat == "wall",
-        "room": False,
-    }.get(category)
-    if category_matches is None:
-        category_matches = object_cat == category or _contains_phrase(
-            identity, normalized_category
-        )
-    if not category_matches:
-        return False
+def _role_matches_object(role: str, obj: dict[str, Any]) -> bool:
     if not role:
         return True
+    metadata = obj.get("metadata") if isinstance(obj.get("metadata"), dict) else {}
+    identity = " ".join(
+        str(value or "").lower().replace("_", " ")
+        for value in (
+            metadata.get("semantic_name"),
+            obj.get("id"),
+            obj.get("name"),
+            obj.get("description"),
+        )
+    )
     if role in {
         "back",
         "main",
@@ -1112,10 +1058,70 @@ def _selector_matches_object(category: str, role: str, obj: dict[str, Any]) -> b
         "east",
         "west",
     }:
-        # Wall direction names are not reliable across arbitrary floor plans;
-        # they are resolved by geometry rather than ID text.
-        return category == "wall"
+        return (
+            str(obj.get("category_norm") or obj.get("category") or "").lower() == "wall"
+        )
     return role in identity
+
+
+def _selector_matches_object(category: str, role: str, obj: dict[str, Any]) -> bool:
+    object_cat = object_category(obj)
+    metadata = obj.get("metadata") if isinstance(obj.get("metadata"), dict) else {}
+    semantic_name = str(metadata.get("semantic_name") or "").lower()
+    if semantic_name == category:
+        return _role_matches_object(role, obj)
+    base_category = str(obj.get("category_norm") or obj.get("category") or "").lower()
+    identity = " ".join(
+        str(obj.get(key) or "").lower().replace("_", " ")
+        for key in ("id", "name", "description")
+    )
+    identity = " ".join(
+        value
+        for value in (semantic_name.replace("_", " "), base_category, identity)
+        if value
+    )
+    normalized_category = category.replace("_", " ")
+    category_matches = {
+        "student_desk": base_category == "desk" and "student" in identity,
+        "teacher_desk": base_category == "desk"
+        and ("teacher" in identity or "instructor" in identity),
+        "guest_chair": base_category in {"chair", "armchair", "office_chair"}
+        and ("guest" in identity or "visitor" in identity),
+        "student_chair": base_category in {"chair", "office_chair", "dining_chair"}
+        and "student" in identity,
+        "dining_chair": base_category in {"dining_chair", "chair"}
+        and "dining" in identity,
+        "dining_table": base_category in {"dining_table", "table"}
+        and "dining" in identity,
+        "coffee_table": base_category in {"coffee_table", "table"}
+        and "coffee" in identity,
+        "tv_stand": base_category
+        in {"tv_stand", "media_console", "entertainment_center"}
+        or "tv stand" in identity,
+        "television": base_category in {"television", "tv", "screen", "display"}
+        or "television" in identity
+        or re.search(r"\btv\b", identity) is not None,
+        "office_chair": base_category in {"office_chair", "chair"}
+        and (
+            "office" in identity
+            or "desk chair" in identity
+            or base_category == "office_chair"
+        ),
+        "table": base_category in {"table", "dining_table", "coffee_table", "desk"},
+        "chair": base_category
+        in {"chair", "office_chair", "dining_chair", "armchair", "stool", "bench"},
+        "wall": base_category == "wall",
+        "room": False,
+    }.get(category)
+    if category_matches is None:
+        category_matches = (
+            object_cat == category
+            or base_category == category
+            or _contains_phrase(identity, normalized_category)
+        )
+    if not category_matches:
+        return False
+    return _role_matches_object(role, obj)
 
 
 def _fd_relation_for_constraint(

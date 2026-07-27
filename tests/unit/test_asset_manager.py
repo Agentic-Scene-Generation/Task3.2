@@ -175,6 +175,40 @@ class TestAssetManager(unittest.TestCase):
         self.assertEqual(scene_obj.geometry_path, Path("/test/asset.gltf"))
         self.assertEqual(scene_obj.sdf_path, sdf_path)
 
+    def test_semantic_name_changes_display_identity_not_registry_asset_id(self):
+        config = AssetPathConfig(
+            description="A compact classroom desk",
+            short_name="desk",
+            image_path=None,
+            geometry_path=Path("/test/geometry.glb"),
+            sdf_dir=Path("/test/sdf"),
+        )
+        first = self.asset_manager._create_scene_object(
+            config=config,
+            object_type=ObjectType.FURNITURE,
+            sdf_path=Path("/test/asset.sdf"),
+            final_gltf_path=Path("/test/asset.gltf"),
+            semantic_name="student_desk",
+            semantic_name_source="rendered_asset_choice",
+        )
+        second = self.asset_manager._create_scene_object(
+            config=config,
+            object_type=ObjectType.FURNITURE,
+            sdf_path=Path("/test/asset_2.sdf"),
+            final_gltf_path=Path("/test/asset_2.gltf"),
+            semantic_name="student_desk",
+            semantic_name_source="rendered_asset_choice",
+        )
+
+        self.assertEqual(first.name, "student_desk")
+        self.assertEqual(first.metadata["semantic_name"], "student_desk")
+        self.assertEqual(first.metadata["asset_short_name"], "desk")
+        self.assertEqual(
+            first.metadata["semantic_name_source"], "rendered_asset_choice"
+        )
+        self.assertEqual(str(first.object_id), "desk_0")
+        self.assertEqual(str(second.object_id), "desk_1")
+
     def test_initialization(self):
         """Test AssetManager initialization."""
         self.assertEqual(self.asset_manager.output_dir, self.output_dir)

@@ -71,7 +71,6 @@ def _relations(contract: dict) -> set[tuple[str, str, str]]:
             "sits at the front near the chalkboard, which hangs on the wall.",
             {
                 ("paired_with", "student_chair", "student_desk"),
-                ("against_wall", "teacher_desk", "wall"),
             },
         ),
         (
@@ -322,20 +321,18 @@ def test_classroom_each_with_builds_one_to_one_pair_checks_without_grid_gate() -
     assert {result["label"] for result in surface_results} == {"pass"}
 
 
-def test_single_teacher_wall_constraint_skips_mislabeled_desk_cohort() -> None:
-    """One teacher role must not bind every role-mislabeled student desk."""
+def test_teacher_desk_at_front_does_not_infer_wall_constraint() -> None:
+    """Front location is not an explicit wall-placement instruction."""
     prompt = (
         "A classroom with six student desks, each with a chair. A teacher's desk "
         "sits at the front near the chalkboard."
     )
     contract = build_intent_contract(prompt, room_type="classroom")
-    teacher_constraint = next(
-        row
+    assert not any(
+        row["relation"] == "against_wall"
+        and row["subjects"].get("category") == "teacher_desk"
         for row in contract["constraints"]
-        if row["relation"] == "against_wall"
-        and row["subjects"]["category"] == "teacher_desk"
     )
-    assert teacher_constraint["subjects"]["count"] == 1
 
     case_pack = {
         "task_instruction": prompt,
@@ -361,6 +358,13 @@ def test_single_teacher_wall_constraint_skips_mislabeled_desk_cohort() -> None:
         check.get("relation_type") == "back_against_wall"
         for check in case_pack["checks"]
     )
+
+
+def test_explicit_teacher_desk_against_wall_remains_a_core_constraint() -> None:
+    contract = build_intent_contract(
+        "A classroom has a teacher desk against the front wall."
+    )
+    assert ("against_wall", "teacher_desk", "wall") in _relations(contract)
 
 
 def test_explicit_counts_preserve_role_specific_categories() -> None:

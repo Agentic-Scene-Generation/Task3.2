@@ -16,6 +16,7 @@ from scenesmith.agent_utils.asset_manager import (
     AssetGenerationResult as DomainAssetGenerationResult,
     AssetManager,
 )
+from scenesmith.agent_utils.semantic_names import semantic_name_candidates_for_request
 from scenesmith.agent_utils.furniture_layout_planning import (
     apply_bedroom_asset_size_policy,
 )
@@ -504,6 +505,11 @@ class FurnitureTools:
                 style_context=style_context,
                 scene_prompt_context=self.scene.text_description,
                 scene_id=self.scene.scene_dir.name,
+                semantic_name_candidates=semantic_name_candidates_for_request(
+                    getattr(self.scene, "scene_expert_task_spec", None),
+                    size_policy_result.short_names,
+                    ObjectType.FURNITURE,
+                ),
             )
             return self._generate_assets_impl(request)
 

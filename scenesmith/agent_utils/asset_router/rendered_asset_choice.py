@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from scenesmith.utils.llm_json import parse_llm_json_object
+from scenesmith.agent_utils.semantic_names import normalize_semantic_name
 from PIL import Image, ImageDraw
 
 if TYPE_CHECKING:
@@ -119,6 +120,7 @@ class RenderedAssetChoice:
     candidates: list["HssdRetrievalResult"]
     selected_hssd_id: str | None = None
     selected_index: int | None = None
+    semantic_name: str | None = None
     reason: str | None = None
     used_image_count: int = 0
 
@@ -407,8 +409,17 @@ def choose_hssd_candidate_from_iso_renders(
     object_short_name: str | None = None,
     requested_dimensions: list[float] | tuple[float, ...] | None = None,
     requested_shape: str | None = None,
+    semantic_name_candidates: list[str] | None = None,
 ) -> RenderedAssetChoice:
     """Optionally reorder candidates using pre-rendered HSSD visual evidence."""
+    fallback_semantic_name = normalize_semantic_name(object_short_name)
+    allowed_semantic_names = []
+    for value in semantic_name_candidates or []:
+        normalized = normalize_semantic_name(value)
+        if normalized and normalized not in allowed_semantic_names:
+            allowed_semantic_names.append(normalized)
+    if fallback_semantic_name and fallback_semantic_name not in allowed_semantic_names:
+        allowed_semantic_names.append(fallback_semantic_name)
     if top_n <= 1 or len(candidates) <= 1:
         _write_choice_audit(
             object_description=object_description,
@@ -426,7 +437,9 @@ def choose_hssd_candidate_from_iso_renders(
             status="skipped",
             reason="top_n_or_candidate_count_too_small",
         )
-        return RenderedAssetChoice(candidates=candidates)
+        return RenderedAssetChoice(
+            candidates=candidates, semantic_name=fallback_semantic_name or None
+        )
 
     evidence_records: list[_CandidateRenderEvidence] = []
     for original_index, candidate in enumerate(candidates[:top_n], start=1):
@@ -482,7 +495,9 @@ def choose_hssd_candidate_from_iso_renders(
             min(top_n, len(candidates)),
         )
         return RenderedAssetChoice(
-            candidates=candidates, used_image_count=used_image_count
+            candidates=candidates,
+            semantic_name=fallback_semantic_name or None,
+            used_image_count=used_image_count,
         )
 
     candidate_lines = [
@@ -508,6 +523,11 @@ def choose_hssd_candidate_from_iso_renders(
         )
     if requested_shape:
         request_details.append(f"Requested footprint shape: {requested_shape}")
+    if allowed_semantic_names:
+        request_details.append(
+            "Allowed semantic names (choose exactly one verbatim): "
+            + json.dumps(allowed_semantic_names)
+        )
     covering_guidance = (
         " For rugs, carpets, mats, and runners, near-zero visual thickness is "
         "expected and must not be penalized; prioritize semantic appearance, "
@@ -538,7 +558,9 @@ def choose_hssd_candidate_from_iso_renders(
         "In particular, an upright dining, desk, or task chair must not be "
         "replaced by a low lounge chair or armchair." + covering_guidance + "\n"
         'Return JSON only: {"selected_index": <index number>, '
-        '"selected_hssd_id": "<hssd_id>", "reason": "<short reason>"}'
+        '"selected_hssd_id": "<hssd_id>", '
+        '"semantic_name": "<one allowed semantic name>", '
+        '"reason": "<short reason>"}'
     )
 
     user_content = [{"type": "text", "text": prompt}]
@@ -608,11 +630,19 @@ def choose_hssd_candidate_from_iso_renders(
             exc,
         )
         return RenderedAssetChoice(
-            candidates=candidates, used_image_count=used_image_count
+            candidates=candidates,
+            semantic_name=fallback_semantic_name or None,
+            used_image_count=used_image_count,
         )
 
     selected_index = _coerce_selected_index(response_json.get("selected_index"))
     selected_hssd_id = response_json.get("selected_hssd_id")
+    raw_semantic_name = normalize_semantic_name(response_json.get("semantic_name"))
+    semantic_name = (
+        raw_semantic_name
+        if raw_semantic_name and raw_semantic_name in allowed_semantic_names
+        else fallback_semantic_name
+    )
     reason = response_json.get("reason")
 
     selected_candidate: "HssdRetrievalResult | None" = None
@@ -656,6 +686,8 @@ def choose_hssd_candidate_from_iso_renders(
             parsed_response=response_json,
             selected_index=selected_index,
             selected_hssd_id=selected_hssd_id,
+            semantic_name=semantic_name or None,
+            allowed_semantic_names=allowed_semantic_names,
         )
         console_logger.warning(
             "Rendered HSSD choice for '%s' returned invalid selection %s/%s; "
@@ -665,7 +697,9 @@ def choose_hssd_candidate_from_iso_renders(
             selected_hssd_id,
         )
         return RenderedAssetChoice(
-            candidates=candidates, used_image_count=used_image_count
+            candidates=candidates,
+            semantic_name=fallback_semantic_name or None,
+            used_image_count=used_image_count,
         )
 
     if str(requested_shape or "").strip().lower() == "square":
@@ -714,6 +748,9 @@ def choose_hssd_candidate_from_iso_renders(
         parsed_response=response_json,
         selected_index=original_index,
         selected_hssd_id=selected_candidate.hssd_id,
+        semantic_name=semantic_name or None,
+        allowed_semantic_names=allowed_semantic_names,
+        returned_semantic_name=raw_semantic_name or None,
         reason=str(reason) if reason is not None else None,
     )
 
@@ -726,6 +763,7 @@ def choose_hssd_candidate_from_iso_renders(
         candidates=reordered,
         selected_hssd_id=selected_candidate.hssd_id,
         selected_index=original_index,
+        semantic_name=semantic_name or None,
         reason=str(reason) if reason is not None else None,
         used_image_count=used_image_count,
     )

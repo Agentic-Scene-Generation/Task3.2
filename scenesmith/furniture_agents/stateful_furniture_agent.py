@@ -95,6 +95,14 @@ REPAIR_ASSET_SPECS: dict[str, tuple[str, list[float]]] = {
     "wardrobe": ("Compact wardrobe closet with simple doors", [0.90, 0.55, 2.00]),
     "dresser": ("Low dresser chest with storage drawers", [1.10, 0.48, 0.85]),
     "desk": ("Practical rectangular work desk", [1.10, 0.60, 0.75]),
+    "student_desk": (
+        "Compact student classroom desk with a writing surface and storage shelf",
+        [1.05, 0.50, 0.75],
+    ),
+    "teacher_desk": (
+        "Larger teacher classroom desk with a broad work surface and modesty panel",
+        [1.40, 0.65, 0.76],
+    ),
     "office_chair": (
         "Ergonomic office task chair with an adjustable back",
         [0.60, 0.60, 1.05],
@@ -105,6 +113,7 @@ REPAIR_ASSET_SPECS: dict[str, tuple[str, list[float]]] = {
     ),
     "dining_chair": ("Simple upright dining chair", [0.50, 0.55, 0.90]),
     "chair": ("Simple upright task chair", [0.50, 0.50, 0.90]),
+    "student_chair": ("Simple upright student classroom chair", [0.50, 0.50, 0.90]),
     "sofa": ("Compact upholstered two-seat sofa", [1.70, 0.85, 0.90]),
     "table": ("Practical rectangular table", [1.20, 0.80, 0.75]),
     "cabinet": ("Compact freestanding storage cabinet", [0.90, 0.45, 1.10]),
@@ -667,8 +676,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         )
         console_logger.info("Deterministic furniture %s", repair_plan.to_log_text())
 
-        controller = getattr(self, "furniture_safety_controller", None)
-        required_counts = getattr(controller, "required_counts", {}) or {}
+        required_counts = self._repair_required_counts()
         for category in required_counts:
             if f"missing required {category}" not in reasons:
                 continue
@@ -759,8 +767,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
 
     def _converge_prompt_required_inventory(self, *, source: str) -> int:
         """Remove prompt-counted duplicates independently of hard-check status."""
-        controller = getattr(self, "furniture_safety_controller", None)
-        required_counts = getattr(controller, "required_counts", {}) or {}
+        required_counts = self._repair_required_counts()
         removed = self._remove_excess_required_furniture(required_counts)
         if removed:
             console_logger.info(
@@ -1113,10 +1120,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         if self.scene is None:
             return 0
 
-        controller = getattr(self, "furniture_safety_controller", None)
-        configured_categories = list(
-            (getattr(controller, "required_counts", {}) or {}).keys()
-        )
+        configured_categories = list(self._repair_required_counts())
         categories: list[str] = []
         for category in configured_categories:
             if category in reasons:
@@ -1212,6 +1216,10 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             return getattr(repair_cfg, key, default)
 
     def _category_for_object(self, object_id: Any, obj: SceneObject) -> str | None:
+        metadata = getattr(obj, "metadata", {}) or {}
+        semantic_name = str(metadata.get("semantic_name") or "").strip().lower()
+        if semantic_name in REPAIR_ASSET_SPECS:
+            return semantic_name
         name = getattr(obj, "name", "")
         description = getattr(obj, "description", "")
         text = f"{object_id} {name} {description}".lower()
@@ -1257,10 +1265,56 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         return result
 
     def _required_count(self, category: str) -> int:
+        return int(self._repair_required_counts().get(category, 0) or 0)
+
+    def _repair_required_counts(self) -> dict[str, int]:
+        """Use TaskCompiler's role-specific inventory when it is available."""
         controller = getattr(self, "furniture_safety_controller", None)
-        if not controller:
-            return 0
-        return int(getattr(controller, "required_counts", {}).get(category, 0) or 0)
+        counts = dict(getattr(controller, "required_counts", {}) or {})
+        task_spec = getattr(self.scene, "scene_expert_task_spec", None)
+        required = (
+            task_spec.get("required_large_objects", [])
+            if isinstance(task_spec, dict)
+            else getattr(task_spec, "required_large_objects", [])
+        )
+        semantic_counts: dict[str, int] = {}
+        for item in required or []:
+            category = re.sub(r"[^a-z0-9]+", "_", str(item).lower()).strip("_")
+            if category in REPAIR_ASSET_SPECS:
+                semantic_counts[category] = semantic_counts.get(category, 0) + 1
+        intent_constraints = (
+            task_spec.get("intent_constraints", [])
+            if isinstance(task_spec, dict)
+            else getattr(task_spec, "intent_constraints", [])
+        )
+        for constraint in intent_constraints or []:
+            if not isinstance(constraint, dict):
+                continue
+            selector = constraint.get("subjects") or constraint.get("subject")
+            if not isinstance(selector, dict):
+                continue
+            category = re.sub(
+                r"[^a-z0-9]+", "_", str(selector.get("category") or "").lower()
+            ).strip("_")
+            if category not in REPAIR_ASSET_SPECS:
+                continue
+            try:
+                count = int(selector.get("count") or 0)
+            except (TypeError, ValueError):
+                count = 0
+            if count > 0:
+                semantic_counts[category] = max(semantic_counts.get(category, 0), count)
+        if semantic_counts:
+            for generic in ("desk", "chair"):
+                specialized = sum(
+                    count
+                    for category, count in semantic_counts.items()
+                    if category.endswith(f"_{generic}")
+                )
+                if specialized:
+                    counts.pop(generic, None)
+            counts.update(semantic_counts)
+        return counts
 
     def _ensure_required_furniture_asset(self, category: str) -> int:
         required = self._required_count(category)

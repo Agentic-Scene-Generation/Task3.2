@@ -18,6 +18,7 @@ from typing_extensions import TypedDict
 
 from scenesmith.agent_utils.action_logger import log_scene_action
 from scenesmith.agent_utils.asset_manager import AssetGenerationRequest, AssetManager
+from scenesmith.agent_utils.semantic_names import semantic_name_candidates_for_request
 from scenesmith.agent_utils.loop_detector import LoopDetector
 from scenesmith.agent_utils.physical_feasibility import apply_surface_projection
 from scenesmith.agent_utils.placement_noise import (
@@ -263,8 +264,14 @@ class ManipulandTools:
         surface: SupportSurface, reference: SupportSurface
     ) -> tuple[float, float, float, float]:
         corners = []
-        for x in (float(surface.bounding_box_min[0]), float(surface.bounding_box_max[0])):
-            for y in (float(surface.bounding_box_min[1]), float(surface.bounding_box_max[1])):
+        for x in (
+            float(surface.bounding_box_min[0]),
+            float(surface.bounding_box_max[0]),
+        ):
+            for y in (
+                float(surface.bounding_box_min[1]),
+                float(surface.bounding_box_max[1]),
+            ):
                 world = surface.transform @ np.array([x, y, 0.0])
                 local = reference.transform.inverse() @ world
                 corners.append(local[:2])
@@ -695,6 +702,11 @@ class ManipulandTools:
                 style_context=style_context,
                 scene_prompt_context=self.scene.text_description,
                 scene_id=self.scene.scene_dir.name,
+                semantic_name_candidates=semantic_name_candidates_for_request(
+                    getattr(self.scene, "scene_expert_task_spec", None),
+                    short_names,
+                    ObjectType.MANIPULAND,
+                ),
             )
             return self._generate_assets_impl(request)
 

@@ -111,6 +111,9 @@ def load_geometry(case_pack: dict[str, Any]) -> GeometryStore | None:
 def object_category(obj: dict[str, Any] | None) -> str:
     if not obj:
         return ""
+    metadata = obj.get("metadata")
+    if isinstance(metadata, dict) and metadata.get("semantic_name"):
+        return str(metadata["semantic_name"]).strip()
     return str(obj.get("category_norm") or obj.get("category") or "").strip()
 
 

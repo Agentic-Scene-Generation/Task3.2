@@ -17,6 +17,7 @@ from scenesmith.agent_utils.asset_router.rendered_asset_choice import (
 )
 from scenesmith.agent_utils.hssd_retrieval_server.dataclasses import HssdRetrievalResult
 from scenesmith.agent_utils.room import AgentType, ObjectType
+from scenesmith.agent_utils.semantic_names import semantic_name_candidates_for_request
 
 
 class TestAnalysisResultWasModified(unittest.TestCase):
@@ -280,6 +281,96 @@ class TestRenderedHssdAssetChoice(unittest.TestCase):
             self.assertEqual(
                 event["candidates"][0]["evidence_views"][0]["label"], "iso"
             )
+
+    def test_uses_only_task_compiler_semantic_name_candidates(self) -> None:
+        candidates = [
+            self._candidate("student_asset", "school desk", 0.91),
+            self._candidate("teacher_asset", "teacher desk", 0.89),
+        ]
+        vlm_service = MagicMock()
+        vlm_service.create_completion.return_value = (
+            '{"selected_index": 1, "selected_hssd_id": "student_asset", '
+            '"semantic_name": "student_desk", "reason": "student-sized desk"}'
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            for candidate in candidates:
+                self._write_iso(root, candidate.hssd_id)
+            choice = choose_hssd_candidate_from_iso_renders(
+                candidates=candidates,
+                object_description="compact desk for a student",
+                object_short_name="desk",
+                semantic_name_candidates=["student_desk", "teacher_desk", "desk"],
+                scene_context="A classroom with student desks and a teacher desk.",
+                vlm_service=vlm_service,
+                model="test-model",
+                reasoning_effort="low",
+                verbosity="low",
+                vision_detail="low",
+                rendered_assets_dir=root,
+                top_n=2,
+            )
+
+        self.assertEqual(choice.semantic_name, "student_desk")
+        prompt = vlm_service.create_completion.call_args.kwargs["messages"][0][
+            "content"
+        ][0]["text"]
+        self.assertIn('"student_desk"', prompt)
+        self.assertIn('"semantic_name"', prompt)
+
+    def test_invalid_or_missing_semantic_name_falls_back_to_short_name(self) -> None:
+        candidates = [
+            self._candidate("student_asset", "school desk", 0.91),
+            self._candidate("teacher_asset", "teacher desk", 0.89),
+        ]
+        vlm_service = MagicMock()
+        vlm_service.create_completion.return_value = (
+            '{"selected_index": 1, "selected_hssd_id": "student_asset", '
+            '"semantic_name": "invented_desk", "reason": "wrong label"}'
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            for candidate in candidates:
+                self._write_iso(root, candidate.hssd_id)
+            choice = choose_hssd_candidate_from_iso_renders(
+                candidates=candidates,
+                object_description="compact desk for a student",
+                object_short_name="desk",
+                semantic_name_candidates=["student_desk", "teacher_desk", "desk"],
+                scene_context=None,
+                vlm_service=vlm_service,
+                model="test-model",
+                reasoning_effort="low",
+                verbosity="low",
+                vision_detail="low",
+                rendered_assets_dir=root,
+                top_n=2,
+            )
+
+        self.assertEqual(choice.semantic_name, "desk")
+
+    def test_task_compiler_candidates_preserve_stage_roles_and_short_name(self) -> None:
+        task_spec = {
+            "required_large_objects": [
+                "student desk",
+                "student desk",
+                "teacher desk",
+            ],
+            "intent_constraints": [
+                {"subjects": {"category": "student_chair", "count": 6}}
+            ],
+        }
+        candidates = semantic_name_candidates_for_request(
+            task_spec, ["desk", "student_chair"], ObjectType.FURNITURE
+        )
+
+        self.assertEqual(
+            candidates,
+            [
+                ["student_desk", "teacher_desk", "student_chair", "desk"],
+                ["student_desk", "teacher_desk", "student_chair"],
+            ],
+        )
 
     @patch(
         "scenesmith.scenebenchmark_critic.asset_library_annotations."

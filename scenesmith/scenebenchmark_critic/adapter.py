@@ -915,6 +915,9 @@ def _offset_xy_polygon(raw: Any, offset: np.ndarray) -> Any:
 
 
 def _category_for_object(obj: SceneObject) -> str:
+    semantic_name = obj.metadata.get("semantic_name")
+    if semantic_name:
+        return str(semantic_name).strip().lower().replace(" ", "_")
     for key in ("category_norm", "category", "asset_category"):
         raw = obj.metadata.get(key)
         if raw:
