@@ -30,6 +30,9 @@ from scenesmith.agent_utils.furniture_layout_planning import (
     format_bedroom_anchor_guidance,
     is_bedroom_scene,
 )
+from scenesmith.agent_utils.furniture_placement_order import (
+    build_furniture_placement_order_reference,
+)
 from scenesmith.agent_utils.mesh_physics_analyzer import MeshPhysicsAnalysis
 from scenesmith.agent_utils.placement_noise import PlacementNoiseMode
 from scenesmith.agent_utils.reachability import (
@@ -52,6 +55,9 @@ from scenesmith.agent_utils.scoring import (
     log_agent_response,
 )
 from scenesmith.agent_utils.sdf_generator import generate_drake_sdf
+from scenesmith.agent_utils.stage_placement_order_config import (
+    append_placement_order_reference,
+)
 from scenesmith.agent_utils.workflow_tools import WorkflowTools
 from scenesmith.furniture_agents.base_furniture_agent import BaseFurnitureAgent
 from scenesmith.furniture_agents.tools.furniture_tools import FurnitureTools
@@ -138,6 +144,8 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
 
         # Context image for designer initialization (furniture-specific).
         self.context_image_path: Path | None = None
+        # Populated per scene only when the optional feature is enabled.
+        self._placement_order_reference: str = ""
 
     def _create_designer_agent(self, tools: list[FunctionTool]) -> Agent:
         """Create designer agent with tools.
@@ -323,6 +331,17 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             scene.text_description,
         )
         self._configure_furniture_safety_for_scene(safety_description)
+        self._placement_order_reference = build_furniture_placement_order_reference(
+            cfg=self.cfg,
+            scene_prompt=safety_description,
+            scene_dir=scene.scene_dir,
+            vlm_service=self.vlm_service,
+            model=self.cfg.openai.model,
+            room_dimensions={
+                "length_m": scene.room_geometry.length,
+                "width_m": scene.room_geometry.width,
+            },
+        )
 
         # Generate context image if configured. If generation fails, continue without it.
         if self.cfg.context_image_generation.enabled:
@@ -439,6 +458,10 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
 
     def _build_initial_design_input(self, instruction: str) -> str | list[dict]:
         """Add deterministic room-aware bedroom guidance to the initial design."""
+        instruction = append_placement_order_reference(
+            instruction,
+            self._placement_order_reference,
+        )
         safety_cfg = getattr(self.cfg, "furniture_safety_controller", None)
         bedroom_cfg = getattr(safety_cfg, "bedroom_layout", None)
         guidance = format_bedroom_anchor_guidance(

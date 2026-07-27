@@ -18,6 +18,9 @@ from scenesmith.agent_utils.base_stateful_agent import (
     BaseStatefulAgent,
     log_agent_usage,
 )
+from scenesmith.agent_utils.manipuland_placement_order import (
+    build_manipuland_placement_order_reference,
+)
 from scenesmith.agent_utils.physical_feasibility import (
     apply_per_furniture_postprocessing,
 )
@@ -35,6 +38,9 @@ from scenesmith.agent_utils.scene_analyzer import FurnitureSelection, SceneAnaly
 from scenesmith.agent_utils.scoring import (
     ManipulandCritiqueWithScores,
     log_agent_response,
+)
+from scenesmith.agent_utils.stage_placement_order_config import (
+    append_placement_order_reference,
 )
 from scenesmith.agent_utils.support_surface_extraction import (
     SupportSurfaceExtractionConfig,
@@ -114,6 +120,8 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
 
         # Context image for manipuland designer initialization (per-furniture).
         self.manipuland_context_image_path: Path | None = None
+        # Cleared and rebuilt for each furniture item when enabled.
+        self._placement_order_reference: str = ""
 
     def _render_furniture_for_context(self) -> Path:
         """Render furniture with clean angled front view for context image input.
@@ -402,7 +410,7 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
         if not selection:
             raise ValueError("No current furniture selection set")
 
-        return super()._create_planner_agent(
+        planner = super()._create_planner_agent(
             tools=tools,
             prompt_enum=planner_prompt_enum,
             furniture_description=furniture_description,
@@ -414,6 +422,12 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
             reset_total_sum_threshold=total_threshold,
             early_finish_min_score=self.cfg.early_finish_min_score,
         )
+        if self._placement_order_reference and isinstance(planner.instructions, str):
+            planner.instructions = append_placement_order_reference(
+                planner.instructions,
+                self._placement_order_reference,
+            )
+        return planner
 
     def _create_tools_for_furniture(
         self, furniture_id: UniqueID
@@ -468,6 +482,14 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
         return {
             "has_reference_image": self.manipuland_context_image_path is not None,
         }
+
+    def _build_initial_design_input(self, instruction: str) -> str | list[dict]:
+        """Append the current soft reference only when one was generated."""
+        instruction = append_placement_order_reference(
+            instruction,
+            self._placement_order_reference,
+        )
+        return super()._build_initial_design_input(instruction)
 
     def _get_design_change_prompt_enum(self) -> Any:
         """Get the prompt enum for design change instruction.
@@ -537,6 +559,7 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
         # Clear pending images from previous furniture iteration.
         # This prevents image leakage if session callback somehow doesn't trigger.
         self.pending_images = []
+        self._placement_order_reference = ""
 
         furniture_id = furniture_selection.furniture_id
 
@@ -830,6 +853,28 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
                     furniture_obj = scene.get_object(furniture_id)
                     furniture_description = (
                         furniture_obj.description if furniture_obj else "furniture"
+                    )
+                    scene_prompt = getattr(
+                        self.scene,
+                        "scene_expert_original_description",
+                        self.scene.text_description,
+                    )
+                    self._placement_order_reference = (
+                        build_manipuland_placement_order_reference(
+                            cfg=self.cfg,
+                            scene_prompt=scene_prompt,
+                            scene_dir=self.scene.scene_dir,
+                            vlm_service=self.vlm_service,
+                            model=self.cfg.openai.model,
+                            furniture_id=furniture_id,
+                            furniture_description=furniture_description,
+                            suggested_items=furniture_selection.suggested_items,
+                            prompt_constraints=furniture_selection.prompt_constraints,
+                            style_notes=furniture_selection.style_notes,
+                            support_surfaces={
+                                str(surface.surface_id): surface for surface in surfaces
+                            },
+                        )
                     )
 
                     # Create agents and sessions.

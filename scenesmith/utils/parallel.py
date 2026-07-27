@@ -81,6 +81,17 @@ def _reset_worker_logging() -> None:
             handler.close()
 
 
+def _configure_worker_logging() -> None:
+    """Restore the application log level in clean forkserver/spawn workers.
+
+    Clean workers do not execute main.py's logging configuration and otherwise
+    keep Python's WARNING default, which drops application INFO records such as
+    planner token usage and final responses.
+    """
+    log_level = os.environ.get("LOGLEVEL", "INFO").upper()
+    logging.getLogger().setLevel(getattr(logging, log_level, logging.INFO))
+
+
 def _worker_wrapper(
     target: Callable,
     kwargs: dict,
@@ -90,6 +101,7 @@ def _worker_wrapper(
 ) -> None:
     """Wrapper that runs target function and reports result to queue."""
     _reset_worker_logging()
+    _configure_worker_logging()
     console_logger.debug(f"Worker {task_id} starting: {target.__name__}")
     try:
         result = target(**kwargs)
