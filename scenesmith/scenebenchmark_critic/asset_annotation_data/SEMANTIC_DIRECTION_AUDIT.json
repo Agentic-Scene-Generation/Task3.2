@@ -1,0 +1,3724 @@
+{
+  "schema_version": "hssd_semantic_direction_audit@1.0",
+  "asset_count": 10963,
+  "category_count": 469,
+  "outcomes": {
+    "no_stable_direction": 182,
+    "preserved": 1047,
+    "promoted_down": 942,
+    "promoted_front": 5855,
+    "promoted_up": 2937
+  },
+  "semantic_asset_count": 10781,
+  "strict_positive_front_count": 6734,
+  "direction_kind_counts": {
+    "down": 942,
+    "front": 6902,
+    "none": 182,
+    "up": 2937
+  },
+  "coordinate_mapping": {
+    "asset_up_axis": "+Y",
+    "horizontal_views": {
+      "back.png": "+Z",
+      "front.png": "-Z",
+      "right.png": "+X",
+      "left.png": "-X"
+    },
+    "vertical_views": {
+      "top.png": "+Y",
+      "bottom": "-Y (not rendered)"
+    }
+  },
+  "categories": {
+    "showerhead": {
+      "primary_direction_kind": "down",
+      "semantic_direction_kinds": [
+        "down"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "candlestick": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "ashcan": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "mantel clock": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "throw pillow": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "coffee table": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "pendant lamp": {
+      "primary_direction_kind": "down",
+      "semantic_direction_kinds": [
+        "down"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "sofa": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "preserve_existing_asset_verified_front"
+    },
+    "vase": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "rug": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "wall art": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "place mat": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "dining table": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "sculpture": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "swivel chair": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "preserve_existing_asset_verified_front"
+    },
+    "double bed": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "preserve_existing_asset_verified_front"
+    },
+    "table": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "tv stand": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "toilet": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "balcony": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "bed": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "preserve_existing_asset_verified_front"
+    },
+    "wall lamp": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "ceiling fan": {
+      "primary_direction_kind": "down",
+      "semantic_direction_kinds": [
+        "down"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "bunk bed": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "preserve_existing_asset_verified_front"
+    },
+    "wall mirror": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "hamper": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "flower in vase": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "christmas tree": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "wall sign": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "oven": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "washer.n.03,dryer": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "laptop": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "umbrella": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "easy chair": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "preserve_existing_asset_verified_front"
+    },
+    "swing chair": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "preserve_existing_asset_verified_front"
+    },
+    "kitchen cabinet": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "bedclothes": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "preserve_existing_asset_verified_front"
+    },
+    "ottoman": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "desk": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "floor lamp": {
+      "primary_direction_kind": "down",
+      "semantic_direction_kinds": [
+        "down"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "end table": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "ceiling lamp": {
+      "primary_direction_kind": "down",
+      "semantic_direction_kinds": [
+        "down"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "drum": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "potted plant": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "nightstand": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "chest of drawers": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "letter.n.02,wall decor": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "club chair": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "preserve_existing_asset_verified_front"
+    },
+    "table lamp": {
+      "primary_direction_kind": "down",
+      "semantic_direction_kinds": [
+        "down"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "firepit": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "sink": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "bathrobe": {
+      "primary_direction_kind": null,
+      "semantic_direction_kinds": [],
+      "has_semantic_direction": false,
+      "policy_source": "explicit_no_stable_category_direction"
+    },
+    "window curtain": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "chandelier": {
+      "primary_direction_kind": "down",
+      "semantic_direction_kinds": [
+        "down"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "refrigerator": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "stool": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "chair": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "preserve_existing_asset_verified_front"
+    },
+    "console table": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "beanbag chair": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "preserve_existing_asset_verified_front"
+    },
+    "wall decor": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "bench": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "preserve_existing_asset_verified_front"
+    },
+    "plant": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "buffet": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "picture frame": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "heating system": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "bottle": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "towel rack": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "armchair": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "preserve_existing_asset_verified_front"
+    },
+    "lantern": {
+      "primary_direction_kind": "down",
+      "semantic_direction_kinds": [
+        "down"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "washer": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "wall hook rack": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "round daybed": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "preserve_existing_asset_verified_front"
+    },
+    "rocking chair": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "preserve_existing_asset_verified_front"
+    },
+    "candlestick.n.01,candle": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "sink cabinet": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "glass": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "carafe": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "hanging cabinet": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "bowl": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "flat bench": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "makeup mirror": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "armoire": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "dishwasher": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "clothes tree": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "l-shaped couch": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "fireplace": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "swing": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "gym equipment": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "stairway.n.01,stairs": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "radio receiver": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "toilet brush.n.01,toilet brush holder": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "bar stool": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "bookcase": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "shower stall": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "fence": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "footstool": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "clothing rack": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "bread-bin": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "barbecue": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "shoe": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "playhouse": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "shelving": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "camera": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "wall shelf": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "china cabinet": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "basket": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "planter": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "beam": {
+      "primary_direction_kind": null,
+      "semantic_direction_kinds": [],
+      "has_semantic_direction": false,
+      "policy_source": "explicit_no_stable_category_direction"
+    },
+    "storage bench": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "towel": {
+      "primary_direction_kind": null,
+      "semantic_direction_kinds": [],
+      "has_semantic_direction": false,
+      "policy_source": "explicit_no_stable_category_direction"
+    },
+    "cabin": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "loudspeaker": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "bath mat": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "cabinet": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "railing": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "wall panel": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "bag": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "darts": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "window shade": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "coffee maker": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "board game.n.01,chess": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "pen holder": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "seat cushion": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "valve": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "stove.n.01,oven": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "mirror": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "projector": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "dressing table": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "casserole": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "alarm clock": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "tumbler": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "bathtub": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "toiletry.n.01,perfume.n.02,bottle": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "mousepad": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "hot tub": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "toaster": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "pedestal sink": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "pet bed": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "preserve_existing_asset_verified_front"
+    },
+    "earphone": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "kitchen scale": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "toilet brush.n.01,toilet paper holder": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "kitchen island": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "microwave": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "desk organizer": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "candle": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "telephone": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "straight chair": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "preserve_existing_asset_verified_front"
+    },
+    "jar": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "file": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "mailbox": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "electric fan": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "range hood": {
+      "primary_direction_kind": "down",
+      "semantic_direction_kinds": [
+        "down"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "television receiver": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "plaything": {
+      "primary_direction_kind": null,
+      "semantic_direction_kinds": [],
+      "has_semantic_direction": false,
+      "policy_source": "explicit_no_stable_category_direction"
+    },
+    "air hockey table": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "toy box": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "bar stool.n.01,chair": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "knocker": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "ladder bookcase": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "step ladder": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "treadmill": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "switch": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "highchair": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "preserve_existing_asset_verified_front"
+    },
+    "kitchen appliance": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "double door": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "vacuum": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "pathway light": {
+      "primary_direction_kind": "down",
+      "semantic_direction_kinds": [
+        "down"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "throw": {
+      "primary_direction_kind": null,
+      "semantic_direction_kinds": [],
+      "has_semantic_direction": false,
+      "policy_source": "explicit_no_stable_category_direction"
+    },
+    "cookie sheet": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "streetlight": {
+      "primary_direction_kind": "down",
+      "semantic_direction_kinds": [
+        "down"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "shower pan": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "wall mounted screen": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "mat": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "easel": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "ball chair": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "preserve_existing_asset_verified_front"
+    },
+    "notebook": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "overnighter": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "purse": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "water heater": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "credenza": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "saucepan": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "rock": {
+      "primary_direction_kind": null,
+      "semantic_direction_kinds": [],
+      "has_semantic_direction": false,
+      "policy_source": "explicit_no_stable_category_direction"
+    },
+    "desk calendar": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "floor mirror": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "mobile": {
+      "primary_direction_kind": null,
+      "semantic_direction_kinds": [],
+      "has_semantic_direction": false,
+      "policy_source": "explicit_no_stable_category_direction"
+    },
+    "bouquet": {
+      "primary_direction_kind": null,
+      "semantic_direction_kinds": [],
+      "has_semantic_direction": false,
+      "policy_source": "explicit_no_stable_category_direction"
+    },
+    "crib": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "bulletin board": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "punching bag": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "faucet": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "cafeteria tray": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "curtain": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "tray": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "clock": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "crate": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "radio receiver.n.01,alarm clock": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "wall clock": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "bar": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "switch.n.01,dimmer": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "chaise longue": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "wardrobe": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "preserve_existing_asset_verified_front"
+    },
+    "swing bench": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "plate": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "coffeepot": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "espresso maker": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "window blind": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "car": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "mattress": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "gazebo": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "picnic rug": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "surfboard": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "candelabrum": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "wall sticker": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "serving cart": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "pet bowl": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "roaster": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "soap dispenser": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "toiletry": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "tissue box": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "stove": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "tapestry": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "swivel chair.n.01,ball chair": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "preserve_existing_asset_verified_front"
+    },
+    "mantel clock.n.01,radio receiver": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "headboard": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "mixer": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "monitor": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "shoe rack.n.01,cabinet": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "flower": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "trunk": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "drawer unit.n.01,file": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "hedge": {
+      "primary_direction_kind": null,
+      "semantic_direction_kinds": [],
+      "has_semantic_direction": false,
+      "policy_source": "explicit_no_stable_category_direction"
+    },
+    "wineglass": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "book": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "string lights": {
+      "primary_direction_kind": null,
+      "semantic_direction_kinds": [],
+      "has_semantic_direction": false,
+      "policy_source": "explicit_no_stable_category_direction"
+    },
+    "medicine chest": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "king bed": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "preserve_existing_asset_verified_front"
+    },
+    "plush toy": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "cup": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "wall art.n.01,sign": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "whiteboard": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "toilet paper holder.n.01,toilet tissue": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "teapot": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "wall unit": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "cake": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "printer": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "door": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "blender": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "shower faucet": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "table mirror": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "sink stand": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "bathroom scale": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "towel rail": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "toilet flush plate": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "cushion": {
+      "primary_direction_kind": null,
+      "semantic_direction_kinds": [],
+      "has_semantic_direction": false,
+      "policy_source": "explicit_no_stable_category_direction"
+    },
+    "drying rack": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "sewing machine": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "room divider": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "computer screen": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "bucket": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "jewelry box": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "wall calendar": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "daybed": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "preserve_existing_asset_verified_front"
+    },
+    "kettle": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "shower curtain": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "hourglass": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "cruet": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "ceiling lamp.n.01,track lighting": {
+      "primary_direction_kind": "down",
+      "semantic_direction_kinds": [
+        "down"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "doorbell": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "candle.n.01,candlestick.n.01,wall mirror": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "air conditioner": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "washbasin": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "paperweight": {
+      "primary_direction_kind": null,
+      "semantic_direction_kinds": [],
+      "has_semantic_direction": false,
+      "policy_source": "explicit_no_stable_category_direction"
+    },
+    "socket": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "rack": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "luggage rack": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "bench grinder": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "swimming pool": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "scooter": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "step stool": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "wreath": {
+      "primary_direction_kind": null,
+      "semantic_direction_kinds": [],
+      "has_semantic_direction": false,
+      "policy_source": "explicit_no_stable_category_direction"
+    },
+    "umbrella stand": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "table-tennis table": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "jug": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "hall tree": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "music stand": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "punch bowl": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "butter dish": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "christmas stocking": {
+      "primary_direction_kind": null,
+      "semantic_direction_kinds": [],
+      "has_semantic_direction": false,
+      "policy_source": "explicit_no_stable_category_direction"
+    },
+    "lamp": {
+      "primary_direction_kind": "down",
+      "semantic_direction_kinds": [
+        "down"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "coatrack": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "xxxwall shelving": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "weight": {
+      "primary_direction_kind": null,
+      "semantic_direction_kinds": [],
+      "has_semantic_direction": false,
+      "policy_source": "explicit_no_stable_category_direction"
+    },
+    "kitchen timer": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "globe": {
+      "primary_direction_kind": null,
+      "semantic_direction_kinds": [],
+      "has_semantic_direction": false,
+      "policy_source": "explicit_no_stable_category_direction"
+    },
+    "quilt": {
+      "primary_direction_kind": null,
+      "semantic_direction_kinds": [],
+      "has_semantic_direction": false,
+      "policy_source": "explicit_no_stable_category_direction"
+    },
+    "chest of drawers.n.01,end table": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "pitcher": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "spicemill": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "postbox": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "exercise bike": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "birdcage": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "soap dish": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "lectern": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "grandfather clock": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "recliner": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "preserve_existing_asset_verified_front"
+    },
+    "safe": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "plant stand": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "trellis": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "dollhouse": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "soccer ball": {
+      "primary_direction_kind": null,
+      "semantic_direction_kinds": [],
+      "has_semantic_direction": false,
+      "policy_source": "explicit_no_stable_category_direction"
+    },
+    "storage box": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "hammock": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "bicycle": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "cellular telephone": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "pond": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "wall socket": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "cake stand": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "bridge": {
+      "primary_direction_kind": null,
+      "semantic_direction_kinds": [],
+      "has_semantic_direction": false,
+      "policy_source": "explicit_no_stable_category_direction"
+    },
+    "shoe rack": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "grab bar": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "cocktail shaker": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "foosball table": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "pestle.n.03,mortar": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "blackboard": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "gate": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "track lighting": {
+      "primary_direction_kind": "down",
+      "semantic_direction_kinds": [
+        "down"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "gift box": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "soda can": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "base cabinet": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "spoon": {
+      "primary_direction_kind": null,
+      "semantic_direction_kinds": [],
+      "has_semantic_direction": false,
+      "policy_source": "explicit_no_stable_category_direction"
+    },
+    "poster.n.01,wall art": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "chopping board": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "candle.n.01,candlestick": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "handcart": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "swing.n.02,play area": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "toilet brush": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "hook": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "table runner": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "broom": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "playhouse.n.01,play area": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "cage": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "media player": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "towel ring": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "doormat": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "guitar": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "ladder": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "wine rack": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "record player": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "video game console": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "radiator": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "napkin": {
+      "primary_direction_kind": null,
+      "semantic_direction_kinds": [],
+      "has_semantic_direction": false,
+      "policy_source": "explicit_no_stable_category_direction"
+    },
+    "wall organizer": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "chest": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "mantel": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "skateboard": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "wall hook": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "timer": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "shed": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "pinball machine": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "blanket": {
+      "primary_direction_kind": null,
+      "semantic_direction_kinds": [],
+      "has_semantic_direction": false,
+      "policy_source": "explicit_no_stable_category_direction"
+    },
+    "pool table": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "motorcycle": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "paper organizer": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "garage door": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "cradle": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "coffee table.n.01,aquarium": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "fan": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "caddy": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "play area": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "salver": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "clothes dryer.n.01,drying rack": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "ball": {
+      "primary_direction_kind": null,
+      "semantic_direction_kinds": [],
+      "has_semantic_direction": false,
+      "policy_source": "explicit_no_stable_category_direction"
+    },
+    "pepper mill": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "bolster": {
+      "primary_direction_kind": null,
+      "semantic_direction_kinds": [],
+      "has_semantic_direction": false,
+      "policy_source": "explicit_no_stable_category_direction"
+    },
+    "shopping bag": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "canister": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "game table.n.01,chessboard": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "thermos": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "colander": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "drawer unit": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "towel rack.n.01,radiator": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "toaster oven": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "curtain rod": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "soap": {
+      "primary_direction_kind": null,
+      "semantic_direction_kinds": [],
+      "has_semantic_direction": false,
+      "policy_source": "explicit_no_stable_category_direction"
+    },
+    "greenhouse": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "net": {
+      "primary_direction_kind": null,
+      "semantic_direction_kinds": [],
+      "has_semantic_direction": false,
+      "policy_source": "explicit_no_stable_category_direction"
+    },
+    "frying pan": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "spade": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "roof": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "wind chime": {
+      "primary_direction_kind": null,
+      "semantic_direction_kinds": [],
+      "has_semantic_direction": false,
+      "policy_source": "explicit_no_stable_category_direction"
+    },
+    "spectacles": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "microphone": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "pet house": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "picnic table": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "spice holder": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "videodisk": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "hobby": {
+      "primary_direction_kind": null,
+      "semantic_direction_kinds": [],
+      "has_semantic_direction": false,
+      "policy_source": "explicit_no_stable_category_direction"
+    },
+    "ashtray": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "workbench": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "wine bucket": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "sauna": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "water scooter": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "watering can": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "bicycle rack": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "toilet paper holder": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "electric frying pan": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "smoke detector": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "folding chair": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "preserve_existing_asset_verified_front"
+    },
+    "wok": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "dish rack": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "telescope": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "piano": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "tent": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "window": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "power saw": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "trampoline": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "camcorder": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "tureen": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "barrow": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "potholder": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "toiletry.n.01,bottle": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "sugar bowl": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "blanket chest": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "conference table": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "cooker.n.01,steamer": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "magazine rack": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "reamer": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "board game": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "playpen": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "subwoofer": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "football": {
+      "primary_direction_kind": null,
+      "semantic_direction_kinds": [],
+      "has_semantic_direction": false,
+      "policy_source": "explicit_no_stable_category_direction"
+    },
+    "elevator": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "magazine": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "dryer": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "space heater": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "toilet bag": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "pan": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "chain saw": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "ironing board": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "coaster": {
+      "primary_direction_kind": null,
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": false,
+      "policy_source": "explicit_no_stable_category_direction"
+    },
+    "spice rack": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "magnet": {
+      "primary_direction_kind": null,
+      "semantic_direction_kinds": [],
+      "has_semantic_direction": false,
+      "policy_source": "explicit_no_stable_category_direction"
+    },
+    "slide": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "bidet": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "urinal": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "dvd player": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "audio system": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "mixing bowl": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "strainer": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "wine bottle": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "countertop": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "armrest": {
+      "primary_direction_kind": null,
+      "semantic_direction_kinds": [],
+      "has_semantic_direction": false,
+      "policy_source": "explicit_no_stable_category_direction"
+    },
+    "drawer": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "binder": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "tablet computer": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "handle": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "kitchen appliance.n.01,slicer": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "bottle opener": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front",
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "lawn mower": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "shower caddy": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "bathtub.n.01,shower stall": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "bookend": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "paper towel.n.01,paper towel holder": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "aquarium": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "shoebox": {
+      "primary_direction_kind": "up",
+      "semantic_direction_kinds": [
+        "up"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "birdhouse": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "chess": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "hand glass": {
+      "primary_direction_kind": "front",
+      "semantic_direction_kinds": [
+        "front"
+      ],
+      "has_semantic_direction": true,
+      "policy_source": "explicit_category_semantics"
+    },
+    "bath towel": {
+      "primary_direction_kind": null,
+      "semantic_direction_kinds": [],
+      "has_semantic_direction": false,
+      "policy_source": "explicit_no_stable_category_direction"
+    }
+  }
+}

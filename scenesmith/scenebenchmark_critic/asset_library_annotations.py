@@ -362,6 +362,11 @@ def _scenebenchmark_front_hint(record: dict[str, Any], affordances: set[str]) ->
             return side_text
     canonical = record.get("canonical_front") or {}
     if canonical.get("canonical_orientation_is_semantic_front") is True:
+        kind = canonical.get("semantic_direction_kind")
+        if kind == "up":
+            return "top"
+        if kind == "down":
+            return "bottom"
         return "front"
     if "openable" in affordances or "sittable" in affordances:
         return "front"
@@ -647,6 +652,12 @@ def build_scenebenchmark_annotation(record: dict[str, Any]) -> dict[str, Any]:
         )
         hints["canonical_orientation_is_semantic_front"] = canonical_front.get(
             "canonical_orientation_is_semantic_front"
+        )
+        hints["semantic_direction_kind"] = canonical_front.get(
+            "semantic_direction_kind"
+        )
+        hints["semantic_directions"] = canonical_front.get(
+            "semantic_directions", []
         )
 
     return {
