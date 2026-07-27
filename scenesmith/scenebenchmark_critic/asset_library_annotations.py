@@ -659,6 +659,9 @@ def build_scenebenchmark_annotation(record: dict[str, Any]) -> dict[str, Any]:
         hints["semantic_directions"] = canonical_front.get(
             "semantic_directions", []
         )
+        hints["functional_directions"] = record.get(
+            "functional_directions", []
+        )
 
     return {
         "schema_version": "scenebenchmark_hssd_fd_sa@0.1",

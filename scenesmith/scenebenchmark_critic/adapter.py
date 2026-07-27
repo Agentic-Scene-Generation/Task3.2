@@ -1198,6 +1198,7 @@ def _metadata_functional_hints(obj: SceneObject) -> dict[str, Any]:
         "canonical_orientation_is_semantic_front",
         "semantic_direction_kind",
         "semantic_directions",
+        "functional_directions",
         "front_face",
         "front_confidence",
         "front_hint",

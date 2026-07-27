@@ -224,7 +224,22 @@ def patch_record(record: dict[str, Any], policy: dict[str, Any]) -> str:
     front = record.setdefault("canonical_front", {})
     kinds = policy["semantic_direction_kinds"]
     primary = policy["primary_direction_kind"]
+    vertical_kinds = [kind for kind in kinds if kind in {"up", "down"}]
+    record["functional_directions"] = [
+        direction_entry(kind, 0.82 if kind == primary else 0.74, kind == primary)
+        for kind in vertical_kinds
+    ]
+    for direction in record["functional_directions"]:
+        direction["is_strict_positive_front"] = False
+        direction["direction_role"] = "non_front_functional_direction"
+
     if not primary:
+        front["asset_local_front_axis"] = [0.0, 0.0, 1.0]
+        front["canonical_front_direction"] = "+Z asset-local horizontal fallback"
+        front["canonical_orientation_axis"] = [0.0, 0.0, 1.0]
+        front["canonical_orientation_axis_frame"] = "asset_local"
+        front["canonical_orientation_confidence"] = 0.2
+        front["canonical_orientation_source"] = "fallback_asset_library_horizontal_axis"
         front["semantic_directions"] = []
         front["semantic_direction_kind"] = None
         front["canonical_orientation_is_semantic_front"] = False
@@ -232,15 +247,16 @@ def patch_record(record: dict[str, Any], policy: dict[str, Any]) -> str:
         front["is_strict_positive_front"] = False
         front["validation_status"] = "explicit_no_stable_category_direction"
         front["semantic_direction_audit_status"] = "explicit_no_stable_category_direction"
-        front["semantic_direction_audit_status"] = "explicit_no_stable_category_direction"
         return "no_stable_direction"
 
     preserved = policy["policy_source"] == "preserve_existing_asset_verified_front"
     confidence = float(front.get("canonical_orientation_confidence") or 0.0) if preserved else 0.82
     confidence = max(confidence, 0.82 if primary != "front" else 0.78)
-    entries = [direction_entry(kind, confidence if kind == primary else 0.74, kind == primary) for kind in kinds]
-    front["semantic_directions"] = entries
-    front["semantic_direction_kind"] = primary
+    horizontal_entries = [
+        direction_entry("front", confidence, True)
+    ] if primary == "front" else []
+    front["semantic_directions"] = horizontal_entries
+    front["semantic_direction_kind"] = "front" if primary == "front" else None
     front["semantic_direction_schema_version"] = "hssd_semantic_direction@1.0"
     front["semantic_direction_audit_status"] = (
         "preserved_asset_verified" if preserved else "category_semantics_verified_axis"
@@ -248,12 +264,49 @@ def patch_record(record: dict[str, Any], policy: dict[str, Any]) -> str:
 
     if preserved:
         # Keep the already audited per-asset horizontal axis and its confidence.
-        entries[0]["axis"] = list(front["canonical_orientation_axis"])
-        entries[0]["direction"] = front.get("canonical_front_direction")
-        entries[0]["front_view_image_index"] = front.get("front_view_image_index")
-        entries[0]["render_evidence_view"] = front.get("front_view_image_name")
-        entries[0]["is_strict_positive_front"] = bool(front.get("is_strict_positive_front"))
+        horizontal_entries[0]["axis"] = list(front["canonical_orientation_axis"])
+        horizontal_entries[0]["direction"] = front.get("canonical_front_direction")
+        horizontal_entries[0]["front_view_image_index"] = front.get("front_view_image_index")
+        horizontal_entries[0]["render_evidence_view"] = front.get("front_view_image_name")
+        horizontal_entries[0]["is_strict_positive_front"] = bool(front.get("is_strict_positive_front"))
         return "preserved"
+
+    if primary in {"up", "down"}:
+        front.update(
+            {
+                "asset_local_front_axis": [0.0, 0.0, 1.0],
+                "canonical_front_direction": "+Z asset-local horizontal fallback",
+                "canonical_front_face": None,
+                "canonical_orientation_axis": [0.0, 0.0, 1.0],
+                "canonical_orientation_axis_frame": "asset_local",
+                "canonical_orientation_confidence": 0.2,
+                "canonical_orientation_is_semantic_front": False,
+                "canonical_orientation_source": "fallback_asset_library_horizontal_axis",
+                "confidence": 0.2,
+                "front_strictness_label": "default_horizontal_direction_not_strict",
+                "front_view_image_index": None,
+                "front_view_image_name": None,
+                "is_strict_front": False,
+                "is_strict_positive_front": False,
+                "method": "horizontal_fallback_plus_separate_functional_direction",
+                "notes": (
+                    f"No stable horizontal semantic front; {primary} is stored "
+                    "separately in record.functional_directions."
+                ),
+                "status": "default_horizontal_direction",
+                "validation_status": "functional_direction_not_canonical_front",
+                "world_front_axis": None,
+            }
+        )
+        front["semantic_direction_audit_status"] = (
+            "vertical_functional_direction_separate_from_horizontal_front"
+        )
+        front["evidence"] = [
+            item
+            for item in (front.get("evidence") or [])
+            if not str(item).startswith("full-library-semantic-direction-v1:")
+        ]
+        return f"promoted_functional_{primary}"
 
     axis, label, view_index, view_name = AXES[primary]
     strict = primary == "front"
@@ -261,7 +314,7 @@ def patch_record(record: dict[str, Any], policy: dict[str, Any]) -> str:
         {
             "asset_local_front_axis": axis,
             "canonical_front_direction": label,
-            "canonical_front_face": entries[0]["semantic_face"],
+            "canonical_front_face": horizontal_entries[0]["semantic_face"],
             "canonical_orientation_axis": axis,
             "canonical_orientation_axis_frame": "asset_local",
             "canonical_orientation_confidence": confidence,
@@ -278,7 +331,7 @@ def patch_record(record: dict[str, Any], policy: dict[str, Any]) -> str:
             "is_strict_front": strict,
             "is_strict_positive_front": strict,
             "method": "category_semantics_with_hssd_axis_convention",
-            "notes": entries[0]["semantic_face"],
+            "notes": horizontal_entries[0]["semantic_face"],
             "status": "verified_semantic_direction",
             "validation_status": "category_semantics_verified_axis",
             "world_front_axis": None,
@@ -322,6 +375,7 @@ def main() -> int:
                 "hssd_id": hssd_id,
                 "category": category,
                 "primary_direction_kind": front.get("semantic_direction_kind"),
+                "annotation_kind": policy["primary_direction_kind"],
                 "axis": json.dumps(front.get("canonical_orientation_axis")),
                 "is_semantic": front.get("canonical_orientation_is_semantic_front"),
                 "is_strict_positive_front": front.get("is_strict_positive_front"),
@@ -343,9 +397,23 @@ def main() -> int:
         "asset_count": len(lookup),
         "category_count": len(categories),
         "outcomes": dict(sorted(outcomes.items())),
-        "semantic_asset_count": sum(bool(r["is_semantic"]) for r in rows),
+        "semantic_front_asset_count": sum(bool(r["is_semantic"]) for r in rows),
         "strict_positive_front_count": sum(bool(r["is_strict_positive_front"]) for r in rows),
-        "direction_kind_counts": dict(sorted(Counter(r["primary_direction_kind"] or "none" for r in rows).items())),
+        "horizontal_semantic_front_count": sum(
+            bool(r["is_semantic"]) for r in rows
+        ),
+        "functional_direction_counts": dict(
+            sorted(
+                Counter(
+                    direction["kind"]
+                    for record in lookup.values()
+                    for direction in record.get("functional_directions", [])
+                ).items()
+            )
+        ),
+        "annotation_policy_counts": dict(
+            sorted(Counter(r["annotation_kind"] or "none" for r in rows).items())
+        ),
         "coordinate_mapping": {
             "asset_up_axis": "+Y",
             "horizontal_views": {
@@ -360,7 +428,7 @@ def main() -> int:
         writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
         writer.writeheader()
         writer.writerows(rows)
-    print(json.dumps({k: audit[k] for k in ("asset_count", "category_count", "semantic_asset_count", "strict_positive_front_count", "direction_kind_counts", "outcomes")}, indent=2))
+    print(json.dumps({k: audit[k] for k in ("asset_count", "category_count", "semantic_front_asset_count", "strict_positive_front_count", "functional_direction_counts", "annotation_policy_counts", "outcomes")}, indent=2))
     return 0
 
 

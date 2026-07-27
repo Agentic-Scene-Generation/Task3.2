@@ -3,24 +3,23 @@
 Date: 2026-07-27
 
 This release completes the semantic-direction pass over all 10,963 HSSD
-assets. A semantic direction is a face that has a stable functional, display,
-access, receiving, support, output, or light-emission meaning for the asset
-category. It is independent of SceneSmith placement yaw.
+assets. Project policy requires canonical front to be horizontal. Vertical
+functional directions are therefore stored separately and can never make
+`canonical_orientation_is_semantic_front` true.
 
 ## Result
 
-- Assets with at least one semantic direction: **10,781 / 10,963**
+- Assets with a horizontal semantic front: **6,902 / 10,963**
 - Strict positive horizontal fronts: **6,734**
-- Primary horizontal semantic fronts: **6,902**
-- Primary upward semantic faces: **2,937**
-- Primary downward functional faces: **942**
-- Explicitly no stable category direction: **182**
+- Assets with an upward functional direction: **2,939**
+- Assets with a downward functional direction: **942**
+- Assets using a non-semantic horizontal fallback: **4,061**
 - Categories audited: **469 / 469**
 
-The 182 explicit `none` assets are mostly flexible textiles, generic
-decorative objects, balls, rocks, nets, and other objects whose front cannot be
-defined from the asset library alone without an instance-specific human
-decision. They are not silently assigned a fake `+Z` semantic front.
+Fallback assets still have a horizontal `+Z` canonical orientation axis for
+placement descriptions, but it is explicitly non-semantic. Bowls and ceiling
+lamps are examples: their up/down function is annotated without pretending
+that the vertical axis is a front.
 
 ## Coordinate contract
 
@@ -31,8 +30,8 @@ HSSD source assets use asset-local **Y-up** coordinates:
 | Horizontal front | `+Z` (or an already audited asset-specific horizontal axis) | `back.png` for `+Z` |
 | Opposite horizontal face | `-Z` | `front.png` |
 | Horizontal side | `+X` / `-X` | `right.png` / `left.png` |
-| Upward face | `+Y` | `top.png` |
-| Downward functional face | `-Y` | No bottom image is present in the shared six-view bundle |
+| Upward functional direction (not front) | `+Y` | `top.png` |
+| Downward functional direction (not front) | `-Y` | No bottom image is present in the shared six-view bundle |
 
 The `front_view_image_index` field remains the week27 normalized horizontal
 index and is `null` for `up` and `down` directions. Downward faces are recorded
@@ -40,8 +39,9 @@ as functional evidence rather than represented by an invented render.
 
 ## Data fields
 
-Every record now contains `canonical_front.semantic_directions`, an array of
-one or more entries with:
+`canonical_front.semantic_directions` contains horizontal front entries only.
+Vertical entries are stored in the record-level `functional_directions` array.
+Both entry types include:
 
 - `kind`: `front`, `up`, or `down`
 - `axis`: asset-local unit axis
@@ -50,10 +50,9 @@ one or more entries with:
 - `is_strict_positive_front`
 - `render_evidence_view`
 
-The legacy `canonical_orientation_is_semantic_front` field remains the
-backward-compatible existence flag for a canonical semantic face. For upward
-and downward primary faces it is true, while
-`is_strict_positive_front` is false.
+`canonical_orientation_is_semantic_front` is true only for horizontal semantic
+fronts. An up/down functional direction never changes that flag and always has
+`direction_role == non_front_functional_direction`.
 
 Machine-readable outputs:
 

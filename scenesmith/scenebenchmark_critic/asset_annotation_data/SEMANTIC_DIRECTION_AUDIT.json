@@ -5,13 +5,18 @@
   "outcomes": {
     "no_stable_direction": 182,
     "preserved": 1047,
-    "promoted_down": 942,
     "promoted_front": 5855,
-    "promoted_up": 2937
+    "promoted_functional_down": 942,
+    "promoted_functional_up": 2937
   },
-  "semantic_asset_count": 10781,
+  "semantic_front_asset_count": 6902,
   "strict_positive_front_count": 6734,
-  "direction_kind_counts": {
+  "horizontal_semantic_front_count": 6902,
+  "functional_direction_counts": {
+    "down": 942,
+    "up": 2939
+  },
+  "annotation_policy_counts": {
     "down": 942,
     "front": 6902,
     "none": 182,
