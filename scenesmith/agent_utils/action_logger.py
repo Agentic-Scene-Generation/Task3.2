@@ -294,6 +294,14 @@ def log_scene_action(func: Callable) -> Callable:
                 if not kwargs_dict:
                     arguments_dict.pop("kwargs")
 
+        trajectory_metadata = {
+            "floor_plan_mode": getattr(scene, "floor_plan_mode", "room"),
+            "tool_schema_version": getattr(scene, "tool_schema_version", 1),
+        }
+        if metadata is not None:
+            trajectory_metadata.update(metadata)
+        metadata = trajectory_metadata
+
         # Log the action.
         _append_action_to_log(
             log_path=action_log_path,

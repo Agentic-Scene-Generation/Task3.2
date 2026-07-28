@@ -1,7 +1,16 @@
 # Base floor plan agent configuration with shared settings
 
-# Floor plan mode: "room" (single room) or "house" (multi-room)
+# Floor plan mode: "room" (single rectangle), "house" (multiple rectangles),
+# or "polygon" (single simple polygon room).
 mode: "room"
+
+# Validation constraints used only by mode="polygon".
+polygon:
+  max_vertices: 32
+  min_area_m2: 4.0
+  min_edge_length_m: 0.8
+  min_interior_angle_deg: 20.0
+  coordinate_precision: 4
 
 # Session memory management for context efficiency.
 # Trims old conversation turns by removing images and optionally summarizing text.

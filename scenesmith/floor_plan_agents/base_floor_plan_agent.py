@@ -6,6 +6,7 @@ Provides shared functionality for floor plan design and geometry generation.
 import logging
 
 from abc import ABC, abstractmethod
+from enum import Enum
 from pathlib import Path
 
 from omegaconf import DictConfig
@@ -18,6 +19,14 @@ from scenesmith.prompts import prompt_registry
 from scenesmith.utils.logging import BaseLogger
 
 console_logger = logging.getLogger(__name__)
+
+
+class FloorPlanMode(str, Enum):
+    """Supported floor-plan execution paths."""
+
+    ROOM = "room"
+    HOUSE = "house"
+    POLYGON = "polygon"
 
 
 class BaseFloorPlanAgent(ABC):
@@ -36,8 +45,13 @@ class BaseFloorPlanAgent(ABC):
         self.cfg = cfg
         self.logger = logger
 
-        # Floor plan mode: "room" (single room) or "house" (multi-room).
-        self.mode = cfg.mode
+        try:
+            self.mode = FloorPlanMode(cfg.mode).value
+        except ValueError as exc:
+            supported = ", ".join(mode.value for mode in FloorPlanMode)
+            raise ValueError(
+                f"Unknown floor plan mode: {cfg.mode!r}. Supported modes: {supported}."
+            ) from exc
 
         # Prompt registry for agent prompts.
         self.prompt_registry = prompt_registry
