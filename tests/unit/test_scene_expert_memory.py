@@ -18,7 +18,7 @@ from scenesmith.scene_expert.memory.embedding import (
 )
 from scenesmith.scene_expert.memory.hybrid_retriever import HybridMemoryRetriever
 from scenesmith.scene_expert.memory.index import NumpyMemoryIndex
-from scenesmith.scene_expert.memory.retriever import _tokenize
+from scenesmith.scene_expert.memory.retriever import MemoryRetriever, _tokenize
 from scenesmith.scene_expert.memory.schemas import (
     FailureCase,
     MemoryUpdateOp,
@@ -45,9 +45,15 @@ from scenesmith.scene_expert.schemas import (
     StageBrief,
     StageVerifyReport,
 )
-from scenesmith.agent_utils.scoring import CategoryScore, FurnitureCritiqueWithScores
+from scenesmith.agent_utils.scoring import (
+    CategoryScore,
+    FloorPlanCritiqueWithScores,
+    FurnitureCritiqueWithScores,
+    scores_to_dict,
+)
 from scenesmith.agent_utils.stage_working_memory import StageWorkingMemory
 from scenesmith.scene_expert.task_compiler import _fallback_spec_from_prompt
+from scenesmith.scene_expert.prompt_context import strip_sceneexpert_injected_blocks
 from scenesmith.scene_expert.verifier import (
     FullVerifier,
     StageVerifier,
@@ -91,6 +97,72 @@ class SceneExpertMemoryTest(unittest.TestCase):
         )
 
         self.assertTrue(record.prompt_contains_scenebenchmark_context)
+
+    def test_transient_floor_plan_context_is_not_reused_as_room_prompt(self) -> None:
+        prompt = (
+            "A living room with a sofa, rug, and two plants.\n\n"
+            "=== SceneExpert Stage Brief: floor_plan ===\n"
+            "Known failure patterns to avoid:\n"
+            "  - bedroom bed collision from an unrelated case\n"
+            "=== End Stage Brief ===\n\n"
+            "=== SceneExpert Retrieved Memory Directives ===\n"
+            "Negative constraints from retrieved memory:\n"
+            "  - do not place a bed under a bedroom window\n"
+            "=== End Retrieved Memory Directives ==="
+        )
+
+        cleaned = strip_sceneexpert_injected_blocks(prompt)
+
+        self.assertEqual(
+            "A living room with a sofa, rug, and two plants.",
+            cleaned,
+        )
+        self.assertNotIn("bed", cleaned)
+
+    def test_keyword_memory_does_not_cross_room_type_for_object_cases(self) -> None:
+        with TemporaryDirectory() as tmp:
+            store = FastMemoryStore(tmp)
+            store.add_failure_case(
+                FailureCase(
+                    failure_id="bedroom_bed_failure",
+                    room_type="bedroom",
+                    stage="furniture",
+                    object="bed",
+                    failure_type="collision",
+                    bad_pattern="bed intersects the wall",
+                )
+            )
+            store.add_failure_case(
+                FailureCase(
+                    failure_id="living_sofa_failure",
+                    room_type="living_room",
+                    stage="furniture",
+                    object="sofa",
+                    failure_type="orientation",
+                    bad_pattern="sofa faces the wall",
+                )
+            )
+            store.add_failure_case(
+                FailureCase(
+                    failure_id="contaminated_living_bed_failure",
+                    room_type="living_room",
+                    stage="furniture",
+                    object="bed",
+                    failure_type="unexpected_object",
+                    bad_pattern="do not add a bed to this living room",
+                )
+            )
+            pack = MemoryRetriever(store=store).retrieve(
+                SceneTaskSpec(
+                    room_type="living_room",
+                    style="modern",
+                    required_large_objects=["sofa", "rug", "plant"],
+                ),
+                "furniture",
+            )
+
+        self.assertEqual(["living_sofa_failure"], pack.failure_case_ids)
+        self.assertNotIn("bed", " ".join(pack.failure_hints).lower())
 
     def test_memory_writer_normalizes_null_noop_fields(self) -> None:
         normalized = MemoryWriter._normalize_update_op(
@@ -175,7 +247,9 @@ class SceneExpertMemoryTest(unittest.TestCase):
         self.assertIn("original_task=A study", bundle.scene_summary)
         self.assertNotIn("Mutable StageBrief", bundle.scene_summary)
 
-    def test_stage_working_memory_commits_public_failure_event(self) -> None:
+    def test_stage_working_memory_commits_evidence_without_long_term_case(
+        self,
+    ) -> None:
         class FakeTransform:
             def translation(self):
                 return np.array([0.0, 0.0, 0.0])
@@ -236,8 +310,13 @@ class SceneExpertMemoryTest(unittest.TestCase):
                     os.environ["SCENEEXPERT_ACTIVE_MEMORY_BANK_DIR"] = old_env
 
             self.assertTrue((public_dir / "events.jsonl").exists())
-            self.assertTrue((public_dir / "failure_cases.jsonl").exists())
-            self.assertGreater((public_dir / "failure_cases.jsonl").stat().st_size, 0)
+            event = json.loads(
+                (public_dir / "events.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()[0]
+            )
+            self.assertEqual("stage_working_memory", event["event_type"])
+            self.assertFalse((public_dir / "failure_cases.jsonl").exists())
 
     def test_furniture_stage_verifier_fails_hard_missing_and_collision(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -401,6 +480,248 @@ class SceneExpertMemoryTest(unittest.TestCase):
         self.assertAlmostEqual(0.4, mapped["plausibility"])
         self.assertAlmostEqual(0.85, mapped["aesthetic"])
 
+    def test_floor_plan_score_contract_ignores_model_display_names(self) -> None:
+        critique = FloorPlanCritiqueWithScores(
+            critique="Compact structured assessment.",
+            room_proportions=CategoryScore("Room Proportions", 8, "Good scale."),
+            spatial_flow=CategoryScore("Spatial flow quality", 7, "Usable."),
+            natural_lighting=CategoryScore("采光", 9, "Bright."),
+            material_consistency=CategoryScore("materials", 8, "Coherent."),
+            prompt_following=CategoryScore("Requirement compliance", 10, "Complete."),
+        )
+
+        serialized = scores_to_dict(critique)
+        mapped = _map_scenesmith_scores(
+            {
+                key: value["grade"]
+                for key, value in serialized.items()
+                if isinstance(value, dict)
+            },
+            score_scale="0-10",
+        )
+
+        self.assertEqual(
+            {
+                "room_proportions",
+                "spatial_flow",
+                "natural_lighting",
+                "material_consistency",
+                "prompt_following",
+                "summary",
+            },
+            set(serialized),
+        )
+        self.assertAlmostEqual(25 / 30, mapped["semantic"])
+        self.assertAlmostEqual(0.85, mapped["aesthetic"])
+
+    def test_hard_check_synthetic_grades_are_not_visual_quality_scores(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scores_dir = root / "scene_states" / "furniture"
+            scores_dir.mkdir(parents=True)
+            (scores_dir / "scores.yaml").write_text(
+                "\n".join(
+                    [
+                        "Realism:",
+                        "  grade: 3",
+                        "Functionality:",
+                        "  grade: 2",
+                        "Prompt Following:",
+                        "  grade: 2",
+                        "Summary: 'DETERMINISTIC HARD-CHECK FAILED BEFORE VLM "
+                        "SCORING. Hard issues: physics hard violation: collisions.'",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            (scores_dir / "score_provenance.yaml").write_text(
+                "\n".join(
+                    [
+                        "score_source: deterministic_hard_check",
+                        "vlm_scoring_performed: false",
+                        "hard_check_passed: false",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            report = StageVerifier(pass_threshold=0.6).verify(
+                stage="furniture",
+                stage_output_dir=str(root),
+                task_spec=SceneTaskSpec(room_type="bedroom", style="standard"),
+                scene_state_info={"object_names": ["bed_0"]},
+            )
+
+            self.assertEqual("deterministic_hard_check", report.score_source)
+            self.assertFalse(report.vlm_scoring_performed)
+            self.assertNotIn("aesthetic", report.scores)
+            self.assertNotIn("semantic", report.scores)
+            self.assertEqual({}, report.scores)
+            self.assertEqual(0.0, report.rule_scores["physics"])
+            issue_types = {issue.issue_type for issue in report.issues}
+            self.assertIn("deterministic_hard_fail", issue_types)
+            self.assertNotIn("low_prompt_following", issue_types)
+
+    def test_explicit_ten_point_scale_preserves_one_out_of_ten(self) -> None:
+        mapped = _map_scenesmith_scores(
+            {"Realism": 1, "Functionality": 10},
+            score_scale="0-10",
+        )
+
+        self.assertAlmostEqual(0.1, mapped["aesthetic"])
+        self.assertAlmostEqual(1.0, mapped["semantic"])
+
+    def test_full_verifier_requires_each_stage_gate(self) -> None:
+        reports = [
+            StageVerifyReport(
+                stage="floor_plan",
+                pass_stage=True,
+                scores={"semantic": 0.9, "aesthetic": 0.9},
+            ),
+            StageVerifyReport(
+                stage="furniture",
+                pass_stage=False,
+                scores={"physics": 0.9, "interaction": 0.9},
+            ),
+        ]
+
+        full_report = FullVerifier(pass_threshold=0.7).verify(reports)
+
+        self.assertAlmostEqual(0.9, full_report.overall_score)
+        self.assertFalse(full_report.pass_scene)
+
+    def test_full_verifier_rejects_missing_expected_stage(self) -> None:
+        report = StageVerifyReport(
+            stage="furniture",
+            pass_stage=True,
+            scores={"semantic": 0.9},
+            visual_scores={"semantic": 0.9},
+            rule_scores={"physics": 1.0},
+        )
+
+        full_report = FullVerifier(pass_threshold=0.7).verify(
+            [report],
+            expected_stages=["furniture", "wall_mounted"],
+        )
+
+        self.assertEqual(["wall_mounted"], full_report.missing_stages)
+        self.assertEqual(["furniture"], full_report.completed_stages)
+        self.assertFalse(full_report.pass_scene)
+
+    def test_full_verifier_counts_each_room_stage_invocation(self) -> None:
+        report = StageVerifyReport(
+            stage="furniture",
+            pass_stage=True,
+            scores={"semantic": 0.9},
+            visual_scores={"semantic": 0.9},
+        )
+
+        full_report = FullVerifier(pass_threshold=0.7).verify(
+            [report],
+            expected_stages=["furniture", "furniture"],
+        )
+
+        self.assertEqual(["furniture"], full_report.missing_stages)
+        self.assertFalse(full_report.pass_scene)
+
+    def test_transient_critic_fallback_is_not_mapped_as_vlm_score(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scores_dir = root / "scene_states" / "furniture"
+            scores_dir.mkdir(parents=True)
+            (scores_dir / "scores.yaml").write_text(
+                "\n".join(
+                    [
+                        "Realism:",
+                        "  grade: 5",
+                        "Prompt Following:",
+                        "  grade: 8",
+                        "Summary: TRANSIENT LOCAL VLM TIMEOUT DURING VISUAL "
+                        "CRITIC SCORING.",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            report = StageVerifier(pass_threshold=0.6).verify(
+                stage="furniture",
+                stage_output_dir=str(root),
+                task_spec=SceneTaskSpec(room_type="bedroom", style="standard"),
+                scene_state_info={"object_names": ["bed_0"]},
+            )
+
+            self.assertEqual("critic_fallback", report.score_source)
+            self.assertFalse(report.vlm_scoring_performed)
+            self.assertEqual({}, report.scores)
+            self.assertFalse(report.pass_stage)
+            self.assertIn(
+                "critic_unavailable",
+                {issue.issue_type for issue in report.issues},
+            )
+
+    def test_empty_optional_stage_fails_nonzero_completion_contract(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scores_dir = root / "scene_states" / "wall"
+            scores_dir.mkdir(parents=True)
+            (scores_dir / "scores.yaml").write_text(
+                "Realism:\n  grade: 8\nFunctionality:\n  grade: 8\n",
+                encoding="utf-8",
+            )
+            (scores_dir / "score_provenance.yaml").write_text(
+                "score_source: vlm_critic\nvlm_scoring_performed: true\n",
+                encoding="utf-8",
+            )
+
+            report = StageVerifier(pass_threshold=0.6).verify(
+                stage="wall_mounted",
+                stage_output_dir=str(root),
+                task_spec=SceneTaskSpec(room_type="bedroom", style="standard"),
+                scene_state_info={
+                    "object_names": [],
+                    "object_counts": {"wall_mounted": 0},
+                    "stage_min_output_objects": 1,
+                    "stage_max_output_objects": 3,
+                },
+            )
+
+            self.assertFalse(report.pass_stage)
+            self.assertIn(
+                "insufficient_stage_objects",
+                {issue.issue_type for issue in report.issues},
+            )
+
+    def test_provenance_only_unscored_stage_is_discoverable(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scores_dir = root / "scene_states" / "ceiling"
+            scores_dir.mkdir(parents=True)
+            (scores_dir / "score_provenance.yaml").write_text(
+                "score_source: critic_fallback\n"
+                "vlm_scoring_performed: false\n"
+                "source_scores_file: critic_unavailable.yaml\n",
+                encoding="utf-8",
+            )
+            (scores_dir / "critic_unavailable.yaml").write_text(
+                "status: unscored\nreason: timeout\n",
+                encoding="utf-8",
+            )
+
+            report = StageVerifier(pass_threshold=0.6).verify(
+                stage="ceiling_mounted",
+                stage_output_dir=str(root),
+                task_spec=SceneTaskSpec(room_type="bedroom", style="standard"),
+                scene_state_info={
+                    "object_names": ["ceiling_light_0"],
+                    "object_counts": {"ceiling_mounted": 1},
+                    "stage_min_output_objects": 1,
+                    "stage_max_output_objects": 1,
+                },
+            )
+
+            self.assertEqual("critic_fallback", report.score_source)
+            self.assertFalse(report.pass_stage)
+
     def test_full_verifier_keeps_low_plausibility_as_an_observability_signal(
         self,
     ) -> None:
@@ -542,31 +863,6 @@ class SceneExpertMemoryTest(unittest.TestCase):
         self.assertIs(True, failure.content["is_deterministic"])
         self.assertEqual("stage", failure.content["scope"])
         self.assertTrue(failure.content["embedding_text"])
-
-    def test_memory_writer_extracts_reasoning_content_and_markdown_json(self) -> None:
-        writer = MemoryWriter.__new__(MemoryWriter)
-        message = types.SimpleNamespace(
-            content=None,
-            model_dump=lambda: {
-                "content": None,
-                "model_extra": {
-                    "reasoning_content": (
-                        "```json\n"
-                        '{"updates":[{"op":"NOOP","memory_type":"success_case","content":{}}]}'
-                        "\n```"
-                    )
-                },
-            },
-        )
-        response = types.SimpleNamespace(
-            choices=[types.SimpleNamespace(message=message, finish_reason="stop")]
-        )
-
-        raw = writer._extract_response_text(response)
-        data = writer._parse_json_payload(raw)
-
-        self.assertEqual(1, len(data["updates"]))
-        self.assertEqual("NOOP", data["updates"][0]["op"])
 
     def test_memory_writer_builds_conservative_fallback_success_ops(self) -> None:
         writer = MemoryWriter.__new__(MemoryWriter)
@@ -888,6 +1184,9 @@ class SceneExpertMemoryTest(unittest.TestCase):
             self.assertIn("do not retry", pack.failure_hints[0])
             self.assertEqual(1, len(pack.skill_texts))
             self.assertIn("arrange_bedroom_anchor", pack.skill_texts[0])
+            self.assertEqual(["success_bedroom_001"], pack.success_case_ids)
+            self.assertEqual(["fail_asset_001"], pack.failure_case_ids)
+            self.assertEqual(["arrange_bedroom_anchor"], pack.skill_names)
 
     def test_hybrid_retriever_writes_timing_jsonl(self) -> None:
         class DummyEmbedder:

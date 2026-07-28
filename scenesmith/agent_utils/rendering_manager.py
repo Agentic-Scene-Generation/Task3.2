@@ -1,4 +1,5 @@
 import logging
+import math
 import random
 import shutil
 import time
@@ -190,9 +191,10 @@ class RenderingManager:
             wall_surfaces_for_labels: Wall surfaces for top-down wall labels.
             wall_furniture_map: For wall mode, mapping from surface_id to list of
                 furniture UniqueIDs to include in each wall's orthographic render.
-            room_bounds: For ceiling_perspective mode, room XY bounds
-                (min_x, min_y, max_x, max_y) in meters.
-            ceiling_height: For ceiling_perspective mode, ceiling height in meters.
+            room_bounds: Architectural room XY bounds used for stable camera framing
+                and ceiling views, as (min_x, min_y, max_x, max_y) in meters.
+            ceiling_height: Architectural room height used for stable camera framing
+                and ceiling views, in meters.
             context_furniture_ids: For manipuland mode, list of furniture IDs to keep
                 visible in per-surface top-down renders. These provide spatial context
                 for item placement (e.g., chairs around a table).
@@ -219,6 +221,44 @@ class RenderingManager:
         )
         effective_cfg = self._effective_cfg_for_active_profile()
         render_profile = self.active_render_profile()
+
+        # Room-scale renders must be framed by the architectural envelope, not
+        # by arbitrary extrema in an imported asset mesh.  Malformed HSSD
+        # geometry can otherwise push the camera hundreds of metres away and
+        # make an otherwise normal room appear as a dot.  Explicit caller
+        # values still take precedence (for ceiling and focused render modes).
+        room_geometry = getattr(scene, "room_geometry", None)
+        if not exclude_room_geometry and room_geometry is not None:
+            if room_bounds is None:
+                try:
+                    length = float(getattr(room_geometry, "length", 0.0))
+                    width = float(getattr(room_geometry, "width", 0.0))
+                    if (
+                        math.isfinite(length)
+                        and math.isfinite(width)
+                        and length > 0.0
+                        and width > 0.0
+                    ):
+                        room_bounds = (
+                            -length / 2.0,
+                            -width / 2.0,
+                            length / 2.0,
+                            width / 2.0,
+                        )
+                except (TypeError, ValueError):
+                    console_logger.debug(
+                        "Could not derive stable room bounds for rendering",
+                        exc_info=True,
+                    )
+            if ceiling_height is None:
+                try:
+                    candidate_height = float(getattr(room_geometry, "wall_height", 0.0))
+                    if math.isfinite(candidate_height) and candidate_height > 0.0:
+                        ceiling_height = candidate_height
+                except (TypeError, ValueError):
+                    console_logger.debug(
+                        "Could not derive room height for rendering", exc_info=True
+                    )
 
         # Generate cache key from scene content and rendering parameters.
         # Scene content hash includes all objects, transforms, and support surfaces,
@@ -278,6 +318,12 @@ class RenderingManager:
             cache_key_parts.append("no_vert")
         if override_side_view_count is not None:
             cache_key_parts.append(f"sides_{override_side_view_count}")
+        if room_bounds is not None:
+            cache_key_parts.append(
+                "room_" + "_".join(f"{float(value):.3f}" for value in room_bounds)
+            )
+        if ceiling_height is not None:
+            cache_key_parts.append(f"room_h_{float(ceiling_height):.3f}")
 
         cache_key = "_".join(cache_key_parts)
 

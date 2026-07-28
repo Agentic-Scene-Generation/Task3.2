@@ -60,6 +60,11 @@ else
 fi
 echo "  ✓ 依赖安装完成"
 
+if [ "${SCENEEXPERT_SKIP_PYTHON_PREFLIGHT:-0}" != "1" ]; then
+    echo "  检查 vLLM / OpenAI / Agents SDK 兼容性..."
+    PYTHONDONTWRITEBYTECODE=1 python "$PROJECT_DIR/scripts/check_runtime_compatibility.py"
+fi
+
 # --------------------------------------------------------------------------
 # 步骤 2：下载模型
 # --------------------------------------------------------------------------

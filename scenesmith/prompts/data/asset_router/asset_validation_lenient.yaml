@@ -1,6 +1,6 @@
 name: "asset_validation_lenient"
 version: "1.0"
-description: "Lenient validation for pre-existing dataset assets (articulated objects)"
+description: "Lenient validation and orientation calibration for dataset assets"
 template_variables: ["description", "num_images"]
 prompt: |
   <role>
@@ -20,8 +20,12 @@ prompt: |
   1. Object TYPE matches (wardrobe→wardrobe, dresser→dresser, cabinet→cabinet)
   2. Basic structure is present (doors/drawers if expected)
   3. Object is complete (not cut off or missing major parts)
-  4. Single object (not multiple separate items)
-     EXCEPTION: Beds with bedding (mattress, blankets, pillows) count as one object
+  4. Single furniture asset (not multiple separate furniture items)
+     EXCEPTIONS:
+     - Beds with bedding (mattress, blankets, pillows) count as one asset
+     - Sofas with integral seat/back cushions or decorative throw pillows count as
+       one asset. These cushions are part of the upholstered product, not separate
+       scene manipulands.
 
   REJECT only if:
   1. Wrong object category: "wardrobe" but shows bookshelf/desk/chair
@@ -35,15 +39,32 @@ prompt: |
   - Era/style: "modern", "antique", "contemporary" - ignore these qualifiers
   - Specific counts: "6-drawer" showing 4 drawers - accept if has drawers
   - Finish details: "polished", "rustic", "weathered" - ignore
+  - Placement adjectives: "corner", "against-wall", "front-of-room" - ignore
+    unless the request explicitly requires an intrinsic shape such as "L-shaped"
 
   Focus ONLY on: Is this the RIGHT TYPE of furniture?
   </style_guidance>
+
+  <orientation_contract>
+  Images 0 and 1 are top and bottom views. Images 2, 3, 4, and 5 are four
+  evenly spaced side views. For directional furniture, identify which SIDE image
+  most directly shows the semantic front: the sitting/access side of a sofa or
+  chair, or the drawer/door side of a desk, wardrobe, or cabinet. Beds use a
+  special SceneSmith contract: select the headboard side because canonical local
+  +Y is the head-wall anchor direction. Never choose image 0 or 1 as the front.
+  If the front is genuinely
+  ambiguous or the object is rotationally symmetric, return null and low confidence.
+  This orientation field is calibration metadata and must not by itself cause a
+  semantically correct asset to be rejected.
+  </orientation_contract>
 
   <output_schema>
   {
     "is_acceptable": boolean,
     "reason": "string (brief explanation)",
-    "suggestions": ["string"] (if rejected)
+    "suggestions": ["string"] (if rejected),
+    "front_view_image_index": integer or null,
+    "orientation_confidence": number between 0 and 1
   }
   </output_schema>
 
@@ -52,28 +73,36 @@ prompt: |
   {
     "is_acceptable": true,
     "reason": "Mesh shows a wardrobe with doors - matches requested wardrobe type",
-    "suggestions": []
+    "suggestions": [],
+    "front_view_image_index": 3,
+    "orientation_confidence": 0.95
   }
 
   Example 2 - Reject (wrong type):
   {
     "is_acceptable": false,
     "reason": "Requested wardrobe but mesh shows a bookshelf with open shelves",
-    "suggestions": ["Retrieve different object - need enclosed storage"]
+    "suggestions": ["Retrieve different object - need enclosed storage"],
+    "front_view_image_index": 3,
+    "orientation_confidence": 0.8
   }
 
   Example 3 - Accept (structure close enough):
   {
     "is_acceptable": true,
     "reason": "Mesh shows dresser with multiple drawers - matches requested dresser",
-    "suggestions": []
+    "suggestions": [],
+    "front_view_image_index": 4,
+    "orientation_confidence": 0.9
   }
 
   Example 4 - Reject (wrong material category):
   {
     "is_acceptable": false,
     "reason": "Requested wooden wardrobe but mesh shows metal industrial locker",
-    "suggestions": ["Retrieve wooden furniture variant"]
+    "suggestions": ["Retrieve wooden furniture variant"],
+    "front_view_image_index": 2,
+    "orientation_confidence": 0.75
   }
   </examples>
 

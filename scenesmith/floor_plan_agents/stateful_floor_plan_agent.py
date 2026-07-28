@@ -15,9 +15,8 @@ from typing import Any
 import lxml.etree as ET
 import numpy as np
 import trimesh
-import yaml
 
-from agents import Agent, FunctionTool, Runner, RunResult
+from agents import Agent, FunctionTool, ModelSettings, RunResult
 from omegaconf import DictConfig
 from pydrake.all import RigidTransform
 
@@ -47,7 +46,7 @@ from scenesmith.agent_utils.scoring import (
     format_score_deltas_for_planner,
     log_agent_response,
     log_critique_scores,
-    scores_to_dict,
+    parse_floor_plan_critique_text,
 )
 from scenesmith.agent_utils.workflow_tools import WorkflowTools
 from scenesmith.floor_plan_agents.base_floor_plan_agent import BaseFloorPlanAgent
@@ -130,6 +129,7 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
 
         # Vision tools for floor plan rendering (lazy initialized).
         self._vision_tools: FloorPlanVisionTools | None = None
+        self._critic_floor_plan_tools: FloorPlanTools | None = None
 
         # Geometry cache for reusing unchanged room geometry across iterations.
         self._geometry_cache: GeometryCache | None = None
@@ -187,6 +187,7 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
             wall_height_max=self.cfg.wall_height.max,
             room_dim_min=self.cfg.min_floor_plan_dim_m,
             room_dim_max=self.cfg.max_floor_plan_dim_m,
+            room_size_policy=self.cfg.get("room_size_policy"),
         )
 
         vision_tools = self._get_vision_tools()
@@ -225,7 +226,9 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
             wall_height_max=self.cfg.wall_height.max,
             room_dim_min=self.cfg.min_floor_plan_dim_m,
             room_dim_max=self.cfg.max_floor_plan_dim_m,
+            room_size_policy=self.cfg.get("room_size_policy"),
         )
+        self._critic_floor_plan_tools = floor_plan_tools
 
         return list(vision_tools.tools.values()) + [floor_plan_tools.tools["validate"]]
 
@@ -330,6 +333,53 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
         """
         # Floor plan doesn't use placement noise.
 
+    def _make_floor_plan_critic_fallback_scores(
+        self,
+        *,
+        error: BaseException,
+        validation_layout: str,
+        validation_connectivity: str,
+    ) -> FloorPlanCritiqueWithScores:
+        """Create an unpersisted control response without discarding the layout."""
+        validation_ok = (
+            validation_layout == "ok" and validation_connectivity == "ok"
+        )
+        detail = f"{type(error).__name__}: {error}"
+        critique = (
+            "FLOOR-PLAN VISUAL CRITIC DEGRADED. The current layout was retained "
+            "because structured visual scoring did not complete. "
+            f"layout={validation_layout}; connectivity={validation_connectivity}; "
+            f"critic_error={detail}"
+        )
+        neutral = "Conservative fallback; visual quality was not fully verified."
+        flow_grade = 5 if validation_ok else 2
+        flow_comment = (
+            "Deterministic floor-plan validation passed."
+            if validation_ok
+            else (
+                "Deterministic validation failed: "
+                f"layout={validation_layout}; connectivity={validation_connectivity}."
+            )
+        )
+        return FloorPlanCritiqueWithScores(
+            critique=critique,
+            room_proportions=self._make_category_score(
+                "room_proportions", 5, neutral
+            ),
+            spatial_flow=self._make_category_score(
+                "spatial_flow", flow_grade, flow_comment
+            ),
+            natural_lighting=self._make_category_score(
+                "natural_lighting", 5, neutral
+            ),
+            material_consistency=self._make_category_score(
+                "material_consistency", 5, neutral
+            ),
+            prompt_following=self._make_category_score(
+                "prompt_following", 5, neutral
+            ),
+        )
+
     async def _request_critique_impl(self, update_checkpoint: bool = True) -> str:
         """Implementation for critique request.
 
@@ -349,29 +399,280 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
         critique_instruction = self.prompt_registry.get_prompt(
             prompt_enum=FloorPlanAgentPrompts.CRITIC_RUNNER_INSTRUCTION,
         )
-
-        # Run critic.
-        # Critic will call observe_scene, render_ascii, and validate tools.
-        async with self._reasoning_persistence_context_for_session(self.critic_session):
-            result = await Runner.run(
-                starting_agent=self.critic,
-                input=critique_instruction,
-                session=self.critic_session,
-                max_turns=self.cfg.agents.critic_agent.max_turns,
-                run_config=self._create_run_config(),
-            )
-        log_agent_usage(result=result, agent_name="CRITIC (FLOOR PLAN)")
+        feedback_contract = self._sceneexpert_critic_feedback_contract()
+        if feedback_contract:
+            critique_instruction += "\n\n" + feedback_contract
         vision_tools = self._get_vision_tools()
+        validation_tools = self._critic_floor_plan_tools
+        if validation_tools is None:
+            raise RuntimeError("Floor-plan validation tools were not initialized")
 
-        # Parse structured output.
-        response = result.final_output_as(FloorPlanCritiqueWithScores)
+        # Collect deterministic text evidence directly. This removes two LLM
+        # orchestration turns and guarantees that validation is available even
+        # when the local model fails to call the requested tools.
+        ascii_layout = vision_tools._render_ascii_impl()
+        validation = validation_tools._validate_impl()
+        validation_text = (
+            f"layout={validation.layout}; connectivity={validation.connectivity}"
+        )
+        run_config = self._create_run_config()
+        base_settings = self.critic.model_settings or ModelSettings()
+
+        # Build native compatibility agents. SceneExpert collects the same visual
+        # evidence directly and uses the shared structured scorer below.
+        critic_observe = self.critic.clone(
+            output_type=None,
+            tool_use_behavior="stop_on_first_tool",
+            model_settings=base_settings.resolve(
+                ModelSettings(tool_choice="observe_scene", parallel_tool_calls=False)
+            ),
+        )
+        score_instructions = self.critic.instructions
+        if self._stage_runtime_budget:
+            score_instructions = self._direct_critic_system_instructions(
+                FloorPlanCritiqueWithScores
+            )
+        critic_score = self.critic.clone(
+            tools=[],
+            instructions=score_instructions,
+            model_settings=base_settings.resolve(
+                ModelSettings(tool_choice="none", parallel_tool_calls=False)
+            ),
+        )
+
+        direct_multimodal = self._critic_fast_path_enabled(
+            "direct_multimodal_evaluation", True
+        )
+        direct_images: list[dict[str, str]] = []
+        result_observe: RunResult | None = None
+        if direct_multimodal:
+            try:
+                direct_outputs = list(vision_tools._observe_scene_impl() or [])
+                for output in direct_outputs:
+                    image_url = getattr(output, "image_url", None)
+                    if image_url and len(direct_images) < 3:
+                        direct_images.append(
+                            {"type": "input_image", "image_url": str(image_url)}
+                        )
+            except Exception as exc:
+                console_logger.warning(
+                    "Direct floor-plan render failed; continuing with "
+                    "ASCII and validation evidence: %s: %s",
+                    type(exc).__name__,
+                    exc,
+                )
+        else:
+            try:
+                result_observe = await self._run_agent_with_stage_sla(
+                    starting_agent=critic_observe,
+                    input=critique_instruction,
+                    role="critic",
+                    event="floor_plan_observe_scene",
+                    session=self.critic_session,
+                    configured_max_turns=self.cfg.agents.critic_agent.max_turns,
+                    run_config=run_config,
+                )
+            except Exception as exc:
+                if not self._is_transient_model_error(exc):
+                    raise
+                console_logger.warning(
+                    "Floor-plan visual observation request failed transiently; "
+                    "falling back to a direct deterministic render: %s: %s",
+                    type(exc).__name__,
+                    exc,
+                )
+            if result_observe is not None:
+                log_agent_usage(
+                    result=result_observe, agent_name="CRITIC (FLOOR PLAN OBSERVE)"
+                )
+            if vision_tools.last_render_dir is None:
+                try:
+                    vision_tools._observe_scene_impl()
+                except Exception as exc:
+                    console_logger.warning(
+                        "Direct floor-plan render fallback failed; continuing with "
+                        "ASCII and validation evidence: %s: %s",
+                        type(exc).__name__,
+                        exc,
+                    )
+
+        score_prompt = (
+            "/no_think\n"
+            "The mandatory observation, ASCII-layout, and validation steps are "
+            "complete. Evaluate the current floor plan and return only the "
+            "structured JSON object required by your output schema. Do not use "
+            "Markdown or code fences.\n\n"
+            f"VALIDATION RESULT:\n{validation_text}\n\n"
+            f"ASCII FLOOR PLAN:\n{ascii_layout}"
+        )
+        response: FloorPlanCritiqueWithScores
+        score_input: Any = score_prompt
+        score_session = self.critic_session
+        direct_text = ""
+        if direct_multimodal:
+            direct_text = (
+                "Evaluate this floor-plan candidate using the attached render(s) "
+                "and deterministic evidence. Return the complete structured score "
+                "object.\n\n"
+                f"VALIDATION RESULT:\n{validation_text}\n\n"
+                f"ASCII FLOOR PLAN:\n{ascii_layout}"
+            )
+            score_input = [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": direct_text,
+                        },
+                        *direct_images,
+                    ],
+                }
+            ]
+            score_session = None
+        # Evidence rendering is deterministic preparation, not model reasoning.
+        # Begin the quality transaction only when the structured VLM score starts.
+        self._begin_critic_evaluation()
+        try:
+            use_sceneexpert_direct = bool(
+                self._stage_runtime_budget and direct_multimodal and direct_images
+            )
+            direct_response = None
+            if use_sceneexpert_direct:
+                direct_response = await self._run_sceneexpert_direct_critic_score(
+                    evidence_text=direct_text,
+                    image_parts=direct_images,
+                    response_type=FloorPlanCritiqueWithScores,
+                    event="floor_plan_score_direct_structured",
+                )
+            result = None
+            configured_attempts = int(
+                self._critic_fast_path_value(
+                    "direct_multimodal_max_attempts",
+                    2,
+                )
+                or 2
+            )
+            if self._stage_runtime_budget and not use_sceneexpert_direct:
+                configured_attempts = int(
+                    self._stage_budget_value(
+                        "critic_max_attempts",
+                        configured_attempts,
+                    )
+                    or configured_attempts
+                )
+            attempts = (
+                0
+                if use_sceneexpert_direct
+                else (max(1, configured_attempts) if direct_images else 0)
+            )
+            if not direct_multimodal:
+                attempts = 1
+            for attempt in range(1, attempts + 1):
+                result = await self._run_agent_with_stage_sla(
+                    starting_agent=critic_score,
+                    input=score_input,
+                    role="critic",
+                    event=f"floor_plan_score_attempt_{attempt}",
+                    session=score_session,
+                    configured_max_turns=self.cfg.agents.critic_agent.max_turns,
+                    run_config=run_config,
+                    call_timeout_seconds=(
+                        self._critic_score_call_timeout(
+                            float(
+                                self._critic_fast_path_value(
+                                    "direct_multimodal_attempt_timeout_seconds",
+                                    120.0,
+                                )
+                                or 120.0
+                            )
+                        )
+                        if direct_multimodal
+                        else None
+                    ),
+                )
+                if result is not None:
+                    break
+            if use_sceneexpert_direct:
+                response = direct_response or (
+                    self._make_floor_plan_critic_fallback_scores(
+                        error=TimeoutError(
+                            "direct floor-plan critic did not produce valid scores"
+                        ),
+                        validation_layout=validation.layout,
+                        validation_connectivity=validation.connectivity,
+                    )
+                )
+            elif result is None:
+                response = self._make_floor_plan_critic_fallback_scores(
+                    error=TimeoutError("floor-plan critic budget exhausted"),
+                    validation_layout=validation.layout,
+                    validation_connectivity=validation.connectivity,
+                )
+            elif isinstance(result.final_output, FloorPlanCritiqueWithScores):
+                log_agent_usage(result=result, agent_name="CRITIC (FLOOR PLAN SCORE)")
+                response = result.final_output
+            else:
+                recovered = parse_floor_plan_critique_text(
+                    str(result.final_output or "")
+                )
+                response = recovered or self._make_floor_plan_critic_fallback_scores(
+                    error=TypeError(
+                        "critic returned "
+                        f"{type(result.final_output).__name__}, not structured scores"
+                    ),
+                    validation_layout=validation.layout,
+                    validation_connectivity=validation.connectivity,
+                )
+        except Exception as exc:
+            recovered = (
+                parse_floor_plan_critique_text(str(exc))
+                if type(exc).__name__ == "ModelBehaviorError"
+                else None
+            )
+            if recovered is not None:
+                console_logger.warning(
+                    "Recovered all five floor-plan scores from a non-JSON critic "
+                    "response; the layout will not be discarded"
+                )
+                response = recovered
+            elif self._is_transient_model_error(exc) or type(exc).__name__ == (
+                "ModelBehaviorError"
+            ):
+                console_logger.warning(
+                    "Floor-plan critic scoring degraded; recording an unscored "
+                    "diagnostic and retaining the usable layout: %s: %s",
+                    type(exc).__name__,
+                    exc,
+                )
+                response = self._make_floor_plan_critic_fallback_scores(
+                    error=exc,
+                    validation_layout=validation.layout,
+                    validation_connectivity=validation.connectivity,
+                )
+            else:
+                raise
+
+        self._remember_critic_feedback(response.critique)
 
         # Log critique.
         log_agent_response(response=response.critique, agent_name="CRITIC")
-        log_critique_scores(response, title="FLOOR PLAN CRITIQUE SCORES")
+        response_provenance = self._score_provenance_for_response(
+            response=response,
+            physics_context=validation_text,
+        )
+        self._last_score_provenance = dict(response_provenance)
+        trusted_visual_score = (
+            response_provenance.get("score_source") == "vlm_critic"
+        )
+        if response_provenance.get("score_source") == "critic_fallback":
+            console_logger.warning(
+                "Floor-plan critic is unscored; suppressing legacy placeholder grades"
+            )
+        else:
+            log_critique_scores(response, title="FLOOR PLAN CRITIQUE SCORES")
 
         # Save scores to render directory.
-        scores_dict = scores_to_dict(response)
         render_dir = vision_tools.last_render_dir
 
         # Always track the final render directory (separate from checkpoint logic).
@@ -380,10 +681,14 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
         self.final_render_dir = render_dir
 
         if render_dir is not None:
-            scores_path = render_dir / "scores.yaml"
-            with open(scores_path, "w") as f:
-                yaml.dump(scores_dict, f, default_flow_style=False, sort_keys=False)
-            console_logger.info(f"Scores saved to: {scores_path}")
+            self._write_score_artifacts(
+                response=response,
+                images_dir=render_dir,
+                physics_context=(
+                    f"layout={validation.layout}; "
+                    f"connectivity={validation.connectivity}"
+                ),
+            )
         else:
             console_logger.warning(
                 "No render directory available; skipping scores save"
@@ -391,7 +696,7 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
 
         # Shift checkpoints only during iteration critiques, not final critique.
         # This preserves N-1 checkpoint for reset check in _finalize_scene_and_scores.
-        if update_checkpoint:
+        if update_checkpoint and trusted_visual_score:
             # Update checkpoint state (shift current to previous before saving new).
             self.previous_scene_checkpoint = self.scene_checkpoint
             self.previous_checkpoint_scores = self.checkpoint_scores
@@ -409,17 +714,17 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
 
         # Compute score deltas BEFORE updating previous_scores.
         score_change_msg = ""
-        if self.previous_scores is not None:
+        if trusted_visual_score and self.previous_scores is not None:
             score_change_msg = format_score_deltas_for_planner(
                 current_scores=response,
                 previous_scores=self.previous_scores,
                 format_style="detailed",
             )
 
-        # Always update previous_scores for delta formatting in planner.
-        self.previous_scores = response
+        if trusted_visual_score:
+            self.previous_scores = response
 
-        return response.critique + score_change_msg
+        return self._critic_feedback_for_planner(response.critique) + score_change_msg
 
     @log_scene_action
     def _perform_checkpoint_reset(self, checkpoint_state_dict: dict) -> None:
@@ -523,16 +828,10 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
                 # Save scores to the new render directory.
                 # Use checkpoint_scores (N-1) since we reset to that state.
                 if self.checkpoint_scores is not None:
-                    scores_dict = scores_to_dict(self.checkpoint_scores)
-                    scores_path = render_dir / "scores.yaml"
-                    with open(scores_path, "w") as f:
-                        yaml.dump(
-                            scores_dict,
-                            f,
-                            default_flow_style=False,
-                            sort_keys=False,
-                        )
-                    console_logger.info(f"Scores saved to: {scores_path}")
+                    self._write_score_artifacts(
+                        response=self.checkpoint_scores,
+                        images_dir=render_dir,
+                    )
 
                 console_logger.info(f"Final scene restored to checkpoint state.")
 
@@ -544,15 +843,31 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
             final_scene_dir = self._get_final_scores_directory()
             final_scene_dir.mkdir(parents=True, exist_ok=True)
 
-            # Copy scores.
-            scores_source = render_dir_to_copy / "scores.yaml"
-            if scores_source.exists():
-                scores_dest = final_scene_dir / "scores.yaml"
-                shutil.copy(scores_source, scores_dest)
-                console_logger.info(f"Saved final scores to {scores_dest}")
+            score_artifacts = (
+                "scores.yaml",
+                "score_provenance.yaml",
+                "vlm_scores.yaml",
+                "hard_check_decision_scores.yaml",
+                "hard_check_report.yaml",
+                "critic_unavailable.yaml",
+            )
+            copied_score_artifacts = []
+            for filename in score_artifacts:
+                source = render_dir_to_copy / filename
+                if not source.exists():
+                    continue
+                shutil.copy(source, final_scene_dir / filename)
+                copied_score_artifacts.append(filename)
+            if copied_score_artifacts:
+                console_logger.info(
+                    "Saved final floor-plan score artifacts to %s: %s",
+                    final_scene_dir,
+                    ", ".join(copied_score_artifacts),
+                )
             else:
                 console_logger.warning(
-                    f"Scores file not found at {scores_source}, cannot copy"
+                    "No score artifacts found at %s, cannot copy",
+                    render_dir_to_copy,
                 )
 
             # Copy render images.
@@ -582,16 +897,20 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
             prompt_enum=FloorPlanAgentPrompts.DESIGNER_INITIAL_INSTRUCTION,
         )
 
-        # Run designer.
-        async with self._reasoning_persistence_context_for_session(
-            self.designer_session
-        ):
-            result = await Runner.run(
-                starting_agent=self.designer,
-                input=instruction,
-                session=self.designer_session,
-                max_turns=self.cfg.agents.designer_agent.max_turns,
-                run_config=self._create_run_config(),
+        # Run designer under the same SceneExpert stage SLA as its planner.
+        result = await self._run_agent_with_stage_sla(
+            starting_agent=self.designer,
+            input=instruction,
+            role="designer",
+            event="floor_plan_initial_design",
+            session=self.designer_session,
+            configured_max_turns=self.cfg.agents.designer_agent.max_turns,
+            run_config=self._create_run_config(),
+        )
+        if result is None:
+            return (
+                "Designer execution budget exhausted; preserve the current "
+                "floor-plan candidate and finish the workflow."
             )
         log_agent_usage(result=result, agent_name="DESIGNER (INITIAL FLOOR PLAN)")
 
@@ -619,16 +938,20 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
             instruction=instruction,
         )
 
-        # Run designer.
-        async with self._reasoning_persistence_context_for_session(
-            self.designer_session
-        ):
-            result = await Runner.run(
-                starting_agent=self.designer,
-                input=full_instruction,
-                session=self.designer_session,
-                max_turns=self.cfg.agents.designer_agent.max_turns,
-                run_config=self._create_run_config(),
+        # Run designer under the same SceneExpert stage SLA as its planner.
+        result = await self._run_agent_with_stage_sla(
+            starting_agent=self.designer,
+            input=full_instruction,
+            role="designer",
+            event="floor_plan_design_change",
+            session=self.designer_session,
+            configured_max_turns=self.cfg.agents.designer_agent.max_turns,
+            run_config=self._create_run_config(),
+        )
+        if result is None:
+            return (
+                "Designer execution budget exhausted; preserve the current "
+                "floor-plan candidate and finish the workflow."
             )
         log_agent_usage(result=result, agent_name="DESIGNER (CHANGE FLOOR PLAN)")
 
@@ -678,17 +1001,45 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
         )
 
         # Run the floor plan design workflow.
-        result: RunResult = await Runner.run(
-            starting_agent=self.planner,
-            input=runner_instruction,
-            max_turns=self.cfg.agents.planner_agent.max_turns,
-            run_config=self._create_run_config(),
-        )
-        log_agent_usage(result=result, agent_name="PLANNER (FLOOR PLAN)")
+        result: RunResult | None = None
+        try:
+            result = await self._run_agent_with_stage_sla(
+                starting_agent=self.planner,
+                input=runner_instruction,
+                role="planner",
+                event="floor_plan_workflow",
+                configured_max_turns=self.cfg.agents.planner_agent.max_turns,
+                run_config=self._create_run_config(),
+            )
+        except Exception as exc:
+            if not self._is_transient_model_error(exc):
+                raise
+            console_logger.warning(
+                "Floor-plan planner failed transiently; checking whether its "
+                "current candidate can be finalized: %s: %s",
+                type(exc).__name__,
+                exc,
+            )
 
-        if result.final_output:
+        if result is not None:
+            log_agent_usage(result=result, agent_name="PLANNER (FLOOR PLAN)")
+
+        if result is not None and result.final_output:
             log_agent_response(
                 response=result.final_output, agent_name="PLANNER (FLOOR PLAN)"
+            )
+
+        # A timeout commonly occurs after the designer has already produced a
+        # valid candidate. Preserve that work; fail only when there is genuinely
+        # no geometry-capable layout to continue with.
+        if not self.layout.placed_rooms or not self.layout.placement_valid:
+            raise RuntimeError(
+                "Floor-plan workflow ended without a valid placed-room candidate"
+            )
+        if result is None:
+            console_logger.warning(
+                "Continuing from the current valid floor-plan candidate after "
+                "planner budget exhaustion or a transient transport failure"
             )
 
         # Final critique.

@@ -93,6 +93,34 @@ class MemoryPack(BaseModel):
             "Injected directly into the designer prompt, bypassing GlobalPlanner."
         ),
     )
+    success_case_ids: list[str] = Field(default_factory=list)
+    failure_case_ids: list[str] = Field(default_factory=list)
+    skill_names: list[str] = Field(default_factory=list)
+
+    def deduplicated(self) -> "MemoryPack":
+        """Return an order-preserving copy without repeated prompt content."""
+
+        def unique_text(values: list[str]) -> list[str]:
+            seen: set[str] = set()
+            result: list[str] = []
+            for value in values:
+                text = " ".join(str(value or "").split())
+                key = text.casefold()
+                if text and key not in seen:
+                    result.append(text)
+                    seen.add(key)
+            return result
+
+        return self.model_copy(
+            update={
+                "success_hints": unique_text(self.success_hints),
+                "failure_hints": unique_text(self.failure_hints),
+                "skill_texts": unique_text(self.skill_texts),
+                "success_case_ids": unique_text(self.success_case_ids),
+                "failure_case_ids": unique_text(self.failure_case_ids),
+                "skill_names": unique_text(self.skill_names),
+            }
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -105,6 +133,31 @@ class StageBudget(BaseModel):
 
     max_designer_iterations: int = 2
     max_repair_steps: int = 1
+    max_planner_turns: int = 8
+    max_designer_turns: int = 12
+    max_critic_turns: int = 6
+    max_wall_clock_seconds: float = 0.0
+    planner_active_max_seconds: float = 0.0
+    designer_active_max_seconds: float = 0.0
+    critic_active_max_seconds: float = 0.0
+    planner_max_output_tokens: int = 0
+    designer_max_output_tokens: int = 0
+    critic_max_output_tokens: int = 0
+    critic_max_attempts: int = 2
+    critic_evaluation_max_seconds: float = 0.0
+    critic_reserve_fraction: float = 0.25
+    fallback_reserve_fraction: float = 0.10
+    finalization_reserve_fraction: float = 0.05
+    critical_retry_budget_multiplier: float = 1.5
+    max_asset_requests: int = 0
+    asset_acquisition_timeout_seconds: int = 300
+    max_optional_object_families: int = 0
+    max_assets_per_request: int = 0
+    max_semantic_retries_per_family: int = 2
+    min_output_objects: int = 0
+    max_output_objects: int = 0
+    max_stage_regenerations: int = 1
+    min_visual_score: float = 0.60
 
 
 class HarnessContext(BaseModel):
@@ -194,7 +247,15 @@ class StageVerifyReport(BaseModel):
     pass_stage: bool
     scores: dict[str, float] = Field(
         default_factory=dict,
-        description="Scores 0-1 for semantic, aesthetic, physics, interaction",
+        description="Backward-compatible alias of VLM-only visual_scores",
+    )
+    visual_scores: dict[str, float] = Field(
+        default_factory=dict,
+        description="VLM-only 0-1 quality metrics",
+    )
+    rule_scores: dict[str, float] = Field(
+        default_factory=dict,
+        description="Deterministic rule metrics kept separate from VLM quality",
     )
     issues: list[VerifyIssue] = Field(default_factory=list)
     repair_suggestions: list[str] = Field(default_factory=list)
@@ -202,6 +263,19 @@ class StageVerifyReport(BaseModel):
         default="",
         description="Full critic summary text from SceneSmith scores.yaml — richest signal for memory",
     )
+    score_source: str = Field(
+        default="unknown",
+        description=(
+            "Origin of numeric scores: vlm_critic, deterministic_hard_check, "
+            "critic_fallback, unavailable, or unknown"
+        ),
+    )
+    vlm_scoring_performed: bool = False
+    hard_check_report: dict = Field(
+        default_factory=dict,
+        description="Deterministic validation provenance kept separate from VLM scores",
+    )
+    runtime_repair_events: list[str] = Field(default_factory=list)
 
 
 class FullVerifyReport(BaseModel):
@@ -218,6 +292,9 @@ class FullVerifyReport(BaseModel):
     support_relation_accuracy: float = 0.0
     overall_score: float = 0.0
     pass_scene: bool = False
+    expected_stages: list[str] = Field(default_factory=list)
+    completed_stages: list[str] = Field(default_factory=list)
+    missing_stages: list[str] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -245,6 +322,19 @@ class StageCost(BaseModel):
     stage_time_sec: float = 0.0
 
 
+class StageExecutionEvidence(BaseModel):
+    """Auditable proof that SceneExpert inputs reached a stage agent."""
+
+    task_spec_source: str = "unknown"
+    stage_brief_source: str = "unknown"
+    retrieved_memory_ids: list[str] = Field(default_factory=list)
+    context_bundle_hash: str = ""
+    injected_brief_hash: str = ""
+    designer_prompt_hash: str = ""
+    designer_prompt_contains_brief: bool = False
+    degraded: bool = False
+
+
 class StageTraceEntry(BaseModel):
     stage: str
     memory_pack: MemoryPack
@@ -253,3 +343,6 @@ class StageTraceEntry(BaseModel):
     verify_report: StageVerifyReport | None = None
     repair_actions: list[RepairResult] = Field(default_factory=list)
     cost: StageCost = Field(default_factory=StageCost)
+    execution_evidence: StageExecutionEvidence = Field(
+        default_factory=StageExecutionEvidence
+    )

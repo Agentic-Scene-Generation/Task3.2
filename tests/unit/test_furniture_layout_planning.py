@@ -7,6 +7,7 @@ from typing import Any
 import numpy as np
 
 from scenesmith.agent_utils.furniture_layout_planning import (
+    _bed_head_vector_xy,
     apply_bedroom_asset_size_policy,
     build_bedroom_anchor_plan,
     evaluate_bedroom_layout_plausibility,
@@ -100,6 +101,19 @@ def make_bedroom_scene() -> DummyScene:
 
 
 class FurnitureLayoutPlanningTest(unittest.TestCase):
+    def test_bed_headboard_opposes_canonical_front(self) -> None:
+        bed = DummyObject(
+            object_type="furniture",
+            name="bed",
+            description="Bed with headboard",
+            bbox_min=np.array([-0.8, -1.0, 0.0]),
+            bbox_max=np.array([0.8, 1.0, 0.8]),
+        )
+
+        headboard = _bed_head_vector_xy(bed)
+
+        np.testing.assert_allclose(headboard, np.array([0.0, -1.0]))
+
     def test_injected_memory_cannot_turn_living_room_into_bedroom(self) -> None:
         scene = DummyScene(
             room_geometry=DummyRoomGeometry(),

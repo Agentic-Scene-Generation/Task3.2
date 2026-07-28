@@ -12,7 +12,6 @@ import json
 import logging
 import os
 import time
-import hashlib
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +24,26 @@ from scenesmith.scene_expert.context_bundle import (
 
 console_logger = logging.getLogger(__name__)
 
+_OBJECT_ALIASES: dict[str, tuple[str, ...]] = {
+    "bed": ("bed", "beds"),
+    "nightstand": ("nightstand", "nightstands", "bedside table", "bedside_table"),
+    "wardrobe": ("wardrobe", "wardrobes", "closet", "closets", "corner_wardrobe"),
+    "student_desk": ("student desk", "student desks", "student_desk"),
+    "teacher_desk": (
+        "teacher's desk",
+        "teacher desk",
+        "teacher_desk",
+        "instructor desk",
+        "podium",
+        "lectern",
+    ),
+    "desk": ("desk", "desks"),
+    "chair": ("chair", "chairs"),
+    "sofa": ("sofa", "sofas", "couch", "couches"),
+    "plant": ("plant", "plants", "potted plant"),
+    "rug": ("rug", "rugs", "area rug"),
+    "dresser": ("dresser", "dressers", "chest of drawers"),
+}
 
 def _now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -48,15 +67,43 @@ def _object_names(scene: Any) -> list[str]:
         return []
 
 
+def _invalid_asset_names(scene: Any) -> list[str]:
+    invalid: list[str] = []
+    try:
+        for object_id, obj in scene.objects.items():
+            metadata = getattr(obj, "metadata", {}) or {}
+            if metadata.get("repair_placeholder", False):
+                invalid.append(str(object_id))
+    except Exception:
+        return []
+    return invalid
+
+
+def _infer_category(text: str) -> str | None:
+    normalized = str(text or "").lower().replace("_", " ")
+    for category, aliases in _OBJECT_ALIASES.items():
+        if any(alias.replace("_", " ") in normalized for alias in aliases):
+            return category
+    return None
+
+
 def _count_required_categories(
-    object_names: list[str], required_categories: list[str]
+    object_names: list[str],
+    required_categories: list[str] | None = None,
 ) -> dict[str, int]:
-    return {
-        category: sum(
-            furniture_category_matches(name, category) for name in object_names
-        )
-        for category in required_categories
-    }
+    if required_categories is not None:
+        return {
+            category: sum(
+                furniture_category_matches(name, category) for name in object_names
+            )
+            for category in required_categories
+        }
+    counts = {category: 0 for category in _OBJECT_ALIASES}
+    for name in object_names:
+        category = _infer_category(name)
+        if category in counts:
+            counts[category] += 1
+    return counts
 
 
 def _extract_grade(scores: dict[str, Any], *name_parts: str) -> float | None:
@@ -65,7 +112,9 @@ def _extract_grade(scores: dict[str, Any], *name_parts: str) -> float | None:
         if not all(part.lower().replace("_", " ") in key_lower for part in name_parts):
             continue
         if isinstance(value, dict):
-            grade = value.get("grade") or value.get("score")
+            grade = value.get("grade")
+            if grade is None:
+                grade = value.get("score")
             if isinstance(grade, (int, float)):
                 return float(grade)
         if isinstance(value, (int, float)):
@@ -79,6 +128,9 @@ def _deterministic_quality(
     required_counts: dict[str, int],
     scores: dict[str, Any],
     critique: str,
+    invalid_assets: list[str] | None = None,
+    hard_check_passed: bool | None = None,
+    hard_issues: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     required_counts = {
         str(key).lower(): int(value)
@@ -107,7 +159,18 @@ def _deterministic_quality(
     inconsistent = bool(missing) and (
         claims_complete or (prompt_following is not None and prompt_following >= 8)
     )
-    hard_valid = not missing
+    invalid_assets = list(invalid_assets or [])
+    deterministic_hard_fail = "deterministic hard-check failed" in critique_lower
+    hard_failure = bool(missing or invalid_assets or deterministic_hard_fail)
+    hard_valid: bool | None
+    if hard_failure or hard_check_passed is False:
+        hard_valid = False
+    elif hard_check_passed is True:
+        hard_valid = True
+    else:
+        # Absence of a missing-object failure does not prove collision, support,
+        # opening-clearance, or physics validity.
+        hard_valid = None
     note = ""
     if missing:
         note = (
@@ -117,12 +180,31 @@ def _deterministic_quality(
         )
         if inconsistent:
             note += " Ignore contradictory critic/designer text that claims completion."
+    if invalid_assets:
+        invalid_note = (
+            "Deterministic state check: invalid placeholder furniture "
+            + ", ".join(invalid_assets)
+            + "."
+        )
+        note = f"{note} {invalid_note}".strip()
+    if deterministic_hard_fail and not note:
+        note = "Deterministic hard-check failed before VLM critic scoring."
 
     return {
         "required_counts": required_counts,
         "observed_counts": observed_counts,
         "missing_required_objects": missing,
+        "invalid_asset_objects": invalid_assets,
         "hard_valid": hard_valid,
+        "hard_check_status": (
+            "passed"
+            if hard_valid is True
+            else "failed"
+            if hard_valid is False
+            else "unverified"
+        ),
+        "hard_issues": list(hard_issues or []),
+        "deterministic_hard_fail": deterministic_hard_fail,
         "critic_inconsistent_with_state": inconsistent,
         "deterministic_note": note,
     }
@@ -247,6 +329,7 @@ class StageWorkingMemory:
         text: str = "",
         scores: Any | None = None,
         critique: str = "",
+        score_source: str = "",
         extra: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Save a compact record for one render or scored render."""
@@ -257,12 +340,36 @@ class StageWorkingMemory:
         images = sorted(str(path) for path in render_dir.glob("*.png"))
         score_data = _score_dict(scores)
         object_names = _object_names(scene)
+        resolved_score_source = str(score_source or "none")
+        if not score_source:
+            if event == "deterministic_hard_fail":
+                resolved_score_source = "deterministic_hard_check"
+            elif score_data and role == "critic":
+                resolved_score_source = "vlm_critic"
+        extra_payload = extra or {}
+        hard_check_passed = extra_payload.get("hard_check_passed")
+        if hard_check_passed not in (True, False):
+            hard_check_passed = (
+                False if resolved_score_source == "deterministic_hard_check" else None
+            )
         deterministic_quality = _deterministic_quality(
             object_names=object_names,
             required_counts=self.required_counts,
             scores=score_data,
             critique=critique or text,
+            invalid_assets=_invalid_asset_names(scene),
+            hard_check_passed=hard_check_passed,
+            hard_issues=extra_payload.get("hard_issues", []),
         )
+        visual_score_data = (
+            score_data if resolved_score_source == "vlm_critic" else {}
+        )
+        hard_decision_scores = (
+            score_data
+            if resolved_score_source == "deterministic_hard_check"
+            else {}
+        )
+        decision_score_total = _score_total(scores)
         record = {
             "schema_version": "1.0",
             "created_at": _now(),
@@ -276,15 +383,30 @@ class StageWorkingMemory:
                 if (render_dir / "scores.yaml").exists()
                 else ""
             ),
-            "scores": score_data,
-            "score_total": _score_total(scores),
+            # Backwards-compatible ``scores`` now has one unambiguous meaning:
+            # VLM quality only. Synthetic hard-check decision grades live in a
+            # separate namespace and never rank or seed success memory.
+            "scores": visual_score_data,
+            "visual_scores": visual_score_data,
+            "hard_decision_scores": hard_decision_scores,
+            "score_total": (
+                decision_score_total
+                if resolved_score_source == "vlm_critic"
+                else None
+            ),
+            "hard_decision_score_total": (
+                decision_score_total
+                if resolved_score_source == "deterministic_hard_check"
+                else None
+            ),
+            "score_source": resolved_score_source,
             "critique": _compact(critique, max_chars=900),
             "text": _compact(text, max_chars=900),
             "scene_hash": _scene_hash(scene),
             "object_names": object_names,
             "object_count": len(object_names),
             "deterministic_quality": deterministic_quality,
-            "extra": extra or {},
+            "extra": extra_payload,
         }
         _write_json(render_dir / "render_memory.json", record)
         _append_jsonl(self.memory_path, record)
@@ -394,18 +516,27 @@ class StageWorkingMemory:
                 ]
             ).lower()
             overlap = sum(1 for token in query_tokens if token and token in text)
-            has_scores = 1.0 if record.get("scores") else 0.0
+            has_scores = (
+                1.0
+                if record.get("score_source") == "vlm_critic"
+                and record.get("visual_scores", record.get("scores"))
+                else 0.0
+            )
             is_critic = 1.0 if record.get("role") == "critic" else 0.0
             invalid_penalty = (
                 4.0 if quality.get("critic_inconsistent_with_state") else 0.0
             )
-            hard_valid_bonus = 0.5 if quality.get("hard_valid", True) else 0.0
+            hard_valid_bonus = 0.5 if quality.get("hard_valid") is True else 0.0
             # Invalid records with high hallucinated scores must not outrank
             # deterministic failure notes.
             score_total = (
                 0.0
                 if quality.get("critic_inconsistent_with_state")
-                else (record.get("score_total") or 0.0)
+                else (
+                    record.get("score_total") or 0.0
+                    if record.get("score_source") == "vlm_critic"
+                    else 0.0
+                )
             )
             return (
                 overlap + has_scores + is_critic + hard_valid_bonus - invalid_penalty,
@@ -482,7 +613,7 @@ class StageWorkingMemory:
         )
 
     def _commit_public_stage_event(self, record: dict[str, Any]) -> None:
-        """Append a durable stage event and optional memory case to the shared bank."""
+        """Append durable evidence; long-term cases have a single owner."""
         if self.public_events_path is None or self.public_memory_dir is None:
             return
         event_payload = {
@@ -498,144 +629,10 @@ class StageWorkingMemory:
         }
         _append_jsonl(self.public_events_path, event_payload)
 
-        if record.get("role") != "critic":
-            return
-        try:
-            quality = record.get("deterministic_quality") or {}
-            scores = record.get("scores") or {}
-            hard_valid = bool(quality.get("hard_valid", True))
-            if hard_valid and scores:
-                self._commit_public_success_case(record)
-            elif not hard_valid or record.get("event") == "deterministic_hard_fail":
-                self._commit_public_failure_case(record)
-        except Exception as e:
-            console_logger.warning("Failed to commit public stage memory event: %s", e)
-
-    def _memory_id(self, prefix: str, record: dict[str, Any]) -> str:
-        payload = "|".join(
-            [
-                self.stage,
-                str(record.get("role", "")),
-                str(record.get("event", "")),
-                str(record.get("scene_hash", "")),
-                str(record.get("render_dir", "")),
-                str(record.get("critique", ""))[:300],
-            ]
-        )
-        digest = hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
-        return f"{prefix}_{self.stage}_{digest}"
-
-    def _room_type_from_record(self, record: dict[str, Any]) -> str:
-        text = " ".join(
-            [
-                self.stage,
-                str(record.get("text", "")),
-                str(record.get("critique", "")),
-                " ".join(str(x) for x in record.get("object_names", [])),
-            ]
-        ).lower()
-        if "bedroom" in text or "bed" in text or "nightstand" in text:
-            return "bedroom"
-        return "room"
-
-    def _normalized_quality(self, record: dict[str, Any]) -> float:
-        total = record.get("score_total")
-        scores = record.get("scores") or {}
-        if not isinstance(total, (int, float)) or not scores:
-            return 0.0
-        max_total = 10.0 * max(1, len(scores))
-        return max(0.0, min(1.0, float(total) / max_total))
-
-    def _commit_public_success_case(self, record: dict[str, Any]) -> None:
-        quality_score = self._normalized_quality(record)
-        if quality_score < 0.75:
-            return
-        from scenesmith.scene_expert.memory.schemas import SuccessCase
-        from scenesmith.scene_expert.memory.store import FastMemoryStore
-        from scenesmith.scene_expert.memory.text_builder import build_embedding_text
-
-        case = SuccessCase(
-            case_id=self._memory_id("success", record),
-            room_type=self._room_type_from_record(record),
-            style="",
-            stage=self.stage,
-            task_signature=list(record.get("object_names", []))[:12],
-            required_objects=list(
-                (record.get("deterministic_quality") or {})
-                .get("required_counts", {})
-                .keys()
-            ),
-            scene_summary=f"Stage {self.stage} critic accepted render {record.get('render_dir', '')}.",
-            successful_pattern=[
-                _compact(record.get("critique", ""), 500)
-                or f"{self.stage} produced a hard-valid scored candidate."
-            ],
-            scores={
-                k: float(v.get("grade", v))
-                for k, v in (record.get("scores") or {}).items()
-                if isinstance(v, (int, float, dict))
-                and (
-                    not isinstance(v, dict) or isinstance(v.get("grade"), (int, float))
-                )
-            },
-            trace_ref=str(record.get("render_dir", "")),
-            quality_score=quality_score,
-            confidence=0.45,
-            created_at=_now(),
-        )
-        if not case.embedding_text:
-            case = case.model_copy(
-                update={"embedding_text": build_embedding_text(case)}
-            )
-        FastMemoryStore(str(self.public_memory_dir)).add_success_case(case)
-
-    def _commit_public_failure_case(self, record: dict[str, Any]) -> None:
-        from scenesmith.scene_expert.memory.schemas import FailureCase
-        from scenesmith.scene_expert.memory.store import FastMemoryStore
-        from scenesmith.scene_expert.memory.text_builder import build_embedding_text
-
-        quality = record.get("deterministic_quality") or {}
-        note = (
-            quality.get("deterministic_note")
-            or record.get("critique")
-            or record.get("text")
-            or ""
-        )
-        failure_type = "deterministic_hard_fail"
-        lowered = str(note).lower()
-        if "missing required" in lowered:
-            failure_type = "missing_required_object"
-        elif "door" in lowered or "open-connection" in lowered or "opening" in lowered:
-            failure_type = "door_or_opening_clearance"
-        elif "collision" in lowered or "overlap" in lowered:
-            failure_type = "collision_or_overlap"
-        case = FailureCase(
-            failure_id=self._memory_id("failure", record),
-            room_type=self._room_type_from_record(record),
-            stage=self.stage,
-            object="",
-            failure_type=failure_type,
-            bad_pattern=_compact(note, 900),
-            failure_reason=_compact(note, 900),
-            repair_action="Run stage repair loop and re-score before accepting this candidate.",
-            repair_verified=False,
-            required_objects=list((quality.get("required_counts") or {}).keys()),
-            scene_summary=f"Stage {self.stage} hard-failed at render {record.get('render_dir', '')}.",
-            quality_score=max(0.0, self._normalized_quality(record)),
-            confidence=0.6,
-            created_at=_now(),
-            scope="stage",
-            is_deterministic=True,
-            negative_constraint=_compact(note, 700),
-            critic_check="Verify deterministic hard constraints before invoking VLM scoring.",
-            trace_ref=str(record.get("render_dir", "")),
-        )
-        if not case.embedding_text:
-            case = case.model_copy(
-                update={"embedding_text": build_embedding_text(case)}
-            )
-        FastMemoryStore(str(self.public_memory_dir)).add_failure_case(case)
-
+        # Working memory is evidence, not a second long-term memory writer.
+        # SceneExpert's post-stage committer owns verified success/failure cases;
+        # keeping mutation out of this diagnostic path prevents duplicate and
+        # unverified records from entering Fast Memory.
 
 def save_generic_render_memory(
     *,
@@ -650,6 +647,30 @@ def save_generic_render_memory(
     """Save a render-only record from RenderingManager."""
     stage = _canonical_stage(stage)
     memory = StageWorkingMemory(root_dir=root_dir, stage=stage, enabled=True)
+    if stage in ("furniture", "furniture_selection"):
+        # Generic renders (notably the manipuland-stage furniture_selection
+        # overview) instantiate a fresh working-memory object. Reconstruct the
+        # same prompt requirements so a placeholder-filled scene cannot appear
+        # hard-valid merely because this render has no live furniture agent.
+        try:
+            from scenesmith.agent_utils.furniture_safety import (
+                FurnitureSafetyController,
+            )
+
+            controller = FurnitureSafetyController({"enabled": True})
+            controller.reset_for_scene(
+                getattr(
+                    scene,
+                    "scene_expert_original_description",
+                    getattr(scene, "text_description", ""),
+                )
+            )
+            memory.set_required_counts(controller.required_counts)
+        except Exception as exc:
+            console_logger.warning(
+                "Could not infer furniture requirements for generic render memory: %s",
+                exc,
+            )
     memory.save_render_record(
         render_dir=render_dir,
         role="render",

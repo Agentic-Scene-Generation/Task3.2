@@ -1,13 +1,16 @@
 """Asset router for LLM-advised asset generation."""
 
 import logging
+import re
 import tempfile
 import time
 
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import numpy as np
 from omegaconf import DictConfig
+from PIL import Image, ImageDraw
 
 from scenesmith.agent_utils.articulated_retrieval_server import (
     ArticulatedRetrievalClient,
@@ -82,6 +85,26 @@ if TYPE_CHECKING:
     )
 
 console_logger = logging.getLogger(__name__)
+
+
+def _validation_render_has_visible_content(image_paths: list[Path]) -> bool:
+    """Reject near-uniform multiview renders before spending a VLM request."""
+    for image_path in image_paths:
+        try:
+            with Image.open(image_path) as image:
+                rgb = np.asarray(image.convert("RGB").resize((128, 128)), dtype=float)
+        except Exception:
+            continue
+        border = np.concatenate(
+            (rgb[0], rgb[-1], rgb[:, 0], rgb[:, -1]),
+            axis=0,
+        )
+        background = np.median(border, axis=0)
+        foreground_distance = np.max(np.abs(rgb - background), axis=2)
+        foreground_ratio = float(np.mean(foreground_distance > 18.0))
+        if foreground_ratio >= 0.003 and float(np.std(rgb)) >= 2.0:
+            return True
+    return False
 
 
 class AssetRouter:
@@ -266,6 +289,8 @@ class AssetRouter:
         description: str,
         output_dir: Path | None = None,
         use_lenient: bool = False,
+        timeout_seconds: float | None = None,
+        max_retries: int | None = None,
     ) -> ValidationResult:
         """Validate a generated asset using VLM.
 
@@ -282,6 +307,8 @@ class AssetRouter:
             output_dir: Optional directory to save rendered images.
             use_lenient: If True, use lenient validation prompt. Lenient validation
                 accepts minor imperfections common in library assets.
+            timeout_seconds: Optional deadline for this asset-only VLM request.
+            max_retries: Optional retry count for this asset-only VLM request.
 
         Returns:
             ValidationResult with acceptance decision and reasoning.
@@ -314,6 +341,10 @@ class AssetRouter:
                 taa_samples=self.validation_taa_samples,
             )
             console_logger.debug(f"Rendered {len(image_paths)} images for validation")
+            if not _validation_render_has_visible_content(image_paths):
+                raise RuntimeError(
+                    "all multiview images are blank or contain no visible asset"
+                )
         except Exception as e:
             console_logger.error(f"Failed to render mesh for validation: {e}")
             return ValidationResult(
@@ -365,6 +396,8 @@ class AssetRouter:
                 verbosity=verbosity,
                 response_format={"type": "json_object"},
                 vision_detail=vision_detail,
+                timeout_seconds=timeout_seconds,
+                max_retries=max_retries,
             )
             elapsed = time.time() - start_time
             response_json = parse_llm_json_object(response_text)
@@ -381,10 +414,27 @@ class AssetRouter:
             )
 
         # Parse response.
+        front_view_image_index = response_json.get("front_view_image_index")
+        try:
+            if front_view_image_index is not None:
+                front_view_image_index = int(front_view_image_index)
+        except (TypeError, ValueError):
+            front_view_image_index = None
+        orientation_confidence = response_json.get("orientation_confidence")
+        try:
+            if orientation_confidence is not None:
+                orientation_confidence = max(
+                    0.0, min(1.0, float(orientation_confidence))
+                )
+        except (TypeError, ValueError):
+            orientation_confidence = None
+
         return ValidationResult(
             is_acceptable=response_json.get("is_acceptable", False),
             reason=response_json.get("reason", "Unknown"),
             suggestions=response_json.get("suggestions", []),
+            front_view_image_index=front_view_image_index,
+            orientation_confidence=orientation_confidence,
         )
 
     def validate_item_types(self, items: list[AssetItem]) -> str | None:
@@ -857,12 +907,6 @@ class AssetRouter:
         Returns:
             GeneratedGeometry if successful, None if retrieval/validation fails.
         """
-        if materials_client is None:
-            console_logger.warning(
-                f"Materials client not available for '{item.description}'"
-            )
-            return None
-
         # Wall agent uses vertical geometry (wall-mounted).
         is_wall_mode = self.agent_type == AgentType.WALL_MOUNTED
 
@@ -897,6 +941,50 @@ class AssetRouter:
                 f"({width:.2f}m x {depth:.2f}m)"
             )
 
+        thin_covering_cfg = self.cfg.asset_manager.router.strategies.thin_covering
+        thickness = thin_covering_cfg.thickness_m
+
+        def generated_fallback(reason: str) -> GeneratedGeometry | None:
+            console_logger.warning(
+                "%s; trying configured covering fallback for '%s'",
+                reason,
+                item.description,
+            )
+            if max_retries == 0 and not is_wall_mode:
+                return self._generate_procedural_floor_covering_fallback(
+                    item=item,
+                    width=width,
+                    depth=depth,
+                    thickness=thickness,
+                    geometry_dir=geometry_dir,
+                    shape=shape,
+                )
+            generated = self._try_generated_thin_covering(
+                item=item,
+                image_generator=image_generator,
+                width=width,
+                second_dim=height if is_wall_mode else depth,
+                thickness=thickness,
+                geometry_dir=geometry_dir,
+                debug_dir=debug_dir,
+                is_wall_mode=is_wall_mode,
+                shape=shape,
+                validate=max_retries > 0,
+            )
+            if generated is not None or is_wall_mode:
+                return generated
+            return self._generate_procedural_floor_covering_fallback(
+                item=item,
+                width=width,
+                depth=depth,
+                thickness=thickness,
+                geometry_dir=geometry_dir,
+                shape=shape,
+            )
+
+        if materials_client is None:
+            return generated_fallback("Materials client is unavailable")
+
         # Request materials from server.
         request = MaterialsRetrievalServerRequest(
             material_description=item.description,
@@ -909,29 +997,22 @@ class AssetRouter:
             # Fetch materials (single request returns single response).
             responses = list(materials_client.retrieve_materials([request]))
             if not responses:
-                console_logger.warning(
-                    f"No material response for thin covering '{item.description}'"
+                return generated_fallback(
+                    "Materials server returned no thin-covering response"
                 )
-                return None
             _, response = responses[0]
             materials = response.results
         except Exception as e:
-            console_logger.error(
-                f"Materials retrieval failed for thin covering '{item.description}': {e}"
+            return generated_fallback(
+                f"Materials retrieval failed ({type(e).__name__}: {e})"
             )
-            return None
 
         if not materials:
-            console_logger.warning(
-                f"No materials found for thin covering '{item.description}'"
-            )
-            return None
+            return generated_fallback("Materials server returned no candidates")
         console_logger.info(
             f"Got {len(materials)} material candidates for '{item.description}'"
         )
 
-        thin_covering_cfg = self.cfg.asset_manager.router.strategies.thin_covering
-        thickness = thin_covering_cfg.thickness_m
         # single_image (artwork) uses cover mode, tileable uses configured scale.
         is_single_image = item.thin_covering_type == "single_image"
         texture_scale = None if is_single_image else thin_covering_cfg.texture_scale
@@ -1001,17 +1082,73 @@ class AssetRouter:
             f"thin covering '{item.description}'"
         )
 
-        # Fallback to AI texture generation if enabled and image_generator available.
-        return self._try_generated_thin_covering(
+        return generated_fallback(
+            f"All {len(materials)} retrieved materials failed validation"
+        )
+
+    def _generate_procedural_floor_covering_fallback(
+        self,
+        *,
+        item: AssetItem,
+        width: float,
+        depth: float,
+        thickness: float,
+        geometry_dir: Path,
+        shape: str,
+    ) -> GeneratedGeometry | None:
+        """Create a local woven rug when both material backends are unavailable."""
+        geometry_dir.mkdir(parents=True, exist_ok=True)
+        safe_name = re.sub(r"[^a-zA-Z0-9_-]+", "_", item.short_name).strip("_")
+        texture_path = geometry_dir / f"{safe_name or 'rug'}_woven_fallback.png"
+        size = 512
+        image = Image.new("RGB", (size, size), color=(128, 96, 74))
+        draw = ImageDraw.Draw(image)
+        for offset in range(0, size, 8):
+            tone = (151, 116, 87) if (offset // 8) % 2 == 0 else (108, 78, 61)
+            draw.line((0, offset, size, offset), fill=tone, width=2)
+            draw.line((offset, 0, offset, size), fill=tone, width=1)
+        border = max(8, size // 32)
+        draw.rectangle(
+            (border, border, size - border, size - border),
+            outline=(70, 51, 40),
+            width=max(3, border // 3),
+        )
+        image.save(texture_path)
+        console_logger.warning(
+            "Using local woven texture fallback for floor covering '%s'",
+            item.description,
+        )
+        return self._generate_thin_covering_geometry(
             item=item,
-            image_generator=image_generator,
+            material_path=texture_path,
             width=width,
-            second_dim=height if is_wall_mode else depth,
+            second_dim=depth,
             thickness=thickness,
             geometry_dir=geometry_dir,
-            debug_dir=debug_dir,
-            is_wall_mode=is_wall_mode,
+            is_wall_mode=False,
             shape=shape,
+            texture_scale=None,
+        )
+
+    def generate_thin_covering_without_validation(
+        self,
+        item: AssetItem,
+        *,
+        materials_client: "MaterialsRetrievalClient | None",
+        image_generator: "BaseImageGenerator | None",
+        geometry_dir: Path,
+        debug_dir: Path,
+        scene_id: str | None = None,
+    ) -> GeneratedGeometry | None:
+        """Generate a procedural covering from the top material without a VLM call."""
+        return self._try_thin_covering_strategy(
+            item=item,
+            max_retries=0,
+            materials_client=materials_client,
+            image_generator=image_generator,
+            geometry_dir=geometry_dir,
+            debug_dir=debug_dir,
+            scene_id=scene_id,
         )
 
     def _try_generated_thin_covering(
@@ -1025,6 +1162,7 @@ class AssetRouter:
         debug_dir: Path,
         is_wall_mode: bool,
         shape: str,
+        validate: bool = True,
     ) -> GeneratedGeometry | None:
         """Try generating thin covering texture with AI when retrieval fails.
 
@@ -1117,6 +1255,9 @@ class AssetRouter:
 
             if result is None:
                 continue
+
+            if not validate:
+                return result
 
             # Validate with VLM.
             validation = self._validate_thin_covering(

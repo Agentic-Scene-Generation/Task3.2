@@ -246,9 +246,20 @@ python -m pip install uv -i https://pypi.tuna.tsinghua.edu.cn/simple
 uv sync --frozen --no-dev
 python -m pip install modelscope vllm -i https://pypi.tuna.tsinghua.edu.cn/simple
 python -m pip install "numpy>=1.26,<2.0" -i https://pypi.tuna.tsinghua.edu.cn/simple
+python scripts/check_runtime_compatibility.py
 ```
 
 注意：`vllm` 和 `modelscope` 是运行脚本需要的依赖，不在 `pyproject.toml` 主依赖里，需要单独装。`vllm` 安装过程可能把 NumPy 升级到 2.x，但 `bpy==4.5.4` / Blender 扩展通常按 NumPy 1.x ABI 编译；如果日志出现 `A module that was compiled using NumPy 1.x cannot be run in NumPy 2.x`，必须重新执行上面的 NumPy pin 命令。`scripts/run_experiment.sh` 已加入预检查，发现 NumPy 2.x 会在启动 vLLM 前直接停止，避免浪费 30 分钟模型启动时间。
+
+当前 ACP 运行环境必须保持 `openai==2.44.0` 与 `openai-agents==0.6.4`。`openai` 太旧（例如 `2.11.0`）缺少 vLLM 0.22.x 导入的 `NamespaceTool`；直接升级到 `2.45.0` 又会让 Agents SDK 在构造 `Usage()` 时因 `cache_write_tokens` 必填而失败。`pyproject.toml` 和 `uv.lock` 已固定这组兼容版本。若已有环境被 `pip install vllm` 改写，可修复后立即自检：
+
+```bash
+python -m pip install --upgrade "openai==2.44.0" "openai-agents==0.6.4" \
+  -i https://pypi.tuna.tsinghua.edu.cn/simple
+python scripts/check_runtime_compatibility.py
+```
+
+ACP 入口也会在加载 Qwen 权重前自动运行同一检查；检查失败时会直接退出并打印修复命令。
 
 如果要运行向量 / hybrid memory 版本，还需要安装可选 memory 依赖。`requirements-memory.txt` 不是可执行脚本，而是 pip 的依赖清单；在项目根目录执行：
 
@@ -1615,4 +1626,56 @@ bash scripts/run_experiment.sh ablation_4_qwen3_harness_memory
 ```bash
 SCENEEXPERT_ENV_FILE=/share/configs/sceneexpert_qwen36.env \
   bash scripts/run_experiment.sh ablation_4_qwen3_harness_memory
+```
+
+## 13. SceneExpert 结构化调用自检与降级审计
+
+`TaskCompiler`、`GlobalPlanner`、`MemoryWriter` 现在共用同一个本地
+Qwen/vLLM 结构化调用客户端。角色级预算在
+`configurations/scene_expert/base_scene_expert.yaml` 的
+`structured_llm.roles` 中配置，默认最多尝试 2 次，并显式设置 thinking、
+timeout、最大输出 token 和 JSON response format。OpenAI Python SDK 在这里
+只是访问本地 `OPENAI_BASE_URL` 的客户端，不会访问 OpenAI 云服务。
+
+运行 `ablation_3/4/5` 时，`scripts/run_experiment.sh` 会在 vLLM health check
+通过后自动执行一次结构化 smoke test：
+
+```bash
+python scripts/smoke_test_sceneexpert_llm.py \
+  --model "$SCENEEXPERT_MODEL_ID" \
+  --base-url "$OPENAI_BASE_URL"
+```
+
+该测试同时验证：served model 名称可用、`enable_thinking=false` 生效、模型能在
+预算内返回 schema-valid JSON。失败时会在正式五阶段生成前直接退出，避免运行数小时
+后才发现 SceneExpert 自定义角色没有生效。仅在临时排查时可关闭：
+
+```bash
+export SCENEEXPERT_STRUCTURED_LLM_SMOKE_TEST=0
+```
+
+正式生成中的单次结构化调用失败不会直接终止整条场景链路。客户端只做一次有针对性的
+恢复，例如 `length/reasoning_only` 会切换为 no-think，JSON schema 不兼容会降级为
+JSON object；仍失败时角色使用 deterministic fallback，并在 trace 中标记
+`degraded=true`，而不是静默伪装成模型输出。
+
+主要审计文件：
+
+```text
+scene_<id>/scene_expert/timing/scene_expert_llm_calls.jsonl
+scene_<id>/scene_expert/stages/*_pre.json
+scene_<id>/scene_expert/trace/trace_<id>.json
+traces/trace_<id>.json
+```
+
+最终 trace 的 `component_status` 会记录每个角色的 attempt、error kind、finish
+reason、token 和 fallback 状态；每个 stage 的 `execution_evidence` 会记录检索到的
+memory ID、上下文哈希、注入文本哈希，以及 designer 输入是否确实包含 SceneExpert
+brief。判断 SceneExpert 是否真正落地时，不应只看是否生成了 trace 文件，还应检查：
+
+```text
+degraded == false
+component_status.task_compiler.source == "llm"
+component_status.global_planner.<stage>.source == "llm"
+stages[*].execution_evidence.designer_prompt_contains_brief == true
 ```

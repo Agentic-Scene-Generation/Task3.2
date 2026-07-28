@@ -20,6 +20,7 @@ from scenesmith.agent_utils.house import (
     Wall,
     WallDirection,
 )
+from scenesmith.agent_utils.room_size_policy import normalize_room_dimensions
 from scenesmith.floor_plan_agents.tools.ascii_generator import generate_ascii_floor_plan
 from scenesmith.floor_plan_agents.tools.door_window_mixin import DoorWindowMixin
 from scenesmith.floor_plan_agents.tools.materials_resolver import (
@@ -139,6 +140,7 @@ class FloorPlanTools(DoorWindowMixin, OpenPlanMixin):
         wall_height_max: float = 4.5,
         room_dim_min: float = 1.5,
         room_dim_max: float = 20.0,
+        room_size_policy: object | None = None,
     ):
         """Initialize floor plan tools.
 
@@ -155,6 +157,7 @@ class FloorPlanTools(DoorWindowMixin, OpenPlanMixin):
             wall_height_max: Maximum wall height in meters.
             room_dim_min: Minimum room dimension (width or depth) in meters.
             room_dim_max: Maximum room dimension (width or depth) in meters.
+            room_size_policy: Optional room-type envelope for unqualified prompts.
         """
         self.layout = layout
         self.mode = mode
@@ -170,6 +173,7 @@ class FloorPlanTools(DoorWindowMixin, OpenPlanMixin):
         self.wall_height_max = wall_height_max
         self.room_dim_min = room_dim_min
         self.room_dim_max = room_dim_max
+        self.room_size_policy = room_size_policy
 
         # Build tools dictionary using closure pattern.
         # This avoids including 'self' in OpenAI function schemas.
@@ -531,6 +535,7 @@ class FloorPlanTools(DoorWindowMixin, OpenPlanMixin):
 
         # Convert to RoomSpec objects.
         specs = []
+        size_adjustments: list[str] = []
         room_type_counts: dict[str, int] = {}
         for spec_dict in room_specs:
             room_type = spec_dict.get("type", "room")
@@ -573,6 +578,31 @@ class FloorPlanTools(DoorWindowMixin, OpenPlanMixin):
                 )
                 console_logger.info(f"Tool failed: {msg}")
                 return RoomSpecsResult(success=False, message=msg)
+
+            size_adjustment = normalize_room_dimensions(
+                room_type=room_type,
+                width=room_width,
+                depth=room_depth,
+                prompt=prompt,
+                mode=self.mode,
+                policy=self.room_size_policy,
+            )
+            if size_adjustment.changed:
+                console_logger.warning(
+                    "Normalized room '%s' from %.3fm x %.3fm to %.3fm x %.3fm (%s)",
+                    room_type,
+                    room_width,
+                    room_depth,
+                    size_adjustment.width,
+                    size_adjustment.depth,
+                    size_adjustment.reason,
+                )
+                size_adjustments.append(
+                    f"{room_id}: {room_width:g}m x {room_depth:g}m -> "
+                    f"{size_adjustment.width:g}m x {size_adjustment.depth:g}m"
+                )
+                room_width = size_adjustment.width
+                room_depth = size_adjustment.depth
 
             # Parse connections from JSON.
             connections_raw = spec_dict.get("connections", {})
@@ -633,9 +663,14 @@ class FloorPlanTools(DoorWindowMixin, OpenPlanMixin):
                 dir_str = f" ({direction})" if direction else ""
                 labels_desc[label] = f"Exterior: {room_a}{dir_str}"
 
+        message = f"Created {len(specs)} room(s) successfully."
+        if size_adjustments:
+            message += " Applied professional size envelope: " + "; ".join(
+                size_adjustments
+            )
         return RoomSpecsResult(
             success=True,
-            message=f"Created {len(specs)} room(s) successfully.",
+            message=message,
             ascii_floor_plan=ascii_result.ascii_art,
             wall_segment_labels=labels_desc,
         )
@@ -680,6 +715,28 @@ class FloorPlanTools(DoorWindowMixin, OpenPlanMixin):
         spec = self.layout.get_room_spec(room_id)
         if not spec:
             return self._fail(f"Room '{room_id}' not found.")
+
+        size_adjustment = normalize_room_dimensions(
+            room_type=spec.room_type,
+            width=width,
+            depth=depth,
+            prompt=spec.prompt,
+            mode=self.mode,
+            policy=self.room_size_policy,
+        )
+        if size_adjustment.changed:
+            console_logger.warning(
+                "Normalized resize for room '%s' from %.3fm x %.3fm to "
+                "%.3fm x %.3fm (%s)",
+                room_id,
+                width,
+                depth,
+                size_adjustment.width,
+                size_adjustment.depth,
+                size_adjustment.reason,
+            )
+            width = size_adjustment.width
+            depth = size_adjustment.depth
 
         # Store old state for rollback on failure.
         old_width = spec.length  # X dimension.

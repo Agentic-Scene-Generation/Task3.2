@@ -21,7 +21,7 @@ from scenesmith.agent_utils.hssd_retrieval.data_loader import (
     load_preprocessed_data,
 )
 from scenesmith.agent_utils.hssd_retrieval.zvec_similarity import HssdZvecSearcher
-from scenesmith.agent_utils.mesh_frame import gltf_y_up_dimensions_to_scene_z_up
+from scenesmith.agent_utils.mesh_frame import hssd_dimension_shape_error
 
 console_logger = logging.getLogger(__name__)
 
@@ -94,19 +94,19 @@ class HssdRetriever:
     def _calculate_bbox_score(
         self, target_dimensions: np.ndarray, mesh_extents: np.ndarray
     ) -> float:
-        """Calculate SceneSmith-frame bounding box score (L1 distance).
+        """Calculate scale-invariant residual after SceneSmith uniform scaling.
 
         Args:
             target_dimensions: Desired dimensions (3,).
             mesh_extents: Actual glTF Y-up mesh extents ``[X, Y, Z]``.
 
         Returns:
-            L1 distance score (lower is better).
+            Log-ratio residual score (lower is better).
         """
-        scene_extents = np.asarray(
-            gltf_y_up_dimensions_to_scene_z_up(mesh_extents), dtype=float
-        )
-        return float(np.sum(np.abs(target_dimensions - scene_extents)))
+        # Downstream scaling uses the median per-axis scale factor. Ranking raw
+        # library meters with L1 distance can therefore select the wrong shape
+        # merely because its arbitrary source scale is closer to the request.
+        return hssd_dimension_shape_error(mesh_extents, target_dimensions)
 
     def _load_and_process_mesh(
         self, mesh_id: str, metadata: HssdMeshMetadata
@@ -162,7 +162,8 @@ class HssdRetriever:
         Args:
             description: Object description text.
             object_type: Object type (e.g., "FURNITURE", "MANIPULAND").
-            desired_dimensions: Optional desired dimensions (width, height, depth).
+            desired_dimensions: Optional SceneSmith dimensions
+                (width, depth, height).
 
         Returns:
             Tuple of (mesh, mesh_id, clip_score, metadata) where:
@@ -204,7 +205,8 @@ class HssdRetriever:
         Args:
             description: Object description text.
             object_type: Object type (e.g., "FURNITURE", "MANIPULAND").
-            desired_dimensions: Optional desired dimensions (width, height, depth).
+            desired_dimensions: Optional SceneSmith dimensions
+                (width, depth, height).
             max_candidates: Maximum candidates to return. If None, returns all
                 available (up to use_top_k CLIP candidates).
 

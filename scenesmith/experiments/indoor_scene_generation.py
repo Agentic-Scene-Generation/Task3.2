@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import csv
 import faulthandler
 import json
@@ -14,7 +15,7 @@ from threading import Lock
 
 # SceneExpert hook runner (imported lazily to avoid circular imports at module level)
 # TYPE_CHECKING block keeps the type hint available without a hard import.
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from agents import custom_span, trace
 from omegaconf import DictConfig, OmegaConf
@@ -55,6 +56,14 @@ from scenesmith.scenebenchmark_critic.api import seating_orientation_targets
 from scenesmith.scenebenchmark_critic.furniture_relation_repair import (
     improve_furniture_relations,
     unresolved_furniture_relation_failures,
+)
+from scenesmith.scene_expert.config_utils import resolve_scene_expert_stage_budget
+from scenesmith.scene_expert.exceptions import StageValidationError
+from scenesmith.scene_expert.runtime_state import (
+    ScenePausedError,
+    is_scene_paused_error,
+    mark_retryable_pause_resolved,
+    persist_retryable_pause,
 )
 from scenesmith.utils.logging import ConsoleLogger, FileLoggingContext
 from scenesmith.utils.openai import configure_reasoning_persistence
@@ -145,6 +154,11 @@ def _archive_failed_scene_attempt(
 def _is_retryable_scene_failure(error: str) -> bool:
     """Return whether a fresh process can plausibly recover this failure."""
     normalized = error.lower()
+    # Deterministic content/layout failures are handled inside the stage.  A
+    # fresh scene process merely repeats the same agent decision, archives useful
+    # diagnostics, and wastes the full upstream generation budget.
+    if "stage failed deterministic validation" in normalized:
+        return False
     transient_markers = (
         "sigsegv",
         "sigabrt",
@@ -159,6 +173,465 @@ def _is_retryable_scene_failure(error: str) -> bool:
         "connection refused",
     )
     return any(marker in normalized for marker in transient_markers)
+
+
+def _is_repairable_stage_validation(error: StageValidationError) -> bool:
+    """Classify layout/content failures that should not terminate ACP early."""
+    text = " ".join(error.reasons).lower()
+    terminal_markers = (
+        "fatal asset retrieval setup error",
+        "invalid room geometry",
+        "room geometry is unavailable",
+        "unrecoverable environment",
+    )
+    return not any(marker in text for marker in terminal_markers)
+
+
+def _is_critic_unavailable_validation(error: StageValidationError) -> bool:
+    return bool(error.reasons) and all(
+        "visual critic did not produce a trustworthy score" in reason.lower()
+        for reason in error.reasons
+    )
+
+
+def _stage_validation_kind(
+    error: StageValidationError,
+    agent: Any,
+) -> str:
+    """Classify a stage failure so recovery spends budget only where useful."""
+    text = " ".join(error.reasons).lower()
+    if _is_critic_unavailable_validation(error):
+        return "critic_unavailable"
+    if any(
+        marker in text
+        for marker in (
+            "stage surface unavailable",
+            "no valid furniture support target",
+            "support surface unavailable",
+        )
+    ):
+        return "structural_unavailable"
+    if (
+        getattr(agent, "_stage_runtime_exhausted", False)
+        or getattr(agent, "_planner_budget_exhausted", False)
+        or any(
+            marker in text
+            for marker in (
+                "budget exhausted",
+                "execution budget",
+                "max turns",
+                "timed out",
+                "timeout",
+            )
+        )
+    ):
+        return "execution_budget"
+    return "repairable_quality"
+
+
+def _pause_unscored_scene_candidate(
+    *,
+    stage: str,
+    agent: Any,
+    scene: RoomScene,
+    reasons: list[str],
+    runtime_events: list[str],
+) -> None:
+    """Persist the current hard-valid candidate and pause only this scene."""
+
+    working_memory = getattr(agent, "stage_working_memory", None)
+    scene_root_dir = getattr(working_memory, "scene_root_dir", scene.scene_dir)
+    rendering_manager = getattr(agent, "rendering_manager", None)
+    render_dir = getattr(agent, "final_render_dir", None) or getattr(
+        rendering_manager,
+        "last_render_dir",
+        None,
+    )
+    runtime_events.append("paused_retryable_at_critic")
+    setattr(scene, "scene_expert_runtime_repair_events", runtime_events)
+    reason = "; ".join(str(item) for item in reasons if str(item).strip())
+    manifest_path = persist_retryable_pause(
+        scene_root_dir=scene_root_dir,
+        stage=stage,
+        reason=reason,
+        candidate_state=scene.to_state_dict(),
+        candidate_hash=scene.content_hash(),
+        render_dir=render_dir,
+        attempt_count=2,
+        metadata={
+            "room_id": str(getattr(scene, "room_id", "")),
+            "room_dir": str(getattr(scene, "scene_dir", "")),
+            "score_provenance": dict(
+                getattr(agent, "_last_score_provenance", {}) or {}
+            ),
+            "runtime_events": list(runtime_events),
+        },
+    )
+    raise ScenePausedError(stage, reason, str(manifest_path))
+
+
+def _pause_incomplete_placement_stage(
+    *,
+    stage: str,
+    agent: Any,
+    scene: RoomScene,
+    reasons: list[str],
+    runtime_events: list[str],
+) -> None:
+    """Pause before committing a stage that lacks a real placed output."""
+    available_assets_fn = getattr(agent, "admitted_stage_assets", None)
+    available_assets = (
+        list(available_assets_fn()) if callable(available_assets_fn) else []
+    )
+    asset_ids = [
+        str(getattr(asset, "object_id", "")) for asset in available_assets
+    ]
+    unavailable_families_fn = getattr(
+        agent, "unavailable_required_asset_families", None
+    )
+    unavailable_families = (
+        list(unavailable_families_fn())
+        if callable(unavailable_families_fn)
+        else []
+    )
+    if unavailable_families or not available_assets:
+        failure_code = "asset_unavailable"
+        role = "asset"
+        resume_action = "retry_stage_asset_acquisition"
+    else:
+        failure_code = "placement_incomplete"
+        role = "designer"
+        resume_action = "retry_stage_placement"
+
+    runtime_events.append(f"paused_retryable_{failure_code}")
+    setattr(scene, "scene_expert_runtime_repair_events", runtime_events)
+    details = "; ".join(str(item) for item in reasons if str(item).strip())
+    reason = f"{failure_code}: {details}"
+    working_memory = getattr(agent, "stage_working_memory", None)
+    scene_root_dir = getattr(
+        working_memory,
+        "scene_root_dir",
+        getattr(scene, "scene_dir", Path.cwd()),
+    )
+    content_hash = getattr(scene, "content_hash", None)
+    manifest_path = persist_retryable_pause(
+        scene_root_dir=scene_root_dir,
+        stage=stage,
+        role=role,
+        reason=reason,
+        resume_action=resume_action,
+        candidate_state=scene.to_state_dict(),
+        candidate_hash=(content_hash() if callable(content_hash) else ""),
+        attempt_count=1,
+        metadata={
+            "room_id": str(getattr(scene, "room_id", "")),
+            "room_dir": str(getattr(scene, "scene_dir", "")),
+            "available_admitted_asset_ids": asset_ids,
+            "unavailable_required_asset_families": unavailable_families,
+            "runtime_events": list(runtime_events),
+        },
+    )
+    raise ScenePausedError(stage, reason, str(manifest_path))
+
+
+def _raise_if_required_assets_unavailable(*, stage: str, agent: Any) -> None:
+    """Reject a stage before commit when a required semantic family has no asset."""
+    unavailable_families_fn = getattr(
+        agent, "unavailable_required_asset_families", None
+    )
+    unavailable_families = (
+        list(unavailable_families_fn())
+        if callable(unavailable_families_fn)
+        else []
+    )
+    if not unavailable_families:
+        return
+    raise StageValidationError(
+        stage=stage,
+        reasons=[
+            "required asset unavailable: no semantically admitted real HSSD asset "
+            f"for family '{family}'"
+            for family in unavailable_families
+        ],
+    )
+
+
+def _score_postprocessed_candidate_or_pause(
+    *,
+    stage: str,
+    agent: Any,
+    scene: RoomScene,
+    runtime_events: list[str],
+) -> None:
+    """Score an actual post-physics candidate, retrying only transport failure."""
+
+    retry_critic = getattr(agent, "retry_final_critic_evaluation", None)
+    if not callable(retry_critic):
+        raise RuntimeError(f"{stage} agent has no final critic retry entry point")
+
+    reasons: list[str] = []
+    for attempt in range(1, 3):
+        runtime_events.append(f"postprocess_critic_attempt_{attempt}")
+        try:
+            asyncio.run(retry_critic())
+            runtime_events.append("postprocess_final_critic_verified")
+            setattr(scene, "scene_expert_runtime_repair_events", runtime_events)
+            return
+        except StageValidationError as exc:
+            if not _is_critic_unavailable_validation(exc):
+                raise
+            reasons = list(exc.reasons)
+        except Exception as exc:
+            is_transient = getattr(agent, "_is_transient_model_error", None)
+            if callable(is_transient) and not is_transient(exc):
+                raise
+            reasons = [
+                "visual critic did not produce a trustworthy score: "
+                f"{type(exc).__name__}: {exc}"
+            ]
+
+    _pause_unscored_scene_candidate(
+        stage=stage,
+        agent=agent,
+        scene=scene,
+        reasons=reasons,
+        runtime_events=runtime_events,
+    )
+
+
+def _run_sceneexpert_placement_stage(
+    *,
+    stage: str,
+    agent: Any,
+    scene: RoomScene,
+    run_once: Callable[[], Any],
+) -> int:
+    """Run a placement stage transaction with bounded agent-led recovery."""
+    baseline_state = copy.deepcopy(scene.to_state_dict())
+    stage_prompt = str(scene.text_description or "")
+    budget = getattr(scene, "scene_expert_stage_budget", {}) or {}
+    max_regenerations = max(0, int(budget.get("max_stage_regenerations", 0) or 0))
+    recovery_enabled = bool(budget)
+    regeneration_attempt = 0
+    critic_retry_attempted = False
+    placement_continuation_attempted = False
+    runtime_events: list[str] = []
+
+    while True:
+        try:
+            asyncio.run(run_once())
+            _raise_if_required_assets_unavailable(stage=stage, agent=agent)
+            setattr(scene, "scene_expert_runtime_repair_events", runtime_events)
+            return regeneration_attempt
+        except StageValidationError as exc:
+            if not _is_repairable_stage_validation(exc):
+                raise
+            failure_kind = _stage_validation_kind(exc, agent)
+            critic_only = failure_kind == "critic_unavailable"
+            if critic_only and not critic_retry_attempted:
+                critic_retry_attempted = True
+                console_logger.warning(
+                    "%s output is hard-valid but unscored; retrying one compact "
+                    "final critic with an expanded critical budget",
+                    stage,
+                )
+                retry_critic = getattr(agent, "retry_final_critic_evaluation", None)
+                if callable(retry_critic):
+                    runtime_events.append("expanded_compact_critic_retry")
+                    try:
+                        asyncio.run(retry_critic())
+                        setattr(
+                            scene,
+                            "scene_expert_runtime_repair_events",
+                            runtime_events,
+                        )
+                        return regeneration_attempt
+                    except StageValidationError as retry_exc:
+                        if not _is_repairable_stage_validation(retry_exc):
+                            raise
+                        exc = retry_exc
+                        failure_kind = _stage_validation_kind(exc, agent)
+                    except Exception as retry_exc:
+                        console_logger.exception(
+                            "%s expanded critic retry failed; preserving an "
+                            "explicitly unscored stage instead of aborting ACP",
+                            stage,
+                        )
+                        exc = StageValidationError(
+                            stage=stage,
+                            reasons=[
+                                *list(exc.reasons),
+                                "expanded visual critic retry failed: "
+                                f"{type(retry_exc).__name__}: {retry_exc}",
+                            ],
+                        )
+                        failure_kind = "critic_unavailable"
+
+            if failure_kind == "critic_unavailable" and critic_retry_attempted:
+                _pause_unscored_scene_candidate(
+                    stage=stage,
+                    agent=agent,
+                    scene=scene,
+                    reasons=list(exc.reasons),
+                    runtime_events=runtime_events,
+                )
+
+            # A structural surface absence cannot benefit from another layout
+            # proposal. Critic transport failure is handled as a resumable scene
+            # pause below; it must not trigger a redesign of a hard-valid scene.
+            if failure_kind == "structural_unavailable":
+                regeneration_attempt = max_regenerations
+
+            missing_output = any(
+                marker in " ".join(exc.reasons).lower()
+                for marker in (
+                    "missing required stage output",
+                    "produced 0 objects",
+                    "requires at least 1",
+                )
+            )
+            admitted_assets = getattr(agent, "admitted_stage_assets", None)
+            available_assets = (
+                list(admitted_assets()) if callable(admitted_assets) else []
+            )
+            if (
+                missing_output
+                and available_assets
+                and not placement_continuation_attempted
+            ):
+                placement_continuation_attempted = True
+                runtime_events.append("placement_only_continuation")
+                console_logger.warning(
+                    "%s acquired %d real asset(s) but placed none; restoring the "
+                    "stage input and running one compact placement-only continuation",
+                    stage,
+                    len(available_assets),
+                )
+                scene.restore_from_state_dict(copy.deepcopy(baseline_state))
+                scene.text_description = stage_prompt
+                prepare_placement = getattr(
+                    agent, "prepare_placement_continuation", None
+                )
+                if callable(prepare_placement):
+                    asyncio.run(prepare_placement(list(exc.reasons)))
+                    continue
+
+            if regeneration_attempt >= max_regenerations:
+                if not recovery_enabled:
+                    raise
+                console_logger.error(
+                    "%s stage exhausted %d regeneration(s) without a valid real "
+                    "placed output; pausing this scene before downstream commit: %s",
+                    stage,
+                    regeneration_attempt,
+                    "; ".join(exc.reasons),
+                )
+                _pause_incomplete_placement_stage(
+                    stage=stage,
+                    agent=agent,
+                    scene=scene,
+                    reasons=list(exc.reasons),
+                    runtime_events=runtime_events,
+                )
+
+            regeneration_attempt += 1
+            runtime_events.append(
+                f"full_stage_regeneration_{regeneration_attempt}"
+            )
+            console_logger.warning(
+                "%s stage failed its completion contract; restoring the stage "
+                "input checkpoint and requesting a new agent design (%d/%d): %s",
+                stage,
+                regeneration_attempt,
+                max_regenerations,
+                "; ".join(exc.reasons),
+            )
+            scene.restore_from_state_dict(copy.deepcopy(baseline_state))
+            scene.text_description = (
+                f"{stage_prompt}\n\n"
+                "# Mandatory Stage Regeneration\n"
+                "The previous attempt was rejected. Create a genuinely new, "
+                "bounded stage layout and do not finish with zero stage-native "
+                "objects. If a requested asset failed, choose a semantically "
+                "equivalent HSSD substitute with realistic natural proportions. "
+                "Resolve all of: " + "; ".join(exc.reasons)
+            )
+            prepare_regeneration = getattr(agent, "prepare_stage_regeneration", None)
+            if callable(prepare_regeneration):
+                asyncio.run(prepare_regeneration(list(exc.reasons)))
+
+
+def _root_error_summary(error: str, max_chars: int = 700) -> str:
+    """Return one actionable root-cause line without replaying nested tracebacks."""
+    lines = [line.strip() for line in str(error or "").splitlines() if line.strip()]
+    if not lines:
+        return "Unknown scene failure"
+    root_line = lines[-1]
+    if root_line.startswith("^") or root_line.startswith("File "):
+        root_line = lines[0]
+    if len(root_line) > max_chars:
+        root_line = root_line[: max_chars - 3] + "..."
+    return root_line
+
+
+def _write_batch_summary(
+    *,
+    output_dir: Path,
+    experiment_run_id: str,
+    prompts_with_ids: list[tuple[int, str]],
+    results: dict[str, tuple[str, str | None]],
+) -> None:
+    summary_path = output_dir / "batch_summary.json"
+    existing_scenes: dict[str, dict] = {}
+    if summary_path.exists():
+        try:
+            existing = json.loads(summary_path.read_text(encoding="utf-8"))
+            if existing.get("experiment_run_id") == experiment_run_id:
+                existing_scenes = {
+                    str(item.get("scene_id")): item
+                    for item in existing.get("scenes", [])
+                }
+        except (OSError, ValueError, TypeError):
+            existing_scenes = {}
+
+    prompt_map = {scene_id: prompt for scene_id, prompt in prompts_with_ids}
+    for scene_id, prompt in prompts_with_ids:
+        task_id = f"scene_{scene_id:03d}"
+        status, error = results.get(
+            task_id,
+            ("failed", "Missing worker result"),
+        )
+        existing_scenes[task_id] = {
+            "scene_id": task_id,
+            "prompt": prompt_map[scene_id],
+            "status": status,
+            "root_error": (
+                ""
+                if status == "completed"
+                else _root_error_summary(str(error))
+            ),
+            "scene_status_path": str(output_dir / task_id / _SCENE_STATUS_FILENAME),
+        }
+
+    scenes = [existing_scenes[key] for key in sorted(existing_scenes)]
+    payload = {
+        "experiment_run_id": experiment_run_id,
+        "updated_at": datetime.now().astimezone().isoformat(),
+        "total_scenes": len(scenes),
+        "completed_scenes": sum(
+            1 for item in scenes if item["status"] == "completed"
+        ),
+        "failed_scenes": sum(1 for item in scenes if item["status"] == "failed"),
+        "paused_retryable_scenes": sum(
+            1 for item in scenes if item["status"] == "paused_retryable"
+        ),
+        "scenes": scenes,
+    }
+    temporary_path = summary_path.with_suffix(".json.tmp")
+    temporary_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    temporary_path.replace(summary_path)
 
 
 def _get_retrieval_gpu_device() -> str | None:
@@ -377,6 +850,40 @@ def _export_scene_blend_file(
     blend_output_path = scene_dir / "scene_states" / name / "scene.blend"
     try:
         rendering_cfg = cfg_dict.get("furniture_agent", {}).get("rendering", {})
+        visualization_cfg = cfg_dict.get("experiment", {}).get(
+            "stage_visualization", {}
+        )
+        snapshot_names = set(
+            visualization_cfg.get(
+                "checkpoints",
+                [
+                    "scene_after_furniture",
+                    "scene_after_wall_objects",
+                    "scene_after_ceiling_objects",
+                    "final_scene",
+                ],
+            )
+        )
+        render_snapshots = bool(visualization_cfg.get("enabled", True)) and (
+            name in snapshot_names
+        )
+        snapshot_rendering_cfg = None
+        if render_snapshots:
+            snapshot_payload = OmegaConf.to_container(
+                OmegaConf.create(rendering_cfg), resolve=True
+            )
+            if bool(visualization_cfg.get("clean_annotations", True)):
+                annotations = snapshot_payload.setdefault("annotations", {})
+                annotations.update(
+                    {
+                        "enable_set_of_mark_labels": False,
+                        "enable_bounding_boxes": False,
+                        "enable_direction_arrows": False,
+                        "enable_support_surface_debug": False,
+                        "enable_convex_hull_debug": False,
+                    }
+                )
+            snapshot_rendering_cfg = OmegaConf.create(snapshot_payload)
         save_scene_as_blend(
             scene=scene,
             output_path=blend_output_path,
@@ -386,6 +893,21 @@ def _export_scene_blend_file(
             ),
             server_startup_delay=rendering_cfg.get("server_startup_delay", 0.1),
             port_cleanup_delay=rendering_cfg.get("port_cleanup_delay", 0.1),
+            render_cfg=snapshot_rendering_cfg,
+            render_output_dir=(
+                scene_dir / "scene_states" / name / "renders"
+                if render_snapshots
+                else None
+            ),
+            rendering_mode=str(
+                visualization_cfg.get("rendering_mode", "furniture")
+            ),
+            render_taa_samples=int(
+                visualization_cfg.get(
+                    "taa_samples",
+                    rendering_cfg.get("taa_samples", 4),
+                )
+            ),
         )
     except Exception as e:
         console_logger.error(f"Failed to export .blend file: {e}")
@@ -918,7 +1440,308 @@ def _generate_room(
                 render_gpu_id=render_gpu_id,
             )
             try:
-                asyncio.run(furniture_agent.add_furniture(scene=scene))
+                recovery_cfg = cfg_dict["furniture_agent"].get(
+                    "hard_constraint_recovery", {}
+                )
+                max_stage_regenerations = max(
+                    0, int(recovery_cfg.get("max_stage_regenerations", 1) or 0)
+                )
+                continue_after_exhaustion = bool(
+                    recovery_cfg.get(
+                        "continue_after_repairable_exhaustion", True
+                    )
+                )
+                empty_stage_state = scene.to_state_dict()
+                stage_prompt = scene.text_description
+                regeneration_attempt = 0
+                critic_only_retry_attempted = False
+                placement_continuation_attempted = False
+                furniture_runtime_events: list[str] = []
+                best_agent_candidate = None
+                repairable_hard_exhausted = False
+                capture_agent_candidate = getattr(
+                    furniture_agent, "capture_agent_candidate", None
+                )
+                prefer_agent_candidate = getattr(
+                    furniture_agent, "prefer_agent_candidate", None
+                )
+                should_regenerate_for_quality = getattr(
+                    furniture_agent, "should_regenerate_for_quality", None
+                )
+                while True:
+                    try:
+                        asyncio.run(furniture_agent.add_furniture(scene=scene))
+                        _raise_if_required_assets_unavailable(
+                            stage="furniture",
+                            agent=furniture_agent,
+                        )
+                        candidate = (
+                            capture_agent_candidate()
+                            if callable(capture_agent_candidate)
+                            else None
+                        )
+                        if callable(prefer_agent_candidate):
+                            best_agent_candidate = prefer_agent_candidate(
+                                best_agent_candidate,
+                                candidate,
+                            )
+                        should_regenerate, quality_reason = (
+                            should_regenerate_for_quality(candidate)
+                            if callable(should_regenerate_for_quality)
+                            else (False, "quality fallback unsupported by this agent")
+                        )
+                        if (
+                            should_regenerate
+                            and regeneration_attempt < max_stage_regenerations
+                        ):
+                            regeneration_attempt += 1
+                            console_logger.warning(
+                                "Furniture agent candidate missed the trusted critic "
+                                "target; restarting the full designer/critic stage "
+                                "from the empty-room checkpoint (%d/%d): %s",
+                                regeneration_attempt,
+                                max_stage_regenerations,
+                                quality_reason,
+                            )
+                            scene.restore_from_state_dict(empty_stage_state)
+                            scene.text_description = (
+                                f"{stage_prompt}\n\n"
+                                "# Mandatory Quality Regeneration\n"
+                                "The previous layout was physically valid but did "
+                                "not meet the visual critic target. Propose a "
+                                "genuinely new expert layout and address: "
+                                f"{quality_reason}."
+                            )
+                            asyncio.run(
+                                furniture_agent.prepare_stage_regeneration(
+                                    [quality_reason]
+                                )
+                            )
+                            continue
+                        break
+                    except StageValidationError as exc:
+                        critic_only = bool(exc.reasons) and all(
+                            "visual critic did not produce a trustworthy score"
+                            in reason.lower()
+                            for reason in exc.reasons
+                        )
+                        if critic_only and not critic_only_retry_attempted:
+                            critic_only_retry_attempted = True
+                            console_logger.warning(
+                                "Furniture output is hard-valid but unscored; "
+                                "retrying only the compact final critic before "
+                                "discarding the layout"
+                            )
+                            try:
+                                asyncio.run(
+                                    furniture_agent.retry_final_critic_evaluation()
+                                )
+                                break
+                            except StageValidationError as retry_exc:
+                                exc = retry_exc
+
+                        critic_still_unavailable = (
+                            _is_critic_unavailable_validation(exc)
+                        )
+                        if critic_only_retry_attempted and critic_still_unavailable:
+                            _pause_unscored_scene_candidate(
+                                stage="furniture",
+                                agent=furniture_agent,
+                                scene=scene,
+                                reasons=list(exc.reasons),
+                                runtime_events=list(
+                                    getattr(
+                                        scene,
+                                        "scene_expert_runtime_repair_events",
+                                        [],
+                                    )
+                                    or []
+                                ),
+                            )
+
+                        repairable = _is_repairable_stage_validation(exc)
+                        missing_output = any(
+                            marker in " ".join(exc.reasons).lower()
+                            for marker in (
+                                "missing required",
+                                "produced 0 objects",
+                                "placeholder furniture",
+                            )
+                        )
+                        admitted_assets_fn = getattr(
+                            furniture_agent, "admitted_stage_assets", None
+                        )
+                        admitted_assets = (
+                            list(admitted_assets_fn())
+                            if callable(admitted_assets_fn)
+                            else []
+                        )
+                        if (
+                            repairable
+                            and missing_output
+                            and admitted_assets
+                            and not placement_continuation_attempted
+                        ):
+                            placement_continuation_attempted = True
+                            furniture_runtime_events.append(
+                                "placement_only_continuation"
+                            )
+                            console_logger.warning(
+                                "Furniture acquired %d admitted real asset(s) but "
+                                "did not commit a valid layout; running one compact "
+                                "placement-only continuation before any reacquisition",
+                                len(admitted_assets),
+                            )
+                            scene.restore_from_state_dict(empty_stage_state)
+                            scene.text_description = stage_prompt
+                            prepare_placement = getattr(
+                                furniture_agent,
+                                "prepare_placement_continuation",
+                                None,
+                            )
+                            if callable(prepare_placement):
+                                asyncio.run(
+                                    prepare_placement(list(exc.reasons))
+                                )
+                                continue
+                        if (
+                            repairable
+                            and regeneration_attempt < max_stage_regenerations
+                        ):
+                            regeneration_attempt += 1
+                            console_logger.warning(
+                                "Furniture layout remained invalid after local repair; "
+                                "restarting the full designer/critic stage from the "
+                                "empty-room checkpoint (%d/%d): %s",
+                                regeneration_attempt,
+                                max_stage_regenerations,
+                                "; ".join(exc.reasons),
+                            )
+                            scene.restore_from_state_dict(empty_stage_state)
+                            scene.text_description = (
+                                f"{stage_prompt}\n\n"
+                                "# Mandatory Stage Regeneration\n"
+                                "The previous furniture layout was rejected by "
+                                "deterministic validation. Design a genuinely new "
+                                "layout from the empty room; do not incrementally "
+                                "recreate the rejected arrangement. Resolve all of: "
+                                + "; ".join(exc.reasons)
+                            )
+                            asyncio.run(
+                                furniture_agent.prepare_stage_regeneration(
+                                    exc.reasons
+                                )
+                            )
+                            continue
+
+                        if repairable and continue_after_exhaustion:
+                            console_logger.warning(
+                                "Furniture repair and stage regeneration were "
+                                "exhausted. Persisting the diagnosed agent candidate "
+                                "for the final deterministic comparison; an invalid "
+                                "selected candidate will pause before downstream "
+                                "commit: %s",
+                                "; ".join(exc.reasons),
+                            )
+                            asyncio.run(
+                                furniture_agent.complete_repair_exhausted_stage(
+                                    exc.reasons
+                                )
+                            )
+                            repairable_hard_exhausted = True
+                            break
+                        raise
+
+                # A deterministic relation layout remains a final comparison
+                # candidate, never the normal generator.  Hard-recovery
+                # exhaustion and missing critic evidence are not successful
+                # agent outcomes, so they must not silently bypass this branch.
+                latest_candidate = (
+                    capture_agent_candidate(
+                        allow_hard_invalid=repairable_hard_exhausted
+                    )
+                    if callable(capture_agent_candidate)
+                    else None
+                )
+                if repairable_hard_exhausted:
+                    comparison_candidate = latest_candidate
+                else:
+                    if callable(prefer_agent_candidate):
+                        best_agent_candidate = prefer_agent_candidate(
+                            best_agent_candidate,
+                            latest_candidate,
+                        )
+                    comparison_candidate = best_agent_candidate
+                restore_agent_candidate = getattr(
+                    furniture_agent, "restore_agent_candidate", None
+                )
+                should_generate_fallback = getattr(
+                    furniture_agent,
+                    "should_generate_deterministic_fallback",
+                    None,
+                )
+                if (
+                    comparison_candidate is not None
+                    and callable(restore_agent_candidate)
+                    and callable(should_generate_fallback)
+                ):
+                    restore_agent_candidate(comparison_candidate)
+                    should_fallback, fallback_reason = should_generate_fallback(
+                        comparison_candidate,
+                        regeneration_attempts=regeneration_attempt,
+                        max_stage_regenerations=max_stage_regenerations,
+                        repairable_hard_exhausted=repairable_hard_exhausted,
+                    )
+                    if should_fallback:
+                        console_logger.warning(
+                            "Pure-agent furniture workflow exhausted; generating "
+                            "one separately rendered deterministic comparison "
+                            "candidate: %s",
+                            fallback_reason,
+                        )
+                        compare_deterministic_fallback = getattr(
+                            furniture_agent,
+                            "compare_deterministic_fallback",
+                            None,
+                        )
+                        if callable(compare_deterministic_fallback):
+                            asyncio.run(
+                                compare_deterministic_fallback(
+                                    agent_candidate=comparison_candidate,
+                                    trigger=fallback_reason,
+                                    regeneration_attempts=regeneration_attempt,
+                                )
+                            )
+                    else:
+                        persist_agent_best = getattr(
+                            furniture_agent,
+                            "persist_agent_best_candidate",
+                            None,
+                        )
+                        if callable(persist_agent_best) and getattr(
+                            scene, "scene_expert_stage_budget", None
+                        ):
+                            persist_agent_best(comparison_candidate)
+
+                evaluate_hard_state = getattr(
+                    furniture_agent, "_evaluate_current_hard_state", None
+                )
+                selected_hard_state = (
+                    evaluate_hard_state()
+                    if callable(evaluate_hard_state)
+                    else None
+                )
+                if (
+                    selected_hard_state is not None
+                    and not selected_hard_state.hard_valid
+                ):
+                    _pause_incomplete_placement_stage(
+                        stage="furniture",
+                        agent=furniture_agent,
+                        scene=scene,
+                        reasons=list(selected_hard_state.hard_reasons),
+                        runtime_events=furniture_runtime_events,
+                    )
                 end_time = time.time()
                 console_logger.info(
                     f"Furniture added to room {room_id} in "
@@ -926,6 +1749,15 @@ def _generate_room(
                 )
 
                 pre_postprocess_hash = scene.content_hash()
+                pre_postprocess_state = scene.to_state_dict()
+                capture_postprocessing_guard = getattr(
+                    furniture_agent, "capture_postprocessing_guard", None
+                )
+                postprocessing_guard = (
+                    capture_postprocessing_guard()
+                    if callable(capture_postprocessing_guard)
+                    else {}
+                )
 
                 # Furniture post-processing (projection + simulation).
                 if projection_cfg["enabled"] and projection_cfg["furniture"]["enabled"]:
@@ -978,16 +1810,37 @@ def _generate_room(
                         )
                     )
                     postprocess_end_time = time.time()
-                    if removed_ids:
-                        console_logger.info(
-                            f"Removed {len(removed_ids)} fallen furniture item(s) "
-                            f"during simulation: {removed_ids}"
-                        )
                     if not projection_success:
                         console_logger.error(
-                            "Furniture projection failed, keeping original positions"
+                            "Furniture projection failed; restoring original positions"
                         )
+                        scene.restore_from_state_dict(pre_postprocess_state)
+                        removed_ids = []
                     else:
+                        postprocessing_regression_reason = getattr(
+                            furniture_agent,
+                            "postprocessing_regression_reason",
+                            None,
+                        )
+                        regression_reason = (
+                            postprocessing_regression_reason(postprocessing_guard)
+                            if callable(postprocessing_regression_reason)
+                            else ""
+                        )
+                        if regression_reason:
+                            console_logger.warning(
+                                "Furniture post-processing regressed the selected "
+                                "candidate; restoring the selected pre-physics "
+                                "state: %s",
+                                regression_reason,
+                            )
+                            scene.restore_from_state_dict(pre_postprocess_state)
+                            removed_ids = []
+                        if removed_ids:
+                            console_logger.info(
+                                f"Removed {len(removed_ids)} fallen furniture item(s) "
+                                f"during simulation: {removed_ids}"
+                            )
                         console_logger.info(
                             f"Furniture post-processing completed for room {room_id} "
                             f"in {postprocess_end_time - postprocess_start_time:.2f} "
@@ -1090,7 +1943,12 @@ def _generate_room(
                 render_gpu_id=render_gpu_id,
             )
             try:
-                asyncio.run(wall_agent.add_wall_objects(scene=scene))
+                _run_sceneexpert_placement_stage(
+                    stage="wall_mounted",
+                    agent=wall_agent,
+                    scene=scene,
+                    run_once=lambda: wall_agent.add_wall_objects(scene=scene),
+                )
             finally:
                 # Always cleanup server subprocesses.
                 wall_agent.cleanup()
@@ -1153,7 +2011,12 @@ def _generate_room(
                 render_gpu_id=render_gpu_id,
             )
             try:
-                asyncio.run(ceiling_agent.add_ceiling_objects(scene=scene))
+                _run_sceneexpert_placement_stage(
+                    stage="ceiling_mounted",
+                    agent=ceiling_agent,
+                    scene=scene,
+                    run_once=lambda: ceiling_agent.add_ceiling_objects(scene=scene),
+                )
             finally:
                 # Always cleanup server subprocesses.
                 ceiling_agent.cleanup()
@@ -1217,7 +2080,15 @@ def _generate_room(
             logger=logger,
             render_gpu_id=render_gpu_id,
         )
-        _add_manipulands_with_cleanup(manipuland_agent, scene)
+        try:
+            _run_sceneexpert_placement_stage(
+                stage="manipuland",
+                agent=manipuland_agent,
+                scene=scene,
+                run_once=lambda: manipuland_agent.add_manipulands(scene=scene),
+            )
+        finally:
+            manipuland_agent.cleanup()
         end_time = time.time()
         console_logger.info(
             f"Manipulands added to room {room_id} in "
@@ -1238,6 +2109,7 @@ def _generate_room(
 
         console_logger.info("Running final post-processing (projection + simulation)")
         start_time = time.time()
+        pre_final_postprocess_state = scene.to_state_dict()
 
         # Determine HTML output path for simulation.
         final_sim_html_path = None
@@ -1250,9 +2122,12 @@ def _generate_room(
         # Fallen furniture removal is not needed here (furniture is welded).
         # Get fallen manipuland config from manipuland_agent physics_validation.
         manipuland_physics_cfg = cfg_dict["manipuland_agent"]["physics_validation"]
-        scene, projection_success, removed_ids = (
-            apply_physical_feasibility_postprocessing(
-                scene=scene,
+
+        def run_final_postprocessing(
+            candidate_scene: RoomScene,
+        ) -> tuple[RoomScene, bool, list[str]]:
+            return apply_physical_feasibility_postprocessing(
+                scene=candidate_scene,
                 weld_furniture=True,
                 projection_enabled=True,
                 projection_influence_distance=final_cfg["influence_distance"],
@@ -1280,20 +2155,186 @@ def _generate_room(
                     "fallen_manipuland_z_displacement"
                 ],
             )
-        )
-        end_time = time.time()
-        if removed_ids:
-            console_logger.info(
-                f"Removed {len(removed_ids)} fallen manipuland(s) during "
-                f"final simulation: {removed_ids}"
-            )
+
+        scene, projection_success, removed_ids = run_final_postprocessing(scene)
+        postprocess_critic_attempted = False
         if not projection_success:
-            console_logger.error("Final projection failed, keeping original positions")
-        else:
-            console_logger.info(
-                f"Final post-processing completed for room {room_id} in "
-                f"{end_time - start_time:.2f} seconds"
+            console_logger.error(
+                "Final projection failed; restoring original positions"
             )
+            scene.restore_from_state_dict(pre_final_postprocess_state)
+            removed_ids = []
+            degraded_reasons = list(
+                getattr(scene, "scene_expert_degraded_stage_reasons", []) or []
+            )
+            degraded_reasons.append(
+                "final manipuland physics projection failed; restored the "
+                "pre-projection candidate without final physics verification"
+            )
+            setattr(
+                scene,
+                "scene_expert_degraded_stage_reasons",
+                degraded_reasons,
+            )
+        else:
+            if removed_ids:
+                console_logger.info(
+                    f"Removed {len(removed_ids)} fallen manipuland(s) during "
+                    f"final simulation: {removed_ids}"
+                )
+            minimum_manipulands = int(
+                getattr(scene, "scene_expert_min_output_objects", 0) or 0
+            )
+            final_manipuland_count = len(
+                scene.get_objects_by_type(ObjectType.MANIPULAND)
+            )
+            if (
+                minimum_manipulands > 0
+                and final_manipuland_count < minimum_manipulands
+            ):
+                reason = (
+                    "final physics post-processing removed required manipulands: "
+                    f"{final_manipuland_count} remain, "
+                    f"{minimum_manipulands} required"
+                )
+                console_logger.warning(
+                    "%s; restarting the original planner/designer/critic loop once",
+                    reason,
+                )
+                runtime_events = list(
+                    getattr(scene, "scene_expert_runtime_repair_events", []) or []
+                )
+                runtime_events.append("postprocess_completion_rescue")
+                setattr(
+                    scene,
+                    "scene_expert_runtime_repair_events",
+                    runtime_events,
+                )
+                try:
+                    manipuland_agent.scene = scene
+                    asyncio.run(
+                        manipuland_agent.prepare_stage_regeneration([reason])
+                    )
+                    asyncio.run(manipuland_agent.add_manipulands(scene=scene))
+                    scene = manipuland_agent.scene
+                    post_rescue_state = scene.to_state_dict()
+                    (
+                        scene,
+                        rescue_projection_success,
+                        rescue_removed_ids,
+                    ) = run_final_postprocessing(scene)
+                    if not rescue_projection_success:
+                        scene.restore_from_state_dict(post_rescue_state)
+                        raise RuntimeError(
+                            "final projection failed after manipuland rescue"
+                        )
+                    remaining_after_rescue = len(
+                        scene.get_objects_by_type(ObjectType.MANIPULAND)
+                    )
+                    if remaining_after_rescue < minimum_manipulands:
+                        raise StageValidationError(
+                            stage="manipuland",
+                            reasons=[
+                                "focused post-processing rescue still left "
+                                f"{remaining_after_rescue} manipulands; "
+                                f"{minimum_manipulands} required; removed="
+                                f"{rescue_removed_ids}"
+                            ],
+                        )
+                    manipuland_agent.scene = scene
+                    postprocess_critic_attempted = True
+                    _score_postprocessed_candidate_or_pause(
+                        stage="manipuland",
+                        agent=manipuland_agent,
+                        scene=scene,
+                        runtime_events=runtime_events,
+                    )
+                    runtime_events.append("postprocess_planner_rescue_verified")
+                    setattr(
+                        scene,
+                        "scene_expert_runtime_repair_events",
+                        runtime_events,
+                    )
+                except ScenePausedError:
+                    raise
+                except Exception as rescue_exc:
+                    console_logger.exception(
+                        "Manipuland post-processing rescue did not produce a "
+                        "verified minimum-output scene; pausing before final commit"
+                    )
+                    _pause_incomplete_placement_stage(
+                        stage="manipuland",
+                        agent=manipuland_agent,
+                        scene=scene,
+                        reasons=[
+                            reason
+                            + "; focused rescue failed: "
+                            + f"{type(rescue_exc).__name__}: {rescue_exc}"
+                        ],
+                        runtime_events=runtime_events,
+                    )
+            final_manipuland_count = len(
+                scene.get_objects_by_type(ObjectType.MANIPULAND)
+            )
+            if (
+                getattr(manipuland_agent, "_stage_runtime_budget", {})
+                and final_manipuland_count >= minimum_manipulands
+                and not postprocess_critic_attempted
+                and getattr(manipuland_agent, "_last_scored_scene_hash", None)
+                != scene.content_hash()
+            ):
+                console_logger.info(
+                    "Final physics post-processing changed the manipuland scene; "
+                    "scoring the actual post-processed candidate once"
+                )
+                runtime_events = list(
+                    getattr(scene, "scene_expert_runtime_repair_events", []) or []
+                )
+                runtime_events.append("postprocess_final_critic")
+                setattr(
+                    scene,
+                    "scene_expert_runtime_repair_events",
+                    runtime_events,
+                )
+                try:
+                    manipuland_agent.scene = scene
+                    postprocess_critic_attempted = True
+                    _score_postprocessed_candidate_or_pause(
+                        stage="manipuland",
+                        agent=manipuland_agent,
+                        scene=scene,
+                        runtime_events=runtime_events,
+                    )
+                except ScenePausedError:
+                    raise
+                except Exception as critic_exc:
+                    degraded_reasons = list(
+                        getattr(
+                            scene,
+                            "scene_expert_degraded_stage_reasons",
+                            [],
+                        )
+                        or []
+                    )
+                    degraded_reasons.append(
+                        "final post-processed manipuland scene could not be "
+                        "visually verified: "
+                        f"{type(critic_exc).__name__}: {critic_exc}"
+                    )
+                    setattr(
+                        scene,
+                        "scene_expert_degraded_stage_reasons",
+                        degraded_reasons,
+                    )
+                    console_logger.exception(
+                        "Final post-processed manipuland critic did not complete; "
+                        "continuing as degraded"
+                    )
+        end_time = time.time()
+        console_logger.info(
+            f"Final post-processing completed for room {room_id} in "
+            f"{end_time - start_time:.2f} seconds"
+        )
 
     # Log and export final scene.
     logger.log_scene(scene=scene, name="final_scene")
@@ -1356,13 +2397,24 @@ def _run_sequential_room_generation(
         room_geometry = house_layout.get_room_geometry(room_id)
         if room_geometry is None:
             raise RuntimeError(f"Room geometry not generated for room '{room_id}'")
+        room_prompt = room_spec.prompt
+        if scene_expert_hooks:
+            # The floor-plan subprocess persists the effective house prompt in
+            # RoomSpec.  Remove its transient StageBrief/memory blocks before a
+            # room-specific brief is added, otherwise unrelated failure examples
+            # can become accidental furniture requests.
+            from scenesmith.scene_expert.prompt_context import (
+                strip_sceneexpert_injected_blocks,
+            )
+
+            room_prompt = strip_sceneexpert_injected_blocks(room_prompt)
 
         with custom_span(f"room_{room_id}_generation"):
             with logger.room_context(room_id) as room_dir:
-                console_logger.info(f"Generating room '{room_id}': {room_spec.prompt}")
+                console_logger.info(f"Generating room '{room_id}': {room_prompt}")
                 room_scene = _generate_room(
                     room_id=room_id,
-                    room_prompt=room_spec.prompt,
+                    room_prompt=room_prompt,
                     room_geometry=room_geometry,
                     room_dir=room_dir,
                     logger=logger,
@@ -1427,6 +2479,15 @@ def _generate_floor_plan_worker(
                     logger=logger,
                     render_gpu_id=render_gpu_id,
                 )
+                floor_plan_budget = resolve_scene_expert_stage_budget(
+                    cfg_dict, "floor_plan"
+                )
+                configure_runtime_budget = getattr(
+                    floor_plan_agent, "configure_stage_runtime_budget", None
+                )
+                if callable(configure_runtime_budget):
+                    configure_runtime_budget(floor_plan_budget)
+                pause_reason = ""
                 try:
                     house_layout = asyncio.run(
                         floor_plan_agent.generate_house_layout(
@@ -1434,14 +2495,82 @@ def _generate_floor_plan_worker(
                             output_dir=scene_path / "floor_plans",
                         )
                     )
+                    if (
+                        floor_plan_budget
+                        and getattr(
+                            floor_plan_agent,
+                            "_last_score_provenance",
+                            {},
+                        ).get("score_source")
+                        != "vlm_critic"
+                    ):
+                        console_logger.warning(
+                            "Floor-plan output is usable but visually unscored; "
+                            "retrying one compact critic with an expanded critical "
+                            "budget"
+                        )
+                        try:
+                            asyncio.run(
+                                floor_plan_agent.retry_final_critic_evaluation()
+                            )
+                            house_layout = floor_plan_agent.layout
+                        except Exception:
+                            console_logger.exception(
+                                "Expanded floor-plan critic retry failed; retaining "
+                                "the usable layout as explicitly unscored"
+                            )
+                        if getattr(
+                            floor_plan_agent,
+                            "_last_score_provenance",
+                            {},
+                        ).get("score_source") != "vlm_critic":
+                            console_logger.error(
+                                "Floor-plan visual critic remained unavailable after "
+                                "the single expanded retry; downstream verification "
+                                "will pause this scene before downstream generation"
+                            )
+                            pause_reason = (
+                                "Floor-plan visual critic did not produce a "
+                                "trustworthy score after the isolated retry."
+                            )
                 finally:
                     floor_plan_agent.cleanup()
 
                 # Save to disk for parent to load.
                 house_layout_path = scene_path / "house_layout.json"
+                serialized_layout = house_layout.to_dict(scene_dir=scene_path)
                 with open(house_layout_path, "w") as f:
-                    json.dump(house_layout.to_dict(scene_dir=scene_path), f, indent=2)
+                    json.dump(serialized_layout, f, indent=2)
                 console_logger.info(f"Saved house layout to {house_layout_path}")
+                if pause_reason:
+                    manifest_path = persist_retryable_pause(
+                        scene_root_dir=scene_path,
+                        stage="floor_plan",
+                        reason=pause_reason,
+                        candidate_state=serialized_layout,
+                        candidate_hash=house_layout.content_hash(),
+                        render_dir=getattr(
+                            floor_plan_agent,
+                            "final_render_dir",
+                            None,
+                        ),
+                        attempt_count=2,
+                        metadata={
+                            "score_provenance": dict(
+                                getattr(
+                                    floor_plan_agent,
+                                    "_last_score_provenance",
+                                    {},
+                                )
+                                or {}
+                            )
+                        },
+                    )
+                    raise ScenePausedError(
+                        "floor_plan",
+                        pause_reason,
+                        str(manifest_path),
+                    )
 
 
 def _generate_room_worker(
@@ -2205,6 +3334,11 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                         # Check for failure.
                         success, error = results["floor_plan"]
                         if not success:
+                            if is_scene_paused_error(error):
+                                raise ScenePausedError(
+                                    "floor_plan",
+                                    str(error),
+                                )
                             raise RuntimeError(f"Floor plan generation failed: {error}")
 
                         # Load result from disk (subprocess saved it).
@@ -2273,6 +3407,7 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                             status="completed",
                             attempt=attempt,
                         )
+                        mark_retryable_pause_resolved(scene_dir)
                         (scene_dir / _SCENE_SUCCESS_MARKER).write_text(
                             "completed\n", encoding="utf-8"
                         )
@@ -2373,6 +3508,22 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                         f"{timedelta(seconds=time.time() - scene_generation_start_time)}"
                     )
 
+            except ScenePausedError as e:
+                if scene_expert_hooks:
+                    scene_expert_hooks.save_partial_trace(error=str(e))
+                _write_scene_status(
+                    output_dir=output_dir,
+                    scene_id=scene_id,
+                    prompt=prompt,
+                    status="paused_retryable",
+                    attempt=attempt,
+                    error=str(e),
+                )
+                console_logger.warning(
+                    "Scene generation paused at a recoverable critic boundary: %s",
+                    e,
+                )
+                raise
             except Exception as e:
                 if scene_expert_hooks:
                     scene_expert_hooks.save_partial_trace(error=str(e))
@@ -2394,6 +3545,7 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
             status="completed",
             attempt=attempt,
         )
+        mark_retryable_pause_resolved(scene_dir)
         (scene_dir / _SCENE_SUCCESS_MARKER).write_text("completed\n", encoding="utf-8")
 
     def _run_serial_generation(
@@ -2480,7 +3632,7 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
             pending[task_id] = (scene_id, prompt, render_gpu_id)
             console_logger.info(f"Queued {task_id} (GPU {render_gpu_id}): {prompt}")
 
-        final_results: dict[str, tuple[bool, str | None]] = {}
+        final_results: dict[str, tuple[str, str | None]] = {}
         attempt = 1
         while pending:
             tasks: list[tuple[str, Callable, dict]] = []
@@ -2509,11 +3661,28 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                 scene_id, prompt, _ = metadata
                 success, result_or_error = results[task_id]
                 if success:
-                    final_results[task_id] = (True, None)
+                    final_results[task_id] = ("completed", None)
                     console_logger.info(f"Completed {task_id} on attempt {attempt}")
                     continue
 
                 error = str(result_or_error)
+                if is_scene_paused_error(error):
+                    _write_scene_status(
+                        output_dir=self.output_dir,
+                        scene_id=scene_id,
+                        prompt=prompt,
+                        status="paused_retryable",
+                        attempt=attempt,
+                        error=error[-8000:],
+                    )
+                    final_results[task_id] = ("paused_retryable", error)
+                    console_logger.warning(
+                        "%s paused at a recoverable critic boundary; other scene "
+                        "tasks will continue. %s",
+                        task_id,
+                        _root_error_summary(error),
+                    )
+                    continue
                 _write_scene_status(
                     output_dir=self.output_dir,
                     scene_id=scene_id,
@@ -2538,22 +3707,31 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                     )
                     retry_pending[task_id] = metadata
                 else:
-                    final_results[task_id] = (False, error)
+                    final_results[task_id] = ("failed", error)
                     console_logger.error(
-                        f"{task_id} failed permanently after attempt {attempt}: {error}"
+                        f"{task_id} failed permanently after attempt {attempt}: "
+                        f"{_root_error_summary(error)}"
                     )
 
             pending = retry_pending
             attempt += 1
 
+        _write_batch_summary(
+            output_dir=self.output_dir,
+            experiment_run_id=experiment_run_id,
+            prompts_with_ids=prompts_with_ids,
+            results=final_results,
+        )
+
         failed_scenes = [
             (task_id, error)
-            for task_id, (success, error) in final_results.items()
-            if not success
+            for task_id, (status, error) in final_results.items()
+            if status == "failed"
         ]
         if failed_scenes:
             failure_details = "\n".join(
-                f"  - {task_id}: {error}" for task_id, error in failed_scenes
+                f"  - {task_id}: {_root_error_summary(str(error))}"
+                for task_id, error in failed_scenes
             )
             raise RuntimeError(
                 f"{len(failed_scenes)}/{len(prompts_with_ids)} scene(s) failed:\n"

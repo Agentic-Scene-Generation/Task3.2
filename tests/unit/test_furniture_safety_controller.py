@@ -6,6 +6,9 @@ from types import SimpleNamespace
 from scenesmith.agent_utils.furniture_safety import (
     FurnitureSafetyController,
     furniture_object_category_matches,
+    HardIssue,
+    HardStateEvaluation,
+    hard_state_repair_objective,
 )
 from scenesmith.agent_utils.scoring import CategoryScore, CritiqueWithScores
 
@@ -95,12 +98,136 @@ class BoundedFurniture:
 
 
 class FurnitureSafetyControllerTest(unittest.TestCase):
+    def test_repair_objective_keeps_newly_completed_required_content(self) -> None:
+        missing = HardStateEvaluation(
+            hard_valid=False,
+            hard_reasons=[
+                "missing required bed: expected 1, found 0",
+                "missing required nightstand: expected 2, found 0",
+                "missing required wardrobe: expected 1, found 0",
+                "bedroom plausibility: no bed object found",
+            ],
+            issues=[
+                HardIssue(issue_type="missing_required_object", object_a_id="bed"),
+                HardIssue(
+                    issue_type="missing_required_object", object_a_id="nightstand"
+                ),
+                HardIssue(issue_type="missing_required_object", object_a_id="wardrobe"),
+            ],
+        )
+        completed_with_collisions = HardStateEvaluation(
+            hard_valid=False,
+            hard_reasons=["physics hard violation: collisions"],
+            issues=[
+                HardIssue(
+                    issue_type="collision_or_overlap",
+                    penetration_depth_m=0.54,
+                )
+            ],
+        )
+
+        self.assertLess(
+            hard_state_repair_objective(completed_with_collisions),
+            hard_state_repair_objective(missing),
+        )
+
+    def test_repair_objective_rejects_collision_fix_moved_outside_room(self) -> None:
+        collision = HardStateEvaluation(
+            hard_valid=False,
+            hard_reasons=["physics hard violation: collisions"],
+            issues=[
+                HardIssue(
+                    issue_type="collision_or_overlap",
+                    penetration_depth_m=0.08,
+                )
+            ],
+        )
+        outside = HardStateEvaluation(
+            hard_valid=False,
+            hard_reasons=["chair full bounding box exceeds room bounds"],
+            issues=[HardIssue(issue_type="out_of_bounds", object_a_id="chair")],
+        )
+
+        self.assertGreater(
+            hard_state_repair_objective(outside),
+            hard_state_repair_objective(collision),
+        )
+
+    def test_physics_collision_keeps_structured_object_pair(self) -> None:
+        controller = FurnitureSafetyController({"enabled": True})
+        scene = SimpleNamespace(objects={}, room_geometry=None, text_description="office")
+        evaluation = controller.evaluate_scene_state(
+            scene,
+            physics_context=(
+                "Physics violations detected (1 issue(s)):\n"
+                "Collisions (1):\n"
+                "- chair_0 collides with desk_0 (3.2cm penetration)"
+            ),
+        )
+
+        self.assertFalse(evaluation.hard_valid)
+        self.assertEqual(len(evaluation.issues), 1)
+        self.assertEqual(evaluation.issues[0].object_a_id, "chair_0")
+        self.assertEqual(evaluation.issues[0].object_b_id, "desk_0")
+        self.assertAlmostEqual(evaluation.issues[0].penetration_depth_m, 0.032)
+
+    def test_placeholder_furniture_requires_stage_regeneration(self) -> None:
+        controller = FurnitureSafetyController(
+            {"enabled": True, "placeholder_assets_are_hard": True}
+        )
+        placeholder = BoundedFurniture(
+            name="bed",
+            description="deterministic placeholder bed",
+            world_min=(-0.8, -1.0, 0.0),
+            world_max=(0.8, 1.0, 0.8),
+        )
+        placeholder.metadata = {
+            "repair_placeholder": True,
+            "asset_source": "deterministic_placeholder",
+        }
+
+        evaluation = controller.evaluate_scene_state(
+            SimpleNamespace(
+                room_type="studio",
+                text_description="A studio.",
+                objects={"bed_0": placeholder},
+                room_geometry=None,
+            )
+        )
+
+        self.assertFalse(evaluation.hard_valid)
+        self.assertTrue(
+            any(
+                "not a valid final asset" in reason
+                for reason in evaluation.hard_reasons
+            )
+        )
+        self.assertEqual(evaluation.issues[0].issue_type, "asset_invalid")
+
     def test_window_only_issue_is_soft(self) -> None:
         controller = FurnitureSafetyController({"enabled": True})
         evaluation = controller.evaluate_scores(make_scores())
 
         self.assertTrue(evaluation.hard_valid)
         self.assertTrue(evaluation.soft_reasons)
+
+    def test_bedroom_plausibility_relations_can_be_deferred_to_fallback(self) -> None:
+        controller = FurnitureSafetyController(
+            {
+                "enabled": True,
+                "bedroom_layout": {"hard_plausibility_issues": False},
+            }
+        )
+
+        hard, soft = controller._classify_bedroom_plausibility_issues(
+            [
+                "bedroom plausibility: bed headboard faces west_wall, "
+                "expected north_wall"
+            ]
+        )
+
+        self.assertEqual(hard, [])
+        self.assertEqual(len(soft), 1)
 
     def test_collision_issue_is_hard_but_negated_collision_is_not(self) -> None:
         controller = FurnitureSafetyController({"enabled": True})
@@ -335,6 +462,19 @@ class FurnitureSafetyControllerTest(unittest.TestCase):
         self.assertTrue(second.rollback_to_best)
         self.assertTrue(second.should_finish)
         self.assertEqual(controller.best_scene_state, {"state": 1})
+        self.assertEqual(controller.best_score_source, "vlm_critic")
+
+    def test_unscored_checkpoint_never_claims_visual_critic_provenance(self) -> None:
+        controller = FurnitureSafetyController({"enabled": True})
+
+        saved = controller.remember_hard_valid_scene_state(
+            scene_state={"state": "hard-valid"},
+            source="critic_fallback_unscored",
+        )
+
+        self.assertTrue(saved)
+        self.assertIsNone(controller.best_scores)
+        self.assertEqual(controller.best_score_source, "unscored_hard_valid")
 
     def test_unscored_baseline_allows_first_critic_guided_repair(self) -> None:
         controller = FurnitureSafetyController(
@@ -570,9 +710,63 @@ class FurnitureSafetyControllerTest(unittest.TestCase):
             "A teacher's desk sits at the front near the chalkboard."
         )
 
-        self.assertEqual(controller.required_counts.get("desk"), 7)
+        self.assertEqual(controller.required_counts.get("student_desk"), 6)
+        self.assertEqual(controller.required_counts.get("teacher_desk"), 1)
         self.assertEqual(controller.required_counts.get("chair"), 6)
+        self.assertNotIn("desk", controller.required_counts)
         self.assertNotIn("table", controller.required_counts)
+        self.assertEqual(
+            controller.infer_object_category(
+                "desk_0 Practical rectangular work desk"
+            ),
+            "student_desk",
+        )
+        self.assertEqual(
+            controller.infer_object_category(
+                "teacher_desk_0 Full-size classroom teacher desk"
+            ),
+            "teacher_desk",
+        )
+
+    def test_required_classroom_asset_below_usable_height_is_hard(self) -> None:
+        controller = FurnitureSafetyController(
+            {
+                "enabled": True,
+                "size_bounds": {
+                    "student_desk": {
+                        "min": [0.5, 0.4, 0.62],
+                        "max": [1.1, 0.85, 0.95],
+                    }
+                },
+            }
+        )
+        controller.reset_for_scene("A classroom with one student desk.")
+        desk = BoundedFurniture(
+            name="student_desk",
+            description="student desk",
+            world_min=(-0.35, -0.25, 0.0),
+            world_max=(0.35, 0.25, 0.41),
+        )
+        desk.bbox_min = (-0.35, -0.25, 0.0)
+        desk.bbox_max = (0.35, 0.25, 0.41)
+        desk.metadata = {}
+
+        evaluation = controller.evaluate_scene_state(
+            SimpleNamespace(
+                room_type="classroom",
+                text_description="A classroom with one student desk.",
+                objects={"student_desk_0": desk},
+                room_geometry=None,
+            )
+        )
+
+        self.assertFalse(evaluation.hard_valid)
+        self.assertTrue(
+            any("unusable dimensions" in reason for reason in evaluation.hard_reasons)
+        )
+        self.assertTrue(
+            any(issue.issue_type == "asset_invalid" for issue in evaluation.issues)
+        )
 
     def test_living_room_prompt_tracks_rug_and_plant_counts(self) -> None:
         controller = FurnitureSafetyController({"enabled": True})

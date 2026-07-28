@@ -17,11 +17,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from scenesmith.agent_utils.furniture_functional_layout import (
+    evaluate_functional_layout,
+    furnishable_room_bounds_xy,
+)
 from scenesmith.agent_utils.furniture_layout_planning import (
     evaluate_bedroom_layout_plausibility,
     is_bedroom_scene,
 )
 from scenesmith.agent_utils.scoring import CritiqueWithScores
+from scenesmith.scene_expert.critic_feedback import parse_critic_feedback
 
 console_logger = logging.getLogger(__name__)
 
@@ -62,8 +67,17 @@ DEFAULT_ALIASES = {
         "visitor armchair",
         "visitor armchairs",
     ],
-    "student_desk": ["student desk", "student desks"],
-    "teacher_desk": ["teacher desk", "teacher desks", "teacher's desk"],
+    # Keep classroom roles ahead of generic ``desk`` so six student desks and
+    # one teacher desk remain distinct requirements and asset-cache families.
+    "student_desk": ["student desk", "student desks", "pupil desk", "pupil desks"],
+    "teacher_desk": [
+        "teacher's desk",
+        "teacher desk",
+        "teacher desks",
+        "instructor desk",
+        "lectern",
+        "podium",
+    ],
     "dining_chair": ["dining chair", "dining chairs"],
     "student_chair": ["student chair", "student chairs"],
     "armchair": ["armchair", "armchairs", "arm chair", "arm chairs"],
@@ -132,6 +146,17 @@ class SafetyEvaluation:
 
 
 @dataclass
+class HardIssue:
+    """Structured deterministic issue used by code-level repair operators."""
+
+    issue_type: str
+    object_a_id: str = ""
+    object_b_id: str = ""
+    penetration_depth_m: float = 0.0
+    details: str = ""
+
+
+@dataclass
 class HardStateEvaluation:
     """Deterministic hard-check result independent of critic scoring."""
 
@@ -140,6 +165,70 @@ class HardStateEvaluation:
     soft_reasons: list[str] = field(default_factory=list)
     weighted_score_penalty: float = 0.0
     plausibility_report: dict[str, Any] | None = None
+    issues: list[HardIssue] = field(default_factory=list)
+
+
+def hard_state_repair_objective(
+    evaluation: HardStateEvaluation,
+) -> tuple[int, int, int, int, int, float, int, int]:
+    """Return a lexicographic objective for deterministic repair transactions.
+
+    Completing required content must outrank temporary layout conflicts.  This
+    lets a first repair add missing furniture and a subsequent repair separate
+    the new objects instead of rolling the complete candidate back to an empty
+    room merely because its collision count initially increased.
+    """
+    reasons = [str(reason).lower() for reason in evaluation.hard_reasons]
+    issue_types = [
+        str(getattr(issue, "issue_type", "")).lower() for issue in evaluation.issues
+    ]
+
+    def count_reasons(*terms: str) -> int:
+        return sum(any(term in reason for term in terms) for reason in reasons)
+
+    missing = max(
+        issue_types.count("missing_required_object"),
+        count_reasons("missing required", "no bed object found"),
+    )
+    invalid_assets = max(
+        issue_types.count("asset_invalid"),
+        count_reasons("geometry construction failed", "drake/qhull"),
+    )
+    out_of_bounds = max(
+        issue_types.count("out_of_bounds"),
+        count_reasons("exceeds room bounds", "outside room bounds"),
+    )
+    wall_height = count_reasons("wall height exceeded")
+    opening_clearance = max(
+        issue_types.count("door_or_opening_clearance"),
+        count_reasons("door clearance", "open connection blocked"),
+    )
+    collision_issues = [
+        issue
+        for issue in evaluation.issues
+        if str(getattr(issue, "issue_type", "")).lower() == "collision_or_overlap"
+    ]
+    penetration = round(
+        sum(
+            float(getattr(issue, "penetration_depth_m", 0.0) or 0.0)
+            for issue in collision_issues
+        ),
+        9,
+    )
+    collision_count = max(
+        len(collision_issues),
+        count_reasons("physics hard violation: collisions"),
+    )
+    return (
+        missing,
+        invalid_assets,
+        out_of_bounds,
+        wall_height,
+        opening_clearance,
+        penetration,
+        collision_count,
+        len(reasons),
+    )
 
 
 @dataclass
@@ -344,6 +433,9 @@ class FurnitureSafetyController:
         self.room_bounds_tolerance_m = float(
             _cfg_get(cfg, "room_bounds_tolerance_m", 0.02)
         )
+        self.placeholder_assets_are_hard = bool(
+            _cfg_get(cfg, "placeholder_assets_are_hard", True)
+        )
 
         self.score_weights = {
             **DEFAULT_SCORE_WEIGHTS,
@@ -351,6 +443,10 @@ class FurnitureSafetyController:
         }
         self.size_bounds = _plain_dict(_cfg_get(cfg, "size_bounds", {}))
         self.bedroom_layout_cfg = _cfg_get(cfg, "bedroom_layout", {})
+        self.functional_layout_cfg = _cfg_get(cfg, "functional_layout", {})
+        self.functional_layout_hard = bool(
+            _cfg_get(self.functional_layout_cfg, "hard_relations", True)
+        )
         self.window_blocking_is_hard = bool(
             _cfg_get(self.bedroom_layout_cfg, "window_blocking_is_hard", False)
         )
@@ -412,6 +508,7 @@ class FurnitureSafetyController:
 
         self.best_scene_state: dict[str, Any] | None = None
         self.best_scores: CritiqueWithScores | None = None
+        self.best_score_source = "unavailable"
         self.best_render_dir: Path | None = None
         self.best_weighted_score = -1.0
         self.best_reasons: list[str] = []
@@ -421,6 +518,7 @@ class FurnitureSafetyController:
         """Discard only candidate-ranking state for a new authoritative baseline."""
         self.best_scene_state = None
         self.best_scores = None
+        self.best_score_source = "unavailable"
         self.best_render_dir = None
         self.best_weighted_score = -1.0
         self.best_reasons = []
@@ -431,6 +529,11 @@ class FurnitureSafetyController:
         self.scene_description = scene_description or ""
         self.required_terms = self._infer_required_terms(self.scene_description)
         self.required_counts = self._infer_required_counts(self.scene_description)
+        if "student_desk" in self.required_counts:
+            # The generic desk alias also matches the noun in "student desks".
+            # It must not create a second, ambiguous requirement.
+            self.required_counts.pop("desk", None)
+            self.required_terms.discard("desk")
         # A style-only bedroom prompt still semantically requires a bed.  Do
         # not infer the rest of a bedroom set unless the task requests it.
         if "bedroom" in self.scene_description.lower():
@@ -487,6 +590,24 @@ class FurnitureSafetyController:
                     ):
                         continue
                     count_text = match.groupdict().get("count")
+                    if not count_text:
+                        # The optional adjective window can begin at an earlier
+                        # word ("with six student desks") and greedily consume the
+                        # numeric token. Recover the nearest number before the
+                        # matched alias instead of silently collapsing six to one.
+                        matched_text = match.group(0).lower()
+                        alias_offset = matched_text.rfind(alias.lower())
+                        before_alias = (
+                            matched_text[:alias_offset]
+                            if alias_offset >= 0
+                            else matched_text
+                        )
+                        number_matches = re.findall(
+                            rf"(?<![a-z0-9])({number_pattern})(?![a-z0-9])",
+                            before_alias,
+                        )
+                        if number_matches:
+                            count_text = number_matches[-1]
                     count = 1
                     if count_text:
                         count = (
@@ -589,7 +710,13 @@ class FurnitureSafetyController:
                         break
 
     def _infer_category(self, text: str) -> str | None:
-        return infer_furniture_category(text)
+        category = infer_furniture_category(text)
+        if category == "desk" and "student_desk" in self.required_counts:
+            # Designers and legacy checkpoints frequently use ``desk_0`` for
+            # classroom student desks. Explicit teacher aliases are classified
+            # before this contextual fallback.
+            return "student_desk"
+        return category
 
     @staticmethod
     def _required_category_for_text(
@@ -987,7 +1114,22 @@ class FurnitureSafetyController:
 
         critique_text = scores.critique.lower()
         comments_text = " ".join(score.comment.lower() for score in scores.get_scores())
-        text = f"{critique_text} {comments_text}"
+        feedback = parse_critic_feedback(scores.critique)
+        finding_text = " ".join(
+            " ".join(
+                (
+                    finding.severity,
+                    finding.category,
+                    " ".join(finding.object_ids),
+                    finding.observation,
+                    finding.reason,
+                    finding.required_change,
+                    finding.acceptance_check,
+                )
+            )
+            for finding in feedback.findings
+        ).lower()
+        text = f"{critique_text} {comments_text} {finding_text}"
 
         hard_reasons: list[str] = []
         soft_reasons: list[str] = []
@@ -1053,6 +1195,7 @@ class FurnitureSafetyController:
         """Run deterministic hard checks that do not depend on critic judgment."""
         hard_reasons: list[str] = []
         soft_reasons: list[str] = []
+        hard_issues: list[HardIssue] = []
 
         required_counts = self.required_counts or {
             term: 1 for term in self.required_terms
@@ -1064,10 +1207,40 @@ class FurnitureSafetyController:
             }
             for term, required_count in required_counts.items():
                 if observed_counts.get(term, 0) < required_count:
-                    hard_reasons.append(
+                    reason = (
                         f"missing required {term}: expected {required_count}, "
                         f"found {observed_counts.get(term, 0)}"
                     )
+                    hard_reasons.append(reason)
+                    hard_issues.append(
+                        HardIssue(
+                            issue_type="missing_required_object",
+                            object_a_id=term,
+                            details=reason,
+                        )
+                    )
+
+        if self.placeholder_assets_are_hard:
+            for object_id, obj in getattr(scene, "objects", {}).items():
+                metadata = getattr(obj, "metadata", {}) or {}
+                if not metadata.get("repair_placeholder", False):
+                    continue
+                reason = (
+                    f"placeholder furniture {object_id} is not a valid final asset; "
+                    "regenerate the stage with a semantically valid mesh"
+                )
+                hard_reasons.append(reason)
+                hard_issues.append(
+                    HardIssue(
+                        issue_type="asset_invalid",
+                        object_a_id=str(object_id),
+                        details=reason,
+                    )
+                )
+
+        size_reasons, size_issues = self._evaluate_required_asset_sizes(scene)
+        hard_reasons.extend(size_reasons)
+        hard_issues.extend(size_issues)
 
         room_bounds = self._room_bounds_xy(scene)
         if room_bounds is not None:
@@ -1088,12 +1261,20 @@ class FurnitureSafetyController:
                     or world_min[1] < min_y - tol
                     or world_max[1] > max_y + tol
                 ):
-                    hard_reasons.append(
+                    reason = (
                         f"{object_id} full bounding box exceeds room bounds: "
                         f"x=[{world_min[0]:.3f}, {world_max[0]:.3f}] vs "
                         f"[{min_x:.3f}, {max_x:.3f}], "
                         f"y=[{world_min[1]:.3f}, {world_max[1]:.3f}] vs "
                         f"[{min_y:.3f}, {max_y:.3f}]"
+                    )
+                    hard_reasons.append(reason)
+                    hard_issues.append(
+                        HardIssue(
+                            issue_type="out_of_bounds",
+                            object_a_id=str(object_id),
+                            details=reason,
+                        )
                     )
 
         bedroom_scene = is_bedroom_scene(scene)
@@ -1106,6 +1287,7 @@ class FurnitureSafetyController:
             )
             hard_reasons.extend(hard_from_physics)
             soft_reasons.extend(soft_from_physics)
+            hard_issues.extend(self._parse_hard_issues(physics_context))
 
         plausibility_report = None
         if bedroom_scene:
@@ -1130,6 +1312,41 @@ class FurnitureSafetyController:
 
             hard_reasons.extend(self._evaluate_bedroom_relation_hard_reasons(scene))
 
+        functional_report = None
+        try:
+            functional_report = evaluate_functional_layout(
+                scene=scene,
+                category_resolver=self._infer_category,
+                cfg=self.functional_layout_cfg,
+            )
+        except Exception as exc:
+            soft_reasons.append(
+                "functional layout check failed: "
+                f"{type(exc).__name__}: {exc}"
+            )
+        if functional_report is not None and functional_report.issues:
+            if self.functional_layout_hard:
+                hard_reasons.extend(functional_report.issues)
+                hard_issues.extend(
+                    HardIssue(
+                        issue_type="functional_relation",
+                        details=reason,
+                    )
+                    for reason in functional_report.issues
+                )
+            else:
+                soft_reasons.extend(functional_report.issues)
+
+        report_dict = (
+            plausibility_report.to_dict()
+            if plausibility_report is not None
+            else None
+        )
+        if functional_report is not None:
+            if report_dict is None:
+                report_dict = {}
+            report_dict["functional_layout"] = functional_report.to_dict()
+
         return HardStateEvaluation(
             hard_valid=not hard_reasons,
             hard_reasons=hard_reasons,
@@ -1137,22 +1354,76 @@ class FurnitureSafetyController:
             weighted_score_penalty=(
                 plausibility_report.penalty if plausibility_report is not None else 0.0
             ),
-            plausibility_report=(
-                plausibility_report.to_dict()
-                if plausibility_report is not None
-                else None
-            ),
+            plausibility_report=report_dict,
+            issues=hard_issues,
         )
 
+    def _evaluate_required_asset_sizes(
+        self, scene: Any
+    ) -> tuple[list[str], list[HardIssue]]:
+        """Reject required furniture whose final mesh dimensions are unusable."""
+        if not self.size_bounds:
+            return [], []
+        required = set((self.required_counts or {}).keys())
+        reasons: list[str] = []
+        issues: list[HardIssue] = []
+        for object_id, obj in getattr(scene, "objects", {}).items():
+            if getattr(obj, "immutable", False) or not self._is_furniture_object(obj):
+                continue
+            category = self._infer_category(
+                f"{object_id} {getattr(obj, 'name', '')} "
+                f"{getattr(obj, 'description', '')}"
+            )
+            if category not in required:
+                continue
+            bounds_cfg = self.size_bounds.get(category)
+            if bounds_cfg is None and category in ("student_desk", "teacher_desk"):
+                bounds_cfg = self.size_bounds.get("desk")
+            if bounds_cfg is None:
+                continue
+            bounds_cfg = _plain_dict(bounds_cfg)
+            min_dims = list(bounds_cfg.get("min", []) or [])
+            max_dims = list(bounds_cfg.get("max", []) or [])
+            bbox_min = getattr(obj, "bbox_min", None)
+            bbox_max = getattr(obj, "bbox_max", None)
+            if bbox_min is None or bbox_max is None:
+                continue
+            try:
+                dims = [
+                    abs(float(upper) - float(lower))
+                    for lower, upper in zip(bbox_min, bbox_max)
+                ]
+            except (TypeError, ValueError):
+                continue
+            if len(dims) != 3:
+                continue
+            below = len(min_dims) == 3 and any(
+                value + 1e-3 < float(limit)
+                for value, limit in zip(dims, min_dims)
+            )
+            above = len(max_dims) == 3 and any(
+                value - 1e-3 > float(limit)
+                for value, limit in zip(dims, max_dims)
+            )
+            if not below and not above:
+                continue
+            reason = (
+                f"required {category} asset {object_id} has unusable dimensions "
+                f"{[round(value, 3) for value in dims]}; expected within "
+                f"min={min_dims or 'unset'}, max={max_dims or 'unset'}"
+            )
+            reasons.append(reason)
+            issues.append(
+                HardIssue(
+                    issue_type="asset_invalid",
+                    object_a_id=str(object_id),
+                    details=reason,
+                )
+            )
+        return reasons, issues
+
     def _room_bounds_xy(self, scene: Any) -> tuple[float, float, float, float] | None:
-        room_geometry = getattr(scene, "room_geometry", None)
-        if room_geometry is None:
-            return None
-        length = float(getattr(room_geometry, "length", 0.0) or 0.0)
-        width = float(getattr(room_geometry, "width", 0.0) or 0.0)
-        if length <= 0 or width <= 0:
-            return None
-        return (-length / 2.0, -width / 2.0, length / 2.0, width / 2.0)
+        return furnishable_room_bounds_xy(scene)
 
     def _is_furniture_object(self, obj: Any) -> bool:
         object_type = getattr(obj, "object_type", "")
@@ -1423,6 +1694,50 @@ class FurnitureSafetyController:
 
         return hard_reasons, soft_reasons
 
+    def _parse_hard_issues(self, physics_context: str) -> list[HardIssue]:
+        """Preserve collision object IDs that were previously flattened to text."""
+        issues: list[HardIssue] = []
+        collision_pattern = re.compile(
+            r"^\s*-\s+(?P<a>\S+)\s+collides\s+with\s+(?P<b>\S+)\s+"
+            r"\((?:(?P<depth>[0-9.]+)cm penetration|touching)\)\s*$",
+            flags=re.IGNORECASE | re.MULTILINE,
+        )
+        seen_pairs: set[tuple[str, str]] = set()
+        for match in collision_pattern.finditer(str(physics_context or "")):
+            object_a = match.group("a")
+            object_b = match.group("b")
+            pair = tuple(sorted((object_a, object_b)))
+            if pair in seen_pairs:
+                continue
+            seen_pairs.add(pair)
+            depth_cm = float(match.group("depth") or 0.0)
+            issues.append(
+                HardIssue(
+                    issue_type="collision_or_overlap",
+                    object_a_id=object_a,
+                    object_b_id=object_b,
+                    penetration_depth_m=depth_cm / 100.0,
+                    details=match.group(0).strip(" -"),
+                )
+            )
+
+        text = str(physics_context or "").lower()
+        if "door clearance violations" in text or "open connection blocked" in text:
+            issues.append(
+                HardIssue(
+                    issue_type="door_or_opening_clearance",
+                    details="Door or open-connection clearance violation",
+                )
+            )
+        if "geometry construction failed" in text or "drake/qhull" in text:
+            issues.append(
+                HardIssue(
+                    issue_type="asset_invalid",
+                    details="Geometry construction failed",
+                )
+            )
+        return issues
+
     def remember_hard_valid_scene_state(
         self,
         scene_state: dict[str, Any],
@@ -1430,6 +1745,7 @@ class FurnitureSafetyController:
         weighted_score: float | None = None,
         scores: CritiqueWithScores | None = None,
         render_dir: Path | None = None,
+        score_source: str = "unscored_hard_valid",
     ) -> bool:
         """Save a deterministic hard-valid checkpoint when useful."""
         if not self.enabled:
@@ -1446,6 +1762,9 @@ class FurnitureSafetyController:
 
         self.best_scene_state = copy.deepcopy(scene_state)
         self.best_scores = copy.deepcopy(scores) if scores is not None else None
+        self.best_score_source = (
+            score_source if scores is not None else "unscored_hard_valid"
+        )
         self.best_render_dir = render_dir
         self.best_weighted_score = max(candidate_score, self.best_weighted_score)
         self.best_reasons = [f"deterministic hard-valid checkpoint from {source}"]
@@ -1468,6 +1787,7 @@ class FurnitureSafetyController:
         scene_state: dict[str, Any],
         render_dir: Path | None,
         hard_state_evaluation: HardStateEvaluation | None = None,
+        score_source: str = "vlm_critic",
     ) -> CandidateDecision:
         """Evaluate a critiqued candidate and update/rollback best state metadata."""
         evaluation = self.evaluate_scores(scores)
@@ -1497,6 +1817,7 @@ class FurnitureSafetyController:
             if self.best_scene_state is None or improvement >= self.min_accept_delta:
                 self.best_scene_state = copy.deepcopy(scene_state)
                 self.best_scores = copy.deepcopy(scores)
+                self.best_score_source = score_source
                 self.best_render_dir = render_dir
                 self.best_weighted_score = evaluation.weighted_score
                 self.best_reasons = []

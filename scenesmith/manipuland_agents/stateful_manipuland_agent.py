@@ -63,6 +63,7 @@ from scenesmith.scenebenchmark_critic.manipuland_targets import (
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.dining_place_setting import (
     evaluate_dining_place_setting_alignment,
 )
+from scenesmith.scene_expert.exceptions import StageValidationError
 from scenesmith.utils.logging import BaseLogger
 
 console_logger = logging.getLogger(__name__)
@@ -666,15 +667,18 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
             prompt_enum=planner_runner_prompt,
         )
 
-        result: RunResult = await Runner.run(
+        result = await self._run_agent_with_stage_sla(
             starting_agent=self.planner,
             input=runner_instruction,
-            max_turns=self.cfg.agents.planner_agent.max_turns,
+            role="planner",
+            event="planner_workflow",
+            configured_max_turns=self.cfg.agents.planner_agent.max_turns,
             run_config=self._create_run_config(),
         )
-        log_agent_usage(result=result, agent_name="PLANNER (MANIPULAND)")
+        if result is not None:
+            log_agent_usage(result=result, agent_name="PLANNER (MANIPULAND)")
 
-        if result.final_output:
+        if result is not None and result.final_output:
             log_agent_response(
                 response=result.final_output, agent_name="PLANNER (MANIPULAND)"
             )
@@ -699,8 +703,19 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
             # Pass update_checkpoint=False to preserve N-1 checkpoint for reset check.
             await self._request_critique_impl(update_checkpoint=False)
 
-        # Validate final scene and save scores.
-        await self._finalize_scene_and_scores()
+        # Per-furniture workflows are substeps of one manipuland stage. A zero
+        # result on the first support surface must not trigger the global
+        # minimum-output contract before later selected furniture is attempted.
+        self._defer_stage_completion_contract = True
+        try:
+            await self._finalize_scene_and_scores()
+        finally:
+            self._defer_stage_completion_contract = False
+        if self._last_score_provenance.get("score_source") == "vlm_critic":
+            self._stage_trusted_score_available = True
+            visual_score = self._normalized_visual_score(self.previous_scores)
+            if visual_score is not None:
+                self._stage_visual_scores.append(visual_score)
 
         console_logger.info(
             f"Completed manipuland placement for furniture {furniture_id}"
@@ -799,6 +814,10 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
         """
         console_logger.info("Starting manipuland placement")
         self.scene = scene
+        self._configure_stage_runtime(scene)
+        self.scene = scene
+        self._stage_trusted_score_available = False
+        self._stage_visual_scores: list[float] = []
 
         # Clear render cache to ensure fresh renders for manipulands.
         # This prevents cache key collisions when object IDs are reused.
@@ -817,11 +836,55 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
 
         if not furniture_data:
             console_logger.info("No furniture identified for manipuland placement")
+            if self._stage_runtime_budget:
+                eligible_support_objects = [
+                    obj
+                    for obj in scene.get_objects_by_type(ObjectType.FURNITURE)
+                    if not getattr(obj, "immutable", False)
+                ]
+                if not eligible_support_objects:
+                    raise StageValidationError(
+                        stage=self.agent_type.value,
+                        reasons=[
+                            "support surface unavailable: the scene contains no "
+                            "eligible furniture for manipuland placement"
+                        ],
+                    )
+                hard_state = self._evaluate_current_hard_state()
+                if hard_state is not None and not hard_state.hard_valid:
+                    raise StageValidationError(
+                        stage=self.agent_type.value,
+                        reasons=list(hard_state.hard_reasons),
+                    )
             return
 
         console_logger.info(
             f"Identified {len(furniture_data)} furniture pieces to populate"
         )
+        furniture_data = [
+            selection
+            for selection in furniture_data
+            if (
+                (target := scene.get_object(selection.furniture_id)) is not None
+                and str(
+                    getattr(
+                        getattr(target, "object_type", ""),
+                        "value",
+                        getattr(target, "object_type", ""),
+                    )
+                ).lower()
+                == ObjectType.FURNITURE.value
+                and not getattr(target, "immutable", False)
+            )
+        ]
+        if not furniture_data:
+            raise StageValidationError(
+                stage=self.agent_type.value,
+                reasons=[
+                    "missing required stage output: the analyzer selection "
+                    "contained no eligible furniture support target"
+                ],
+            )
         max_target_furniture = self._get_max_target_furniture()
         if max_target_furniture > 0 and len(furniture_data) > max_target_furniture:
             original_count = len(furniture_data)
@@ -975,6 +1038,31 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
                             simulation_html_path=sim_html_path,
                         )
 
+                    minimum = int(
+                        getattr(
+                            self.scene,
+                            "scene_expert_min_output_objects",
+                            0,
+                        )
+                        or 0
+                    )
+                    placed_count = len(
+                        self.scene.get_objects_by_type(ObjectType.MANIPULAND)
+                    )
+                    if await self._manipuland_stage_contract_satisfied(
+                        minimum=minimum,
+                        placed_count=placed_count,
+                    ):
+                        console_logger.info(
+                            "Manipuland completion contract satisfied after %s "
+                            "(%d/%d objects with trusted critic); stopping bounded "
+                            "target search",
+                            furniture_id,
+                            placed_count,
+                            minimum,
+                        )
+                        break
+
                 except Exception as e:
                     console_logger.error(
                         f"Error populating furniture {furniture_id}: {e}", exc_info=True
@@ -982,7 +1070,100 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
                     # Continue to next furniture piece.
                     continue
 
+        if self._stage_runtime_budget:
+            final_hard_state = self._evaluate_current_hard_state()
+            if final_hard_state is not None and not final_hard_state.hard_valid:
+                raise StageValidationError(
+                    stage=self.agent_type.value,
+                    reasons=list(final_hard_state.hard_reasons),
+                )
+            current_scene_scored = (
+                self._stage_trusted_score_available
+                and self._last_scored_scene_hash == self.scene.content_hash()
+            )
+            if not current_scene_scored:
+                raise StageValidationError(
+                    stage=self.agent_type.value,
+                    reasons=[
+                        "visual critic did not produce a trustworthy score for "
+                        "the final manipuland scene after bounded compact retries"
+                    ],
+                )
+            final_visual_score = (
+                self._stage_visual_scores[-1]
+                if self._stage_visual_scores
+                else None
+            )
+            minimum_visual_score = float(
+                self._stage_budget_value("min_visual_score", 0.60) or 0.60
+            )
+            if (
+                final_visual_score is not None
+                and final_visual_score < minimum_visual_score
+            ):
+                raise StageValidationError(
+                    stage=self.agent_type.value,
+                    reasons=[
+                        "visual critic quality below stage threshold: "
+                        f"{final_visual_score:.3f} < {minimum_visual_score:.3f}"
+                    ],
+                )
+
         console_logger.info("Manipuland placement complete")
+
+    async def _manipuland_stage_contract_satisfied(
+        self,
+        *,
+        minimum: int,
+        placed_count: int,
+    ) -> bool:
+        """Evaluate the committed manipuland stage, not each support target.
+
+        Per-furniture post-processing can make a physically meaningful change
+        after that furniture's critic score.  Re-score that exact aggregate
+        scene once, then stop target search as soon as the stage-wide minimum
+        and quality contract pass.  This prevents an empty second nightstand
+        from overwriting a valid first-nightstand stage with a local zero score.
+        """
+
+        if (
+            minimum <= 0
+            or placed_count < minimum
+            or not self._stage_trusted_score_available
+            or not self._stage_visual_scores
+        ):
+            return False
+
+        threshold = float(
+            self._stage_budget_value("min_visual_score", 0.60) or 0.60
+        )
+        if self._stage_visual_scores[-1] < threshold:
+            return False
+
+        hard_state = self._evaluate_current_hard_state()
+        if hard_state is not None and not hard_state.hard_valid:
+            return False
+
+        current_hash = self.scene.content_hash()
+        if self._last_scored_scene_hash != current_hash:
+            console_logger.info(
+                "Per-furniture post-processing changed the manipuland candidate; "
+                "scoring the exact aggregate stage before target selection continues"
+            )
+            await self._request_critique_impl(update_checkpoint=False)
+            if self._last_score_provenance.get("score_source") != "vlm_critic":
+                return False
+            refreshed_score = self._normalized_visual_score(self.previous_scores)
+            if refreshed_score is None:
+                return False
+            self._stage_trusted_score_available = True
+            self._stage_visual_scores.append(refreshed_score)
+
+        return (
+            self._last_scored_scene_hash == self.scene.content_hash()
+            and bool(self._stage_visual_scores)
+            and self._stage_visual_scores[-1] >= threshold
+        )
 
     def _get_max_target_furniture(self) -> int:
         try:

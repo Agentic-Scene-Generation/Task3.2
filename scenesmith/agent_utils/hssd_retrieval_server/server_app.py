@@ -294,10 +294,13 @@ class HssdRetrievalApp(flask.Flask):
             raise FatalRetrievalError(self._fatal_error)
         retriever = self._get_retriever()
 
-        # Convert dimensions tuple to numpy array if provided.
+        # Preserve the SceneSmith [width, depth, height] request contract here.
+        # The retriever handles both evaluated Z-up and raw glTF Y-up candidate
+        # extents because HSSD's sparse orientation metadata leaves both forms
+        # present in the corpus.
         desired_dimensions = None
         if request.desired_dimensions:
-            desired_dimensions = np.array(request.desired_dimensions)
+            desired_dimensions = np.asarray(request.desired_dimensions, dtype=float)
 
         # Retrieve candidates sorted by bbox_score, limited by num_candidates.
         candidates = retriever.retrieve_multiple(

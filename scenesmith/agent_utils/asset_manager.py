@@ -1,6 +1,10 @@
+import hashlib
+import json
 import logging
+import os
 import re
 import shutil
+import threading
 import time
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -24,6 +28,7 @@ from scenesmith.agent_utils.asset_router.dataclasses import (
     AssetItem,
     GeneratedGeometry,
     ModificationInfo,
+    ValidationResult,
 )
 from scenesmith.agent_utils.asset_router.rendered_asset_choice import (
     RenderedAssetChoice,
@@ -33,6 +38,7 @@ from scenesmith.agent_utils.asset_router.rendered_asset_choice import (
     is_floor_covering_request,
 )
 from scenesmith.agent_utils.semantic_names import normalize_semantic_name
+from scenesmith.agent_utils.asset_runtime import AssetRuntimeGate, semantic_asset_family
 from scenesmith.agent_utils.convex_decomposition_server import ConvexDecompositionClient
 from scenesmith.agent_utils.geometry_generation_server.client import (
     GeometryGenerationClient,
@@ -62,6 +68,7 @@ from scenesmith.agent_utils.mesh_physics_analyzer import (
     MeshPhysicsAnalysis,
     analyze_mesh_orientation_and_material,
     build_deterministic_hssd_physics,
+    get_front_axis_from_image_number,
 )
 from scenesmith.agent_utils.mesh_utils import (
     load_mesh_as_trimesh,
@@ -430,114 +437,90 @@ class AssetManager:
                 cfg=cfg,
                 blender_server=blender_server,
             )
+        self._thin_covering_router = self.router
+        if (
+            thin_covering_enabled
+            and self._thin_covering_router is None
+            and agent_type == AgentType.FURNITURE
+        ):
+            self._thin_covering_router = AssetRouter(
+                agent_type=agent_type,
+                vlm_service=vlm_service,
+                cfg=cfg,
+                blender_server=blender_server,
+            )
+        # Direct HSSD semantic admission is independent from request routing and
+        # the thin-covering/materials service. ACP commonly disables both; tying
+        # validation to either one silently admitted category-mismatched assets.
+        semantic_validation_cfg = getattr(
+            getattr(cfg.asset_manager, "hssd", None),
+            "semantic_validation",
+            None,
+        )
+        self._asset_validation_router = self.router
+        if (
+            self.general_asset_source == "hssd"
+            and bool(getattr(semantic_validation_cfg, "enabled", False))
+            and self._asset_validation_router is None
+        ):
+            console_logger.info(
+                "Initializing independent HSSD semantic validation router"
+            )
+            self._asset_validation_router = AssetRouter(
+                agent_type=agent_type,
+                vlm_service=vlm_service,
+                cfg=cfg,
+                blender_server=blender_server,
+            )
 
         # Track duplicate requests from the last generate_assets call.
         self.last_duplicate_info: dict[str, list[int]] | None = None
         self._fatal_asset_error: str | None = None
+        self._runtime_gate = AssetRuntimeGate()
+        self._collision_geometry_cache: dict[str, list[trimesh.Trimesh]] = {}
+        self._collision_cache_lock = threading.Lock()
+        # Reuse the direct HSSD semantic call as an orientation calibration call.
+        # Cache semantic decisions by dataset ID + requested family, and retain
+        # the selected asset's calibration by dataset ID for canonicalization.
+        self._direct_hssd_validation_results: dict[str, ValidationResult] = {}
+        self._direct_hssd_semantic_cache: dict[str, ValidationResult] = {}
+        self._execution_clock: object | None = None
+        self._asset_acquisition_timeout_seconds = 300
+        self._reuse_only = False
 
-    def _analyze_mesh_physics(
+    def configure_runtime_budget(
         self,
         *,
-        mesh_path: Path,
-        asset_source: str,
-        object_name: str,
-        debug_output_dir: Path,
-    ) -> MeshPhysicsAnalysis:
-        """Resolve asset physics without making HSSD depend on VLM indexing."""
-        if (
-            asset_source == "hssd"
-            and str(
-                getattr(
-                    self.cfg.asset_manager,
-                    "hssd_physics_analysis_mode",
-                    "deterministic",
-                )
-            ).lower()
-            == "deterministic"
-        ):
-            physics = build_deterministic_hssd_physics(
-                mesh_path, object_name=object_name
-            )
-            console_logger.info(
-                "Using deterministic HSSD physics for %s: material=%s, mass=%.1fkg",
-                object_name,
-                physics.material,
-                physics.mass_kg,
-            )
-            return physics
-        return analyze_mesh_orientation_and_material(
-            mesh_path=mesh_path,
-            vlm_service=self.vlm_service,
-            cfg=self.cfg,
-            elevation_degrees=self.side_view_elevation_degrees,
-            blender_server=self.blender_server,
-            num_side_views=self.num_side_views_for_physics_analysis,
-            prompt_type="hssd" if asset_source == "hssd" else "generated",
-            include_vertical_views=asset_source != "hssd",
-            debug_output_dir=debug_output_dir,
+        stage: str,
+        budget: dict,
+        required_objects: list[str],
+        execution_clock: object | None = None,
+    ) -> None:
+        """Configure per-stage acquisition limits supplied by SceneExpert."""
+        self._execution_clock = execution_clock
+        self._asset_acquisition_timeout_seconds = max(
+            30,
+            int(budget.get("asset_acquisition_timeout_seconds", 300) or 300),
+        )
+        self._runtime_gate.configure(
+            stage=stage,
+            budget=budget,
+            required_objects=required_objects,
+        )
+        console_logger.info(
+            "Asset runtime budget configured for %s: required=%s, requests=%d, "
+            "optional_families=%d, assets_per_request=%d, retries_per_family=%d",
+            stage,
+            sorted(self._runtime_gate.required_families),
+            self._runtime_gate.max_asset_requests,
+            self._runtime_gate.max_optional_families,
+            self._runtime_gate.max_assets_per_request,
+            self._runtime_gate.max_retries_per_family,
         )
 
-    def _scale_and_measure_canonical_mesh(
-        self,
-        *,
-        canonical_path: Path,
-        final_path: Path,
-        desired_dimensions: list[float] | tuple[float, ...] | None,
-        uniform_fit_min_ratio: float = 0.5,
-        fit_axes: tuple[int, ...] = (0, 1, 2),
-        exact_fit_axes: tuple[int, ...] = (),
-    ) -> tuple[Path, np.ndarray, np.ndarray, float]:
-        """Scale canonical Y-up glTF and expose SceneSmith-frame bounds."""
-        applied_scale = 1.0
-        if desired_dimensions is not None:
-            scene_to_gltf_axis = {0: 0, 1: 2, 2: 1}
-            gltf_fit_axes = tuple(scene_to_gltf_axis[axis] for axis in fit_axes)
-            final_path, applied_scale = scale_mesh_uniformly_to_dimensions(
-                mesh_path=canonical_path,
-                desired_dimensions=scene_dimensions_to_gltf_y_up(desired_dimensions),
-                output_path=final_path,
-                min_dimension_meters=self.min_mesh_dimension_meters,
-                relative_threshold=self.mesh_relative_dimension_threshold,
-                fit_axes=gltf_fit_axes,
-            )
-            if exact_fit_axes:
-                gltf_exact_axes = tuple(
-                    scene_to_gltf_axis[axis] for axis in exact_fit_axes
-                )
-                mesh = load_mesh_as_trimesh(final_path, force_merge=True)
-                current_dimensions = mesh.bounds[1] - mesh.bounds[0]
-                desired_gltf_dimensions = np.asarray(
-                    scene_dimensions_to_gltf_y_up(desired_dimensions), dtype=float
-                )
-                axis_scales = np.ones(3, dtype=float)
-                for axis in gltf_exact_axes:
-                    if current_dimensions[axis] <= 0.0:
-                        raise ValueError(
-                            "Cannot exactly fit a degenerate mesh axis: "
-                            f"axis={axis}, dimensions={current_dimensions.tolist()}"
-                        )
-                    axis_scales[axis] = (
-                        desired_gltf_dimensions[axis] / current_dimensions[axis]
-                    )
-                mesh.apply_transform(np.diag([*axis_scales, 1.0]))
-                mesh.export(final_path)
-                console_logger.info(
-                    "Exactly fitted mesh axes %s with scale factors %s",
-                    gltf_exact_axes,
-                    axis_scales.round(4).tolist(),
-                )
-        else:
-            canonical_path.replace(final_path)
-        mesh = load_mesh_as_trimesh(final_path, force_merge=True)
-        bbox_min, bbox_max = gltf_y_up_bounds_to_scene_z_up(mesh.bounds)
-        if desired_dimensions is not None:
-            validate_uniform_dimension_fit(
-                bbox_max - bbox_min,
-                desired_dimensions,
-                min_ratio=uniform_fit_min_ratio,
-                fit_axes=fit_axes,
-            )
-        return final_path, bbox_min, bbox_max, applied_scale
+    def set_reuse_only(self, enabled: bool) -> None:
+        """Restrict a placement continuation to already admitted assets."""
+        self._reuse_only = bool(enabled)
 
     def _hssd_uniform_fit_min_ratio(self, description: str) -> float:
         """Choose a semantic floor for uniformly fitted HSSD proportions."""
@@ -589,9 +572,34 @@ class AssetManager:
                 "Collision client not available. Cannot generate collision geometry."
             )
 
+        stat = mesh_path.stat()
+        method_cfg = (
+            self.collision_coacd_cfg
+            if self.collision_method == "coacd"
+            else self.collision_vhacd_cfg
+        )
+        cache_key = "|".join(
+            (
+                str(mesh_path.resolve()),
+                str(stat.st_size),
+                str(stat.st_mtime_ns),
+                str(self.collision_method),
+                repr(method_cfg),
+            )
+        )
+        with self._collision_cache_lock:
+            cached = self._collision_geometry_cache.get(cache_key)
+        if cached is not None:
+            console_logger.info(
+                "Collision geometry cache hit for %s (%d piece(s))",
+                mesh_path.name,
+                len(cached),
+            )
+            return [piece.copy() for piece in cached]
+
         # Build parameter dict based on method.
         if self.collision_method == "coacd":
-            return self.collision_client.generate_collision_geometry(
+            pieces = self.collision_client.generate_collision_geometry(
                 mesh_path=mesh_path,
                 method="coacd",
                 threshold=self.collision_coacd_cfg.threshold,
@@ -613,7 +621,7 @@ class AssetManager:
             )
         else:
             # V-HACD method.
-            return self.collision_client.generate_collision_geometry(
+            pieces = self.collision_client.generate_collision_geometry(
                 mesh_path=mesh_path,
                 method="vhacd",
                 max_convex_hulls=self.collision_vhacd_cfg.max_convex_hulls,
@@ -626,6 +634,15 @@ class AssetManager:
                 min_edge_length=self.collision_vhacd_cfg.min_edge_length,
                 find_best_plane=self.collision_vhacd_cfg.find_best_plane,
             )
+        with self._collision_cache_lock:
+            self._collision_geometry_cache[cache_key] = [
+                piece.copy() for piece in pieces
+            ]
+            while len(self._collision_geometry_cache) > 64:
+                self._collision_geometry_cache.pop(
+                    next(iter(self._collision_geometry_cache))
+                )
+        return pieces
 
     def _validate_sam3d_config(self) -> None:
         """Validate SAM3D configuration at startup.
@@ -878,6 +895,809 @@ class AssetManager:
             friction_coefficient=physics_analysis.friction_coefficient,
         )
 
+    def _analyze_mesh_physics(
+        self,
+        *,
+        mesh_path: Path,
+        asset_source: str,
+        object_name: str,
+        debug_output_dir: Path,
+    ) -> MeshPhysicsAnalysis:
+        """Use deterministic HSSD metadata unless explicitly configured for VLM."""
+        is_hssd = asset_source == "hssd"
+        hssd_mode = str(
+            getattr(
+                self.cfg.asset_manager,
+                "hssd_physics_analysis_mode",
+                "deterministic",
+            )
+        ).lower()
+        if is_hssd and hssd_mode == "deterministic":
+            physics = build_deterministic_hssd_physics(
+                mesh_path, object_name=object_name
+            )
+            console_logger.info(
+                "Using deterministic HSSD physics for %s: material=%s, mass=%.1fkg",
+                object_name,
+                physics.material,
+                physics.mass_kg,
+            )
+            return physics
+
+        return analyze_mesh_orientation_and_material(
+            mesh_path=mesh_path,
+            vlm_service=self.vlm_service,
+            cfg=self.cfg,
+            elevation_degrees=self.side_view_elevation_degrees,
+            blender_server=self.blender_server,
+            num_side_views=self.num_side_views_for_physics_analysis,
+            prompt_type="hssd" if is_hssd else "generated",
+            include_vertical_views=not is_hssd,
+            debug_output_dir=debug_output_dir,
+        )
+
+    def _is_deterministic_floor_covering(
+        self, description: str, short_name: str, object_type: ObjectType
+    ) -> bool:
+        """Return whether a non-router furniture request should bypass HSSD."""
+        return (
+            self.agent_type == AgentType.FURNITURE
+            and object_type == ObjectType.FURNITURE
+            and self._thin_covering_router is not None
+            and semantic_asset_family(description, short_name) == "rug"
+        )
+
+    def _generate_deterministic_floor_covering(
+        self, request: AssetGenerationRequest, index: int
+    ) -> SceneObject:
+        """Generate a correctly sized rug without router analysis or VLM validation."""
+        if self._thin_covering_router is None:
+            raise RuntimeError("Thin-covering strategy is not available")
+        item = AssetItem(
+            description=request.object_descriptions[index],
+            short_name=request.short_names[index],
+            dimensions=list(request.desired_dimensions[index]),
+            object_type=request.object_type,
+            strategies=["thin_covering"],
+            thin_covering_type="tileable",
+        )
+        generated = (
+            self._thin_covering_router.generate_thin_covering_without_validation(
+                item,
+                materials_client=self.materials_client,
+                image_generator=self.image_generator,
+                geometry_dir=self.geometry_dir,
+                debug_dir=self.debug_dir,
+                scene_id=request.scene_id,
+            )
+        )
+        if generated is None:
+            raise RuntimeError(
+                f"No procedural material available for floor covering '{item.description}'"
+            )
+        return self._convert_generated_to_scene_object(
+            item=item, generated=generated, request=request
+        )
+
+    def _hssd_semantic_validation_settings(
+        self, description: str, short_name: str
+    ) -> tuple[bool, int, bool, float, int, float]:
+        """Resolve targeted direct-HSSD validation without enabling LLM routing."""
+        hssd_cfg = getattr(self.cfg.asset_manager, "hssd", None)
+        validation_cfg = getattr(hssd_cfg, "semantic_validation", None)
+        if validation_cfg is None:
+            return False, 1, False, 180.0, 0, 0.55
+        try:
+            enabled = bool(validation_cfg.get("enabled", False))
+            families = {
+                str(value).lower()
+                for value in list(validation_cfg.get("families", []) or [])
+            }
+            max_candidates = max(
+                1, int(validation_cfg.get("max_candidates", 2) or 2)
+            )
+            use_lenient = bool(validation_cfg.get("use_lenient", False))
+            timeout_seconds = float(
+                validation_cfg.get("timeout_seconds", 180.0) or 180.0
+            )
+            max_retries = max(0, int(validation_cfg.get("max_retries", 0) or 0))
+            min_orientation_confidence = float(
+                validation_cfg.get("min_orientation_confidence", 0.55) or 0.55
+            )
+        except Exception:
+            enabled = bool(getattr(validation_cfg, "enabled", False))
+            families = {
+                str(value).lower()
+                for value in list(getattr(validation_cfg, "families", []) or [])
+            }
+            max_candidates = max(
+                1, int(getattr(validation_cfg, "max_candidates", 2) or 2)
+            )
+            use_lenient = bool(getattr(validation_cfg, "use_lenient", False))
+            timeout_seconds = float(
+                getattr(validation_cfg, "timeout_seconds", 180.0) or 180.0
+            )
+            max_retries = max(0, int(getattr(validation_cfg, "max_retries", 0) or 0))
+            min_orientation_confidence = float(
+                getattr(validation_cfg, "min_orientation_confidence", 0.55) or 0.55
+            )
+
+        family = semantic_asset_family(description, short_name)
+        return (
+            enabled and family in families,
+            max_candidates,
+            use_lenient,
+            max(1.0, timeout_seconds),
+            max_retries,
+            max(0.0, min(1.0, min_orientation_confidence)),
+        )
+
+    def _hssd_validation_config_value(self, key: str, default: object) -> object:
+        hssd_cfg = getattr(self.cfg.asset_manager, "hssd", None)
+        validation_cfg = getattr(hssd_cfg, "semantic_validation", None)
+        if validation_cfg is None:
+            return default
+        try:
+            return validation_cfg.get(key, default)
+        except Exception:
+            return getattr(validation_cfg, key, default)
+
+    def _is_required_hssd_family(self, family: str) -> bool:
+        required_families = getattr(
+            getattr(self, "_runtime_gate", None),
+            "required_families",
+            set(),
+        )
+        return family in set(required_families or set())
+
+    def _is_critical_hssd_family(self, family: str) -> bool:
+        configured = {
+            str(value).lower()
+            for value in list(
+                self._hssd_validation_config_value("critical_families", []) or []
+            )
+        }
+        return self._is_required_hssd_family(family) or family in configured
+
+    def _optional_hssd_candidate_is_ambiguous(
+        self,
+        candidates: list[HssdRetrievalResult],
+        *,
+        proportion_match_found: bool,
+    ) -> bool:
+        if not candidates or not proportion_match_found:
+            return True
+        minimum_score = float(
+            self._hssd_validation_config_value(
+                "optional_min_similarity_score",
+                0.28,
+            )
+            or 0.28
+        )
+        minimum_margin = float(
+            self._hssd_validation_config_value(
+                "optional_min_similarity_margin",
+                0.04,
+            )
+            or 0.04
+        )
+        selected_score = float(candidates[0].similarity_score)
+        competing_scores = sorted(
+            (
+                float(candidate.similarity_score)
+                for candidate in candidates[1:]
+            ),
+            reverse=True,
+        )
+        return selected_score < minimum_score or (
+            bool(competing_scores)
+            and selected_score - competing_scores[0] < minimum_margin
+        )
+
+    def _hssd_validation_cache_path(
+        self,
+        *,
+        candidate_id: str,
+        family: str,
+        use_lenient: bool,
+    ) -> Path | None:
+        configured_dir = str(
+            self._hssd_validation_config_value("cache_dir", "") or ""
+        ).strip()
+        cache_dir_value = os.environ.get(
+            "SCENEEXPERT_ASSET_VALIDATION_CACHE_DIR",
+            configured_dir,
+        ).strip()
+        if not cache_dir_value:
+            return None
+        cache_dir = Path(cache_dir_value).expanduser()
+        cache_key = hashlib.sha256(
+            (
+                f"hssd-semantic-v2|{candidate_id}|{family}|"
+                f"lenient={int(use_lenient)}"
+            ).encode("utf-8")
+        ).hexdigest()
+        return cache_dir / f"{cache_key}.json"
+
+    def _load_persistent_hssd_validation(
+        self,
+        *,
+        candidate_id: str,
+        family: str,
+        use_lenient: bool,
+    ) -> ValidationResult | None:
+        cache_path = self._hssd_validation_cache_path(
+            candidate_id=candidate_id,
+            family=family,
+            use_lenient=use_lenient,
+        )
+        if cache_path is None or not cache_path.exists():
+            return None
+        try:
+            payload = json.loads(cache_path.read_text(encoding="utf-8"))
+            return ValidationResult(
+                is_acceptable=bool(payload["is_acceptable"]),
+                reason=str(payload.get("reason", "cached validation")),
+                suggestions=list(payload.get("suggestions", []) or []),
+                front_view_image_index=payload.get("front_view_image_index"),
+                orientation_confidence=payload.get("orientation_confidence"),
+            )
+        except Exception as exc:
+            console_logger.warning(
+                "Ignoring unreadable HSSD semantic cache %s: %s",
+                cache_path,
+                exc,
+            )
+            return None
+
+    def _save_persistent_hssd_validation(
+        self,
+        *,
+        candidate_id: str,
+        family: str,
+        use_lenient: bool,
+        validation: ValidationResult,
+    ) -> None:
+        cache_path = self._hssd_validation_cache_path(
+            candidate_id=candidate_id,
+            family=family,
+            use_lenient=use_lenient,
+        )
+        if cache_path is None:
+            return
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "schema_version": "2.0",
+            "candidate_id": candidate_id,
+            "family": family,
+            "is_acceptable": validation.is_acceptable,
+            "reason": validation.reason,
+            "suggestions": validation.suggestions,
+            "front_view_image_index": validation.front_view_image_index,
+            "orientation_confidence": validation.orientation_confidence,
+        }
+        temporary = cache_path.with_name(
+            f".{cache_path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+        )
+        temporary.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        temporary.replace(cache_path)
+
+    def _calibrated_hssd_front_axis(self, mesh_id: str) -> str | None:
+        """Return a trusted front axis from the already-paid semantic VLM call."""
+        validation = getattr(self, "_direct_hssd_validation_results", {}).get(mesh_id)
+        if validation is None or validation.front_view_image_index is None:
+            return None
+        _, _, _, _, _, min_confidence = self._hssd_semantic_validation_settings(
+            mesh_id, mesh_id
+        )
+        confidence = float(validation.orientation_confidence or 0.0)
+        if confidence < min_confidence:
+            console_logger.warning(
+                "Ignoring low-confidence HSSD front calibration for %s (%.2f < %.2f)",
+                mesh_id,
+                confidence,
+                min_confidence,
+            )
+            return None
+        try:
+            raw_axis = get_front_axis_from_image_number(
+                image_number=int(validation.front_view_image_index),
+                num_side_views=4,
+                include_diagonal_views=False,
+                include_vertical_views=True,
+            )
+        except ValueError:
+            console_logger.warning(
+                "Ignoring invalid HSSD front-view image index %s for %s",
+                validation.front_view_image_index,
+                mesh_id,
+            )
+            return None
+        if raw_axis.lower() in {"z", "-z"}:
+            return None
+        return raw_axis.upper() if raw_axis.startswith("-") else f"+{raw_axis.upper()}"
+
+    def _select_direct_hssd_candidate(
+        self,
+        *,
+        candidates: list[HssdRetrievalResult],
+        description: str,
+        short_name: str,
+        desired_dimensions: list[float] | tuple[float, ...] | None = None,
+    ) -> HssdRetrievalResult:
+        """Select a visually valid candidate for silhouette-critical furniture.
+
+        The non-router path intentionally avoids an LLM request-analysis call, but
+        taking CLIP rank 1 blindly cannot reject a wall frame mislabeled as a bed.
+        For a small configurable set of high-impact furniture families, validate
+        the already retrieved top candidates directly with the existing VLM.
+        """
+        if not candidates:
+            raise ValueError("No results returned from HSSD server")
+
+        family = semantic_asset_family(description, short_name)
+        critical_family = self._is_critical_hssd_family(family)
+        proportion_match_found = True
+        if desired_dimensions is not None:
+            # Retrieval extents use the SceneSmith semantic order
+            # [width, depth, height]. Axis conversion belongs only at the
+            # exported glTF file boundary.
+            target = np.asarray(desired_dimensions, dtype=float)
+            target_variants = (
+                target,
+                np.asarray(
+                    scene_dimensions_to_gltf_y_up(desired_dimensions),
+                    dtype=float,
+                ),
+            )
+            min_ratio, max_ratio = self._uniform_dimension_fit_bounds(
+                critical_family=critical_family,
+            )
+            proportion_compatible: list[HssdRetrievalResult] = []
+            for candidate in candidates:
+                extents = np.asarray(candidate.size, dtype=float)
+                if np.any(extents <= 0):
+                    continue
+                for variant_index, target_variant in enumerate(target_variants):
+                    predicted = extents * float(
+                        np.median(target_variant / extents)
+                    )
+                    try:
+                        validate_uniform_dimension_fit(
+                            predicted,
+                            target_variant,
+                            min_ratio=min_ratio,
+                            max_ratio=max_ratio,
+                        )
+                        if critical_family:
+                            predicted_scene = (
+                                predicted
+                                if variant_index == 0
+                                else np.asarray(
+                                    [predicted[0], predicted[2], predicted[1]],
+                                    dtype=float,
+                                )
+                            )
+                            self._validate_configured_asset_size(
+                                dimensions=predicted_scene,
+                                description=description,
+                                short_name=short_name,
+                            )
+                    except ValueError:
+                        continue
+                    proportion_compatible.append(candidate)
+                    break
+            if proportion_compatible:
+                candidates = proportion_compatible
+            else:
+                proportion_match_found = False
+                if critical_family:
+                    raise ValueError(
+                        "No HSSD candidate satisfies the critical semantic and "
+                        f"dimension contract for '{description}' within ratios "
+                        f"[{min_ratio:.2f}, {max_ratio:.2f}]"
+                    )
+                console_logger.warning(
+                    "No retrieved HSSD candidate for '%s' fully matches the "
+                    "requested proportions; trying the best scale-invariant shape",
+                    description,
+                )
+
+        (
+            enabled,
+            max_candidates,
+            use_lenient,
+            timeout_seconds,
+            max_retries,
+            _,
+        ) = self._hssd_semantic_validation_settings(description, short_name)
+        validate_ambiguous_optional = bool(
+            self._hssd_validation_config_value(
+                "validate_ambiguous_optional",
+                False,
+            )
+        )
+        if not enabled and not critical_family and not validate_ambiguous_optional:
+            return candidates[0]
+        if (
+            not critical_family
+            and not self._optional_hssd_candidate_is_ambiguous(
+                candidates,
+                proportion_match_found=proportion_match_found,
+            )
+        ):
+            console_logger.info(
+                "Accepted optional HSSD candidate %s for '%s' from deterministic "
+                "dimension/CLIP evidence; VLM validation was not required",
+                candidates[0].hssd_id,
+                description,
+            )
+            return candidates[0]
+
+        validation_router = getattr(
+            self,
+            "_asset_validation_router",
+            getattr(self, "_thin_covering_router", None),
+        )
+        if validation_router is None:
+            console_logger.warning(
+                "Direct HSSD semantic validation is enabled for '%s' but no "
+                "validation router is available; using the dimension-ranked candidate",
+                description,
+            )
+            return candidates[0]
+
+        infrastructure_failures = 0
+        considered = candidates[:max_candidates]
+        validation_started = time.monotonic()
+        total_validation_seconds = max(
+            timeout_seconds,
+            float(
+                self._hssd_validation_config_value(
+                    "total_timeout_seconds",
+                    timeout_seconds * (2 if critical_family else 1),
+                )
+                or timeout_seconds
+            ),
+        )
+        for candidate_index, candidate in enumerate(considered):
+            validation_cache = getattr(self, "_direct_hssd_semantic_cache", None)
+            if validation_cache is None:
+                validation_cache = {}
+                self._direct_hssd_semantic_cache = validation_cache
+            validation_cache_key = f"{candidate.hssd_id}|{family}"
+            validation = validation_cache.get(validation_cache_key)
+            if validation is None:
+                validation = self._load_persistent_hssd_validation(
+                    candidate_id=candidate.hssd_id,
+                    family=family,
+                    use_lenient=use_lenient,
+                )
+                if validation is not None:
+                    validation_cache[validation_cache_key] = validation
+            mesh_path = Path(candidate.mesh_path)
+            validation_dir = (
+                self.debug_dir
+                / short_name
+                / f"hssd_{candidate_index:02d}_{candidate.hssd_id[:12]}_validation"
+            )
+            if validation is None:
+                allowed_retries = (
+                    max(1, max_retries)
+                    if critical_family
+                    else max(
+                        0,
+                        int(
+                            self._hssd_validation_config_value(
+                                "optional_max_retries",
+                                0,
+                            )
+                            or 0
+                        ),
+                    )
+                )
+                remaining_seconds = total_validation_seconds - (
+                    time.monotonic() - validation_started
+                )
+                if remaining_seconds <= 1.0:
+                    if not critical_family:
+                        console_logger.warning(
+                            "Optional HSSD semantic validation deadline expired "
+                            "for '%s'; accepting deterministic dimension/CLIP "
+                            "candidate %s",
+                            description,
+                            candidates[0].hssd_id,
+                        )
+                        return candidates[0]
+                    raise TimeoutError(
+                        "HSSD semantic validation exhausted its shared "
+                        f"{total_validation_seconds:.0f}s deadline for "
+                        f"'{description}'"
+                    )
+                per_attempt_timeout = min(
+                    timeout_seconds,
+                    remaining_seconds / (allowed_retries + 1),
+                )
+                validation = validation_router.validate_asset(
+                    mesh_path=mesh_path,
+                    description=description,
+                    output_dir=validation_dir,
+                    use_lenient=use_lenient,
+                    timeout_seconds=max(1.0, per_attempt_timeout),
+                    max_retries=allowed_retries,
+                )
+                validation_reason = str(validation.reason or "")
+                if not validation_reason.startswith(
+                    ("Rendering failed", "Validation call failed")
+                ):
+                    # Infrastructure outcomes are retryable and must not poison
+                    # the semantic cache for a later isolated stage retry.
+                    validation_cache[validation_cache_key] = validation
+                    self._save_persistent_hssd_validation(
+                        candidate_id=candidate.hssd_id,
+                        family=family,
+                        use_lenient=use_lenient,
+                        validation=validation,
+                    )
+            if validation.is_acceptable:
+                orientation_results = getattr(
+                    self, "_direct_hssd_validation_results", None
+                )
+                if orientation_results is None:
+                    orientation_results = {}
+                    self._direct_hssd_validation_results = orientation_results
+                orientation_results[candidate.hssd_id] = validation
+                console_logger.info(
+                    "Direct HSSD semantic validation selected candidate %s for '%s'",
+                    candidate.hssd_id,
+                    description,
+                )
+                return candidate
+
+            reason = str(validation.reason or "")
+            if reason.startswith(("Rendering failed", "Validation call failed")):
+                infrastructure_failures += 1
+            console_logger.warning(
+                "Rejected HSSD candidate %s for '%s': %s",
+                candidate.hssd_id,
+                description,
+                reason,
+            )
+
+        if infrastructure_failures == len(considered):
+            if not critical_family and bool(
+                getattr(
+                    self.cfg.asset_manager,
+                    "hssd_vlm_fallback_on_transient_error",
+                    True,
+                )
+            ):
+                console_logger.warning(
+                    "Optional HSSD VLM validation was unavailable for '%s'; "
+                    "accepting deterministic dimension/CLIP candidate %s",
+                    description,
+                    candidates[0].hssd_id,
+                )
+                return candidates[0]
+            raise TimeoutError(
+                "HSSD semantic validation infrastructure was unavailable for "
+                f"all {len(considered)} candidate(s) of '{description}'"
+            )
+
+        raise ValueError(
+            f"All {len(considered)} HSSD candidates failed visual semantic "
+            f"validation for '{description}'"
+        )
+
+    def _direct_hssd_candidate_count(
+        self, description: str, short_name: str
+    ) -> int:
+        enabled, max_candidates, _, _, _, _ = self._hssd_semantic_validation_settings(
+            description, short_name
+        )
+        if enabled:
+            return max_candidates
+        hssd_cfg = getattr(self.cfg.asset_manager, "hssd", None)
+        try:
+            return max(1, int(hssd_cfg.get("dimension_candidates", 3) or 3))
+        except Exception:
+            return max(1, int(getattr(hssd_cfg, "dimension_candidates", 3) or 3))
+
+    def _uniform_dimension_fit_bounds(
+        self,
+        *,
+        critical_family: bool = False,
+    ) -> tuple[float, float]:
+        """Return bounded residual tolerance for approximate LLM dimensions."""
+        if self.agent_type in {AgentType.WALL_MOUNTED, AgentType.CEILING_MOUNTED}:
+            # Mounted-object prompts often specify a target footprint while HSSD
+            # preserves a natural frame depth or pendant drop. Keep the guard
+            # bounded, but do not reject a semantic match for a 2-3x axial
+            # difference in an approximate designer estimate.
+            return 0.30, 2.50
+        if critical_family:
+            return (
+                float(
+                    self._hssd_validation_config_value(
+                        "critical_min_dimension_ratio",
+                        0.75,
+                    )
+                    or 0.75
+                ),
+                float(
+                    self._hssd_validation_config_value(
+                        "critical_max_dimension_ratio",
+                        1.35,
+                    )
+                    or 1.35
+                ),
+            )
+        return 0.50, 1.75
+
+    def _configured_asset_size_bounds(
+        self,
+        *,
+        description: str,
+        short_name: str,
+    ) -> tuple[list[float], list[float]] | None:
+        """Resolve the final hard-size contract used by furniture verification."""
+
+        if self.agent_type != AgentType.FURNITURE:
+            return None
+        safety_cfg = getattr(self.cfg, "furniture_safety_controller", None)
+        all_bounds = getattr(safety_cfg, "size_bounds", None)
+        if all_bounds is None:
+            return None
+
+        normalized_name = re.sub(
+            r"[^a-z0-9]+",
+            "_",
+            f"{short_name} {description}".lower(),
+        ).strip("_")
+        family = semantic_asset_family(description, short_name)
+        keys = []
+        if "twin_bed" in normalized_name or "single_bed" in normalized_name:
+            keys.append("twin_bed")
+        keys.extend((family, short_name))
+        for key in dict.fromkeys(value for value in keys if value):
+            try:
+                bounds_cfg = all_bounds.get(key)
+            except Exception:
+                bounds_cfg = getattr(all_bounds, key, None)
+            if bounds_cfg is None:
+                continue
+            try:
+                minimum = list(bounds_cfg.get("min", []) or [])
+                maximum = list(bounds_cfg.get("max", []) or [])
+            except Exception:
+                minimum = list(getattr(bounds_cfg, "min", []) or [])
+                maximum = list(getattr(bounds_cfg, "max", []) or [])
+            if len(minimum) == len(maximum) == 3:
+                return (
+                    [float(value) for value in minimum],
+                    [float(value) for value in maximum],
+                )
+        return None
+
+    def _validate_configured_asset_size(
+        self,
+        *,
+        dimensions: np.ndarray,
+        description: str,
+        short_name: str,
+    ) -> None:
+        """Reject assets that the downstream furniture verifier must reject."""
+
+        configured = self._configured_asset_size_bounds(
+            description=description,
+            short_name=short_name,
+        )
+        if configured is None:
+            return
+        minimum, maximum = configured
+        below = any(
+            float(value) + 1e-3 < lower
+            for value, lower in zip(dimensions, minimum)
+        )
+        above = any(
+            float(value) - 1e-3 > upper
+            for value, upper in zip(dimensions, maximum)
+        )
+        if below or above:
+            raise ValueError(
+                "Asset dimensions violate the shared furniture admission "
+                f"contract: actual={np.asarray(dimensions).round(3).tolist()}, "
+                f"expected min={minimum}, max={maximum}"
+            )
+
+    def _scale_and_measure_canonical_mesh(
+        self,
+        *,
+        canonical_path: Path,
+        final_path: Path,
+        desired_dimensions: list[float] | tuple[float, ...] | None,
+        description: str = "",
+        short_name: str = "",
+        uniform_fit_min_ratio: float | None = None,
+        fit_axes: tuple[int, ...] = (0, 1, 2),
+        exact_fit_axes: tuple[int, ...] = (),
+    ) -> tuple[Path, np.ndarray, np.ndarray, float]:
+        """Scale a Y-up mesh with main's axis fit and dev's admission checks."""
+        applied_scale = 1.0
+        if desired_dimensions is not None:
+            scene_to_gltf_axis = {0: 0, 1: 2, 2: 1}
+            gltf_fit_axes = tuple(scene_to_gltf_axis[axis] for axis in fit_axes)
+            gltf_dimensions = scene_dimensions_to_gltf_y_up(desired_dimensions)
+            final_path, applied_scale = scale_mesh_uniformly_to_dimensions(
+                mesh_path=canonical_path,
+                desired_dimensions=gltf_dimensions,
+                output_path=final_path,
+                min_dimension_meters=self.min_mesh_dimension_meters,
+                relative_threshold=self.mesh_relative_dimension_threshold,
+                fit_axes=gltf_fit_axes,
+            )
+            if exact_fit_axes:
+                gltf_exact_axes = tuple(
+                    scene_to_gltf_axis[axis] for axis in exact_fit_axes
+                )
+                mesh = load_mesh_as_trimesh(final_path, force_merge=True)
+                current_dimensions = mesh.bounds[1] - mesh.bounds[0]
+                desired_gltf_dimensions = np.asarray(gltf_dimensions, dtype=float)
+                axis_scales = np.ones(3, dtype=float)
+                for axis in gltf_exact_axes:
+                    if current_dimensions[axis] <= 0.0:
+                        raise ValueError(
+                            "Cannot exactly fit a degenerate mesh axis: "
+                            f"axis={axis}, dimensions={current_dimensions.tolist()}"
+                        )
+                    axis_scales[axis] = (
+                        desired_gltf_dimensions[axis] / current_dimensions[axis]
+                    )
+                mesh.apply_transform(np.diag([*axis_scales, 1.0]))
+                mesh.export(final_path)
+                console_logger.info(
+                    "Exactly fitted mesh axes %s with scale factors %s",
+                    gltf_exact_axes,
+                    axis_scales.round(4).tolist(),
+                )
+        else:
+            canonical_path.replace(final_path)
+
+        mesh = load_mesh_as_trimesh(final_path, force_merge=True)
+        bbox_min, bbox_max = gltf_y_up_bounds_to_scene_z_up(mesh.bounds)
+        if desired_dimensions is not None:
+            actual_dimensions = bbox_max - bbox_min
+            family = semantic_asset_family(description, short_name)
+            critical_family = self._is_critical_hssd_family(family)
+            min_ratio, max_ratio = self._uniform_dimension_fit_bounds(
+                critical_family=critical_family,
+            )
+            if uniform_fit_min_ratio is not None:
+                min_ratio = max(min_ratio, float(uniform_fit_min_ratio))
+            validate_uniform_dimension_fit(
+                actual_dimensions,
+                desired_dimensions,
+                min_ratio=min_ratio,
+                max_ratio=max_ratio,
+                fit_axes=fit_axes,
+            )
+            if critical_family:
+                self._validate_configured_asset_size(
+                    dimensions=actual_dimensions,
+                    description=description,
+                    short_name=short_name,
+                )
+            console_logger.info(
+                "Canonical asset dimensions: requested=%s, actual=%s, scale=%.3f",
+                list(desired_dimensions),
+                actual_dimensions.round(4).tolist(),
+                applied_scale,
+            )
+        return final_path, bbox_min, bbox_max, applied_scale
+
     def _retrieve_hssd_assets(
         self, request: AssetGenerationRequest
     ) -> AssetGenerationResult:
@@ -913,30 +1733,62 @@ class AssetManager:
         rendered_choice_enabled, rendered_choice_top_n, rendered_assets_dir = (
             hssd_rendered_choice_options(self.cfg)
         )
-        num_candidates = rendered_choice_top_n if rendered_choice_enabled else 1
+        # Rugs and carpets are 2D coverings, not freestanding HSSD furniture.
+        # Route these obvious cases deterministically even when the LLM router is
+        # disabled, avoiding both semantic mismatches and an extra model call.
+        floor_covering_indices = [
+            index
+            for index, (description, short_name) in enumerate(
+                zip(request.object_descriptions, request.short_names)
+            )
+            if self._is_deterministic_floor_covering(
+                description, short_name, request.object_type
+            )
+        ]
+        floor_covering_index_set = set(floor_covering_indices)
+        hssd_indices = [
+            index
+            for index in range(len(request.object_descriptions))
+            if index not in floor_covering_index_set
+        ]
 
         # Create batch requests for HSSD server with client-specified output dirs.
         retrieval_requests = [
             HssdRetrievalServerRequest(
-                object_description=desc,
+                object_description=request.object_descriptions[index],
                 object_type=request.object_type.value,
-                desired_dimensions=tuple(dims) if dims else None,
-                output_dir=str(config.sdf_dir),
+                desired_dimensions=(
+                    tuple(request.desired_dimensions[index])
+                    if request.desired_dimensions[index]
+                    else None
+                ),
+                output_dir=str(asset_path_configs[index].sdf_dir),
                 scene_id=request.scene_id,
-                num_candidates=num_candidates,
+                num_candidates=max(
+                    self._direct_hssd_candidate_count(
+                        request.object_descriptions[index],
+                        request.short_names[index],
+                    ),
+                    rendered_choice_top_n if rendered_choice_enabled else 1,
+                ),
             )
-            for desc, dims, config in zip(
-                request.object_descriptions,
-                request.desired_dimensions,
-                asset_path_configs,
-            )
+            for index in hssd_indices
         ]
 
         successful_objects: list[SceneObject] = []
         failed_assets: list[FailedAsset] = []
 
         # Submit batch to server and process streaming responses.
-        for index, response in self.hssd_client.retrieve_objects(retrieval_requests):
+        retrieval_responses = (
+            self.hssd_client.retrieve_objects(
+                retrieval_requests,
+                timeout_s=self._asset_acquisition_timeout_seconds,
+            )
+            if retrieval_requests
+            else []
+        )
+        for retrieval_index, response in retrieval_responses:
+            index = hssd_indices[retrieval_index]
             desc = request.object_descriptions[index]
             config = asset_path_configs[index]
 
@@ -1004,6 +1856,24 @@ class AssetManager:
                     FailedAsset(index=index, description=desc, error_message=str(e))
                 )
 
+        for index in floor_covering_indices:
+            desc = request.object_descriptions[index]
+            try:
+                successful_objects.append(
+                    self._generate_deterministic_floor_covering(request, index)
+                )
+                console_logger.info(
+                    "Generated deterministic floor covering: %s",
+                    request.short_names[index],
+                )
+            except Exception as e:
+                console_logger.error(
+                    "Failed to generate floor covering '%s': %s", desc, e, exc_info=True
+                )
+                failed_assets.append(
+                    FailedAsset(index=index, description=desc, error_message=str(e))
+                )
+
         return AssetGenerationResult(
             successful_assets=successful_objects, failed_assets=failed_assets
         )
@@ -1018,43 +1888,46 @@ class AssetManager:
         top_n: int,
         rendered_assets_dir: Path,
     ) -> RenderedAssetChoice:
-        """Apply rendered-choice ranking to the direct, non-router HSSD path."""
+        """Combine main's rendered ranking with dev's semantic validation."""
+        if not candidates:
+            raise ValueError("No results returned from HSSD server")
         if not enabled or len(candidates) <= 1:
-            return RenderedAssetChoice(
+            choice = RenderedAssetChoice(
                 candidates=candidates,
                 semantic_name=normalize_semantic_name(request.short_names[index])
                 or None,
             )
-        openai_config = self.cfg.openai
-        choice = choose_hssd_candidate_from_iso_renders(
-            candidates=candidates,
-            object_description=request.object_descriptions[index],
-            scene_context=request.scene_prompt_context,
-            vlm_service=self.vlm_service,
-            model=openai_config.model,
-            reasoning_effort=openai_config.reasoning_effort.asset_validation,
-            verbosity=openai_config.verbosity.asset_validation,
-            vision_detail=openai_config.vision_detail,
-            rendered_assets_dir=rendered_assets_dir,
-            top_n=top_n,
-            object_short_name=request.short_names[index],
-            requested_dimensions=request.desired_dimensions[index],
-            requested_shape=(
-                infer_floor_covering_footprint_shape(
-                    request.object_descriptions[index], request.short_names[index]
-                )
-                if is_floor_covering_request(
-                    request.object_descriptions[index], request.short_names[index]
-                )
-                else None
-            ),
-            semantic_name_candidates=(
-                request.semantic_name_candidates[index]
-                if request.semantic_name_candidates
-                and index < len(request.semantic_name_candidates)
-                else None
-            ),
-        )
+        else:
+            openai_config = self.cfg.openai
+            choice = choose_hssd_candidate_from_iso_renders(
+                candidates=candidates,
+                object_description=request.object_descriptions[index],
+                scene_context=request.scene_prompt_context,
+                vlm_service=self.vlm_service,
+                model=openai_config.model,
+                reasoning_effort=openai_config.reasoning_effort.asset_validation,
+                verbosity=openai_config.verbosity.asset_validation,
+                vision_detail=openai_config.vision_detail,
+                rendered_assets_dir=rendered_assets_dir,
+                top_n=top_n,
+                object_short_name=request.short_names[index],
+                requested_dimensions=request.desired_dimensions[index],
+                requested_shape=(
+                    infer_floor_covering_footprint_shape(
+                        request.object_descriptions[index], request.short_names[index]
+                    )
+                    if is_floor_covering_request(
+                        request.object_descriptions[index], request.short_names[index]
+                    )
+                    else None
+                ),
+                semantic_name_candidates=(
+                    request.semantic_name_candidates[index]
+                    if request.semantic_name_candidates
+                    and index < len(request.semantic_name_candidates)
+                    else None
+                ),
+            )
         if choice.selected_hssd_id:
             console_logger.info(
                 "Direct rendered HSSD choice selected candidate %s/%s for '%s': "
@@ -1065,7 +1938,32 @@ class AssetManager:
                 choice.selected_hssd_id,
                 choice.reason,
             )
-        return choice
+        selected = self._select_direct_hssd_candidate(
+            candidates=choice.candidates,
+            description=request.object_descriptions[index],
+            short_name=request.short_names[index],
+            desired_dimensions=request.desired_dimensions[index],
+        )
+        ordered_candidates = [selected] + [
+            candidate
+            for candidate in choice.candidates
+            if candidate.hssd_id != selected.hssd_id
+        ]
+        return RenderedAssetChoice(
+            candidates=ordered_candidates,
+            selected_hssd_id=selected.hssd_id,
+            selected_index=next(
+                (
+                    candidate_index
+                    for candidate_index, candidate in enumerate(candidates)
+                    if candidate.hssd_id == selected.hssd_id
+                ),
+                None,
+            ),
+            semantic_name=choice.semantic_name,
+            reason=choice.reason,
+            used_image_count=choice.used_image_count,
+        )
 
     def _process_direct_hssd_candidate(
         self,
@@ -1115,6 +2013,16 @@ class AssetManager:
             object_name=short_name,
             debug_output_dir=debug_dir,
         )
+        calibrated_front_axis = self._calibrated_hssd_front_axis(mesh_id)
+        if calibrated_front_axis is not None:
+            vlm_physics = MeshPhysicsAnalysis(
+                up_axis=vlm_physics.up_axis,
+                front_axis=calibrated_front_axis,
+                material=vlm_physics.material,
+                mass_kg=vlm_physics.mass_kg,
+                mass_range_kg=vlm_physics.mass_range_kg,
+                friction_coefficient=vlm_physics.friction_coefficient,
+            )
         console_logger.info(
             "VLM analysis complete: material=%s, mass=%skg, front=%s",
             vlm_physics.material,
@@ -1154,6 +2062,8 @@ class AssetManager:
                 canonical_path=canonical_path,
                 final_path=config.sdf_dir / f"{config.short_name}.gltf",
                 desired_dimensions=request.desired_dimensions[index],
+                description=request.object_descriptions[index],
+                short_name=request.short_names[index],
                 uniform_fit_min_ratio=self._hssd_uniform_fit_min_ratio(
                     request.object_descriptions[index]
                 ),
@@ -1349,21 +2259,26 @@ class AssetManager:
                     f"Canonicalizing Objaverse mesh: up={vlm_physics.up_axis}, "
                     f"front={vlm_physics.front_axis} → +Y"
                 )
-                final_gltf_path = config.sdf_dir / f"{config.short_name}.gltf"
+                canonical_path = config.sdf_dir / f"{config.short_name}_canonical.gltf"
                 canonicalize_mesh(
                     gltf_path=gltf_path,
-                    output_path=final_gltf_path,
+                    output_path=canonical_path,
                     up_axis=vlm_physics.up_axis,
                     front_axis=vlm_physics.front_axis,
                     blender_server=self.blender_server,
                     object_type=request.object_type,
                 )
 
+                final_gltf_path, bbox_min, bbox_max, _ = (
+                    self._scale_and_measure_canonical_mesh(
+                        canonical_path=canonical_path,
+                        final_path=config.sdf_dir / f"{config.short_name}.gltf",
+                        desired_dimensions=request.desired_dimensions[index],
+                    )
+                )
+
                 # Generate collision geometry via collision server.
                 collision_pieces = self._generate_collision_geometry(final_gltf_path)
-
-                # Load mesh for bounding box calculation.
-                mesh = load_mesh_as_trimesh(final_gltf_path, force_merge=True)
 
                 sdf_path = config.sdf_dir / f"{config.short_name}.sdf"
                 generate_drake_sdf(
@@ -1372,10 +2287,8 @@ class AssetManager:
                     physics_analysis=physics_analysis,
                     output_path=sdf_path,
                     asset_name=config.short_name,
+                    mesh_frame="gltf_y_up",
                 )
-
-                # Scene-graph transforms are already applied by the mesh loader.
-                bbox_min, bbox_max = mesh.bounds
 
                 # Create SceneObject using shared helper.
                 scene_obj = self._create_scene_object(
@@ -1388,6 +2301,8 @@ class AssetManager:
                     additional_metadata={
                         "asset_source": "objaverse",
                         "objaverse_mesh_id": mesh_id,
+                        "requested_dimensions": list(request.desired_dimensions[index]),
+                        "actual_dimensions": (bbox_max - bbox_min).tolist(),
                     },
                 )
 
@@ -1527,6 +2442,26 @@ class AssetManager:
         )
 
     def generate_assets(self, request: AssetGenerationRequest) -> AssetGenerationResult:
+        """Acquire assets under a service deadline, outside LLM active time.
+
+        HSSD queueing, canonicalization, collision decomposition, and SDF
+        generation are blocking tool work. They must remain bounded, but must
+        not consume the designer/planner inference lease needed to place the
+        admitted assets afterwards.
+        """
+        clock = self._execution_clock
+        pause = getattr(clock, "pause_for_external_operation", None)
+        resume = getattr(clock, "resume_from_external_operation", None)
+        pause_token = pause("asset_acquisition") if callable(pause) else None
+        try:
+            return self._generate_assets_impl(request)
+        finally:
+            if callable(resume):
+                resume(pause_token)
+
+    def _generate_assets_impl(
+        self, request: AssetGenerationRequest
+    ) -> AssetGenerationResult:
         """Generate scene assets using configured source (generated or hssd).
 
         If router is enabled, analyzes requests to split composites and filter
@@ -1548,24 +2483,147 @@ class AssetManager:
         if self._fatal_asset_error:
             return self._fatal_generation_result(request, self._fatal_asset_error)
 
+        if self._reuse_only:
+            successful_assets: list[SceneObject] = []
+            failed_assets: list[FailedAsset] = []
+            seen_families: set[str] = set()
+            for index, description in enumerate(request.object_descriptions):
+                short_name = (
+                    request.short_names[index]
+                    if index < len(request.short_names)
+                    else ""
+                )
+                family = semantic_asset_family(description, short_name)
+                cached = self._runtime_gate.success_cache.get(family, [])
+                if cached and family not in seen_families:
+                    successful_assets.append(cached[0])
+                    seen_families.add(family)
+                elif not cached:
+                    failed_assets.append(
+                        FailedAsset(
+                            index=index,
+                            description=description,
+                            error_message=(
+                                "Placement continuation is reuse-only and has no "
+                                f"admitted real asset for family '{family}'."
+                            ),
+                        )
+                    )
+            return AssetGenerationResult(
+                successful_assets=successful_assets,
+                failed_assets=failed_assets,
+            )
+
+        original_request = request
+        gate_plan = None
+        prefetched_assets: list[SceneObject] = []
+        gate_failures: list[FailedAsset] = []
+        original_indices: list[int] = list(range(len(request.object_descriptions)))
+        if self._runtime_gate.enabled and (
+            len(request.object_descriptions)
+            == len(request.short_names)
+            == len(request.desired_dimensions)
+        ):
+            gate_plan = self._runtime_gate.plan(
+                request.object_descriptions,
+                request.short_names,
+            )
+            prefetched_assets = list(gate_plan.cached_assets)
+            gate_failures = [
+                FailedAsset(
+                    index=failure.index,
+                    description=failure.description,
+                    error_message=failure.reason,
+                )
+                for failure in gate_plan.failures
+            ]
+            original_indices = gate_plan.allowed_indices
+            if not original_indices:
+                console_logger.info(
+                    "Asset runtime gate served %d cached asset(s) and blocked/deferred "
+                    "%d request item(s); no acquisition call needed",
+                    len(prefetched_assets),
+                    len(gate_failures),
+                )
+                return AssetGenerationResult(
+                    successful_assets=prefetched_assets,
+                    failed_assets=gate_failures,
+                )
+            request = AssetGenerationRequest(
+                object_descriptions=[
+                    original_request.object_descriptions[index]
+                    for index in original_indices
+                ],
+                short_names=[
+                    original_request.short_names[index] for index in original_indices
+                ],
+                object_type=original_request.object_type,
+                desired_dimensions=[
+                    original_request.desired_dimensions[index]
+                    for index in original_indices
+                ],
+                style_context=original_request.style_context,
+                operation_type=original_request.operation_type,
+                scene_id=original_request.scene_id,
+            )
+
         try:
             # If router is enabled, analyze and potentially modify the request.
             if self.router is not None:
-                return self._generate_assets_with_router(request)
+                result = self._generate_assets_with_router(request)
 
             # Dispatch based on asset source (router disabled).
-            if self.general_asset_source == "hssd":
-                return self._retrieve_hssd_assets(request)
+            elif self.general_asset_source == "hssd":
+                result = self._retrieve_hssd_assets(request)
             elif self.general_asset_source == "objaverse":
-                return self._retrieve_objaverse_assets(request)
+                result = self._retrieve_objaverse_assets(request)
             elif self.general_asset_source == "generated":
-                return self._generate_assets_with_model(request)
+                result = self._generate_assets_with_model(request)
             else:
                 # This should never happen due to __init__ validation.
                 raise ValueError(f"Unknown asset source: {self.general_asset_source}")
         except FatalRetrievalError as e:
             self._fatal_asset_error = str(e)
-            return self._fatal_generation_result(request, str(e))
+            result = self._fatal_generation_result(request, str(e))
+
+        if gate_plan is None:
+            return result
+
+        allowed_families = [
+            gate_plan.families_by_index[index] for index in original_indices
+        ]
+        allowed_family_set = set(allowed_families)
+        for result_index, asset in enumerate(result.successful_assets):
+            inferred_family = semantic_asset_family(
+                str(getattr(asset, "description", "")),
+                str(getattr(asset, "name", "")),
+            )
+            if inferred_family not in allowed_family_set:
+                inferred_family = allowed_families[
+                    min(result_index, len(allowed_families) - 1)
+                ]
+            self._runtime_gate.remember_success(inferred_family, asset)
+
+        remapped_failures = []
+        for failure in result.failed_assets:
+            relative_index = int(failure.index)
+            original_index = (
+                original_indices[relative_index]
+                if 0 <= relative_index < len(original_indices)
+                else relative_index
+            )
+            remapped_failures.append(
+                FailedAsset(
+                    index=original_index,
+                    description=failure.description,
+                    error_message=failure.error_message,
+                )
+            )
+        return AssetGenerationResult(
+            successful_assets=prefetched_assets + result.successful_assets,
+            failed_assets=gate_failures + remapped_failures,
+            modification_info=result.modification_info,
+        )
 
     def _fatal_generation_result(
         self, request: AssetGenerationRequest, error_message: str
@@ -2046,6 +3104,10 @@ class AssetManager:
                     "is_wall_covering": False,
                 }
             )
+        if generated.asset_source == "hssd":
+            # HSSD support-surface annotations use source-asset coordinates.
+            # Runtime geometry is already canonicalized and scaled.
+            additional_metadata["source_to_canonical_scale"] = float(initial_scale)
 
         # Add thin_covering-specific metadata for physics validation.
         if generated.asset_source == "thin_covering":
@@ -2071,7 +3133,7 @@ class AssetManager:
             bbox_min=bbox_min,
             bbox_max=bbox_max,
             additional_metadata=additional_metadata,
-            scale_factor=initial_scale,
+            scale_factor=1.0,
         )
 
     def _convert_articulated_to_scene_object(
@@ -2341,7 +3403,7 @@ class AssetManager:
                 )
 
                 # Process mesh: VLM → canonicalize → scale → collision → SDF.
-                sdf_path, final_gltf_path, bbox_min, bbox_max, initial_scale = (
+                sdf_path, final_gltf_path, bbox_min, bbox_max, _ = (
                     self._convert_mesh_to_simulation_asset(
                         geometry_path=server_geometry_path,
                         config=config,
@@ -2359,7 +3421,7 @@ class AssetManager:
                     bbox_min=bbox_min,
                     bbox_max=bbox_max,
                     additional_metadata={"asset_source": "generated"},
-                    scale_factor=initial_scale,
+                    scale_factor=1.0,
                 )
 
                 scene_objects.append(scene_obj)
@@ -2466,8 +3528,9 @@ class AssetManager:
                 distance_threshold=self.cfg.asset_manager.floater_distance_threshold,
             )
 
-        # VLM analysis for orientation, material, mass.
-        # Create debug directory for saving multi-view physics analysis images.
+        # Resolve orientation, material, and mass. Generated assets use the VLM;
+        # HSSD assets use deterministic metadata unless explicitly overridden.
+        # Keep a debug directory available for the VLM path.
         # Use geometry_path stem to match asset naming pattern (e.g., "desk_A_1234567890").
         debug_dir = self.debug_dir / config.geometry_path.stem
 
@@ -2475,11 +3538,11 @@ class AssetManager:
         # already upright (Z-up). Generated assets need full orientation analysis.
         is_hssd = asset_source == "hssd"
         prompt_type = "hssd" if is_hssd else "generated"
-        include_vertical_views = not is_hssd
 
         console_logger.info(
-            f"Running VLM analysis for mesh physics "
-            f"(asset_source={asset_source}, prompt_type={prompt_type})"
+            "Resolving mesh physics (asset_source=%s, prompt_type=%s)",
+            asset_source,
+            prompt_type,
         )
         physics_analysis = self._analyze_mesh_physics(
             mesh_path=gltf_path,
@@ -2494,13 +3557,13 @@ class AssetManager:
             )
 
         console_logger.info(
-            f"VLM analysis complete: up={physics_analysis.up_axis}, "
+            f"Mesh physics complete: up={physics_analysis.up_axis}, "
             f"front={physics_analysis.front_axis}, material={physics_analysis.material}, "
             f"mass={physics_analysis.mass_kg}kg"
         )
 
-        # Canonicalize mesh in Blender (rotate to canonical orientation + placement).
-        # Input: Y-up GLTF, Output: Z-up GLTF for Drake.
+        # Canonicalize mesh in Blender. The file remains standard glTF Y-up;
+        # SceneSmith conversion happens only at the dimensions/bounds boundary.
         canonical_path = config.sdf_dir / f"{config.short_name}_canonical.gltf"
         canonicalize_mesh(
             gltf_path=gltf_path,
@@ -2526,7 +3589,6 @@ class AssetManager:
         )
         initial_scale = applied_scale if is_hssd else 1.0
 
-        # Generate collision geometry via convex decomposition server.
         # Generate Drake SDF.
         sdf_path = config.sdf_dir / f"{config.short_name}.sdf"
         if floor_covering:
@@ -2543,6 +3605,7 @@ class AssetManager:
                 physics_analysis=physics_analysis,
                 output_path=sdf_path,
                 asset_name=config.short_name,
+                mesh_frame="gltf_y_up",
             )
 
         console_logger.info(
@@ -2606,6 +3669,7 @@ class AssetManager:
 
         # Load mesh for bounding box calculation.
         mesh = load_mesh_as_trimesh(gltf_path, force_merge=True)
+        # Trimesh exposes standard glTF coordinates. Scene placement is Z-up.
         bbox_min, bbox_max = gltf_y_up_bounds_to_scene_z_up(mesh.bounds)
 
         console_logger.info(
@@ -2664,8 +3728,9 @@ class AssetManager:
             bbox_max: Maximum corner of object-frame bounding box.
             additional_metadata: Optional metadata to merge into the object's
                 metadata dict. Useful for HSSD assets to add {"asset_source": "hssd"}.
-            scale_factor: Initial uniform scale factor applied during mesh scaling.
-                This is needed to correctly scale HSSD pre-computed support surfaces.
+            scale_factor: Runtime-only scale not already baked into the final
+                glTF/SDF. HSSD source scaling belongs in
+                ``metadata['source_to_canonical_scale']``.
 
         Returns:
             Complete SceneObject ready for scene placement.
@@ -2722,7 +3787,79 @@ class AssetManager:
         Returns:
             List of all registered SceneObjects.
         """
-        return self.registry.list_all()
+        return [
+            asset
+            for asset in self.registry.list_all()
+            if self._runtime_gate.is_asset_admitted(asset)
+        ]
+
+    @staticmethod
+    def _asset_identity_signatures(asset: SceneObject) -> set[str]:
+        signatures: set[str] = set()
+        for attribute in ("sdf_path", "geometry_path"):
+            value = getattr(asset, attribute, None)
+            if value:
+                signatures.add(f"{attribute}:{Path(value)}")
+        metadata = getattr(asset, "metadata", {}) or {}
+        mesh_id = metadata.get("hssd_mesh_id")
+        if mesh_id:
+            signatures.add(f"hssd_mesh_id:{mesh_id}")
+        return signatures
+
+    def invalidate_assets(
+        self,
+        assets: list[SceneObject],
+        *,
+        reason: str,
+    ) -> int:
+        """Revoke assets that failed the final scene geometry contract.
+
+        Semantic VLM admission alone is insufficient for required furniture:
+        the canonical mesh must also satisfy the exact dimensions used by the
+        downstream hard verifier. Revocation updates both the registry view and
+        the per-stage semantic cache so regeneration can acquire a different
+        HSSD mesh instead of replaying the rejected one.
+        """
+
+        invalid_signatures: set[str] = set()
+        invalid_families: set[str] = set()
+        for asset in assets:
+            invalid_signatures.update(self._asset_identity_signatures(asset))
+            invalid_families.add(
+                semantic_asset_family(
+                    str(getattr(asset, "description", "")),
+                    str(getattr(asset, "name", "")),
+                )
+            )
+
+        revoked = 0
+        for registered in self.registry.list_all():
+            if not (
+                self._asset_identity_signatures(registered) & invalid_signatures
+            ):
+                continue
+            metadata = getattr(registered, "metadata", None)
+            if metadata is None:
+                metadata = {}
+                registered.metadata = metadata
+            if metadata.get("asset_admission_failed", False):
+                continue
+            metadata["asset_admission_failed"] = True
+            metadata["asset_admission_failure_reason"] = str(reason)
+            revoked += 1
+
+        for family in invalid_families:
+            self._runtime_gate.invalidate_family(family)
+
+        if revoked and self.registry.auto_save_path:
+            self.registry.save_to_file(self.registry.auto_save_path)
+        console_logger.warning(
+            "Revoked %d asset template(s) from families %s: %s",
+            revoked,
+            sorted(invalid_families),
+            reason,
+        )
+        return revoked
 
     def _extract_bounds_from_visual_mesh(
         self, sdf_path: Path
@@ -2774,3 +3911,4 @@ class AssetManager:
     def clear_asset_registry(self) -> None:
         """Clear the asset registry."""
         self.registry.clear()
+        self._runtime_gate.clear_success_cache()

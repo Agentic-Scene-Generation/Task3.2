@@ -32,7 +32,7 @@ from scenesmith.manipuland_agents.tools.response_dataclasses import (
     FillContainerResult,
     ManipulandErrorType,
 )
-from scenesmith.utils.mesh_loading import load_collision_meshes_from_sdf
+from scenesmith.utils.mesh_loading import load_object_collision_geometry
 
 console_logger = logging.getLogger(__name__)
 
@@ -438,7 +438,7 @@ def fill_container_tool_impl(
 
     # Load container collision geometry.
     try:
-        container_meshes = load_collision_meshes_from_sdf(container_asset.sdf_path)
+        container_meshes = load_object_collision_geometry(container_asset)
         if not container_meshes:
             console_logger.warning(
                 "Fill container failed: no collision geometry found in container"
@@ -456,11 +456,6 @@ def fill_container_tool_impl(
                 removed_assets=[],
                 error_type=ManipulandErrorType.INVALID_OPERATION,
             ).to_json()
-
-        # Apply container's scale_factor to collision meshes.
-        if container_asset.scale_factor != 1.0:
-            for mesh in container_meshes:
-                mesh.vertices *= container_asset.scale_factor
 
         container_interior = compute_container_interior_bounds(
             collision_meshes=container_meshes,
@@ -489,12 +484,8 @@ def fill_container_tool_impl(
     fill_collision_meshes: list[list[trimesh.Trimesh]] = []
     for fill_asset in fill_assets:
         try:
-            fill_meshes = load_collision_meshes_from_sdf(fill_asset.sdf_path)
+            fill_meshes = load_object_collision_geometry(fill_asset)
             if fill_meshes:
-                # Apply fill item's scale_factor to collision meshes.
-                if fill_asset.scale_factor != 1.0:
-                    for mesh in fill_meshes:
-                        mesh.vertices *= fill_asset.scale_factor
                 fill_collision_meshes.append(fill_meshes)
             else:
                 fill_collision_meshes.append([])

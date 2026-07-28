@@ -47,6 +47,11 @@ TOOL_CALL_PARSER="${SCENEEXPERT_TOOL_CALL_PARSER:-qwen3_xml}"
 REASONING_PARSER="${SCENEEXPERT_REASONING_PARSER:-qwen3}"
 VLLM_LOG="${SCENEEXPERT_VLLM_LOG:-$PROJECT_DIR/vllm_server.log}"
 
+if [ "${SCENEEXPERT_SKIP_PYTHON_PREFLIGHT:-0}" != "1" ]; then
+    echo "运行 runtime dependency compatibility preflight..."
+    PYTHONDONTWRITEBYTECODE=1 python "$PROJECT_DIR/scripts/check_runtime_compatibility.py"
+fi
+
 if [ ! -d "$MODEL_DIR" ]; then
     echo "错误：模型目录不存在: $MODEL_DIR"
     echo "请先运行 bash scripts/deploy_qwen.sh 下载模型"

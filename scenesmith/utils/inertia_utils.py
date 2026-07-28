@@ -18,6 +18,13 @@ console_logger = logging.getLogger(__name__)
 # Small positive value used as minimum eigenvalue and epsilon for triangle
 # inequality enforcement.
 _EIGENVALUE_EPSILON = 1e-10
+_TRIANGLE_RELATIVE_MARGIN = 1e-8
+
+
+def _triangle_margin(sorted_eigenvalues: np.ndarray) -> float:
+    """Return a scale-aware margin that survives text serialization."""
+    scale = max(float(np.max(np.abs(sorted_eigenvalues))), _EIGENVALUE_EPSILON)
+    return max(_EIGENVALUE_EPSILON, scale * _TRIANGLE_RELATIVE_MARGIN)
 
 
 def ensure_valid_inertia(inertia_tensor: np.ndarray) -> np.ndarray:
@@ -46,7 +53,8 @@ def ensure_valid_inertia(inertia_tensor: np.ndarray) -> np.ndarray:
 
     # Sort eigenvalues for triangle inequality check.
     sorted_eigs = np.sort(eigenvalues)
-    if sorted_eigs[0] + sorted_eigs[1] < sorted_eigs[2]:
+    triangle_margin = _triangle_margin(sorted_eigs)
+    if sorted_eigs[0] + sorted_eigs[1] < sorted_eigs[2] + triangle_margin:
         needs_fix = True
 
     if not needs_fix:
@@ -59,21 +67,16 @@ def ensure_valid_inertia(inertia_tensor: np.ndarray) -> np.ndarray:
     sorted_indices = np.argsort(fixed_eigenvalues)
     sorted_eigs = fixed_eigenvalues[sorted_indices]
 
-    if sorted_eigs[0] + sorted_eigs[1] < sorted_eigs[2]:
+    triangle_margin = _triangle_margin(sorted_eigs)
+    if sorted_eigs[0] + sorted_eigs[1] < sorted_eigs[2] + triangle_margin:
         # Scale up the two smaller eigenvalues minimally so that
         # e1 + e2 = e3 + epsilon.
-        deficit = (
-            sorted_eigs[2] + _EIGENVALUE_EPSILON - (sorted_eigs[0] + sorted_eigs[1])
-        )
-        # Distribute deficit proportionally. If both are epsilon, split
-        # evenly.
-        total_small = sorted_eigs[0] + sorted_eigs[1]
-        if total_small > 0:
-            sorted_eigs[0] += deficit * sorted_eigs[0] / total_small
-            sorted_eigs[1] += deficit * sorted_eigs[1] / total_small
-        else:
-            sorted_eigs[0] += deficit / 2
-            sorted_eigs[1] += deficit / 2
+        deficit = sorted_eigs[2] + triangle_margin - (sorted_eigs[0] + sorted_eigs[1])
+        # The equal split is the minimum-L2 projection onto the half-space and
+        # avoids pushing only the middle eigenvalue above the old maximum (which
+        # would merely move the violation to a different sorted index).
+        sorted_eigs[0] += deficit / 2
+        sorted_eigs[1] += deficit / 2
 
         # Write back to unsorted order.
         fixed_eigenvalues[sorted_indices] = sorted_eigs
@@ -135,12 +138,15 @@ def fix_sdf_file_inertia(sdf_path: Path) -> bool:
         )
 
         # Write back the fixed components.
-        inertia_elem.find("ixx").text = f"{fixed_tensor[0, 0]:.6e}"
-        inertia_elem.find("iyy").text = f"{fixed_tensor[1, 1]:.6e}"
-        inertia_elem.find("izz").text = f"{fixed_tensor[2, 2]:.6e}"
-        inertia_elem.find("ixy").text = f"{fixed_tensor[0, 1]:.6e}"
-        inertia_elem.find("ixz").text = f"{fixed_tensor[0, 2]:.6e}"
-        inertia_elem.find("iyz").text = f"{fixed_tensor[1, 2]:.6e}"
+        # Twelve decimal digits retain the projected safety margin after SDF
+        # round-trip parsing. Six digits can round a valid boundary tensor back
+        # into a Drake triangle-inequality violation.
+        inertia_elem.find("ixx").text = f"{fixed_tensor[0, 0]:.12e}"
+        inertia_elem.find("iyy").text = f"{fixed_tensor[1, 1]:.12e}"
+        inertia_elem.find("izz").text = f"{fixed_tensor[2, 2]:.12e}"
+        inertia_elem.find("ixy").text = f"{fixed_tensor[0, 1]:.12e}"
+        inertia_elem.find("ixz").text = f"{fixed_tensor[0, 2]:.12e}"
+        inertia_elem.find("iyz").text = f"{fixed_tensor[1, 2]:.12e}"
 
         any_modified = True
 

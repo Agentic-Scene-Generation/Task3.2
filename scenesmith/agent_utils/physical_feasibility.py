@@ -55,7 +55,10 @@ from scenesmith.agent_utils.room import (
     deserialize_rigid_transform,
     serialize_rigid_transform,
 )
-from scenesmith.utils.geometry_utils import safe_convex_hull_2d
+from scenesmith.utils.geometry_utils import (
+    convert_mesh_yup_to_zup,
+    safe_convex_hull_2d,
+)
 
 console_logger = logging.getLogger(__name__)
 
@@ -1191,6 +1194,9 @@ def apply_surface_projection(
             )
             object_feasible_regions[obj_id] = surface_hpoly
             continue
+
+        # Canonical visual glTF is Y-up; feasibility operates in Drake Z-up.
+        convert_mesh_yup_to_zup(obj_mesh)
 
         # Apply scale_factor to mesh for correct footprint dimensions.
         if obj.scale_factor != 1.0:

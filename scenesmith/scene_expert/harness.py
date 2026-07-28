@@ -157,23 +157,35 @@ class Harness:
         if stage_cfg is None:
             return StageBudget()
 
+        def build_budget(value: object) -> StageBudget:
+            defaults = StageBudget()
+            return StageBudget(
+                **{
+                    field_name: getattr(value, field_name, default_value)
+                    for field_name, default_value in defaults.model_dump().items()
+                }
+            )
+
         # Check stage-specific override first
         stage_override = getattr(stage_cfg, stage, None)
         if stage_override is not None:
-            return StageBudget(
-                max_designer_iterations=getattr(
-                    stage_override, "max_designer_iterations", 2
-                ),
-                max_repair_steps=getattr(stage_override, "max_repair_steps", 1),
-            )
+            default = getattr(stage_cfg, "default", None)
+            if default is None:
+                return build_budget(stage_override)
+            merged = {
+                field_name: getattr(
+                    stage_override,
+                    field_name,
+                    getattr(default, field_name, default_value),
+                )
+                for field_name, default_value in StageBudget().model_dump().items()
+            }
+            return StageBudget(**merged)
 
         # Fall back to default
         default = getattr(stage_cfg, "default", None)
         if default is not None:
-            return StageBudget(
-                max_designer_iterations=getattr(default, "max_designer_iterations", 2),
-                max_repair_steps=getattr(default, "max_repair_steps", 1),
-            )
+            return build_budget(default)
 
         return StageBudget()
 

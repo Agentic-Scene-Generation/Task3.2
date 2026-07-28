@@ -5,6 +5,8 @@ This module implements a furniture placement workflow using persistent
 SQLiteSession agents that maintain conversation memory across interactions.
 """
 
+import copy
+import json
 import logging
 import math
 import re
@@ -14,7 +16,6 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-import trimesh
 
 from agents import Agent, FunctionTool, Runner, RunResult
 from agents.exceptions import MaxTurnsExceeded
@@ -27,8 +28,17 @@ from scenesmith.agent_utils.base_stateful_agent import (
     HardStateEvaluation,
     log_agent_usage,
 )
+from scenesmith.agent_utils.furniture_functional_layout import (
+    INWARD_NORMALS,
+    choose_functional_anchor_wall,
+    evaluate_functional_layout,
+    format_functional_layout_guidance,
+    functional_layout_family,
+    furnishable_room_bounds_xy,
+)
 from scenesmith.agent_utils.furniture_layout_planning import (
     build_bedroom_anchor_plan,
+    evaluate_bedroom_layout_plausibility,
     format_bedroom_anchor_guidance,
     is_bedroom_scene,
 )
@@ -202,6 +212,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         self.context_image_path: Path | None = None
         # Populated per scene only when the optional feature is enabled.
         self._placement_order_reference: str = ""
+        self._allow_functional_layout_repair = False
 
     def _create_designer_agent(self, tools: list[FunctionTool]) -> Agent:
         """Create designer agent with tools.
@@ -385,6 +396,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         """
         # Store everything as instance variables for closure access.
         self.scene = scene
+        self._configure_stage_runtime(scene)
         safety_description = getattr(
             scene,
             "scene_expert_original_description",
@@ -427,20 +439,16 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         )
 
         # Run the furniture placement workflow.
-        result: RunResult | None = None
-        try:
-            result = await Runner.run(
-                starting_agent=self.planner,
-                input=runner_instruction,
-                max_turns=self.cfg.agents.planner_agent.max_turns,
-                run_config=self._create_run_config(),
-            )
-        except MaxTurnsExceeded as error:
-            self._recover_from_planner_turn_limit(error)
-
+        result = await self._run_agent_with_stage_sla(
+            starting_agent=self.planner,
+            input=runner_instruction,
+            role="planner",
+            event="planner_workflow",
+            configured_max_turns=self.cfg.agents.planner_agent.max_turns,
+            run_config=self._create_run_config(),
+        )
         if result is not None:
             log_agent_usage(result=result, agent_name="PLANNER (FURNITURE)")
-
         if result is not None and result.final_output:
             log_agent_response(
                 response=result.final_output, agent_name="PLANNER (FURNITURE)"
@@ -562,17 +570,24 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         }
 
     def _build_initial_design_input(self, instruction: str) -> str | list[dict]:
-        """Add deterministic room-aware bedroom guidance to the initial design."""
+        """Add placement-order and deterministic room-aware layout guidance."""
         instruction = append_placement_order_reference(
             instruction,
             self._placement_order_reference,
         )
         safety_cfg = getattr(self.cfg, "furniture_safety_controller", None)
         bedroom_cfg = getattr(safety_cfg, "bedroom_layout", None)
-        guidance = format_bedroom_anchor_guidance(
+        guidance_blocks = [format_bedroom_anchor_guidance(
             scene=self.scene,
             cfg=bedroom_cfg,
+        )]
+        guidance_blocks.append(
+            format_functional_layout_guidance(
+                scene=self.scene,
+                cfg=getattr(safety_cfg, "functional_layout", None),
+            )
         )
+        guidance = "\n\n".join(block for block in guidance_blocks if block)
         if guidance:
             instruction = (
                 f"{instruction}\n\n"
@@ -663,14 +678,68 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         """
         self.furniture_tools.set_noise_profile(mode)
 
+    def _on_furniture_hard_state_evaluated(
+        self,
+        hard_state: HardStateEvaluation,
+    ) -> None:
+        """Revoke geometry-invalid templates before any stage regeneration."""
+
+        invalid_ids = {
+            str(issue.object_a_id)
+            for issue in getattr(hard_state, "issues", [])
+            if getattr(issue, "issue_type", "") == "asset_invalid"
+            and getattr(issue, "object_a_id", "")
+        }
+        if not invalid_ids or self.scene is None:
+            return
+        invalid_objects = [
+            obj
+            for object_id, obj in self.scene.objects.items()
+            if str(object_id) in invalid_ids
+        ]
+        if not invalid_objects:
+            return
+
+        # The same identity exclusion is shared by deterministic replacement,
+        # the visible asset registry, and AssetRuntimeGate's semantic cache.
+        self._remember_geometry_failed_assets(invalid_objects)
+        invalidate = getattr(self.asset_manager, "invalidate_assets", None)
+        if not callable(invalidate):
+            return
+        reason = "; ".join(
+            str(issue.details)
+            for issue in getattr(hard_state, "issues", [])
+            if getattr(issue, "issue_type", "") == "asset_invalid"
+            and getattr(issue, "details", "")
+        )
+        invalidate(invalid_objects, reason=reason)
+
     def _attempt_deterministic_repair(
         self, hard_state: HardStateEvaluation
     ) -> tuple[bool, list[str]]:
         if not self.scene:
             return False, []
+        if getattr(self, "_stage_runtime_budget", {}) and not getattr(
+            self, "_allow_deterministic_fallback_repair", False
+        ):
+            # SceneExpert's agent candidate must remain the result of the nested
+            # SceneSmith planner/designer/critic loop. Deterministic mutation is
+            # allowed exactly once, in the named fallback comparison below.
+            return False, []
 
         actions: list[str] = []
         reasons = " ".join(hard_state.hard_reasons or []).lower()
+        invalid_categories: set[str] = set()
+        for issue in getattr(hard_state, "issues", []):
+            if getattr(issue, "issue_type", "") != "asset_invalid":
+                continue
+            object_id = str(getattr(issue, "object_a_id", "") or "")
+            obj = self.scene.objects.get(object_id)
+            if obj is None:
+                continue
+            category = self._category_for_object(object_id, obj)
+            if category:
+                invalid_categories.add(category)
         repair_plan = build_repair_plan(
             stage=self.agent_type.value,
             hard_reasons=hard_state.hard_reasons,
@@ -694,11 +763,28 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 actions.append(
                     f"replaced {replaced} geometry-failed furniture asset(s)"
                 )
+        replaced_invalid = self._replace_invalid_furniture_assets(hard_state)
+        if replaced_invalid:
+            actions.append(
+                f"replaced {replaced_invalid} invalid furniture asset(s)"
+            )
+        relation_changed = False
         if (
             FailureCategory.DOOR_OR_OPENING_CLEARANCE in repair_plan.categories
             and self._repair_forbidden_zone_conflicts(include_windows=False)
         ):
             actions.append("cleared deterministic door/opening forbidden zones")
+            relation_changed = True
+
+        window_conflict = (
+            "window access warning" in reasons
+            or FailureCategory.WINDOW_OR_WALL_ACCESS in repair_plan.categories
+        )
+        if window_conflict and self._repair_forbidden_zone_conflicts(
+            include_windows=True
+        ):
+            actions.append("cleared deterministic window forbidden zones")
+            relation_changed = True
 
         if not is_bedroom_scene(self.scene):
             if "collisions" in reasons:
@@ -707,36 +793,61 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                         "moved generic furniture away from room walls to the deterministic margin"
                     )
                 actions.extend(self._repair_shallow_furniture_collisions())
-            removed_excess = self._remove_excess_required_furniture(required_counts)
-            if removed_excess:
+        else:
+            bed_repair_needed = (
+                "missing required bed" in reasons
+                or "bedroom plausibility: bed" in reasons
+                or bool({"bed", "twin_bed"} & invalid_categories)
+                or window_conflict
+            )
+            nightstand_repair_needed = (
+                bed_repair_needed
+                or "missing required nightstand" in reasons
+                or "nightstand" in invalid_categories
+                or "bedroom relation:" in reasons
+            )
+            if bed_repair_needed and self._anchor_existing_bed():
+                actions.append("anchored bed to deterministic bedroom head wall")
+                relation_changed = True
+            if nightstand_repair_needed and self._repair_bedside_nightstands():
                 actions.append(
-                    f"removed {removed_excess} duplicate prompt-required furniture asset(s)"
+                    "repositioned nightstands to deterministic bedside anchors"
                 )
-            return bool(actions), actions
-
-        if self._anchor_existing_bed():
-            actions.append("anchored bed to deterministic bedroom head wall")
-        if self._repair_bedside_nightstands():
-            actions.append("repositioned nightstands to deterministic bedside anchors")
-        if "dresser" in reasons and self._repair_dresser_opposite_bed_wall_anchor():
-            actions.append("anchored dresser to the wall opposite the bed")
-        repaired_storage_pair = False
-        if self._prompt_requires_wardrobe_next_to_dresser():
-            repaired_storage_pair = self._repair_wardrobe_next_to_dresser()
-            if repaired_storage_pair:
-                actions.append("placed wardrobe against the wall next to dresser")
-        if (
-            not repaired_storage_pair
-            and (
-                "window access warning" in reasons
+                relation_changed = True
+            if "dresser" in reasons and self._repair_dresser_opposite_bed_wall_anchor():
+                actions.append("anchored dresser to the wall opposite the bed")
+                relation_changed = True
+            repaired_storage_pair = False
+            if self._prompt_requires_wardrobe_next_to_dresser():
+                repaired_storage_pair = self._repair_wardrobe_next_to_dresser()
+                if repaired_storage_pair:
+                    actions.append("placed wardrobe against the wall next to dresser")
+                    relation_changed = True
+            if not repaired_storage_pair and (
+                window_conflict
                 or "wardrobe" in reasons
                 or "closet" in reasons
+                or "wardrobe" in invalid_categories
                 or "collisions" in reasons
-                or FailureCategory.WINDOW_OR_WALL_ACCESS in repair_plan.categories
-            )
-            and self._repair_wardrobe_wall_anchor()
-        ):
-            actions.append("moved wardrobe to a deterministic wall/corner anchor")
+            ) and self._repair_wardrobe_wall_anchor():
+                actions.append("moved wardrobe to a deterministic wall/corner anchor")
+                relation_changed = True
+
+        if getattr(self, "_allow_functional_layout_repair", False):
+            functional_action = self._repair_functional_layout()
+            if functional_action:
+                actions.append(functional_action)
+                relation_changed = True
+
+        # Structured collision pairs survive the verifier boundary. If a
+        # bedroom relation operator already moved objects, defer collision
+        # handling until the next re-evaluation so stale pairs are not applied.
+        if not relation_changed:
+            repaired_collisions = self._repair_structured_collisions(hard_state)
+            if repaired_collisions:
+                actions.append(
+                    f"separated {repaired_collisions} structured collision pair(s)"
+                )
 
         removed_excess = self._remove_excess_required_furniture(required_counts)
         if removed_excess:
@@ -1116,6 +1227,1216 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 if overlap_x > 1e-4 and overlap_y > 1e-4 and overlap_z > 1e-4:
                     pairs.add(frozenset((first_id, second_id)))
         return pairs
+    def capture_agent_candidate(
+        self, *, allow_hard_invalid: bool = False
+    ) -> dict[str, Any] | None:
+        """Export the best candidate, optionally preserving a diagnosed failure."""
+        controller = getattr(self, "furniture_safety_controller", None)
+        hard_state = None
+        if (
+            allow_hard_invalid
+            or controller is None
+            or controller.best_scene_state is None
+        ):
+            hard_state = self._evaluate_current_hard_state()
+        if (
+            allow_hard_invalid
+            and hard_state is not None
+            and not hard_state.hard_valid
+            and self.scene is not None
+        ):
+            return {
+                "scene_state": copy.deepcopy(self.scene.to_state_dict()),
+                "scores": None,
+                "render_dir": self.final_render_dir,
+                "weighted_score": None,
+                "score_source": self._last_score_provenance.get(
+                    "score_source", "deterministic_hard_check"
+                ),
+                "hard_valid": False,
+                "hard_reasons": list(hard_state.hard_reasons),
+            }
+        if controller is None or controller.best_scene_state is None:
+            if hard_state is None or not hard_state.hard_valid or self.scene is None:
+                return None
+            return {
+                "scene_state": copy.deepcopy(self.scene.to_state_dict()),
+                "scores": None,
+                "render_dir": None,
+                "weighted_score": None,
+                "score_source": "unscored_hard_valid",
+                "hard_valid": True,
+                "hard_reasons": [],
+            }
+        return {
+            "scene_state": copy.deepcopy(controller.best_scene_state),
+            "scores": (
+                copy.deepcopy(controller.best_scores)
+                if getattr(controller, "best_score_source", "unavailable")
+                == "vlm_critic"
+                else None
+            ),
+            "render_dir": controller.best_render_dir,
+            "weighted_score": (
+                float(controller.best_weighted_score)
+                if (
+                    controller.best_scores is not None
+                    and getattr(controller, "best_score_source", "unavailable")
+                    == "vlm_critic"
+                )
+                else None
+            ),
+            "score_source": getattr(
+                controller,
+                "best_score_source",
+                "unscored_hard_valid",
+            ),
+            "hard_valid": True,
+            "hard_reasons": [],
+        }
+
+    @staticmethod
+    def prefer_agent_candidate(
+        current: dict[str, Any] | None,
+        candidate: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        """Prefer trusted critic score, else retain the first hard-valid state."""
+        if candidate is None:
+            return current
+        if current is None:
+            return candidate
+        current_score = current.get("weighted_score")
+        candidate_score = candidate.get("weighted_score")
+        if candidate_score is None:
+            return current
+        if current_score is None or float(candidate_score) > float(current_score):
+            return candidate
+        return current
+
+    @staticmethod
+    def deterministic_candidate_improves(
+        agent_candidate: dict[str, Any],
+        deterministic_candidate: dict[str, Any],
+        *,
+        minimum_delta: float,
+    ) -> bool:
+        """Compare only commensurate trusted VLM scores."""
+        agent_score = agent_candidate.get("weighted_score")
+        deterministic_score = deterministic_candidate.get("weighted_score")
+        return bool(
+            agent_candidate.get("score_source") == "vlm_critic"
+            and deterministic_candidate.get("score_source") == "vlm_critic"
+            and agent_score is not None
+            and deterministic_score is not None
+            and float(deterministic_score)
+            >= float(agent_score) + max(0.0, float(minimum_delta))
+        )
+
+    def restore_agent_candidate(self, candidate: dict[str, Any]) -> None:
+        """Restore a cross-regeneration best candidate into agent/controller state."""
+        self._restore_furniture_scene_state(candidate["scene_state"])
+        controller = self.furniture_safety_controller
+        if candidate.get("hard_valid", True):
+            controller.best_scene_state = copy.deepcopy(candidate["scene_state"])
+            controller.best_scores = copy.deepcopy(candidate.get("scores"))
+            controller.best_score_source = str(
+                candidate.get("score_source", "unscored_hard_valid")
+            )
+            controller.best_render_dir = candidate.get("render_dir")
+            controller.best_weighted_score = float(
+                candidate.get("weighted_score")
+                if candidate.get("weighted_score") is not None
+                else 0.0
+            )
+            controller.best_reasons = ["best pure-agent candidate across regenerations"]
+        self.previous_scores = copy.deepcopy(candidate.get("scores"))
+        self.final_render_dir = candidate.get("render_dir")
+        self.rendering_manager.clear_cache()
+
+    def persist_agent_best_candidate(self, candidate: dict[str, Any]) -> Path:
+        """Save the selected pure-agent baseline under a stable semantic name."""
+        self.restore_agent_candidate(candidate)
+        self.logger.log_scene(
+            scene=self.scene,
+            name="furniture_agent_best_pre_deterministic",
+        )
+        self.rendering_manager.clear_cache()
+        render_dir = self.rendering_manager.render_scene(
+            scene=self.scene,
+            blender_server=self.blender_server,
+            rendering_mode="furniture",
+            render_name="agent_best_pre_deterministic",
+        )
+        if candidate.get("scores") is not None:
+            self._write_score_artifacts(
+                response=candidate["scores"],
+                images_dir=render_dir,
+                physics_context=self._get_cached_physics_context(),
+                event="agent_best_candidate",
+            )
+        return render_dir
+
+    def should_regenerate_for_quality(
+        self, candidate: dict[str, Any] | None
+    ) -> tuple[bool, str]:
+        """Request another agent design only for a real critic score below target."""
+        if not getattr(self.scene, "scene_expert_stage_budget", None):
+            return False, "SceneExpert quality fallback is inactive for this run"
+        if candidate is None or candidate.get("score_source") != "vlm_critic":
+            return False, "visual critic unavailable; not interpreted as a failure"
+        weighted_score = candidate.get("weighted_score")
+        if weighted_score is None:
+            return False, "visual critic score unavailable"
+        threshold = float(self.furniture_safety_controller.accept_score_threshold)
+        if float(weighted_score) >= threshold:
+            return (
+                False,
+                f"trusted critic score {weighted_score:.3f} meets {threshold:.3f}",
+            )
+        scores = candidate.get("scores")
+        critique = str(getattr(scores, "critique", "") or "").strip()
+        critique_hint = f"; critic: {critique[:1200]}" if critique else ""
+        return (
+            True,
+            f"trusted critic score {float(weighted_score):.3f} below "
+            f"{threshold:.3f}{critique_hint}",
+        )
+
+    def should_generate_deterministic_fallback(
+        self,
+        candidate: dict[str, Any] | None,
+        *,
+        regeneration_attempts: int,
+        max_stage_regenerations: int,
+        repairable_hard_exhausted: bool,
+    ) -> tuple[bool, str]:
+        """Decide whether agent exhaustion warrants a rendered fallback candidate."""
+        if not getattr(self.scene, "scene_expert_stage_budget", None):
+            return False, "SceneExpert deterministic fallback is inactive"
+        if candidate is None:
+            return False, "no agent scene state is available for comparison"
+        if repairable_hard_exhausted or not candidate.get("hard_valid", True):
+            reasons = "; ".join(candidate.get("hard_reasons", []))
+            return (
+                True,
+                "agent hard-constraint recovery exhausted"
+                + (f": {reasons}" if reasons else ""),
+            )
+        should_regenerate, reason = self.should_regenerate_for_quality(candidate)
+        if should_regenerate:
+            return (
+                regeneration_attempts >= max_stage_regenerations,
+                reason,
+            )
+        if candidate.get("score_source") != "vlm_critic":
+            return (
+                True,
+                "agent workflow completed without a trustworthy visual critic score",
+            )
+        return False, reason
+
+    def capture_postprocessing_guard(self) -> dict[str, Any]:
+        """Capture selection invariants before projection/simulation."""
+        hard_state = self._evaluate_current_hard_state()
+        safety_cfg = getattr(self.cfg, "furniture_safety_controller", None)
+        functional_cfg = getattr(safety_cfg, "functional_layout", None)
+        functional_report = evaluate_functional_layout(
+            self.scene,
+            category_resolver=self.furniture_safety_controller.infer_object_category,
+            cfg=functional_cfg,
+        )
+        required_counts = getattr(
+            self.furniture_safety_controller, "required_counts", {}
+        )
+        observed_counts = {
+            category: len(self._furniture_by_category(category))
+            for category in required_counts
+        }
+        return {
+            "hard_valid": bool(hard_state is None or hard_state.hard_valid),
+            "functional_score": (
+                None if functional_report is None else functional_report.score
+            ),
+            "required_counts": observed_counts,
+        }
+
+    def postprocessing_regression_reason(
+        self,
+        guard: dict[str, Any],
+    ) -> str:
+        """Return why physics post-processing should be rolled back, if any."""
+        hard_state = self._evaluate_current_hard_state()
+        if guard.get("hard_valid") and (
+            hard_state is not None and not hard_state.hard_valid
+        ):
+            return "post-processing introduced deterministic hard violations"
+
+        for category, before_count in dict(
+            guard.get("required_counts", {})
+        ).items():
+            after_count = len(self._furniture_by_category(category))
+            if after_count < int(before_count):
+                return (
+                    "post-processing removed prompt-required furniture "
+                    f"({category}: {before_count} -> {after_count})"
+                )
+
+        before_score = guard.get("functional_score")
+        if before_score is not None:
+            safety_cfg = getattr(self.cfg, "furniture_safety_controller", None)
+            functional_cfg = getattr(safety_cfg, "functional_layout", None)
+            report = evaluate_functional_layout(
+                self.scene,
+                category_resolver=self.furniture_safety_controller.infer_object_category,
+                cfg=functional_cfg,
+            )
+            if report is not None and report.score + 0.05 < float(before_score):
+                return (
+                    "post-processing degraded functional relations "
+                    f"({float(before_score):.3f} -> {report.score:.3f})"
+                )
+        return ""
+
+    @staticmethod
+    def _candidate_score_summary(candidate: dict[str, Any] | None) -> dict[str, Any]:
+        if candidate is None:
+            return {"score_source": "unavailable", "weighted_score": None}
+        scores = candidate.get("scores")
+        return {
+            "score_source": candidate.get("score_source", "unavailable"),
+            "weighted_score": candidate.get("weighted_score"),
+            "hard_valid": candidate.get("hard_valid"),
+            "hard_reasons": candidate.get("hard_reasons", []),
+            "scores": (
+                {score.name: score.grade for score in scores.get_scores()}
+                if scores is not None
+                else {}
+            ),
+        }
+
+    async def compare_deterministic_fallback(
+        self,
+        *,
+        agent_candidate: dict[str, Any],
+        trigger: str,
+        regeneration_attempts: int,
+    ) -> dict[str, Any]:
+        """Render and score one deterministic fallback without making it authoritative.
+
+        The controller keeps the pure-agent candidate as incumbent. The fallback
+        wins when it resolves a hard-invalid incumbent, or when deterministic hard
+        checks pass and a real VLM critic score improves a hard-valid incumbent.
+        """
+        self.restore_agent_candidate(agent_candidate)
+        agent_hash = self.scene.content_hash()
+        agent_hard_state = self._evaluate_current_hard_state()
+        agent_render_dir = self.persist_agent_best_candidate(agent_candidate)
+
+        comparison: dict[str, Any] = {
+            "schema_version": "1.0",
+            "trigger": trigger,
+            "agent_regeneration_attempts": regeneration_attempts,
+            "deterministic_layout_family": (
+                "bedroom"
+                if is_bedroom_scene(self.scene)
+                else functional_layout_family(self.scene) or "unsupported"
+            ),
+            "agent_candidate": self._candidate_score_summary(agent_candidate),
+            "agent_hard_valid": bool(
+                agent_hard_state is None or agent_hard_state.hard_valid
+            ),
+            "agent_hard_reasons": (
+                [] if agent_hard_state is None else agent_hard_state.hard_reasons
+            ),
+            "deterministic_actions": [],
+            "deterministic_candidate": {
+                "score_source": "not_generated",
+                "weighted_score": None,
+            },
+            "selection": "agent_best_pre_deterministic",
+            "selection_reason": "deterministic candidate was not generated",
+            "agent_render_dir": str(agent_render_dir),
+        }
+        # Persist the trigger and pure-agent baseline before attempting any
+        # optional fallback work. A renderer/critic interruption must still
+        # leave a complete explanation of why no deterministic image appeared.
+        self._write_fallback_comparison(comparison)
+
+        # The planner can exhaust its turns without ever reaching request_critique.
+        # Give a hard-valid incumbent one explicit, isolated visual decision before
+        # interpreting the missing score as fallback evidence.  This makes the
+        # named agent baseline useful for quality comparison and for memory writing.
+        if (
+            comparison["agent_hard_valid"]
+            and agent_candidate.get("score_source") != "vlm_critic"
+        ):
+            self._stage_runtime_phase = "fallback"
+            try:
+                self._critic_failed = False
+                self._last_trusted_critic_candidate = None
+                await self._request_critique_impl(update_checkpoint=False)
+                scored_agent_candidate = self._last_trusted_critic_candidate
+                if (
+                    scored_agent_candidate is not None
+                    and self.scene.content_hash() == agent_hash
+                ):
+                    scored_agent_candidate["hard_valid"] = True
+                    scored_agent_candidate["hard_reasons"] = []
+                    agent_candidate = scored_agent_candidate
+                    comparison["agent_candidate"] = self._candidate_score_summary(
+                        agent_candidate
+                    )
+                    self._write_score_artifacts(
+                        response=agent_candidate["scores"],
+                        images_dir=agent_render_dir,
+                        physics_context=self._get_cached_physics_context(),
+                        event="fallback_agent_independent_critic",
+                    )
+                    needs_fallback, refreshed_reason = (
+                        self.should_regenerate_for_quality(agent_candidate)
+                    )
+                    if not needs_fallback:
+                        comparison["selection_reason"] = (
+                            "independent visual critic confirmed that the agent "
+                            f"candidate meets the quality target: {refreshed_reason}"
+                        )
+                        self._write_fallback_comparison(comparison)
+                        self.restore_agent_candidate(agent_candidate)
+                        await self._finalize_scene_and_scores()
+                        return comparison
+                    comparison["trigger"] = refreshed_reason
+            except Exception as exc:
+                console_logger.warning(
+                    "Independent agent-baseline critic retry failed; continuing "
+                    "with deterministic comparison: %s: %s",
+                    type(exc).__name__,
+                    exc,
+                )
+            finally:
+                if self.scene.content_hash() != agent_hash:
+                    self.scene.restore_from_state_dict(agent_candidate["scene_state"])
+                    self.rendering_manager.clear_cache()
+                self._stage_runtime_phase = "agent"
+
+        controller_cfg = getattr(self.cfg, "furniture_safety_controller", None)
+        bedroom_cfg = getattr(controller_cfg, "bedroom_layout", None)
+        functional_cfg = getattr(controller_cfg, "functional_layout", None)
+        functional_fallback_enabled = bool(
+            getattr(functional_cfg, "deterministic_fallback_enabled", False)
+        )
+        fallback_enabled = (
+            bool(
+                getattr(
+                    bedroom_cfg,
+                    "deterministic_fallback_enabled",
+                    functional_fallback_enabled,
+                )
+            )
+            if is_bedroom_scene(self.scene)
+            else functional_fallback_enabled
+        )
+        if not fallback_enabled:
+            comparison["selection_reason"] = (
+                "deterministic layout fallback is disabled by configuration"
+            )
+            self._write_fallback_comparison(comparison)
+            return comparison
+
+        deterministic_actions: list[str] = []
+        # Resolve invalid/missing assets before relation placement. Otherwise a
+        # late rug replacement is inserted at a generic free-grid position and
+        # silently destroys the conversation-zone layout we just produced.
+        deterministic_hard_state = self._evaluate_current_hard_state()
+        if (
+            deterministic_hard_state is not None
+            and not deterministic_hard_state.hard_valid
+        ):
+            self._allow_deterministic_fallback_repair = True
+            try:
+                (
+                    deterministic_hard_state,
+                    _,
+                    hard_repair_actions,
+                ) = self._try_deterministic_repair_for_hard_state(
+                    deterministic_hard_state,
+                    source="fallback_asset_preparation",
+                )
+            finally:
+                self._allow_deterministic_fallback_repair = False
+            deterministic_actions.extend(hard_repair_actions)
+
+        self._allow_functional_layout_repair = True
+        try:
+            action = self._repair_functional_layout()
+        finally:
+            self._allow_functional_layout_repair = False
+        if action:
+            deterministic_actions.append(action)
+
+        deterministic_hard_state = self._evaluate_current_hard_state()
+        if (
+            deterministic_hard_state is not None
+            and not deterministic_hard_state.hard_valid
+        ):
+            self._allow_deterministic_fallback_repair = True
+            try:
+                (
+                    deterministic_hard_state,
+                    _,
+                    hard_repair_actions,
+                ) = self._try_deterministic_repair_for_hard_state(
+                    deterministic_hard_state,
+                    source="fallback_candidate",
+                )
+            finally:
+                self._allow_deterministic_fallback_repair = False
+            deterministic_actions.extend(hard_repair_actions)
+            # Collision/bounds repair can move members of a functional group.
+            # Reassert the relation contract once, after all asset replacement,
+            # so the separately rendered deterministic candidate is coherent.
+            self._allow_functional_layout_repair = True
+            try:
+                final_relation_action = self._repair_functional_layout()
+            finally:
+                self._allow_functional_layout_repair = False
+            if final_relation_action:
+                deterministic_actions.append(
+                    final_relation_action + " after hard-state repair"
+                )
+            deterministic_hard_state = self._evaluate_current_hard_state()
+
+        if not deterministic_actions or self.scene.content_hash() == agent_hash:
+            comparison["selection_reason"] = (
+                "no applicable deterministic operator produced a different "
+                "candidate layout"
+            )
+            self._write_fallback_comparison(comparison)
+            return comparison
+
+        comparison["deterministic_actions"] = deterministic_actions
+        deterministic_hard_state = self._evaluate_current_hard_state()
+        comparison["deterministic_hard_valid"] = bool(
+            deterministic_hard_state is None or deterministic_hard_state.hard_valid
+        )
+        comparison["deterministic_hard_reasons"] = (
+            []
+            if deterministic_hard_state is None
+            else deterministic_hard_state.hard_reasons
+        )
+        self.logger.log_scene(
+            scene=self.scene,
+            name="furniture_deterministic_candidate",
+        )
+        self.rendering_manager.clear_cache()
+        deterministic_render_dir = self.rendering_manager.render_scene(
+            scene=self.scene,
+            blender_server=self.blender_server,
+            rendering_mode="furniture",
+            render_name="deterministic_candidate",
+        )
+
+        deterministic_hash = self.scene.content_hash()
+        comparison["deterministic_render_dir"] = str(deterministic_render_dir)
+        comparison["deterministic_scene_changed"] = deterministic_hash != agent_hash
+        # The deterministic render is a required diagnostic artifact, even if
+        # its later VLM comparison times out or the process is interrupted.
+        self._write_fallback_comparison(comparison)
+        self._stage_runtime_phase = "fallback"
+        deterministic_state = (
+            copy.deepcopy(self.scene.to_state_dict())
+            if comparison["deterministic_hard_valid"]
+            else None
+        )
+        try:
+            if (
+                deterministic_hard_state is not None
+                and not deterministic_hard_state.hard_valid
+            ):
+                self.restore_agent_candidate(agent_candidate)
+                comparison["deterministic_candidate"] = {
+                    "score_source": "hard_check_only",
+                    "weighted_score": None,
+                }
+                comparison["selection_reason"] = (
+                    "deterministic candidate failed physical hard checks"
+                )
+            else:
+                # A failure on the agent candidate does not prove that the
+                # independent deterministic candidate is unscorable. Retry its
+                # visual decision with the fresh per-evaluation critic context.
+                self._critic_failed = False
+                self._last_trusted_critic_candidate = None
+                await self._request_critique_impl(update_checkpoint=False)
+                deterministic_candidate = self._last_trusted_critic_candidate
+                comparison["deterministic_candidate"] = self._candidate_score_summary(
+                    deterministic_candidate
+                )
+                if deterministic_candidate is not None:
+                    self._write_score_artifacts(
+                        response=deterministic_candidate["scores"],
+                        images_dir=deterministic_render_dir,
+                        physics_context=self._get_cached_physics_context(),
+                        event="fallback_deterministic_critic",
+                    )
+                if not comparison["agent_hard_valid"]:
+                    # Physical validity dominates visual score availability.
+                    # Preserve the repaired candidate even when the VLM transport
+                    # times out; reverting to a known colliding scene is never a
+                    # valid comparison outcome.
+                    self.scene.restore_from_state_dict(deterministic_state)
+                    self.rendering_manager.clear_cache()
+                    comparison["selection"] = "deterministic_candidate"
+                    comparison["selection_reason"] = (
+                        "deterministic candidate resolved agent hard violations"
+                    )
+                    controller = self.furniture_safety_controller
+                    deterministic_scores = (
+                        deterministic_candidate.get("scores")
+                        if deterministic_candidate is not None
+                        else None
+                    )
+                    deterministic_weighted_score = (
+                        deterministic_candidate.get("weighted_score")
+                        if deterministic_candidate is not None
+                        else None
+                    )
+                    controller.best_scene_state = copy.deepcopy(deterministic_state)
+                    controller.best_scores = copy.deepcopy(deterministic_scores)
+                    controller.best_score_source = (
+                        "vlm_critic"
+                        if deterministic_candidate is not None
+                        else "unscored_hard_valid"
+                    )
+                    controller.best_render_dir = deterministic_render_dir
+                    controller.best_weighted_score = float(
+                        deterministic_weighted_score or 0.0
+                    )
+                    controller.best_reasons = [
+                        "deterministic fallback resolved agent hard violations"
+                    ]
+                elif deterministic_candidate is None:
+                    self.restore_agent_candidate(agent_candidate)
+                    comparison["deterministic_candidate"] = {
+                        "score_source": self._last_score_provenance.get(
+                            "score_source", "critic_unavailable"
+                        ),
+                        "weighted_score": None,
+                    }
+                    comparison["selection_reason"] = (
+                        "deterministic candidate rendered, but its visual critic "
+                        "did not complete; pure-agent candidate preserved"
+                    )
+                else:
+                    agent_score = agent_candidate.get("weighted_score")
+                    deterministic_score = deterministic_candidate.get(
+                        "weighted_score"
+                    )
+                    minimum_delta = float(
+                        getattr(
+                            self.furniture_safety_controller,
+                            "min_accept_delta",
+                            0.05,
+                        )
+                    )
+                    if self.deterministic_candidate_improves(
+                        agent_candidate,
+                        deterministic_candidate,
+                        minimum_delta=minimum_delta,
+                    ) and self.scene.content_hash() == deterministic_hash:
+                        comparison["selection"] = "deterministic_candidate"
+                        comparison["selection_reason"] = (
+                            "hard-valid deterministic candidate improved the "
+                            "trusted critic score by "
+                            f"{float(deterministic_score) - float(agent_score):.3f} "
+                            f"(required {minimum_delta:.3f})"
+                        )
+                        controller = self.furniture_safety_controller
+                        controller.best_scene_state = copy.deepcopy(
+                            deterministic_state
+                        )
+                        controller.best_scores = copy.deepcopy(
+                            deterministic_candidate["scores"]
+                        )
+                        controller.best_score_source = "vlm_critic"
+                        controller.best_render_dir = deterministic_render_dir
+                        controller.best_weighted_score = float(deterministic_score)
+                        controller.best_reasons = [
+                            "deterministic fallback improved trusted critic score"
+                        ]
+                    else:
+                        self.restore_agent_candidate(agent_candidate)
+                        comparison["selection_reason"] = (
+                            "deterministic candidate did not establish the "
+                            "required trusted-score improvement"
+                        )
+        except Exception as exc:
+            preserve_hard_recovery = (
+                deterministic_state is not None
+                and not comparison["agent_hard_valid"]
+                and comparison.get("deterministic_hard_valid", False)
+            )
+            if preserve_hard_recovery:
+                console_logger.exception(
+                    "Deterministic fallback critic failed after hard recovery; "
+                    "preserving the hard-valid deterministic candidate"
+                )
+                self.scene.restore_from_state_dict(deterministic_state)
+                self.rendering_manager.clear_cache()
+                controller = self.furniture_safety_controller
+                controller.best_scene_state = copy.deepcopy(deterministic_state)
+                controller.best_scores = None
+                controller.best_score_source = "unscored_hard_valid"
+                controller.best_render_dir = deterministic_render_dir
+                controller.best_weighted_score = 0.0
+                controller.best_reasons = [
+                    "deterministic fallback resolved agent hard violations"
+                ]
+                comparison["selection"] = "deterministic_candidate"
+                comparison["selection_reason"] = (
+                    "deterministic candidate resolved agent hard violations; "
+                    "visual critic failed"
+                )
+            else:
+                console_logger.exception(
+                    "Deterministic fallback comparison failed; restoring "
+                    "pure-agent candidate"
+                )
+                self.restore_agent_candidate(agent_candidate)
+            comparison["deterministic_candidate"] = {
+                "score_source": "critic_error",
+                "weighted_score": None,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+            if not preserve_hard_recovery:
+                comparison["selection_reason"] = (
+                    "fallback critic failed; pure-agent candidate preserved"
+                )
+        finally:
+            self._stage_runtime_phase = "agent"
+
+        # Preserve the diagnostic render path even when the controller restores
+        # the incumbent after scoring.
+        comparison["selected_scene_hash"] = self.scene.content_hash()
+        self._write_fallback_comparison(comparison)
+        # Candidate comparison is the last layout-selection operation. Generic
+        # finalization may still validate/copy artifacts, but it must not run a
+        # new deterministic placement pass and create an unnamed third layout.
+        self._freeze_selected_fallback_candidate = True
+        try:
+            await self._finalize_scene_and_scores()
+        finally:
+            self._freeze_selected_fallback_candidate = False
+        return comparison
+
+    def _write_fallback_comparison(self, comparison: dict[str, Any]) -> Path:
+        output_path = (
+            self.logger.output_dir
+            / "scene_states"
+            / "furniture"
+            / "fallback_comparison.json"
+        )
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps(comparison, indent=2, ensure_ascii=False)
+        output_path.write_text(payload, encoding="utf-8")
+        render_manifest_path = (
+            self.logger.output_dir
+            / "scene_renders"
+            / "furniture"
+            / "fallback_comparison.json"
+        )
+        render_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        render_manifest_path.write_text(payload, encoding="utf-8")
+        console_logger.info("Furniture fallback comparison saved to %s", output_path)
+        return output_path
+
+    def _replace_invalid_furniture_assets(self, hard_state: HardStateEvaluation) -> int:
+        """Replace placeholder or dimension-invalid required furniture assets."""
+        if self.scene is None:
+            return 0
+        invalid_ids = {
+            str(issue.object_a_id)
+            for issue in getattr(hard_state, "issues", [])
+            if getattr(issue, "issue_type", "") == "asset_invalid"
+            and getattr(issue, "object_a_id", "")
+        }
+        if not invalid_ids:
+            return 0
+        invalid_objects = [
+            obj
+            for object_id, obj in self.scene.objects.items()
+            if str(object_id) in invalid_ids
+        ]
+        if not invalid_objects:
+            return 0
+
+        excluded: set[str] = set()
+        for obj in invalid_objects:
+            excluded.update(self._asset_signature_values(obj))
+
+        replaced = 0
+        for old_obj in invalid_objects:
+            category = self._category_for_object(old_obj.object_id, old_obj)
+            if not category or self._required_count(category) <= 0:
+                continue
+            replacement = self._get_or_generate_repair_asset(
+                category,
+                exclude_asset_signatures=excluded,
+            )
+            if replacement is None:
+                continue
+            old_id = old_obj.object_id
+            self.scene.remove_object(old_id)
+            if self._place_repair_asset(category, replacement):
+                replaced += 1
+            else:
+                self.scene.add_object(old_obj)
+        return replaced
+
+    def _repair_functional_layout(self) -> str:
+        if self.scene is None or not hasattr(self.scene, "objects"):
+            return ""
+        if is_bedroom_scene(self.scene):
+            bedroom_actions = self._repair_bedroom_layout()
+            if bedroom_actions:
+                return "normalized bedroom fallback: " + "; ".join(
+                    bedroom_actions
+                )
+        family = functional_layout_family(self.scene)
+        if family == "living_room" and self._repair_living_room_layout():
+            return "normalized sofa, rug, and plants into one conversation zone"
+        if family == "classroom" and self._repair_classroom_layout():
+            return "normalized classroom desk-chair pairs and front teaching zone"
+        return ""
+
+    def _repair_bedroom_layout(self) -> list[str]:
+        """Build one coherent bedroom fallback from existing safe operators.
+
+        This method is invoked only by the separately rendered fallback path.
+        It reacts to deterministic plausibility evidence instead of normalizing
+        every low-scoring bedroom indiscriminately. Moving the bed also moves its
+        dependent nightstands and rechecks wardrobe anchoring as one candidate.
+        """
+        if self.scene is None:
+            return []
+        report = evaluate_bedroom_layout_plausibility(
+            scene=self.scene,
+            cfg=self._bedroom_layout_cfg(),
+        )
+        issue_text = " ".join(report.issues).lower()
+        if not issue_text:
+            return []
+
+        bed_relation_issue = any(
+            term in issue_text
+            for term in (
+                "bed headboard faces",
+                "bed headboard is not anchored",
+                "bed headboard overlaps",
+            )
+        )
+        nightstand_relation_issue = "nightstands are not on opposite" in issue_text
+        wardrobe_relation_issue = "wardrobe is floating away" in issue_text
+
+        actions: list[str] = []
+        bed_changed = bed_relation_issue and self._anchor_existing_bed()
+        if bed_changed:
+            actions.append("anchored bed headboard to the preferred solid wall")
+
+        nightstands_changed = (
+            bed_changed or nightstand_relation_issue
+        ) and self._repair_bedside_nightstands()
+        if nightstands_changed:
+            actions.append("placed paired nightstands beside the bed headboard")
+
+        wardrobe_changed = (
+            bed_changed or nightstands_changed or wardrobe_relation_issue
+        ) and self._repair_wardrobe_wall_anchor()
+        if wardrobe_changed:
+            actions.append("anchored wardrobe to a non-opening wall or corner")
+        return actions
+
+    def _repair_living_room_layout(self) -> bool:
+        if self.scene is None:
+            return False
+        sofas = self._furniture_by_category("sofa")
+        if not sofas:
+            return False
+        wall = choose_functional_anchor_wall(self.scene, "living_room")
+        if wall is None:
+            return False
+        sofa = sofas[0]
+        yaw = self._yaw_for_inward_wall(wall)
+        transform = self._grounded_transform(sofa, x=0.0, y=0.0, yaw_deg=yaw)
+        wall_margin = float(
+            self._repair_cfg_value("functional_wall_margin_m", 0.18)
+        )
+        transform = self._snap_transform_to_wall(
+            sofa,
+            transform,
+            wall,
+            margin=wall_margin,
+        )
+        transform = self._fit_transform_inside_room(sofa, transform)
+        changed = False
+        if not self._transform_close(sofa.transform, transform):
+            self.scene.move_object(sofa.object_id, transform)
+            changed = True
+
+        sofa_center = np.asarray(transform.translation(), dtype=float)
+        # Functional geometry follows the room wall contract. Asset visual-front
+        # metadata controls the sofa yaw, but must not change where "in front"
+        # or "at each side" is in room coordinates.
+        forward_xy = np.asarray(INWARD_NORMALS[wall], dtype=float)
+        lateral_xy = np.asarray([forward_xy[1], -forward_xy[0]], dtype=float)
+        forward = np.asarray([forward_xy[0], forward_xy[1], 0.0])
+        lateral = np.asarray([lateral_xy[0], lateral_xy[1], 0.0])
+        sofa_dims = self._local_size(sofa, [1.70, 0.85, 0.90])
+
+        rugs = self._furniture_by_category("rug")
+        if rugs:
+            rug = rugs[0]
+            rug_dims = self._local_size(rug, [1.80, 1.80, 0.03])
+            distance = max(
+                0.75,
+                sofa_dims[1] / 2.0 + rug_dims[1] / 2.0 - 0.20,
+            )
+            target = sofa_center + forward * distance
+            rug_transform = self._grounded_transform(
+                rug,
+                x=float(target[0]),
+                y=float(target[1]),
+                yaw_deg=yaw,
+            )
+            rug_transform = self._fit_transform_inside_room(rug, rug_transform)
+            if not self._transform_close(rug.transform, rug_transform):
+                self.scene.move_object(rug.object_id, rug_transform)
+                changed = True
+
+        plants = self._furniture_by_category("plant")[:2]
+        if len(plants) == 2:
+            for side, plant in zip((-1.0, 1.0), plants):
+                plant_dims = self._local_size(plant, [0.60, 0.60, 1.20])
+                target = (
+                    sofa_center
+                    + lateral
+                    * side
+                    * (sofa_dims[0] / 2.0 + plant_dims[0] / 2.0 + 0.15)
+                    + forward * 0.05
+                )
+                plant_transform = self._grounded_transform(
+                    plant,
+                    x=float(target[0]),
+                    y=float(target[1]),
+                    yaw_deg=yaw,
+                )
+                plant_transform = self._fit_transform_inside_room(
+                    plant, plant_transform
+                )
+                if not self._transform_close(plant.transform, plant_transform):
+                    self.scene.move_object(plant.object_id, plant_transform)
+                    changed = True
+        return changed
+
+    def _repair_classroom_layout(self) -> bool:
+        if self.scene is None:
+            return False
+        desks = sorted(
+            self._furniture_by_category("student_desk"),
+            key=lambda obj: str(obj.object_id),
+        )
+        chairs = sorted(
+            self._furniture_by_category("chair"),
+            key=lambda obj: str(obj.object_id),
+        )
+        teacher_desks = self._furniture_by_category("teacher_desk")
+        if not desks:
+            return False
+        wall = choose_functional_anchor_wall(self.scene, "classroom")
+        room_bounds = self._room_bounds_xy()
+        if wall is None or room_bounds is None:
+            return False
+
+        inward_xy = {
+            "north": np.asarray([0.0, -1.0]),
+            "south": np.asarray([0.0, 1.0]),
+            "east": np.asarray([-1.0, 0.0]),
+            "west": np.asarray([1.0, 0.0]),
+        }[wall]
+        lateral_xy = np.asarray([inward_xy[1], -inward_xy[0]])
+        min_x, min_y, max_x, max_y = room_bounds
+        wall_center = {
+            "north": np.asarray([0.0, max_y]),
+            "south": np.asarray([0.0, min_y]),
+            "east": np.asarray([max_x, 0.0]),
+            "west": np.asarray([min_x, 0.0]),
+        }[wall]
+        student_yaw = self._yaw_for_head_wall(wall)
+        teacher_yaw = self._yaw_for_inward_wall(wall)
+        changed = False
+
+        teacher_depth = 0.70
+        if teacher_desks:
+            teacher = teacher_desks[0]
+            teacher_depth = float(
+                self._local_size(teacher, [1.40, 0.70, 0.75])[1]
+            )
+            teacher_transform = self._grounded_transform(
+                teacher,
+                x=float(wall_center[0]),
+                y=float(wall_center[1]),
+                yaw_deg=teacher_yaw,
+            )
+            teacher_transform = self._snap_transform_to_wall(
+                teacher, teacher_transform, wall
+            )
+            teacher_transform = self._fit_transform_inside_room(
+                teacher, teacher_transform
+            )
+            if not self._transform_close(teacher.transform, teacher_transform):
+                self.scene.move_object(teacher.object_id, teacher_transform)
+                changed = True
+            metadata = dict(getattr(teacher, "metadata", {}) or {})
+            metadata.update(
+                {"functional_zone": "classroom_front", "front_wall": wall}
+            )
+            teacher.metadata = metadata
+
+        safety_cfg = getattr(self.cfg, "furniture_safety_controller", None)
+        functional_cfg = getattr(safety_cfg, "functional_layout", None)
+        classroom_cfg = getattr(functional_cfg, "classroom", None)
+        columns = max(
+            1,
+            min(
+                len(desks),
+                int(getattr(classroom_cfg, "preferred_columns", 3) or 3),
+            ),
+        )
+        sample_dims = self._local_size(desks[0], [0.70, 0.55, 0.75])
+        lateral_room_span = (max_x - min_x) if wall in ("north", "south") else (
+            max_y - min_y
+        )
+        column_spacing = min(
+            max(float(sample_dims[0]) + 0.45, 1.15),
+            max(0.85, (lateral_room_span - 0.8) / max(1, columns)),
+        )
+        row_spacing = max(float(sample_dims[1]) + 0.95, 1.45)
+        first_row_distance = teacher_depth / 2.0 + 1.35
+
+        for index, desk in enumerate(desks):
+            row = index // columns
+            column = index % columns
+            lateral_offset = (column - (columns - 1) / 2.0) * column_spacing
+            desk_xy = (
+                wall_center
+                + inward_xy * (first_row_distance + row * row_spacing)
+                + lateral_xy * lateral_offset
+            )
+            desk_transform = self._grounded_transform(
+                desk,
+                x=float(desk_xy[0]),
+                y=float(desk_xy[1]),
+                yaw_deg=student_yaw,
+            )
+            desk_transform = self._fit_transform_inside_room(desk, desk_transform)
+            if not self._transform_close(desk.transform, desk_transform):
+                self.scene.move_object(desk.object_id, desk_transform)
+                changed = True
+
+            if index >= len(chairs):
+                continue
+            chair = chairs[index]
+            desk_depth = float(self._local_size(desk, [0.70, 0.55, 0.75])[1])
+            chair_depth = float(self._local_size(chair, [0.48, 0.50, 0.85])[1])
+            chair_distance = desk_depth / 2.0 + chair_depth / 2.0 + 0.12
+            chair_xy = desk_xy + inward_xy * chair_distance
+            chair_transform = self._grounded_transform(
+                chair,
+                x=float(chair_xy[0]),
+                y=float(chair_xy[1]),
+                yaw_deg=student_yaw,
+            )
+            chair_transform = self._fit_transform_inside_room(
+                chair, chair_transform
+            )
+            if not self._transform_close(chair.transform, chair_transform):
+                self.scene.move_object(chair.object_id, chair_transform)
+                changed = True
+        return changed
+
+    def _repair_structured_collisions(self, hard_state: HardStateEvaluation) -> int:
+        if self.scene is None:
+            return 0
+        collision_issues = [
+            issue
+            for issue in getattr(hard_state, "issues", [])
+            if getattr(issue, "issue_type", "") == "collision_or_overlap"
+        ]
+        repaired = 0
+        moved_ids: set[str] = set()
+        for issue in collision_issues:
+            object_a = self._scene_object_by_string_id(issue.object_a_id)
+            object_b = self._scene_object_by_string_id(issue.object_b_id)
+            movable = [
+                obj
+                for obj in (object_a, object_b)
+                if obj is not None
+                and not getattr(obj, "immutable", False)
+                and str(getattr(obj.object_type, "value", obj.object_type)).lower()
+                == "furniture"
+            ]
+            if not movable:
+                continue
+
+            def move_priority(obj: SceneObject) -> tuple[int, float]:
+                category = self._category_for_object(obj.object_id, obj)
+                required = bool(category and self._required_count(category) > 0)
+                bounds = obj.compute_world_bounds()
+                if bounds is None:
+                    footprint = float("inf")
+                else:
+                    bounds_min = np.asarray(bounds[0], dtype=float)
+                    bounds_max = np.asarray(bounds[1], dtype=float)
+                    footprint = float(
+                        np.prod(np.maximum(0.0, bounds_max[:2] - bounds_min[:2]))
+                    )
+                return (1 if required else 0, footprint)
+
+            movable.sort(key=move_priority)
+            obj = movable[0]
+            if str(obj.object_id) in moved_ids:
+                continue
+            other = object_b if obj is object_a else object_a
+            room_boundary_id = next(
+                (
+                    str(candidate_id)
+                    for candidate_id in (issue.object_a_id, issue.object_b_id)
+                    if str(candidate_id).startswith("room_geometry::")
+                ),
+                "",
+            )
+            if room_boundary_id:
+                transform = self._move_away_from_room_boundary_transform(
+                    obj,
+                    room_boundary_id=room_boundary_id,
+                    penetration_depth_m=float(
+                        getattr(issue, "penetration_depth_m", 0.0) or 0.0
+                    ),
+                )
+            else:
+                transform = self._best_collision_separation_transform(obj, other)
+            if transform is None or self._transform_close(obj.transform, transform):
+                continue
+            old_penalty = self._furniture_placement_penalty(
+                obj, obj.transform, exclude_object_id=str(obj.object_id)
+            )
+            new_penalty = self._furniture_placement_penalty(
+                obj, transform, exclude_object_id=str(obj.object_id)
+            )
+            # Boundary motion is driven by Drake's measured wall penetration;
+            # the furniture-only AABB penalty does not include room walls and can
+            # therefore remain numerically unchanged after a valid inward snap.
+            if not room_boundary_id and new_penalty + 1e-5 >= old_penalty:
+                continue
+            self.scene.move_object(obj.object_id, transform)
+            moved_ids.add(str(obj.object_id))
+            repaired += 1
+            console_logger.info(
+                "Deterministic collision repair moved %s away from %s "
+                "(penalty %.4f -> %.4f)",
+                obj.object_id,
+                getattr(other, "object_id", "unknown"),
+                old_penalty,
+                new_penalty,
+            )
+        return repaired
+
+    def _move_away_from_room_boundary_transform(
+        self,
+        obj: SceneObject,
+        *,
+        room_boundary_id: str,
+        penetration_depth_m: float,
+    ) -> RigidTransform | None:
+        """Translate furniture inward from the specific wall it penetrates."""
+        boundary = room_boundary_id.lower()
+        inward_xy: tuple[float, float] | None = None
+        if "north" in boundary:
+            inward_xy = (0.0, -1.0)
+        elif "south" in boundary:
+            inward_xy = (0.0, 1.0)
+        elif "east" in boundary:
+            inward_xy = (-1.0, 0.0)
+        elif "west" in boundary:
+            inward_xy = (1.0, 0.0)
+        if inward_xy is None:
+            return self._best_generic_repair_transform(
+                obj,
+                fallback=obj.transform,
+                exclude_object_id=str(obj.object_id),
+            )
+
+        gap = float(self._repair_cfg_value("wall_clearance_gap_m", 0.03))
+        distance = max(0.0, float(penetration_depth_m)) + max(0.0, gap)
+        translation = np.array(obj.transform.translation(), dtype=float, copy=True)
+        translation[0] += inward_xy[0] * distance
+        translation[1] += inward_xy[1] * distance
+        candidate = RigidTransform(R=obj.transform.rotation(), p=translation)
+        return self._fit_transform_inside_room(obj, candidate)
+
+    def _scene_object_by_string_id(self, object_id: str) -> SceneObject | None:
+        if self.scene is None:
+            return None
+        for candidate_id, obj in self.scene.objects.items():
+            if str(candidate_id) == str(object_id):
+                return obj
+        return None
+
+    def _best_collision_separation_transform(
+        self,
+        obj: SceneObject,
+        other: SceneObject | None,
+    ) -> RigidTransform | None:
+        if other is None:
+            return self._best_generic_repair_transform(
+                obj,
+                fallback=obj.transform,
+                exclude_object_id=str(obj.object_id),
+            )
+        obj_bounds = obj.compute_world_bounds()
+        other_bounds = other.compute_world_bounds()
+        if obj_bounds is None or other_bounds is None:
+            return None
+        obj_min = np.asarray(obj_bounds[0], dtype=float)
+        obj_max = np.asarray(obj_bounds[1], dtype=float)
+        other_min = np.asarray(other_bounds[0], dtype=float)
+        other_max = np.asarray(other_bounds[1], dtype=float)
+        obj_center = (obj_min + obj_max) / 2.0
+        current_translation = np.asarray(obj.transform.translation(), dtype=float)
+        origin_offset = current_translation[:2] - obj_center[:2]
+        half_size = (obj_max[:2] - obj_min[:2]) / 2.0
+        gap = float(self._repair_cfg_value("collision_separation_gap_m", 0.08))
+        candidate_centers = (
+            np.asarray([other_min[0] - half_size[0] - gap, obj_center[1]]),
+            np.asarray([other_max[0] + half_size[0] + gap, obj_center[1]]),
+            np.asarray([obj_center[0], other_min[1] - half_size[1] - gap]),
+            np.asarray([obj_center[0], other_max[1] + half_size[1] + gap]),
+        )
+        yaw = math.degrees(RollPitchYaw(obj.transform.rotation()).yaw_angle())
+        best: RigidTransform | None = None
+        best_penalty = float("inf")
+        for center in candidate_centers:
+            xy = center + origin_offset
+            candidate = self._grounded_transform(
+                obj, x=float(xy[0]), y=float(xy[1]), yaw_deg=yaw
+            )
+            candidate = self._fit_transform_inside_room(obj, candidate)
+            penalty = self._furniture_placement_penalty(
+                obj, candidate, exclude_object_id=str(obj.object_id)
+            )
+            if penalty < best_penalty:
+                best = candidate
+                best_penalty = penalty
+        return best
 
     def _replace_geometry_failed_furniture_assets(self, reasons: str) -> int:
         """Replace required furniture whose SDF/mesh cannot be loaded by Drake."""
@@ -1410,7 +2731,29 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                     asset.object_id,
                 )
                 continue
+            if self._category_for_object(
+                getattr(asset, "object_id", ""), asset
+            ) != category:
+                console_logger.warning(
+                    "Deterministic repair rejected asset %s because it does not "
+                    "satisfy requested semantic family %s",
+                    asset.object_id,
+                    category,
+                )
+                continue
             return asset
+        failure_details = "; ".join(
+            f"{failure.description}: {failure.error_message}"
+            for failure in result.failed_assets
+        )
+        console_logger.error(
+            "No admitted real HSSD asset is available for required family %s%s",
+            category,
+            f" ({failure_details})" if failure_details else "",
+        )
+        runtime_gate = getattr(self.asset_manager, "_runtime_gate", None)
+        if runtime_gate is not None and runtime_gate.enabled:
+            return None
         return self._create_placeholder_repair_asset(category, dimensions)
 
     def _create_placeholder_repair_asset(
@@ -1551,6 +2894,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         obj: SceneObject,
         *,
         fallback: RigidTransform,
+        exclude_object_id: str = "",
     ) -> RigidTransform:
         """Choose a low-overlap in-bounds pose for non-bedroom repair assets."""
         room_bounds = self._room_bounds_xy()
@@ -1571,37 +2915,58 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                     bounds = self._bounds_for_transform(obj, candidate)
                     if bounds is None:
                         continue
-                    penalty = self._zone_overlap_penalty(bounds, zones)
-                    for existing in self.scene.objects.values():
-                        if getattr(existing, "immutable", False):
-                            continue
-                        existing_type = getattr(existing, "object_type", None)
-                        existing_value = getattr(existing_type, "value", existing_type)
-                        if str(existing_value).lower() != "furniture":
-                            continue
-                        try:
-                            existing_bounds = existing.compute_world_bounds()
-                        except Exception as exc:
-                            console_logger.warning(
-                                "Skipping invalid obstacle %s while placing %s: %s",
-                                getattr(existing, "object_id", "unknown"),
-                                getattr(obj, "object_id", "repair_asset"),
-                                exc,
-                            )
-                            continue
-                        if existing_bounds is None:
-                            continue
-                        overlap_x, overlap_y = self._xy_overlap_depths(
-                            bounds,
-                            existing_bounds,
-                        )
-                        penalty += overlap_x * overlap_y * 1000.0
+                    penalty = self._furniture_placement_penalty(
+                        obj,
+                        candidate,
+                        exclude_object_id=exclude_object_id,
+                    )
                     if penalty < best_penalty:
                         best = candidate
                         best_penalty = penalty
                     if penalty <= 1e-6:
                         return candidate
         return best
+
+    def _furniture_placement_penalty(
+        self,
+        obj: SceneObject,
+        transform: RigidTransform,
+        *,
+        exclude_object_id: str = "",
+    ) -> float:
+        if self.scene is None:
+            return float("inf")
+        bounds = self._bounds_for_transform(obj, transform)
+        if bounds is None:
+            return float("inf")
+        penalty = self._zone_overlap_penalty(
+            bounds,
+            self._opening_forbidden_zones(include_windows=False),
+        )
+        for existing_id, existing in self.scene.objects.items():
+            if str(existing_id) == exclude_object_id:
+                continue
+            if getattr(existing, "immutable", False):
+                continue
+            existing_type = getattr(existing, "object_type", None)
+            existing_value = getattr(existing_type, "value", existing_type)
+            if str(existing_value).lower() != "furniture":
+                continue
+            try:
+                existing_bounds = existing.compute_world_bounds()
+            except Exception as exc:
+                console_logger.warning(
+                    "Skipping invalid obstacle %s while placing %s: %s",
+                    getattr(existing, "object_id", "unknown"),
+                    getattr(obj, "object_id", "repair_asset"),
+                    exc,
+                )
+                continue
+            if existing_bounds is None:
+                continue
+            overlap_x, overlap_y = self._xy_overlap_depths(bounds, existing_bounds)
+            penalty += overlap_x * overlap_y * 1000.0
+        return penalty
 
     def _default_repair_pose(self, category: str) -> tuple[float, float, float]:
         room_bounds = self._room_bounds_xy()
@@ -1614,7 +2979,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             return min_x + 0.8, min_y + 0.8, 0.0
         plan = build_bedroom_anchor_plan(self.scene, self._bedroom_layout_cfg())
         wall = plan.bed_head_wall if plan else "north"
-        return 0.0, 0.0, self._yaw_for_head_wall(wall)
+        return 0.0, 0.0, self._yaw_for_inward_wall(wall)
 
     def _anchor_existing_bed(self) -> bool:
         beds = self._furniture_by_category("bed")
@@ -1623,7 +2988,10 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         bed = beds[0]
         plan = build_bedroom_anchor_plan(self.scene, self._bedroom_layout_cfg())
         wall = plan.bed_head_wall if plan and plan.bed_head_wall else "north"
-        yaw = self._yaw_for_head_wall(wall)
+        # Canonical furniture front is local +Y.  A wall-backed bed must point
+        # that front/foot direction into the room, leaving local -Y (the
+        # headboard/back) toward the selected wall.
+        yaw = self._yaw_for_inward_wall(wall)
         current = np.asarray(bed.transform.translation(), dtype=float)
         transform = self._grounded_transform(
             bed, x=float(current[0]), y=float(current[1]), yaw_deg=yaw
@@ -1690,6 +3058,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         obstacles = self._furniture_by_category("bed") + self._furniture_by_category(
             "nightstand"
         )
+        opening_zones = self._opening_forbidden_zones(include_windows=True)
         best_transform = None
         best_score = -1e9
         for transform, wall_opening_penalty in candidates:
@@ -1717,7 +3086,16 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 else np.zeros(3)
             )
             distance_score = float(np.linalg.norm(center[:2] - bed_center[:2]))
-            score = distance_score - overlap_penalty - wall_opening_penalty
+            exact_opening_penalty = self._zone_overlap_penalty(
+                bounds,
+                opening_zones,
+            )
+            score = (
+                distance_score
+                - overlap_penalty
+                - wall_opening_penalty
+                - exact_opening_penalty
+            )
             # Hard collisions must never win merely because the candidate is
             # farther from the bed. If no fully valid wall candidate exists,
             # retain the current pose for a later generic repair instead of
@@ -1952,10 +3330,10 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         if zone_min is not None and zone_max is not None:
             return np.asarray(zone_min, dtype=float), np.asarray(zone_max, dtype=float)
 
-            opening_type_raw = getattr(opening, "opening_type", "")
-            opening_type = str(
-                getattr(opening_type_raw, "value", opening_type_raw)
-            ).lower()
+        opening_type_raw = getattr(opening, "opening_type", "")
+        opening_type = str(
+            getattr(opening_type_raw, "value", opening_type_raw)
+        ).lower()
         if opening_type != "open":
             return None
         try:
@@ -2150,13 +3528,9 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         return getattr(safety_cfg, "bedroom_layout", None)
 
     def _room_bounds_xy(self) -> tuple[float, float, float, float] | None:
-        if self.scene is None or self.scene.room_geometry is None:
+        if self.scene is None:
             return None
-        length = float(getattr(self.scene.room_geometry, "length", 0.0) or 0.0)
-        width = float(getattr(self.scene.room_geometry, "width", 0.0) or 0.0)
-        if length <= 0 or width <= 0:
-            return None
-        return (-length / 2, -width / 2, length / 2, width / 2)
+        return furnishable_room_bounds_xy(self.scene)
 
     def _local_size(self, obj: SceneObject, default: list[float]) -> np.ndarray:
         if obj.bbox_min is None or obj.bbox_max is None:
@@ -2195,7 +3569,11 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             obj.transform = old_transform
 
     def _snap_transform_to_wall(
-        self, obj: SceneObject, transform: RigidTransform, wall: str
+        self,
+        obj: SceneObject,
+        transform: RigidTransform,
+        wall: str,
+        margin: float | None = None,
     ) -> RigidTransform:
         room_bounds = self._room_bounds_xy()
         bounds = self._bounds_for_transform(obj, transform)
@@ -2203,7 +3581,11 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             return transform
         min_x, min_y, max_x, max_y = room_bounds
         world_min, world_max = bounds
-        margin = float(self._repair_cfg_value("wall_margin_m", 0.08))
+        margin = (
+            float(self._repair_cfg_value("wall_margin_m", 0.08))
+            if margin is None
+            else max(0.0, float(margin))
+        )
         translation = np.asarray(transform.translation(), dtype=float).copy()
         if wall == "north":
             translation[1] += max_y - margin - float(world_max[1])

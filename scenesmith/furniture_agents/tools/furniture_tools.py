@@ -17,6 +17,9 @@ from scenesmith.agent_utils.asset_manager import (
     AssetManager,
 )
 from scenesmith.agent_utils.semantic_names import semantic_name_candidates_for_request
+from scenesmith.agent_utils.furniture_functional_layout import (
+    furnishable_room_bounds_xy,
+)
 from scenesmith.agent_utils.furniture_layout_planning import (
     apply_bedroom_asset_size_policy,
 )
@@ -240,15 +243,7 @@ class FurnitureTools:
         return True, ""
 
     def _get_room_bounds_xy(self) -> tuple[float, float, float, float] | None:
-        room_geometry = self.scene.room_geometry
-        if not room_geometry or room_geometry.length <= 0 or room_geometry.width <= 0:
-            return None
-        return (
-            -room_geometry.length / 2,
-            -room_geometry.width / 2,
-            room_geometry.length / 2,
-            room_geometry.width / 2,
-        )
+        return furnishable_room_bounds_xy(self.scene)
 
     def _room_bounds_tolerance(self) -> float:
         safety_cfg = getattr(self.cfg, "furniture_safety_controller", None)
@@ -442,15 +437,15 @@ class FurnitureTools:
         ) -> str:
             """Create 3D furniture models from descriptions with specified dimensions.
 
-            Generate floor-standing furniture items only. This tool is restricted
-            to furniture that sits flat on the floor.
+            Generate floor-standing furniture and requested floor coverings.
+            Rugs/carpets are routed to the dedicated thin-covering generator and
+            do not consume a general 3D generation request.
 
             DO NOT generate:
             - Manipulands (small objects meant for surfaces like books, vases, cups)
-            - Carpets or rugs
             - Wall decorations
 
-            ONLY generate furniture items that rest directly on the floor.
+            ONLY generate items that rest directly on the floor.
 
             You MUST specify dimensions for each object considering the
             relative sizes of other objects in the scene. Use realistic furniture
@@ -1165,8 +1160,29 @@ class FurnitureTools:
             scale_factor=scale_factor,
             object_type_name="furniture",
             asset_registry=self.asset_manager.registry,
+            post_validate=self._validate_rescaled_furniture,
         )
         return result.to_json()
+
+    def _validate_rescaled_furniture(
+        self, affected_objects: list[SceneObject]
+    ) -> tuple[bool, str]:
+        """Reject a scale mutation if any shared instance leaves the room."""
+        failures: list[str] = []
+        for affected in affected_objects:
+            is_valid, message = self._check_object_bounds_for_transform(
+                affected,
+                affected.transform,
+            )
+            if not is_valid:
+                failures.append(f"{affected.object_id}: {message}")
+        if failures:
+            return (
+                False,
+                "Rescale transaction rolled back because the resulting geometry "
+                "is infeasible: " + " | ".join(failures),
+            )
+        return True, ""
 
     def _add_duplicate_warning(self, message_parts: list[str]) -> None:
         """Add duplicate warning to message if duplicates were detected."""

@@ -9,6 +9,7 @@ from scenesmith.agent_utils.stage_working_memory import (
     StageWorkingMemory,
     _canonical_stage,
     _score_total,
+    save_generic_render_memory,
 )
 
 
@@ -52,6 +53,25 @@ class _StudyScene:
 
     def content_hash(self) -> str:
         return "study-scene"
+
+
+class _ClassroomScene:
+    def __init__(self) -> None:
+        self.text_description = (
+            "A classroom with six student desks, each with a chair, and one "
+            "teacher's desk at the front."
+        )
+        self.objects = {
+            **{
+                f"student_desk_{index}": _DummyObject("student_desk")
+                for index in range(6)
+            },
+            **{f"chair_{index}": _DummyObject("chair") for index in range(6)},
+            "teacher_desk_0": _DummyObject("teacher_desk"),
+        }
+
+    def content_hash(self) -> str:
+        return "classroom-scene"
 
 
 def _score(name: str, grade: int) -> CategoryScore:
@@ -160,7 +180,96 @@ class StageWorkingMemoryTest(unittest.TestCase):
             self.assertIn("Ignore contradictory critic", retrieved)
             self.assertNotIn("critic: All required furniture is present", retrieved)
 
-    def test_required_counts_use_shared_furniture_category_hierarchy(self) -> None:
+    def test_classroom_roles_are_counted_independently(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root_dir = Path(tmp)
+            render_dir = root_dir / "scene_renders" / "furniture" / "renders_001"
+            render_dir.mkdir(parents=True)
+            memory = StageWorkingMemory(
+                root_dir=root_dir,
+                stage="furniture",
+                enabled=True,
+            )
+            memory.set_required_counts(
+                {"student_desk": 6, "chair": 6, "teacher_desk": 1}
+            )
+
+            record = memory.save_render_record(
+                render_dir=render_dir,
+                role="critic",
+                event="deterministic_hard_fail",
+                scene=_ClassroomScene(),
+                critique="DETERMINISTIC HARD-CHECK FAILED BEFORE VLM SCORING.",
+            )
+
+            quality = record["deterministic_quality"]
+            self.assertEqual(quality["observed_counts"]["student_desk"], 6)
+            self.assertEqual(quality["observed_counts"]["teacher_desk"], 1)
+            self.assertEqual(record["score_source"], "deterministic_hard_check")
+            self.assertFalse(quality["hard_valid"])
+            self.assertEqual({}, record["visual_scores"])
+            self.assertIsNone(record["score_total"])
+
+    def test_generic_classroom_render_reconstructs_prompt_requirements(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root_dir = Path(tmp)
+            render_dir = root_dir / "scene_renders" / "furniture" / "renders_002"
+            render_dir.mkdir(parents=True)
+
+            save_generic_render_memory(
+                root_dir=root_dir,
+                stage="furniture_selection",
+                render_dir=render_dir,
+                scene=_ClassroomScene(),
+                rendering_mode="furniture_selection",
+                render_name="furniture_selection",
+                elapsed_sec=0.1,
+            )
+
+            record = json.loads(
+                (render_dir / "render_memory.json").read_text(encoding="utf-8")
+            )
+            quality = record["deterministic_quality"]
+            self.assertEqual(quality["required_counts"]["student_desk"], 6)
+            self.assertEqual(quality["required_counts"]["teacher_desk"], 1)
+            self.assertIsNone(quality["hard_valid"])
+            self.assertEqual("unverified", quality["hard_check_status"])
+
+    def test_vlm_and_hard_evidence_remain_separate(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root_dir = Path(tmp)
+            render_dir = root_dir / "scene_renders" / "furniture" / "renders_004"
+            render_dir.mkdir(parents=True)
+            scores = FurnitureCritiqueWithScores(
+                critique="The required arrangement is visually coherent.",
+                realism=_score("display realism", 8),
+                functionality=_score("functional score", 8),
+                layout=_score("composition", 7),
+                layout_plausibility=_score("professional use", 8),
+                holistic_completeness=_score("completeness", 8),
+                prompt_following=_score("requirements", 9),
+                reachability=_score("paths", 8),
+            )
+            memory = StageWorkingMemory(root_dir, "furniture", enabled=True)
+
+            record = memory.save_render_record(
+                render_dir=render_dir,
+                role="critic",
+                event="critique",
+                scene=_DummyScene(),
+                scores=scores,
+                critique=scores.critique,
+                score_source="vlm_critic",
+                extra={"hard_check_passed": True, "hard_issues": []},
+            )
+
+            self.assertTrue(record["deterministic_quality"]["hard_valid"])
+            self.assertEqual({}, record["hard_decision_scores"])
+            self.assertEqual(56.0, record["score_total"])
+
+    def test_required_counts_preserve_inventory_without_claiming_hard_validity(
+        self,
+    ) -> None:
         with TemporaryDirectory() as tmp:
             root_dir = Path(tmp)
             render_dir = root_dir / "scene_renders" / "furniture" / "renders_004"
@@ -176,7 +285,8 @@ class StageWorkingMemoryTest(unittest.TestCase):
             )
 
             quality = record["deterministic_quality"]
-            self.assertTrue(quality["hard_valid"])
+            self.assertIsNone(quality["hard_valid"])
+            self.assertEqual("unverified", quality["hard_check_status"])
             self.assertEqual(
                 {"desk": 1, "chair": 3, "bookshelf": 1},
                 quality["observed_counts"],

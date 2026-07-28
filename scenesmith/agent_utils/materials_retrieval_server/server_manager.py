@@ -11,6 +11,7 @@ import requests
 from omegaconf import DictConfig
 
 from scenesmith.agent_utils.materials_retrieval_server.config import MaterialsConfig
+from scenesmith.agent_utils.server_lifecycle import ManagedWSGIServer
 from scenesmith.utils.network_utils import is_port_available
 
 from .server_app import MaterialsRetrievalApp
@@ -73,6 +74,7 @@ class MaterialsRetrievalServer:
         self._clip_device = clip_device
         self._app: MaterialsRetrievalApp | None = None
         self._server_thread: Thread | None = None
+        self._http_server: ManagedWSGIServer | None = None
         self._running = False
         self._shutdown_event = threading.Event()
 
@@ -105,12 +107,10 @@ class MaterialsRetrievalServer:
             # Start the processing queue.
             self._app.start_processing()
 
-            # Start Flask server in a separate thread.
-            self._server_thread = Thread(
-                target=self._run_server,
-                daemon=False,  # Not daemon so we can shut down cleanly.
+            self._http_server = ManagedWSGIServer(
+                self._app, self._host, self._port, threaded=True
             )
-            self._server_thread.start()
+            self._server_thread = self._http_server.start()
 
             # Wait for the server to be ready.
             self._wait_until_ready()
@@ -143,25 +143,8 @@ class MaterialsRetrievalServer:
         if self._app:
             self._app.stop_processing()
 
-        # Trigger Flask server shutdown via shutdown endpoint.
-        try:
-            response = requests.post(
-                f"http://{self._host}:{self._port}/shutdown", timeout=2
-            )
-            if response.status_code == 200:
-                console_logger.debug("Shutdown endpoint called successfully")
-            else:
-                console_logger.warning(
-                    f"Shutdown endpoint returned status {response.status_code}"
-                )
-        except requests.exceptions.RequestException as e:
-            console_logger.warning(f"Failed to call shutdown endpoint: {e}")
-
-        # Wait for server thread to complete.
-        if self._server_thread and self._server_thread.is_alive():
-            self._server_thread.join(timeout=5)
-            if self._server_thread.is_alive():
-                console_logger.warning("Server thread did not stop gracefully")
+        if self._http_server:
+            self._http_server.stop(timeout=5)
 
         self._cleanup()
         console_logger.info("Materials retrieval server stopped")
@@ -198,20 +181,6 @@ class MaterialsRetrievalServer:
         """Get the server port number."""
         return self._port
 
-    def _run_server(self) -> None:
-        """Run the Flask server in a separate thread."""
-        try:
-            self._app.run(
-                host=self._host,
-                port=self._port,
-                debug=False,
-                threaded=True,
-                use_reloader=False,  # Important: avoid reloader in thread.
-            )
-        except Exception as e:
-            console_logger.error(f"Server thread failed: {e}")
-            self._shutdown_event.set()
-
     def _wait_until_ready(self, timeout: float = 30) -> None:
         """Wait for server to be ready to accept requests.
 
@@ -239,6 +208,9 @@ class MaterialsRetrievalServer:
     def _cleanup(self) -> None:
         """Clean up server resources."""
         self._running = False
+        if self._http_server is not None:
+            self._http_server.stop(timeout=1)
+        self._http_server = None
         self._app = None
         self._server_thread = None
         self._shutdown_event.clear()

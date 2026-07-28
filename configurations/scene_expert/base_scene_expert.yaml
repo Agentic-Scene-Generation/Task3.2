@@ -15,6 +15,42 @@ enabled: false   # Default: off. Set true in ablation_3/4/5 experiment configs.
 #   "full"           → harness_memory + LoRA model (model ID differs, behavior same)
 mode: "disabled"
 
+# Runtime budget injection is independently switchable from SceneExpert itself.
+# Set false (or export SCENEEXPERT_RUNTIME_BUDGET_ENABLED=false) to keep
+# TaskCompiler/Harness/Memory/Verifier active while restoring the native
+# SceneSmith turn, token, deadline, and asset-request behavior.
+runtime_budget_control:
+  enabled: ${oc.env:SCENEEXPERT_RUNTIME_BUDGET_ENABLED,true}
+
+# Direct structured calls made by SceneExpert itself. These roles share one
+# local OpenAI-compatible client, but each role has an explicit bounded budget.
+structured_llm:
+  roles:
+    task_compiler:
+      thinking_mode: "none"
+      max_tokens: 768
+      retry_max_tokens: 1536
+      timeout_seconds: 45
+      temperature: 0.1
+      max_attempts: 2
+      response_format: "json_schema"
+    global_planner:
+      thinking_mode: "none"
+      max_tokens: 1024
+      retry_max_tokens: 2048
+      timeout_seconds: 60
+      temperature: 0.1
+      max_attempts: 2
+      response_format: "json_schema"
+    memory_writer:
+      thinking_mode: "low"
+      max_tokens: ${oc.env:SCENEEXPERT_MEMORY_WRITER_MAX_TOKENS,2048}
+      retry_max_tokens: ${oc.env:SCENEEXPERT_MEMORY_WRITER_MAX_TOKENS,2048}
+      timeout_seconds: 90
+      temperature: 0.1
+      max_attempts: 2
+      response_format: "json_schema"
+
 # Memory system
 memory:
   # Directory for persistent memory storage (relative to project root)
@@ -60,10 +96,141 @@ stage_budget:
   default:
     max_designer_iterations: 2
     max_repair_steps: 1
+    max_planner_turns: 8
+    max_designer_turns: 12
+    max_critic_turns: 6
+    max_wall_clock_seconds: 600
+    # Exclusive role-active leases. Planner time pauses while its nested
+    # designer/critic tools run. max_wall_clock_seconds bounds planning/design;
+    # required visual scoring uses the isolated quality transaction below.
+    planner_active_max_seconds: 180
+    designer_active_max_seconds: 360
+    critic_active_max_seconds: 300
+    # Compact response caps live here so pure SceneSmith/disabled ablations
+    # preserve their original runtime behavior.
+    planner_max_output_tokens: 768
+    designer_max_output_tokens: 1536
+    critic_max_output_tokens: 1536
+    # Two explicit direct requests share the transaction budget. The second is
+    # used only for transport, truncation, empty-content, JSON, or schema recovery.
+    critic_max_attempts: 2
+    # This is the sole SceneExpert deadline for one candidate's visual-scoring
+    # transaction and starts only after deterministic render/state evidence has
+    # been collected.
+    critic_evaluation_max_seconds: 240
+    # Preserve role-specific tails instead of allowing design work to consume
+    # the whole stage deadline before visual verification and finalization.
+    critic_reserve_fraction: 0.25
+    fallback_reserve_fraction: 0.10
+    finalization_reserve_fraction: 0.05
+    # A single isolated retry expands the quality transaction when the only
+    # failure is transport latency or structured-output recovery latency.
+    critical_retry_budget_multiplier: 1.5
+    max_asset_requests: 4
+    # Blocking retrieval/canonicalization has its own service deadline and is
+    # excluded from planner/designer active inference time.
+    asset_acquisition_timeout_seconds: 300
+    max_optional_object_families: 3
+    max_assets_per_request: 6
+    max_semantic_retries_per_family: 2
+    min_output_objects: 0
+    max_output_objects: 0
+    max_stage_regenerations: 1
+    min_visual_score: 0.60
+  floor_plan:
+    max_designer_iterations: 2
+    max_repair_steps: 1
+    max_planner_turns: 8
+    max_designer_turns: 12
+    max_critic_turns: 4
+    max_wall_clock_seconds: 420
+    planner_active_max_seconds: 120
+    designer_active_max_seconds: 240
+    critic_active_max_seconds: 240
+    max_asset_requests: 4
+    max_optional_object_families: 0
+    max_assets_per_request: 0
+    max_semantic_retries_per_family: 0
+  furniture:
+    max_designer_iterations: 2
+    max_repair_steps: 2
+    max_planner_turns: 8
+    max_designer_turns: 16
+    max_critic_turns: 6
+    max_wall_clock_seconds: 900
+    planner_active_max_seconds: 240
+    designer_active_max_seconds: 480
+    critic_active_max_seconds: 360
+    # Furniture quality gates must not inherit a nearly exhausted designer
+    # deadline. Each distinct rendered candidate gets one bounded VLM window.
+    critic_evaluation_max_seconds: 360
+    fallback_reserve_fraction: 0.15
+    max_asset_requests: 4
+    asset_acquisition_timeout_seconds: 360
+    max_optional_object_families: 2
+    max_assets_per_request: 6
+    max_semantic_retries_per_family: 2
+    # Every placement stage must create at least one stage-native object. Prompt
+    # requirements may raise this effective minimum, but do not require filler
+    # objects in addition to explicitly requested furniture.
+    min_output_objects: 1
+  wall_mounted:
+    max_designer_iterations: 1
+    max_repair_steps: 1
+    max_planner_turns: 6
+    max_designer_turns: 10
+    max_critic_turns: 5
+    max_wall_clock_seconds: 420
+    planner_active_max_seconds: 150
+    designer_active_max_seconds: 240
+    critic_active_max_seconds: 240
+    max_asset_requests: 2
+    asset_acquisition_timeout_seconds: 300
+    max_optional_object_families: 3
+    max_assets_per_request: 4
+    max_semantic_retries_per_family: 1
+    # Decoration stages must produce a bounded, non-empty result. Explicit
+    # prompt requirements may raise the effective maximum above this value.
+    min_output_objects: 1
+    max_output_objects: 3
+    max_stage_regenerations: 1
+  ceiling_mounted:
+    max_designer_iterations: 1
+    max_repair_steps: 1
+    max_planner_turns: 6
+    max_designer_turns: 8
+    max_critic_turns: 5
+    max_wall_clock_seconds: 360
+    planner_active_max_seconds: 150
+    designer_active_max_seconds: 210
+    critic_active_max_seconds: 240
+    max_asset_requests: 2
+    asset_acquisition_timeout_seconds: 300
+    max_optional_object_families: 1
+    max_assets_per_request: 2
+    max_semantic_retries_per_family: 1
+    min_output_objects: 1
+    max_output_objects: 1
+    max_stage_regenerations: 1
   # Manipuland is the most error-prone stage — allow more repair attempts
   manipuland:
     max_designer_iterations: 2
     max_repair_steps: 2
+    max_planner_turns: 8
+    max_designer_turns: 12
+    max_critic_turns: 6
+    max_wall_clock_seconds: 600
+    planner_active_max_seconds: 180
+    designer_active_max_seconds: 360
+    critic_active_max_seconds: 300
+    max_asset_requests: 4
+    asset_acquisition_timeout_seconds: 300
+    max_optional_object_families: 4
+    max_assets_per_request: 6
+    max_semantic_retries_per_family: 2
+    min_output_objects: 1
+    max_output_objects: 4
+    max_stage_regenerations: 1
 
 # Verifier pass thresholds
 verifier:

@@ -2,6 +2,7 @@ import atexit
 import copy
 import logging
 import os
+import shutil
 import sys
 import tempfile
 import time
@@ -881,9 +882,10 @@ def render_scene_for_agent_observation(
         wall_furniture_map: For wall mode, mapping from surface_id to list of furniture
             UniqueIDs to include in that wall's orthographic render. Required when
             rendering_mode="wall".
-        room_bounds: For ceiling_perspective mode, room XY bounds
-            (min_x, min_y, max_x, max_y) in meters.
-        ceiling_height: For ceiling_perspective mode, ceiling height in meters.
+        room_bounds: Architectural room XY bounds used for stable camera framing
+            and ceiling views, as (min_x, min_y, max_x, max_y) in meters.
+        ceiling_height: Architectural room height used for stable camera framing
+            and ceiling views, in meters.
         context_furniture_ids: For manipuland mode, list of furniture IDs to keep
             visible in per-surface top-down renders. These provide spatial context
             for item placement orientation (e.g., chairs around a table).
@@ -1346,6 +1348,10 @@ def save_scene_as_blend(
     blender_server_port_range: tuple[int, int] = (8000, 8050),
     server_startup_delay: float = 0.1,
     port_cleanup_delay: float = 0.1,
+    render_cfg: DictConfig | None = None,
+    render_output_dir: Path | None = None,
+    rendering_mode: str = "furniture",
+    render_taa_samples: int = 4,
 ) -> Path:
     """Export scene to a .blend file.
 
@@ -1358,6 +1364,10 @@ def save_scene_as_blend(
         blender_server_port_range: Port range for the Blender server.
         server_startup_delay: Delay after starting server subprocess.
         port_cleanup_delay: Delay after stopping server.
+        render_cfg: Optional room-scale render configuration.
+        render_output_dir: If set with render_cfg, persist full-room PNG views here.
+        rendering_mode: Observation renderer mode used for snapshot generation.
+        render_taa_samples: EEVEE samples for the persisted snapshots.
 
     Returns:
         Path to the saved .blend file.
@@ -1433,6 +1443,36 @@ def save_scene_as_blend(
             raise RuntimeError(f"Blend file was not created at {output_path}")
 
         console_logger.info(f"Successfully saved .blend file to {output_path}")
+        if render_cfg is not None and render_output_dir is not None:
+            temp_render_root: Path | None = None
+            try:
+                image_paths = render_scene_for_agent_observation(
+                    scene=scene,
+                    cfg=render_cfg,
+                    blender_server=server,
+                    rendering_mode=rendering_mode,
+                    taa_samples=render_taa_samples,
+                )
+                render_output_dir.mkdir(parents=True, exist_ok=True)
+                for image_path in image_paths:
+                    shutil.copy2(image_path, render_output_dir / image_path.name)
+                if image_paths:
+                    temp_render_root = image_paths[0].parent.parent
+                console_logger.info(
+                    "Saved %d full-room snapshot(s) to %s",
+                    len(image_paths),
+                    render_output_dir,
+                )
+            except Exception:
+                # Visualization is an observability artifact.  A renderer failure
+                # must not invalidate an otherwise usable scene or blend export.
+                console_logger.exception(
+                    "Failed to persist full-room snapshots for %s",
+                    output_path,
+                )
+            finally:
+                if temp_render_root is not None:
+                    shutil.rmtree(temp_render_root, ignore_errors=True)
         return output_path
 
     finally:

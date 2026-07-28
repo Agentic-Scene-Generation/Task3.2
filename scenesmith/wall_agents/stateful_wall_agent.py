@@ -36,6 +36,7 @@ from scenesmith.scenebenchmark_critic.prompt_context import format_agent_prompt_
 from scenesmith.scenebenchmark_critic.visual_clearance_repair import (
     improve_wall_visual_clearance,
 )
+from scenesmith.scene_expert.exceptions import StageValidationError
 from scenesmith.utils.logging import BaseLogger
 from scenesmith.wall_agents.base_wall_agent import BaseWallAgent
 from scenesmith.wall_agents.prompt_constraints import (
@@ -501,15 +502,18 @@ class StatefulWallAgent(BaseStatefulAgent, BaseWallAgent):
                 "during this required-object pass."
             )
 
-        result: RunResult = await Runner.run(
+        result = await self._run_agent_with_stage_sla(
             starting_agent=self.planner,
             input=runner_instruction,
-            max_turns=self.cfg.agents.planner_agent.max_turns,
+            role="planner",
+            event="planner_workflow",
+            configured_max_turns=self.cfg.agents.planner_agent.max_turns,
             run_config=self._create_run_config(),
         )
-        log_agent_usage(result=result, agent_name="PLANNER (WALL)")
+        if result is not None:
+            log_agent_usage(result=result, agent_name="PLANNER (WALL)")
 
-        if result.final_output:
+        if result is not None and result.final_output:
             log_agent_response(
                 response=result.final_output, agent_name="PLANNER (WALL)"
             )
@@ -556,6 +560,7 @@ class StatefulWallAgent(BaseStatefulAgent, BaseWallAgent):
         """
         console_logger.info("Starting wall decoration")
         self.scene = scene
+        self._configure_stage_runtime(scene)
 
         # Extract wall surfaces for the room.
         room_id = scene.room_id
@@ -563,6 +568,17 @@ class StatefulWallAgent(BaseStatefulAgent, BaseWallAgent):
 
         if not self.wall_surfaces:
             console_logger.warning(f"No wall surfaces found for room {room_id}")
+            minimum = int(
+                getattr(scene, "scene_expert_min_output_objects", 0) or 0
+            )
+            if minimum > 0:
+                raise StageValidationError(
+                    stage=self.agent_type.value,
+                    reasons=[
+                        "stage surface unavailable: no usable wall surfaces were "
+                        f"extracted for room {room_id}"
+                    ],
+                )
             return
 
         console_logger.info(

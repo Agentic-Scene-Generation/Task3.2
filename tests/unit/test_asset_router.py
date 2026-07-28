@@ -8,6 +8,10 @@ import unittest
 
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+from tempfile import TemporaryDirectory
+from types import SimpleNamespace
+
+from PIL import Image
 
 from scenesmith.agent_utils.asset_router import AssetRouter
 from scenesmith.agent_utils.asset_router.dataclasses import AnalysisResult, AssetItem
@@ -18,6 +22,33 @@ from scenesmith.agent_utils.asset_router.rendered_asset_choice import (
 from scenesmith.agent_utils.hssd_retrieval_server.dataclasses import HssdRetrievalResult
 from scenesmith.agent_utils.room import AgentType, ObjectType
 from scenesmith.agent_utils.semantic_names import semantic_name_candidates_for_request
+
+
+class TestAssetValidationPreflight(unittest.TestCase):
+    def test_blank_multiview_render_is_rejected_without_vlm(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            blank_path = root / "blank.png"
+            Image.new("RGB", (128, 128), color=(20, 20, 20)).save(blank_path)
+            router = object.__new__(AssetRouter)
+            router.blender_server = MagicMock()
+            router.blender_server.is_running.return_value = True
+            router.blender_server.render_multiview_for_analysis.return_value = [
+                blank_path
+            ]
+            router.side_view_elevation_degrees = 20
+            router.validation_taa_samples = 1
+            router.vlm_service = MagicMock()
+
+            result = router.validate_asset(
+                mesh_path=root / "asset.gltf",
+                description="decorative plant",
+                output_dir=root / "renders",
+            )
+
+            self.assertFalse(result.is_acceptable)
+            self.assertIn("blank", result.reason)
+            router.vlm_service.create_completion.assert_not_called()
 
 
 class TestAnalysisResultWasModified(unittest.TestCase):
@@ -154,6 +185,47 @@ class TestAssetRouterItemTypeValidation(unittest.TestCase):
         error = router.validate_item_types(items)
         assert error is not None
         assert "manipuland" in error.lower()
+
+    def test_thin_covering_uses_generated_fallback_without_material_server(
+        self,
+    ) -> None:
+        router = object.__new__(AssetRouter)
+        router.agent_type = AgentType.FURNITURE
+        router.cfg = SimpleNamespace(
+            asset_manager=SimpleNamespace(
+                router=SimpleNamespace(
+                    strategies=SimpleNamespace(
+                        thin_covering=SimpleNamespace(thickness_m=0.003)
+                    )
+                )
+            )
+        )
+        generated = MagicMock()
+        router._try_generated_thin_covering = MagicMock()
+        router._generate_procedural_floor_covering_fallback = MagicMock(
+            return_value=generated
+        )
+        item = AssetItem(
+            description="square low-pile rug",
+            short_name="rug",
+            dimensions=[1.8, 1.8, 0.03],
+            object_type=ObjectType.FURNITURE,
+            strategies=["thin_covering"],
+            thin_covering_type="tileable",
+        )
+
+        result = router._try_thin_covering_strategy(
+            item=item,
+            max_retries=0,
+            materials_client=None,
+            image_generator=MagicMock(),
+            geometry_dir=Path("geometry"),
+            debug_dir=Path("debug"),
+        )
+
+        self.assertIs(result, generated)
+        router._try_generated_thin_covering.assert_not_called()
+        router._generate_procedural_floor_covering_fallback.assert_called_once()
 
 
 class TestRenderedHssdAssetChoice(unittest.TestCase):
