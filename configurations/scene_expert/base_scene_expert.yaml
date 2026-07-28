@@ -22,6 +22,25 @@ mode: "disabled"
 runtime_budget_control:
   enabled: ${oc.env:SCENEEXPERT_RUNTIME_BUDGET_ENABLED,true}
 
+# Versioned SceneBenchmark critic bridge. The default is disabled so the
+# SceneSmith-only and legacy SceneExpert routes remain independently runnable.
+# Ablation 4c enables it and consumes only deterministic ``core`` evidence for
+# durable memory; auxiliary/shadow findings remain trace-only.
+critic_integration:
+  enabled: ${oc.env:SCENEEXPERT_CRITIC_INTEGRATION_ENABLED,false}
+  memory_enabled: ${oc.env:SCENEEXPERT_CRITIC_MEMORY_ENABLED,true}
+  persist_raw_reports: true
+  require_schema_version: true
+  require_available: ${oc.env:SCENEEXPERT_CRITIC_REQUIRE_AVAILABLE,false}
+  # This switch does not create authority by itself. A stage is blocked only
+  # when the provider report also has gate.blocked=true.
+  stage_gate_enabled: ${oc.env:SCENEEXPERT_CRITIC_STAGE_GATE_ENABLED,false}
+  stages:
+    - furniture
+    - wall_mounted
+    - ceiling_mounted
+    - manipuland
+
 # Direct structured calls made by SceneExpert itself. These roles share one
 # local OpenAI-compatible client, but each role has an explicit bounded budget.
 structured_llm:

@@ -62,9 +62,9 @@ fi
 
 # ---------------------------------------------------------------------------
 # 2. TODO: ACP job configuration.
-#    Edit this block for each ACP multi-GPU submission.
-#    Do not duplicate these ACP-only values in .env; this script is the source
-#    of truth for the generated job-specific env overrides.
+#    These are safe defaults for ACP submissions. Every new critic/profile
+#    option can also be supplied by the caller (the ignored tmp 4c template
+#    uses that route); the generated job env records the effective values.
 # ---------------------------------------------------------------------------
 
 # TODO: Choose experiment. Recommended values:
@@ -75,13 +75,73 @@ fi
 #   ablation_4b_qwen3_vector_memory   BGE-M3 vector memory, requires index
 #   ablation_4c_qwen3_hybrid_memory   recommended hybrid memory, requires index
 #   ablation_5_qwen3_full             full/LoRA model, only after LoRA merge exists
-ACP_EXPERIMENT="ablation_4c_qwen3_hybrid_memory"
+ACP_EXPERIMENT="${ACP_EXPERIMENT:-ablation_4c_qwen3_hybrid_memory}"
+
+# TODO: Select the outer execution profile.
+#   critic_probe  -> colleague-aligned Qwen3.6 llama.cpp + embedding services
+#                    and scripts/run_parallel_critic_on.sh (recommended for 4c)
+#   native_vllm   -> legacy SceneExpert-managed vLLM + run_experiment.sh
+ACP_EXECUTION_MODE="${ACP_EXECUTION_MODE:-critic_probe}"
+case "$ACP_EXECUTION_MODE" in
+    critic_probe)
+        ACP_START_VLLM="${ACP_START_VLLM:-0}"
+        ACP_MODEL_NAME="${ACP_MODEL_NAME:-unsloth/Qwen3.6-27B-GGUF}"
+        ACP_OPENAI_BASE_URL="${ACP_OPENAI_BASE_URL:-http://127.0.0.1:8002/v1}"
+        ;;
+    native_vllm)
+        ACP_START_VLLM="${ACP_START_VLLM:-1}"
+        ACP_MODEL_NAME="${ACP_MODEL_NAME:-${SCENEEXPERT_MODEL_ID:-Qwen/Qwen3.5-35B-A3B}}"
+        ACP_OPENAI_BASE_URL="${ACP_OPENAI_BASE_URL:-${OPENAI_BASE_URL:-http://127.0.0.1:8000/v1}}"
+        ;;
+    *)
+        echo "ERROR: ACP_EXECUTION_MODE must be critic_probe or native_vllm" >&2
+        exit 1
+        ;;
+esac
+ACP_OPENAI_API_KEY="${ACP_OPENAI_API_KEY:-${OPENAI_API_KEY:-sk-123}}"
+
+# SceneExpert additions layered on the colleague flow. Critic collection and
+# memory ingestion are enabled for 4c, while both hard gates remain off for the
+# first shadow-mode replay. Runtime budget injection is off by default here so
+# the underlying SceneSmith/Critic execution policy matches the colleague run.
+if [ "$ACP_EXECUTION_MODE" = "critic_probe" ]; then
+    ACP_RUNTIME_BUDGET_ENABLED="${ACP_RUNTIME_BUDGET_ENABLED:-false}"
+    ACP_CRITIC_INTEGRATION_ENABLED="${ACP_CRITIC_INTEGRATION_ENABLED:-true}"
+    ACP_CRITIC_MEMORY_ENABLED="${ACP_CRITIC_MEMORY_ENABLED:-true}"
+    ACP_CRITIC_REQUIRE_AVAILABLE="${ACP_CRITIC_REQUIRE_AVAILABLE:-true}"
+    ACP_SCENEBENCHMARK_CRITIC_ENABLED="${ACP_SCENEBENCHMARK_CRITIC_ENABLED:-true}"
+else
+    ACP_RUNTIME_BUDGET_ENABLED="${ACP_RUNTIME_BUDGET_ENABLED:-true}"
+    ACP_CRITIC_INTEGRATION_ENABLED="${ACP_CRITIC_INTEGRATION_ENABLED:-false}"
+    ACP_CRITIC_MEMORY_ENABLED="${ACP_CRITIC_MEMORY_ENABLED:-true}"
+    ACP_CRITIC_REQUIRE_AVAILABLE="${ACP_CRITIC_REQUIRE_AVAILABLE:-false}"
+    ACP_SCENEBENCHMARK_CRITIC_ENABLED="${ACP_SCENEBENCHMARK_CRITIC_ENABLED:-false}"
+fi
+ACP_CRITIC_STAGE_GATE_ENABLED="${ACP_CRITIC_STAGE_GATE_ENABLED:-false}"
+ACP_CRITIC_PROVIDER_HARD_GATE="${ACP_CRITIC_PROVIDER_HARD_GATE:-false}"
+ACP_CRITIC_CONSTRAINT_MODE="${ACP_CRITIC_CONSTRAINT_MODE:-shadow}"
+
+# First-run critic probe defaults. Increase MAX_CASES/parallelism only after
+# the one-scene smoke run writes a complete trace and critic-backed memory.
+ACP_CRITIC_MAX_CASES="${ACP_CRITIC_MAX_CASES:-${MAX_CASES:-1}}"
+ACP_CRITIC_INNER_PARALLELISM="${ACP_CRITIC_INNER_PARALLELISM:-${CRITIC_PROBE_INNER_PARALLELISM:-1}}"
+ACP_CRITIC_RENDER_FINAL_VIEWS="${ACP_CRITIC_RENDER_FINAL_VIEWS:-${CRITIC_PROBE_RENDER_FINAL_VIEWS:-true}}"
+ACP_CRITIC_GENERATE_SHARED_BASE="${ACP_CRITIC_GENERATE_SHARED_BASE:-${GENERATE_SHARED_BASE:-false}}"
+ACP_CRITIC_BRANCH_FROM_SHARED_BASE="${ACP_CRITIC_BRANCH_FROM_SHARED_BASE:-${BRANCH_FROM_SHARED_BASE:-false}}"
+ACP_CRITIC_SHARED_BASE_ROOT="${ACP_CRITIC_SHARED_BASE_ROOT:-${SHARED_BASE_ROOT:-}}"
+ACP_CRITIC_PORT_BASE="${ACP_CRITIC_PORT_BASE:-${CRITIC_PROBE_PORT_BASE:-13000}}"
+ACP_HSSD_RETRIEVAL_BACKEND="${ACP_HSSD_RETRIEVAL_BACKEND:-${HSSD_RETRIEVAL_BACKEND:-embedding}}"
+ACP_HSSD_RENDERED_ASSET_CHOICE="${ACP_HSSD_RENDERED_ASSET_CHOICE:-${HSSD_RENDERED_ASSET_CHOICE:-true}}"
 
 # TODO: Match ACP requested GPU count. Leave ACP_CUDA_VISIBLE_DEVICES empty on
 # scheduler-managed ACP jobs so the platform-provided CUDA_VISIBLE_DEVICES is
 # preserved. Fill it only for manual debugging on a known-clean node.
-ACP_GPUS=8
-ACP_CUDA_VISIBLE_DEVICES=""
+if [ "$ACP_EXECUTION_MODE" = "critic_probe" ]; then
+    ACP_GPUS="${ACP_GPUS:-1}"
+else
+    ACP_GPUS="${ACP_GPUS:-8}"
+fi
+ACP_CUDA_VISIBLE_DEVICES="${ACP_CUDA_VISIBLE_DEVICES:-}"
 
 # TODO: 2xH100: 65536 is the stable default. For a faster smoke test, use 32768.
 # 4xH100: try 131072 first.
@@ -129,21 +189,23 @@ ACP_VLLM_ENFORCE_EAGER=1
 # TODO: Keep this at 1 unless artvip_sdf or partnet_mobility_sdf has been
 # prepared under writable SCENEEXPERT_DATA_DIR. The fast HSSD-only reproduction should
 # not start the articulated retrieval server.
-ACP_DISABLE_ARTICULATED=0
+ACP_DISABLE_ARTICULATED="${ACP_DISABLE_ARTICULATED:-1}"
 
 # TODO: Keep this at 1 unless materials/ and materials/embeddings/ have been
 # prepared under writable SCENEEXPERT_DATA_DIR. The fast HSSD-only reproduction should
 # not start the materials retrieval server.
-ACP_DISABLE_MATERIALS=0
+ACP_DISABLE_MATERIALS="${ACP_DISABLE_MATERIALS:-1}"
 
-# TODO: ACP nodes can expose 100+ CPU cores and be slow to spawn native
-# geometry libraries from AFS/FUSE. 180s + 32 OMP threads avoids false startup
-# failures without changing the collision geometry algorithm.
+# TODO: Match the colleague's ACP fallback when bwrap namespaces are blocked.
+ACP_DISABLE_BWRAP="${ACP_DISABLE_BWRAP:-1}"
+
+# TODO: Match the colleague's conservative critic replay: two OMP threads per
+# decomposition server avoids multiplying the host-visible CPU count.
 ACP_CONVEX_READY_TIMEOUT=180
-ACP_CONVEX_MAX_OMP_THREADS=32
+ACP_CONVEX_MAX_OMP_THREADS="${ACP_CONVEX_MAX_OMP_THREADS:-2}"
 
 # TODO: Leave empty to use SCENEEXPERT_OUTPUT_DIR from .env.
-ACP_OUTPUT_DIR=""
+ACP_OUTPUT_DIR="${ACP_OUTPUT_DIR:-}"
 
 # Scene scheduling lives here so users do not need ad-hoc terminal overrides.
 ACP_HYDRA_OVERRIDES="experiment.num_workers=${ACP_SCENE_WORKERS} experiment.scene_retry_attempts=${ACP_SCENE_RETRY_ATTEMPTS}"
@@ -164,6 +226,7 @@ shift || true
 
 RUN_STAMP="$(date +'%Y%m%d_%H%M%S')"
 RUN_NAME="${SCENEEXPERT_RUN_NAME:-acp_${EXPERIMENT}_${RUN_STAMP}}"
+CRITIC_OUTPUT_ROOT="${ACP_CRITIC_OUTPUT_ROOT:-${OUTPUT_ROOT:-${SCENEEXPERT_OUTPUT_DIR:-$PROJECT_DIR/outputs}/critic_probe/$RUN_NAME}}"
 LOG_DIR="${SCENEEXPERT_ACP_LOG_DIR:-$PROJECT_DIR/tmp/acp_logs/$RUN_NAME}"
 LOG_FILE="$LOG_DIR/console.log"
 JOB_ENV_FILE="$LOG_DIR/sceneexpert_acp.env"
@@ -202,7 +265,12 @@ cat >> "$JOB_ENV_FILE" <<EOF
 
 # --- ACP multi-GPU overrides generated at $RUN_STAMP ---
 export SCENEEXPERT_RUN_NAME="$RUN_NAME"
-export SCENEEXPERT_START_VLLM=1
+export SCENEEXPERT_START_VLLM=$ACP_START_VLLM
+export SCENEEXPERT_MODEL_ID="$ACP_MODEL_NAME"
+export MODEL_NAME="$ACP_MODEL_NAME"
+export OPENAI_BASE_URL="$ACP_OPENAI_BASE_URL"
+export OPENAI_API_KEY="$ACP_OPENAI_API_KEY"
+export OPENAI_USE_RESPONSES=false
 export SCENEEXPERT_TENSOR_PARALLEL_SIZE=$ACP_GPUS
 export SCENEEXPERT_MAX_MODEL_LEN=$ACP_MAX_MODEL_LEN
 export SCENEEXPERT_GPU_MEMORY_UTILIZATION=$ACP_GPU_MEMORY_UTILIZATION
@@ -216,6 +284,15 @@ export SCENEEXPERT_VLLM_DEEP_GEMM_WARMUP="$ACP_VLLM_DEEP_GEMM_WARMUP"
 export SCENEEXPERT_VLLM_ENFORCE_EAGER=$ACP_VLLM_ENFORCE_EAGER
 export SCENEEXPERT_DISABLE_ARTICULATED=$ACP_DISABLE_ARTICULATED
 export SCENEEXPERT_DISABLE_MATERIALS=$ACP_DISABLE_MATERIALS
+export SCENEEXPERT_DISABLE_BWRAP=$ACP_DISABLE_BWRAP
+export SCENEEXPERT_RUNTIME_BUDGET_ENABLED=$ACP_RUNTIME_BUDGET_ENABLED
+export SCENEEXPERT_CRITIC_INTEGRATION_ENABLED=$ACP_CRITIC_INTEGRATION_ENABLED
+export SCENEEXPERT_CRITIC_MEMORY_ENABLED=$ACP_CRITIC_MEMORY_ENABLED
+export SCENEEXPERT_CRITIC_REQUIRE_AVAILABLE=$ACP_CRITIC_REQUIRE_AVAILABLE
+export SCENEEXPERT_CRITIC_STAGE_GATE_ENABLED=$ACP_CRITIC_STAGE_GATE_ENABLED
+export SCENEEXPERT_CRITIC_PROVIDER_HARD_GATE=$ACP_CRITIC_PROVIDER_HARD_GATE
+export SCENEEXPERT_CRITIC_CONSTRAINT_MODE="$ACP_CRITIC_CONSTRAINT_MODE"
+export SCENEEXPERT_SCENEBENCHMARK_CRITIC_ENABLED=$ACP_SCENEBENCHMARK_CRITIC_ENABLED
 export SCENEEXPERT_CONVEX_READY_TIMEOUT=$ACP_CONVEX_READY_TIMEOUT
 export SCENEEXPERT_CONVEX_MAX_OMP_THREADS=$ACP_CONVEX_MAX_OMP_THREADS
 export SCENEEXPERT_MEMORY_EMBEDDING_DEVICE="$ACP_MEMORY_EMBEDDING_DEVICE"
@@ -223,6 +300,16 @@ export SCENEEXPERT_MEMORY_EMBEDDING_INDEX_DEVICE="$ACP_MEMORY_INDEX_DEVICE"
 export SCENEEXPERT_MEMORY_INDEX_AUTO_BUILD_MISSING=$ACP_MEMORY_INDEX_AUTO_BUILD
 export SCENEEXPERT_MP_START_METHOD="$ACP_MP_START_METHOD"
 export SCENEEXPERT_VLLM_LOG="$LOG_DIR/vllm_server.log"
+export HSSD_RETRIEVAL_BACKEND="$ACP_HSSD_RETRIEVAL_BACKEND"
+export HSSD_RENDERED_ASSET_CHOICE="$ACP_HSSD_RENDERED_ASSET_CHOICE"
+export MAX_CASES=$ACP_CRITIC_MAX_CASES
+export CRITIC_PROBE_INNER_PARALLELISM=$ACP_CRITIC_INNER_PARALLELISM
+export CRITIC_PROBE_RENDER_FINAL_VIEWS=$ACP_CRITIC_RENDER_FINAL_VIEWS
+export GENERATE_SHARED_BASE=$ACP_CRITIC_GENERATE_SHARED_BASE
+export BRANCH_FROM_SHARED_BASE=$ACP_CRITIC_BRANCH_FROM_SHARED_BASE
+export SHARED_BASE_ROOT="$ACP_CRITIC_SHARED_BASE_ROOT"
+export CRITIC_PROBE_PORT_BASE=$ACP_CRITIC_PORT_BASE
+export OUTPUT_ROOT="$CRITIC_OUTPUT_ROOT"
 EOF
 
 if [ -n "$ACP_OUTPUT_DIR" ]; then
@@ -238,7 +325,9 @@ activate_python_env
 
 echo "Project: $PROJECT_DIR"
 echo "Experiment: $EXPERIMENT"
+echo "Execution mode: $ACP_EXECUTION_MODE"
 echo "Run name: $RUN_NAME"
+echo "Critic output root: $CRITIC_OUTPUT_ROOT"
 echo "Log dir: $LOG_DIR"
 echo "CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-<scheduler-default>}"
 echo "Tensor parallel size: $ACP_GPUS"
@@ -254,6 +343,14 @@ printf 'DeepGEMM: use=%s, moe_use=%s, warmup=%s\n' \
 echo "enforce eager: ${ACP_VLLM_ENFORCE_EAGER}"
 echo "disable articulated retrieval: ${ACP_DISABLE_ARTICULATED}"
 echo "disable materials retrieval: ${ACP_DISABLE_MATERIALS}"
+echo "disable bwrap: ${ACP_DISABLE_BWRAP}"
+echo "model endpoint: ${ACP_MODEL_NAME} @ ${ACP_OPENAI_BASE_URL}"
+echo "runtime budget injection: ${ACP_RUNTIME_BUDGET_ENABLED}"
+echo "critic bridge/memory/required: ${ACP_CRITIC_INTEGRATION_ENABLED}/${ACP_CRITIC_MEMORY_ENABLED}/${ACP_CRITIC_REQUIRE_AVAILABLE}"
+echo "SceneBenchmark critic enabled: ${ACP_SCENEBENCHMARK_CRITIC_ENABLED}"
+echo "critic gates (SceneExpert/provider): ${ACP_CRITIC_STAGE_GATE_ENABLED}/${ACP_CRITIC_PROVIDER_HARD_GATE}"
+echo "critic constraint mode: ${ACP_CRITIC_CONSTRAINT_MODE}"
+echo "HSSD retrieval: ${ACP_HSSD_RETRIEVAL_BACKEND} (rendered choice=${ACP_HSSD_RENDERED_ASSET_CHOICE})"
 echo "scene workers: ${ACP_SCENE_WORKERS}"
 echo "scene retry attempts: ${ACP_SCENE_RETRY_ATTEMPTS}"
 echo "multiprocessing start method: ${ACP_MP_START_METHOD}"
@@ -318,19 +415,68 @@ prepare_memory_index_if_needed() {
 prepare_memory_index_if_needed
 
 # ---------------------------------------------------------------------------
-# 6. Run SceneExpert. Keep memory-mode runs conservative by default.
+# 6. Preflight the colleague-aligned external services and local evidence.
+# ---------------------------------------------------------------------------
+preflight_critic_profile() {
+    if [ "$ACP_EXECUTION_MODE" != "critic_probe" ]; then
+        return 0
+    fi
+
+    for required_dir in \
+        "${HSSD_RENDERED_ASSETS_DIR:-}" \
+        "${HSSD_ZVEC_COLLECTION_PATH:-}"; do
+        if [ -z "$required_dir" ] || [ ! -d "$required_dir" ]; then
+            echo "ERROR: required 4c HSSD directory is missing: ${required_dir:-<unset>}" >&2
+            exit 1
+        fi
+    done
+    if [ -z "${HSSD_EMBEDDING_BASE_URL:-}" ]; then
+        echo "ERROR: HSSD_EMBEDDING_BASE_URL is required for critic_probe" >&2
+        exit 1
+    fi
+
+    echo "========== PREFLIGHT QWEN3.6 STRUCTURED OUTPUT =========="
+    python scripts/smoke_test_sceneexpert_llm.py \
+        --model "$ACP_MODEL_NAME" \
+        --base-url "$ACP_OPENAI_BASE_URL" \
+        --api-key "$ACP_OPENAI_API_KEY"
+
+    if [ "$ACP_HSSD_RETRIEVAL_BACKEND" = "embedding" ]; then
+        echo "========== PREFLIGHT HSSD EMBEDDING =========="
+        curl -fsS \
+            -H "Content-Type: application/json" \
+            -d '{"content":"SceneExpert embedding readiness check","embd_normalize":2}' \
+            "${HSSD_EMBEDDING_BASE_URL%/}/embeddings" \
+            | python -c 'import json, sys; from scenesmith.agent_utils.hssd_retrieval.zvec_similarity import _extract_embedding; vector = _extract_embedding(json.load(sys.stdin)); assert vector, "empty embedding vector"; print(f"Embedding preflight passed (dimension={len(vector)}).")'
+    fi
+}
+
+preflight_critic_profile
+
+# ---------------------------------------------------------------------------
+# 7. Run SceneExpert. Keep memory-mode runs conservative by default.
 # ---------------------------------------------------------------------------
 echo "========== START SCENEEXPERT =========="
 set +e
-# shellcheck disable=SC2086
-bash scripts/run_experiment.sh "$EXPERIMENT" $ACP_HYDRA_OVERRIDES "$@" 2>&1 | tee "$LOG_FILE"
+if [ "$ACP_EXECUTION_MODE" = "critic_probe" ]; then
+    SCENEEXPERT_EXPERIMENT="$EXPERIMENT" \
+        bash scripts/run_parallel_critic_on.sh "$@" 2>&1 | tee "$LOG_FILE"
+else
+    # shellcheck disable=SC2086
+    bash scripts/run_experiment.sh "$EXPERIMENT" \
+        $ACP_HYDRA_OVERRIDES "$@" 2>&1 | tee "$LOG_FILE"
+fi
 EXIT_CODE=${PIPESTATUS[0]}
 set -e
 
 echo "========== SCENEEXPERT FINISHED =========="
 echo "EXIT_CODE=$EXIT_CODE"
 echo "Console log: $LOG_FILE"
-echo "vLLM log: $LOG_DIR/vllm_server.log"
+if [ "$ACP_EXECUTION_MODE" = "native_vllm" ]; then
+    echo "vLLM log: $LOG_DIR/vllm_server.log"
+else
+    echo "External llama.cpp and embedding logs are owned by the caller."
+fi
 echo "Job env: $JOB_ENV_FILE"
 
 exit "$EXIT_CODE"

@@ -14,6 +14,7 @@ from scenesmith.scene_expert.structured_llm import (
     SceneExpertStructuredLLMClient,
     StructuredLLMProfile,
 )
+from scenesmith.utils.llm_json import parse_llm_json_object
 
 console_logger = logging.getLogger(__name__)
 
@@ -150,6 +151,11 @@ _OBJECT_ALIASES: dict[str, tuple[str, list[str], str]] = {
     "book": ("small", ["book", "books"], "book"),
     "plant": ("small", ["plant", "plants"], "plant"),
 }
+
+
+def _extract_json_from_text(text: str) -> dict:
+    """Compatibility wrapper for resilient local-model JSON parsing."""
+    return parse_llm_json_object(text)
 
 
 def _extract_count_before_alias(text: str, alias: str) -> int:

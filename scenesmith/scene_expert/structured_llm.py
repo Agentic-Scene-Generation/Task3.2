@@ -27,6 +27,7 @@ from scenesmith.scene_expert.context_bundle import (
     stable_hash,
     utc_now,
 )
+from scenesmith.utils.llm_json import parse_llm_json_object
 
 console_logger = logging.getLogger(__name__)
 
@@ -630,7 +631,7 @@ class SceneExpertStructuredLLMClient:
 
 
 def extract_json_object(text: str) -> dict[str, Any]:
-    """Extract one JSON object without accepting reasoning prose as output."""
+    """Extract one JSON object with the shared local-model repair policy."""
     if not text or not text.strip():
         raise ValueError("Empty response text")
     stripped = text.strip()
@@ -640,11 +641,7 @@ def extract_json_object(text: str) -> dict[str, Any]:
     try:
         value = json.loads(stripped)
     except json.JSONDecodeError:
-        start = stripped.find("{")
-        if start < 0:
-            raise
-        decoder = json.JSONDecoder()
-        value, _ = decoder.raw_decode(stripped[start:])
+        value = parse_llm_json_object(stripped)
     if not isinstance(value, dict):
         raise ValueError(f"Expected JSON object, got {type(value).__name__}")
     return value

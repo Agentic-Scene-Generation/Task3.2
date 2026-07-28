@@ -240,6 +240,56 @@ class VerifyIssue(BaseModel):
     description: str = ""
 
 
+class CriticEvidenceResult(BaseModel):
+    """One normalized, version-independent SceneBenchmark critic result."""
+
+    check_id: str = ""
+    metric: str = "unknown"
+    label: str = "unknown"
+    scoring_tier: str = "core"
+    primary_object: str = ""
+    related_objects: list[str] = Field(default_factory=list)
+    reason: str = ""
+    repair_advice: str = ""
+    confidence: float | None = None
+
+    @property
+    def is_core(self) -> bool:
+        return self.scoring_tier == "core"
+
+
+class CriticEvidence(BaseModel):
+    """Stable SceneExpert view of a versioned external critic report."""
+
+    provider: str = "scenebenchmark_critic"
+    provider_schema_version: str = ""
+    status: str = "disabled"
+    available: bool = False
+    stage: str = ""
+    scope: str = ""
+    report_path: str = ""
+    error: str = ""
+    gate_enabled: bool = False
+    gate_blocked: bool = False
+    gate_label: str = "report_only"
+    scene_score: float | None = None
+    core_total_checks: int = 0
+    core_pass_count: int = 0
+    core_degraded_count: int = 0
+    core_fail_count: int = 0
+    core_unknown_count: int = 0
+    metric_scores: dict[str, float] = Field(default_factory=dict)
+    results: list[CriticEvidenceResult] = Field(default_factory=list)
+
+    @property
+    def core_failures(self) -> list[CriticEvidenceResult]:
+        return [
+            result
+            for result in self.results
+            if result.is_core and result.label in {"fail", "degraded"}
+        ]
+
+
 class StageVerifyReport(BaseModel):
     """Verification result after a single SceneSmith stage."""
 
@@ -276,6 +326,13 @@ class StageVerifyReport(BaseModel):
         description="Deterministic validation provenance kept separate from VLM scores",
     )
     runtime_repair_events: list[str] = Field(default_factory=list)
+    critic_evidence: CriticEvidence | None = Field(
+        default=None,
+        description=(
+            "Normalized SceneBenchmark critic output. The raw versioned report is "
+            "persisted separately and is not embedded into the trace."
+        ),
+    )
 
 
 class FullVerifyReport(BaseModel):

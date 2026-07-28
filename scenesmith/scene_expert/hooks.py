@@ -16,12 +16,13 @@ Ablation mode controls which components are active:
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import math
 import os
 import time
-import hashlib
-import json
+
 from pathlib import Path
 from typing import Any
 
@@ -34,18 +35,20 @@ from scenesmith.scene_expert.context_bundle import (
     build_stage_context_bundle,
     stable_hash,
 )
+from scenesmith.scene_expert.critic_bridge import SceneBenchmarkCriticBridge
 from scenesmith.scene_expert.critic_feedback import (
     feedback_issue_text,
     feedback_repair_text,
     parse_critic_feedback,
 )
+from scenesmith.scene_expert.critic_memory import build_critic_memory_records
 from scenesmith.scene_expert.global_planner import GlobalPlanner
 from scenesmith.scene_expert.harness import STAGE_ORDER, Harness
 from scenesmith.scene_expert.memory.retriever import MemoryRetriever
-from scenesmith.scene_expert.memory.store import FastMemoryStore
-from scenesmith.scene_expert.memory.writer import MemoryWriter
 from scenesmith.scene_expert.memory.schemas import FailureCase, SuccessCase
+from scenesmith.scene_expert.memory.store import FastMemoryStore
 from scenesmith.scene_expert.memory.text_builder import build_embedding_text
+from scenesmith.scene_expert.memory.writer import MemoryWriter
 from scenesmith.scene_expert.repair_controller import RepairController
 from scenesmith.scene_expert.repair_taxonomy import classify_hard_reasons
 from scenesmith.scene_expert.schemas import (
@@ -299,6 +302,8 @@ class SceneExpertHookRunner:
         repair_controller: RepairController,
         memory_writer: MemoryWriter | None,
         memory_store: FastMemoryStore | None,
+        critic_bridge: SceneBenchmarkCriticBridge | None,
+        critic_memory_enabled: bool,
         qwen_model: str,
         experiment_name: str = "",
         config_hash: str = "",
@@ -325,6 +330,8 @@ class SceneExpertHookRunner:
         self._repair_controller = repair_controller
         self._memory_writer = memory_writer
         self._memory_store = memory_store
+        self._critic_bridge = critic_bridge
+        self._critic_memory_enabled = bool(critic_memory_enabled)
         self._qwen_model = qwen_model
         self._experiment_name = experiment_name
         self._config_hash = config_hash
@@ -521,6 +528,32 @@ class SceneExpertHookRunner:
             ),
         )
 
+    def _commit_critic_evidence_memory(
+        self,
+        *,
+        stage: str,
+        verify_report: StageVerifyReport,
+        created_at: str,
+    ) -> None:
+        """Commit deterministic SceneBenchmark evidence through SceneExpert schemas."""
+        if not self._critic_memory_enabled or self._memory_store is None:
+            return
+        evidence = verify_report.critic_evidence
+        if evidence is None or not evidence.available:
+            return
+        failure_cases, success_case = build_critic_memory_records(
+            evidence=evidence,
+            task_spec=self._task_spec,
+            stage=stage,
+            required_objects=self._stage_required_objects(stage),
+            trace_ref=f"trace_{self._scene_id:06d}",
+            created_at=created_at,
+        )
+        for case in failure_cases:
+            self._memory_store.add_failure_case(case)
+        if success_case is not None:
+            self._memory_store.add_success_case(success_case)
+
     def _commit_stage_memory(
         self,
         *,
@@ -543,7 +576,7 @@ class SceneExpertHookRunner:
                 verify_report.critique_summary
             )
             event = {
-                "schema_version": "1.0",
+                "schema_version": "1.1",
                 "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 "event_type": "stage_verify",
                 "trace_id": f"trace_{self._scene_id:06d}",
@@ -567,8 +600,18 @@ class SceneExpertHookRunner:
                 ],
                 "critique_summary": verify_report.critique_summary[:2000],
                 "critic_feedback": critic_feedback.model_dump(),
+                "critic_evidence": (
+                    verify_report.critic_evidence.model_dump()
+                    if verify_report.critic_evidence is not None
+                    else None
+                ),
             }
             self._memory_store.append_event(event)
+            self._commit_critic_evidence_memory(
+                stage=stage,
+                verify_report=verify_report,
+                created_at=event["created_at"],
+            )
 
             digest = hashlib.sha1(
                 json.dumps(event, sort_keys=True, default=str).encode("utf-8")
@@ -1265,7 +1308,28 @@ class SceneExpertHookRunner:
         # Verify stage
         verify_report: StageVerifyReport | None = None
         repair_actions: list[RepairResult] = []
+        critic_evidence = None
         try:
+            if self._critic_bridge is not None:
+                critic_start = time.time()
+                critic_evidence = self._critic_bridge.collect_room_stage(scene, stage)
+                self._trace_logger.record_component_status(
+                    f"scenebenchmark_critic.{stage}",
+                    {
+                        "success": critic_evidence.available,
+                        "source": critic_evidence.provider,
+                        "degraded": not critic_evidence.available,
+                        "status": critic_evidence.status,
+                        "error": critic_evidence.error,
+                        "report_path": critic_evidence.report_path,
+                    },
+                )
+                console_logger.info(
+                    "[SceneExpertTiming] stage=%s module=scenebenchmark_critic "
+                    "elapsed=%.2fs",
+                    stage,
+                    time.time() - critic_start,
+                )
             verify_start = time.time()
             verify_report = self._stage_verifier.verify(
                 stage=stage,
@@ -1273,6 +1337,7 @@ class SceneExpertHookRunner:
                 task_spec=self._task_spec,
                 stage_brief=self._current_stage_brief,
                 scene_state_info=scene_state_info,
+                critic_evidence=critic_evidence,
             )
             console_logger.info(
                 "[SceneExpertTiming] stage=%s module=stage_verifier elapsed=%.2fs",
@@ -1651,6 +1716,7 @@ def build_hook_runner(
         return None
     memory_cfg = se_cfg.get("memory", {})
     structured_llm_cfg = se_cfg.get("structured_llm", {})
+    critic_integration_cfg = se_cfg.get("critic_integration", {}) or {}
 
     mode = se_cfg.get("mode", "disabled")
     if mode == "disabled" or not se_cfg.get("enabled", False):
@@ -1739,6 +1805,25 @@ def build_hook_runner(
     stage_verifier = StageVerifier(
         pass_threshold=ver_cfg.get("stage_pass_threshold", 0.6),
         visual_score_hard_gate=ver_cfg.get("visual_score_hard_gate", False),
+        critic_gate_enabled=_cfg_bool(
+            critic_integration_cfg.get("stage_gate_enabled"),
+            False,
+        ),
+        critic_required=_cfg_bool(
+            critic_integration_cfg.get("require_available"),
+            False,
+        ),
+        critic_required_stages=list(
+            critic_integration_cfg.get(
+                "stages",
+                [
+                    "furniture",
+                    "wall_mounted",
+                    "ceiling_mounted",
+                    "manipuland",
+                ],
+            )
+        ),
     )
     full_verifier = FullVerifier(
         pass_threshold=ver_cfg.get("full_pass_threshold", 0.7),
@@ -1786,6 +1871,38 @@ def build_hook_runner(
         llm_client=structured_llm_client,
     )
     repair_controller = RepairController(memory_store=memory_store)
+    critic_bridge_enabled = _cfg_bool(
+        critic_integration_cfg.get("enabled"),
+        False,
+    )
+    critic_bridge = (
+        SceneBenchmarkCriticBridge(
+            enabled=True,
+            critic_config=cfg_dict,
+            output_dir=scene_debug_dir / "critic",
+            stages=list(
+                critic_integration_cfg.get(
+                    "stages",
+                    [
+                        "furniture",
+                        "wall_mounted",
+                        "ceiling_mounted",
+                        "manipuland",
+                    ],
+                )
+            ),
+            persist_raw_reports=_cfg_bool(
+                critic_integration_cfg.get("persist_raw_reports"),
+                True,
+            ),
+            require_schema_version=_cfg_bool(
+                critic_integration_cfg.get("require_schema_version"),
+                True,
+            ),
+        )
+        if critic_bridge_enabled
+        else None
+    )
     start_stage = (
         cfg_dict.get("experiment", {})
         .get("pipeline", {})
@@ -1806,6 +1923,11 @@ def build_hook_runner(
         repair_controller=repair_controller,
         memory_writer=memory_writer,
         memory_store=memory_store,
+        critic_bridge=critic_bridge,
+        critic_memory_enabled=_cfg_bool(
+            critic_integration_cfg.get("memory_enabled"),
+            True,
+        ),
         qwen_model=model,
         experiment_name=cfg_dict.get("name", ""),
         config_hash=_stable_config_hash(cfg_dict),

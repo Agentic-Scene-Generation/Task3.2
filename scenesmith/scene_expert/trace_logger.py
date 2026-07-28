@@ -34,7 +34,7 @@ class TraceLogger:
     One TraceLogger instance per scene generation run.
     """
 
-    SCHEMA_VERSION = "1.2"
+    SCHEMA_VERSION = "1.3"
 
     def __init__(
         self,
@@ -352,6 +352,16 @@ class TraceLogger:
                 if entry.verify_report.issues:
                     issue_types = [i.issue_type for i in entry.verify_report.issues]
                     stage_line += f" issues={issue_types}"
+                critic_evidence = entry.verify_report.critic_evidence
+                if critic_evidence is not None:
+                    stage_line += (
+                        " scenebenchmark="
+                        f"{critic_evidence.status}"
+                        f"(score={critic_evidence.scene_score},"
+                        f"core={critic_evidence.core_total_checks},"
+                        f"fail={critic_evidence.core_fail_count},"
+                        f"degraded={critic_evidence.core_degraded_count})"
+                    )
             if entry.repair_actions:
                 repairs = [r.repair_type for r in entry.repair_actions]
                 stage_line += f" repairs={repairs}"
@@ -383,6 +393,15 @@ class TraceLogger:
                     if len(summary_text) > 800:
                         summary_text = summary_text[:800] + "... [truncated]"
                     lines.append(f"    CriticLegacy: {summary_text}")
+            if entry.verify_report and entry.verify_report.critic_evidence:
+                evidence = entry.verify_report.critic_evidence
+                for result in evidence.core_failures:
+                    lines.append(
+                        "    SceneBenchmarkCoreFailure: "
+                        f"check={result.check_id!r} metric={result.metric!r} "
+                        f"object={result.primary_object!r} reason={result.reason!r} "
+                        f"repair={result.repair_advice!r}"
+                    )
 
         if self._full_report:
             lines.append(

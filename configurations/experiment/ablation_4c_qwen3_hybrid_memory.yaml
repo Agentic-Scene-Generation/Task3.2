@@ -13,9 +13,33 @@
 defaults:
   - base_experiment
 
+# SceneBenchmark critic is the authoritative deterministic evidence provider
+# for 4c. Keep prompt-originated contracts in shadow mode until a separate
+# replay authorizes contract-mode hard gating.
+scenebenchmark_critic:
+  enabled: ${oc.env:SCENEEXPERT_SCENEBENCHMARK_CRITIC_ENABLED,true}
+  inject_into_llm_critic: true
+  agent_prompt_context_filter_enabled: true
+  fd_relation_proposer_mode: template
+  max_fd_relation_proposals: 8
+  constraint_mode: ${oc.env:SCENEEXPERT_CRITIC_CONSTRAINT_MODE,shadow}
+  hard_gate: ${oc.env:SCENEEXPERT_CRITIC_PROVIDER_HARD_GATE,false}
+  intent_compiler:
+    enabled: true
+  visual_grounding:
+    enabled: false
+  vlm_hard_gate: false
+
 scene_expert:
   enabled: true
   mode: "harness_memory"
+  critic_integration:
+    enabled: ${oc.env:SCENEEXPERT_CRITIC_INTEGRATION_ENABLED,true}
+    memory_enabled: ${oc.env:SCENEEXPERT_CRITIC_MEMORY_ENABLED,true}
+    persist_raw_reports: true
+    require_schema_version: true
+    require_available: ${oc.env:SCENEEXPERT_CRITIC_REQUIRE_AVAILABLE,true}
+    stage_gate_enabled: ${oc.env:SCENEEXPERT_CRITIC_STAGE_GATE_ENABLED,false}
   memory:
     dir: "${paths.memory_dir}/ablation_4c"
     retriever_type: "hybrid"

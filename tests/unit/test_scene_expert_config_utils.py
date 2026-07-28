@@ -23,13 +23,20 @@ class SceneExpertConfigUtilsTest(unittest.TestCase):
                         "max_critic_turns": 4,
                     },
                 },
+                "critic_integration": {
+                    "enabled": False,
+                    "memory_enabled": True,
+                    "stages": ["furniture", "manipuland"],
+                },
             },
             "experiment": {
                 "scene_expert": {
                     "enabled": True,
                     "mode": "harness_memory",
-                    "stage_budget": {
-                        "default": {"max_designer_iterations": 1}
+                    "stage_budget": {"default": {"max_designer_iterations": 1}},
+                    "critic_integration": {
+                        "enabled": True,
+                        "require_available": True,
                     },
                 }
             },
@@ -46,6 +53,15 @@ class SceneExpertConfigUtilsTest(unittest.TestCase):
         self.assertEqual(
             resolved["stage_budget"]["default"]["max_wall_clock_seconds"], 600
         )
+
+    def test_critic_override_preserves_root_integration_contract(self) -> None:
+        resolved = resolve_scene_expert_config(self.cfg)
+        critic = resolved["critic_integration"]
+
+        self.assertTrue(critic["enabled"])
+        self.assertTrue(critic["memory_enabled"])
+        self.assertTrue(critic["require_available"])
+        self.assertEqual(["furniture", "manipuland"], critic["stages"])
 
     def test_floor_plan_budget_keeps_wall_clock_and_stage_override(self) -> None:
         budget = resolve_scene_expert_stage_budget(self.cfg, "floor_plan")

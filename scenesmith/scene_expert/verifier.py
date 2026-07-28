@@ -24,6 +24,7 @@ from scenesmith.scene_expert.critic_feedback import (
     parse_critic_feedback,
 )
 from scenesmith.scene_expert.schemas import (
+    CriticEvidence,
     FullVerifyReport,
     SceneTaskSpec,
     StageBrief,
@@ -580,9 +581,18 @@ class StageVerifier:
         self,
         pass_threshold: float = 0.6,
         visual_score_hard_gate: bool = False,
+        critic_gate_enabled: bool = False,
+        critic_required: bool = False,
+        critic_required_stages: list[str] | tuple[str, ...] | None = None,
     ) -> None:
         self._pass_threshold = pass_threshold
         self._visual_score_hard_gate = bool(visual_score_hard_gate)
+        self._critic_gate_enabled = bool(critic_gate_enabled)
+        self._critic_required = bool(critic_required)
+        self._critic_required_stages = set(
+            critic_required_stages
+            or ("furniture", "wall_mounted", "ceiling_mounted", "manipuland")
+        )
 
     def verify(
         self,
@@ -591,6 +601,7 @@ class StageVerifier:
         task_spec: SceneTaskSpec,
         stage_brief: StageBrief | None = None,
         scene_state_info: dict | None = None,
+        critic_evidence: CriticEvidence | None = None,
     ) -> StageVerifyReport:
         """Run stage verification.
 
@@ -653,6 +664,55 @@ class StageVerifier:
                 "(score_source=%s)",
                 stage,
                 score_source,
+            )
+
+        # --- 1a. SceneBenchmark critic evidence ---
+        # The bridge keeps deterministic critic results separate from VLM
+        # scores. They are always traceable and memory-eligible; they only gate
+        # stage acceptance when both the SceneExpert integration gate and the
+        # provider's own hard gate are enabled.
+        if critic_evidence is not None and critic_evidence.available:
+            rule_scores.update(
+                {
+                    f"critic.{metric}": score
+                    for metric, score in critic_evidence.metric_scores.items()
+                }
+            )
+            for result in critic_evidence.core_failures:
+                if result.repair_advice:
+                    repair_suggestions.append(result.repair_advice)
+            if (
+                self._critic_gate_enabled
+                and critic_evidence.gate_enabled
+                and critic_evidence.gate_blocked
+            ):
+                _add_issue_once(
+                    issues,
+                    VerifyIssue(
+                        issue_type="scenebenchmark_critic_gate",
+                        object_name=(
+                            critic_evidence.core_failures[0].primary_object
+                            if critic_evidence.core_failures
+                            else ""
+                        ),
+                        description=(
+                            "SceneBenchmark critic hard gate blocked stage "
+                            f"'{stage}' with {critic_evidence.core_fail_count} failed "
+                            "and "
+                            f"{critic_evidence.core_degraded_count} degraded core checks"
+                        ),
+                    ),
+                )
+        elif self._critic_required and stage in self._critic_required_stages:
+            _add_issue_once(
+                issues,
+                VerifyIssue(
+                    issue_type="scenebenchmark_critic_unavailable",
+                    description=(
+                        f"Required SceneBenchmark critic evidence is unavailable for "
+                        f"stage '{stage}'"
+                    ),
+                ),
             )
 
         # --- 2. Rule-based checks ---
@@ -960,6 +1020,7 @@ class StageVerifier:
                 if scene_state_info
                 else []
             ),
+            critic_evidence=critic_evidence,
         )
 
 
