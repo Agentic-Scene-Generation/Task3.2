@@ -462,11 +462,23 @@ def _room_geometry_record(scene: RoomScene, offset: np.ndarray) -> dict[str, Any
     height = float(getattr(geom, "wall_height", 2.5) or 2.5)
     x0, x1 = -length / 2.0 + offset[0], length / 2.0 + offset[0]
     y0, y1 = -width / 2.0 + offset[1], width / 2.0 + offset[1]
+    stored_footprint = getattr(geom, "footprint_vertices", None)
+    if isinstance(stored_footprint, (list, tuple)):
+        floor_polygon = [
+            [
+                float(vertex[0]) + float(offset[0]),
+                float(vertex[1]) + float(offset[1]),
+            ]
+            for vertex in geom.room_local_footprint_vertices
+        ]
+    else:
+        # Preserve the established rectangle path for room/house checkpoints.
+        floor_polygon = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
     return {
         "id": scene.room_id,
         "room_type": scene.room_type,
         "bbox": {"min": [x0, y0, 0.0], "max": [x1, y1, height]},
-        "floor_polygon": [[x0, y0], [x1, y0], [x1, y1], [x0, y1]],
+        "floor_polygon": floor_polygon,
     }
 
 
@@ -562,6 +574,7 @@ def _scene_shell_record(scene: RoomScene, offset: np.ndarray) -> dict[str, Any]:
 def _opening_record(opening: Any, offset: np.ndarray) -> dict[str, Any]:
     center = np.array(getattr(opening, "center_world", [0.0, 0.0, 0.0]), dtype=float)
     center = center + offset
+    wall_direction = getattr(opening, "wall_direction", None)
     record = {
         "id": str(getattr(opening, "opening_id", "")),
         "opening_id": str(getattr(opening, "opening_id", "")),
@@ -571,8 +584,23 @@ def _opening_record(opening: Any, offset: np.ndarray) -> dict[str, Any]:
         "width": float(getattr(opening, "width", 0.0) or 0.0),
         "height": float(getattr(opening, "height", 0.0) or 0.0),
         "sill_height": float(getattr(opening, "sill_height", 0.0) or 0.0),
-        "wall_direction": str(getattr(opening, "wall_direction", "")),
+        "wall_direction": (
+            str(wall_direction) if wall_direction is not None else None
+        ),
+        "wall_id": getattr(opening, "wall_id", None),
     }
+    inward_normal = getattr(opening, "wall_inward_normal", None)
+    if inward_normal is not None:
+        record["wall_inward_normal"] = [float(value) for value in inward_normal[:2]]
+    clearance_polygon = getattr(opening, "clearance_polygon", None)
+    if clearance_polygon is not None:
+        record["clearance_polygon"] = [
+            [
+                float(point[0]) + float(offset[0]),
+                float(point[1]) + float(offset[1]),
+            ]
+            for point in clearance_polygon
+        ]
     bbox_min = getattr(opening, "clearance_bbox_min", None)
     bbox_max = getattr(opening, "clearance_bbox_max", None)
     if bbox_min is not None and bbox_max is not None:
