@@ -578,10 +578,17 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         )
         safety_cfg = getattr(self.cfg, "furniture_safety_controller", None)
         bedroom_cfg = getattr(safety_cfg, "bedroom_layout", None)
-        guidance = format_bedroom_anchor_guidance(
-            scene=self.scene,
-            cfg=bedroom_cfg,
-        )
+        guidance = ""
+        if not self._is_polygon_room():
+            guidance = format_bedroom_anchor_guidance(
+                scene=self.scene,
+                cfg=bedroom_cfg,
+            )
+        else:
+            console_logger.info(
+                "Skipping rectangle/cardinal bedroom guidance for polygon room %s",
+                getattr(self.scene, "room_id", "unknown"),
+            )
         if guidance:
             instruction = (
                 f"{instruction}\n\n"
@@ -721,6 +728,14 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 actions.append(
                     f"removed {removed_excess} duplicate prompt-required furniture asset(s)"
                 )
+            return bool(actions), actions
+
+        if self._is_polygon_room():
+            console_logger.info(
+                "Skipping rectangle-only bed, nightstand, and wardrobe anchor "
+                "repairs for polygon room %s",
+                getattr(self.scene, "room_id", "unknown"),
+            )
             return bool(actions), actions
 
         if self._anchor_existing_bed():
@@ -1537,11 +1552,27 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             )
             transform = self._grounded_transform(scene_object, x=x, y=y, yaw_deg=yaw)
             transform = self._fit_transform_inside_room(scene_object, transform)
-            if category not in ("bed", "nightstand", "wardrobe", "twin_bed"):
+            if self._is_polygon_room() or category not in (
+                "bed",
+                "nightstand",
+                "wardrobe",
+                "twin_bed",
+            ):
                 transform = self._best_generic_repair_transform(
                     scene_object,
                     fallback=transform,
                 )
+            if not room_geometry_covers_object(
+                self.scene.room_geometry,
+                scene_object,
+                transform=transform,
+            ):
+                console_logger.warning(
+                    "Deterministic repair could not place %s inside the exact "
+                    "polygon footprint",
+                    category,
+                )
+                return False
             scene_object.transform = transform
             self.scene.add_object(scene_object)
             console_logger.info(
@@ -1577,6 +1608,12 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 for yaw in (0.0, 90.0):
                     candidate = self._grounded_transform(obj, x=x, y=y, yaw_deg=yaw)
                     candidate = self._fit_transform_inside_room(obj, candidate)
+                    if not room_geometry_covers_object(
+                        self.scene.room_geometry,
+                        obj,
+                        transform=candidate,
+                    ):
+                        continue
                     bounds = self._bounds_for_transform(obj, candidate)
                     if bounds is None:
                         continue
@@ -2157,6 +2194,16 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
     def _bedroom_layout_cfg(self) -> Any:
         safety_cfg = getattr(self.cfg, "furniture_safety_controller", None)
         return getattr(safety_cfg, "bedroom_layout", None)
+
+    def _is_polygon_room(self) -> bool:
+        """Return whether the current room uses an exact polygon footprint."""
+        if self.scene is None:
+            return False
+        room_geometry = getattr(self.scene, "room_geometry", None)
+        return isinstance(
+            getattr(room_geometry, "footprint_vertices", None),
+            (list, tuple),
+        )
 
     def _room_bounds_xy(self) -> tuple[float, float, float, float] | None:
         if self.scene is None or self.scene.room_geometry is None:
