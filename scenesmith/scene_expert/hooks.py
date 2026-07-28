@@ -647,6 +647,7 @@ class SceneExpertHookRunner:
                 self._current_stage_brief = self._global_planner.generate_stage_brief(
                     context=context,
                     scene_state_summary="No floor plan has been generated yet.",
+                    original_task=self._prompt,
                 )
                 self._current_stage_brief = _apply_memory_to_stage_brief(
                     self._current_stage_brief,
@@ -845,6 +846,10 @@ class SceneExpertHookRunner:
                 self._current_stage_brief = self._global_planner.generate_stage_brief(
                     context=context,
                     scene_state_summary=scene_state_summary,
+                    original_task=str(
+                        getattr(scene, "scene_expert_original_description", "")
+                        or self._prompt
+                    ),
                 )
                 self._current_stage_brief = _apply_memory_to_stage_brief(
                     self._current_stage_brief,
@@ -1334,9 +1339,13 @@ def build_hook_runner(
     # Verifier thresholds
     ver_cfg = se_cfg.get("verifier", {})
     stage_verifier = StageVerifier(
-        pass_threshold=ver_cfg.get("stage_pass_threshold", 0.6)
+        pass_threshold=ver_cfg.get("stage_pass_threshold", 0.6),
+        visual_score_hard_gate=ver_cfg.get("visual_score_hard_gate", False),
     )
-    full_verifier = FullVerifier(pass_threshold=ver_cfg.get("full_pass_threshold", 0.7))
+    full_verifier = FullVerifier(
+        pass_threshold=ver_cfg.get("full_pass_threshold", 0.7),
+        visual_score_hard_gate=ver_cfg.get("visual_score_hard_gate", False),
+    )
 
     # Build TaskCompiler and compile the task spec
     from omegaconf import OmegaConf

@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from agents import Agent, FunctionTool, Runner, RunResult, custom_span
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 
 from scenesmith.agent_utils.base_stateful_agent import (
     BaseStatefulAgent,
@@ -47,9 +47,22 @@ from scenesmith.agent_utils.support_surface_extraction import (
 )
 from scenesmith.agent_utils.workflow_tools import WorkflowTools
 from scenesmith.manipuland_agents.base_manipuland_agent import BaseManipulandAgent
+from scenesmith.manipuland_agents.cross_stage_inventory import (
+    existing_floor_covering_ids,
+    is_floor_target,
+    is_single_floor_covering_request,
+)
 from scenesmith.manipuland_agents.tools.manipuland_tools import ManipulandTools
 from scenesmith.manipuland_agents.tools.vision_tools import ManipulandVisionTools
 from scenesmith.prompts.registry import ManipulandAgentPrompts
+from scenesmith.scenebenchmark_critic import room_scene_to_case_pack
+from scenesmith.scenebenchmark_critic.manipuland_targets import (
+    classify_manipuland_furniture,
+    infer_prompt_manipuland_obligations,
+)
+from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.dining_place_setting import (
+    evaluate_dining_place_setting_alignment,
+)
 from scenesmith.utils.logging import BaseLogger
 
 console_logger = logging.getLogger(__name__)
@@ -666,6 +679,11 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
                 response=result.final_output, agent_name="PLANNER (MANIPULAND)"
             )
 
+        # The final critic can identify a bad one-to-one dining assignment even
+        # when the planner does not execute its repair recommendation. Enforce the
+        # same deterministic contract before the final scored critique.
+        self._enforce_dining_place_setting_alignment(furniture_id)
+
         # Compute final critique and scores for completed furniture.
         # Check if scene changed since last checkpoint to avoid redundant critique.
         current_scene_hash = self.scene.content_hash()
@@ -687,6 +705,51 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
         console_logger.info(
             f"Completed manipuland placement for furniture {furniture_id}"
         )
+
+    def _enforce_dining_place_setting_alignment(self, furniture_id: UniqueID) -> bool:
+        """Repair a failed dining place-setting contract before final scoring."""
+        table_id = str(furniture_id)
+
+        def current_result() -> dict[str, Any] | None:
+            case_pack = room_scene_to_case_pack(
+                self.scene, stage="dining_place_setting_final_repair"
+            )
+            return next(
+                (
+                    result
+                    for result in evaluate_dining_place_setting_alignment(case_pack)
+                    if str(result.get("primary_object") or "") == table_id
+                ),
+                None,
+            )
+
+        before = current_result()
+        if before is None or before.get("label") != "fail":
+            return False
+
+        console_logger.info(
+            "Applying deterministic dining place-setting alignment for %s",
+            table_id,
+        )
+        self.manipuland_tools._align_dining_place_settings_impl(table_id=table_id)
+
+        after = current_result()
+        if after is not None and after.get("label") == "pass":
+            console_logger.info(
+                "Deterministic dining place-setting alignment passed for %s",
+                table_id,
+            )
+            return True
+
+        unresolved = (
+            "metric produced no result" if after is None else after.get("reason")
+        )
+        console_logger.warning(
+            "Dining place-setting alignment remains unresolved for %s: %s",
+            table_id,
+            unresolved,
+        )
+        return False
 
     def _get_final_scores_directory(self) -> Path:
         """Get the directory path for saving per-furniture manipuland placement state.
@@ -743,6 +806,14 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
 
         # Phase 1: Initial analysis - identify which furniture to populate.
         furniture_data = await self._analyze_furniture_for_placement(scene)
+        furniture_data = self._recover_prompt_required_manipuland_targets(
+            scene=scene,
+            furniture_data=furniture_data,
+        )
+        furniture_data = self._skip_realized_floor_covering_targets(
+            scene=scene,
+            furniture_data=furniture_data,
+        )
 
         if not furniture_data:
             console_logger.info("No furniture identified for manipuland placement")
@@ -922,6 +993,87 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
             return max(0, int(value or 0))
         except Exception:
             return 0
+
+    def _skip_realized_floor_covering_targets(
+        self,
+        *,
+        scene: RoomScene,
+        furniture_data: list[FurnitureSelection],
+    ) -> list[FurnitureSelection]:
+        """Skip floor assignments already realized by an earlier scene stage."""
+        existing_ids = existing_floor_covering_ids(scene)
+        if not existing_ids:
+            return furniture_data
+
+        retained: list[FurnitureSelection] = []
+        for selection in furniture_data:
+            if is_floor_target(
+                scene, selection.furniture_id
+            ) and is_single_floor_covering_request(selection.suggested_items):
+                console_logger.info(
+                    "Skipping redundant floor-covering target %s; already realized by %s",
+                    selection.furniture_id,
+                    existing_ids,
+                )
+                continue
+            retained.append(selection)
+        return retained
+
+    def _recover_prompt_required_manipuland_targets(
+        self,
+        *,
+        scene: RoomScene,
+        furniture_data: list[FurnitureSelection],
+    ) -> list[FurnitureSelection]:
+        """Add fallback targets for explicit, non-optional prompt obligations."""
+        description = str(
+            getattr(scene, "scene_expert_original_description", "")
+            or getattr(scene, "text_description", "")
+            or ""
+        )
+        obligations = infer_prompt_manipuland_obligations(description)
+        if not obligations:
+            return furniture_data
+
+        recovered = list(furniture_data)
+        for obligation in obligations:
+            selected_ids = {
+                selection.furniture_id
+                for selection in recovered
+                if classify_manipuland_furniture(
+                    scene.get_object(selection.furniture_id), selection.furniture_id
+                )
+                == obligation.category
+            }
+            missing = max(0, obligation.target_count - len(selected_ids))
+            if missing <= 0:
+                continue
+            candidates = [
+                obj
+                for object_id, obj in scene.objects.items()
+                if object_id not in selected_ids
+                and not getattr(obj, "immutable", False)
+                and classify_manipuland_furniture(obj, object_id) == obligation.category
+            ]
+            candidates.sort(key=lambda obj: str(obj.object_id))
+            for obj in candidates[:missing]:
+                recovered.append(
+                    FurnitureSelection(
+                        furniture_id=obj.object_id,
+                        suggested_items=f"REQUIRED: {obligation.required_items}",
+                        prompt_constraints=(
+                            "Deterministic critic recovery: this furniture has "
+                            "explicit small-object obligations in the scene prompt."
+                        ),
+                        style_notes="Follow the requested quantity and distribution exactly.",
+                    )
+                )
+                console_logger.warning(
+                    "Recovered prompt-required manipuland target omitted by VLM: %s (%s)",
+                    obj.object_id,
+                    obligation.category,
+                )
+        return recovered
 
     def _select_manipuland_targets(
         self,

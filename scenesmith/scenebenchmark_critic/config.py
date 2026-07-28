@@ -29,6 +29,14 @@ class CriticConfig:
     fail_gate_threshold: int = 1
     degraded_gate_threshold: int = 999999
     asset_annotation: dict[str, Any] = field(default_factory=dict)
+    # Rollout control for prompt-originated intent contracts.  ``legacy`` keeps
+    # historical geometry heuristics unchanged, ``shadow`` records contract
+    # checks with the ignored tier, and ``contract`` makes only contracted
+    # relations eligible for hard critic/repair handling.
+    constraint_mode: str = "legacy"
+    intent_compiler: dict[str, Any] = field(default_factory=dict)
+    visual_grounding: dict[str, Any] = field(default_factory=dict)
+    vlm_hard_gate: bool = False
     extra: dict[str, Any] = field(default_factory=dict)
 
     def metric_enabled(self, metric: str) -> bool:
@@ -64,6 +72,10 @@ def critic_config_from_any(cfg: Any) -> CriticConfig:
         "fail_gate_threshold",
         "degraded_gate_threshold",
         "asset_annotation",
+        "constraint_mode",
+        "intent_compiler",
+        "visual_grounding",
+        "vlm_hard_gate",
     }
     extra = {key: value for key, value in data.items() if key not in known}
     metrics = _as_tuple(data.get("metrics", DEFAULT_METRICS), DEFAULT_METRICS)
@@ -92,6 +104,13 @@ def critic_config_from_any(cfg: Any) -> CriticConfig:
         fail_gate_threshold=int(data.get("fail_gate_threshold", 1)),
         degraded_gate_threshold=int(data.get("degraded_gate_threshold", 999999)),
         asset_annotation=_as_dict(data.get("asset_annotation")),
+        constraint_mode=str(data.get("constraint_mode", "legacy") or "legacy"),
+        intent_compiler=_as_dict(data.get("intent_compiler")),
+        visual_grounding=_as_dict(data.get("visual_grounding")),
+        # VLM output is evidence-only in v1.  Retaining this parsed field makes
+        # an accidental future config opt-in observable without granting it
+        # authority in the evaluator.
+        vlm_hard_gate=_as_bool(data.get("vlm_hard_gate", False)),
         extra=extra,
     )
 

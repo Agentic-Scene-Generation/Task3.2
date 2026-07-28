@@ -67,10 +67,35 @@ def parse_arguments() -> argparse.Namespace:
         "variable HSSD_PREPROCESSED_PATH or default 'data/preprocessed'.",
     )
     parser.add_argument(
+        "--hssd-retrieval-backend",
+        type=str,
+        default="clip",
+        choices=["clip", "embedding"],
+        help="Semantic retrieval backend to use (default: %(default)s).",
+    )
+    parser.add_argument(
         "--hssd-top-k",
         type=int,
         default=5,
-        help="Number of top CLIP candidates before size ranking (default: %(default)s).",
+        help="Number of top semantic candidates before size ranking (default: %(default)s).",
+    )
+    parser.add_argument(
+        "--hssd-zvec-collection-path",
+        type=str,
+        default=None,
+        help="Path to the local HSSD Zvec collection for embedding retrieval.",
+    )
+    parser.add_argument(
+        "--hssd-embedding-base-url",
+        type=str,
+        default=None,
+        help="llama.cpp /embeddings base URL for embedding retrieval.",
+    )
+    parser.add_argument(
+        "--hssd-embedding-dimension",
+        type=int,
+        default=2048,
+        help="Expected embedding dimension for embedding retrieval.",
     )
 
     return parser.parse_args()
@@ -119,7 +144,11 @@ def main() -> int:
             preload_retriever=args.preload,
             hssd_data_path=args.hssd_data_path,
             hssd_preprocessed_path=args.hssd_preprocessed_path,
+            hssd_retrieval_backend=args.hssd_retrieval_backend,
             hssd_top_k=args.hssd_top_k,
+            hssd_zvec_collection_path=args.hssd_zvec_collection_path,
+            hssd_embedding_base_url=args.hssd_embedding_base_url,
+            hssd_embedding_dimension=args.hssd_embedding_dimension,
         )
         server.start()
 

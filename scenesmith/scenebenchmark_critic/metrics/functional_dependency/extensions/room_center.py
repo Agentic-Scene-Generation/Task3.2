@@ -27,6 +27,14 @@ _RELATIVE_CENTER_RE = re.compile(
 )
 _CLAUSE_SPLIT_RE = re.compile(r"\s*(?:[,;]|\band\b)\s*", re.IGNORECASE)
 _ROOM_CONTEXT_RE = re.compile(r"\b(?:room|space|area)\b")
+_ROOM_CENTER_PLACEMENT_RE = re.compile(
+    r"\b(?:contains?|holds?|features?|includes?|has|houses?|"
+    r"is\s+(?:occupied|anchored)\s+by)\b"
+)
+_NEGATIVE_CENTER_CONTEXT_RE = re.compile(
+    r"\b(?:avoid|avoiding|failure\s+patterns?|do\s+not|don't|must\s+not|"
+    r"should\s+not|off[-\s]?center)\b"
+)
 _ANCHOR_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("dining_table", ("dining table", "dining_table")),
     ("table", ("table",)),
@@ -41,6 +49,11 @@ _SEATING_TOKENS = ("chair", "seat", "stool", "bench", "sofa", "couch")
 
 def evaluate_room_center_alignment(case_pack: dict[str, Any]) -> list[dict[str, Any]]:
     """Evaluate objects explicitly requested at the room center."""
+    if str(case_pack.get("intent_contract_mode") or "legacy") == "contract":
+        # Contract mode uses the shared prompt-originated evaluator.  The
+        # legacy regex scans injected StageBrief text and can duplicate or
+        # manufacture a room-center request.
+        return []
     geometry = case_pack.get("scene_geometry") or {}
     objects = [
         obj
@@ -52,7 +65,16 @@ def evaluate_room_center_alignment(case_pack: dict[str, Any]) -> list[dict[str, 
         for room in geometry.get("rooms") or []
         if isinstance(room, dict) and room.get("id")
     ]
-    prompt = str(case_pack.get("task_instruction") or "")
+    # ``task_instruction`` is the mutable stage prompt and can contain a
+    # SceneExpert StageBrief or retrieved-memory advice.  Those additions are
+    # useful to the planner, but must not manufacture a user-facing placement
+    # contract.  The adapter records the original task separately; retain the
+    # legacy fallback for callers that build a case pack themselves.
+    prompt = str(
+        case_pack.get("original_task_instruction")
+        or case_pack.get("task_instruction")
+        or ""
+    )
     if not objects or not rooms or not prompt:
         return []
 
@@ -82,8 +104,7 @@ def evaluate_room_center_alignment(case_pack: dict[str, Any]) -> list[dict[str, 
         candidates = [
             obj
             for obj in objects
-            if str(obj.get("id")) not in used_anchor_ids
-            and _matches_alias(obj, alias)
+            if str(obj.get("id")) not in used_anchor_ids and _matches_alias(obj, alias)
         ]
         if not candidates:
             continue
@@ -165,6 +186,11 @@ def _prompt_center_sentences(prompt: str) -> list[tuple[str, list[str]]]:
             lower = clause.lower()
             if not clause or not _CENTER_RE.search(lower):
                 continue
+            # Stage briefs include counterexamples such as "Avoid placing the
+            # sofa in the middle" and "Leaving the table off-center". They are
+            # constraints against a pose, not positive room-center requests.
+            if _NEGATIVE_CENTER_CONTEXT_RE.search(lower):
+                continue
             if _RELATIVE_CENTER_RE.search(lower):
                 continue
             for alias, aliases in _ANCHOR_ALIASES:
@@ -181,6 +207,13 @@ def _has_room_center_anchor(clause: str, aliases: tuple[str, ...]) -> bool:
     只有家具在中心短语前、明确使用 ``central`` 修饰家具，或句子明确说
     ``center of the room`` 时才建立 room-center contract。
     """
+    # A "central anchor" can describe visual hierarchy within a sleeping or
+    # seating zone. It is not an explicit request to put the object at the
+    # geometric center of the room. Require room-relative language before a
+    # core room-center constraint is allowed.
+    if not _ROOM_CONTEXT_RE.search(clause):
+        return False
+
     alias_matches = [
         match
         for alias in aliases
@@ -210,7 +243,10 @@ def _has_room_center_anchor(clause: str, aliases: tuple[str, ...]) -> bool:
             # Support natural wording such as ``the center of the room
             # contains a dining table`` where the anchor follows the center
             # phrase.
-            if _ROOM_CONTEXT_RE.search(clause[center.end() : alias.start()]):
+            between = clause[center.end() : alias.start()]
+            if _ROOM_CONTEXT_RE.search(between) and _ROOM_CENTER_PLACEMENT_RE.search(
+                between
+            ):
                 return True
 
             # ``central dining table`` and ``centrally positioned dining table``

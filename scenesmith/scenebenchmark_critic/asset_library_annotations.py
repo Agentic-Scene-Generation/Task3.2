@@ -155,7 +155,16 @@ _CATEGORY_GROUP_KEYWORDS: tuple[tuple[tuple[str, ...], str], ...] = (
         "decor",
     ),
     (
-        ("shelf", "stand", "sideboard", "console", "nightstand", "bookcase", "buffet", "cart"),
+        (
+            "shelf",
+            "stand",
+            "sideboard",
+            "console",
+            "nightstand",
+            "bookcase",
+            "buffet",
+            "cart",
+        ),
         "storage_surface",
     ),
     (("television", "tv", "monitor", "screen", "speaker"), "media"),
@@ -296,7 +305,9 @@ def _scenebenchmark_scene_object_type(record: dict[str, Any], group: str) -> str
         return "ceiling_mounted"
     if _category_contains(category_words, _WALL_MOUNTED_HINTS):
         return "wall_mounted"
-    if group == "small_object" or _category_contains(category_words, tuple(_SMALL_OBJECT_HINTS)):
+    if group == "small_object" or _category_contains(
+        category_words, tuple(_SMALL_OBJECT_HINTS)
+    ):
         return "manipuland"
     if group == "decor":
         return "manipuland"
@@ -354,7 +365,9 @@ def _scenebenchmark_accessibility_policy(
     return "required" if affordances else "ignored"
 
 
-def _scenebenchmark_front_hint(record: dict[str, Any], affordances: set[str]) -> str | None:
+def _scenebenchmark_front_hint(
+    record: dict[str, Any], affordances: set[str]
+) -> str | None:
     policy = record.get("week27_asset_policy") or {}
     for side in policy.get("access_sides") or []:
         side_text = str(side).strip().lower()
@@ -362,6 +375,11 @@ def _scenebenchmark_front_hint(record: dict[str, Any], affordances: set[str]) ->
             return side_text
     canonical = record.get("canonical_front") or {}
     if canonical.get("canonical_orientation_is_semantic_front") is True:
+        kind = canonical.get("semantic_direction_kind")
+        if kind == "up":
+            return "top"
+        if kind == "down":
+            return "bottom"
         return "front"
     if "openable" in affordances or "sittable" in affordances:
         return "front"
@@ -377,7 +395,8 @@ def _scenebenchmark_access_sides(
     sides = [
         str(side).strip().lower()
         for side in policy.get("access_sides") or []
-        if str(side).strip().lower() in {"front", "back", "left", "right", "top", "bottom"}
+        if str(side).strip().lower()
+        in {"front", "back", "left", "right", "top", "bottom"}
     ]
     face = front_hint if front_hint in {"front", "back", "left", "right"} else "front"
     if "openable" in affordances or "sittable" in affordances:
@@ -408,7 +427,9 @@ def _interaction_surface_map(affordances: set[str]) -> dict[str, list[str]]:
     return mapping
 
 
-def _interaction_height_m(record: dict[str, Any], affordances: set[str]) -> dict[str, float]:
+def _interaction_height_m(
+    record: dict[str, Any], affordances: set[str]
+) -> dict[str, float]:
     category_words = _category_words(record)
     heights: dict[str, float] = {}
     if "sittable" in affordances:
@@ -445,7 +466,9 @@ def _relation_target_categories(record: dict[str, Any]) -> list[str]:
         target = _normalize_category_token(relation.get("target_category"))
         if target and target not in targets:
             targets.append(target)
-    partners = ((record.get("interaction_clearance") or {}).get("functional_partners") or {})
+    partners = (record.get("interaction_clearance") or {}).get(
+        "functional_partners"
+    ) or {}
     for partner in partners.get("partners") or []:
         target = _normalize_category_token(partner)
         if target and target not in targets:
@@ -545,7 +568,10 @@ def _orientation_dependencies(record: dict[str, Any]) -> list[dict[str, Any]]:
         if relation.get("target_kind") != "asset_category":
             continue
         facing = str(relation.get("relative_facing") or "")
-        if "front" not in facing and relation.get("relation_type") not in {"faces", "around"}:
+        if "front" not in facing and relation.get("relation_type") not in {
+            "faces",
+            "around",
+        }:
             continue
         target = _normalize_category_token(relation.get("target_category"))
         if not target:
@@ -600,7 +626,9 @@ def build_scenebenchmark_annotation(record: dict[str, Any]) -> dict[str, Any]:
     functional_dependencies = _functional_dependencies(record)
     attachment_dependencies = _attachment_dependencies(record)
     orientation_dependencies = _orientation_dependencies(record)
-    has_keep_clear = bool((record.get("interaction_clearance") or {}).get("has_keep_clear"))
+    has_keep_clear = bool(
+        (record.get("interaction_clearance") or {}).get("has_keep_clear")
+    )
     benchmark_relevance = (
         "functional"
         if affordances or target_relations or accessibility_policy == "required"
@@ -648,6 +676,11 @@ def build_scenebenchmark_annotation(record: dict[str, Any]) -> dict[str, Any]:
         hints["canonical_orientation_is_semantic_front"] = canonical_front.get(
             "canonical_orientation_is_semantic_front"
         )
+        hints["semantic_direction_kind"] = canonical_front.get(
+            "semantic_direction_kind"
+        )
+        hints["semantic_directions"] = canonical_front.get("semantic_directions", [])
+        hints["functional_directions"] = record.get("functional_directions", [])
 
     return {
         "schema_version": "scenebenchmark_hssd_fd_sa@0.1",
@@ -667,9 +700,15 @@ class AssetLibraryAnnotationStore:
         unified_affordance_dir: str | Path = DEFAULT_UNIFIED_AFFORDANCE_DIR,
         operation_space_dir: str | Path = DEFAULT_OPERATION_SPACE_DIR,
         nonartic_clearance_v2_path: str | Path = DEFAULT_NONARTIC_CLEARANCE_V2,
-        official_combined_clearance_path: str | Path = DEFAULT_OFFICIAL_COMBINED_CLEARANCE,
-        hssd_articulation_clearance_run_path: str | Path = DEFAULT_HSSD_ARTICULATION_CLEARANCE_RUN,
-        hssd_clearance_voxel_results_path: str | Path = DEFAULT_HSSD_CLEARANCE_VOXEL_RESULTS,
+        official_combined_clearance_path: (
+            str | Path
+        ) = DEFAULT_OFFICIAL_COMBINED_CLEARANCE,
+        hssd_articulation_clearance_run_path: (
+            str | Path
+        ) = DEFAULT_HSSD_ARTICULATION_CLEARANCE_RUN,
+        hssd_clearance_voxel_results_path: (
+            str | Path
+        ) = DEFAULT_HSSD_CLEARANCE_VOXEL_RESULTS,
     ) -> None:
         self.lookup_path = Path(lookup_path)
         self.clearance_dir = Path(clearance_dir)
@@ -677,7 +716,9 @@ class AssetLibraryAnnotationStore:
         self.operation_space_dir = Path(operation_space_dir)
         self.nonartic_clearance_v2_path = Path(nonartic_clearance_v2_path)
         self.official_combined_clearance_path = Path(official_combined_clearance_path)
-        self.hssd_articulation_clearance_run_path = Path(hssd_articulation_clearance_run_path)
+        self.hssd_articulation_clearance_run_path = Path(
+            hssd_articulation_clearance_run_path
+        )
         self.hssd_clearance_voxel_results_path = Path(hssd_clearance_voxel_results_path)
         self._records: dict[str, dict[str, Any]] | None = None
         self._nonartic_clearance: dict[str, dict[str, Any]] | None = None
@@ -687,7 +728,9 @@ class AssetLibraryAnnotationStore:
         self._nonartic_clearance_v2: dict[str, dict[str, Any]] | None = None
         self._official_combined_clearance: dict[str, dict[str, Any]] | None = None
         self._hssd_articulation_clearance_run: dict[str, dict[str, Any]] | None = None
-        self._hssd_clearance_voxel_results_cache: dict[str, dict[str, Any]] | None = None
+        self._hssd_clearance_voxel_results_cache: dict[str, dict[str, Any]] | None = (
+            None
+        )
 
     def _load(self) -> dict[str, dict[str, Any]]:
         if self._records is None:
@@ -751,7 +794,9 @@ class AssetLibraryAnnotationStore:
                                 continue
                             row = json.loads(line)
                             asset_id = normalize_hssd_id(row.get("asset_id", ""))
-                            records[asset_id] = self.unified_affordance_dir / row["record"]
+                            records[asset_id] = (
+                                self.unified_affordance_dir / row["record"]
+                            )
                 except OSError:
                     # 2026-07-07: External UD4 affordance files are optional
                     # enrichment; permission/mount failures must not break the
@@ -773,13 +818,18 @@ class AssetLibraryAnnotationStore:
 
     def _official_combined(self) -> dict[str, dict[str, Any]]:
         if self._official_combined_clearance is None:
-            data = self._load_json_if_present(self.official_combined_clearance_path) or {}
+            data = (
+                self._load_json_if_present(self.official_combined_clearance_path) or {}
+            )
             self._official_combined_clearance = data if isinstance(data, dict) else {}
         return self._official_combined_clearance
 
     def _hssd_articulation_run(self) -> dict[str, dict[str, Any]]:
         if self._hssd_articulation_clearance_run is None:
-            data = self._load_json_if_present(self.hssd_articulation_clearance_run_path) or []
+            data = (
+                self._load_json_if_present(self.hssd_articulation_clearance_run_path)
+                or []
+            )
             records: dict[str, dict[str, Any]] = {}
             if isinstance(data, list):
                 for item in data:
@@ -793,7 +843,9 @@ class AssetLibraryAnnotationStore:
 
     def _hssd_clearance_voxel_results(self) -> dict[str, dict[str, Any]]:
         if self._hssd_clearance_voxel_results_cache is None:
-            data = self._load_json_if_present(self.hssd_clearance_voxel_results_path) or []
+            data = (
+                self._load_json_if_present(self.hssd_clearance_voxel_results_path) or []
+            )
             records: dict[str, dict[str, Any]] = {}
             if isinstance(data, list):
                 for item in data:
@@ -843,13 +895,23 @@ class AssetLibraryAnnotationStore:
             "asset_id": normalized,
             "nonartic_clearance_v2": self._nonartic_v2().get(normalized),
             "official_combined_clearance": self._official_combined().get(normalized),
-            "hssd_articulation_clearance_run": self._hssd_articulation_run().get(normalized),
-            "hssd_clearance_voxel_metrics": self._hssd_clearance_voxel_results().get(normalized),
+            "hssd_articulation_clearance_run": self._hssd_articulation_run().get(
+                normalized
+            ),
+            "hssd_clearance_voxel_metrics": self._hssd_clearance_voxel_results().get(
+                normalized
+            ),
             "sources": {
                 "nonartic_clearance_v2": str(self.nonartic_clearance_v2_path),
-                "official_combined_clearance": str(self.official_combined_clearance_path),
-                "hssd_articulation_clearance_run": str(self.hssd_articulation_clearance_run_path),
-                "hssd_clearance_voxel_metrics": str(self.hssd_clearance_voxel_results_path),
+                "official_combined_clearance": str(
+                    self.official_combined_clearance_path
+                ),
+                "hssd_articulation_clearance_run": str(
+                    self.hssd_articulation_clearance_run_path
+                ),
+                "hssd_clearance_voxel_metrics": str(
+                    self.hssd_clearance_voxel_results_path
+                ),
             },
         }
 
@@ -917,7 +979,9 @@ class AssetLibraryAnnotationStore:
                 and not operation_space["available"]
             ):
                 return None
-            articulation_run = clearance_regions.get("hssd_articulation_clearance_run") or {}
+            articulation_run = (
+                clearance_regions.get("hssd_articulation_clearance_run") or {}
+            )
             category = articulation_run.get("cat") or articulation_run.get("pnm_cat")
             out = {
                 "asset_uid": f"hssd:{normalized}",
@@ -944,8 +1008,10 @@ class AssetLibraryAnnotationStore:
             out["interaction_clearance"] = interaction_clearance
         else:
             out["interaction_clearance_external"] = interaction_clearance
-        out.setdefault("post_replacement",
-                       {"articulated": False, "realization_kind": "static_only"})
+        out.setdefault(
+            "post_replacement",
+            {"articulated": False, "realization_kind": "static_only"},
+        )
         out["ud4_affordance"] = ud4_affordance
         out["operation_space"] = operation_space
         out["clearance_regions"] = clearance_regions
@@ -977,10 +1043,14 @@ class AssetLibraryAnnotationStore:
             return []
         matches = []
         for record in self._load().values():
-            haystack = " ".join(
-                str(record.get(key) or "")
-                for key in ("category", "category_key", "asset_uid")
-            ).lower().replace("_", " ")
+            haystack = (
+                " ".join(
+                    str(record.get(key) or "")
+                    for key in ("category", "category_key", "asset_uid")
+                )
+                .lower()
+                .replace("_", " ")
+            )
             if q in haystack:
                 matches.append(record)
                 if len(matches) >= limit:

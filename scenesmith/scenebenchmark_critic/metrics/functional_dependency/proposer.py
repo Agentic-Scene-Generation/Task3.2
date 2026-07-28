@@ -106,6 +106,14 @@ def propose_dependency_relations(
     progress=lambda _message: None,
     vlm_proposer: VlmProposer | None = None,
 ) -> list[FunctionalDependencyProposal]:
+    if str(case_pack.get("intent_contract_mode") or "legacy") == "contract":
+        # Prompt-originated checks have already been materialized by
+        # ``augment_contract_checks``.  Do not add a geometry-nearest template
+        # relation here: doing so would let the current layout invent a new
+        # hard requirement and reintroduce the replay overfitting this mode is
+        # intended to remove.
+        progress("Using prompt-originated intent-contract relations only")
+        return []
     max_proposals = int(
         getattr(getattr(config, "run", config), "max_fd_relation_proposals", 8) or 8
     )

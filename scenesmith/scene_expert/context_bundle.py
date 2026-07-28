@@ -246,9 +246,15 @@ def build_scene_summary(scene: Any | None) -> str:
                 typ = getattr(typ, "value", typ)
                 opening_bits.append(f"{idx}:{typ or 'opening'}@{wall or 'wall'}")
             parts.append("openings=" + ", ".join(opening_bits))
-    text = getattr(scene, "text_description", "")
+    # SceneExpert may append a StageBrief, memory, or previous critique to the
+    # mutable scene description.  A context bundle shared with a critic must
+    # retain the user's immutable task as its semantic source; otherwise a
+    # planner suggestion can be reintroduced as an apparent prompt failure.
+    original_task = getattr(scene, "scene_expert_original_description", "")
+    text = original_task or getattr(scene, "text_description", "")
     if text:
-        parts.append("description=" + compact_text(text, 700))
+        label = "original_task" if original_task else "description"
+        parts.append(label + "=" + compact_text(text, 700))
     object_count = len(getattr(scene, "objects", {}) or {})
     parts.append(f"object_count={object_count}")
     return "; ".join(parts)

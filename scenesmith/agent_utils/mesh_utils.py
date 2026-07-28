@@ -377,6 +377,7 @@ def scale_mesh_uniformly_to_dimensions(
     output_path: Path | None = None,
     min_dimension_meters: float = 0.001,
     relative_threshold: float = 0.01,
+    fit_axes: tuple[int, ...] = (0, 1, 2),
 ) -> tuple[Path, float]:
     """Scale a 3D mesh uniformly to match desired dimensions.
 
@@ -402,6 +403,9 @@ def scale_mesh_uniformly_to_dimensions(
         relative_threshold: Minimum ratio between smallest and largest dimension.
             Meshes where min_dim/max_dim < this threshold are rejected. Default:
             0.01 (1%, meaning aspect ratios worse than 100:1 are rejected).
+        fit_axes: Mesh axes that participate in degeneracy checks and uniform-fit
+            scaling. Floor coverings use their two planar axes so an intentionally
+            thin third axis is not treated as failed near-2D generation.
 
     Returns:
         Tuple of (path to scaled mesh file, uniform scale factor applied).
@@ -424,6 +428,11 @@ def scale_mesh_uniformly_to_dimensions(
         )
     if any(dim <= 0 for dim in desired_dimensions):
         raise ValueError(f"All dimensions must be positive, got: {desired_dimensions}")
+    normalized_fit_axes = tuple(dict.fromkeys(int(axis) for axis in fit_axes))
+    if not normalized_fit_axes or any(
+        axis not in {0, 1, 2} for axis in normalized_fit_axes
+    ):
+        raise ValueError(f"fit_axes must contain mesh axes 0, 1, or 2, got: {fit_axes}")
 
     # Load mesh and ensure it's a single Trimesh object.
     mesh = load_mesh_as_trimesh(mesh_path, force_merge=True)
@@ -433,10 +442,14 @@ def scale_mesh_uniformly_to_dimensions(
     current_dimensions = bounds[1] - bounds[0]  # [width, depth, height]
 
     # Check for degenerate dimensions (completely flat meshes).
-    if np.any(current_dimensions < min_dimension_meters):
+    fit_dimensions = current_dimensions[list(normalized_fit_axes)]
+    if np.any(fit_dimensions < min_dimension_meters):
         degenerate_axes = [
             f"{axis}={dim:.6f}m"
-            for axis, dim in zip(["X", "Y", "Z"], current_dimensions)
+            for axis_index, (axis, dim) in enumerate(
+                zip(["X", "Y", "Z"], current_dimensions)
+            )
+            if axis_index in normalized_fit_axes
             if dim < min_dimension_meters
         ]
         raise ValueError(
@@ -450,12 +463,12 @@ def scale_mesh_uniformly_to_dimensions(
     # Check for relative degenerate dimensions (one dimension much smaller than others).
     # This catches cases where a dimension passes the absolute threshold but would still
     # cause extreme scaling artifacts due to disproportionate geometry.
-    min_dim = np.min(current_dimensions)
-    max_dim = np.max(current_dimensions)
+    min_dim = np.min(fit_dimensions)
+    max_dim = np.max(fit_dimensions)
     relative_ratio = min_dim / max_dim
 
     if relative_ratio < relative_threshold:
-        min_axis_idx = np.argmin(current_dimensions)
+        min_axis_idx = normalized_fit_axes[int(np.argmin(fit_dimensions))]
         axis_names = ["X", "Y", "Z"]
         raise ValueError(
             f"Degenerate dimension detected - {axis_names[min_axis_idx]}-axis "
@@ -469,7 +482,7 @@ def scale_mesh_uniformly_to_dimensions(
     # Calculate uniform scale factor (median to match target dimensions).
     # Use median instead of mean for robustness to near-degenerate dimensions.
     desired_array = np.array(desired_dimensions)
-    scale_factors = desired_array / current_dimensions
+    scale_factors = desired_array[list(normalized_fit_axes)] / fit_dimensions
     uniform_scale = np.median(scale_factors)
 
     # Calculate actual resulting dimensions.

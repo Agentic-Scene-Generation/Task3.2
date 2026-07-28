@@ -493,12 +493,81 @@ def _tabletop_regions(
         footprint = table.get("footprint_world")
         if isinstance(footprint, list):
             candidates.append((None, footprint))
-    return [
+    normalized = [
         (surface_id, [(float(point[0]), float(point[1])) for point in polygon])
         for surface_id, polygon in candidates
         if len(polygon) >= 3
         and all(isinstance(point, (list, tuple)) and len(point) >= 2 for point in polygon)
     ]
+    return _coalesce_adjacent_tabletop_regions(normalized)
+
+
+def _coalesce_adjacent_tabletop_regions(
+    regions: list[tuple[str | None, list[tuple[float, float]]]],
+) -> list[tuple[str | None, list[tuple[float, float]]]]:
+    """Treat connected coplanar tabletop strips as one placement region.
+
+    HSSD support extraction can split a continuous tabletop at mesh seams.  The
+    critic must retain the table's outer boundary while ignoring those internal
+    seams; otherwise a seat whose front axis lands on the seam is moved to one
+    side of the table.  Region records do not always carry height, so the
+    geometry-only merge is intentionally limited to rectangles whose projected
+    bounding boxes touch or overlap.  The input order is preserved and the first
+    region ID remains the stable execution ID used by the manipuland tool.
+    """
+    if len(regions) < 2:
+        return regions
+
+    def bounds(polygon: list[tuple[float, float]]) -> tuple[float, float, float, float]:
+        xs = [point[0] for point in polygon]
+        ys = [point[1] for point in polygon]
+        return min(xs), max(xs), min(ys), max(ys)
+
+    def adjacent(
+        first: list[tuple[float, float]], second: list[tuple[float, float]]
+    ) -> bool:
+        a = bounds(first)
+        b = bounds(second)
+        tolerance = 0.04
+        overlap_x = min(a[1], b[1]) - max(a[0], b[0])
+        overlap_y = min(a[3], b[3]) - max(a[2], b[2])
+        gap_x = max(0.0, max(a[0], b[0]) - min(a[1], b[1]))
+        gap_y = max(0.0, max(a[2], b[2]) - min(a[3], b[3]))
+        return (overlap_y >= -tolerance and gap_x <= tolerance) or (
+            overlap_x >= -tolerance and gap_y <= tolerance
+        )
+
+    groups: list[list[tuple[str | None, list[tuple[float, float]]]]] = []
+    remaining = list(regions)
+    while remaining:
+        group = [remaining.pop(0)]
+        changed = True
+        while changed:
+            changed = False
+            for candidate in list(remaining):
+                if any(adjacent(item[1], candidate[1]) for item in group):
+                    group.append(candidate)
+                    remaining.remove(candidate)
+                    changed = True
+        groups.append(group)
+
+    merged: list[tuple[str | None, list[tuple[float, float]]]] = []
+    for group in groups:
+        if len(group) == 1:
+            merged.extend(group)
+            continue
+        all_points = [point for _region_id, polygon in group for point in polygon]
+        min_x = min(point[0] for point in all_points)
+        max_x = max(point[0] for point in all_points)
+        min_y = min(point[1] for point in all_points)
+        max_y = max(point[1] for point in all_points)
+        merged.append(
+            (
+                group[0][0],
+                [(min_x, min_y), (max_x, min_y), (max_x, max_y), (min_x, max_y)],
+            )
+        )
+    return merged
 
 
 def _nearest_tabletop_region_entry(

@@ -42,6 +42,31 @@ DEFAULT_ALIASES = {
     "nightstand": ["nightstand", "nightstands", "bedside table", "bedside tables"],
     "wardrobe": ["wardrobe", "wardrobes", "closet", "closets"],
     "dresser": ["dresser", "dressers", "chest of drawers"],
+    "office_chair": [
+        "office chair",
+        "office chairs",
+        "desk chair",
+        "desk chairs",
+        "task chair",
+        "task chairs",
+        "swivel chair",
+        "swivel chairs",
+    ],
+    "guest_chair": [
+        "guest chair",
+        "guest chairs",
+        "visitor chair",
+        "visitor chairs",
+        "guest armchair",
+        "guest armchairs",
+        "visitor armchair",
+        "visitor armchairs",
+    ],
+    "student_desk": ["student desk", "student desks"],
+    "teacher_desk": ["teacher desk", "teacher desks", "teacher's desk"],
+    "dining_chair": ["dining chair", "dining chairs"],
+    "student_chair": ["student chair", "student chairs"],
+    "armchair": ["armchair", "armchairs", "arm chair", "arm chairs"],
     "desk": ["desk", "desks"],
     "chair": ["chair", "chairs"],
     "sofa": ["sofa", "sofas", "couch", "couches"],
@@ -50,6 +75,29 @@ DEFAULT_ALIASES = {
     "bookshelf": ["bookshelf", "bookshelves", "bookcase", "bookcases"],
     "plant": ["plant", "plants", "potted plant", "potted plants"],
     "rug": ["rug", "rugs", "area rug", "area rugs"],
+    "floor_lamp": ["floor lamp", "floor lamps", "floorlamp", "floorlamps"],
+    "tv_stand": [
+        "tv stand",
+        "tv stands",
+        "tvstand",
+        "tvstands",
+        "tv console",
+        "media console",
+    ],
+    "sideboard": ["sideboard", "sideboards", "buffet cabinet"],
+}
+
+# Keep specific categories for asset selection and repair, while allowing a
+# concrete subtype to satisfy an explicitly broader inventory requirement.
+FURNITURE_CATEGORY_PARENTS: dict[str, frozenset[str]] = {
+    "twin_bed": frozenset({"bed"}),
+    "student_desk": frozenset({"desk"}),
+    "teacher_desk": frozenset({"desk"}),
+    "office_chair": frozenset({"chair"}),
+    "guest_chair": frozenset({"chair"}),
+    "dining_chair": frozenset({"chair"}),
+    "student_chair": frozenset({"chair"}),
+    "armchair": frozenset({"chair"}),
 }
 
 NUMBER_WORDS = {
@@ -62,6 +110,15 @@ NUMBER_WORDS = {
     "five": 5,
     "six": 6,
 }
+
+DISTINCT_FURNITURE_ROLES = (
+    "student",
+    "teacher",
+    "guest",
+    "visitor",
+    "office",
+    "dining",
+)
 
 
 @dataclass
@@ -120,14 +177,102 @@ def _normalize_score_name(name: str) -> str:
     return name.lower().replace(" ", "_").replace("-", "_")
 
 
-def _contains_alias(text: str, alias: str) -> bool:
+def _contains_alias(
+    text: str,
+    alias: str,
+    *,
+    category: str | None = None,
+) -> bool:
     normalized = text.lower().replace("_", " ")
     escaped = re.escape(alias.lower())
-    if " " in alias:
-        return (
-            re.search(rf"(^|[^a-z0-9]){escaped}([^a-z0-9]|$)", normalized) is not None
+    for match in re.finditer(rf"(^|[^a-z0-9]){escaped}([^a-z0-9]|$)", normalized):
+        if category == "table" and _is_non_furniture_table_reference(
+            normalized, match.end() - 1
+        ):
+            continue
+        return True
+    return False
+
+
+def infer_furniture_category(text: str) -> str | None:
+    """Return the most specific configured category found in object text."""
+    for canonical, aliases in DEFAULT_ALIASES.items():
+        if any(
+            _contains_alias(text, alias, category=canonical)
+            for alias in [canonical, *aliases]
+        ):
+            return canonical
+    return None
+
+
+def furniture_category_matches(text: str, required_category: str) -> bool:
+    """Return whether object text satisfies a canonical inventory category."""
+    object_category = infer_furniture_category(text)
+    if object_category is not None:
+        return furniture_category_satisfies(object_category, required_category)
+    required_category = str(required_category).lower()
+    if required_category not in DEFAULT_ALIASES:
+        return _contains_alias(
+            text, required_category.replace("_", " "), category=required_category
         )
-    return re.search(rf"(^|[^a-z0-9]){escaped}([^a-z0-9]|$)", normalized) is not None
+    return False
+
+
+def furniture_category_satisfies(
+    object_category: str | None, required_category: str | None
+) -> bool:
+    """Return whether a category fulfills itself or any transitive parent role."""
+    observed = str(object_category or "").lower()
+    required = str(required_category or "").lower()
+    if not observed or not required:
+        return False
+    pending = [observed]
+    visited: set[str] = set()
+    while pending:
+        current = pending.pop()
+        if current in visited:
+            continue
+        if current == required:
+            return True
+        visited.add(current)
+        pending.extend(FURNITURE_CATEGORY_PARENTS.get(current, ()))
+    return False
+
+
+def infer_furniture_object_category(
+    object_id: object,
+    name: object,
+    description: object,
+) -> str | None:
+    """Classify structured identity before free-form asset description.
+
+    Asset descriptions often mention related furniture parts, such as a sideboard
+    with ``cabinet doors``.  The explicit object ID/name is the stronger signal and
+    must not be overwritten by an incidental alias in the description.
+    """
+    identity_category = infer_furniture_category(f"{object_id} {name}")
+    if identity_category is not None:
+        return identity_category
+    return infer_furniture_category(str(description or ""))
+
+
+def furniture_object_category_matches(
+    object_id: object,
+    name: object,
+    description: object,
+    required_category: str,
+) -> bool:
+    """Return whether a structured scene object satisfies an inventory category."""
+    object_category = infer_furniture_object_category(object_id, name, description)
+    if object_category is not None:
+        return furniture_category_satisfies(object_category, required_category)
+    return furniture_category_matches(str(description or ""), required_category)
+
+
+def _is_non_furniture_table_reference(text: str, end: int) -> bool:
+    """Exclude table-lamp/settings phrases from furniture-table matching."""
+    suffix = text[end + 1 :].lstrip()
+    return re.match(r"(?:lamp|lamps|setting|settings)\b", suffix) is not None
 
 
 def _has_unnegated_collision(text: str) -> bool:
@@ -240,6 +385,12 @@ class FurnitureSafetyController:
         self.nightstand_bed_max_gap_m = float(
             _cfg_get(self.bedroom_layout_cfg, "nightstand_bed_max_gap_m", 0.55)
         )
+        self.storage_wall_max_distance_m = float(
+            _cfg_get(self.bedroom_layout_cfg, "storage_wall_max_distance_m", 0.35)
+        )
+        self.storage_pair_max_gap_m = float(
+            _cfg_get(self.bedroom_layout_cfg, "storage_pair_max_gap_m", 0.25)
+        )
         self.required_object_names = [
             str(x).lower()
             for x in list(_cfg_get(cfg, "required_object_names", []) or [])
@@ -266,6 +417,15 @@ class FurnitureSafetyController:
         self.best_reasons: list[str] = []
         self.best_plausibility_report: dict[str, Any] | None = None
 
+    def reset_best_checkpoint(self) -> None:
+        """Discard only candidate-ranking state for a new authoritative baseline."""
+        self.best_scene_state = None
+        self.best_scores = None
+        self.best_render_dir = None
+        self.best_weighted_score = -1.0
+        self.best_reasons = []
+        self.best_plausibility_report = None
+
     def reset_for_scene(self, scene_description: str) -> None:
         """Reset counters and infer required objects for a new scene."""
         self.scene_description = scene_description or ""
@@ -290,12 +450,7 @@ class FurnitureSafetyController:
         self.generate_asset_calls = 0
         self.rescale_counts = {}
         self.should_finish = False
-        self.best_scene_state = None
-        self.best_scores = None
-        self.best_render_dir = None
-        self.best_weighted_score = -1.0
-        self.best_reasons = []
-        self.best_plausibility_report = None
+        self.reset_best_checkpoint()
         console_logger.info(
             "Furniture safety controller reset: required_terms=%s",
             sorted(self.required_terms),
@@ -305,7 +460,9 @@ class FurnitureSafetyController:
         terms = set()
         text = prompt.lower()
         for canonical, aliases in DEFAULT_ALIASES.items():
-            if any(_contains_alias(text, alias) for alias in aliases):
+            if any(
+                _contains_alias(text, alias, category=canonical) for alias in aliases
+            ):
                 terms.add(canonical)
         if "twin_bed" in terms:
             terms.discard("bed")
@@ -321,10 +478,14 @@ class FurnitureSafetyController:
                 escaped_alias = re.escape(alias.lower())
                 pattern = (
                     rf"(^|[^a-z0-9])(?:(?P<count>{number_pattern})\s+)?"
-                    rf"(?:\w+\s+){{0,2}}{escaped_alias}"
+                    rf"(?:(?!(?:{number_pattern})\b)\w+\s+){{0,2}}{escaped_alias}"
                     rf"([^a-z0-9]|$)"
                 )
                 for match in re.finditer(pattern, text):
+                    if canonical == "table" and _is_non_furniture_table_reference(
+                        text, match.end() - 1
+                    ):
+                        continue
                     count_text = match.groupdict().get("count")
                     count = 1
                     if count_text:
@@ -338,8 +499,68 @@ class FurnitureSafetyController:
                 counts[canonical] = best_count
         if "twin_bed" in counts:
             counts.pop("bed", None)
+        self._infer_bilateral_bedside_counts(text, counts)
         self._propagate_each_relation_counts(text, counts)
+        self._combine_distinct_role_counts(text, counts)
         return counts
+
+    def _infer_bilateral_bedside_counts(
+        self, text: str, counts: dict[str, int]
+    ) -> None:
+        """Treat a bedside item on each bed side as two nightstands.
+
+        Prompts often use the compact form ``a nightstand with a lamp on each
+        side of the bed``.  The leading article describes the furniture type,
+        not the final inventory count: satisfying the bilateral relation needs
+        one nightstand on each side.
+        """
+        if "nightstand" not in counts:
+            return
+        nightstand_mentioned = any(
+            _contains_alias(text, alias, category="nightstand")
+            for alias in DEFAULT_ALIASES["nightstand"]
+        )
+        bilateral_bedside = re.search(
+            r"(?:on|at)\s+(?:the\s+)?(?:each|either|both)\s+side(?:s)?\s+of\s+"
+            r"(?:the\s+)?bed\b",
+            text,
+        )
+        paired_nightstands = re.search(
+            r"\bnightstands?\b.{0,80}\b(?:one\s+on\s+each|both)\s+side",
+            text,
+        )
+        if nightstand_mentioned and (bilateral_bedside or paired_nightstands):
+            counts["nightstand"] = max(counts.get("nightstand", 0), 2)
+
+    def _combine_distinct_role_counts(self, text: str, counts: dict[str, int]) -> None:
+        """Sum explicitly distinct desk/chair roles without double-counting briefs."""
+        number_pattern = "|".join([r"\d+", *NUMBER_WORDS.keys()])
+        for canonical in ("desk", "chair"):
+            role_counts: dict[str, int] = {}
+            for role in DISTINCT_FURNITURE_ROLES:
+                best_count = 0
+                for alias in DEFAULT_ALIASES[canonical]:
+                    pattern = (
+                        rf"(^|[^a-z0-9])(?:(?P<count>{number_pattern})\s+)?"
+                        rf"{role}(?:'s)?\s+(?:\w+\s+){{0,1}}"
+                        rf"{re.escape(alias)}([^a-z0-9]|$)"
+                    )
+                    for match in re.finditer(pattern, text):
+                        count_text = match.groupdict().get("count")
+                        count = 1
+                        if count_text:
+                            count = (
+                                int(count_text)
+                                if count_text.isdigit()
+                                else NUMBER_WORDS.get(count_text, 1)
+                            )
+                        best_count = max(best_count, count)
+                if best_count:
+                    role_counts[role] = best_count
+            if len(role_counts) >= 2:
+                counts[canonical] = max(
+                    counts.get(canonical, 0), sum(role_counts.values())
+                )
 
     def _propagate_each_relation_counts(
         self, text: str, counts: dict[str, int]
@@ -368,10 +589,23 @@ class FurnitureSafetyController:
                         break
 
     def _infer_category(self, text: str) -> str | None:
-        for canonical, aliases in DEFAULT_ALIASES.items():
-            if any(_contains_alias(text, alias) for alias in [canonical, *aliases]):
-                return canonical
-        return None
+        return infer_furniture_category(text)
+
+    @staticmethod
+    def _required_category_for_text(
+        text: str, required_counts: dict[str, int]
+    ) -> str | None:
+        exact_category = infer_furniture_category(text)
+        if exact_category in required_counts:
+            return exact_category
+        return next(
+            (
+                category
+                for category in required_counts
+                if furniture_category_matches(text, category)
+            ),
+            None,
+        )
 
     def infer_object_category(self, text: str) -> str | None:
         """Return the canonical configured furniture category for object text."""
@@ -383,8 +617,7 @@ class FurnitureSafetyController:
             return False
         text = f"{object_id} {object_text}".lower().replace("_", " ")
         for term in self.required_terms:
-            aliases = DEFAULT_ALIASES.get(term, [term])
-            if any(_contains_alias(text, alias) for alias in [term, *aliases]):
+            if furniture_category_matches(text, term):
                 return True
         return False
 
@@ -394,11 +627,12 @@ class FurnitureSafetyController:
         for object_id, obj in getattr(scene, "objects", {}).items():
             if getattr(obj, "immutable", False):
                 continue
-            object_text = (
-                f"{object_id} {getattr(obj, 'name', '')} "
-                f"{getattr(obj, 'description', '')}"
-            )
-            if self._infer_category(object_text) == category:
+            if furniture_object_category_matches(
+                object_id,
+                getattr(obj, "name", ""),
+                getattr(obj, "description", ""),
+                category,
+            ):
                 count += 1
         return count
 
@@ -601,8 +835,8 @@ class FurnitureSafetyController:
         }
         if not required_counts:
             return True, ""
-        category = self._infer_category(asset_text)
-        if category is None or category not in required_counts:
+        category = self._required_category_for_text(asset_text, required_counts)
+        if category is None:
             return True, ""
         current_count = self._count_category_in_scene(scene, category)
         required_count = required_counts[category]
@@ -629,10 +863,12 @@ class FurnitureSafetyController:
         stop_message = self._designer_stop_message()
         if stop_message:
             return False, stop_message
-        category = self._infer_category(f"{object_id} {object_text}")
         required_counts = self.required_counts or {
             term: 1 for term in self.required_terms
         }
+        category = self._required_category_for_text(
+            f"{object_id} {object_text}", required_counts
+        )
         if (
             scene is not None
             and category is not None
@@ -756,14 +992,17 @@ class FurnitureSafetyController:
         hard_reasons: list[str] = []
         soft_reasons: list[str] = []
 
-        prompt_following = score_by_name.get("prompt_following")
-        if prompt_following and prompt_following.grade < self.prompt_following_hard_min:
-            hard_reasons.append(
-                f"prompt_following={prompt_following.grade} below "
-                f"{self.prompt_following_hard_min}"
-            )
-
         if self.score_thresholds_are_hard:
+            prompt_following = score_by_name.get("prompt_following")
+            if (
+                prompt_following
+                and prompt_following.grade < self.prompt_following_hard_min
+            ):
+                hard_reasons.append(
+                    f"prompt_following={prompt_following.grade} below "
+                    f"{self.prompt_following_hard_min}"
+                )
+
             functionality = score_by_name.get("functionality")
             if functionality and functionality.grade < self.functionality_hard_min:
                 hard_reasons.append(
@@ -819,16 +1058,10 @@ class FurnitureSafetyController:
             term: 1 for term in self.required_terms
         }
         if required_counts:
-            observed_counts = {term: 0 for term in required_counts}
-            for object_id, obj in getattr(scene, "objects", {}).items():
-                if getattr(obj, "immutable", False):
-                    continue
-                category = self._infer_category(
-                    f"{object_id} {getattr(obj, 'name', '')} "
-                    f"{getattr(obj, 'description', '')}"
-                )
-                if category in observed_counts:
-                    observed_counts[category] += 1
+            observed_counts = {
+                term: self._count_category_in_scene(scene, term)
+                for term in required_counts
+            }
             for term, required_count in required_counts.items():
                 if observed_counts.get(term, 0) < required_count:
                     hard_reasons.append(
@@ -883,8 +1116,7 @@ class FurnitureSafetyController:
                 )
             except Exception as exc:
                 soft_reasons.append(
-                    "bedroom plausibility check failed: "
-                    f"{type(exc).__name__}: {exc}"
+                    "bedroom plausibility check failed: " f"{type(exc).__name__}: {exc}"
                 )
 
             if plausibility_report is not None and plausibility_report.issues:
@@ -949,6 +1181,7 @@ class FurnitureSafetyController:
             "bed": [],
             "nightstand": [],
             "wardrobe": [],
+            "dresser": [],
         }
         for object_id, obj in getattr(scene, "objects", {}).items():
             if getattr(obj, "immutable", False) or not self._is_furniture_object(obj):
@@ -962,15 +1195,56 @@ class FurnitureSafetyController:
 
         beds = objects_by_category["bed"]
         nightstands = objects_by_category["nightstand"]
+        hard_reasons: list[str] = []
+        if beds and self._prompt_requires_dresser_wall_anchor(scene):
+            room_bounds = self._room_bounds_xy(scene)
+            if room_bounds is not None:
+                min_x, min_y, max_x, max_y = room_bounds
+                expected_wall = self._bed_foot_wall(beds[0][1])
+                for dresser_id, dresser in objects_by_category["dresser"]:
+                    dresser_bounds = self._safe_world_bounds(dresser)
+                    if dresser_bounds is None:
+                        continue
+                    world_min, world_max = dresser_bounds
+                    expected_wall_gap = {
+                        "west": abs(float(world_min[0]) - min_x),
+                        "east": abs(max_x - float(world_max[0])),
+                        "south": abs(float(world_min[1]) - min_y),
+                        "north": abs(max_y - float(world_max[1])),
+                    }[expected_wall]
+                    if expected_wall_gap > self.storage_wall_max_distance_m:
+                        hard_reasons.append(
+                            f"bedroom relation: {dresser_id} is not backed against "
+                            f"the {expected_wall} wall opposite the bed (gap "
+                            f"{expected_wall_gap:.2f}m, max "
+                            f"{self.storage_wall_max_distance_m:.2f}m)"
+                        )
+
+        if self._prompt_requires_wardrobe_next_to_dresser(scene):
+            dressers = objects_by_category["dresser"]
+            wardrobes = objects_by_category["wardrobe"]
+            if dressers and wardrobes:
+                dresser_bounds = self._safe_world_bounds(dressers[0][1])
+                wardrobe_bounds = self._safe_world_bounds(wardrobes[0][1])
+                if dresser_bounds is not None and wardrobe_bounds is not None:
+                    pair_gap = self._xy_aabb_gap_m(dresser_bounds, wardrobe_bounds)
+                    if pair_gap > self.storage_pair_max_gap_m:
+                        hard_reasons.append(
+                            f"bedroom relation: {wardrobes[0][0]} is {pair_gap:.2f}m "
+                            f"from {dressers[0][0]}, above the requested next-to "
+                            f"gap {self.storage_pair_max_gap_m:.2f}m"
+                        )
+
         if not beds or not nightstands:
-            return []
+            return hard_reasons
 
         bed_id, bed = beds[0]
         bed_bounds = self._safe_world_bounds(bed)
         if bed_bounds is None:
-            return []
+            return hard_reasons
 
-        hard_reasons: list[str] = []
+        bed_forward = self._object_forward_xy(bed)
+
         for nightstand_id, nightstand in nightstands:
             nightstand_bounds = self._safe_world_bounds(nightstand)
             if nightstand_bounds is None:
@@ -994,8 +1268,71 @@ class FurnitureSafetyController:
                     f"bedroom relation: {nightstand_id} is {gap:.2f}m from {bed_id}, "
                     f"above max bedside gap {self.nightstand_bed_max_gap_m:.2f}m"
                 )
+            nightstand_forward = self._object_forward_xy(nightstand)
+            if (
+                bed_forward is not None
+                and nightstand_forward is not None
+                and sum(a * b for a, b in zip(bed_forward, nightstand_forward)) < 0.85
+            ):
+                hard_reasons.append(
+                    f"bedroom relation: {nightstand_id} use direction is not "
+                    f"aligned with {bed_id}"
+                )
 
         return hard_reasons
+
+    @staticmethod
+    def _object_forward_xy(obj: Any) -> Any:
+        try:
+            rotation = obj.transform.rotation().matrix()
+            try:
+                forward = [float(rotation[0, 1]), float(rotation[1, 1])]
+            except (TypeError, IndexError):
+                forward = [float(rotation[0][1]), float(rotation[1][1])]
+            norm = (forward[0] ** 2 + forward[1] ** 2) ** 0.5
+            if norm <= 1e-8:
+                return None
+            return (forward[0] / norm, forward[1] / norm)
+        except Exception:
+            return None
+
+    def _bed_foot_wall(self, bed: Any) -> str:
+        forward = self._object_forward_xy(bed)
+        if forward is None:
+            return "south"
+        if abs(float(forward[0])) > abs(float(forward[1])):
+            return "east" if float(forward[0]) > 0 else "west"
+        return "north" if float(forward[1]) > 0 else "south"
+
+    def _prompt_requires_dresser_wall_anchor(self, scene: Any) -> bool:
+        text = str(
+            getattr(scene, "scene_expert_original_description", "")
+            or getattr(scene, "text_description", "")
+            or ""
+        ).lower()
+        dresser = r"(?:dresser|chest\s+of\s+drawers)"
+        wall_relation = r"(?:against|along|back(?:ed)?\s+up\s+to|flush\s+with)"
+        return bool(
+            re.search(rf"{dresser}.{{0,100}}{wall_relation}.{{0,40}}wall", text)
+            or re.search(rf"{wall_relation}.{{0,40}}wall.{{0,100}}{dresser}", text)
+        )
+
+    def _prompt_requires_wardrobe_next_to_dresser(self, scene: Any) -> bool:
+        text = str(
+            getattr(scene, "scene_expert_original_description", "")
+            or getattr(scene, "text_description", "")
+            or ""
+        ).lower()
+        wardrobe = r"(?:wardrobe|closet|armoire)"
+        dresser = r"(?:dresser|chest\s+of\s+drawers)"
+        return bool(
+            re.search(
+                rf"{wardrobe}.{{0,50}}(?:next|adjacent)\s+to.{{0,30}}{dresser}", text
+            )
+            or re.search(
+                rf"{dresser}.{{0,50}}(?:next|adjacent)\s+to.{{0,30}}{wardrobe}", text
+            )
+        )
 
     def _safe_world_bounds(
         self, obj: Any
@@ -1182,11 +1519,24 @@ class FurnitureSafetyController:
                     f"{self.min_accept_delta:.3f}."
                 )
         else:
-            rollback_to_best = self.best_scene_state is not None
-            message = (
-                "Safety controller rejected candidate: hard constraints failed "
-                f"({'; '.join(evaluation.hard_reasons)})."
-            )
+            if self.best_scene_state is not None and self.best_scores is None:
+                # A transaction records a deterministic baseline before the
+                # first critic pass so a physically invalid designer call can
+                # still roll back.  That baseline has not earned acceptance
+                # from the critic, however.  Restoring it and finishing on the
+                # first low-scoring critique prevents the designer from ever
+                # repairing the reported functional issue.
+                message = (
+                    "Safety controller rejected the unscored baseline: hard "
+                    f"constraints failed ({'; '.join(evaluation.hard_reasons)}). "
+                    "Keep the current state and allow a critique-guided repair."
+                )
+            else:
+                rollback_to_best = self.best_scene_state is not None
+                message = (
+                    "Safety controller rejected candidate: hard constraints failed "
+                    f"({'; '.join(evaluation.hard_reasons)})."
+                )
 
         if rollback_to_best:
             self.should_finish = True

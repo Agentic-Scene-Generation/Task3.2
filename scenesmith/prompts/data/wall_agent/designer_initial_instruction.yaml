@@ -1,9 +1,25 @@
 name: "designer_initial_instruction"
 version: "1.0"
 description: "Instructions for initial wall decoration design phase"
-template_variables: ["wall_summary"]
+template_variables: ["wall_summary", "required_wall_objects"]
 prompt: |
   Create the initial wall decoration for this room.
+
+  Required wall prompt items:
+  {{ required_wall_objects }}
+
+  REQUIRED-FIRST EXECUTION RULE:
+  - If the list above contains a REQUIRED item, this invocation is a focused
+    required-item pass. Generate, place, align, and verify ONLY those REQUIRED
+    wall objects, then return immediately. Do not create TODOs and do not generate
+    optional artwork, mirrors, shelves, clocks, or other decoration in this pass.
+  - If the required placement intersects a window, call list_windows before any
+    fallback placement. Resize the exact window first (prefer width 0.6m), then move
+    it, and remove it only if necessary. Retry the required object at the support
+    centerline and call align_wall_object_over_support. Never shift a required TV
+    sideways merely to avoid the window.
+  - Only when there is no REQUIRED item should you perform the full decorative
+    workflow below.
 
   Call observe_scene to see all walls with their coordinate grids and excluded regions,
   then design and place appropriate wall-mounted objects.
@@ -16,13 +32,14 @@ prompt: |
   1. Call observe_scene to see all walls and understand the space
   2. Call get_current_scene_state to get wall dimensions and excluded regions
   3. Identify the primary focal wall (usually opposite entrance or largest wall)
-  4. Plan decoration for each wall considering:
+  4. Satisfy every REQUIRED wall prompt item before optional decoration.
+  5. Plan decoration for each wall considering:
      - Wall dimensions and available space
      - Excluded regions (doors/windows) to avoid
      - Nearby furniture that affects decoration choices
      - Cross-wall balance and visual harmony
-  5. Create TODO list based on your decoration plan
-  6. Generate wall decoration assets (batch for style consistency)
+  6. Create TODO list based on your decoration plan
+  7. Generate wall decoration assets (batch for style consistency)
   7. Place items using wall-local coordinates from the grid overlays
   8. Save object_ids from placement responses for future operations
   9. Complete TODOs systematically using designer_todo_manager

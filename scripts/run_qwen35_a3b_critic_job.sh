@@ -134,6 +134,67 @@ if [ "$PORT" -gt 65535 ]; then
     exit 2
 fi
 
+# Own a single model stack per cgroup.  Starting a second llama-server on the
+# same ACP allocation can pass the readiness check briefly and still push the
+# model plus one Python scene worker over the memory limit.
+STACK_LOCK_FILE="${CRITIC_STACK_LOCK_FILE:-${TMPDIR:-/tmp}/scenesmith_qwen35_a3b_stack.lock}"
+if ! command -v flock >/dev/null 2>&1; then
+    echo "ERROR: flock is required to prevent duplicate model stacks" >&2
+    exit 2
+fi
+exec 8>"$STACK_LOCK_FILE"
+if ! flock -n 8; then
+    echo "ERROR: another Qwen35-A3B stack already owns $STACK_LOCK_FILE" >&2
+    exit 1
+fi
+if command -v ss >/dev/null 2>&1 \
+    && ss -H -ltn "sport = :$PORT" 2>/dev/null | awk '$1 == "LISTEN" {found=1} END {exit !found}'; then
+    echo "ERROR: port $PORT is already listening; refusing duplicate llama-server" >&2
+    exit 1
+fi
+if curl -fsS --max-time 2 "http://127.0.0.1:${PORT}/health" >/dev/null 2>&1; then
+    echo "ERROR: an existing llama-server is healthy on port $PORT; refusing duplicate startup" >&2
+    exit 1
+fi
+
+read_cgroup_memory_value() {
+    local path value
+    for path in /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory/memory.limit_in_bytes; do
+        if [ -r "$path" ]; then
+            value=$(tr -d '[:space:]' < "$path")
+            if [[ "$value" =~ ^[0-9]+$ ]]; then
+                printf '%s\n' "$value"
+                return 0
+            fi
+        fi
+    done
+    return 1
+}
+
+read_cgroup_memory_current() {
+    local path value
+    for path in /sys/fs/cgroup/memory.current /sys/fs/cgroup/memory/memory.usage_in_bytes; do
+        if [ -r "$path" ]; then
+            value=$(tr -d '[:space:]' < "$path")
+            if [[ "$value" =~ ^[0-9]+$ ]]; then
+                printf '%s\n' "$value"
+                return 0
+            fi
+        fi
+    done
+    return 1
+}
+
+if memory_limit_bytes=$(read_cgroup_memory_value) \
+    && memory_current_bytes=$(read_cgroup_memory_current) \
+    && [ "${ALLOW_HIGH_MEMORY_START:-0}" != "1" ] \
+    && [ "$memory_current_bytes" -gt $((memory_limit_bytes * 70 / 100)) ]; then
+    echo "ERROR: cgroup memory is already above 70%; refusing model startup" >&2
+    echo "       current=$memory_current_bytes limit=$memory_limit_bytes" >&2
+    echo "       Set ALLOW_HIGH_MEMORY_START=1 only after verifying stale processes." >&2
+    exit 1
+fi
+
 mkdir -p "$WORKSPACE_ROOT/llama_slot_cache"
 cd "$WORKSPACE_ROOT"
 
@@ -215,7 +276,7 @@ setsid env \
     SCENEEXPERT_DISABLE_MATERIALS="${SCENEEXPERT_DISABLE_MATERIALS:-1}" \
     SCENEEXPERT_DISABLE_BWRAP="${SCENEEXPERT_DISABLE_BWRAP:-1}" \
     CRITIC_PROBE_PARALLEL="${CRITIC_PROBE_PARALLEL:-true}" \
-    CRITIC_PROBE_INNER_PARALLELISM="${CRITIC_PROBE_INNER_PARALLELISM:-3}" \
+    CRITIC_PROBE_INNER_PARALLELISM="${CRITIC_PROBE_INNER_PARALLELISM:-1}" \
     MAX_CASES="${MAX_CASES:-3}" \
     PIPELINE_STOP_STAGE="${PIPELINE_STOP_STAGE:-manipuland}" \
     CRITIC_PROBE_PORT_BASE="${CRITIC_PROBE_PORT_BASE:-13000}" \

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 
 from typing import Any
 
@@ -14,11 +15,20 @@ from scenesmith.scenebenchmark_critic.core.geometry import (
     object_affordances,
     object_category,
 )
-from scenesmith.scenebenchmark_critic.metrics.functional_dependency.semantics import (
-    _is_actionable_seating_surface_pair,
-)
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.profiles import (
     object_function_profile,
+)
+from scenesmith.scenebenchmark_critic.metrics.functional_dependency.seat_surface_assignment import (
+    ASSIGNMENT_SOURCE,
+    SeatSurfaceAssignment,
+    assign_work_seats_to_surfaces,
+    room_bounds_from_case_pack,
+    work_seat_candidates,
+)
+from scenesmith.scenebenchmark_critic.metrics.functional_dependency.semantics import (
+    _classroom_student_role,
+    _is_actionable_seating_surface_pair,
+    _is_classroom_student_pair,
 )
 
 console_logger = logging.getLogger(__name__)
@@ -27,10 +37,14 @@ CONTRACT_CHECK_SOURCE = "scenesmith_orientation_contract"
 CONTRACT_ATTR = "_scenebenchmark_orientation_contracts"
 
 SEATING_RELATIONS = {"seating_to_media", "seating_to_work_surface"}
-CONTRACT_RELATIONS = SEATING_RELATIONS | {"back_against_wall"}
+CONTRACT_RELATIONS = SEATING_RELATIONS | {
+    "back_against_wall",
+    "furniture_faces_furniture",
+}
 CONFLICTING_ORIENTATION_RELATIONS = CONTRACT_RELATIONS | {
     "furniture_faces_furniture",
     "seat_faces_surface",
+    "workstation",
 }
 MEDIA_CATEGORIES = {
     "display",
@@ -78,7 +92,14 @@ WORK_SURFACE_CATEGORIES = {
 }
 # 2026-07-12 修改原因：墙边独立座椅判定应随资产尺寸缩放，避免用 guest/visitor
 # 名称和单个书房回放标定的绝对米制阈值决定功能关系。
-WALL_ANCHOR_GAP_RATIO = 0.45
+# Keep this proportional to the seat's shortest footprint axis.  Rendered HSSD
+# seats often have a small collision/annotation offset from the wall; a fixed
+# absolute threshold would drop otherwise valid wall-backed seating.
+# Initial LLM layouts can leave an independent seat about one seat-depth from
+# its intended wall.  Treat that as the same wall-backed topology and let the
+# deterministic repair snap it to the wall; the separate surface-separation
+# and wall-preference checks prevent ordinary table seating from matching.
+WALL_ANCHOR_GAP_RATIO = 1.0
 SURFACE_SEPARATION_RATIO = 0.5
 WALL_PREFERENCE_MARGIN_RATIO = 0.2
 
@@ -118,6 +139,31 @@ def stabilize_orientation_contracts(
     room_type = str(case_pack.get("room_type") or "")
     media_focus = _best_media_focus(objects, task_text=task_text, room_type=room_type)
     media_intent = _has_media_intent(task_text, room_type) and media_focus is not None
+    fixed_pairs = {
+        str(subject_id): str((contract.get("target_ids") or [""])[0])
+        for subject_id, contract in memory.items()
+        if isinstance(contract, dict)
+        and contract.get("assignment_source") == ASSIGNMENT_SOURCE
+        and contract.get("target_ids")
+    }
+    work_assignments = assign_work_seats_to_surfaces(
+        objects,
+        task_instruction=task_text,
+        room_type=room_type,
+        fixed_pairs=fixed_pairs,
+        room_bounds=room_bounds_from_case_pack(case_pack),
+    )
+    work_assignment_by_seat = {
+        assignment.seat_id: assignment for assignment in work_assignments
+    }
+    work_cohort_ids = {
+        str(obj.get("id") or "")
+        for obj in work_seat_candidates(
+            objects,
+            task_instruction=task_text,
+            room_type=room_type,
+        )
+    }
 
     checks_added = 0
     for subject in objects:
@@ -125,6 +171,21 @@ def stabilize_orientation_contracts(
         if not subject_id or not _is_seating(subject):
             continue
 
+        explicit_facing_target = _explicit_prompt_facing_target(
+            subject,
+            objects,
+            task_text=task_text,
+        )
+        explicit_wall_target = _explicit_prompt_wall_target(
+            subject,
+            objects,
+            task_text=task_text,
+            explicit_facing_target=explicit_facing_target,
+        )
+        if explicit_wall_target is not None:
+            # A later stage brief can refine an earlier one-line summary from
+            # desk-facing to wall-normal inward-facing seating.
+            explicit_facing_target = None
         existing = memory.get(subject_id)
         if _contract_is_usable(
             existing,
@@ -133,15 +194,34 @@ def stabilize_orientation_contracts(
             objects,
             media_intent,
             media_focus,
+            work_assignment_by_seat.get(subject_id),
+            subject_id in work_cohort_ids,
+            explicit_facing_target,
+            explicit_wall_target,
         ):
             contract = dict(existing)
             contract["stage_last_seen"] = stage
+            assignment = work_assignment_by_seat.get(subject_id)
+            if (
+                assignment is not None
+                and contract.get("assignment_source") == ASSIGNMENT_SOURCE
+            ):
+                # Keep the stable surface identity, but recompute its local slot
+                # after a coordinated repair moves or rotates the desk.
+                evidence = assignment.evidence()
+                contract["target_slot"] = evidence["target_slot"]
+                contract["assignment_cost"] = evidence["assignment_cost"]
+                contract["annotation_sources"] = evidence["annotation_sources"]
         else:
             contract = _plan_contract(
                 subject,
                 objects,
                 media_focus=media_focus,
                 media_intent=media_intent,
+                work_assignment=work_assignment_by_seat.get(subject_id),
+                work_cohort_member=subject_id in work_cohort_ids,
+                explicit_facing_target=explicit_facing_target,
+                explicit_wall_target=explicit_wall_target,
                 stage=stage,
             )
 
@@ -192,6 +272,10 @@ def _contract_is_usable(
     objects: list[dict[str, Any]],
     media_intent: bool,
     media_focus: dict[str, Any] | None,
+    work_assignment: SeatSurfaceAssignment | None,
+    work_cohort_member: bool,
+    explicit_facing_target: dict[str, Any] | None,
+    explicit_wall_target: dict[str, Any] | None,
 ) -> bool:
     if not isinstance(contract, dict):
         return False
@@ -204,6 +288,37 @@ def _contract_is_usable(
     if relation_type not in CONTRACT_RELATIONS:
         return False
 
+    if explicit_facing_target is not None:
+        return (
+            bool(contract.get("prompt_explicit_facing"))
+            and relation_type == "furniture_faces_furniture"
+            and target_ids == [str(explicit_facing_target.get("id") or "")]
+        )
+    if contract.get("prompt_explicit_facing"):
+        return False
+
+    if explicit_wall_target is not None:
+        return (
+            bool(contract.get("prompt_explicit_wall"))
+            and relation_type == "back_against_wall"
+            and target_ids == [str(explicit_wall_target.get("id") or "")]
+        )
+    if contract.get("prompt_explicit_wall"):
+        return False
+
+    if work_assignment is not None:
+        return relation_type == "seating_to_work_surface" and target_ids == [
+            work_assignment.surface_id
+        ]
+    if work_cohort_member:
+        return False
+
+    classroom_target = _classroom_student_partner(subject, objects)
+    if classroom_target is not None:
+        return relation_type == "seating_to_work_surface" and target_ids == [
+            str(classroom_target.get("id") or "")
+        ]
+
     # 2026-07-14 修改原因：dining_chair 被门净空或桌椅碰撞推到墙边后，旧逻辑
     # 会把它重新识别为 back_against_wall，覆盖“餐椅属于餐桌”的功能依赖，导致
     # 椅子不再保持餐桌座位线。餐椅存在餐桌时，餐桌 contract 优先于墙 contract。
@@ -215,10 +330,9 @@ def _contract_is_usable(
     # 否则稳定目标会持续强迫空闲椅朝向书桌，破坏背靠墙且相互平行的布局。
     if relation_type == "seating_to_work_surface":
         target = objects_by_id[target_ids[0]]
-        if (
-            _nearest_dining_table(subject, objects) is None
-            and _is_wall_anchored_standalone_seating(subject, target, objects)
-        ):
+        if _nearest_dining_table(
+            subject, objects
+        ) is None and _is_wall_anchored_standalone_seating(subject, target, objects):
             return False
     elif relation_type == "back_against_wall":
         wall = _standalone_wall_target(subject, objects)
@@ -238,9 +352,8 @@ def _contract_is_usable(
     )
     if uses_nearest_living_focus and nearest_focus is not None:
         preferred_target, preferred_relation = nearest_focus
-        if (
-            relation_type != preferred_relation
-            or target_ids[0] != str(preferred_target.get("id") or "")
+        if relation_type != preferred_relation or target_ids[0] != str(
+            preferred_target.get("id") or ""
         ):
             return False
 
@@ -262,8 +375,88 @@ def _plan_contract(
     *,
     media_focus: dict[str, Any] | None,
     media_intent: bool,
+    work_assignment: SeatSurfaceAssignment | None,
+    work_cohort_member: bool,
+    explicit_facing_target: dict[str, Any] | None,
+    explicit_wall_target: dict[str, Any] | None,
     stage: str,
 ) -> dict[str, Any] | None:
+    if explicit_facing_target is not None:
+        return _contract(
+            subject,
+            explicit_facing_target,
+            relation_type="furniture_faces_furniture",
+            stage=stage,
+            reason=(
+                "task instruction explicitly requires this seating role to face "
+                "the referenced work surface"
+            ),
+            dependency={
+                "subject_face": "front",
+                "target_face": "any",
+                "max_angle_deg": 60.0,
+                # Prompt-facing topology can intentionally span a meeting zone.
+                "max_distance_m": 6.5,
+            },
+            prompt_explicit_facing=True,
+        )
+
+    if explicit_wall_target is not None:
+        return _contract(
+            subject,
+            explicit_wall_target,
+            relation_type="back_against_wall",
+            stage=stage,
+            reason=(
+                "task instruction explicitly places this seating role against a "
+                "wall, with its front normal to the wall and facing into the room"
+            ),
+            dependency={
+                "subject_face": "back",
+                "max_angle_deg": 10.0,
+                "max_distance_m": 0.25,
+            },
+            prompt_explicit_wall=True,
+        )
+
+    if work_assignment is not None:
+        target = next(
+            (
+                obj
+                for obj in objects
+                if str(obj.get("id") or "") == work_assignment.surface_id
+            ),
+            None,
+        )
+        if target is not None:
+            return _contract(
+                subject,
+                target,
+                relation_type="seating_to_work_surface",
+                stage=stage,
+                reason=(
+                    "functional annotations and surface-local geometry assign this "
+                    "work seat to a distinct work-surface slot"
+                ),
+                assignment=work_assignment,
+            )
+
+    classroom_desk = _classroom_student_partner(subject, objects)
+    if classroom_desk is not None:
+        return _contract(
+            subject,
+            classroom_desk,
+            relation_type="seating_to_work_surface",
+            stage=stage,
+            reason=(
+                "indexed classroom student chair is paired with its matching "
+                "student desk; pairing takes priority over incidental wall proximity"
+            ),
+        )
+
+    if work_cohort_member:
+        return None
+
     # 2026-07-14 修改原因：餐桌座位关系是显式功能拓扑，优先于几何上更近的
     # 墙面；否则门净空把 dining_chair 推近墙后会发生 wall/table contract 抖动。
     dining_table = _nearest_dining_table(subject, objects)
@@ -289,6 +482,11 @@ def _plan_contract(
                 "wall-anchored standalone seating keeps its back at the "
                 "wall and its front normal to the wall"
             ),
+            dependency={
+                "subject_face": "back",
+                "max_angle_deg": 10.0,
+                "max_distance_m": 0.25,
+            },
         )
 
     nearest_focus = _nearest_living_seat_focus(
@@ -341,6 +539,398 @@ def _plan_contract(
     )
 
 
+def _classroom_student_partner(
+    subject: dict[str, Any], objects: list[dict[str, Any]]
+) -> dict[str, Any] | None:
+    role = _classroom_student_role(subject)
+    if role is None or role[0] != "chair":
+        return None
+    candidates = [obj for obj in objects if _is_classroom_student_pair(subject, obj)]
+    candidates.sort(key=lambda obj: str(obj.get("id") or ""))
+    return candidates[0] if candidates else None
+
+
+def _explicit_prompt_facing_target(
+    subject: dict[str, Any],
+    objects: list[dict[str, Any]],
+    *,
+    task_text: str,
+) -> dict[str, Any] | None:
+    """Resolve an explicit prompt role-facing-surface relation for one seat."""
+    if not task_text.strip():
+        return None
+    subject_aliases = _prompt_subject_aliases(subject)
+    if not subject_aliases:
+        return None
+    other_seating_aliases = tuple(
+        sorted(
+            {
+                alias
+                for obj in objects
+                if obj.get("id") != subject.get("id") and _is_seating(obj)
+                for alias in _prompt_subject_aliases(obj)
+            },
+            key=lambda value: (-len(value.split()), value),
+        )
+    )
+
+    normalized_task = _normalize_prompt_text(task_text)
+    matches: list[tuple[int, dict[str, Any]]] = []
+    for target in objects:
+        if target.get("id") == subject.get("id") or not _is_work_surface(target):
+            continue
+        target_aliases = _prompt_target_aliases(target)
+        specificity = _explicit_facing_pair_specificity(
+            normalized_task,
+            subject_aliases,
+            target_aliases,
+            other_seating_aliases=other_seating_aliases,
+        )
+        if specificity is not None:
+            matches.append((specificity, target))
+    if not matches:
+        return None
+    matches.sort(
+        key=lambda item: (
+            -item[0],
+            *_surface_rank(subject, item[1]),
+        )
+    )
+    return matches[0][1]
+
+
+def _explicit_prompt_wall_target(
+    subject: dict[str, Any],
+    objects: list[dict[str, Any]],
+    *,
+    task_text: str,
+    explicit_facing_target: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Resolve an explicitly wall-backed seating role from the task text.
+
+    Prompt topology takes priority over a proximity-based work-seat assignment.
+    A direct instruction to face a work surface remains stronger unless a later
+    stage constraint explicitly changes the same seating role to inward-facing,
+    wall-normal placement.
+    """
+    if not task_text.strip():
+        return None
+    subject_aliases = _prompt_subject_aliases(subject)
+    if not subject_aliases:
+        return None
+    other_seating_aliases = tuple(
+        sorted(
+            {
+                alias
+                for obj in objects
+                if obj.get("id") != subject.get("id") and _is_seating(obj)
+                for alias in _prompt_subject_aliases(obj)
+            },
+            key=lambda value: (-len(value.split()), value),
+        )
+    )
+    normalized_task = _normalize_prompt_text(task_text)
+    matches: list[tuple[int, int, str]] = []
+    for subject_alias in subject_aliases:
+        pattern = re.compile(
+            rf"\b{re.escape(subject_alias)}\b"
+            # A comma commonly starts the next furniture noun phrase, e.g.
+            # "four dining chairs ..., a sideboard against the wall". Do not
+            # transfer that later object's wall relation back to the seats.
+            rf"(?P<between>[^,.!?;\n]{{0,160}}?)\b"
+            rf"(?:(?:are|is)\s+)?"
+            rf"(?:(?:placed|positioned|arranged|set|located|kept)\s+)?"
+            rf"(?:against|along|by|beside|near|at)\s+"
+            rf"(?:the\s+|an?\s+)?"
+            rf"(?P<wall_descriptor>"
+            rf"(?:(?:left|right|side|adjacent|back|rear|front|north|south|east|west)\s+)?"
+            rf"wall)\b"
+        )
+        for match in pattern.finditer(normalized_task):
+            between = match.group("between")
+            if any(
+                re.search(rf"\b{re.escape(alias)}\b", between)
+                for alias in other_seating_aliases
+            ):
+                continue
+            descriptor = str(match.group("wall_descriptor") or "wall").strip()
+            specificity = len(subject_alias.split()) + (
+                1 if descriptor != "wall" else 0
+            )
+            matches.append((specificity, match.start(), descriptor))
+    if not matches:
+        return None
+    if explicit_facing_target is not None:
+        latest_facing = _latest_explicit_facing_pair_position(
+            normalized_task,
+            subject_aliases,
+            _prompt_target_aliases(explicit_facing_target),
+            other_seating_aliases=other_seating_aliases,
+        )
+        latest_inward = _latest_inward_facing_position(
+            normalized_task,
+            subject_aliases,
+            other_seating_aliases=other_seating_aliases,
+        )
+        if latest_inward is None or (
+            latest_facing is not None and latest_inward <= latest_facing
+        ):
+            return None
+    matches.sort(key=lambda item: (-item[0], -item[1], item[2]))
+    return _prompt_wall_target(subject, objects, descriptor=matches[0][2])
+
+
+def _prompt_wall_target(
+    subject: dict[str, Any],
+    objects: list[dict[str, Any]],
+    *,
+    descriptor: str,
+) -> dict[str, Any] | None:
+    walls = [obj for obj in objects if object_category(obj) == "wall"]
+    if not walls:
+        return None
+    direction = descriptor.split()[0] if descriptor != "wall" else ""
+    if direction in {"north", "south", "east", "west"}:
+        named_walls = [
+            wall for wall in walls if re.search(rf"\b{direction}\b", _object_text(wall))
+        ]
+        if named_walls:
+            walls = named_walls
+    elif direction in {"side", "adjacent", "left", "right"}:
+        side_walls = _side_walls_for_work_surface(subject, objects, walls)
+        if side_walls:
+            walls = side_walls
+    # "Back" and "rear" are relative to the intended seating composition,
+    # not a compass direction. Keep every wall eligible: deriving a target
+    # from a coffee table or TV stand selects the wall opposite a correctly
+    # wall-backed sofa. The geometry rank below binds the adjacent wall.
+    walls.sort(key=lambda wall: _prompt_wall_rank(subject, wall))
+    return walls[0] if walls else None
+
+
+def _side_walls_for_work_surface(
+    subject: dict[str, Any],
+    objects: list[dict[str, Any]],
+    walls: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    backing_wall = _primary_work_surface_backing_wall(subject, objects, walls)
+    backing_normal_axis = _wall_normal_axis(backing_wall)
+    if backing_normal_axis is None:
+        return walls
+    side_walls = [
+        wall
+        for wall in walls
+        if _wall_normal_axis(wall) not in {None, backing_normal_axis}
+    ]
+    return side_walls or walls
+
+
+def _primary_work_surface_backing_wall(
+    subject: dict[str, Any],
+    objects: list[dict[str, Any]],
+    walls: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    surfaces = [obj for obj in objects if _is_work_surface(obj)]
+    if not surfaces or not walls:
+        return None
+    candidates: list[tuple[int, float, tuple[float, float, str], dict[str, Any]]] = []
+    for surface in surfaces:
+        category = object_category(surface)
+        desk_rank = 0 if category == "desk" or "desk" in _object_text(surface) else 1
+        for wall in walls:
+            wall_gap = _wall_gap(surface, wall)
+            if wall_gap is None:
+                continue
+            candidates.append(
+                (desk_rank, wall_gap, _surface_rank(subject, surface), wall)
+            )
+    if not candidates:
+        return None
+    candidates.sort(
+        key=lambda item: (item[0], item[1], item[2], str(item[3].get("id") or ""))
+    )
+    return candidates[0][3]
+
+
+def _wall_normal_axis(wall: dict[str, Any] | None) -> int | None:
+    if not isinstance(wall, dict):
+        return None
+    size = (wall.get("bbox_world") or {}).get("size") or []
+    if len(size) < 2:
+        return None
+    return 0 if float(size[0]) <= float(size[1]) else 1
+
+
+def _prompt_wall_rank(
+    subject: dict[str, Any], wall: dict[str, Any]
+) -> tuple[float, float, str]:
+    gap = _wall_gap(subject, wall)
+    distance = distance_xy(subject, wall)
+    return (
+        gap if gap is not None else 999.0,
+        distance if distance is not None else 999.0,
+        str(wall.get("id") or ""),
+    )
+
+
+def _explicit_facing_pair_specificity(
+    task_text: str,
+    subject_aliases: tuple[str, ...],
+    target_aliases: tuple[str, ...],
+    *,
+    other_seating_aliases: tuple[str, ...],
+) -> int | None:
+    best: int | None = None
+    for subject_alias in subject_aliases:
+        for target_alias in target_aliases:
+            pattern = re.compile(
+                rf"\b{re.escape(subject_alias)}\b"
+                rf"(?P<between>[^.!?;\n]{{0,160}}?)\b"
+                rf"(?P<facing>(?:are\s+|is\s+)?"
+                rf"(?:oriented\s+(?:to\s+)?)?(?:face|faces|facing))\s+"
+                rf"(?!away(?:\s+from)?\b)"
+                rf"(?:directly\s+)?(?:(?:toward|towards)\s+)?"
+                rf"(?:the\s+|an?\s+)?\b{re.escape(target_alias)}\b"
+            )
+            for match in pattern.finditer(task_text):
+                if _prompt_facing_match_is_negated(task_text, match):
+                    continue
+                between = match.group("between")
+                if any(
+                    re.search(rf"\b{re.escape(alias)}\b", between)
+                    for alias in other_seating_aliases
+                ):
+                    continue
+                specificity = len(subject_alias.split()) + len(target_alias.split())
+                best = specificity if best is None else max(best, specificity)
+    return best
+
+
+def _prompt_facing_match_is_negated(task_text: str, match: re.Match[str]) -> bool:
+    clause_start = max(
+        task_text.rfind(mark, 0, match.start("facing"))
+        for mark in (".", "!", "?", ";", "\n")
+    )
+    prefix = task_text[clause_start + 1 : match.start("facing")]
+    return bool(
+        re.search(
+            r"\b(?:avoid|never|not|do not|must not|should not|without)\b",
+            prefix,
+        )
+    )
+
+
+def _latest_explicit_facing_pair_position(
+    task_text: str,
+    subject_aliases: tuple[str, ...],
+    target_aliases: tuple[str, ...],
+    *,
+    other_seating_aliases: tuple[str, ...],
+) -> int | None:
+    latest: int | None = None
+    for subject_alias in subject_aliases:
+        for target_alias in target_aliases:
+            pattern = re.compile(
+                rf"\b{re.escape(subject_alias)}\b"
+                rf"(?P<between>[^.!?;\n]{{0,160}}?)\b"
+                rf"(?P<facing>(?:are\s+|is\s+)?"
+                rf"(?:oriented\s+(?:to\s+)?)?(?:face|faces|facing))\s+"
+                rf"(?!away(?:\s+from)?\b)"
+                rf"(?:directly\s+)?(?:(?:toward|towards)\s+)?"
+                rf"(?:the\s+|an?\s+)?\b{re.escape(target_alias)}\b"
+            )
+            for match in pattern.finditer(task_text):
+                if _prompt_facing_match_is_negated(task_text, match):
+                    continue
+                between = match.group("between")
+                if any(
+                    re.search(rf"\b{re.escape(alias)}\b", between)
+                    for alias in other_seating_aliases
+                ):
+                    continue
+                latest = match.start() if latest is None else max(latest, match.start())
+    return latest
+
+
+def _latest_inward_facing_position(
+    task_text: str,
+    subject_aliases: tuple[str, ...],
+    *,
+    other_seating_aliases: tuple[str, ...],
+) -> int | None:
+    latest: int | None = None
+    for subject_alias in subject_aliases:
+        pattern = re.compile(
+            rf"\b{re.escape(subject_alias)}\b"
+            rf"(?P<between>[^.!?;\n]{{0,220}}?)\b"
+            rf"(?:fronts?\s+)?"
+            rf"(?:are\s+|is\s+)?"
+            rf"(?:oriented\s+(?:with\s+(?:their|its)\s+fronts?\s+)?)?"
+            rf"(?:face|faces|facing|point|pointing)\s+"
+            rf"(?:inward|inwards|into\s+(?:the\s+)?room|toward\s+(?:the\s+)?room\s+center)\b"
+        )
+        for match in pattern.finditer(task_text):
+            between = match.group("between")
+            if any(
+                re.search(rf"\b{re.escape(alias)}\b", between)
+                for alias in other_seating_aliases
+            ):
+                continue
+            latest = match.start() if latest is None else max(latest, match.start())
+    return latest
+
+
+def _prompt_subject_aliases(obj: dict[str, Any]) -> tuple[str, ...]:
+    identity_aliases = {
+        alias
+        for key in ("id", "name")
+        if (alias := _normalize_prompt_object_identity(obj.get(key)))
+    }
+    aliases = set(identity_aliases)
+    if not aliases:
+        category = _normalize_prompt_object_identity(object_category(obj))
+        if category:
+            aliases.add(category)
+
+    identity_text = " ".join(aliases)
+    if re.search(r"\b(?:guest|visitor)\s+(?:arm\s*)?chair\b", identity_text):
+        aliases.update(
+            {"guest chair", "visitor chair", "guest armchair", "visitor armchair"}
+        )
+    return _with_prompt_plurals(aliases)
+
+
+def _prompt_target_aliases(obj: dict[str, Any]) -> tuple[str, ...]:
+    aliases = {
+        alias
+        for value in (obj.get("id"), obj.get("name"), object_category(obj))
+        if (alias := _normalize_prompt_object_identity(value))
+    }
+    return _with_prompt_plurals(aliases)
+
+
+def _with_prompt_plurals(aliases: set[str]) -> tuple[str, ...]:
+    expanded = set(aliases)
+    for alias in aliases:
+        if alias.endswith("chair") or alias.endswith("desk") or alias.endswith("table"):
+            expanded.add(f"{alias}s")
+    return tuple(sorted(expanded, key=lambda value: (-len(value.split()), value)))
+
+
+def _normalize_prompt_object_identity(value: Any) -> str:
+    text = _normalize_prompt_text(str(value or ""))
+    text = re.sub(r"\s+[0-9]+$", "", text).strip()
+    return text if text and "\n" not in text else ""
+
+
+def _normalize_prompt_text(value: str) -> str:
+    text = value.lower().replace("_", " ").replace("-", " ")
+    # Preserve commas so relation parsers can distinguish adjacent furniture
+    # noun phrases instead of treating the whole sentence as one subject.
+    text = re.sub(r"[^a-z0-9,.!?;\n]+", " ", text)
+    return re.sub(r"[ \t\r\f\v]+", " ", text).strip()
+
+
 def _nearest_dining_table(
     subject: dict[str, Any], objects: list[dict[str, Any]]
 ) -> dict[str, Any] | None:
@@ -358,7 +948,11 @@ def _nearest_dining_table(
     ]
     candidates.sort(
         key=lambda obj: (
-            distance_xy(subject, obj) if distance_xy(subject, obj) is not None else 999.0,
+            (
+                distance_xy(subject, obj)
+                if distance_xy(subject, obj) is not None
+                else 999.0
+            ),
             str(obj.get("id") or ""),
         )
     )
@@ -372,8 +966,12 @@ def _contract(
     relation_type: str,
     stage: str,
     reason: str,
+    assignment: SeatSurfaceAssignment | None = None,
+    dependency: dict[str, Any] | None = None,
+    prompt_explicit_facing: bool = False,
+    prompt_explicit_wall: bool = False,
 ) -> dict[str, Any]:
-    return {
+    contract = {
         "schema_version": "scenesmith.scenebenchmark_critic.orientation_contract.v1",
         "subject_id": str(subject.get("id") or ""),
         "target_ids": [str(target.get("id") or "")],
@@ -386,6 +984,15 @@ def _contract(
         ),
         "reason": reason,
     }
+    if assignment is not None:
+        contract.update(assignment.evidence())
+    if dependency:
+        contract["dependency"] = dict(dependency)
+    if prompt_explicit_facing:
+        contract["prompt_explicit_facing"] = True
+    if prompt_explicit_wall:
+        contract["prompt_explicit_wall"] = True
+    return contract
 
 
 def _replace_contract_check(
@@ -409,7 +1016,9 @@ def _replace_contract_check(
                     check.get("check_source") == CONTRACT_CHECK_SOURCE
                     and str(check.get("subject_id") or "") == subject_id
                 )
-                or _check_conflicts_with_orientation_contract(check, subject_id)
+                or _check_conflicts_with_orientation_contract(
+                    check, subject_id, relation_type
+                )
             )
         )
     ]
@@ -433,6 +1042,13 @@ def _replace_contract_check(
                 "reason": contract.get("reason"),
                 "stage_created": contract.get("stage_created"),
                 "stage_last_seen": contract.get("stage_last_seen"),
+                "assignment_source": contract.get("assignment_source"),
+                "topology_required": contract.get("topology_required"),
+                "target_slot": contract.get("target_slot"),
+                "annotation_sources": contract.get("annotation_sources"),
+                "dependency": contract.get("dependency"),
+                "prompt_explicit_facing": contract.get("prompt_explicit_facing"),
+                "prompt_explicit_wall": contract.get("prompt_explicit_wall"),
             },
             "evidence_refs": ["scene_geometry"],
             "check_source": CONTRACT_CHECK_SOURCE,
@@ -443,7 +1059,9 @@ def _replace_contract_check(
 
 
 def _check_conflicts_with_orientation_contract(
-    check: dict[str, Any], contract_subject_id: str
+    check: dict[str, Any],
+    contract_subject_id: str,
+    contract_relation_type: str,
 ) -> bool:
     relation_type = str(check.get("relation_type") or "")
     if relation_type not in CONFLICTING_ORIENTATION_RELATIONS:
@@ -455,6 +1073,8 @@ def _check_conflicts_with_orientation_contract(
     )
     if not involved:
         return False
+    if relation_type == "workstation":
+        return contract_relation_type == "back_against_wall"
     # 2026-07-11 修改原因：稳定 wall contract 不能与资产标注/模板残留的
     # guest-chair<->desk 朝向 FD 并存；否则远端椅仍会被计作 desk companion，
     # 后续 critic/SA 又可能把它拉回书桌。稳定 contract 应替换冲突拓扑。
@@ -466,6 +1086,8 @@ def _expected_use(relation_type: str) -> str:
         return "sit and view the room's chosen media focal point"
     if relation_type == "back_against_wall":
         return "remain wall-backed with the seating front normal to the wall"
+    if relation_type == "furniture_faces_furniture":
+        return "face the work surface explicitly referenced by the task instruction"
     return "sit at and use the chosen table or work surface"
 
 
@@ -556,9 +1178,7 @@ def _nearest_living_seat_focus(
         and object_category(obj) == "coffee_table"
         and _is_actionable_seating_surface_pair(subject, obj)
     ]
-    candidates = [
-        (obj, "seating_to_work_surface") for obj in surfaces
-    ]
+    candidates = [(obj, "seating_to_work_surface") for obj in surfaces]
     if media_focus is not None:
         candidates.append((media_focus, "seating_to_media"))
     if not candidates:
@@ -567,12 +1187,16 @@ def _nearest_living_seat_focus(
     # 已朝外的椅子会因角度惩罚换目标，critic 无法稳定修回最近活动区。
     candidates.sort(
         key=lambda item: (
-            bbox_gap_xy(subject, item[0])
-            if bbox_gap_xy(subject, item[0]) is not None
-            else 999.0,
-            distance_xy(subject, item[0])
-            if distance_xy(subject, item[0]) is not None
-            else 999.0,
+            (
+                bbox_gap_xy(subject, item[0])
+                if bbox_gap_xy(subject, item[0]) is not None
+                else 999.0
+            ),
+            (
+                distance_xy(subject, item[0])
+                if distance_xy(subject, item[0]) is not None
+                else 999.0
+            ),
             str(item[0].get("id") or ""),
         )
     )
@@ -628,7 +1252,15 @@ def _is_wall_anchored_standalone_seating(
     if wall_gap is None or surface_gap is None:
         return False
     category = object_category(subject)
-    if category not in {"armchair", "chair", "dining_chair", "office_chair"}:
+    if category not in {
+        "armchair",
+        "bar_stool",
+        "bench",
+        "chair",
+        "dining_chair",
+        "office_chair",
+        "stool",
+    }:
         return False
     footprint_scale = _seat_footprint_scale(subject)
     if footprint_scale is None:
@@ -677,9 +1309,12 @@ def _standalone_wall_target(
 def _is_wall_anchor_candidate(subject: dict[str, Any]) -> bool:
     return object_category(subject) in {
         "armchair",
+        "bar_stool",
+        "bench",
         "chair",
         "dining_chair",
         "office_chair",
+        "stool",
     }
 
 

@@ -21,10 +21,15 @@ from scenesmith.agent_utils.asset_manager import (
 from scenesmith.agent_utils.geometry_generation_server.dataclasses import (
     GeometryGenerationServerResponse,
 )
+from scenesmith.agent_utils.hssd_retrieval_server.dataclasses import (
+    HssdRetrievalResult,
+    HssdRetrievalServerResponse,
+)
 from scenesmith.agent_utils.image_generation import (
     AssetOperationType,
     OpenAIImageGenerator,
 )
+from scenesmith.agent_utils.mesh_frame import validate_uniform_dimension_fit
 from scenesmith.agent_utils.mesh_physics_analyzer import MeshPhysicsAnalysis
 from scenesmith.agent_utils.room import AgentType, ObjectType, SceneObject
 from tests.unit.mock_utils import create_mock_logger
@@ -128,7 +133,6 @@ class TestAssetManager(unittest.TestCase):
         if self.temp_dir.exists():
             shutil.rmtree(self.temp_dir)
 
-
     def test_asset_generation_request_creation(self):
         """Test creating AssetGenerationRequest instances."""
         request = AssetGenerationRequest(
@@ -171,10 +175,322 @@ class TestAssetManager(unittest.TestCase):
         self.assertEqual(scene_obj.geometry_path, Path("/test/asset.gltf"))
         self.assertEqual(scene_obj.sdf_path, sdf_path)
 
+    def test_semantic_name_changes_display_identity_not_registry_asset_id(self):
+        config = AssetPathConfig(
+            description="A compact classroom desk",
+            short_name="desk",
+            image_path=None,
+            geometry_path=Path("/test/geometry.glb"),
+            sdf_dir=Path("/test/sdf"),
+        )
+        first = self.asset_manager._create_scene_object(
+            config=config,
+            object_type=ObjectType.FURNITURE,
+            sdf_path=Path("/test/asset.sdf"),
+            final_gltf_path=Path("/test/asset.gltf"),
+            semantic_name="student_desk",
+            semantic_name_source="rendered_asset_choice",
+        )
+        second = self.asset_manager._create_scene_object(
+            config=config,
+            object_type=ObjectType.FURNITURE,
+            sdf_path=Path("/test/asset_2.sdf"),
+            final_gltf_path=Path("/test/asset_2.gltf"),
+            semantic_name="student_desk",
+            semantic_name_source="rendered_asset_choice",
+        )
+
+        self.assertEqual(first.name, "student_desk")
+        self.assertEqual(first.metadata["semantic_name"], "student_desk")
+        self.assertEqual(first.metadata["asset_short_name"], "desk")
+        self.assertEqual(
+            first.metadata["semantic_name_source"], "rendered_asset_choice"
+        )
+        self.assertEqual(str(first.object_id), "desk_0")
+        self.assertEqual(str(second.object_id), "desk_1")
+
     def test_initialization(self):
         """Test AssetManager initialization."""
         self.assertEqual(self.asset_manager.output_dir, self.output_dir)
         self.assertEqual(self.asset_manager.logger, self.mock_logger)
+
+    def test_upright_seating_requires_stricter_uniform_dimension_fit(self):
+        self.assertEqual(
+            self.asset_manager._hssd_uniform_fit_min_ratio(
+                "Classic dining chair with upholstered seat"
+            ),
+            0.65,
+        )
+        self.assertEqual(
+            self.asset_manager._hssd_uniform_fit_min_ratio("Wooden sideboard"),
+            0.5,
+        )
+
+    def test_direct_hssd_requests_top_n_and_retries_failed_candidate(self):
+        """Direct HSSD path should request and try rendered-choice candidates."""
+        request = AssetGenerationRequest(
+            object_descriptions=["Large indoor potted floor plant"],
+            short_names=["plant"],
+            object_type=ObjectType.FURNITURE,
+            desired_dimensions=[[0.6, 0.6, 1.2]],
+            scene_prompt_context="A bright living room with two floor plants.",
+        )
+        candidates = [
+            HssdRetrievalResult(
+                mesh_path=f"/tmp/plant_{index}.glb",
+                hssd_id=f"plant_{index}",
+                object_name=f"plant {index}",
+                similarity_score=0.9 - index * 0.01,
+                size=(0.6, 0.6, 1.2),
+                category="plant",
+            )
+            for index in range(2)
+        ]
+        response = HssdRetrievalServerResponse(
+            results=candidates,
+            query_description=request.object_descriptions[0],
+        )
+        self.asset_manager.hssd_client = MagicMock()
+        self.asset_manager.hssd_client.retrieve_objects.return_value = iter(
+            [(0, response)]
+        )
+        recovered = SceneObject(
+            object_id="plant_0",
+            object_type=ObjectType.FURNITURE,
+            name="plant",
+            description=request.object_descriptions[0],
+            transform=MagicMock(),
+            metadata={"asset_source": "hssd"},
+        )
+
+        with (
+            patch.dict(
+                "os.environ",
+                {
+                    "HSSD_RENDERED_ASSET_CHOICE": "true",
+                    "HSSD_RENDERED_ASSET_CHOICE_TOP_N": "5",
+                    "HSSD_RENDERED_ASSETS_DIR": str(self.temp_dir),
+                },
+            ),
+            patch.object(
+                self.asset_manager,
+                "_process_direct_hssd_candidate",
+                side_effect=[ValueError("bad proportions"), recovered],
+            ) as process_candidate,
+        ):
+            result = self.asset_manager._retrieve_hssd_assets(request)
+
+        sent_requests = self.asset_manager.hssd_client.retrieve_objects.call_args.args[
+            0
+        ]
+        self.assertEqual(sent_requests[0].num_candidates, 5)
+        self.assertEqual(
+            [
+                call.kwargs["candidate"].hssd_id
+                for call in process_candidate.call_args_list
+            ],
+            ["plant_0", "plant_1"],
+        )
+        self.assertEqual(result.successful_assets, [recovered])
+        self.assertEqual(result.failed_assets, [])
+
+    def test_direct_hssd_candidate_preserves_baked_scale_for_support_surfaces(self):
+        """Direct retries must keep the scale used by HSSD surface annotations."""
+        request = AssetGenerationRequest(
+            object_descriptions=["Dining room sideboard"],
+            short_names=["sideboard"],
+            object_type=ObjectType.FURNITURE,
+            desired_dimensions=[[1.36, 0.53, 0.85]],
+        )
+        candidate = HssdRetrievalResult(
+            mesh_path=str(self.temp_dir / "sideboard.gltf"),
+            hssd_id="sideboard_mesh",
+            object_name="sideboard",
+            similarity_score=0.9,
+            size=(1.2, 0.47, 0.75),
+            category="sideboard",
+        )
+        config = self.asset_manager._create_asset_paths(
+            request.object_descriptions, request.short_names
+        )[0]
+        physics = MeshPhysicsAnalysis(
+            up_axis="+Y",
+            front_axis="+Z",
+            material="wood",
+            mass_kg=20.0,
+            mass_range_kg=[15.0, 25.0],
+            friction_coefficient=0.4,
+        )
+        bbox_min = np.array([-0.68, -0.265, 0.0])
+        bbox_max = np.array([0.68, 0.265, 0.85])
+        applied_scale = 1.135
+        created = SceneObject(
+            object_id="sideboard_0",
+            object_type=ObjectType.FURNITURE,
+            name="sideboard",
+            description="Dining room sideboard",
+            transform=MagicMock(),
+        )
+
+        with (
+            patch.object(
+                self.asset_manager, "_analyze_mesh_physics", return_value=physics
+            ),
+            patch.object(
+                self.asset_manager,
+                "_override_hssd_asset_annotations",
+                return_value=physics,
+            ),
+            patch("scenesmith.agent_utils.asset_manager.canonicalize_mesh"),
+            patch.object(
+                self.asset_manager,
+                "_scale_and_measure_canonical_mesh",
+                return_value=(
+                    config.sdf_dir / "sideboard.gltf",
+                    bbox_min,
+                    bbox_max,
+                    applied_scale,
+                ),
+            ),
+            patch.object(
+                self.asset_manager, "_generate_collision_geometry", return_value=[]
+            ),
+            patch("scenesmith.agent_utils.asset_manager.generate_drake_sdf"),
+            patch.object(
+                self.asset_manager, "_create_scene_object", return_value=created
+            ) as create_scene_object,
+        ):
+            result = self.asset_manager._process_direct_hssd_candidate(
+                request=request,
+                index=0,
+                config=config,
+                candidate=candidate,
+            )
+
+        self.assertIs(result, created)
+        kwargs = create_scene_object.call_args.kwargs
+        self.assertEqual(kwargs["scale_factor"], applied_scale)
+        self.assertEqual(
+            kwargs["additional_metadata"]["requested_dimensions"],
+            request.desired_dimensions[0],
+        )
+        self.assertEqual(
+            kwargs["additional_metadata"]["actual_dimensions"],
+            [1.36, 0.53, 0.85],
+        )
+
+    def test_direct_hssd_rug_uses_planar_fit_and_static_covering_sdf(self):
+        request = AssetGenerationRequest(
+            object_descriptions=["Rectangular low-pile area rug"],
+            short_names=["area_rug"],
+            object_type=ObjectType.FURNITURE,
+            desired_dimensions=[[2.4, 1.6, 0.02]],
+        )
+        candidate = HssdRetrievalResult(
+            mesh_path=str(self.temp_dir / "rug.gltf"),
+            hssd_id="rug_mesh",
+            object_name="patterned rug",
+            similarity_score=0.91,
+            size=(2.0, 1.3, 0.006),
+            category="rug",
+        )
+        config = self.asset_manager._create_asset_paths(
+            request.object_descriptions, request.short_names
+        )[0]
+        physics = MeshPhysicsAnalysis(
+            up_axis="+Y",
+            front_axis="+Z",
+            material="fabric",
+            mass_kg=2.0,
+            mass_range_kg=[1.0, 3.0],
+            friction_coefficient=0.5,
+        )
+        bbox_min = np.array([-1.2, -0.8, 0.0])
+        bbox_max = np.array([1.2, 0.8, 0.008])
+        created = MagicMock(spec=SceneObject)
+
+        with (
+            patch.object(
+                self.asset_manager, "_analyze_mesh_physics", return_value=physics
+            ),
+            patch.object(
+                self.asset_manager,
+                "_override_hssd_asset_annotations",
+                return_value=physics,
+            ),
+            patch("scenesmith.agent_utils.asset_manager.canonicalize_mesh"),
+            patch.object(
+                self.asset_manager,
+                "_scale_and_measure_canonical_mesh",
+                return_value=(
+                    config.sdf_dir / "area_rug.gltf",
+                    bbox_min,
+                    bbox_max,
+                    1.2,
+                ),
+            ) as scale_mesh,
+            patch.object(
+                self.asset_manager, "_generate_collision_geometry"
+            ) as collision,
+            patch(
+                "scenesmith.agent_utils.asset_manager.generate_thin_covering_sdf"
+            ) as generate_covering,
+            patch.object(
+                self.asset_manager, "_create_scene_object", return_value=created
+            ) as create_scene_object,
+        ):
+            result = self.asset_manager._process_direct_hssd_candidate(
+                request=request,
+                index=0,
+                config=config,
+                candidate=candidate,
+            )
+
+        self.assertIs(result, created)
+        self.assertEqual(scale_mesh.call_args.kwargs["fit_axes"], (0, 1))
+        collision.assert_not_called()
+        generate_covering.assert_called_once()
+        metadata = create_scene_object.call_args.kwargs["additional_metadata"]
+        self.assertEqual(metadata["asset_source"], "thin_covering")
+        self.assertEqual(metadata["retrieval_source"], "hssd")
+        self.assertEqual(metadata["hssd_mesh_id"], "rug_mesh")
+
+    def test_square_hssd_rug_is_exactly_fitted_on_both_planar_axes(self):
+        canonical_path = self.temp_dir / "square_rug_canonical.gltf"
+        final_path = self.temp_dir / "square_rug.gltf"
+        trimesh.creation.box(extents=[3.0, 0.01, 2.0]).export(canonical_path)
+
+        _, bbox_min, bbox_max, _ = self.asset_manager._scale_and_measure_canonical_mesh(
+            canonical_path=canonical_path,
+            final_path=final_path,
+            desired_dimensions=[2.0, 2.0, 0.05],
+            fit_axes=(0, 1),
+            exact_fit_axes=(0, 1),
+        )
+
+        np.testing.assert_allclose(
+            (bbox_max - bbox_min)[:2], [2.0, 2.0], rtol=1e-5, atol=1e-5
+        )
+
+    def test_plant_uniform_fit_relaxation_is_targeted(self):
+        """Plant envelopes may use 0.45; other assets retain the 0.50 floor."""
+        actual = np.array([0.6, 0.754861, 0.556976])
+        requested = np.array([0.6, 0.6, 1.2])
+
+        plant_min_ratio = self.asset_manager._hssd_uniform_fit_min_ratio(
+            "Large indoor potted floor plant"
+        )
+        self.assertEqual(plant_min_ratio, 0.45)
+        validate_uniform_dimension_fit(actual, requested, min_ratio=plant_min_ratio)
+
+        non_plant_min_ratio = self.asset_manager._hssd_uniform_fit_min_ratio(
+            "Tall wooden bookcase"
+        )
+        self.assertEqual(non_plant_min_ratio, 0.5)
+        with self.assertRaisesRegex(ValueError, "allowed=\\[0.5, 1.75\\]"):
+            validate_uniform_dimension_fit(
+                actual, requested, min_ratio=non_plant_min_ratio
+            )
 
     def test_create_asset_paths_disambiguates_duplicate_short_names(self):
         """Duplicate requested objects must not share intermediate asset paths."""
@@ -1138,7 +1454,9 @@ class TestHssdFrontAxisOverride(unittest.TestCase):
         """HSM +Z-forward becomes SceneSmith/Blender -Y."""
         self.assertEqual(_normalize_hssd_annotation_front_axis([0.0, 0.0, 1.0]), "-Y")
 
-    @patch("scenesmith.agent_utils.asset_manager._get_hssd_front_axis_annotation_record")
+    @patch(
+        "scenesmith.agent_utils.asset_manager._get_hssd_front_axis_annotation_record"
+    )
     def test_annotation_replaces_only_front_axis(self, mock_annotation_record):
         """Curated front replaces VLM orientation without changing physics metadata."""
         mock_annotation_record.return_value = {

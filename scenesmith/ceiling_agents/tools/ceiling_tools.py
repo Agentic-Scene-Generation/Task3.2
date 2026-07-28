@@ -15,6 +15,7 @@ from pydrake.all import RigidTransform, RollPitchYaw
 
 from scenesmith.agent_utils.action_logger import log_scene_action
 from scenesmith.agent_utils.asset_manager import AssetGenerationRequest, AssetManager
+from scenesmith.agent_utils.semantic_names import semantic_name_candidates_for_request
 from scenesmith.agent_utils.loop_detector import LoopDetector
 from scenesmith.agent_utils.placement_noise import (
     PlacementNoiseMode,
@@ -93,6 +94,20 @@ class CeilingTools:
         self.ceiling_height = ceiling_height
         self.asset_manager = asset_manager
         self.cfg = cfg
+
+        # A retrieval miss is useful feedback, but repeatedly rephrasing an
+        # unavailable ceiling asset (for example a long structural beam) burns
+        # turns without changing the scene.  Keep this circuit breaker local to
+        # the current ceiling stage: a successful retrieval resets it, while
+        # repeated *complete* failures tell the agent to continue without that
+        # optional decoration.
+        asset_generation_safety = cfg.get("asset_generation_safety", {})
+        self._max_consecutive_asset_generation_failures = max(
+            1,
+            int(asset_generation_safety.get("max_consecutive_complete_failures", 2)),
+        )
+        self._consecutive_asset_generation_failures = 0
+        self._asset_generation_circuit_open = False
 
         # Initialize placement noise configuration.
         # Start with natural profile as default until planner sets it.
@@ -195,7 +210,13 @@ class CeilingTools:
                 object_type=ObjectType.CEILING_MOUNTED,
                 desired_dimensions=desired_dimensions,
                 style_context=style_context,
+                scene_prompt_context=self.scene.text_description,
                 scene_id=self.scene.scene_dir.name,
+                semantic_name_candidates=semantic_name_candidates_for_request(
+                    getattr(self.scene, "scene_expert_task_spec", None),
+                    short_names,
+                    ObjectType.CEILING_MOUNTED,
+                ),
             )
             return self._generate_assets_impl(request)
 
@@ -344,6 +365,9 @@ class CeilingTools:
 
     def _generate_assets_impl(self, request: AssetGenerationRequest) -> str:
         """Implementation for generating ceiling assets."""
+        if self._asset_generation_circuit_open:
+            return self._asset_generation_circuit_breaker_response()
+
         try:
             result = self.asset_manager.generate_assets(request=request)
 
@@ -372,6 +396,14 @@ class CeilingTools:
                     f"{fa.description}: {fa.error_message}"
                     for fa in result.failed_assets
                 )
+                if not generated_assets:
+                    self._record_complete_asset_generation_failure()
+                    if self._asset_generation_circuit_open:
+                        return self._asset_generation_circuit_breaker_response(
+                            failure_details
+                        )
+                else:
+                    self._consecutive_asset_generation_failures = 0
                 return AssetGenerationResultDTO(
                     success=False,
                     assets=generated_assets,
@@ -383,6 +415,7 @@ class CeilingTools:
                 ).to_json()
 
             # All succeeded.
+            self._consecutive_asset_generation_failures = 0
             return AssetGenerationResultDTO(
                 success=True,
                 assets=generated_assets,
@@ -392,11 +425,44 @@ class CeilingTools:
 
         except Exception as e:
             console_logger.error(f"Error generating ceiling assets: {e}", exc_info=True)
+            self._record_complete_asset_generation_failure()
+            if self._asset_generation_circuit_open:
+                return self._asset_generation_circuit_breaker_response(str(e))
             return AssetGenerationResultDTO(
                 success=False,
                 assets=[],
                 message=f"Asset generation failed: {str(e)}",
             ).to_json()
+
+    def _record_complete_asset_generation_failure(self) -> None:
+        """Open a stage-local circuit after repeated empty retrieval results."""
+        self._consecutive_asset_generation_failures += 1
+        if (
+            self._consecutive_asset_generation_failures
+            >= self._max_consecutive_asset_generation_failures
+        ):
+            self._asset_generation_circuit_open = True
+            console_logger.warning(
+                "Ceiling asset-generation circuit opened after %d consecutive "
+                "complete failures.",
+                self._consecutive_asset_generation_failures,
+            )
+
+    def _asset_generation_circuit_breaker_response(
+        self, failure_details: str | None = None
+    ) -> str:
+        """Tell the agent that rephrasing unavailable assets will not help."""
+        details = f" Latest failure: {failure_details}" if failure_details else ""
+        return AssetGenerationResultDTO(
+            success=False,
+            assets=[],
+            message=(
+                "Ceiling asset retrieval circuit is open after repeated complete "
+                "failures. Do not call generate_ceiling_assets again in this stage; "
+                "continue without the unavailable optional ceiling decoration."
+                f"{details}"
+            ),
+        ).to_json()
 
     @log_scene_action
     def _place_ceiling_object_impl(

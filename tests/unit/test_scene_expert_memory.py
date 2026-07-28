@@ -32,13 +32,17 @@ from scenesmith.scene_expert.context_bundle import (
     build_llm_call_debug_record,
     build_stage_context_bundle,
 )
+from scenesmith.scene_expert.global_planner import GlobalPlanner, _SYSTEM_PROMPT
 from scenesmith.scene_expert.repair_taxonomy import (
     FailureCategory,
     classify_hard_reasons,
 )
 from scenesmith.scene_expert.schemas import (
     FullVerifyReport,
+    HarnessContext,
+    MemoryPack,
     SceneTaskSpec,
+    StageBrief,
     StageVerifyReport,
 )
 from scenesmith.agent_utils.scoring import CategoryScore, FurnitureCritiqueWithScores
@@ -52,6 +56,28 @@ from scenesmith.scene_expert.verifier import (
 
 
 class SceneExpertMemoryTest(unittest.TestCase):
+    def test_stage_brief_and_planner_preserve_immutable_task_priority(self) -> None:
+        task = "A study with guest chairs against the wall facing into the room."
+        context = HarnessContext(
+            stage="furniture",
+            task_spec=SceneTaskSpec(room_type="study", style="standard"),
+            memory_pack=MemoryPack(),
+        )
+        planner = object.__new__(GlobalPlanner)
+
+        message = planner._build_user_message(
+            context,
+            "",
+            original_task=task,
+        )
+        brief = StageBrief(stage="furniture", stage_objective="Place furniture")
+
+        self.assertIn("## Immutable User Task", message)
+        self.assertIn(task, message)
+        self.assertIn("takes priority over", message)
+        self.assertIn("explicit object, position, or facing", brief.to_injection_text())
+        self.assertIn("Immutable User Task", _SYSTEM_PROMPT)
+
     def test_llm_debug_record_marks_scenebenchmark_prompt_context(self) -> None:
         record = build_llm_call_debug_record(
             stage="furniture",
@@ -128,6 +154,26 @@ class SceneExpertMemoryTest(unittest.TestCase):
         self.assertIn("StageContextBundle: furniture / designer", text)
         self.assertIn("door clearance violation", text)
         self.assertIn("bedroom", text)
+
+    def test_stage_context_bundle_prefers_immutable_original_task(self) -> None:
+        scene = types.SimpleNamespace(
+            room_geometry=None,
+            objects={},
+            text_description=("Mutable StageBrief: guest chairs must face the desk."),
+            scene_expert_original_description=(
+                "A study with guest chairs facing into the room."
+            ),
+        )
+
+        bundle = build_stage_context_bundle(
+            stage="furniture",
+            agent_role="critic",
+            event="request_critique",
+            scene=scene,
+        )
+
+        self.assertIn("original_task=A study", bundle.scene_summary)
+        self.assertNotIn("Mutable StageBrief", bundle.scene_summary)
 
     def test_stage_working_memory_commits_public_failure_event(self) -> None:
         class FakeTransform:
@@ -218,7 +264,10 @@ class SceneExpertMemoryTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            report = StageVerifier(pass_threshold=0.6).verify(
+            report = StageVerifier(
+                pass_threshold=0.6,
+                visual_score_hard_gate=True,
+            ).verify(
                 stage="furniture",
                 stage_output_dir=str(root),
                 task_spec=SceneTaskSpec(
@@ -241,6 +290,105 @@ class SceneExpertMemoryTest(unittest.TestCase):
             self.assertIn("missing_object", issue_types)
             self.assertIn("physics_collision", issue_types)
 
+    def test_furniture_visual_scores_are_advisory_by_default(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scores_dir = root / "scene_states" / "furniture"
+            scores_dir.mkdir(parents=True)
+            (scores_dir / "scores.yaml").write_text(
+                "\n".join(
+                    [
+                        "Functionality:",
+                        "  grade: 2",
+                        "Prompt Following:",
+                        "  grade: 6",
+                        "Layout Plausibility:",
+                        "  grade: 4",
+                        "Summary: No physics collisions detected. All required furniture is present.",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            report = StageVerifier(pass_threshold=0.6).verify(
+                stage="furniture",
+                stage_output_dir=str(root),
+                task_spec=SceneTaskSpec(
+                    room_type="study",
+                    style="standard",
+                    required_large_objects=["desk"],
+                ),
+                scene_state_info={"object_names": ["desk_0"]},
+            )
+
+            self.assertTrue(report.pass_stage)
+            self.assertEqual([], report.issues)
+
+    def test_manipuland_verifier_normalizes_names_and_enforces_counts(self) -> None:
+        task_spec = SceneTaskSpec(
+            room_type="bedroom",
+            style="standard",
+            required_small_objects=[
+                "table lamp",
+                "table lamp",
+                "alarm clock",
+                "book",
+                "magazines",
+            ],
+        )
+
+        issues = (
+            StageVerifier(pass_threshold=0.6)
+            .verify(
+                stage="manipuland",
+                stage_output_dir="/path/that/does/not/exist",
+                task_spec=task_spec,
+                scene_state_info={
+                    "object_names": [
+                        "table_lamp",
+                        "table_lamp",
+                        "alarm_clock",
+                        "book",
+                        "magazine",
+                    ]
+                },
+            )
+            .issues
+        )
+
+        self.assertEqual([], issues)
+
+        missing_one_lamp = (
+            StageVerifier(pass_threshold=0.6)
+            .verify(
+                stage="manipuland",
+                stage_output_dir="/path/that/does/not/exist",
+                task_spec=task_spec,
+                scene_state_info={
+                    "object_names": ["table_lamp", "alarm_clock", "book", "magazine"]
+                },
+            )
+            .issues
+        )
+
+        self.assertEqual(
+            ["table lamp"], [issue.object_name for issue in missing_one_lamp]
+        )
+
+    def test_wall_verifier_matches_tv_display_to_television(self) -> None:
+        report = StageVerifier(pass_threshold=0.6).verify(
+            stage="wall_mounted",
+            stage_output_dir="/path/that/does/not/exist",
+            task_spec=SceneTaskSpec(
+                room_type="living room",
+                style="standard",
+                required_wall_objects=["television"],
+            ),
+            scene_state_info={"object_names": ["tv_display"]},
+        )
+
+        self.assertEqual([], report.issues)
+
     def test_layout_plausibility_maps_to_scene_expert_category(self) -> None:
         mapped = _map_scenesmith_scores(
             {
@@ -253,7 +401,7 @@ class SceneExpertMemoryTest(unittest.TestCase):
         self.assertAlmostEqual(0.4, mapped["plausibility"])
         self.assertAlmostEqual(0.85, mapped["aesthetic"])
 
-    def test_full_verifier_gates_low_plausibility_even_with_high_average(
+    def test_full_verifier_keeps_low_plausibility_as_an_observability_signal(
         self,
     ) -> None:
         report = StageVerifyReport(
@@ -272,6 +420,26 @@ class SceneExpertMemoryTest(unittest.TestCase):
 
         self.assertAlmostEqual(0.4, full_report.plausibility_score)
         self.assertAlmostEqual(0.88, full_report.overall_score)
+        self.assertTrue(full_report.pass_scene)
+
+    def test_full_verifier_can_gate_visual_scores_for_offline_ablation(self) -> None:
+        report = StageVerifyReport(
+            stage="furniture",
+            pass_stage=True,
+            scores={
+                "semantic": 1.0,
+                "aesthetic": 1.0,
+                "plausibility": 0.4,
+                "physics": 1.0,
+                "interaction": 1.0,
+            },
+        )
+
+        full_report = FullVerifier(
+            pass_threshold=0.7,
+            visual_score_hard_gate=True,
+        ).verify([report])
+
         self.assertFalse(full_report.pass_scene)
 
     def test_chinese_aliases_expand_to_english_tokens(self) -> None:
