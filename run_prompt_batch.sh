@@ -13,7 +13,7 @@
 #   --output-dir DIR       Parent directory for per-scene Hydra outputs.
 #   --model-dir DIR        Local model directory passed to vLLM.
 #   --experiment NAME      Hydra experiment config (default: indoor_scene_generation).
-#   --floor-plan-mode MODE room or house (default: room).
+#   --floor-plan-mode MODE room, house, or polygon (default: room).
 #   --dry-run              Validate inputs and print resolved settings only.
 #   -h, --help             Show this help.
 #
@@ -146,9 +146,9 @@ if [ "$END" -le "$START" ]; then
     echo "[ERROR] END ($END) must be greater than START ($START)" >&2
     exit 2
 fi
-if [[ "$FLOOR_PLAN_MODE" != "room" && "$FLOOR_PLAN_MODE" != "house" ]]; then
-    echo "[ERROR] --floor-plan-mode must be room or house" >&2
-    echo "        polygon will be enabled in the separate polygon migration." >&2
+if [[ "$FLOOR_PLAN_MODE" != "room" && "$FLOOR_PLAN_MODE" != "house" &&
+      "$FLOOR_PLAN_MODE" != "polygon" ]]; then
+    echo "[ERROR] --floor-plan-mode must be room, house, or polygon" >&2
     exit 2
 fi
 

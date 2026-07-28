@@ -783,6 +783,45 @@ class TestRoomGeometry(unittest.TestCase):
         self.test_data_dir = Path(__file__).parent.parent / "test_data"
         self.sdf_path = self.test_data_dir / "simple_room_geometry.sdf"
 
+    def test_room_local_footprint_uses_exact_polygon(self):
+        """Exact polygon vertices are the authoritative downstream boundary."""
+        vertices = [
+            (-3.5, -3.0),
+            (3.5, -3.0),
+            (3.5, 0.0),
+            (0.5, 0.0),
+            (0.5, 3.0),
+            (-3.5, 3.0),
+        ]
+        room_geometry = RoomGeometry(
+            sdf_tree=ET.parse(self.sdf_path),
+            sdf_path=self.sdf_path,
+            width=6.0,
+            length=7.0,
+            footprint_vertices=vertices,
+        )
+
+        self.assertEqual(room_geometry.room_local_footprint_vertices, vertices)
+
+    def test_room_local_footprint_derives_rectangle(self):
+        """Rectangle rooms expose the same boundary representation."""
+        room_geometry = RoomGeometry(
+            sdf_tree=ET.parse(self.sdf_path),
+            sdf_path=self.sdf_path,
+            width=6.0,
+            length=7.0,
+        )
+
+        self.assertEqual(
+            room_geometry.room_local_footprint_vertices,
+            [
+                (-3.5, -3.0),
+                (3.5, -3.0),
+                (3.5, 3.0),
+                (-3.5, 3.0),
+            ],
+        )
+
     def test_to_dict_minimal(self):
         """Test RoomGeometry serialization with minimal fields."""
         sdf_tree = ET.parse(self.sdf_path)

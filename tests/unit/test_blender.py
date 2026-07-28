@@ -767,6 +767,23 @@ class TestMetricRendering(unittest.TestCase):
         expected_positions_set = set(expected_positions)
         self.assertEqual(actual_positions, expected_positions_set)
 
+    def test_room_markers_preserve_concave_footprint(self):
+        """Room marker filtering must not fill a concave cutout."""
+        renderer = BlenderRenderer()
+        renderer._surface_corners = None
+        renderer._room_local_footprint_vertices = [
+            [-3.5, -3.0],
+            [3.5, -3.0],
+            [3.5, 0.0],
+            [0.5, 0.0],
+            [0.5, 3.0],
+            [-3.5, 3.0],
+        ]
+
+        self.assertTrue(renderer._should_include_marker((-1.5, 0.5, 0.0)))
+        self.assertTrue(renderer._should_include_marker((0.5, 1.0, 0.0)))
+        self.assertFalse(renderer._should_include_marker((1.5, 0.5, 0.0)))
+
     @patch("scenesmith.agent_utils.blender.camera_utils.world_to_camera_view")
     def test_half_meter_precision_rounding(self, mock_world_to_camera):
         """Test that strategic markers use floor bounds directly without rounding."""

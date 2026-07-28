@@ -10,7 +10,7 @@
 # Options:
 #   --output-dir DIR
 #   --experiment NAME
-#   --floor-plan-mode room|house
+#   --floor-plan-mode room|house|polygon
 #   --dry-run
 #   -h, --help
 #
@@ -106,8 +106,9 @@ if [ "$END" -le "$START" ]; then
     echo "[ERROR] END ($END) must be greater than START ($START)" >&2
     exit 2
 fi
-if [[ "$FLOOR_PLAN_MODE" != "room" && "$FLOOR_PLAN_MODE" != "house" ]]; then
-    echo "[ERROR] --floor-plan-mode must be room or house" >&2
+if [[ "$FLOOR_PLAN_MODE" != "room" && "$FLOOR_PLAN_MODE" != "house" &&
+      "$FLOOR_PLAN_MODE" != "polygon" ]]; then
+    echo "[ERROR] --floor-plan-mode must be room, house, or polygon" >&2
     exit 2
 fi
 
