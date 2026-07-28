@@ -724,6 +724,10 @@ def _generate_room(
         room_id=room_id,
         text_description=room_prompt,
         action_log_path=room_dir / "action_log.json",
+        floor_plan_mode=cfg_dict["floor_plan_agent"]["mode"],
+        tool_schema_version=(
+            2 if cfg_dict["floor_plan_agent"]["mode"] == "polygon" else 1
+        ),
     )
     for wall in room_geometry.walls:
         scene.add_object(wall)
@@ -1241,7 +1245,13 @@ def _generate_floor_plan_worker(
         console_logger.info(f"Floor plan worker started for scene: {scene_dir}")
 
         # Create trace metadata for this floor plan generation.
-        trace_metadata = {"scene_dir": scene_dir, "prompt": prompt}
+        floor_plan_mode = cfg_dict["floor_plan_agent"]["mode"]
+        trace_metadata = {
+            "scene_dir": scene_dir,
+            "prompt": prompt,
+            "floor_plan_mode": floor_plan_mode,
+            "tool_schema_version": 2 if floor_plan_mode == "polygon" else 1,
+        }
         if experiment_run_id:
             trace_metadata["experiment_run_id"] = experiment_run_id
 
@@ -1346,6 +1356,10 @@ def _generate_room_worker(
             "experiment_name": cfg_dict["name"],
             "room_dir": str(room_dir_path),
             "room_prompt": room_prompt,
+            "floor_plan_mode": cfg_dict["floor_plan_agent"]["mode"],
+            "tool_schema_version": (
+                2 if cfg_dict["floor_plan_agent"]["mode"] == "polygon" else 1
+            ),
         }
         if experiment_run_id:
             trace_metadata["experiment_run_id"] = experiment_run_id
@@ -1401,6 +1415,8 @@ def _reconstruct_room_scene(worker_result: dict, scene_dir: Path) -> RoomScene:
         room_id=worker_result["room_id"],
         text_description=worker_result.get("text_description", ""),
         action_log_path=scene_dir / "action_log.json",
+        floor_plan_mode=scene_state.get("floor_plan_mode", "room"),
+        tool_schema_version=scene_state.get("tool_schema_version", 1),
     )
 
     # Restore objects and other state.
@@ -1958,6 +1974,10 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                     "experiment_name": cfg_dict["name"],
                     "scene_dir": str(scene_dir),
                     "prompt": prompt,
+                    "floor_plan_mode": cfg_dict["floor_plan_agent"]["mode"],
+                    "tool_schema_version": (
+                        2 if cfg_dict["floor_plan_agent"]["mode"] == "polygon" else 1
+                    ),
                 }
                 if experiment_run_id:
                     trace_metadata["experiment_run_id"] = experiment_run_id

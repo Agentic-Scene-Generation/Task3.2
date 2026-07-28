@@ -57,6 +57,9 @@ from scenesmith.furniture_agents.base_furniture_agent import BaseFurnitureAgent
 from scenesmith.furniture_agents.tools.furniture_tools import FurnitureTools
 from scenesmith.furniture_agents.tools.scene_tools import SceneTools
 from scenesmith.furniture_agents.tools.vision_tools import VisionTools
+from scenesmith.floor_plan_agents.tools.polygon_geometry import (
+    room_geometry_covers_object,
+)
 from scenesmith.prompts.registry import FurnitureAgentPrompts
 from scenesmith.utils.logging import BaseLogger
 
@@ -430,11 +433,17 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         """Get prompt kwargs for initial design instruction.
 
         Returns:
-            Dict with scene description and reference image flag.
+            Dict with scene description, room boundary, and reference image flag.
         """
+        room_geometry = self.scene.room_geometry
         return {
             "scene_description": self.scene.text_description,
             "has_reference_image": self.context_image_path is not None,
+            "room_length": room_geometry.length,
+            "room_width": room_geometry.width,
+            "room_local_footprint_vertices": (
+                room_geometry.room_local_footprint_vertices
+            ),
         }
 
     def _build_initial_design_input(self, instruction: str) -> str | list[dict]:
