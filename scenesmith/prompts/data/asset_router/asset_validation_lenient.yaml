@@ -1,5 +1,5 @@
 name: "asset_validation_lenient"
-version: "1.0"
+version: "2.0"
 description: "Lenient validation and orientation calibration for dataset assets"
 template_variables: ["description", "num_images"]
 prompt: |
@@ -46,13 +46,20 @@ prompt: |
   </style_guidance>
 
   <orientation_contract>
+  `front` has one universal meaning: the object's FUNCTIONAL FRONT pointing
+  OUTWARD, toward the user or usable open space. After canonicalization this
+  direction becomes local +Y; local +Z is up; dimensions are always
+  [width, depth, height] = [X, Y, Z].
+
   Images 0 and 1 are top and bottom views. Images 2, 3, 4, and 5 are four
   evenly spaced side views. For directional furniture, identify which SIDE image
-  most directly shows the semantic front: the sitting/access side of a sofa or
-  chair, or the drawer/door side of a desk, wardrobe, or cabinet. Beds use a
-  special SceneSmith contract: select the headboard side because canonical local
-  +Y is the head-wall anchor direction. Never choose image 0 or 1 as the front.
-  If the front is genuinely
+  most directly shows the functional outward direction:
+  - bed: from the headboard toward the foot/open access area (the headboard is back)
+  - sofa/chair: from the backrest through the seat toward the sitting/open side
+  - wardrobe/cabinet/dresser/nightstand: outward from doors or drawers
+  - desk: from the desk toward the seated user/access side
+
+  Never choose image 0 or 1 as the front. If the front is genuinely
   ambiguous or the object is rotationally symmetric, return null and low confidence.
   This orientation field is calibration metadata and must not by itself cause a
   semantically correct asset to be rejected.

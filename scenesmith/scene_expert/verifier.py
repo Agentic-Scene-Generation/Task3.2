@@ -820,13 +820,34 @@ class StageVerifier:
         pass_score_gate = (
             visual_avg_score is None or visual_avg_score >= self._pass_threshold
         )
-        pass_stage = pass_score_gate and pass_plausibility and len(issues) == 0
+        if not pass_score_gate:
+            _add_issue_once(
+                issues,
+                VerifyIssue(
+                    issue_type="quality_below_threshold",
+                    description=(
+                        f"Visual quality average {visual_avg_score:.3f} is below "
+                        f"the stage threshold {self._pass_threshold:.3f}"
+                    ),
+                ),
+            )
         if not pass_plausibility:
+            _add_issue_once(
+                issues,
+                VerifyIssue(
+                    issue_type="low_plausibility",
+                    description=(
+                        f"Visual plausibility {plausibility_score:.3f} is below "
+                        f"the stage threshold {self._pass_threshold:.3f}"
+                    ),
+                ),
+            )
             repair_suggestions.append(
                 "Improve layout plausibility: revise major furniture anchors and "
                 "door/window/opening relationships so the room follows human-use "
                 "and professional arrangement conventions"
             )
+        pass_stage = pass_score_gate and pass_plausibility and len(issues) == 0
 
         console_logger.info(
             "StageVerifier stage=%s: visual_avg=%s "

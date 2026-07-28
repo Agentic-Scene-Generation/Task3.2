@@ -3,6 +3,9 @@ import unittest
 import numpy as np
 
 from scenesmith.agent_utils.mesh_frame import (
+    axis_agnostic_uniform_fit_exists,
+    axis_agnostic_uniform_scale_shape_error,
+    choose_uniform_scale_for_contract,
     gltf_y_up_bounds_to_scene_z_up,
     hssd_dimension_shape_error,
     scene_dimensions_to_gltf_y_up,
@@ -28,6 +31,52 @@ class MeshFrameTest(unittest.TestCase):
 
         self.assertAlmostEqual(scene_order, 0.0)
         self.assertAlmostEqual(gltf_order, 0.0)
+
+    def test_hssd_shape_error_does_not_treat_raw_axis_order_as_semantic(self) -> None:
+        target = [1.2, 0.6, 0.75]
+
+        error = axis_agnostic_uniform_scale_shape_error(
+            [0.6276, 1.0963, 0.75],
+            target,
+        )
+
+        self.assertLess(error, 0.2)
+        self.assertTrue(
+            axis_agnostic_uniform_fit_exists(
+                [0.6276, 1.0963, 0.75],
+                target,
+                min_ratio=0.75,
+                max_ratio=1.35,
+            )
+        )
+
+    def test_uniform_scale_solver_uses_feasible_family_interval(self) -> None:
+        source = np.array([1.6, 1.416, 0.944])
+
+        scale, normalized = choose_uniform_scale_for_contract(
+            source,
+            [1.6, 2.05, 0.8],
+            min_ratio=0.75,
+            max_ratio=1.35,
+            minimum_dimensions=[1.2, 1.6, 0.25],
+            maximum_dimensions=[2.4, 2.4, 1.3],
+        )
+        actual = source * scale
+
+        np.testing.assert_allclose(normalized, [1.6, 2.05, 0.8])
+        self.assertGreaterEqual(actual[1], 1.6 - 1e-6)
+        self.assertLessEqual(actual[2] / normalized[2], 1.35 + 1e-6)
+
+    def test_uniform_scale_solver_rejects_incompatible_shape(self) -> None:
+        with self.assertRaisesRegex(ValueError, "cannot satisfy"):
+            choose_uniform_scale_for_contract(
+                [1.6, 2.0, 0.2],
+                [1.7, 0.9, 0.85],
+                min_ratio=0.75,
+                max_ratio=1.35,
+                minimum_dimensions=[1.1, 0.55, 0.55],
+                maximum_dimensions=[3.5, 1.3, 1.3],
+            )
 
     def test_scene_dimensions_are_reordered_for_gltf_scaling(self) -> None:
         self.assertEqual(

@@ -51,8 +51,16 @@ from scenesmith.agent_utils.image_generation import (
 from scenesmith.agent_utils.materials_retrieval_server import MaterialsRetrievalClient
 from scenesmith.agent_utils.mesh_canonicalization import canonicalize_mesh
 from scenesmith.agent_utils.mesh_frame import (
+    ASSET_FRAME_CONTRACT_VERSION,
+    CANONICAL_DIMENSION_ORDER,
+    CANONICAL_FRONT_AXIS,
+    CANONICAL_UP_AXIS,
+    axis_agnostic_uniform_fit_exists,
+    choose_uniform_scale_for_contract,
     gltf_y_up_bounds_to_scene_z_up,
+    hssd_dimension_shape_error,
     scene_dimensions_to_gltf_y_up,
+    uniform_scale_shape_error,
     validate_uniform_dimension_fit,
 )
 from scenesmith.agent_utils.mesh_physics_analyzer import (
@@ -346,6 +354,10 @@ class AssetManager:
         thin_covering_enabled = (
             cfg.asset_manager.router.strategies.thin_covering.enabled
         )
+        thin_covering_cfg = cfg.asset_manager.router.strategies.thin_covering
+        procedural_floor_covering_enabled = bool(
+            getattr(thin_covering_cfg, "procedural_fallback_enabled", True)
+        )
         if thin_covering_enabled:
             console_logger.info("Initializing materials retrieval client")
             self.materials_client = MaterialsRetrievalClient(
@@ -364,10 +376,15 @@ class AssetManager:
             )
         self._thin_covering_router = self.router
         if (
-            thin_covering_enabled
+            (thin_covering_enabled or procedural_floor_covering_enabled)
             and self._thin_covering_router is None
             and agent_type == AgentType.FURNITURE
         ):
+            if not thin_covering_enabled:
+                console_logger.info(
+                    "Initializing local procedural floor-covering router without "
+                    "the materials retrieval service"
+                )
             self._thin_covering_router = AssetRouter(
                 agent_type=agent_type,
                 vlm_service=vlm_service,
@@ -382,7 +399,7 @@ class AssetManager:
             "semantic_validation",
             None,
         )
-        self._asset_validation_router = self.router
+        self._asset_validation_router = self.router or self._thin_covering_router
         if (
             self.general_asset_source == "hssd"
             and bool(getattr(semantic_validation_cfg, "enabled", False))
@@ -831,7 +848,7 @@ class AssetManager:
         cache_dir = Path(cache_dir_value).expanduser()
         cache_key = hashlib.sha256(
             (
-                f"hssd-semantic-v2|{candidate_id}|{family}|"
+                f"hssd-semantic-v3|{candidate_id}|{family}|"
                 f"lenient={int(use_lenient)}"
             ).encode("utf-8")
         ).hexdigest()
@@ -885,7 +902,7 @@ class AssetManager:
             return
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
-            "schema_version": "2.0",
+            "schema_version": "3.0",
             "candidate_id": candidate_id,
             "family": family,
             "is_acceptable": validation.is_acceptable,
@@ -938,6 +955,67 @@ class AssetManager:
             return None
         return raw_axis.upper() if raw_axis.startswith("-") else f"+{raw_axis.upper()}"
 
+    def _resolve_hssd_orientation(
+        self,
+        *,
+        result: HssdRetrievalResult,
+        gltf_path: Path,
+        description: str,
+        short_name: str,
+        desired_dimensions: list[float] | tuple[float, ...] | None,
+        default_physics: MeshPhysicsAnalysis,
+    ) -> tuple[str, str, float | None]:
+        """Resolve functional front using dataset, VLM, then family geometry.
+
+        The final fallback only chooses between horizontal axes by dimension
+        compatibility.  It never infers front from "the longest side" alone and
+        therefore remains well-defined for near-cubic assets.
+        """
+        dataset_front = str(getattr(result, "front_axis", "") or "").upper()
+        dataset_up = str(getattr(result, "up_axis", "") or "").upper()
+        if dataset_front in {"+X", "-X", "+Y", "-Y"} and dataset_up == "+Z":
+            return dataset_front, "hssd_dataset_front", 1.0
+
+        calibrated_front = self._calibrated_hssd_front_axis(result.hssd_id)
+        if calibrated_front is not None:
+            validation = getattr(self, "_direct_hssd_validation_results", {}).get(
+                result.hssd_id
+            )
+            return (
+                calibrated_front,
+                "semantic_multiview",
+                float(getattr(validation, "orientation_confidence", 0.0) or 0.0),
+            )
+
+        family = semantic_asset_family(description, short_name)
+        if family in {"table", "rug", "plant"}:
+            return "+Y", "symmetric_front_irrelevant", None
+
+        fallback_front = str(default_physics.front_axis or "+Y").upper()
+        if fallback_front not in {"+X", "-X", "+Y", "-Y"}:
+            fallback_front = "+Y"
+        if desired_dimensions is not None:
+            mesh = load_mesh_as_trimesh(gltf_path, force_merge=True)
+            bbox_min, bbox_max = gltf_y_up_bounds_to_scene_z_up(mesh.bounds)
+            source_dimensions = bbox_max - bbox_min
+            target = np.asarray(desired_dimensions, dtype=float)
+            as_is_error = uniform_scale_shape_error(source_dimensions, target)
+            swapped_error = uniform_scale_shape_error(
+                source_dimensions[[1, 0, 2]],
+                target,
+            )
+            if swapped_error + 1e-6 < as_is_error:
+                fallback_front = "+X"
+            else:
+                fallback_front = "+Y"
+        console_logger.warning(
+            "Using family geometry front fallback for %s (%s): %s",
+            short_name,
+            family,
+            fallback_front,
+        )
+        return fallback_front, "family_geometry_fallback", 0.25
+
     def _select_direct_hssd_candidate(
         self,
         *,
@@ -945,6 +1023,8 @@ class AssetManager:
         description: str,
         short_name: str,
         desired_dimensions: list[float] | tuple[float, ...] | None = None,
+        excluded_candidate_ids: set[str] | None = None,
+        validation_deadline: float | None = None,
     ) -> HssdRetrievalResult:
         """Select a visually valid candidate for silhouette-critical furniture.
 
@@ -953,6 +1033,10 @@ class AssetManager:
         For a small configurable set of high-impact furniture families, validate
         the already retrieved top candidates directly with the existing VLM.
         """
+        excluded = set(excluded_candidate_ids or set())
+        candidates = [
+            candidate for candidate in candidates if candidate.hssd_id not in excluded
+        ]
         if not candidates:
             raise ValueError("No results returned from HSSD server")
 
@@ -960,69 +1044,28 @@ class AssetManager:
         critical_family = self._is_critical_hssd_family(family)
         proportion_match_found = True
         if desired_dimensions is not None:
-            # Retrieval extents use the SceneSmith semantic order
-            # [width, depth, height]. Axis conversion belongs only at the
-            # exported glTF file boundary.
-            target = np.asarray(desired_dimensions, dtype=float)
-            target_variants = (
-                target,
-                np.asarray(
-                    scene_dimensions_to_gltf_y_up(desired_dimensions),
-                    dtype=float,
+            # Raw server extents do not have semantic axis order. Use them only
+            # to rank the bounded candidate set; post-canonical dimensions own
+            # the actual admission decision.
+            candidates = sorted(
+                candidates,
+                key=lambda candidate: hssd_dimension_shape_error(
+                    candidate.size,
+                    desired_dimensions,
                 ),
             )
             min_ratio, max_ratio = self._uniform_dimension_fit_bounds(
                 critical_family=critical_family,
             )
-            proportion_compatible: list[HssdRetrievalResult] = []
-            for candidate in candidates:
-                extents = np.asarray(candidate.size, dtype=float)
-                if np.any(extents <= 0):
-                    continue
-                for variant_index, target_variant in enumerate(target_variants):
-                    predicted = extents * float(
-                        np.median(target_variant / extents)
-                    )
-                    try:
-                        validate_uniform_dimension_fit(
-                            predicted,
-                            target_variant,
-                            min_ratio=min_ratio,
-                            max_ratio=max_ratio,
-                        )
-                        if critical_family:
-                            predicted_scene = (
-                                predicted
-                                if variant_index == 0
-                                else np.asarray(
-                                    [predicted[0], predicted[2], predicted[1]],
-                                    dtype=float,
-                                )
-                            )
-                            self._validate_configured_asset_size(
-                                dimensions=predicted_scene,
-                                description=description,
-                                short_name=short_name,
-                            )
-                    except ValueError:
-                        continue
-                    proportion_compatible.append(candidate)
-                    break
-            if proportion_compatible:
-                candidates = proportion_compatible
-            else:
-                proportion_match_found = False
-                if critical_family:
-                    raise ValueError(
-                        "No HSSD candidate satisfies the critical semantic and "
-                        f"dimension contract for '{description}' within ratios "
-                        f"[{min_ratio:.2f}, {max_ratio:.2f}]"
-                    )
-                console_logger.warning(
-                    "No retrieved HSSD candidate for '%s' fully matches the "
-                    "requested proportions; trying the best scale-invariant shape",
-                    description,
+            proportion_match_found = any(
+                axis_agnostic_uniform_fit_exists(
+                    candidate.size,
+                    desired_dimensions,
+                    min_ratio=min_ratio,
+                    max_ratio=max_ratio,
                 )
+                for candidate in candidates
+            )
 
         (
             enabled,
@@ -1069,7 +1112,7 @@ class AssetManager:
             return candidates[0]
 
         infrastructure_failures = 0
-        considered = candidates[:max_candidates]
+        considered = candidates[: min(4, max_candidates)]
         validation_started = time.monotonic()
         total_validation_seconds = max(
             timeout_seconds,
@@ -1081,6 +1124,11 @@ class AssetManager:
                 or timeout_seconds
             ),
         )
+        if validation_deadline is not None:
+            total_validation_seconds = min(
+                total_validation_seconds,
+                max(0.0, validation_deadline - validation_started),
+            )
         for candidate_index, candidate in enumerate(considered):
             validation_cache = getattr(self, "_direct_hssd_semantic_cache", None)
             if validation_cache is None:
@@ -1217,12 +1265,15 @@ class AssetManager:
             description, short_name
         )
         if enabled:
-            return max_candidates
+            return min(4, max_candidates)
         hssd_cfg = getattr(self.cfg.asset_manager, "hssd", None)
         try:
-            return max(1, int(hssd_cfg.get("dimension_candidates", 3) or 3))
+            return min(4, max(1, int(hssd_cfg.get("dimension_candidates", 3) or 3)))
         except Exception:
-            return max(1, int(getattr(hssd_cfg, "dimension_candidates", 3) or 3))
+            return min(
+                4,
+                max(1, int(getattr(hssd_cfg, "dimension_candidates", 3) or 3)),
+            )
 
     def _uniform_dimension_fit_bounds(
         self,
@@ -1331,6 +1382,28 @@ class AssetManager:
                 f"expected min={minimum}, max={maximum}"
             )
 
+    def _normalized_requested_dimensions(
+        self,
+        *,
+        desired_dimensions: list[float] | tuple[float, ...],
+        description: str,
+        short_name: str,
+    ) -> np.ndarray:
+        """Clamp a designer request to the shared real-world family bounds."""
+        normalized = np.asarray(desired_dimensions, dtype=float)
+        configured = self._configured_asset_size_bounds(
+            description=description,
+            short_name=short_name,
+        )
+        if configured is not None:
+            minimum, maximum = configured
+            normalized = np.clip(
+                normalized,
+                np.asarray(minimum, dtype=float),
+                np.asarray(maximum, dtype=float),
+            )
+        return normalized
+
     def _scale_and_measure_canonical_mesh(
         self,
         *,
@@ -1343,7 +1416,34 @@ class AssetManager:
         """Scale a Y-up canonical mesh and expose its SceneSmith Z-up bounds."""
         applied_scale = 1.0
         if desired_dimensions is not None:
-            gltf_dimensions = scene_dimensions_to_gltf_y_up(desired_dimensions)
+            canonical_mesh = load_mesh_as_trimesh(canonical_path, force_merge=True)
+            source_min, source_max = gltf_y_up_bounds_to_scene_z_up(
+                canonical_mesh.bounds
+            )
+            source_dimensions = source_max - source_min
+            family = semantic_asset_family(description, short_name)
+            critical_family = self._is_critical_hssd_family(family)
+            min_ratio, max_ratio = self._uniform_dimension_fit_bounds(
+                critical_family=critical_family,
+            )
+            configured = self._configured_asset_size_bounds(
+                description=description,
+                short_name=short_name,
+            )
+            minimum, maximum = configured if configured is not None else (None, None)
+            applied_scale, normalized_target = choose_uniform_scale_for_contract(
+                source_dimensions,
+                desired_dimensions,
+                min_ratio=min_ratio,
+                max_ratio=max_ratio,
+                minimum_dimensions=minimum,
+                maximum_dimensions=maximum,
+            )
+            # Preserve exact source proportions: the scaler receives the dimensions
+            # produced by one chosen scalar, never independent per-axis targets.
+            gltf_dimensions = scene_dimensions_to_gltf_y_up(
+                source_dimensions * applied_scale
+            )
             final_path, applied_scale = scale_mesh_uniformly_to_dimensions(
                 mesh_path=canonical_path,
                 desired_dimensions=gltf_dimensions,
@@ -1358,30 +1458,198 @@ class AssetManager:
         bbox_min, bbox_max = gltf_y_up_bounds_to_scene_z_up(mesh.bounds)
         if desired_dimensions is not None:
             actual_dimensions = bbox_max - bbox_min
-            family = semantic_asset_family(description, short_name)
-            critical_family = self._is_critical_hssd_family(family)
-            min_ratio, max_ratio = self._uniform_dimension_fit_bounds(
-                critical_family=critical_family,
-            )
             validate_uniform_dimension_fit(
                 actual_dimensions,
-                desired_dimensions,
+                normalized_target,
                 min_ratio=min_ratio,
                 max_ratio=max_ratio,
             )
-            if critical_family:
+            if configured is not None:
                 self._validate_configured_asset_size(
                     dimensions=actual_dimensions,
                     description=description,
                     short_name=short_name,
                 )
             console_logger.info(
-                "Canonical asset dimensions: requested=%s, actual=%s, scale=%.3f",
+                "Canonical asset dimensions: requested=%s, normalized=%s, "
+                "actual=%s, uniform_scale=%.3f",
                 list(desired_dimensions),
+                normalized_target.round(4).tolist(),
                 actual_dimensions.round(4).tolist(),
                 applied_scale,
             )
         return final_path, bbox_min, bbox_max, applied_scale
+
+    def _prepare_hssd_candidate(
+        self,
+        *,
+        result: HssdRetrievalResult,
+        request: AssetGenerationRequest,
+        index: int,
+        config: AssetPathConfig,
+        candidate_attempt: int,
+    ) -> SceneObject:
+        """Prepare one HSSD candidate as an atomic admission transaction."""
+        description = request.object_descriptions[index]
+        short_name = request.short_names[index]
+        desired_dimensions = request.desired_dimensions[index]
+        server_mesh_path = Path(result.mesh_path)
+        mesh_id = result.hssd_id
+
+        if server_mesh_path.suffix.lower() == ".glb":
+            gltf_path = server_mesh_path.with_suffix(".gltf")
+            if not gltf_path.exists():
+                if not server_mesh_path.exists():
+                    raise FileNotFoundError(
+                        f"Retrieved mesh file missing: {server_mesh_path}"
+                    )
+                self.blender_server.convert_glb_to_gltf(
+                    input_path=server_mesh_path,
+                    output_path=gltf_path,
+                    export_yup=True,
+                )
+        else:
+            gltf_path = server_mesh_path
+
+        debug_dir = self.debug_dir / short_name
+        console_logger.info(
+            "Resolving HSSD physics metadata for %s (mode=%s, candidate=%s)",
+            short_name,
+            getattr(
+                self.cfg.asset_manager,
+                "hssd_physics_analysis_mode",
+                "deterministic",
+            ),
+            mesh_id,
+        )
+        default_physics = self._analyze_mesh_physics(
+            mesh_path=gltf_path,
+            asset_source="hssd",
+            object_name=short_name,
+            debug_output_dir=debug_dir,
+        )
+        front_axis, front_source, front_confidence = self._resolve_hssd_orientation(
+            result=result,
+            gltf_path=gltf_path,
+            description=description,
+            short_name=short_name,
+            desired_dimensions=desired_dimensions,
+            default_physics=default_physics,
+        )
+        physics_analysis = MeshPhysicsAnalysis(
+            up_axis=CANONICAL_UP_AXIS,
+            front_axis=front_axis,
+            material=default_physics.material,
+            mass_kg=default_physics.mass_kg,
+            mass_range_kg=default_physics.mass_range_kg,
+        )
+        console_logger.info(
+            "HSSD frame resolved for %s: source_up=%s, source_front=%s, source=%s",
+            short_name,
+            physics_analysis.up_axis,
+            physics_analysis.front_axis,
+            front_source,
+        )
+
+        canonical_path = config.sdf_dir / f"{config.short_name}_canonical.gltf"
+        canonicalize_mesh(
+            gltf_path=gltf_path,
+            output_path=canonical_path,
+            up_axis=physics_analysis.up_axis,
+            front_axis=physics_analysis.front_axis,
+            blender_server=self.blender_server,
+            object_type=request.object_type,
+        )
+        final_gltf_path, bbox_min, bbox_max, applied_scale = (
+            self._scale_and_measure_canonical_mesh(
+                canonical_path=canonical_path,
+                final_path=config.sdf_dir / f"{config.short_name}.gltf",
+                desired_dimensions=desired_dimensions,
+                description=description,
+                short_name=short_name,
+            )
+        )
+
+        collision_pieces = self._generate_collision_geometry(final_gltf_path)
+        sdf_path = config.sdf_dir / f"{config.short_name}.sdf"
+        generate_drake_sdf(
+            visual_mesh_path=final_gltf_path,
+            collision_pieces=collision_pieces,
+            physics_analysis=physics_analysis,
+            output_path=sdf_path,
+            asset_name=config.short_name,
+            mesh_frame="gltf_y_up",
+        )
+
+        normalized_target = (
+            self._normalized_requested_dimensions(
+                desired_dimensions=desired_dimensions,
+                description=description,
+                short_name=short_name,
+            ).tolist()
+            if desired_dimensions is not None
+            else None
+        )
+        return self._create_scene_object(
+            config=config,
+            object_type=request.object_type,
+            sdf_path=sdf_path,
+            final_gltf_path=final_gltf_path,
+            bbox_min=bbox_min,
+            bbox_max=bbox_max,
+            additional_metadata={
+                "asset_source": "hssd",
+                "hssd_mesh_id": mesh_id,
+                "asset_frame_contract_version": ASSET_FRAME_CONTRACT_VERSION,
+                "front_definition": "functional_outward",
+                "source_front_axis": physics_analysis.front_axis,
+                "canonical_front_axis": CANONICAL_FRONT_AXIS,
+                "canonical_up_axis": CANONICAL_UP_AXIS,
+                "canonical_dimension_order": list(CANONICAL_DIMENSION_ORDER),
+                "front_axis_source": front_source,
+                "front_axis_confidence": front_confidence,
+                "requested_dimensions": (
+                    list(desired_dimensions) if desired_dimensions is not None else None
+                ),
+                "normalized_requested_dimensions": normalized_target,
+                "actual_dimensions": (bbox_max - bbox_min).tolist(),
+                "uniform_scaling_only": True,
+                "source_to_canonical_scale": float(applied_scale),
+                "candidate_attempt": candidate_attempt,
+            },
+            # The final glTF and SDF already contain applied_scale.
+            # SceneObject.scale_factor is reserved for later mutations.
+            scale_factor=1.0,
+        )
+
+    @staticmethod
+    def _is_candidate_specific_hssd_failure(error: Exception) -> bool:
+        """Separate bad-candidate evidence from shared service failures."""
+        if isinstance(error, (ValueError, FileNotFoundError)):
+            return True
+        message = str(error).lower()
+        if any(
+            token in message
+            for token in (
+                "timeout",
+                "timed out",
+                "connection",
+                "server unavailable",
+                "server is not running",
+            )
+        ):
+            return False
+        return any(
+            token in message
+            for token in (
+                "degenerate",
+                "blank",
+                "empty mesh",
+                "invalid mesh",
+                "no geometry",
+                "cannot satisfy the uniform dimension contract",
+            )
+        )
 
     def _retrieve_hssd_assets(
         self, request: AssetGenerationRequest
@@ -1478,169 +1746,80 @@ class AssetManager:
                     f"{index+1}/{len(request.object_descriptions)}: '{desc}'"
                 )
 
-                # Server returns mesh path (already exported to our output_dir).
-                result = self._select_direct_hssd_candidate(
-                    candidates=response.results,
-                    description=desc,
-                    short_name=short_name,
-                    desired_dimensions=request.desired_dimensions[index],
+                max_candidates = min(
+                    4,
+                    self._direct_hssd_candidate_count(desc, short_name),
+                    len(response.results),
                 )
-                server_mesh_path = Path(result.mesh_path)
-                mesh_id = result.hssd_id
-
-                # Server exported to our specified output_dir, convert GLB to GLTF if
-                # needed. Uses BlenderServer for crash isolation.
-                if server_mesh_path.suffix.lower() == ".glb":
-                    # Server exported GLB, convert to GLTF with Y-up coordinates.
-                    # Keep the GLB because duplicate requests may legitimately
-                    # reference the same retrieved mesh in the same batch.
-                    gltf_path = server_mesh_path.with_suffix(".gltf")
-                    if not gltf_path.exists():
-                        if not server_mesh_path.exists():
-                            raise FileNotFoundError(
-                                f"Retrieved mesh file missing: {server_mesh_path}"
-                            )
-                        self.blender_server.convert_glb_to_gltf(
-                            input_path=server_mesh_path,
-                            output_path=gltf_path,
-                            export_yup=True,
+                candidates = list(response.results[:max_candidates])
+                excluded_candidate_ids: set[str] = set()
+                candidate_errors: list[str] = []
+                _, _, _, timeout_seconds, _, _ = (
+                    self._hssd_semantic_validation_settings(desc, short_name)
+                )
+                transaction_seconds = max(
+                    timeout_seconds,
+                    float(
+                        self._hssd_validation_config_value(
+                            "total_timeout_seconds",
+                            timeout_seconds,
                         )
-                else:
-                    # Already GLTF, use as-is.
-                    gltf_path = server_mesh_path
-
-                # Resolve material and mass from the configured HSSD physics mode.
-                # Use HSSD-specific prompts and only side views to constrain
-                # rotation to Z-axis. Orientation (Z-up) is correct from HSSD
-                # transformation pipeline.
-                # Create debug directory for saving multi-view physics analysis images.
-                debug_dir = self.debug_dir / short_name
-
-                console_logger.info(
-                    "Resolving HSSD physics metadata for %s (mode=%s)",
-                    short_name,
-                    getattr(
-                        self.cfg.asset_manager,
-                        "hssd_physics_analysis_mode",
-                        "deterministic",
+                        or timeout_seconds
                     ),
                 )
-                vlm_physics = self._analyze_mesh_physics(
-                    mesh_path=gltf_path,
-                    asset_source="hssd",
-                    object_name=short_name,
-                    debug_output_dir=debug_dir,
-                )
-                calibrated_front_axis = self._calibrated_hssd_front_axis(mesh_id)
-                if calibrated_front_axis is not None:
-                    console_logger.info(
-                        "Using semantic multi-view HSSD front calibration for %s: %s",
-                        short_name,
-                        calibrated_front_axis,
+                validation_deadline = time.monotonic() + transaction_seconds
+
+                scene_obj: SceneObject | None = None
+                for candidate_attempt in range(1, max_candidates + 1):
+                    try:
+                        result = self._select_direct_hssd_candidate(
+                            candidates=candidates,
+                            description=desc,
+                            short_name=short_name,
+                            desired_dimensions=request.desired_dimensions[index],
+                            excluded_candidate_ids=excluded_candidate_ids,
+                            validation_deadline=validation_deadline,
+                        )
+                    except Exception as selection_error:
+                        candidate_errors.append(
+                            f"selection: {selection_error}"
+                        )
+                        break
+                    try:
+                        scene_obj = self._prepare_hssd_candidate(
+                            result=result,
+                            request=request,
+                            index=index,
+                            config=config,
+                            candidate_attempt=candidate_attempt,
+                        )
+                        break
+                    except Exception as candidate_error:
+                        if not self._is_candidate_specific_hssd_failure(
+                            candidate_error
+                        ):
+                            raise
+                        excluded_candidate_ids.add(result.hssd_id)
+                        candidate_errors.append(f"{result.hssd_id}: {candidate_error}")
+                        console_logger.warning(
+                            "Rolling back HSSD candidate %s for '%s' after "
+                            "post-admission preparation failed: %s",
+                            result.hssd_id,
+                            desc,
+                            candidate_error,
+                            exc_info=True,
+                        )
+
+                if scene_obj is None:
+                    raise ValueError(
+                        "All bounded HSSD candidate transactions failed for "
+                        f"'{desc}': {' | '.join(candidate_errors)}"
                     )
-                    vlm_physics = MeshPhysicsAnalysis(
-                        up_axis=vlm_physics.up_axis,
-                        front_axis=calibrated_front_axis,
-                        material=vlm_physics.material,
-                        mass_kg=vlm_physics.mass_kg,
-                        mass_range_kg=vlm_physics.mass_range_kg,
-                    )
-                console_logger.info(
-                    f"HSSD physics metadata complete: material={vlm_physics.material}, "
-                    f"mass={vlm_physics.mass_kg}kg, front={vlm_physics.front_axis}"
-                )
-
-                # Use the selected physics metadata. HSSD is always Z-up.
-                physics_analysis = MeshPhysicsAnalysis(
-                    up_axis=vlm_physics.up_axis,
-                    front_axis=vlm_physics.front_axis,
-                    material=vlm_physics.material,
-                    mass_kg=vlm_physics.mass_kg,
-                    mass_range_kg=vlm_physics.mass_range_kg,
-                )
-
-                # Canonicalize mesh orientation to align with scenesmith canonical
-                # (Z-up, Y-forward). For HSSD objects already with front=+Y, this is
-                # a no-op (fast return). Otherwise, applies Z-rotation to align front.
-                console_logger.info(
-                    f"Canonicalizing HSSD mesh: up={vlm_physics.up_axis}, "
-                    f"front={vlm_physics.front_axis} → +Y"
-                )
-                canonical_path = config.sdf_dir / f"{config.short_name}_canonical.gltf"
-                canonicalize_mesh(
-                    gltf_path=gltf_path,
-                    output_path=canonical_path,
-                    up_axis=vlm_physics.up_axis,
-                    front_axis=vlm_physics.front_axis,
-                    blender_server=self.blender_server,
-                    object_type=request.object_type,
-                )
-
-                final_gltf_path, bbox_min, bbox_max, applied_scale = (
-                    self._scale_and_measure_canonical_mesh(
-                        canonical_path=canonical_path,
-                        final_path=config.sdf_dir / f"{config.short_name}.gltf",
-                        desired_dimensions=request.desired_dimensions[index],
-                        description=desc,
-                        short_name=short_name,
-                    )
-                )
-
-                # Generate collision geometry via convex decomposition server.
-                collision_pieces = self._generate_collision_geometry(final_gltf_path)
-
-                sdf_path = config.sdf_dir / f"{config.short_name}.sdf"
-                generate_drake_sdf(
-                    visual_mesh_path=final_gltf_path,
-                    collision_pieces=collision_pieces,
-                    physics_analysis=physics_analysis,
-                    output_path=sdf_path,
-                    asset_name=config.short_name,
-                    mesh_frame="gltf_y_up",
-                )
-
-                # Create SceneObject using shared helper.
-                scene_obj = self._create_scene_object(
-                    config=config,
-                    object_type=request.object_type,
-                    sdf_path=sdf_path,
-                    final_gltf_path=final_gltf_path,
-                    bbox_min=bbox_min,
-                    bbox_max=bbox_max,
-                    additional_metadata={
-                        "asset_source": "hssd",
-                        "hssd_mesh_id": mesh_id,
-                        "source_front_axis": physics_analysis.front_axis,
-                        "canonical_front_axis": "+Y",
-                        "front_axis_source": (
-                            "semantic_multiview"
-                            if calibrated_front_axis is not None
-                            else "hssd_default"
-                        ),
-                        "front_axis_confidence": (
-                            getattr(
-                                getattr(
-                                    self,
-                                    "_direct_hssd_validation_results",
-                                    {},
-                                ).get(mesh_id),
-                                "orientation_confidence",
-                                None,
-                            )
-                        ),
-                        "requested_dimensions": list(request.desired_dimensions[index]),
-                        "actual_dimensions": (bbox_max - bbox_min).tolist(),
-                        "source_to_canonical_scale": float(applied_scale),
-                    },
-                    # The final glTF and SDF already contain applied_scale.
-                    # SceneObject.scale_factor is reserved for later mutations.
-                    scale_factor=1.0,
-                )
-
                 successful_objects.append(scene_obj)
-
                 console_logger.info(
-                    f"HSSD asset retrieved successfully: {config.short_name}"
+                    "HSSD asset transaction committed: %s (candidate %s)",
+                    config.short_name,
+                    scene_obj.metadata.get("hssd_mesh_id"),
                 )
 
             except Exception as e:

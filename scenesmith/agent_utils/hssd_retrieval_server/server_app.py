@@ -291,6 +291,21 @@ class HssdRetrievalApp(flask.Flask):
                 similarity_score=float(candidate.clip_score),
                 size=tuple(candidate.mesh.extents.tolist()),
                 category=category,
+                # retrieve_multiple() has already applied the dataset transform.
+                # In glTF Y-up this is +Z front; Blender/SceneSmith's inverse
+                # mapping makes it -Y front and +Z up.
+                front_axis=(
+                    "-Y" if candidate.metadata.up and candidate.metadata.front else None
+                ),
+                up_axis=(
+                    "+Z" if candidate.metadata.up and candidate.metadata.front else None
+                ),
+                orientation_source=(
+                    "hssd_dataset_aligned"
+                    if candidate.metadata.up and candidate.metadata.front
+                    else None
+                ),
+                extent_frame="exported_hssd_mesh",
             )
             results.append(result)
 

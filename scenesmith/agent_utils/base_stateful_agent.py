@@ -504,6 +504,12 @@ class BaseStatefulAgent(ABC):
         for asset in assets:
             metadata = getattr(asset, "metadata", {}) or {}
             dimensions = metadata.get("actual_dimensions")
+            front_contract = (
+                f"{metadata.get('canonical_front_axis')} "
+                f"({metadata.get('front_definition')})"
+                if metadata.get("canonical_front_axis")
+                else "local +Y (functional_outward)"
+            )
             bbox_min = getattr(asset, "bbox_min", None)
             bbox_max = getattr(asset, "bbox_max", None)
             if dimensions is None and bbox_min is not None and bbox_max is not None:
@@ -512,7 +518,8 @@ class BaseStatefulAgent(ABC):
                 f"- asset_id={getattr(asset, 'object_id', '')}; "
                 f"name={getattr(asset, 'name', '')}; "
                 f"description={getattr(asset, 'description', '')}; "
-                f"dimensions={dimensions}"
+                f"dimensions=[width,depth,height]={dimensions}; "
+                f"front={front_contract}"
             )
         self._placement_continuation_context = (
             "# Placement-Only Continuation\n"

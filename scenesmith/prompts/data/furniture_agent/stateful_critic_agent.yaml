@@ -54,6 +54,9 @@ prompt: |
   2. Use check_facing_tool() to validate the actual orientation is correct
 
   Common patterns (but scene-dependent):
+  - Universal asset frame contract: local +Z is up, local +Y is the functional
+    front pointing outward, and dimensions are [width, depth, height] = [X, Y, Z].
+    For beds, +Y runs from the headboard toward the foot/open access area.
   - Chairs → tables/desks/worktables (direction="toward") — but waiting room chairs
     may simply face away from walls without a table
   - **Worktable/Desk + Chair Mutual Orientation**: For work surfaces with

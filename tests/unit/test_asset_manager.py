@@ -287,6 +287,49 @@ class TestAssetManager(unittest.TestCase):
         self.assertEqual("dimension_valid_bed", selected.hssd_id)
         manager._thin_covering_router.validate_asset.assert_called_once()
 
+    def test_direct_hssd_candidate_exclusion_advances_transaction(self):
+        manager = object.__new__(AssetManager)
+        manager.agent_type = AgentType.FURNITURE
+        manager.cfg = OmegaConf.create(
+            {
+                "asset_manager": {
+                    "hssd": {
+                        "semantic_validation": {
+                            "enabled": False,
+                            "critical_families": [],
+                        }
+                    }
+                }
+            }
+        )
+        manager._runtime_gate = MagicMock(required_families=set())
+        first = HssdRetrievalResult(
+            mesh_path=str(self.temp_dir / "first.glb"),
+            hssd_id="first",
+            object_name="table",
+            similarity_score=0.9,
+            size=(1.0, 0.8, 0.75),
+            category="large_objects",
+        )
+        second = HssdRetrievalResult(
+            mesh_path=str(self.temp_dir / "second.glb"),
+            hssd_id="second",
+            object_name="table",
+            similarity_score=0.8,
+            size=(1.0, 0.8, 0.75),
+            category="large_objects",
+        )
+
+        selected = manager._select_direct_hssd_candidate(
+            candidates=[first, second],
+            description="side table",
+            short_name="table",
+            desired_dimensions=[1.0, 0.8, 0.75],
+            excluded_candidate_ids={"first"},
+        )
+
+        self.assertEqual("second", selected.hssd_id)
+
     def test_direct_hssd_validation_reuses_front_calibration_and_deadline(self):
         manager = object.__new__(AssetManager)
         manager.cfg = OmegaConf.create(

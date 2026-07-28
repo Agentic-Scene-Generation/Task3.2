@@ -526,6 +526,38 @@ class SceneExpertMemoryTest(unittest.TestCase):
                 {issue.issue_type for issue in report.issues},
             )
 
+    def test_low_visual_score_produces_actionable_stage_issue(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scores_dir = root / "scene_states" / "ceiling"
+            scores_dir.mkdir(parents=True)
+            (scores_dir / "scores.yaml").write_text(
+                "Realism:\n  grade: 3\nFunctionality:\n  grade: 3\n",
+                encoding="utf-8",
+            )
+            (scores_dir / "score_provenance.yaml").write_text(
+                "score_source: vlm_critic\nvlm_scoring_performed: true\n",
+                encoding="utf-8",
+            )
+
+            report = StageVerifier(pass_threshold=0.6).verify(
+                stage="ceiling_mounted",
+                stage_output_dir=str(root),
+                task_spec=SceneTaskSpec(room_type="bedroom", style="standard"),
+                scene_state_info={
+                    "object_names": ["ceiling_light_0"],
+                    "object_counts": {"ceiling_mounted": 1},
+                    "stage_min_output_objects": 1,
+                    "stage_max_output_objects": 1,
+                },
+            )
+
+            self.assertFalse(report.pass_stage)
+            self.assertIn(
+                "quality_below_threshold",
+                {issue.issue_type for issue in report.issues},
+            )
+
     def test_provenance_only_unscored_stage_is_discoverable(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)

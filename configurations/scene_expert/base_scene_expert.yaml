@@ -133,13 +133,15 @@ stage_budget:
   floor_plan:
     max_designer_iterations: 2
     max_repair_steps: 1
-    max_planner_turns: 8
-    max_designer_turns: 12
-    max_critic_turns: 4
-    max_wall_clock_seconds: 420
-    planner_active_max_seconds: 120
-    designer_active_max_seconds: 240
-    critic_active_max_seconds: 240
+    max_planner_turns: 10
+    max_designer_turns: 14
+    max_critic_turns: 6
+    # SceneSmith's planner owns nested designer/critic calls. These leases cover
+    # one complete nested turn instead of truncating valid tool-tail finalization.
+    max_wall_clock_seconds: 600
+    planner_active_max_seconds: 180
+    designer_active_max_seconds: 300
+    critic_active_max_seconds: 300
     max_asset_requests: 4
     max_optional_object_families: 0
     max_assets_per_request: 0

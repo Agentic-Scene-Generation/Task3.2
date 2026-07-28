@@ -125,6 +125,9 @@ asset_manager:
       # Thin covering: flat floor surfaces (rugs, yoga mats, runners).
       thin_covering:
         enabled: true
+        # Keep deterministic local rug/carpet generation available when ACP
+        # disables the remote materials service.
+        procedural_fallback_enabled: true
         max_retries: 1 # Retry with different materials if validation fails
         thickness_m: 0.003  # 3mm default thickness
         texture_scale: 0.5  # Meters per tile for retrieved library textures (tileable)
