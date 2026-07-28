@@ -34,6 +34,8 @@ VALID_RELATIONS = frozenset(
         "against_wall",
         "centered_on_wall",
         "centered_in_room",
+        "centered_between",
+        "between",
         "in_front_of",
         "flanking",
         "faces",
@@ -96,6 +98,29 @@ _SCENE_EXPERT_INJECTION_MARKERS = (
     "=== SceneExpert Stage Brief:",
     "=== SceneExpert Retrieved Memory Directives ===",
     "=== Reference Layout (",
+)
+
+_MEDIA_SUPPORT_PATTERN = re.compile(
+    r"\b(?:tv stand|television stand|media console|media cabinet|entertainment center)\b",
+    re.IGNORECASE,
+)
+_TELEVISION_PATTERN = re.compile(
+    r"\b(?:tv|television)\b(?!\s+(?:stand|console|cabinet))", re.IGNORECASE
+)
+_EXPLICIT_WALL_MOUNTED_TELEVISION_PATTERN = re.compile(
+    r"(?:\b(?:wall[- ]mounted|mounted|hung|hanging)\s+"
+    r"(?:flat[- ]screen\s+)?(?:tv|television)\b)"
+    r"|(?:\b(?:tv|television)\s+(?:is\s+)?(?:mounted|hung|hanging)\s+"
+    r"(?:on|against)\s+(?:the\s+)?(?:opposite\s+)?wall\b)"
+    r"|(?:\b(?:tv|television)\s+(?:is\s+)?(?:on|against)\s+"
+    r"(?:the\s+)?(?:opposite\s+)?wall\b)",
+    re.IGNORECASE,
+)
+_MEDIA_GROUP_ON_WALL_PATTERN = re.compile(
+    r"\b(?:tv stand|television stand|media console|media cabinet|entertainment center)"
+    r"\s+and\s+(?:a\s+|an\s+|the\s+)?(?:tv|television)\s+"
+    r"(?:is\s+)?(?:on|against)\s+(?:the\s+)?(?:opposite\s+)?wall\b",
+    re.IGNORECASE,
 )
 
 
@@ -544,6 +569,36 @@ def _explicit_prompt_constraints(prompt: str, lowered: str) -> list[dict[str, An
 
         for match in re.finditer(
             r"(?P<subject>[a-z0-9_\- ,']{1,70}?)\s+"
+            r"(?:is |sits |lies |placed |positioned )?"
+            r"(?P<centered>centered|centred)?\s*between\s+"
+            r"(?:the\s+|a\s+|an\s+)?(?P<first>[a-z0-9_\- ']{1,50}?)\s+"
+            r"and\s+(?:the\s+|a\s+|an\s+)?"
+            r"(?P<second>[a-z0-9_\- ']{1,50}?)(?:[,.;]|$)",
+            normalized,
+        ):
+            subject = selector_for_phrase(match.group("subject"))
+            first = selector_for_phrase(match.group("first"))
+            second = selector_for_phrase(match.group("second"))
+            if subject is None or first is None or second is None:
+                continue
+            targets = dict(first)
+            targets["secondary_category"] = second["category"]
+            if "role" in second:
+                targets["secondary_role"] = second["role"]
+            if "count" in second:
+                targets["secondary_count"] = second["count"]
+            constraints.append(
+                _constraint(
+                    "centered_between" if match.group("centered") else "between",
+                    subject,
+                    targets,
+                    source="explicit_prompt",
+                    evidence_span=clause,
+                )
+            )
+
+        for match in re.finditer(
+            r"(?P<subject>[a-z0-9_\- ,']{1,70}?)\s+"
             r"(?:is |sits |placed |positioned )?in\s+(?:the\s+)?(?:center|centre|middle)\b"
             r"(?:\s+of\s+(?:the\s+)?room)?",
             normalized,
@@ -873,7 +928,32 @@ def _room_ontology_constraints(room_type: str, lowered: str) -> list[dict[str, A
                 evidence_span="bedroom sleeping-surface anchor",
             )
         )
+    if (
+        _MEDIA_SUPPORT_PATTERN.search(lowered)
+        and _TELEVISION_PATTERN.search(lowered)
+        and not _prompt_explicitly_wall_mounts_television(lowered)
+    ):
+        constraints.append(
+            _constraint(
+                "on_top_of",
+                {"category": "television", "count": 1, "quantifier": "all"},
+                {"category": "tv_stand", "count": 1, "quantifier": "all"},
+                source="room_ontology",
+                evidence_span="freestanding television and media-support pairing",
+            )
+        )
     return constraints
+
+
+def _prompt_explicitly_wall_mounts_television(prompt: str) -> bool:
+    """Distinguish a mounted display from an entertainment group at a wall."""
+    if not _EXPLICIT_WALL_MOUNTED_TELEVISION_PATTERN.search(prompt):
+        return False
+    if _MEDIA_GROUP_ON_WALL_PATTERN.search(prompt) and not re.search(
+        r"\b(?:wall[- ]mounted|mounted|hung|hanging)\b", prompt, re.IGNORECASE
+    ):
+        return False
+    return True
 
 
 def _task_spec_constraints(task_spec: Any | None) -> list[dict[str, Any]]:
@@ -934,6 +1014,17 @@ def _normalize_selector(value: Any) -> dict[str, Any] | None:
     count = value.get("count")
     if isinstance(count, (int, float)) and int(count) > 0:
         normalized["count"] = int(count)
+    secondary_category = (
+        str(value.get("secondary_category") or "").strip().lower().replace(" ", "_")
+    )
+    if secondary_category:
+        normalized["secondary_category"] = secondary_category
+        secondary_role = str(value.get("secondary_role") or "").strip().lower()
+        if secondary_role:
+            normalized["secondary_role"] = secondary_role
+        secondary_count = value.get("secondary_count")
+        if isinstance(secondary_count, (int, float)) and int(secondary_count) > 0:
+            normalized["secondary_count"] = int(secondary_count)
     return normalized
 
 
@@ -1120,8 +1211,10 @@ def _selector_matches_object(category: str, role: str, obj: dict[str, Any]) -> b
         in {"tv_stand", "media_console", "entertainment_center"}
         or "tv stand" in identity,
         "television": base_category in {"television", "tv", "screen", "display"}
-        or "television" in identity
-        or re.search(r"\btv\b", identity) is not None,
+        or (
+            not _MEDIA_SUPPORT_PATTERN.search(identity)
+            and ("television" in identity or re.search(r"\btv\b", identity) is not None)
+        ),
         "office_chair": base_category in {"office_chair", "chair"}
         and (
             "office" in identity

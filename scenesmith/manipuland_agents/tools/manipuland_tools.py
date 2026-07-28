@@ -42,6 +42,10 @@ from scenesmith.agent_utils.room import (
     deserialize_rigid_transform,
     serialize_rigid_transform,
 )
+from scenesmith.manipuland_agents.cross_stage_inventory import (
+    existing_floor_covering_ids,
+    redundant_floor_covering_request_indices,
+)
 from scenesmith.manipuland_agents.tools.arrangement_tools import create_arrangement_impl
 from scenesmith.manipuland_agents.tools.fill_tools import fill_container_tool_impl
 from scenesmith.manipuland_agents.tools.pile_tools import create_pile_tool_impl
@@ -694,6 +698,48 @@ class ManipulandTools:
                 IDs and details of created manipuland models.
             """
             console_logger.info("Tool called: generate_manipuland_assets")
+            existing_coverings = existing_floor_covering_ids(self.scene)
+            skipped_coverings: list[str] = []
+            skipped_indices = redundant_floor_covering_request_indices(
+                self.scene,
+                self.current_furniture_id,
+                object_descriptions,
+                short_names,
+            )
+            if skipped_indices:
+                skipped_index_set = set(skipped_indices)
+                retained_indices = [
+                    index
+                    for index in range(len(short_names))
+                    if index not in skipped_index_set
+                ]
+                skipped_coverings = [short_names[index] for index in skipped_indices]
+                console_logger.info(
+                    "Skipped duplicate floor-covering asset request(s) %s; "
+                    "already realized by %s",
+                    skipped_coverings,
+                    existing_coverings,
+                )
+                object_descriptions = [
+                    object_descriptions[index] for index in retained_indices
+                ]
+                short_names = [short_names[index] for index in retained_indices]
+                desired_dimensions = [
+                    desired_dimensions[index] for index in retained_indices
+                ]
+                if not retained_indices:
+                    return json.dumps(
+                        {
+                            "status": "already_satisfied",
+                            "message": (
+                                "A floor covering already exists in the scene; "
+                                "do not generate or replace it."
+                            ),
+                            "existing_object_ids": existing_coverings,
+                            "skipped_short_names": skipped_coverings,
+                        },
+                        indent=2,
+                    )
             request = AssetGenerationRequest(
                 object_descriptions=object_descriptions,
                 short_names=short_names,
@@ -708,7 +754,12 @@ class ManipulandTools:
                     ObjectType.MANIPULAND,
                 ),
             )
-            return self._generate_assets_impl(request)
+            result = self._generate_assets_impl(request)
+            if skipped_coverings:
+                result += "\nSkipped already-realized floor covering(s): " + ", ".join(
+                    skipped_coverings
+                )
+            return result
 
         @function_tool
         def list_support_surfaces() -> str:

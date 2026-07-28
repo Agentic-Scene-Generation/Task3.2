@@ -1,8 +1,12 @@
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from scenesmith.agent_utils.room import UniqueID
+from scenesmith.agent_utils.room import ObjectType, UniqueID
 from scenesmith.agent_utils.scene_analyzer import FurnitureSelection
+from scenesmith.manipuland_agents.cross_stage_inventory import (
+    existing_floor_covering_ids,
+    redundant_floor_covering_request_indices,
+)
 from scenesmith.manipuland_agents.stateful_manipuland_agent import (
     StatefulManipulandAgent,
 )
@@ -145,3 +149,91 @@ def test_bilateral_bedside_prompt_recovers_both_nightstands() -> None:
     assert [(item.category, item.target_count) for item in obligations] == [
         ("nightstand", 2)
     ]
+
+
+def test_existing_furniture_rug_skips_redundant_floor_target() -> None:
+    floor_id = UniqueID("floor_living_room")
+    rug_id = UniqueID("rug_0")
+    floor = SimpleNamespace(object_id=floor_id, object_type=ObjectType.FLOOR)
+    rug = SimpleNamespace(
+        object_id=rug_id,
+        object_type=ObjectType.FURNITURE,
+        name="rug",
+        description="area rug",
+        metadata={"semantic_name": "rug"},
+    )
+    objects = {floor_id: floor, rug_id: rug}
+    scene = SimpleNamespace(
+        objects=objects,
+        get_object=lambda object_id: objects.get(object_id),
+    )
+    selection = FurnitureSelection(
+        furniture_id=floor_id,
+        suggested_items="REQUIRED: small rug",
+        prompt_constraints="small rug between the table and television stand",
+        style_notes="",
+    )
+    agent = object.__new__(StatefulManipulandAgent)
+
+    filtered = agent._skip_realized_floor_covering_targets(
+        scene=scene, furniture_data=[selection]
+    )
+
+    assert filtered == []
+    assert existing_floor_covering_ids(scene) == ["rug_0"]
+
+
+def test_mixed_floor_target_is_retained_but_duplicate_covering_is_filtered() -> None:
+    floor_id = UniqueID("floor_living_room")
+    rug_id = UniqueID("area_rug_0")
+    floor = SimpleNamespace(object_id=floor_id, object_type=ObjectType.FLOOR)
+    rug = SimpleNamespace(
+        object_id=rug_id,
+        object_type=ObjectType.FURNITURE,
+        name="area_rug",
+        description="",
+        metadata={},
+    )
+    objects = {floor_id: floor, rug_id: rug}
+    scene = SimpleNamespace(
+        objects=objects,
+        get_object=lambda object_id: objects.get(object_id),
+    )
+    selection = FurnitureSelection(
+        furniture_id=floor_id,
+        suggested_items="REQUIRED: rug and planter",
+        prompt_constraints="",
+        style_notes="",
+    )
+    agent = object.__new__(StatefulManipulandAgent)
+
+    retained = agent._skip_realized_floor_covering_targets(
+        scene=scene, furniture_data=[selection]
+    )
+    skipped = redundant_floor_covering_request_indices(
+        scene,
+        floor_id,
+        ["Small rectangular carpet", "Ceramic floor planter"],
+        ["small_carpet", "planter"],
+    )
+
+    assert retained == [selection]
+    assert skipped == [0]
+
+
+def test_floor_covering_request_is_allowed_when_scene_has_none() -> None:
+    floor_id = UniqueID("floor_living_room")
+    floor = SimpleNamespace(object_id=floor_id, object_type=ObjectType.FLOOR)
+    scene = SimpleNamespace(
+        objects={floor_id: floor},
+        get_object=lambda object_id: floor if object_id == floor_id else None,
+    )
+
+    skipped = redundant_floor_covering_request_indices(
+        scene,
+        floor_id,
+        ["Small rug"],
+        ["small_rug"],
+    )
+
+    assert skipped == []

@@ -47,6 +47,8 @@ def evaluate_intent_contract_extensions(
             "required_count",
             "centered_in_room",
             "centered_on_wall",
+            "centered_between",
+            "between",
             "in_front_of",
             "flanking",
         ),
@@ -59,6 +61,8 @@ def evaluate_intent_contract_extensions(
             result = _evaluate_centered_in_room(constraint, geometry, objects, tier)
         elif relation == "centered_on_wall":
             result = _evaluate_centered_on_wall(constraint, geometry, objects, tier)
+        elif relation in {"centered_between", "between"}:
+            result = _evaluate_between(constraint, objects, tier)
         elif relation == "in_front_of":
             result = _evaluate_in_front_of(
                 constraint,
@@ -70,6 +74,109 @@ def evaluate_intent_contract_extensions(
             result = _evaluate_flanking(constraint, objects, tier)
         if result is not None:
             results.extend(result if isinstance(result, list) else [result])
+    return results
+
+
+def _evaluate_between(
+    constraint: dict[str, Any], objects: list[dict[str, Any]], tier: str
+) -> list[dict[str, Any]]:
+    """Evaluate one object against the segment defined by two named anchors."""
+    subject_ids = bound_ids(constraint.get("subjects"), objects)
+    targets = constraint.get("targets") or {}
+    first_ids = bound_ids(targets, objects)
+    secondary_category = str(targets.get("secondary_category") or "")
+    if not subject_ids or not secondary_category:
+        return []
+    secondary_selector: dict[str, Any] = {
+        "category": secondary_category,
+        "quantifier": "all",
+    }
+    if targets.get("secondary_role"):
+        secondary_selector["role"] = targets["secondary_role"]
+    if targets.get("secondary_count"):
+        secondary_selector["count"] = targets["secondary_count"]
+    second_ids = bound_ids(secondary_selector, objects)
+    if len(first_ids) != 1 or len(second_ids) != 1 or first_ids == second_ids:
+        return []
+
+    by_id = {str(obj["id"]): obj for obj in objects}
+    first_center = bbox_center_xy(by_id.get(first_ids[0]))
+    second_center = bbox_center_xy(by_id.get(second_ids[0]))
+    if first_center is None or second_center is None:
+        return []
+    segment = (
+        second_center[0] - first_center[0],
+        second_center[1] - first_center[1],
+    )
+    segment_length = math.hypot(*segment)
+    if segment_length <= 1e-6:
+        return []
+    axis = (segment[0] / segment_length, segment[1] / segment_length)
+    side = (-axis[1], axis[0])
+    midpoint = (
+        (first_center[0] + second_center[0]) / 2.0,
+        (first_center[1] + second_center[1]) / 2.0,
+    )
+    relation = str(constraint.get("relation") or "between")
+    centered = relation == "centered_between"
+    lateral_tolerance = max(0.18, min(0.45, 0.12 * segment_length))
+    midpoint_tolerance = max(0.15, min(0.35, 0.08 * segment_length))
+
+    results: list[dict[str, Any]] = []
+    for subject_id in subject_ids:
+        subject_center = bbox_center_xy(by_id.get(subject_id))
+        if subject_center is None:
+            continue
+        from_first = (
+            subject_center[0] - first_center[0],
+            subject_center[1] - first_center[1],
+        )
+        longitudinal = from_first[0] * axis[0] + from_first[1] * axis[1]
+        fraction = longitudinal / segment_length
+        lateral = abs(from_first[0] * side[0] + from_first[1] * side[1])
+        midpoint_error = math.hypot(
+            subject_center[0] - midpoint[0], subject_center[1] - midpoint[1]
+        )
+        if centered:
+            label = "pass" if midpoint_error <= midpoint_tolerance else "fail"
+        elif 0.10 <= fraction <= 0.90 and lateral <= lateral_tolerance:
+            label = "pass"
+        elif 0.0 <= fraction <= 1.0 and lateral <= 2.0 * lateral_tolerance:
+            label = "degraded"
+        else:
+            label = "fail"
+        relation_type = (
+            "centered_between_alignment" if centered else "between_alignment"
+        )
+        results.append(
+            _result(
+                constraint,
+                suffix=f"{subject_id}__{first_ids[0]}__{second_ids[0]}",
+                label=label,
+                primary=subject_id,
+                related=[first_ids[0], second_ids[0]],
+                relation_type=relation_type,
+                tier=tier,
+                reason=(
+                    f"`{subject_id}` must be {'centered ' if centered else ''}between "
+                    f"`{first_ids[0]}` and `{second_ids[0]}`; segment fraction is "
+                    f"{fraction:.2f}, lateral offset is {lateral:.2f}m, and midpoint "
+                    f"error is {midpoint_error:.2f}m."
+                ),
+                diagnostics={
+                    "anchor_ids": [first_ids[0], second_ids[0]],
+                    "segment_fraction": round(fraction, 6),
+                    "lateral_offset_m": round(lateral, 6),
+                    "lateral_tolerance_m": round(lateral_tolerance, 6),
+                    "midpoint_error_m": round(midpoint_error, 6),
+                    "midpoint_tolerance_m": round(midpoint_tolerance, 6),
+                    "target_center_xy_m": [
+                        round(midpoint[0], 6),
+                        round(midpoint[1], 6),
+                    ],
+                },
+            )
+        )
     return results
 
 
@@ -410,14 +517,17 @@ def _evaluate_flanking(
     target_center = bbox_center_xy(target) if target is not None else None
     if target_center is None:
         return None
-    # Use the target's local side axis, so a rotated coffee table remains a
-    # valid flanking reference.  At least one subject must occur on each side.
+    # Local +Y is the canonical front axis, so local +X is the side axis.  The
+    # old implementation accidentally used +Y and accepted chairs placed at
+    # the front/back of an anchor as a valid left/right flank.
     yaw = math.radians(float(target.get("yaw_deg") or 0.0))
-    side = (-math.sin(yaw), math.cos(yaw))
+    side = (math.cos(yaw), math.sin(yaw))
     signs: list[int] = []
     valid_subjects: list[str] = []
+    subject_rows: list[tuple[str, dict[str, Any], float]] = []
     for subject_id in subjects:
-        center = bbox_center_xy(by_id.get(subject_id))
+        subject = by_id.get(subject_id)
+        center = bbox_center_xy(subject)
         if center is None:
             continue
         lateral = (center[0] - target_center[0]) * side[0] + (
@@ -425,7 +535,29 @@ def _evaluate_flanking(
         ) * side[1]
         signs.append(1 if lateral > 0.05 else -1 if lateral < -0.05 else 0)
         valid_subjects.append(subject_id)
+        subject_rows.append((subject_id, subject, lateral))
     label = "pass" if 1 in signs and -1 in signs else "fail"
+    target_half = _projected_half_extent(target, side)
+    gap = max(0.18, 0.12 * target_half)
+    target_slots: list[dict[str, Any]] = []
+    ordered = sorted(subject_rows, key=lambda row: (row[2], row[0]))
+    for index, (subject_id, subject, _) in enumerate(ordered):
+        sign = -1.0 if index == 0 else 1.0
+        distance = target_half + _projected_half_extent(subject, side) + gap
+        slot = (
+            target_center[0] + sign * side[0] * distance,
+            target_center[1] + sign * side[1] * distance,
+        )
+        to_target = (target_center[0] - slot[0], target_center[1] - slot[1])
+        target_slots.append(
+            {
+                "object_id": subject_id,
+                "target_center_xy_m": [round(slot[0], 6), round(slot[1], 6)],
+                "target_yaw_deg": round(
+                    math.degrees(math.atan2(-to_target[0], to_target[1])), 6
+                ),
+            }
+        )
     return _result(
         constraint,
         suffix=targets[0],
@@ -438,7 +570,12 @@ def _evaluate_flanking(
             f"Prompt requests seating to flank `{targets[0]}`; observed local-side signs "
             f"are {signs}."
         ),
-        diagnostics={"subject_ids": valid_subjects, "side_signs": signs},
+        diagnostics={
+            "subject_ids": valid_subjects,
+            "side_signs": signs,
+            "target_side_xy": [round(side[0], 6), round(side[1], 6)],
+            "target_slots": target_slots,
+        },
     )
 
 

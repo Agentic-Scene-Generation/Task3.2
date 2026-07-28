@@ -169,8 +169,10 @@ def _infer_relation_type(subject: dict[str, Any], target: dict[str, Any]) -> str
     ) and _is_nightstand_target(target):
         return "bed_to_nightstand"
     if (
-        _is_supported_small_subject(subject) and _is_primary_support_target(target)
-    ) or _is_soft_furnishing_seating_support_pair(subject, target):
+        (_is_supported_small_subject(subject) and _is_primary_support_target(target))
+        or _is_media_device_support_pair(subject, target)
+        or _is_soft_furnishing_seating_support_pair(subject, target)
+    ):
         return "object_on_support"
     if _is_lamp_subject(subject) and _is_lamp_surface_target(target):
         return "lamp_to_surface"
@@ -667,9 +669,7 @@ def _eval_bedside_pair(
     selected_ids = [item["target_id"] for item in scored]
     diagnostics = _fd_diagnostics_from_targets(scored, selected=selected_ids)
     diagnostics["cardinality_score"] = min(len(nightstands) / 2.0, 1.0)
-    failed_ids = [
-        item["target_id"] for item in scored if item.get("label") == "fail"
-    ]
+    failed_ids = [item["target_id"] for item in scored if item.get("label") == "fail"]
     if failed_ids:
         reason = f"bedside target(s) failed adjacency or front-axis alignment: {', '.join(failed_ids)}."
     else:
@@ -704,7 +704,9 @@ def _eval_seating_to_surface(
         angle_note = " using front-facing table-edge fallback"
     elif angle_mode == "reversed_front_fallback":
         angle_note = " using flipped-front fallback"
-    if not topology_required and not _is_actionable_seating_surface_pair(subject, target):
+    if not topology_required and not _is_actionable_seating_surface_pair(
+        subject, target
+    ):
         return (
             "unknown",
             0.0,
@@ -850,9 +852,7 @@ def _eval_assigned_seating_slot(
     current_yaw = float(subject.get("yaw_deg") or 0.0)
     yaw_error = abs((current_yaw - float(target_yaw) + 180.0) % 360.0 - 180.0)
     size = (subject.get("bbox_world") or {}).get("size") or []
-    footprint_scale = (
-        min(float(size[0]), float(size[1])) if len(size) >= 2 else 0.5
-    )
+    footprint_scale = min(float(size[0]), float(size[1])) if len(size) >= 2 else 0.5
     position_tolerance = max(0.25, 0.65 * footprint_scale)
     if center_error <= position_tolerance and yaw_error <= 30.0:
         label, confidence = "pass", 0.95
@@ -997,7 +997,12 @@ def _eval_bedside_axis_alignment(
     nightstand_front = front_vector(nightstand)
     dot = max(
         -1.0,
-        min(1.0, abs(bed_front[0] * nightstand_front[0] + bed_front[1] * nightstand_front[1])),
+        min(
+            1.0,
+            abs(
+                bed_front[0] * nightstand_front[0] + bed_front[1] * nightstand_front[1]
+            ),
+        ),
     )
     angle = math.degrees(math.acos(dot))
     if angle <= BEDSIDE_PARALLEL_MAX_ANGLE_DEG:
@@ -1580,9 +1585,12 @@ def _relation_target_is_valid(
         ) and _is_nightstand_target(target)
     if relation_type == "object_on_support":
         return (
-            _is_supported_small_subject(subject) and _is_primary_support_target(target)
-        ) or _is_soft_furnishing_seating_support_pair(
-            subject, target
+            (
+                _is_supported_small_subject(subject)
+                and _is_primary_support_target(target)
+            )
+            or _is_media_device_support_pair(subject, target)
+            or _is_soft_furnishing_seating_support_pair(subject, target)
         )
     if relation_type == "lamp_to_surface":
         return _is_lamp_subject(subject) and _is_lamp_surface_target(target)
@@ -1605,6 +1613,13 @@ def _relation_target_is_valid(
     if relation_type == "generic_near_relation":
         return True
     return False
+
+
+def _is_media_device_support_pair(
+    subject: dict[str, Any], target: dict[str, Any]
+) -> bool:
+    """Allow freestanding displays on semantically valid support furniture."""
+    return object_category(subject) in MEDIA and _is_primary_support_target(target)
 
 
 def _is_soft_furnishing_seating_support_pair(

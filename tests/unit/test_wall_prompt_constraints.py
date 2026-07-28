@@ -1,11 +1,22 @@
+from types import SimpleNamespace
+
 from scenesmith.wall_agents.prompt_constraints import (
     build_required_wall_object_constraints,
+    converge_cross_stage_media_inventory,
 )
 
 
-def test_tv_with_media_support_requires_window_repair_before_offset() -> None:
+def test_tv_group_on_opposite_wall_does_not_imply_wall_mount() -> None:
     constraints = build_required_wall_object_constraints(
         "A sofa faces a TV stand and television on the opposite wall."
+    )
+
+    assert "No explicit wall-object obligations" in constraints
+
+
+def test_explicit_wall_mounted_tv_requires_window_repair_before_offset() -> None:
+    constraints = build_required_wall_object_constraints(
+        "A sofa faces a TV stand with a wall-mounted television above it."
     )
 
     assert "REQUIRED media display" in constraints
@@ -19,3 +30,52 @@ def test_desktop_monitor_does_not_become_wall_requirement() -> None:
     )
 
     assert "No explicit wall-object obligations" in constraints
+
+
+class _Scene:
+    def __init__(self, *, requested: list[str]) -> None:
+        self.scene_expert_task_spec = {
+            "required_large_objects": requested,
+            "required_wall_objects": [],
+        }
+        self.objects = {
+            "television_0": SimpleNamespace(
+                object_id="television_0",
+                object_type="furniture",
+                name="television",
+                description="television on stand",
+                metadata={"semantic_name": "television"},
+            ),
+            "television_1": SimpleNamespace(
+                object_id="television_1",
+                object_type="wall_mounted",
+                name="television",
+                description="wall-mounted display",
+                metadata={"semantic_name": "television"},
+            ),
+        }
+
+    def remove_object(self, object_id: str) -> None:
+        self.objects.pop(str(object_id))
+
+
+def test_cross_stage_media_inventory_keeps_prompt_owned_furniture_tv() -> None:
+    scene = _Scene(requested=["television"])
+
+    removed = converge_cross_stage_media_inventory(
+        scene, "- No explicit wall-object obligations were extracted from the prompt."
+    )
+
+    assert removed == ["television_1"]
+    assert set(scene.objects) == {"television_0"}
+
+
+def test_cross_stage_media_inventory_preserves_explicit_multiple_displays() -> None:
+    scene = _Scene(requested=["television", "television"])
+
+    removed = converge_cross_stage_media_inventory(
+        scene, "- No explicit wall-object obligations were extracted from the prompt."
+    )
+
+    assert removed == []
+    assert set(scene.objects) == {"television_0", "television_1"}

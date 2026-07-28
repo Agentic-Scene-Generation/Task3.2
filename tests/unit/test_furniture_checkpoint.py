@@ -140,7 +140,11 @@ class TestFinalFurnitureRescore(unittest.TestCase):
                 ("align", "4"),
                 ("validate_relations", "4"),
                 ("rescore", "4"),
-                ("validate_relations", "4"),
+                ("align", "5"),
+                ("storage", "6"),
+                ("relations", "7"),
+                ("align", "8"),
+                ("validate_relations", "8"),
             ],
         )
         rescore.assert_awaited_once()

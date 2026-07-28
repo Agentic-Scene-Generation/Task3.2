@@ -40,6 +40,7 @@ from scenesmith.utils.logging import BaseLogger
 from scenesmith.wall_agents.base_wall_agent import BaseWallAgent
 from scenesmith.wall_agents.prompt_constraints import (
     build_required_wall_object_constraints,
+    converge_cross_stage_media_inventory,
 )
 from scenesmith.wall_agents.tools.vision_tools import WallVisionTools
 from scenesmith.wall_agents.tools.wall_surface import WallSurface
@@ -598,6 +599,16 @@ class StatefulWallAgent(BaseStatefulAgent, BaseWallAgent):
                     config=self.cfg,
                 )
                 if fixes:
+                    self.rendering_manager.clear_cache()
+
+                removed_media = converge_cross_stage_media_inventory(
+                    scene, self.required_wall_object_constraints
+                )
+                if removed_media:
+                    console_logger.info(
+                        "Removed cross-stage duplicate media display(s): %s",
+                        ", ".join(removed_media),
+                    )
                     self.rendering_manager.clear_cache()
 
             except Exception as e:

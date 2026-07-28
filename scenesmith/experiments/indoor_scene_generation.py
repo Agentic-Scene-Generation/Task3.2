@@ -454,6 +454,27 @@ async def _apply_and_rescore_final_furniture_state(
     previous_scene_hash: str,
 ) -> bool:
     """Apply final furniture guards before rendering the canonical stage state."""
+    _apply_final_furniture_guards(scene=scene, cfg_dict=cfg_dict)
+
+    _raise_for_unresolved_furniture_relations(scene=scene, cfg_dict=cfg_dict)
+
+    if scene.content_hash() == previous_scene_hash:
+        return False
+
+    await _rescore_furniture_after_postprocessing(
+        furniture_agent=furniture_agent,
+        scene=scene,
+    )
+    # Finalization can restore a scored checkpoint after its own physics
+    # repair. Stabilize that restored state with the same deterministic guards
+    # before deciding whether the actual persisted layout is valid.
+    _apply_final_furniture_guards(scene=scene, cfg_dict=cfg_dict)
+    _raise_for_unresolved_furniture_relations(scene=scene, cfg_dict=cfg_dict)
+    return True
+
+
+def _apply_final_furniture_guards(*, scene: RoomScene, cfg_dict: dict) -> None:
+    """Apply the idempotent guard sequence used around canonical re-scoring."""
     align_seating_to_nearest_surface(
         scene,
         allowed_targets_by_seat=seating_orientation_targets(scene, config=cfg_dict),
@@ -467,20 +488,6 @@ async def _apply_and_rescore_final_furniture_state(
         scene,
         allowed_targets_by_seat=seating_orientation_targets(scene, config=cfg_dict),
     )
-
-    _raise_for_unresolved_furniture_relations(scene=scene, cfg_dict=cfg_dict)
-
-    if scene.content_hash() == previous_scene_hash:
-        return False
-
-    await _rescore_furniture_after_postprocessing(
-        furniture_agent=furniture_agent,
-        scene=scene,
-    )
-    # Finalization can restore a scored checkpoint. Validate the state that will
-    # actually be persisted, not only the pre-critique canonical candidate.
-    _raise_for_unresolved_furniture_relations(scene=scene, cfg_dict=cfg_dict)
-    return True
 
 
 def _furniture_stage_hard_gate_enabled(cfg_dict: dict) -> bool:

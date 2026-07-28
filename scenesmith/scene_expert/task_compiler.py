@@ -57,9 +57,9 @@ You MUST output valid JSON matching this exact schema:
   ],
   "intent_constraints": [
     {
-      "relation": "against_wall | centered_on_wall | centered_in_room | in_front_of | faces | on_top_of | near | aligned_with | flanking | distributed_evenly | one_per_side | clear_access",
+      "relation": "against_wall | centered_on_wall | centered_in_room | centered_between | between | in_front_of | faces | on_top_of | near | aligned_with | flanking | distributed_evenly | one_per_side | clear_access",
       "subjects": {"category": "canonical object category", "count": 1},
-      "targets": {"category": "canonical target category"},
+      "targets": {"category": "canonical target category", "secondary_category": "second target category for between relations only"},
       "source": "model_inferred",
       "confidence": 0.0,
       "evidence_span": "exact supporting words copied from the input prompt"
@@ -81,6 +81,9 @@ Rules:
 - For explicit wording such as "the rug in front of the sofa", emit
   "in_front_of" with the rug as subject and sofa as target. Do not add this
   relation for merely nearby objects.
+- For "X centered between A and B", emit "centered_between" with A as
+  targets.category and B as targets.secondary_category. For ordinary
+  "X between A and B", emit "between" using the same two-target shape.
 - Keep every selector minimal: use category and count only when a count is
   explicit. Omit role, quantifier, and stage fields.
 - Emit at most eight intent constraints, preferring complete relations over

@@ -680,6 +680,91 @@ def test_wall_backed_repair_keeps_nearby_required_relation(tmp_path: Path) -> No
     assert result_by_object["tv_stand_0"]["label"] == "pass"
 
 
+def test_freestanding_television_repair_restores_media_support(tmp_path: Path) -> None:
+    tv_stand = _object("tv_stand_0", "tv_stand", (0.0, 1.1, 0.3), (1.4, 0.5, 0.6))
+    television = _object(
+        "television_0", "television", (1.6, -0.2, 0.31), (0.9, 0.18, 0.6)
+    )
+    scene = _scene(
+        tmp_path,
+        tv_stand,
+        television,
+        text="A living room with a television and a TV stand.",
+    )
+    scene.room_type = "living_room"
+    config = CriticConfig(
+        enabled=True,
+        metrics=("functional_dependency",),
+        constraint_mode="contract",
+    )
+
+    before = next(
+        item
+        for item in evaluate_room_scene(scene, config=config, stage="media_before")[
+            "results"
+        ]
+        if item.get("relation_type") == "object_on_support"
+        and item.get("primary_object") == "television_0"
+    )
+    assert before["label"] == "fail"
+    assert [
+        (item.get("primary_object"), item.get("relation_type"))
+        for item in unresolved_furniture_relation_failures(scene, config=config)
+    ] == [("television_0", "object_on_support")]
+
+    fixes = improve_furniture_relations(scene, config=config)
+
+    assert [(fix.object_id, fix.relation_type) for fix in fixes] == [
+        ("television_0", "object_on_support")
+    ]
+    tv_bounds = television.compute_world_bounds()
+    stand_bounds = tv_stand.compute_world_bounds()
+    assert tv_bounds is not None and stand_bounds is not None
+    np.testing.assert_allclose(
+        (tv_bounds[0][:2] + tv_bounds[1][:2]) / 2.0,
+        (stand_bounds[0][:2] + stand_bounds[1][:2]) / 2.0,
+    )
+    assert math.isclose(
+        float(tv_bounds[0][2]), float(stand_bounds[1][2]) + 0.01, abs_tol=1e-6
+    )
+    after = next(
+        item
+        for item in evaluate_room_scene(scene, config=config, stage="media_after")[
+            "results"
+        ]
+        if item.get("relation_type") == "object_on_support"
+        and item.get("primary_object") == "television_0"
+    )
+    assert after["label"] == "pass"
+
+
+def test_floor_plant_support_failure_is_not_repaired_or_hard_gated(
+    tmp_path: Path, monkeypatch
+) -> None:
+    plant = _object("large_plant_0", "large_plant", (-1.5, 0.8, 0.4), (0.6, 0.6, 0.8))
+    sofa = _object("sofa_0", "sofa", (0.0, -1.2, 0.4), (1.8, 0.8, 0.8))
+    scene = _scene(tmp_path, plant, sofa, text="A living room with a floor plant.")
+    scene.room_type = "living_room"
+    config = CriticConfig(enabled=True, metrics=("functional_dependency",))
+    payload = {
+        "results": [
+            {
+                "check_id": "support__large_plant_0_sofa_0",
+                "label": "fail",
+                "scoring_tier": "core",
+                "relation_type": "object_on_support",
+                "primary_object": "large_plant_0",
+                "selected_related_objects": ["sofa_0"],
+                "diagnostics": {},
+            }
+        ]
+    }
+    monkeypatch.setattr(furniture_relation_repair, "_evaluate", lambda *_: payload)
+
+    assert unresolved_furniture_relation_failures(scene, config=config) == []
+    assert improve_furniture_relations(scene, config=config) == []
+
+
 def test_prompt_facing_guest_chairs_override_cached_orientation_contracts(
     tmp_path: Path,
 ) -> None:
@@ -1854,3 +1939,144 @@ def test_repairs_explicit_front_alignment_without_moving_centered_rug(
     }
     assert results["front_axis_alignment"]["label"] == "pass"
     assert results["back_against_wall"]["label"] == "pass"
+
+
+def test_repairs_two_anchor_living_room_group(tmp_path: Path) -> None:
+    sofa = _object("sofa_0", "sofa", (0.0, -1.5, 0.4), (2.2, 0.8, 0.8))
+    tv_stand = _object("tv_stand_0", "tv_stand", (0.0, 1.7, 0.3), (1.4, 0.5, 0.6))
+    coffee_table = _object(
+        "coffee_table_0", "coffee_table", (-1.0, 0.0, 0.25), (1.0, 0.6, 0.5)
+    )
+    rug = _object("rug_0", "rug", (1.0, 0.85, 0.02), (1.2, 0.7, 0.03))
+    chairs = [
+        _object(
+            f"armchair_{index}",
+            "armchair",
+            (-1.7, y, 0.4),
+            (0.65, 0.7, 0.8),
+        )
+        for index, y in enumerate((-0.5, 0.7))
+    ]
+    prompt = (
+        "A living room with a sofa and TV stand, a coffee table centered between "
+        "the sofa and TV stand, and two armchairs flanking the coffee table. "
+        "A small rug lies between the coffee table and TV stand."
+    )
+    scene = _scene(tmp_path, sofa, tv_stand, coffee_table, rug, *chairs, text=prompt)
+    scene.room_type = "living_room"
+    config = CriticConfig(
+        enabled=True,
+        metrics=("functional_dependency",),
+        constraint_mode="contract",
+    )
+
+    before = evaluate_room_scene(scene, config=config, stage="living_group_before")
+    before_labels = {
+        str(item.get("relation_type")): item.get("label")
+        for item in before["results"]
+        if item.get("relation_type")
+        in {"centered_between_alignment", "between_alignment", "flanking"}
+    }
+    assert before_labels == {
+        "centered_between_alignment": "fail",
+        "between_alignment": "fail",
+        "flanking": "fail",
+    }
+
+    fixes = improve_furniture_relations(scene, config=config)
+
+    assert {fix.relation_type for fix in fixes} == {
+        "centered_between_alignment",
+        "between_alignment",
+        "flanking",
+    }
+    np.testing.assert_allclose(coffee_table.transform.translation()[:2], [0.0, 0.1])
+    np.testing.assert_allclose(rug.transform.translation()[:2], [0.0, 0.9])
+    chair_x = sorted(float(chair.transform.translation()[0]) for chair in chairs)
+    assert chair_x[0] < -0.9
+    assert chair_x[1] > 0.9
+
+    after = evaluate_room_scene(scene, config=config, stage="living_group_after")
+    after_labels = {
+        str(item.get("relation_type")): item.get("label")
+        for item in after["results"]
+        if item.get("relation_type")
+        in {"centered_between_alignment", "between_alignment", "flanking"}
+    }
+    assert after_labels == {
+        "centered_between_alignment": "pass",
+        "between_alignment": "pass",
+        "flanking": "pass",
+    }
+
+
+def test_centered_anchor_repair_preserves_passing_flanking_clearance(
+    tmp_path: Path,
+) -> None:
+    sofa = _object("sofa_0", "sofa", (0.0, -1.46, 0.425), (2.46, 0.9, 0.85))
+    tv_stand = _object("tv_stand_0", "tv_stand", (0.0, 1.695, 0.6), (1.73, 0.45, 1.2))
+    coffee_table = _object(
+        "coffee_table_0", "coffee_table", (0.075, 0.87, 0.225), (1.0, 0.6, 0.45)
+    )
+    chairs = [
+        _object(
+            f"armchair_{index}",
+            "armchair",
+            (x, 0.0, 0.39),
+            (0.75, 0.8, 0.78),
+            yaw_deg=yaw,
+        )
+        for index, (x, yaw) in enumerate(((-1.0, -53.0), (1.0, 55.0)))
+    ]
+    scene = _scene(
+        tmp_path,
+        sofa,
+        tv_stand,
+        coffee_table,
+        *chairs,
+        text=(
+            "A living room with a sofa and TV stand, a coffee table centered "
+            "between the sofa and TV stand, and two armchairs flanking the "
+            "coffee table."
+        ),
+    )
+    scene.room_type = "living_room"
+    config = CriticConfig(
+        enabled=True,
+        metrics=("functional_dependency",),
+        constraint_mode="contract",
+    )
+
+    before = evaluate_room_scene(scene, config=config, stage="group_clearance_before")
+    labels = {
+        str(item.get("relation_type")): item.get("label")
+        for item in before["results"]
+        if item.get("relation_type") in {"centered_between_alignment", "flanking"}
+    }
+    assert labels == {"centered_between_alignment": "fail", "flanking": "pass"}
+
+    fixes = improve_furniture_relations(scene, config=config)
+
+    assert {fix.object_id for fix in fixes} == {
+        "coffee_table_0",
+        "armchair_0",
+        "armchair_1",
+    }
+    assert {fix.relation_type for fix in fixes} == {"centered_between_alignment"}
+    assert float(chairs[0].transform.translation()[0]) < -1.15
+    assert float(chairs[1].transform.translation()[0]) > 1.15
+    table_bounds = coffee_table.compute_world_bounds()
+    assert table_bounds is not None
+    for chair in chairs:
+        chair_bounds = chair.compute_world_bounds()
+        assert chair_bounds is not None
+        assert float(chair_bounds[1][0]) <= float(table_bounds[0][0]) or float(
+            chair_bounds[0][0]
+        ) >= float(table_bounds[1][0])
+
+    after = evaluate_room_scene(scene, config=config, stage="group_clearance_after")
+    assert {
+        str(item.get("relation_type")): item.get("label")
+        for item in after["results"]
+        if item.get("relation_type") in {"centered_between_alignment", "flanking"}
+    } == {"centered_between_alignment": "pass", "flanking": "pass"}

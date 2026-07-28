@@ -22,6 +22,7 @@ from scenesmith.scenebenchmark_critic.furniture_relation_repair import (
 )
 from scenesmith.scenebenchmark_critic.intent_contract import (
     augment_contract_checks,
+    bound_ids,
     build_intent_contract,
     contract_relation_requested,
     contract_seating_targets,
@@ -97,6 +98,7 @@ def _explicit_constraint(
             "sofa, and a floor lamp beside one armchair.",
             {
                 ("against_wall", "sofa", "wall"),
+                ("centered_between", "coffee_table", "sofa"),
                 ("faces", "sofa", "tv_stand"),
                 ("flanking", "armchair", "coffee_table"),
             },
@@ -945,6 +947,147 @@ def test_in_front_of_reports_lateral_alignment_and_preserves_center_anchor() -> 
     )
     assert result["diagnostics"]["forward_distance_m"] > 1.0
     assert result["diagnostics"]["lateral_offset_m"] > 1.0
+
+
+def test_living_room_prompt_extracts_two_anchor_relations() -> None:
+    prompt = (
+        "A living room with a sofa against the back wall facing a TV stand and "
+        "television on the opposite wall, a coffee table centered between the sofa "
+        "and TV stand. A small rug lies between the coffee table and TV stand."
+    )
+
+    contract = build_intent_contract(prompt, room_type="living_room")
+    constraints = {
+        str(row["relation"]): row
+        for row in contract["constraints"]
+        if row["relation"] in {"centered_between", "between"}
+    }
+
+    assert constraints["centered_between"]["subjects"]["category"] == "coffee_table"
+    assert constraints["centered_between"]["targets"]["category"] == "sofa"
+    assert (
+        constraints["centered_between"]["targets"]["secondary_category"] == "tv_stand"
+    )
+    assert constraints["between"]["subjects"]["category"] == "rug"
+    assert constraints["between"]["targets"]["category"] == "coffee_table"
+    assert constraints["between"]["targets"]["secondary_category"] == "tv_stand"
+    assert all(is_hard_constraint(row) for row in constraints.values())
+
+
+def test_media_furniture_ontology_supports_freestanding_television() -> None:
+    prompt = (
+        "A living room with a sofa facing a TV stand and television on the "
+        "opposite wall."
+    )
+
+    contract = build_intent_contract(prompt, room_type="living_room")
+    support = next(
+        row
+        for row in contract["constraints"]
+        if row["relation"] == "on_top_of" and row["source"] == "room_ontology"
+    )
+
+    assert support["subjects"] == {
+        "category": "television",
+        "count": 1,
+        "quantifier": "all",
+    }
+    assert support["targets"] == {
+        "category": "tv_stand",
+        "count": 1,
+        "quantifier": "all",
+    }
+    assert is_hard_constraint(support)
+
+    objects = [
+        _record("television_0", "television", (0.0, 0.0, 0.8)),
+        _record("tv_stand_0", "tv_stand", (0.0, 0.0, 0.3)),
+    ]
+    assert bound_ids(support["subjects"], objects) == ["television_0"]
+    assert bound_ids(support["targets"], objects) == ["tv_stand_0"]
+
+
+def test_media_furniture_ontology_does_not_ground_wall_mounted_television() -> None:
+    contract = build_intent_contract(
+        "A living room with a TV stand and a wall-mounted television above it.",
+        room_type="living_room",
+    )
+
+    assert not any(
+        row["relation"] == "on_top_of" and row["source"] == "room_ontology"
+        for row in contract["constraints"]
+    )
+
+
+def test_between_and_flanking_evaluate_full_two_dimensional_alignment() -> None:
+    case_pack = {
+        "intent_contract": {
+            "constraints": [
+                {
+                    **_explicit_constraint(
+                        "coffee_between", "centered_between", "coffee_table", "sofa"
+                    ),
+                    "targets": {
+                        "category": "sofa",
+                        "count": 1,
+                        "secondary_category": "tv_stand",
+                        "secondary_count": 1,
+                    },
+                },
+                {
+                    **_explicit_constraint(
+                        "rug_between", "between", "rug", "coffee_table"
+                    ),
+                    "targets": {
+                        "category": "coffee_table",
+                        "count": 1,
+                        "secondary_category": "tv_stand",
+                        "secondary_count": 1,
+                    },
+                },
+                {
+                    **_explicit_constraint(
+                        "chairs_flank", "flanking", "armchair", "coffee_table"
+                    ),
+                    "subjects": {"category": "armchair", "count": 2},
+                },
+            ]
+        },
+        "intent_contract_mode": "contract",
+        "scene_geometry": {
+            "rooms": [
+                {
+                    "id": "living_room",
+                    "bbox": {"min": [-2.5, -2.0, 0.0], "max": [2.5, 2.0, 2.7]},
+                }
+            ],
+            "objects": [
+                _record("sofa_0", "sofa", (0.0, -1.5, 0.4), (2.2, 0.8, 0.8)),
+                _record("tv_stand_0", "tv_stand", (0.0, 1.7, 0.3), (1.4, 0.5, 0.6)),
+                _record(
+                    "coffee_table_0", "coffee_table", (-1.0, 0.0, 0.25), (1.0, 0.6, 0.5)
+                ),
+                _record("rug_0", "rug", (1.0, 0.85, 0.02), (1.2, 0.7, 0.03)),
+                _record("armchair_0", "armchair", (-1.7, -0.5, 0.4), (0.65, 0.7, 0.8)),
+                _record("armchair_1", "armchair", (-1.7, 0.7, 0.4), (0.65, 0.7, 0.8)),
+            ],
+        },
+    }
+
+    results = {
+        str(item["relation_type"]): item
+        for item in evaluate_intent_contract_extensions(case_pack)
+    }
+
+    assert results["centered_between_alignment"]["label"] == "fail"
+    assert results["between_alignment"]["label"] == "fail"
+    assert results["flanking"]["label"] == "fail"
+    assert results["flanking"]["diagnostics"]["target_side_xy"] == [1.0, 0.0]
+    slot_x = [
+        row["target_center_xy_m"][0]
+        for row in results["flanking"]["diagnostics"]["target_slots"]
+    ]
+    assert slot_x[0] < -1.0 < slot_x[1]
 
 
 def test_in_front_of_does_not_move_two_independently_centered_objects() -> None:

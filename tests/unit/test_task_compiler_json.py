@@ -37,6 +37,12 @@ def test_task_compiler_requests_only_auxiliary_intent_constraints() -> None:
     """Model relations are useful evidence but cannot self-authorize hard rules."""
     assert '"intent_constraints"' in _SYSTEM_PROMPT
     assert '"source": "model_inferred"' in _SYSTEM_PROMPT
+
+
+def test_task_compiler_requests_two_anchor_between_relations() -> None:
+    assert "centered_between" in _SYSTEM_PROMPT
+    assert "secondary_category" in _SYSTEM_PROMPT
+    assert 'ordinary\n  "X between A and B", emit "between"' in _SYSTEM_PROMPT
     assert "never a hard requirement" in _SYSTEM_PROMPT
     assert "Do not invent coordinates" in _SYSTEM_PROMPT
     assert "Emit at most eight intent constraints" in _SYSTEM_PROMPT

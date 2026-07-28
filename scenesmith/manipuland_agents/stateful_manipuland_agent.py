@@ -47,6 +47,11 @@ from scenesmith.agent_utils.support_surface_extraction import (
 )
 from scenesmith.agent_utils.workflow_tools import WorkflowTools
 from scenesmith.manipuland_agents.base_manipuland_agent import BaseManipulandAgent
+from scenesmith.manipuland_agents.cross_stage_inventory import (
+    existing_floor_covering_ids,
+    is_floor_target,
+    is_single_floor_covering_request,
+)
 from scenesmith.manipuland_agents.tools.manipuland_tools import ManipulandTools
 from scenesmith.manipuland_agents.tools.vision_tools import ManipulandVisionTools
 from scenesmith.prompts.registry import ManipulandAgentPrompts
@@ -701,9 +706,7 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
             f"Completed manipuland placement for furniture {furniture_id}"
         )
 
-    def _enforce_dining_place_setting_alignment(
-        self, furniture_id: UniqueID
-    ) -> bool:
+    def _enforce_dining_place_setting_alignment(self, furniture_id: UniqueID) -> bool:
         """Repair a failed dining place-setting contract before final scoring."""
         table_id = str(furniture_id)
 
@@ -738,7 +741,9 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
             )
             return True
 
-        unresolved = "metric produced no result" if after is None else after.get("reason")
+        unresolved = (
+            "metric produced no result" if after is None else after.get("reason")
+        )
         console_logger.warning(
             "Dining place-setting alignment remains unresolved for %s: %s",
             table_id,
@@ -802,6 +807,10 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
         # Phase 1: Initial analysis - identify which furniture to populate.
         furniture_data = await self._analyze_furniture_for_placement(scene)
         furniture_data = self._recover_prompt_required_manipuland_targets(
+            scene=scene,
+            furniture_data=furniture_data,
+        )
+        furniture_data = self._skip_realized_floor_covering_targets(
             scene=scene,
             furniture_data=furniture_data,
         )
@@ -984,6 +993,31 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
             return max(0, int(value or 0))
         except Exception:
             return 0
+
+    def _skip_realized_floor_covering_targets(
+        self,
+        *,
+        scene: RoomScene,
+        furniture_data: list[FurnitureSelection],
+    ) -> list[FurnitureSelection]:
+        """Skip floor assignments already realized by an earlier scene stage."""
+        existing_ids = existing_floor_covering_ids(scene)
+        if not existing_ids:
+            return furniture_data
+
+        retained: list[FurnitureSelection] = []
+        for selection in furniture_data:
+            if is_floor_target(
+                scene, selection.furniture_id
+            ) and is_single_floor_covering_request(selection.suggested_items):
+                console_logger.info(
+                    "Skipping redundant floor-covering target %s; already realized by %s",
+                    selection.furniture_id,
+                    existing_ids,
+                )
+                continue
+            retained.append(selection)
+        return retained
 
     def _recover_prompt_required_manipuland_targets(
         self,
