@@ -129,6 +129,8 @@ def _get_floor_polygon(scene: RoomScene) -> Polygon:
 
     Floor is a rectangle from (0,0) to (length, width) in world coordinates.
     """
+    if scene.room_geometry.footprint_vertices is not None:
+        return Polygon(scene.room_geometry.footprint_vertices)
     length = scene.room_geometry.length
     width = scene.room_geometry.width
     return Polygon([(0, 0), (length, 0), (length, width), (0, width)])

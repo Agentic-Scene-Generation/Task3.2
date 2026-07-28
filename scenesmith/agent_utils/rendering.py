@@ -1013,6 +1013,10 @@ def render_scene_for_agent_observation(
                 name: normal.tolist()
                 for name, normal in scene.room_geometry.wall_normals.items()
             },
+            "room_local_footprint_vertices": [
+                list(vertex)
+                for vertex in scene.room_geometry.room_local_footprint_vertices
+            ],
             "annotations": {
                 "enable_set_of_mark_labels": annotations_cfg.enable_set_of_mark_labels,
                 "enable_bounding_boxes": annotations_cfg.enable_bounding_boxes,

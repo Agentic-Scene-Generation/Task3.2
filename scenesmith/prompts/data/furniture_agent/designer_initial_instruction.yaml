@@ -1,7 +1,12 @@
 name: "designer_initial_instruction"
 version: "1.0"
 description: "Instructions for initial furniture design phase"
-template_variables: ["scene_description", "has_reference_image"]
+template_variables:
+  - "scene_description"
+  - "has_reference_image"
+  - "room_length"
+  - "room_width"
+  - "room_local_footprint_vertices"
 prompt: |
   Create the initial furniture layout for this room.
 
@@ -84,3 +89,17 @@ prompt: |
 
   ## Scene Requirements:
   {{ scene_description }}
+
+  ## Authoritative Room Boundary:
+  All coordinates below are room-local XY coordinates in meters, with the origin at
+  the room center.
+
+  - Bounding-box length (X): {{ room_length }} m
+  - Bounding-box width (Y): {{ room_width }} m
+  - `room_local_footprint_vertices`: {{ room_local_footprint_vertices }}
+
+  The ordered footprint vertices define the actual usable floor boundary and are
+  authoritative for furniture placement. Length and width describe only its
+  axis-aligned bounding box. Do not treat that bounding box as usable floor space.
+  Every furniture footprint must remain inside the polygon. Concave cutouts are
+  outside the room even when they lie within the bounding box.

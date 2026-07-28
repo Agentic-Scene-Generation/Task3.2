@@ -63,6 +63,9 @@ prompt: |
   - 4 edge-center views: Show space from north, south, east, west positions
   Coordinate markers show actual positions in meters. Read the labeled
   coordinates to understand the room scale and determine precise positions.
+  The room-specific task also provides `room_local_footprint_vertices`; that polygon
+  is the authoritative usable floor boundary. Room length and width are only the
+  polygon's axis-aligned bounding-box dimensions.
   The coordinate system uses RGB colors: red arrow = x-axis, green arrow = y-axis,
   blue arrow = z-axis (vertical).
 

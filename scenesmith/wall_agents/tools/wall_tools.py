@@ -207,7 +207,9 @@ class WallTools:
             """List all wall surfaces available for placement.
 
             Returns info about each wall including dimensions and excluded
-            regions (doors/windows where objects cannot be placed).
+            regions (doors/windows where objects cannot be placed). Polygon
+            rooms identify edges with stable wall_label values (W00, W01, ...);
+            rectangular rooms retain cardinal wall_direction values.
 
             Returns:
                 JSON with list of wall surfaces and their properties.
@@ -219,20 +221,34 @@ class WallTools:
                     ExcludedRegionInfo(x_min=r[0], z_min=r[1], x_max=r[2], z_max=r[3])
                     for r in surface.excluded_regions
                 ]
-                surfaces_info.append(
-                    WallSurfaceInfo(
-                        surface_id=str(surface.surface_id),
-                        wall_id=surface.wall_id,
-                        wall_direction=surface.wall_direction.value,
-                        length=surface.length,
-                        height=surface.height,
-                        excluded_regions=excluded,
+                if surface.wall_direction is None:
+                    surfaces_info.append(
+                        {
+                            "surface_id": str(surface.surface_id),
+                            "wall_id": surface.wall_id,
+                            "wall_label": surface.wall_label,
+                            "length": surface.length,
+                            "height": surface.height,
+                            "excluded_regions": [item.__dict__ for item in excluded],
+                        }
                     )
-                )
+                else:
+                    surfaces_info.append(
+                        WallSurfaceInfo(
+                            surface_id=str(surface.surface_id),
+                            wall_id=surface.wall_id,
+                            wall_direction=surface.wall_direction.value,
+                            length=surface.length,
+                            height=surface.height,
+                            excluded_regions=excluded,
+                        )
+                    )
 
             result = {
                 "num_surfaces": len(surfaces_info),
-                "surfaces": [s.__dict__ for s in surfaces_info],
+                "surfaces": [
+                    s if isinstance(s, dict) else s.__dict__ for s in surfaces_info
+                ],
             }
             return json.dumps(result, indent=2, default=str)
 
@@ -902,6 +918,44 @@ class WallTools:
             f"Tool called: rescale_wall_object("
             f"object_id={object_id}, scale_factor={scale_factor})"
         )
+        scene_object = self.scene.get_object(UniqueID(object_id))
+        if (
+            scene_object is not None
+            and scene_object.sdf_path is not None
+            and scale_factor > 0
+        ):
+            affected_objects = [
+                obj
+                for obj in self.scene.objects.values()
+                if obj.sdf_path == scene_object.sdf_path
+            ]
+            for affected in affected_objects:
+                placement = affected.placement_info
+                if placement is None:
+                    continue
+                surface = self.surfaces_by_id.get(str(placement.parent_surface_id))
+                if surface is None:
+                    continue
+                width = (
+                    float(affected.bbox_max[0] - affected.bbox_min[0]) * scale_factor
+                )
+                height = (
+                    float(affected.bbox_max[2] - affected.bbox_min[2]) * scale_factor
+                )
+                valid, error = surface.check_object_bounds(
+                    position_x=float(placement.position_2d[0]),
+                    position_z=float(placement.position_2d[1]),
+                    object_width=width,
+                    object_height=height,
+                )
+                if not valid:
+                    return WallOperationResult(
+                        success=False,
+                        message=f"Rescale would invalidate '{affected.name}': {error}",
+                        object_id=object_id,
+                        error_type=WallErrorType.POSITION_OUT_OF_BOUNDS,
+                    ).to_json()
+
         result = rescale_object_common(
             scene=self.scene,
             object_id=object_id,
@@ -920,16 +974,28 @@ class WallTools:
                 ExcludedRegionInfo(x_min=r[0], z_min=r[1], x_max=r[2], z_max=r[3])
                 for r in surface.excluded_regions
             ]
-            surfaces_info.append(
-                WallSurfaceInfo(
-                    surface_id=str(surface.surface_id),
-                    wall_id=surface.wall_id,
-                    wall_direction=surface.wall_direction.value,
-                    length=surface.length,
-                    height=surface.height,
-                    excluded_regions=excluded,
+            if surface.wall_direction is None:
+                surfaces_info.append(
+                    {
+                        "surface_id": str(surface.surface_id),
+                        "wall_id": surface.wall_id,
+                        "wall_label": surface.wall_label,
+                        "length": surface.length,
+                        "height": surface.height,
+                        "excluded_regions": [item.__dict__ for item in excluded],
+                    }
                 )
-            )
+            else:
+                surfaces_info.append(
+                    WallSurfaceInfo(
+                        surface_id=str(surface.surface_id),
+                        wall_id=surface.wall_id,
+                        wall_direction=surface.wall_direction.value,
+                        length=surface.length,
+                        height=surface.height,
+                        excluded_regions=excluded,
+                    )
+                )
 
         # Build wall objects info.
         wall_objects_info = []
@@ -962,13 +1028,22 @@ class WallTools:
                 )
             )
 
+        rectangular_surfaces = [
+            surface for surface in surfaces_info if isinstance(surface, WallSurfaceInfo)
+        ]
         result = WallSceneStateResult(
-            wall_surfaces=surfaces_info,
+            wall_surfaces=rectangular_surfaces,
             wall_objects=wall_objects_info,
             object_count=len(wall_objects_info),
         )
-
-        return result.to_json()
+        if len(rectangular_surfaces) == len(surfaces_info):
+            return result.to_json()
+        payload = json.loads(result.to_json())
+        payload["wall_surfaces"] = [
+            surface if isinstance(surface, dict) else surface.__dict__
+            for surface in surfaces_info
+        ]
+        return json.dumps(payload, indent=2, default=str)
 
     def _list_available_assets_impl(self) -> str:
         """Implementation for listing available wall assets."""
