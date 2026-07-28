@@ -53,6 +53,19 @@ def _relations(contract: dict) -> set[tuple[str, str, str]]:
     }
 
 
+def _explicit_constraint(
+    constraint_id: str, relation: str, subject: str, target: str
+) -> dict:
+    return {
+        "constraint_id": constraint_id,
+        "relation": relation,
+        "subjects": {"category": subject, "count": 1},
+        "targets": {"category": target, "count": 1},
+        "source": "explicit_prompt",
+        "strength": "hard",
+    }
+
+
 @pytest.mark.parametrize(
     ("prompt", "expected"),
     (
@@ -888,3 +901,87 @@ def test_generic_centered_on_wall_repair_is_accepted_only_after_improvement(
         )["label"]
         == "pass"
     )
+
+
+def test_in_front_of_reports_lateral_alignment_and_preserves_center_anchor() -> None:
+    case_pack = {
+        "intent_contract": {
+            "constraints": [
+                _explicit_constraint("rug_center", "centered_in_room", "rug", "room"),
+                _explicit_constraint("rug_front", "in_front_of", "rug", "sofa"),
+            ]
+        },
+        "intent_contract_mode": "contract",
+        "scene_geometry": {
+            "rooms": [
+                {
+                    "id": "living_room",
+                    "bbox": {"min": [-2.5, -2.0, 0.0], "max": [2.5, 2.0, 2.7]},
+                }
+            ],
+            "objects": [
+                _record(
+                    "sofa_0",
+                    "sofa",
+                    (-1.57, -1.445, 0.38),
+                    (1.7, 0.95, 0.76),
+                    yaw_deg=0.0,
+                ),
+                _record("rug_0", "rug", (0.0, 0.0, 0.02), (1.8, 1.8, 0.03)),
+            ],
+        },
+    }
+
+    result = next(
+        item
+        for item in evaluate_intent_contract_extensions(case_pack)
+        if item.get("relation_type") == "front_axis_alignment"
+    )
+
+    assert result["label"] == "fail"
+    assert result["diagnostics"]["repair_object_id"] == "sofa_0"
+    np.testing.assert_allclose(
+        result["diagnostics"]["repair_target_center_xy_m"], [0.0, -1.445]
+    )
+    assert result["diagnostics"]["forward_distance_m"] > 1.0
+    assert result["diagnostics"]["lateral_offset_m"] > 1.0
+
+
+def test_in_front_of_does_not_move_two_independently_centered_objects() -> None:
+    case_pack = {
+        "intent_contract": {
+            "constraints": [
+                _explicit_constraint("sofa_center", "centered_on_wall", "sofa", "wall"),
+                _explicit_constraint("rug_center", "centered_in_room", "rug", "room"),
+                _explicit_constraint("rug_front", "in_front_of", "rug", "sofa"),
+            ]
+        },
+        "intent_contract_mode": "contract",
+        "scene_geometry": {
+            "rooms": [
+                {
+                    "id": "living_room",
+                    "bbox": {"min": [-2.5, -2.0, 0.0], "max": [2.5, 2.0, 2.7]},
+                }
+            ],
+            "objects": [
+                _record(
+                    "sofa_0",
+                    "sofa",
+                    (-1.0, -1.445, 0.38),
+                    (1.7, 0.95, 0.76),
+                    yaw_deg=0.0,
+                ),
+                _record("rug_0", "rug", (0.0, 0.0, 0.02), (1.8, 1.8, 0.03)),
+            ],
+        },
+    }
+
+    result = next(
+        item
+        for item in evaluate_intent_contract_extensions(case_pack)
+        if item.get("relation_type") == "front_axis_alignment"
+    )
+
+    assert result["label"] == "fail"
+    assert "repair_object_id" not in result["diagnostics"]

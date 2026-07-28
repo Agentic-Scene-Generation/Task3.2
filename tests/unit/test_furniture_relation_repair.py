@@ -1,3 +1,4 @@
+import hashlib
 import math
 import xml.etree.ElementTree as ET
 
@@ -28,6 +29,7 @@ from scenesmith.scenebenchmark_critic.furniture_relation_repair import (
     improve_furniture_relations,
     unresolved_furniture_relation_failures,
 )
+from scenesmith.scenebenchmark_critic.intent_contract import SCHEMA_VERSION
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.orientation_contracts import (
     CONTRACT_ATTR,
 )
@@ -1359,7 +1361,6 @@ def test_accepted_candidate_moves_support_surface_and_child_together(
         "_evaluate",
         lambda _scene, _config: next(evaluations),
     )
-
     fixes = improve_furniture_relations(
         scene,
         config=CriticConfig(enabled=True, metrics=("functional_dependency",)),
@@ -1712,3 +1713,144 @@ def test_room_center_repair_does_not_move_nearby_sofa(
     assert [fix.object_id for fix in fixes] == ["rug_0"]
     np.testing.assert_allclose(rug.transform.translation()[:2], [0.0, 0.0])
     np.testing.assert_allclose(sofa.transform.GetAsMatrix4(), old_sofa_transform)
+
+
+def test_room_center_repair_prefers_nearest_compliant_pose(
+    tmp_path: Path, monkeypatch
+) -> None:
+    rug = _object("rug_0", "rug", (0.05, 0.325, 0.015), (2.0, 2.0, 0.03))
+    scene = _scene(tmp_path, rug, text="A living room with a rug in the middle.")
+    failed_center = {
+        "check_id": "rug_center",
+        "label": "fail",
+        "relation_type": "room_center_alignment",
+        "primary_object": "rug_0",
+        "related_objects": [],
+        "diagnostics": {
+            "room_center_xy": [0.0, 0.0],
+            "offset_m": math.hypot(0.05, 0.325),
+            "allowed_offset_m": 0.32,
+        },
+    }
+    passed_center = {**failed_center, "label": "pass"}
+    evaluations = iter(
+        [
+            {"results": [failed_center]},
+            {"results": [passed_center]},
+            {"results": [passed_center]},
+        ]
+    )
+    monkeypatch.setattr(
+        furniture_relation_repair,
+        "_evaluate",
+        lambda _scene, _config: next(evaluations),
+    )
+    monkeypatch.setattr(
+        furniture_relation_repair,
+        "improve_storage_front_access",
+        lambda *_args, **_kwargs: [],
+    )
+
+    fixes = improve_furniture_relations(
+        scene,
+        config=CriticConfig(enabled=True, metrics=("functional_dependency",)),
+        max_repairs=1,
+    )
+
+    assert [(fix.object_id, fix.relation_type) for fix in fixes] == [
+        ("rug_0", "room_center_alignment")
+    ]
+    # The repair enters the centered-in-room tolerance, instead of moving a
+    # broad object all the way to the room origin and risking a clearance loss.
+    np.testing.assert_allclose(
+        math.hypot(*rug.transform.translation()[:2]), 0.31, atol=1e-7
+    )
+    np.testing.assert_allclose(
+        rug.transform.translation()[:2] / math.hypot(*rug.transform.translation()[:2]),
+        np.array([0.05, 0.325]) / math.hypot(0.05, 0.325),
+    )
+
+
+def test_repairs_explicit_front_alignment_without_moving_centered_rug(
+    tmp_path: Path,
+) -> None:
+    sofa = _object(
+        "sofa_0",
+        "sofa",
+        (-1.57, -1.445, 0.38),
+        (1.7, 0.95, 0.76),
+        yaw_deg=0.0,
+    )
+    rug = _object("rug_0", "rug", (0.0, 0.0, 0.015), (1.8, 1.8, 0.03))
+    scene = _scene(
+        tmp_path,
+        sofa,
+        rug,
+        text=(
+            "A living room with a two-seater sofa against the wall, a square rug "
+            "in the middle in front of the sofa."
+        ),
+    )
+    scene.room_type = "living_room"
+    scene.scenebenchmark_intent_contract = {
+        "schema_version": SCHEMA_VERSION,
+        "prompt_sha256": hashlib.sha256(
+            " ".join(scene.text_description.split()).encode("utf-8")
+        ).hexdigest(),
+        "constraints": [
+            {
+                "constraint_id": "sofa_wall",
+                "relation": "against_wall",
+                "subjects": {"category": "sofa", "count": 1},
+                "targets": {"category": "wall"},
+                "source": "explicit_prompt",
+                "strength": "hard",
+            },
+            {
+                "constraint_id": "rug_center",
+                "relation": "centered_in_room",
+                "subjects": {"category": "rug", "count": 1},
+                "targets": {"category": "room"},
+                "source": "explicit_prompt",
+                "strength": "hard",
+            },
+            {
+                "constraint_id": "rug_front",
+                "relation": "in_front_of",
+                "subjects": {"category": "rug", "count": 1},
+                "targets": {"category": "sofa", "count": 1},
+                "source": "explicit_prompt",
+                "strength": "hard",
+            },
+        ],
+    }
+    config = CriticConfig(
+        enabled=True,
+        metrics=("functional_dependency",),
+        constraint_mode="contract",
+    )
+
+    before = evaluate_room_scene(scene, config=config, stage="front_alignment_before")
+    before_result = next(
+        item
+        for item in before["results"]
+        if item.get("relation_type") == "front_axis_alignment"
+    )
+    assert before_result["label"] == "fail"
+
+    fixes = improve_furniture_relations(scene, config=config)
+
+    assert [(fix.object_id, fix.relation_type) for fix in fixes] == [
+        ("sofa_0", "front_axis_alignment")
+    ]
+    np.testing.assert_allclose(sofa.transform.translation()[:2], [0.0, -1.445])
+    np.testing.assert_allclose(rug.transform.translation()[:2], [0.0, 0.0])
+
+    after = evaluate_room_scene(scene, config=config, stage="front_alignment_after")
+    results = {
+        str(item.get("relation_type")): item
+        for item in after["results"]
+        if item.get("relation_type") in {"front_axis_alignment", "back_against_wall"}
+    }
+    assert results["front_axis_alignment"]["label"] == "pass"
+    assert results["back_against_wall"]["label"] == "pass"

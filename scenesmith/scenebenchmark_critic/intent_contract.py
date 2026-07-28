@@ -34,6 +34,7 @@ VALID_RELATIONS = frozenset(
         "against_wall",
         "centered_on_wall",
         "centered_in_room",
+        "in_front_of",
         "flanking",
         "faces",
         "on_top_of",
@@ -554,6 +555,26 @@ def _explicit_prompt_constraints(prompt: str, lowered: str) -> list[dict[str, An
                         "centered_in_room",
                         subject,
                         {"category": "room"},
+                        source="explicit_prompt",
+                        evidence_span=clause,
+                    )
+                )
+
+        for match in re.finditer(
+            r"(?P<subject>[a-z0-9_\- ,']{1,70}?)\s+"
+            r"(?:is |sits |placed |positioned )?(?:directly\s+)?"
+            r"in\s+front\s+of\s+(?:the\s+|a\s+|an\s+)?"
+            r"(?P<target>[a-z0-9_\- ,']{1,70}?)(?:[,.;]|$)",
+            normalized,
+        ):
+            subject = selector_for_phrase(match.group("subject"))
+            target = selector_for_phrase(match.group("target"))
+            if subject is not None and target is not None:
+                constraints.append(
+                    _constraint(
+                        "in_front_of",
+                        subject,
+                        target,
                         source="explicit_prompt",
                         evidence_span=clause,
                     )

@@ -8,6 +8,7 @@ from typing import Any
 
 from scenesmith.scenebenchmark_critic.core.geometry import (
     bbox_center_xy,
+    front_vector,
     object_category,
 )
 from scenesmith.scenebenchmark_critic.intent_contract import (
@@ -46,6 +47,7 @@ def evaluate_intent_contract_extensions(
             "required_count",
             "centered_in_room",
             "centered_on_wall",
+            "in_front_of",
             "flanking",
         ),
     ):
@@ -57,6 +59,13 @@ def evaluate_intent_contract_extensions(
             result = _evaluate_centered_in_room(constraint, geometry, objects, tier)
         elif relation == "centered_on_wall":
             result = _evaluate_centered_on_wall(constraint, geometry, objects, tier)
+        elif relation == "in_front_of":
+            result = _evaluate_in_front_of(
+                constraint,
+                case_pack=case_pack,
+                objects=objects,
+                tier=tier,
+            )
         else:
             result = _evaluate_flanking(constraint, objects, tier)
         if result is not None:
@@ -191,6 +200,202 @@ def _evaluate_centered_on_wall(
             )
         )
     return results
+
+
+def _evaluate_in_front_of(
+    constraint: dict[str, Any],
+    *,
+    case_pack: dict[str, Any],
+    objects: list[dict[str, Any]],
+    tier: str,
+) -> list[dict[str, Any]]:
+    """Evaluate prompt-explicit front placement and lateral centerline alignment.
+
+    ``in front of`` is directional: the subject must lie along the target's
+    usable front axis.  For a single subject/target pair it also denotes the
+    same centerline, which prevents a centered rug, chair, or table from being
+    disconnected laterally from the object it is explicitly in front of.
+    """
+    subject_ids = bound_ids(constraint.get("subjects"), objects)
+    target_ids = bound_ids(constraint.get("targets"), objects)
+    # Multiple target instances are ambiguous without an explicit pairing.
+    # Declining that case is safer than binding by scene order or proximity.
+    if not subject_ids or len(target_ids) != 1:
+        return []
+    by_id = {str(obj["id"]): obj for obj in objects}
+    target_id = target_ids[0]
+    target = by_id.get(target_id)
+    target_center = bbox_center_xy(target)
+    if target is None or target_center is None:
+        return []
+
+    front = front_vector(target)
+    front_norm = math.hypot(*front)
+    if front_norm <= 1e-6:
+        return []
+    front = (front[0] / front_norm, front[1] / front_norm)
+    side = (-front[1], front[0])
+    min_forward = max(0.15, _projected_half_extent(target, front) * 0.70)
+    centered_anchor_ids = _centered_anchor_ids(case_pack, objects)
+
+    results: list[dict[str, Any]] = []
+    for subject_id in subject_ids:
+        subject = by_id.get(subject_id)
+        subject_center = bbox_center_xy(subject)
+        if subject is None or subject_center is None:
+            continue
+        delta = (
+            subject_center[0] - target_center[0],
+            subject_center[1] - target_center[1],
+        )
+        forward_distance = delta[0] * front[0] + delta[1] * front[1]
+        lateral_signed = delta[0] * side[0] + delta[1] * side[1]
+        lateral_error = abs(lateral_signed)
+        lateral_tolerance = max(
+            0.18,
+            min(
+                0.40,
+                0.15
+                * (
+                    _projected_half_extent(subject, side)
+                    + _projected_half_extent(target, side)
+                ),
+            ),
+        )
+        forward_error = max(0.0, min_forward - forward_distance)
+        if forward_error <= 1e-6 and lateral_error <= lateral_tolerance:
+            label = "pass"
+        elif forward_distance >= 0.0 and lateral_error <= lateral_tolerance * 2.0:
+            label = "degraded"
+        else:
+            label = "fail"
+
+        repair_object_id, repair_center = _front_alignment_repair_pose(
+            subject_id=subject_id,
+            subject_center=subject_center,
+            target_id=target_id,
+            target_center=target_center,
+            front=front,
+            side=side,
+            forward_distance=forward_distance,
+            lateral_signed=lateral_signed,
+            minimum_forward_distance=min_forward,
+            centered_anchor_ids=centered_anchor_ids,
+        )
+        diagnostics: dict[str, Any] = {
+            "subject_id": subject_id,
+            "target_id": target_id,
+            "target_front_xy": [round(front[0], 6), round(front[1], 6)],
+            "target_side_xy": [round(side[0], 6), round(side[1], 6)],
+            "forward_distance_m": round(forward_distance, 6),
+            "minimum_forward_distance_m": round(min_forward, 6),
+            "lateral_offset_m": round(lateral_error, 6),
+            "lateral_tolerance_m": round(lateral_tolerance, 6),
+        }
+        if repair_object_id is not None and repair_center is not None:
+            diagnostics["repair_object_id"] = repair_object_id
+            diagnostics["repair_target_center_xy_m"] = [
+                round(repair_center[0], 6),
+                round(repair_center[1], 6),
+            ]
+        results.append(
+            _result(
+                constraint,
+                suffix=f"{subject_id}__{target_id}",
+                label=label,
+                primary=subject_id,
+                related=[target_id],
+                relation_type="front_axis_alignment",
+                tier=tier,
+                reason=(
+                    f"`{subject_id}` must be in front of and laterally aligned with "
+                    f"`{target_id}`; forward distance is {forward_distance:.2f}m "
+                    f"(minimum {min_forward:.2f}m), lateral offset is "
+                    f"{lateral_error:.2f}m (allowed {lateral_tolerance:.2f}m)."
+                ),
+                diagnostics=diagnostics,
+            )
+        )
+    return results
+
+
+def _centered_anchor_ids(
+    case_pack: dict[str, Any], objects: list[dict[str, Any]]
+) -> set[str]:
+    """Return objects that another relation may not displace from their center."""
+    anchored: set[str] = set()
+    for constraint in contract_constraints(
+        case_pack,
+        relations=("centered_in_room", "centered_on_wall"),
+        include_auxiliary=False,
+    ):
+        anchored.update(bound_ids(constraint.get("subjects"), objects))
+    return anchored
+
+
+def _front_alignment_repair_pose(
+    *,
+    subject_id: str,
+    subject_center: tuple[float, float],
+    target_id: str,
+    target_center: tuple[float, float],
+    front: tuple[float, float],
+    side: tuple[float, float],
+    forward_distance: float,
+    lateral_signed: float,
+    minimum_forward_distance: float,
+    centered_anchor_ids: set[str],
+) -> tuple[str | None, tuple[float, float] | None]:
+    """Choose one non-anchor object to move while retaining explicit centers."""
+    subject_anchored = subject_id in centered_anchor_ids
+    target_anchored = target_id in centered_anchor_ids
+    if subject_anchored and target_anchored:
+        return None, None
+
+    # Moving a wall-backed target along its tangent preserves its wall gap and
+    # yaw.  Use that option only when the centered subject is already in front
+    # of it, so the repair cannot solve a lateral error by breaking the prompt's
+    # front/back ordering.
+    if (
+        subject_anchored
+        and not target_anchored
+        and forward_distance >= minimum_forward_distance
+    ):
+        return (
+            target_id,
+            (
+                target_center[0] + side[0] * lateral_signed,
+                target_center[1] + side[1] * lateral_signed,
+            ),
+        )
+
+    if target_anchored and subject_anchored:
+        return None, None
+    desired_forward = max(minimum_forward_distance, forward_distance)
+    return (
+        subject_id,
+        (
+            target_center[0] + front[0] * desired_forward,
+            target_center[1] + front[1] * desired_forward,
+        ),
+    )
+
+
+def _projected_half_extent(
+    obj: dict[str, Any], direction: tuple[float, float]
+) -> float:
+    """Return a conservative horizontal half extent along ``direction``."""
+    bbox = obj.get("bbox_world") or {}
+    size = bbox.get("size") or []
+    if len(size) < 2:
+        return 0.0
+    try:
+        return 0.5 * (
+            abs(float(direction[0])) * float(size[0])
+            + abs(float(direction[1])) * float(size[1])
+        )
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _evaluate_flanking(

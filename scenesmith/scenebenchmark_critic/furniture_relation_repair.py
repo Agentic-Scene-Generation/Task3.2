@@ -28,6 +28,7 @@ _REPAIRABLE_RELATIONS = {
     "centered_on_wall",
     "classroom_workstation_distribution",
     "dining_seat_distribution",
+    "front_axis_alignment",
     "room_center_alignment",
     "seating_to_work_surface",
     "study_furniture_layout",
@@ -43,6 +44,10 @@ _WALL_BACKED_CONTACT_GAP_M = 0.03
 # in-tolerance pose instead of forcing a newly conflicting flush placement.
 _WALL_BACKED_DEFAULT_MAX_GAP_M = 0.25
 _WALL_BACKED_GAP_MARGIN_M = 0.02
+# A room-center repair only needs to enter the evaluator's allowed region.  A
+# small interior margin avoids reintroducing nearby clearance conflicts solely
+# to reach an arbitrary exact coordinate.
+_ROOM_CENTER_REPAIR_MARGIN_M = 0.01
 
 
 @dataclass(frozen=True)
@@ -468,6 +473,16 @@ def _result_severity(result: dict[str, Any]) -> tuple[int, float]:
             float(diagnostics.get("tangent_error_m") or 0.0)
             - float(diagnostics.get("allowed_tangent_error_m") or 0.0),
         ) + max(0.0, float(diagnostics.get("normal_error_m") or 0.0) - 0.10)
+    elif relation == "front_axis_alignment":
+        magnitude = max(
+            0.0,
+            float(diagnostics.get("minimum_forward_distance_m") or 0.0)
+            - float(diagnostics.get("forward_distance_m") or 0.0),
+        ) + max(
+            0.0,
+            float(diagnostics.get("lateral_offset_m") or 0.0)
+            - float(diagnostics.get("lateral_tolerance_m") or 0.0),
+        )
     return _label_severity(label), round(magnitude, 9)
 
 
@@ -635,14 +650,18 @@ def _repair_targets(scene: RoomScene, payload: dict[str, Any]) -> list[_RepairTa
             object_id = str(result.get("primary_object") or "")
             center = _xy(diagnostics.get("room_center_xy"))
             if object_id and center is not None:
-                targets.append(
-                    _RepairTarget(
-                        object_id,
-                        relation,
-                        check_id,
-                        center,
-                        None,
-                        _room_center_group_ids(scene, result, object_id, center),
+                group_ids = _room_center_group_ids(scene, result, object_id, center)
+                targets.extend(
+                    _room_center_targets(
+                        scene,
+                        object_id=object_id,
+                        relation_type=relation,
+                        check_id=check_id,
+                        room_center=center,
+                        allowed_offset_m=_float_or_none(
+                            diagnostics.get("allowed_offset_m")
+                        ),
+                        group_ids=group_ids,
                     )
                 )
         elif relation == "centered_on_wall":
@@ -652,6 +671,13 @@ def _repair_targets(scene: RoomScene, payload: dict[str, Any]) -> list[_RepairTa
             if object_id and center is not None and yaw is not None:
                 targets.append(
                     _RepairTarget(object_id, relation, check_id, center, yaw)
+                )
+        elif relation == "front_axis_alignment":
+            object_id = str(diagnostics.get("repair_object_id") or "")
+            center = _xy(diagnostics.get("repair_target_center_xy_m"))
+            if object_id and center is not None:
+                targets.append(
+                    _RepairTarget(object_id, relation, check_id, center, None)
                 )
         elif relation == "wall_backed_storage_alignment":
             object_id = str(
@@ -995,6 +1021,59 @@ def _room_center_group_ids(
         ):
             group_ids.append(str(candidate.object_id))
     return tuple(group_ids)
+
+
+def _room_center_targets(
+    scene: RoomScene,
+    *,
+    object_id: str,
+    relation_type: str,
+    check_id: str,
+    room_center: tuple[float, float],
+    allowed_offset_m: float | None,
+    group_ids: tuple[str, ...],
+) -> list[_RepairTarget]:
+    """Return the least-disruptive centered pose before the exact center.
+
+    Centered-in-room contracts define an allowed radius, not a requirement to
+    overlap the mathematical room origin.  Moving only as far as needed keeps
+    the repair compatible with independent clearance and front-placement
+    constraints.  The exact center remains a fallback for layouts where it is
+    also feasible.
+    """
+    targets: list[_RepairTarget] = []
+    obj = scene.objects.get(UniqueID(object_id))
+    current = _world_center_xy(obj) if obj is not None else None
+    if current is not None and allowed_offset_m is not None and allowed_offset_m > 0:
+        delta_x = current[0] - room_center[0]
+        delta_y = current[1] - room_center[1]
+        current_offset = math.hypot(delta_x, delta_y)
+        target_offset = max(0.0, allowed_offset_m - _ROOM_CENTER_REPAIR_MARGIN_M)
+        if current_offset > target_offset + 1e-6:
+            targets.append(
+                _RepairTarget(
+                    object_id,
+                    relation_type,
+                    check_id,
+                    (
+                        room_center[0] + delta_x * target_offset / current_offset,
+                        room_center[1] + delta_y * target_offset / current_offset,
+                    ),
+                    None,
+                    group_ids,
+                )
+            )
+    targets.append(
+        _RepairTarget(
+            object_id,
+            relation_type,
+            check_id,
+            room_center,
+            None,
+            group_ids,
+        )
+    )
+    return targets
 
 
 def _is_shared_seating_anchor(obj: SceneObject) -> bool:
