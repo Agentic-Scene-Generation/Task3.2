@@ -99,6 +99,75 @@ _HSSD_FRONT_AXIS_SOURCES = {
     "annotations",
 }
 _VALID_HORIZONTAL_FRONT_AXES = {"+X", "-X", "+Y", "-Y"}
+_COMPOSITE_MEDIA_REQUEST = re.compile(
+    r"\b(?:tv|television)\s*(?:stand|console|center)\b.*\b(?:with|and|mounted)\b.*\b(?:tv|television|screen|display)\b|"
+    r"\b(?:tv|television|screen|display)\b.*\b(?:mounted\s+on\s+top|with)\b",
+    re.IGNORECASE,
+)
+_SEPARATE_MEDIA_ROLES = re.compile(
+    r"\b(?:tv|television)\s*(?:stand|console|center)\b\s+and\s+(?:a\s+)?(?:tv|television|screen|display)\b|"
+    r"\b(?:tv|television|screen|display)\b.*\b(?:above|on\s+top\s+of|with)\s+(?:the\s+)?(?:tv|television)\s*(?:stand|console|center)\b",
+    re.IGNORECASE,
+)
+
+
+def _normalize_independent_media_requests(
+    request: "AssetGenerationRequest",
+) -> "AssetGenerationRequest":
+    """Avoid a display-bearing console when the scene requests a second display."""
+    context = str(request.scene_prompt_context or "")
+    if request.object_type != ObjectType.FURNITURE or not _SEPARATE_MEDIA_ROLES.search(
+        context
+    ):
+        return request
+
+    descriptions = list(request.object_descriptions)
+    names = list(request.short_names)
+    dimensions = [list(values) for values in request.desired_dimensions]
+    semantic_candidates = (
+        [list(values) for values in request.semantic_name_candidates]
+        if request.semantic_name_candidates is not None
+        else None
+    )
+    changed = False
+    for index, (description, name) in enumerate(zip(descriptions, names)):
+        if not _COMPOSITE_MEDIA_REQUEST.search(f"{name} {description}"):
+            continue
+        descriptions[index] = (
+            "Low media console / TV stand only, without a television, monitor, "
+            "or built-in display"
+        )
+        names[index] = "tv_stand"
+        if len(dimensions[index]) >= 3:
+            width = max(0.45, float(dimensions[index][0]))
+            dimensions[index][2] = min(
+                float(dimensions[index][2]), min(0.9, width * 0.58)
+            )
+        if semantic_candidates is not None and index < len(semantic_candidates):
+            semantic_candidates[index] = list(
+                dict.fromkeys(
+                    "tv_stand" if value == "tv_stand_with_tv" else value
+                    for value in semantic_candidates[index]
+                )
+            )
+        changed = True
+    if not changed:
+        return request
+    console_logger.info(
+        "Normalized composite media request(s) because the scene asks for a "
+        "separate display."
+    )
+    return AssetGenerationRequest(
+        object_descriptions=descriptions,
+        short_names=names,
+        object_type=request.object_type,
+        desired_dimensions=dimensions,
+        style_context=request.style_context,
+        scene_prompt_context=request.scene_prompt_context,
+        operation_type=request.operation_type,
+        scene_id=request.scene_id,
+        semantic_name_candidates=semantic_candidates,
+    )
 
 
 def _get_hssd_front_axis_annotation_record(
@@ -1538,6 +1607,7 @@ class AssetManager:
         Returns:
             AssetGenerationResult with successful assets and failure information.
         """
+        request = _normalize_independent_media_requests(request)
         console_logger.info(
             f"Starting {request.object_type.value} asset acquisition for "
             f"{len(request.object_descriptions)} items using "

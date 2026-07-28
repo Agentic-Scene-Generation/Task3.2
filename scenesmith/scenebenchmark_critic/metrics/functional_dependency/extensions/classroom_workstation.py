@@ -32,17 +32,11 @@ def evaluate_classroom_workstation_distribution(
     task = str(case_pack.get("task_instruction") or "")
     room_type = str(case_pack.get("room_type") or "")
     contract_mode = str(case_pack.get("intent_contract_mode") or "legacy")
-    if contract_mode == "contract":
-        # Do not turn a count coincidence (N chairs / N+1 desks) into a
-        # teacher-zone requirement.  In contract mode this layout exists only
-        # when the prompt explicitly requested the student cohort and teacher.
-        if not contract_relation_requested(case_pack, "distributed_evenly"):
-            return []
-        if (
-            "teacher" not in f"{room_type} {task}".lower()
-            and "instructor" not in f"{room_type} {task}".lower()
-        ):
-            return []
+    if contract_mode == "contract" and not (
+        contract_relation_requested(case_pack, "distributed_evenly")
+        or _instructional_layout_requested(task, room_type)
+    ):
+        return []
     if not any(hint in f"{room_type} {task}".lower() for hint in _CLASSROOM_HINTS):
         return []
     geometry = case_pack.get("scene_geometry") or {}
@@ -84,6 +78,9 @@ def evaluate_classroom_workstation_distribution(
     }:
         return []
 
+    instructional_surface, instructional_front = _instructional_anchor(
+        objects, room_bounds
+    )
     layout = _layout_targets(
         cohort.student_surfaces,
         cohort.teacher_surface,
@@ -91,7 +88,8 @@ def evaluate_classroom_workstation_distribution(
         objects_by_id,
         objects=objects,
         room_bounds=room_bounds,
-        front=cohort.front_vector_xy,
+        front=instructional_front or cohort.front_vector_xy,
+        instructional_surface=instructional_surface,
     )
     if layout is None:
         return []
@@ -142,7 +140,7 @@ def evaluate_classroom_workstation_distribution(
                 else ""
             ),
             "diagnostics": {
-                "front_vector_xy": list(cohort.front_vector_xy),
+                "front_vector_xy": list(instructional_front or cohort.front_vector_xy),
                 "room_bounds_xy": list(room_bounds),
                 "workstation_slots": workstation_slots,
                 "teacher_slot": teacher_slot,
@@ -167,6 +165,7 @@ def _layout_targets(
     objects: list[dict[str, Any]],
     room_bounds: tuple[float, float, float, float],
     front: tuple[float, float],
+    instructional_surface: dict[str, Any] | None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]] | None:
     count = len(student_surfaces)
     if count < 2:
@@ -204,7 +203,6 @@ def _layout_targets(
     # must stay on the student side of the board's standing/reading clearance.
     # Without this bound, a room-relative "front-zone" target can incorrectly
     # place the desk behind (or directly against) a blackboard.
-    instructional_surface = _front_instructional_surface(objects, front)
     if instructional_surface is not None:
         board_center = bbox_center_xy(instructional_surface)
         if board_center is not None:
@@ -259,7 +257,14 @@ def _layout_targets(
         for surface, _ in student_pairs
     )
     slot_indices = _solve_rectangular_costs(costs)
-    yaw = _yaw_for_front(front)
+    # A student's viewing direction is toward the teaching focal surface, while
+    # the usable front of their desk is the edge facing the seated student.
+    # These directions are intentionally opposite: keeping them equal makes a
+    # visually plausible classroom grid violate the paired desk--chair use
+    # contract and prevents the atomic repair from being accepted.
+    desk_front = (-front[0], -front[1])
+    desk_yaw = _yaw_for_front(desk_front)
+    chair_yaw = _yaw_for_front(front)
     tolerance = min(0.55, max(0.28, 0.06 * min(room_width, room_depth)))
     diagnostics: list[dict[str, Any]] = []
     for pair_index, (surface, seat) in enumerate(student_pairs):
@@ -270,7 +275,7 @@ def _layout_targets(
         )
         desk_distance = _distance(surface, desk_target)
         chair_distance = _distance(seat, chair_target)
-        desk_yaw_error = _front_error_deg(surface, front)
+        desk_yaw_error = _front_error_deg(surface, desk_front)
         chair_yaw_error = _front_error_deg(seat, front)
         aligned = (
             desk_distance <= tolerance
@@ -283,9 +288,9 @@ def _layout_targets(
                 "surface_id": str(surface["id"]),
                 "seat_id": str(seat["id"]),
                 "target_surface_center_xy_m": list(desk_target),
-                "target_surface_yaw_deg": yaw,
+                "target_surface_yaw_deg": desk_yaw,
                 "target_seat_center_xy_m": list(chair_target),
-                "target_seat_yaw_deg": yaw,
+                "target_seat_yaw_deg": chair_yaw,
                 "surface_deviation_m": round(desk_distance, 4),
                 "seat_deviation_m": round(chair_distance, 4),
                 "surface_facing_error_deg": round(desk_yaw_error, 2),
@@ -297,6 +302,10 @@ def _layout_targets(
         )
 
     teacher_q = (q_min + q_max) / 2.0
+    if instructional_surface is not None:
+        board_center = bbox_center_xy(instructional_surface)
+        if board_center is not None:
+            teacher_q = board_center[lateral_axis]
     teacher_target = _world_xy(teacher_p, teacher_q, front_axis, front_sign)
     teacher_front = (-front[0], -front[1])
     teacher_distance = _distance(teacher_surface, teacher_target)
@@ -319,25 +328,57 @@ def _layout_targets(
     return diagnostics, teacher_slot
 
 
-def _front_instructional_surface(
-    objects: list[dict[str, Any]], front: tuple[float, float]
-) -> dict[str, Any] | None:
-    """Return the front-most usable blackboard/whiteboard-like classroom object."""
-    candidates: list[tuple[float, dict[str, Any]]] = []
+def _instructional_layout_requested(task: str, room_type: str) -> bool:
+    """Recognize the reusable teacher/student instructional-room topology."""
+    context = f"{room_type} {task}".lower()
+    return (
+        any(hint in context for hint in _CLASSROOM_HINTS)
+        and any(token in context for token in ("teacher", "instructor", "lecturer"))
+        and "student" in context
+        and any(token in context for token in ("desk", "table", "workstation"))
+    )
+
+
+def _instructional_anchor(
+    objects: list[dict[str, Any]],
+    room_bounds: tuple[float, float, float, float],
+) -> tuple[dict[str, Any] | None, tuple[float, float] | None]:
+    """Find a teaching focal surface and the room-relative direction it anchors."""
+    min_x, min_y, max_x, max_y = room_bounds
+    spans = (max_x - min_x, max_y - min_y)
+    candidates: list[tuple[float, str, dict[str, Any], tuple[float, float]]] = []
     for obj in objects:
         text = " ".join(
             str(obj.get(key) or "")
             for key in ("id", "name", "description", "category", "type")
         ).lower()
         if not any(
-            token in text for token in ("chalkboard", "blackboard", "whiteboard")
+            token in text
+            for token in (
+                "chalkboard",
+                "blackboard",
+                "whiteboard",
+                "projection screen",
+                "projector screen",
+                "teaching screen",
+            )
         ):
             continue
         center = bbox_center_xy(obj)
         if center is None:
             continue
-        candidates.append((front[0] * center[0] + front[1] * center[1], obj))
-    return max(candidates, key=lambda item: item[0])[1] if candidates else None
+        boundary_options = (
+            (abs(center[0] - min_x) / spans[0], (-1.0, 0.0)),
+            (abs(max_x - center[0]) / spans[0], (1.0, 0.0)),
+            (abs(center[1] - min_y) / spans[1], (0.0, -1.0)),
+            (abs(max_y - center[1]) / spans[1], (0.0, 1.0)),
+        )
+        distance, front = min(boundary_options, key=lambda item: item[0])
+        candidates.append((distance, str(obj["id"]), obj, front))
+    if not candidates:
+        return None, None
+    _, _, surface, front = min(candidates, key=lambda item: item[:2])
+    return surface, front
 
 
 def _segment_centers(lower: float, upper: float, count: int) -> list[float]:

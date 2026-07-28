@@ -16,6 +16,7 @@ from scenesmith.agent_utils.asset_manager import (
     AssetManager,
     AssetPathConfig,
     FailedAsset,
+    _normalize_independent_media_requests,
     _normalize_hssd_annotation_front_axis,
 )
 from scenesmith.agent_utils.geometry_generation_server.dataclasses import (
@@ -71,6 +72,29 @@ def create_mock_cfg():
 
     # Merge configurations (base config provides all other values).
     return OmegaConf.merge(base_config, test_overrides)
+
+
+def test_separate_display_rewrites_composite_media_console_request() -> None:
+    request = AssetGenerationRequest(
+        object_descriptions=[
+            "Modern TV stand cabinet with flat-screen television mounted on top"
+        ],
+        short_names=["tv_stand_with_tv"],
+        object_type=ObjectType.FURNITURE,
+        desired_dimensions=[[1.6, 0.45, 1.2]],
+        scene_prompt_context=(
+            "A living room with a sofa facing a TV stand and television on the "
+            "opposite wall."
+        ),
+        semantic_name_candidates=[["tv_stand_with_tv", "television"]],
+    )
+
+    normalized = _normalize_independent_media_requests(request)
+
+    assert normalized.short_names == ["tv_stand"]
+    assert "without a television" in normalized.object_descriptions[0]
+    assert normalized.desired_dimensions[0][2] <= 0.9
+    assert normalized.semantic_name_candidates == [["tv_stand", "television"]]
 
 
 class TestAssetManager(unittest.TestCase):

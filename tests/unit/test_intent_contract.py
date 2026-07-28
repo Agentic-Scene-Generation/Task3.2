@@ -315,9 +315,15 @@ def test_classroom_each_with_builds_one_to_one_pair_checks_without_grid_gate() -
             constraint_mode="contract",
         ),
     )
-    assert not any(
-        result.get("relation_type") == "classroom_workstation_distribution"
+    classroom_result = next(
+        result
         for result in results
+        if result.get("relation_type") == "classroom_workstation_distribution"
+    )
+    assert classroom_result["label"] == "fail"
+    assert (
+        classroom_result["diagnostics"]["teacher_slot"]["surface_id"]
+        == "teacher_desk_0"
     )
     pair_results = [
         result

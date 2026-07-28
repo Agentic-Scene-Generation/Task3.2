@@ -9,6 +9,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from PIL import Image, ImageDraw
+
 from scenesmith.agent_utils.asset_router import AssetRouter
 from scenesmith.agent_utils.asset_router.dataclasses import AnalysisResult, AssetItem
 from scenesmith.agent_utils.asset_router.rendered_asset_choice import (
@@ -190,6 +192,15 @@ class TestRenderedHssdAssetChoice(unittest.TestCase):
         asset_dir.mkdir(parents=True, exist_ok=True)
         (asset_dir / f"{view_name}.png").write_bytes(self._PNG_1X1)
 
+    def _write_colored_iso(
+        self, root: Path, hssd_id: str, color: tuple[int, int, int]
+    ) -> None:
+        asset_dir = root / hssd_id
+        asset_dir.mkdir(parents=True, exist_ok=True)
+        image = Image.new("RGB", (64, 64), (128, 128, 128))
+        ImageDraw.Draw(image).rectangle((12, 8, 51, 55), fill=color)
+        image.save(asset_dir / "iso.png")
+
     def test_reorders_candidates_when_vlm_selects_rendered_iso(self) -> None:
         candidates = [
             self._candidate("asset_a", "generic bed", 0.91),
@@ -281,6 +292,46 @@ class TestRenderedHssdAssetChoice(unittest.TestCase):
             self.assertEqual(
                 event["candidates"][0]["evidence_views"][0]["label"], "iso"
             )
+            self.assertIn("render_quality_by_hssd_id", event)
+
+    def test_material_evidence_guard_rejects_untextured_candidate(self) -> None:
+        candidates = [
+            self._candidate("white_wardrobe", "plain wardrobe", 0.91),
+            self._candidate("wood_wardrobe", "wood wardrobe", 0.89),
+        ]
+        vlm_service = MagicMock()
+        vlm_service.create_completion.return_value = (
+            '{"selected_index": 1, "selected_hssd_id": "white_wardrobe", '
+            '"reason": "shape match"}'
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            audit_path = root / "audit.jsonl"
+            self._write_colored_iso(root, "white_wardrobe", (220, 220, 220))
+            self._write_colored_iso(root, "wood_wardrobe", (105, 72, 42))
+            with patch.dict(
+                os.environ,
+                {"HSSD_RENDERED_ASSET_CHOICE_AUDIT_PATH": str(audit_path)},
+            ):
+                choice = choose_hssd_candidate_from_iso_renders(
+                    candidates=candidates,
+                    object_description="wooden wardrobe with visible material detail",
+                    scene_context="A bedroom with a wardrobe.",
+                    vlm_service=vlm_service,
+                    model="test-model",
+                    reasoning_effort="low",
+                    verbosity="low",
+                    vision_detail="low",
+                    rendered_assets_dir=root,
+                    top_n=2,
+                )
+
+            event = json.loads(audit_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(choice.selected_hssd_id, "wood_wardrobe")
+        self.assertIn("material-evidence guard", choice.reason)
+        self.assertTrue(event["quality_fallback_used"])
 
     def test_uses_only_task_compiler_semantic_name_candidates(self) -> None:
         candidates = [

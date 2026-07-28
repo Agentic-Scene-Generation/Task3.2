@@ -132,6 +132,77 @@ class _CandidateRenderEvidence:
     views: tuple[tuple[str, Path], ...]
 
 
+def _render_material_quality(
+    evidence: _CandidateRenderEvidence,
+) -> dict[str, object]:
+    """Return a conservative material-evidence score for an HSSD render."""
+    if not evidence.views:
+        return {"score": 0.0, "issues": ["missing_render_evidence"]}
+
+    image_path = next(
+        (path for label, path in evidence.views if label == "iso"), evidence.views[0][1]
+    )
+    try:
+        with Image.open(image_path) as source:
+            image = source.convert("RGB")
+            pixels = list(image.getdata())
+    except Exception as exc:
+        return {
+            "score": 0.0,
+            "issues": ["unreadable_render_evidence"],
+            "error": str(exc),
+        }
+    if not pixels:
+        return {"score": 0.0, "issues": ["empty_render_evidence"]}
+
+    width, height = image.size
+    corners = (
+        pixels[0],
+        pixels[max(0, width - 1)],
+        pixels[max(0, (height - 1) * width)],
+        pixels[-1],
+    )
+    background = tuple(
+        sum(pixel[channel] for pixel in corners) / len(corners) for channel in range(3)
+    )
+    foreground = [
+        pixel
+        for pixel in pixels
+        if sum(abs(pixel[channel] - background[channel]) for channel in range(3)) > 30.0
+    ]
+    coverage = len(foreground) / len(pixels)
+    if not foreground:
+        return {
+            "score": 0.0,
+            "issues": ["blank_render"],
+            "foreground_coverage": round(coverage, 4),
+        }
+
+    luminance = sorted(sum(pixel) / 3.0 for pixel in foreground)
+    chroma = sum(max(pixel) - min(pixel) for pixel in foreground) / len(foreground)
+    p10 = luminance[len(luminance) // 10]
+    p90 = luminance[min(len(luminance) - 1, len(luminance) * 9 // 10)]
+    mean_luminance = sum(luminance) / len(luminance)
+    issues: list[str] = []
+    if coverage < 0.015:
+        issues.append("tiny_visible_subject")
+    if mean_luminance >= 202.0 and chroma <= 2.5 and p90 - p10 <= 32.0:
+        issues.append("low_material_detail")
+    score = 1.0
+    if "tiny_visible_subject" in issues:
+        score -= 0.65
+    if "low_material_detail" in issues:
+        score -= 0.55
+    return {
+        "score": round(max(0.0, score), 3),
+        "issues": issues,
+        "foreground_coverage": round(coverage, 4),
+        "mean_luminance": round(mean_luminance, 2),
+        "mean_chroma": round(chroma, 2),
+        "luminance_range": [round(p10, 2), round(p90, 2)],
+    }
+
+
 def _encode_candidate_views_as_one_image(
     views: tuple[tuple[str, Path], ...],
     identity_label: str | None = None,
@@ -459,6 +530,16 @@ def choose_hssd_candidate_from_iso_renders(
             )
         )
 
+    render_quality_by_id = {
+        record.candidate.hssd_id: _render_material_quality(record)
+        for record in evidence_records
+    }
+    quality_eligible_ids = {
+        hssd_id
+        for hssd_id, quality in render_quality_by_id.items()
+        if float(quality["score"]) >= 0.5
+    }
+
     used_view_count = sum(len(record.views) for record in evidence_records)
     # Keep one multimodal image per asset; multiple views are stitched below.
     used_image_count = len(evidence_records)
@@ -502,13 +583,17 @@ def choose_hssd_candidate_from_iso_renders(
 
     candidate_lines = [
         "- index {index}: hssd_id={hssd_id}, name={name}, category={category}, "
-        "size_m={size}, embedding_score={score:.4f}".format(
+        "size_m={size}, embedding_score={score:.4f}, render_quality={quality}".format(
             index=record.original_index,
             hssd_id=record.candidate.hssd_id,
             name=record.candidate.object_name or "(unnamed)",
             category=record.candidate.category or "(unknown)",
             size=tuple(round(float(axis), 3) for axis in record.candidate.size),
             score=float(record.candidate.similarity_score),
+            quality=json.dumps(
+                render_quality_by_id[record.candidate.hssd_id],
+                sort_keys=True,
+            ),
         )
         for record in evidence_records
     ]
@@ -556,7 +641,10 @@ def choose_hssd_candidate_from_iso_renders(
         "reported size as [width, depth, height] and reject visibly incompatible "
         "relative proportions rather than assuming later scaling can fix them. "
         "In particular, an upright dining, desk, or task chair must not be "
-        "replaced by a low lounge chair or armchair." + covering_guidance + "\n"
+        "replaced by a low lounge chair or armchair. Prefer candidates with "
+        "material evidence; `low_material_detail` means the render is nearly "
+        "monochrome and untextured, unless the request explicitly calls for that "
+        "appearance." + covering_guidance + "\n"
         'Return JSON only: {"selected_index": <index number>, '
         '"selected_hssd_id": "<hssd_id>", '
         '"semantic_name": "<one allowed semantic name>", '
@@ -702,6 +790,27 @@ def choose_hssd_candidate_from_iso_renders(
             used_image_count=used_image_count,
         )
 
+    quality_fallback_used = False
+    if quality_eligible_ids and selected_candidate.hssd_id not in quality_eligible_ids:
+        rejected_candidate = selected_candidate
+        selected_candidate = next(
+            record.candidate
+            for record in evidence_records
+            if record.candidate.hssd_id in quality_eligible_ids
+        )
+        quality_fallback_used = True
+        reason = (
+            "material-evidence guard overrode rendered choice "
+            f"{rejected_candidate.hssd_id}; selected {selected_candidate.hssd_id}"
+        )
+        console_logger.warning(
+            "Rendered HSSD choice for '%s' selected low-material-detail asset %s; "
+            "using %s instead",
+            object_description,
+            rejected_candidate.hssd_id,
+            selected_candidate.hssd_id,
+        )
+
     if str(requested_shape or "").strip().lower() == "square":
         square_candidates = [
             record.candidate
@@ -752,6 +861,8 @@ def choose_hssd_candidate_from_iso_renders(
         allowed_semantic_names=allowed_semantic_names,
         returned_semantic_name=raw_semantic_name or None,
         reason=str(reason) if reason is not None else None,
+        render_quality_by_hssd_id=render_quality_by_id,
+        quality_fallback_used=quality_fallback_used,
     )
 
     reordered = [selected_candidate] + [
