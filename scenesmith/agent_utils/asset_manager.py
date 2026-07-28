@@ -956,6 +956,8 @@ class AssetManager:
         if not candidates:
             raise ValueError("No results returned from HSSD server")
 
+        family = semantic_asset_family(description, short_name)
+        critical_family = self._is_critical_hssd_family(family)
         proportion_match_found = True
         if desired_dimensions is not None:
             # Retrieval extents use the SceneSmith semantic order
@@ -969,13 +971,15 @@ class AssetManager:
                     dtype=float,
                 ),
             )
-            min_ratio, max_ratio = self._uniform_dimension_fit_bounds()
+            min_ratio, max_ratio = self._uniform_dimension_fit_bounds(
+                critical_family=critical_family,
+            )
             proportion_compatible: list[HssdRetrievalResult] = []
             for candidate in candidates:
                 extents = np.asarray(candidate.size, dtype=float)
                 if np.any(extents <= 0):
                     continue
-                for target_variant in target_variants:
+                for variant_index, target_variant in enumerate(target_variants):
                     predicted = extents * float(
                         np.median(target_variant / extents)
                     )
@@ -986,6 +990,20 @@ class AssetManager:
                             min_ratio=min_ratio,
                             max_ratio=max_ratio,
                         )
+                        if critical_family:
+                            predicted_scene = (
+                                predicted
+                                if variant_index == 0
+                                else np.asarray(
+                                    [predicted[0], predicted[2], predicted[1]],
+                                    dtype=float,
+                                )
+                            )
+                            self._validate_configured_asset_size(
+                                dimensions=predicted_scene,
+                                description=description,
+                                short_name=short_name,
+                            )
                     except ValueError:
                         continue
                     proportion_compatible.append(candidate)
@@ -994,6 +1012,12 @@ class AssetManager:
                 candidates = proportion_compatible
             else:
                 proportion_match_found = False
+                if critical_family:
+                    raise ValueError(
+                        "No HSSD candidate satisfies the critical semantic and "
+                        f"dimension contract for '{description}' within ratios "
+                        f"[{min_ratio:.2f}, {max_ratio:.2f}]"
+                    )
                 console_logger.warning(
                     "No retrieved HSSD candidate for '%s' fully matches the "
                     "requested proportions; trying the best scale-invariant shape",
@@ -1008,8 +1032,6 @@ class AssetManager:
             max_retries,
             _,
         ) = self._hssd_semantic_validation_settings(description, short_name)
-        family = semantic_asset_family(description, short_name)
-        critical_family = self._is_critical_hssd_family(family)
         validate_ambiguous_optional = bool(
             self._hssd_validation_config_value(
                 "validate_ambiguous_optional",
@@ -1202,7 +1224,11 @@ class AssetManager:
         except Exception:
             return max(1, int(getattr(hssd_cfg, "dimension_candidates", 3) or 3))
 
-    def _uniform_dimension_fit_bounds(self) -> tuple[float, float]:
+    def _uniform_dimension_fit_bounds(
+        self,
+        *,
+        critical_family: bool = False,
+    ) -> tuple[float, float]:
         """Return bounded residual tolerance for approximate LLM dimensions."""
         if self.agent_type in {AgentType.WALL_MOUNTED, AgentType.CEILING_MOUNTED}:
             # Mounted-object prompts often specify a target footprint while HSSD
@@ -1210,7 +1236,100 @@ class AssetManager:
             # bounded, but do not reject a semantic match for a 2-3x axial
             # difference in an approximate designer estimate.
             return 0.30, 2.50
+        if critical_family:
+            return (
+                float(
+                    self._hssd_validation_config_value(
+                        "critical_min_dimension_ratio",
+                        0.75,
+                    )
+                    or 0.75
+                ),
+                float(
+                    self._hssd_validation_config_value(
+                        "critical_max_dimension_ratio",
+                        1.35,
+                    )
+                    or 1.35
+                ),
+            )
         return 0.50, 1.75
+
+    def _configured_asset_size_bounds(
+        self,
+        *,
+        description: str,
+        short_name: str,
+    ) -> tuple[list[float], list[float]] | None:
+        """Resolve the final hard-size contract used by furniture verification."""
+
+        if self.agent_type != AgentType.FURNITURE:
+            return None
+        safety_cfg = getattr(self.cfg, "furniture_safety_controller", None)
+        all_bounds = getattr(safety_cfg, "size_bounds", None)
+        if all_bounds is None:
+            return None
+
+        normalized_name = re.sub(
+            r"[^a-z0-9]+",
+            "_",
+            f"{short_name} {description}".lower(),
+        ).strip("_")
+        family = semantic_asset_family(description, short_name)
+        keys = []
+        if "twin_bed" in normalized_name or "single_bed" in normalized_name:
+            keys.append("twin_bed")
+        keys.extend((family, short_name))
+        for key in dict.fromkeys(value for value in keys if value):
+            try:
+                bounds_cfg = all_bounds.get(key)
+            except Exception:
+                bounds_cfg = getattr(all_bounds, key, None)
+            if bounds_cfg is None:
+                continue
+            try:
+                minimum = list(bounds_cfg.get("min", []) or [])
+                maximum = list(bounds_cfg.get("max", []) or [])
+            except Exception:
+                minimum = list(getattr(bounds_cfg, "min", []) or [])
+                maximum = list(getattr(bounds_cfg, "max", []) or [])
+            if len(minimum) == len(maximum) == 3:
+                return (
+                    [float(value) for value in minimum],
+                    [float(value) for value in maximum],
+                )
+        return None
+
+    def _validate_configured_asset_size(
+        self,
+        *,
+        dimensions: np.ndarray,
+        description: str,
+        short_name: str,
+    ) -> None:
+        """Reject assets that the downstream furniture verifier must reject."""
+
+        configured = self._configured_asset_size_bounds(
+            description=description,
+            short_name=short_name,
+        )
+        if configured is None:
+            return
+        minimum, maximum = configured
+        below = any(
+            float(value) + 1e-3 < lower
+            for value, lower in zip(dimensions, minimum)
+        )
+        above = any(
+            float(value) - 1e-3 > upper
+            for value, upper in zip(dimensions, maximum)
+        )
+        if below or above:
+            raise ValueError(
+                "Asset dimensions violate the shared furniture admission "
+                f"contract: actual={np.asarray(dimensions).round(3).tolist()}, "
+                f"expected min={minimum}, max={maximum}"
+            )
 
     def _scale_and_measure_canonical_mesh(
         self,
@@ -1218,6 +1337,8 @@ class AssetManager:
         canonical_path: Path,
         final_path: Path,
         desired_dimensions: list[float] | tuple[float, ...] | None,
+        description: str = "",
+        short_name: str = "",
     ) -> tuple[Path, np.ndarray, np.ndarray, float]:
         """Scale a Y-up canonical mesh and expose its SceneSmith Z-up bounds."""
         applied_scale = 1.0
@@ -1237,13 +1358,23 @@ class AssetManager:
         bbox_min, bbox_max = gltf_y_up_bounds_to_scene_z_up(mesh.bounds)
         if desired_dimensions is not None:
             actual_dimensions = bbox_max - bbox_min
-            min_ratio, max_ratio = self._uniform_dimension_fit_bounds()
+            family = semantic_asset_family(description, short_name)
+            critical_family = self._is_critical_hssd_family(family)
+            min_ratio, max_ratio = self._uniform_dimension_fit_bounds(
+                critical_family=critical_family,
+            )
             validate_uniform_dimension_fit(
                 actual_dimensions,
                 desired_dimensions,
                 min_ratio=min_ratio,
                 max_ratio=max_ratio,
             )
+            if critical_family:
+                self._validate_configured_asset_size(
+                    dimensions=actual_dimensions,
+                    description=description,
+                    short_name=short_name,
+                )
             console_logger.info(
                 "Canonical asset dimensions: requested=%s, actual=%s, scale=%.3f",
                 list(desired_dimensions),
@@ -1450,6 +1581,8 @@ class AssetManager:
                         canonical_path=canonical_path,
                         final_path=config.sdf_dir / f"{config.short_name}.gltf",
                         desired_dimensions=request.desired_dimensions[index],
+                        description=desc,
+                        short_name=short_name,
                     )
                 )
 
@@ -3144,12 +3277,76 @@ class AssetManager:
         return [
             asset
             for asset in self.registry.list_all()
-            if not bool(
-                (getattr(asset, "metadata", {}) or {}).get(
-                    "repair_placeholder", False
+            if self._runtime_gate.is_asset_admitted(asset)
+        ]
+
+    @staticmethod
+    def _asset_identity_signatures(asset: SceneObject) -> set[str]:
+        signatures: set[str] = set()
+        for attribute in ("sdf_path", "geometry_path"):
+            value = getattr(asset, attribute, None)
+            if value:
+                signatures.add(f"{attribute}:{Path(value)}")
+        metadata = getattr(asset, "metadata", {}) or {}
+        mesh_id = metadata.get("hssd_mesh_id")
+        if mesh_id:
+            signatures.add(f"hssd_mesh_id:{mesh_id}")
+        return signatures
+
+    def invalidate_assets(
+        self,
+        assets: list[SceneObject],
+        *,
+        reason: str,
+    ) -> int:
+        """Revoke assets that failed the final scene geometry contract.
+
+        Semantic VLM admission alone is insufficient for required furniture:
+        the canonical mesh must also satisfy the exact dimensions used by the
+        downstream hard verifier. Revocation updates both the registry view and
+        the per-stage semantic cache so regeneration can acquire a different
+        HSSD mesh instead of replaying the rejected one.
+        """
+
+        invalid_signatures: set[str] = set()
+        invalid_families: set[str] = set()
+        for asset in assets:
+            invalid_signatures.update(self._asset_identity_signatures(asset))
+            invalid_families.add(
+                semantic_asset_family(
+                    str(getattr(asset, "description", "")),
+                    str(getattr(asset, "name", "")),
                 )
             )
-        ]
+
+        revoked = 0
+        for registered in self.registry.list_all():
+            if not (
+                self._asset_identity_signatures(registered) & invalid_signatures
+            ):
+                continue
+            metadata = getattr(registered, "metadata", None)
+            if metadata is None:
+                metadata = {}
+                registered.metadata = metadata
+            if metadata.get("asset_admission_failed", False):
+                continue
+            metadata["asset_admission_failed"] = True
+            metadata["asset_admission_failure_reason"] = str(reason)
+            revoked += 1
+
+        for family in invalid_families:
+            self._runtime_gate.invalidate_family(family)
+
+        if revoked and self.registry.auto_save_path:
+            self.registry.save_to_file(self.registry.auto_save_path)
+        console_logger.warning(
+            "Revoked %d asset template(s) from families %s: %s",
+            revoked,
+            sorted(invalid_families),
+            reason,
+        )
+        return revoked
 
     def _extract_bounds_from_visual_mesh(
         self, sdf_path: Path

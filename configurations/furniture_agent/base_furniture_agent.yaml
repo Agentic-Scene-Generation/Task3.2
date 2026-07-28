@@ -153,7 +153,10 @@ asset_manager:
   hssd:
     data_path: "${paths.hssd_data_dir}/hssd-models"
     preprocessed_path: "${paths.hssd_data_dir}/preprocessed"
-    use_top_k: 5  # Number of top CLIP candidates before size ranking
+    # Required furniture must satisfy both semantic and physical size contracts.
+    # Search a wider cheap CLIP pool, then send only the best four shape matches
+    # through the bounded VLM admission path.
+    use_top_k: 20
     use_lenient_validation: true  # Use lenient validation for retrieved assets
     # Direct mode skips LLM request analysis for speed, but visually verifies a
     # few silhouette-critical families so a wall/frame cannot be accepted as a bed.
@@ -172,6 +175,8 @@ asset_manager:
       # first dimension-compatible, semantically admitted real HSSD mesh.
       max_candidates: 4
       use_lenient: true
+      critical_min_dimension_ratio: 0.75
+      critical_max_dimension_ratio: 1.35
       timeout_seconds: 180
       total_timeout_seconds: 360
       max_retries: 1

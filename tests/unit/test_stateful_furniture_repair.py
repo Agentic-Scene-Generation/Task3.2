@@ -449,6 +449,60 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         StatefulFurnitureAgent is None,
         f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
     )
+    def test_invalid_bed_replacement_reanchors_bedside_group(self) -> None:
+        bed = SimpleNamespace(
+            object_id="bed_0",
+            name="bed",
+            description="double bed",
+        )
+        agent = object.__new__(StatefulFurnitureAgent)
+        agent.scene = SimpleNamespace(
+            room_type="bedroom",
+            text_description="A bedroom with a bed and two nightstands.",
+            scene_expert_original_description=(
+                "A bedroom with a bed and two nightstands."
+            ),
+            objects={"bed_0": bed},
+        )
+        agent.agent_type = SimpleNamespace(value="furniture")
+        agent._stage_runtime_budget = {}
+        agent.furniture_safety_controller = SimpleNamespace(required_counts={})
+        agent._category_for_object = lambda _object_id, _obj: "bed"
+        agent._replace_invalid_furniture_assets = lambda _state: 1
+        agent._repair_forbidden_zone_conflicts = (
+            lambda include_windows=False: False
+        )
+        calls: list[str] = []
+        agent._anchor_existing_bed = lambda: calls.append("bed") or True
+        agent._repair_bedside_nightstands = (
+            lambda: calls.append("nightstands") or True
+        )
+        agent._repair_wardrobe_wall_anchor = lambda: False
+        agent._repair_structured_collisions = lambda _state: 0
+
+        repaired, actions = agent._attempt_deterministic_repair(
+            SimpleNamespace(
+                hard_valid=False,
+                hard_reasons=[
+                    "required bed asset bed_0 has unusable dimensions"
+                ],
+                issues=[
+                    SimpleNamespace(
+                        issue_type="asset_invalid",
+                        object_a_id="bed_0",
+                    )
+                ],
+            )
+        )
+
+        self.assertTrue(repaired)
+        self.assertEqual(["bed", "nightstands"], calls)
+        self.assertTrue(any("invalid furniture" in action for action in actions))
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
     def test_snap_transform_to_wall_copies_readonly_translation(self) -> None:
         agent = self._make_agent()
         agent._bounds_for_transform = lambda _obj, _transform: (

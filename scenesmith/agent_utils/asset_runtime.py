@@ -131,6 +131,16 @@ class AssetRuntimeGate:
     def __init__(self) -> None:
         self.configure(stage="", budget={}, required_objects=[])
 
+    @staticmethod
+    def is_asset_admitted(asset: Any) -> bool:
+        """Return whether an asset may participate in runtime reuse."""
+
+        metadata = getattr(asset, "metadata", {}) or {}
+        return not bool(
+            metadata.get("repair_placeholder", False)
+            or metadata.get("asset_admission_failed", False)
+        )
+
     def configure(
         self,
         *,
@@ -166,14 +176,7 @@ class AssetRuntimeGate:
             {
                 family: list(assets)
                 for family, assets in previous_success_cache.items()
-                if any(
-                    not bool(
-                        (getattr(asset, "metadata", {}) or {}).get(
-                            "repair_placeholder", False
-                        )
-                    )
-                    for asset in assets
-                )
+                if any(self.is_asset_admitted(asset) for asset in assets)
             }
             if stage and stage == previous_stage
             else {}
@@ -182,11 +185,7 @@ class AssetRuntimeGate:
             self.success_cache[family] = [
                 asset
                 for asset in assets
-                if not bool(
-                    (getattr(asset, "metadata", {}) or {}).get(
-                        "repair_placeholder", False
-                    )
-                )
+                if self.is_asset_admitted(asset)
             ]
             if not self.success_cache[family]:
                 del self.success_cache[family]
@@ -295,16 +294,19 @@ class AssetRuntimeGate:
         return plan
 
     def remember_success(self, family: str, asset: Any) -> None:
-        if bool(
-            (getattr(asset, "metadata", {}) or {}).get(
-                "repair_placeholder", False
-            )
-        ):
+        if not self.is_asset_admitted(asset):
             return
         cached = self.success_cache.setdefault(family, [])
         asset_id = str(getattr(asset, "object_id", ""))
         if all(str(getattr(existing, "object_id", "")) != asset_id for existing in cached):
             cached.append(asset)
+
+    def invalidate_family(self, family: str) -> int:
+        """Remove a semantically named family from the reusable success cache."""
+
+        removed = len(self.success_cache.get(family, []) or [])
+        self.success_cache.pop(family, None)
+        return removed
 
     def clear_success_cache(self) -> None:
         self.success_cache.clear()

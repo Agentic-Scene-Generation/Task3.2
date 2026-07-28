@@ -507,6 +507,42 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         """
         self.furniture_tools.set_noise_profile(mode)
 
+    def _on_furniture_hard_state_evaluated(
+        self,
+        hard_state: HardStateEvaluation,
+    ) -> None:
+        """Revoke geometry-invalid templates before any stage regeneration."""
+
+        invalid_ids = {
+            str(issue.object_a_id)
+            for issue in getattr(hard_state, "issues", [])
+            if getattr(issue, "issue_type", "") == "asset_invalid"
+            and getattr(issue, "object_a_id", "")
+        }
+        if not invalid_ids or self.scene is None:
+            return
+        invalid_objects = [
+            obj
+            for object_id, obj in self.scene.objects.items()
+            if str(object_id) in invalid_ids
+        ]
+        if not invalid_objects:
+            return
+
+        # The same identity exclusion is shared by deterministic replacement,
+        # the visible asset registry, and AssetRuntimeGate's semantic cache.
+        self._remember_geometry_failed_assets(invalid_objects)
+        invalidate = getattr(self.asset_manager, "invalidate_assets", None)
+        if not callable(invalidate):
+            return
+        reason = "; ".join(
+            str(issue.details)
+            for issue in getattr(hard_state, "issues", [])
+            if getattr(issue, "issue_type", "") == "asset_invalid"
+            and getattr(issue, "details", "")
+        )
+        invalidate(invalid_objects, reason=reason)
+
     def _attempt_deterministic_repair(
         self, hard_state: HardStateEvaluation
     ) -> tuple[bool, list[str]]:
@@ -522,6 +558,17 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
 
         actions: list[str] = []
         reasons = " ".join(hard_state.hard_reasons or []).lower()
+        invalid_categories: set[str] = set()
+        for issue in getattr(hard_state, "issues", []):
+            if getattr(issue, "issue_type", "") != "asset_invalid":
+                continue
+            object_id = str(getattr(issue, "object_a_id", "") or "")
+            obj = self.scene.objects.get(object_id)
+            if obj is None:
+                continue
+            category = self._category_for_object(object_id, obj)
+            if category:
+                invalid_categories.add(category)
         repair_plan = build_repair_plan(
             stage=self.agent_type.value,
             hard_reasons=hard_state.hard_reasons,
@@ -573,11 +620,13 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             bed_repair_needed = (
                 "missing required bed" in reasons
                 or "bedroom plausibility: bed" in reasons
+                or bool({"bed", "twin_bed"} & invalid_categories)
                 or window_conflict
             )
             nightstand_repair_needed = (
                 bed_repair_needed
                 or "missing required nightstand" in reasons
+                or "nightstand" in invalid_categories
                 or "bedroom relation:" in reasons
             )
             if bed_repair_needed and self._anchor_existing_bed():
@@ -592,6 +641,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 window_conflict
                 or "wardrobe" in reasons
                 or "closet" in reasons
+                or "wardrobe" in invalid_categories
             ) and self._repair_wardrobe_wall_anchor():
                 actions.append("moved wardrobe to a deterministic wall/corner anchor")
                 relation_changed = True

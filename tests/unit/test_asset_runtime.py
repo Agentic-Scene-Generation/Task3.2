@@ -76,6 +76,43 @@ class AssetRuntimeGateTest(unittest.TestCase):
         self.assertEqual(second.cached_assets[0].object_id, "mirror_asset")
         self.assertEqual(gate.request_count, 1)
 
+    def test_invalidated_required_family_can_acquire_a_new_asset(self) -> None:
+        gate = AssetRuntimeGate()
+        gate.configure(
+            stage="furniture",
+            budget={"max_semantic_retries_per_family": 2},
+            required_objects=["bed"],
+        )
+        first = gate.plan(["double bed"], ["bed"])
+        rejected = SimpleNamespace(object_id="bad_bed", metadata={})
+        gate.remember_success("bed", rejected)
+
+        removed = gate.invalidate_family("bed")
+        second = gate.plan(["double bed"], ["bed"])
+
+        self.assertEqual([0], first.allowed_indices)
+        self.assertEqual(1, removed)
+        self.assertEqual([0], second.allowed_indices)
+        self.assertFalse(second.cached_assets)
+
+    def test_admission_failed_asset_is_never_reused(self) -> None:
+        gate = AssetRuntimeGate()
+        gate.configure(
+            stage="furniture",
+            budget={"max_semantic_retries_per_family": 2},
+            required_objects=["bed"],
+        )
+        rejected = SimpleNamespace(
+            object_id="bad_bed",
+            metadata={"asset_admission_failed": True},
+        )
+
+        gate.remember_success("bed", rejected)
+        plan = gate.plan(["double bed"], ["bed"])
+
+        self.assertEqual([0], plan.allowed_indices)
+        self.assertFalse(plan.cached_assets)
+
     def test_failed_family_stops_stylistic_retries(self) -> None:
         gate = AssetRuntimeGate()
         gate.configure(

@@ -49,6 +49,18 @@ class MeshFrameTest(unittest.TestCase):
             requested_dimensions=[1.6, 2.05, 0.8],
         )
 
+    def test_critical_fit_rejects_severely_short_bed(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "does not fit requested proportions",
+        ):
+            validate_uniform_dimension_fit(
+                actual_dimensions=[1.6, 1.416, 0.944],
+                requested_dimensions=[1.6, 2.05, 0.8],
+                min_ratio=0.75,
+                max_ratio=1.35,
+            )
+
     def test_uniform_fit_accepts_float_roundoff_at_boundary(self) -> None:
         validate_uniform_dimension_fit(
             actual_dimensions=[0.7, 0.3 - 3e-8, 2.2],

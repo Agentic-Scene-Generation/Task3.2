@@ -1646,10 +1646,14 @@ class BaseStatefulAgent(ABC):
                 current_furniture_id=current_furniture_id,
                 agent_type=self.agent_type,
             )
-        return controller.evaluate_scene_state(
+        hard_state = controller.evaluate_scene_state(
             scene=self.scene,
             physics_context=physics_context,
         )
+        handler = getattr(self, "_on_furniture_hard_state_evaluated", None)
+        if callable(handler):
+            handler(hard_state)
+        return hard_state
 
     def _critic_fast_path_cfg(self) -> Any:
         return _cfg_get(self.cfg, "critic_fast_path", {})

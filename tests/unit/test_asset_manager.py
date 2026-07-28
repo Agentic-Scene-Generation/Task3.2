@@ -227,6 +227,66 @@ class TestAssetManager(unittest.TestCase):
             2,
         )
 
+    def test_critical_hssd_candidate_must_pass_shared_size_contract(self):
+        manager = object.__new__(AssetManager)
+        manager.agent_type = AgentType.FURNITURE
+        manager.cfg = OmegaConf.create(
+            {
+                "asset_manager": {
+                    "hssd": {
+                        "semantic_validation": {
+                            "enabled": True,
+                            "families": ["bed"],
+                            "critical_families": ["bed"],
+                            "max_candidates": 2,
+                            "critical_min_dimension_ratio": 0.75,
+                            "critical_max_dimension_ratio": 1.35,
+                        }
+                    }
+                },
+                "furniture_safety_controller": {
+                    "size_bounds": {
+                        "bed": {
+                            "min": [1.2, 1.6, 0.25],
+                            "max": [2.4, 2.4, 1.3],
+                        }
+                    }
+                },
+            }
+        )
+        manager.debug_dir = self.temp_dir / "debug"
+        manager._thin_covering_router = MagicMock()
+        manager._thin_covering_router.validate_asset.return_value = ValidationResult(
+            True,
+            "Recognizable complete bed",
+        )
+        compact_bed = HssdRetrievalResult(
+            mesh_path=str(self.temp_dir / "compact_bed.glb"),
+            hssd_id="compact_bed",
+            object_name="bed",
+            similarity_score=0.95,
+            size=(1.6, 1.416, 0.944),
+            category="large_objects",
+        )
+        dimension_valid_bed = HssdRetrievalResult(
+            mesh_path=str(self.temp_dir / "dimension_valid_bed.glb"),
+            hssd_id="dimension_valid_bed",
+            object_name="bed",
+            similarity_score=0.90,
+            size=(1.6, 2.0, 0.8),
+            category="large_objects",
+        )
+
+        selected = manager._select_direct_hssd_candidate(
+            candidates=[compact_bed, dimension_valid_bed],
+            description="Complete double bed with headboard",
+            short_name="bed",
+            desired_dimensions=[1.6, 2.05, 0.8],
+        )
+
+        self.assertEqual("dimension_valid_bed", selected.hssd_id)
+        manager._thin_covering_router.validate_asset.assert_called_once()
+
     def test_direct_hssd_validation_reuses_front_calibration_and_deadline(self):
         manager = object.__new__(AssetManager)
         manager.cfg = OmegaConf.create(
