@@ -178,7 +178,10 @@ asset_manager:
       optional_max_retries: 0
       validate_ambiguous_optional: true
       optional_min_similarity_score: 0.28
-      optional_min_similarity_margin: 0.04
+      # HSSD CLIP scores are densely clustered; a small top-2 margin alone is
+      # not evidence of semantic ambiguity. Optional assets invoke VLM only
+      # when absolute similarity or deterministic dimensions are unreliable.
+      optional_min_similarity_margin: 0.0
       cache_dir: "${oc.env:SCENEEXPERT_ASSET_VALIDATION_CACHE_DIR,outputs/scene_expert_asset_cache}"
       min_orientation_confidence: 0.55
     object_type_mapping:

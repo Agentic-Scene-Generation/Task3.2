@@ -1099,6 +1099,15 @@ class AssetManager:
                     time.monotonic() - validation_started
                 )
                 if remaining_seconds <= 1.0:
+                    if not critical_family:
+                        console_logger.warning(
+                            "Optional HSSD semantic validation deadline expired "
+                            "for '%s'; accepting deterministic dimension/CLIP "
+                            "candidate %s",
+                            description,
+                            candidates[0].hssd_id,
+                        )
+                        return candidates[0]
                     raise TimeoutError(
                         "HSSD semantic validation exhausted its shared "
                         f"{total_validation_seconds:.0f}s deadline for "
@@ -1155,6 +1164,20 @@ class AssetManager:
             )
 
         if infrastructure_failures == len(considered):
+            if not critical_family and bool(
+                getattr(
+                    self.cfg.asset_manager,
+                    "hssd_vlm_fallback_on_transient_error",
+                    True,
+                )
+            ):
+                console_logger.warning(
+                    "Optional HSSD VLM validation was unavailable for '%s'; "
+                    "accepting deterministic dimension/CLIP candidate %s",
+                    description,
+                    candidates[0].hssd_id,
+                )
+                return candidates[0]
             raise TimeoutError(
                 "HSSD semantic validation infrastructure was unavailable for "
                 f"all {len(considered)} candidate(s) of '{description}'"

@@ -352,6 +352,48 @@ class TestAssetManager(unittest.TestCase):
                 short_name="bed",
             )
 
+    def test_optional_hssd_validation_outage_uses_deterministic_candidate(self):
+        manager = object.__new__(AssetManager)
+        manager.cfg = OmegaConf.create(
+            {
+                "asset_manager": {
+                    "hssd_vlm_fallback_on_transient_error": True,
+                    "hssd": {
+                        "semantic_validation": {
+                            "enabled": True,
+                            "families": ["wall_art"],
+                            "critical_families": [],
+                            "validate_ambiguous_optional": True,
+                            "optional_min_similarity_score": 0.5,
+                            "max_candidates": 1,
+                        }
+                    },
+                }
+            }
+        )
+        manager.debug_dir = self.temp_dir / "debug"
+        manager._thin_covering_router = MagicMock()
+        manager._thin_covering_router.validate_asset.return_value = ValidationResult(
+            False,
+            "Validation call failed: upstream timeout",
+        )
+        candidate = HssdRetrievalResult(
+            mesh_path=str(self.temp_dir / "optional_art.glb"),
+            hssd_id="optional_art",
+            object_name="wall art",
+            similarity_score=0.4,
+            size=(0.8, 0.05, 0.6),
+            category="wall_objects",
+        )
+
+        selected = manager._select_direct_hssd_candidate(
+            candidates=[candidate],
+            description="framed wall art",
+            short_name="wall_art",
+        )
+
+        self.assertIs(selected, candidate)
+
     def test_optional_clear_hssd_match_skips_vlm(self):
         manager = object.__new__(AssetManager)
         manager.cfg = OmegaConf.create(

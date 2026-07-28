@@ -89,14 +89,14 @@ stage_budget:
   default:
     max_designer_iterations: 2
     max_repair_steps: 1
-    max_planner_turns: 4
+    max_planner_turns: 8
     max_designer_turns: 12
     max_critic_turns: 6
     max_wall_clock_seconds: 600
     # Exclusive role-active leases. Planner time pauses while its nested
     # designer/critic tools run. max_wall_clock_seconds bounds planning/design;
     # required visual scoring uses the isolated quality transaction below.
-    planner_active_max_seconds: 120
+    planner_active_max_seconds: 180
     designer_active_max_seconds: 360
     critic_active_max_seconds: 300
     # Compact response caps live here so pure SceneSmith/disabled ablations
@@ -147,11 +147,11 @@ stage_budget:
   furniture:
     max_designer_iterations: 2
     max_repair_steps: 2
-    max_planner_turns: 4
+    max_planner_turns: 8
     max_designer_turns: 16
     max_critic_turns: 6
     max_wall_clock_seconds: 900
-    planner_active_max_seconds: 150
+    planner_active_max_seconds: 240
     designer_active_max_seconds: 480
     critic_active_max_seconds: 360
     # Furniture quality gates must not inherit a nearly exhausted designer
@@ -170,11 +170,11 @@ stage_budget:
   wall_mounted:
     max_designer_iterations: 1
     max_repair_steps: 1
-    max_planner_turns: 3
+    max_planner_turns: 6
     max_designer_turns: 10
     max_critic_turns: 5
     max_wall_clock_seconds: 420
-    planner_active_max_seconds: 120
+    planner_active_max_seconds: 150
     designer_active_max_seconds: 240
     critic_active_max_seconds: 240
     max_asset_requests: 2
@@ -190,11 +190,11 @@ stage_budget:
   ceiling_mounted:
     max_designer_iterations: 1
     max_repair_steps: 1
-    max_planner_turns: 3
+    max_planner_turns: 6
     max_designer_turns: 8
     max_critic_turns: 5
     max_wall_clock_seconds: 360
-    planner_active_max_seconds: 90
+    planner_active_max_seconds: 150
     designer_active_max_seconds: 210
     critic_active_max_seconds: 240
     max_asset_requests: 2
@@ -209,11 +209,11 @@ stage_budget:
   manipuland:
     max_designer_iterations: 2
     max_repair_steps: 2
-    max_planner_turns: 4
+    max_planner_turns: 8
     max_designer_turns: 12
     max_critic_turns: 6
     max_wall_clock_seconds: 600
-    planner_active_max_seconds: 120
+    planner_active_max_seconds: 180
     designer_active_max_seconds: 360
     critic_active_max_seconds: 300
     max_asset_requests: 4

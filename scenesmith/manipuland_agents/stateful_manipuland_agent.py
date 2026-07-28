@@ -933,20 +933,9 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
                     placed_count = len(
                         self.scene.get_objects_by_type(ObjectType.MANIPULAND)
                     )
-                    if (
-                        minimum > 0
-                        and placed_count >= minimum
-                        and self._stage_trusted_score_available
-                        and self._stage_visual_scores
-                        and self._last_scored_scene_hash == self.scene.content_hash()
-                        and self._stage_visual_scores[-1]
-                        >= float(
-                            self._stage_budget_value(
-                                "min_visual_score",
-                                0.60,
-                            )
-                            or 0.60
-                        )
+                    if await self._manipuland_stage_contract_satisfied(
+                        minimum=minimum,
+                        placed_count=placed_count,
                     ):
                         console_logger.info(
                             "Manipuland completion contract satisfied after %s "
@@ -1005,6 +994,60 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
                 )
 
         console_logger.info("Manipuland placement complete")
+
+    async def _manipuland_stage_contract_satisfied(
+        self,
+        *,
+        minimum: int,
+        placed_count: int,
+    ) -> bool:
+        """Evaluate the committed manipuland stage, not each support target.
+
+        Per-furniture post-processing can make a physically meaningful change
+        after that furniture's critic score.  Re-score that exact aggregate
+        scene once, then stop target search as soon as the stage-wide minimum
+        and quality contract pass.  This prevents an empty second nightstand
+        from overwriting a valid first-nightstand stage with a local zero score.
+        """
+
+        if (
+            minimum <= 0
+            or placed_count < minimum
+            or not self._stage_trusted_score_available
+            or not self._stage_visual_scores
+        ):
+            return False
+
+        threshold = float(
+            self._stage_budget_value("min_visual_score", 0.60) or 0.60
+        )
+        if self._stage_visual_scores[-1] < threshold:
+            return False
+
+        hard_state = self._evaluate_current_hard_state()
+        if hard_state is not None and not hard_state.hard_valid:
+            return False
+
+        current_hash = self.scene.content_hash()
+        if self._last_scored_scene_hash != current_hash:
+            console_logger.info(
+                "Per-furniture post-processing changed the manipuland candidate; "
+                "scoring the exact aggregate stage before target selection continues"
+            )
+            await self._request_critique_impl(update_checkpoint=False)
+            if self._last_score_provenance.get("score_source") != "vlm_critic":
+                return False
+            refreshed_score = self._normalized_visual_score(self.previous_scores)
+            if refreshed_score is None:
+                return False
+            self._stage_trusted_score_available = True
+            self._stage_visual_scores.append(refreshed_score)
+
+        return (
+            self._last_scored_scene_hash == self.scene.content_hash()
+            and bool(self._stage_visual_scores)
+            and self._stage_visual_scores[-1] >= threshold
+        )
 
     def _get_max_target_furniture(self) -> int:
         try:

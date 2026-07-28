@@ -649,6 +649,22 @@ class BaseStatefulAgent(ABC):
         consumed = float(self._stage_role_active_consumed.get(role, 0.0))
         return limit - consumed
 
+    def _begin_mandatory_repair_transaction(self) -> str:
+        """Give one evidence-backed designer repair its own active-time lease.
+
+        SceneSmith's initial design may legitimately spend most of the designer
+        allowance acquiring and placing required assets.  Charging the later
+        object-specific hard-check repair against that same lease made the most
+        actionable designer call the first one to be cancelled.  The stage wall
+        clock and bounded hard-repair count remain authoritative.
+        """
+
+        previous_phase = self._stage_runtime_phase
+        if self._stage_runtime_budget:
+            self._stage_runtime_phase = "repair"
+            self._stage_role_active_consumed.pop("designer", None)
+        return previous_phase
+
     def _begin_critic_evaluation(self) -> None:
         """Start one isolated visual-scoring transaction for this candidate.
 
@@ -942,7 +958,7 @@ class BaseStatefulAgent(ABC):
         )
         if role == "designer":
             reserve_fraction = critic_reserve + finalization_reserve
-            if self._stage_runtime_phase != "fallback":
+            if self._stage_runtime_phase not in {"fallback", "repair"}:
                 reserve_fraction += fallback_reserve
         elif role == "planner":
             # A shorter outer planner deadline cancels an in-flight designer or
@@ -1077,8 +1093,19 @@ class BaseStatefulAgent(ABC):
             )
             if not budget_error:
                 raise
-            self._stage_runtime_exhausted = isinstance(exc, TimeoutError)
-            if role in {"planner", "designer"}:
+            # A child designer lease expiring is not equivalent to exhausting
+            # the outer workflow.  The candidate may contain useful mutations,
+            # and reserved coordinator/critic time can still diagnose it and
+            # launch the one bounded evidence-backed repair transaction.
+            coordinator_remaining = self._remaining_stage_seconds("planner")
+            self._stage_runtime_exhausted = bool(
+                isinstance(exc, TimeoutError)
+                and coordinator_remaining is not None
+                and coordinator_remaining <= 0
+            )
+            if role == "planner" or (
+                role == "designer" and self._stage_runtime_exhausted
+            ):
                 self._planner_budget_exhausted = True
             self._record_module_timing(
                 role,
@@ -1089,6 +1116,8 @@ class BaseStatefulAgent(ABC):
                     "error": str(exc),
                     "max_turns": max_turns,
                     "remaining_stage_seconds": remaining,
+                    "coordinator_remaining_seconds": coordinator_remaining,
+                    "stage_runtime_exhausted": self._stage_runtime_exhausted,
                 },
             )
             self._record_llm_call_debug(
@@ -1655,12 +1684,22 @@ class BaseStatefulAgent(ABC):
         return feedback.to_designer_text(max_chars=max_chars)
 
     def _hard_repair_design_change_limit(self) -> int:
-        return int(
+        configured_limit = int(
             _cfg_get(
                 self._critic_fast_path_cfg(),
                 "max_hard_repair_design_changes",
                 1,
             )
+        )
+        if not self._stage_runtime_budget:
+            return configured_limit
+        # SceneExpert's repair budget is the outer control contract.  A smaller
+        # legacy fast-path value must not silently cancel a repair round that
+        # the Harness explicitly reserved (for example: required-object repair
+        # followed by a collision repair on the resulting layout).
+        return max(
+            configured_limit,
+            int(self._stage_budget_value("max_repair_steps", configured_limit) or 0),
         )
 
     def _hard_repair_allowance_available(self) -> bool:
@@ -3555,7 +3594,13 @@ class BaseStatefulAgent(ABC):
                     f"{self._pending_hard_repair_hint}"
                 )
 
-            result = await self._request_design_change_impl(instruction)
+            previous_phase = self._stage_runtime_phase
+            if hard_repair_allowance:
+                previous_phase = self._begin_mandatory_repair_transaction()
+            try:
+                result = await self._request_design_change_impl(instruction)
+            finally:
+                self._stage_runtime_phase = previous_phase
             if hard_repair_allowance:
                 self._hard_repair_design_change_calls += 1
             result += await self._score_design_attempt_if_configured("design change")

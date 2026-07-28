@@ -24,6 +24,11 @@ def _load_budget_compatibility_agent() -> type:
         / "base_stateful_agent.py"
     )
     tree = ast.parse(source_path.read_text(encoding="utf-8"))
+    cfg_get = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_cfg_get"
+    )
     base_class = next(
         node
         for node in tree.body
@@ -32,8 +37,10 @@ def _load_budget_compatibility_agent() -> type:
     method_names = {
         "_refresh_asset_runtime_budget",
         "_stage_budget_value",
+        "_begin_mandatory_repair_transaction",
         "_begin_critic_evaluation",
         "_critic_score_call_timeout",
+        "_hard_repair_design_change_limit",
         "_remaining_stage_seconds",
         "configure_stage_runtime_budget",
     }
@@ -58,6 +65,7 @@ def _load_budget_compatibility_agent() -> type:
                 level=0,
             ),
             ast.Import(names=[ast.alias(name="time")]),
+            cfg_get,
             ast.ImportFrom(
                 module="scenesmith.scene_expert.critic_feedback",
                 names=[ast.alias(name="CriticFeedback")],
@@ -219,6 +227,34 @@ class StageRuntimeReserveTest(unittest.TestCase):
 
         agent._stage_runtime_budget = {}
         self.assertEqual(120.0, agent._critic_score_call_timeout(120.0))
+
+    def test_mandatory_repair_gets_fresh_designer_lease(self) -> None:
+        agent = BudgetCompatibilityAgent()
+        agent._stage_runtime_budget = {"max_repair_steps": 2}
+        agent._stage_runtime_phase = "agent"
+        agent._stage_role_active_consumed = {
+            "designer": 359.0,
+            "planner": 20.0,
+        }
+
+        previous_phase = agent._begin_mandatory_repair_transaction()
+
+        self.assertEqual("agent", previous_phase)
+        self.assertEqual("repair", agent._stage_runtime_phase)
+        self.assertNotIn("designer", agent._stage_role_active_consumed)
+        self.assertEqual(20.0, agent._stage_role_active_consumed["planner"])
+
+    def test_harness_repair_budget_overrides_smaller_legacy_limit(self) -> None:
+        budget = {"max_repair_steps": 2}
+        agent = BudgetCompatibilityAgent()
+        agent._stage_runtime_budget = budget
+        agent._critic_fast_path_cfg = lambda: {
+            "max_hard_repair_design_changes": 1,
+        }
+
+        limit = agent._hard_repair_design_change_limit()
+
+        self.assertEqual(2, limit)
 
     @unittest.skipIf(
         BaseStatefulAgent is None,

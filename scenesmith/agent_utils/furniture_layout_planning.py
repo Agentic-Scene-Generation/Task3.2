@@ -447,8 +447,14 @@ def _rotation_matrix(obj: Any) -> np.ndarray:
 
 
 def _bed_head_vector_xy(obj: Any) -> np.ndarray:
+    """Return the headboard/back direction for a +Y-front canonical asset."""
+
     rotation = _rotation_matrix(obj)
-    head = rotation @ np.array([0.0, 1.0, 0.0])
+    # Asset preprocessing canonicalizes the semantic/visible front to local
+    # +Y.  A bed's headboard is its back, so the headboard wall direction is
+    # local -Y.  Treating +Y as both front and headboard inverted deterministic
+    # bedroom layouts while making the plausibility verifier approve them.
+    head = rotation @ np.array([0.0, -1.0, 0.0])
     xy = head[:2]
     norm = float(np.linalg.norm(xy))
     if norm <= 1e-8:

@@ -2181,7 +2181,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             return min_x + 0.8, min_y + 0.8, 0.0
         plan = build_bedroom_anchor_plan(self.scene, self._bedroom_layout_cfg())
         wall = plan.bed_head_wall if plan else "north"
-        return 0.0, 0.0, self._yaw_for_head_wall(wall)
+        return 0.0, 0.0, self._yaw_for_inward_wall(wall)
 
     def _anchor_existing_bed(self) -> bool:
         beds = self._furniture_by_category("bed")
@@ -2190,7 +2190,10 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         bed = beds[0]
         plan = build_bedroom_anchor_plan(self.scene, self._bedroom_layout_cfg())
         wall = plan.bed_head_wall if plan and plan.bed_head_wall else "north"
-        yaw = self._yaw_for_head_wall(wall)
+        # Canonical furniture front is local +Y.  A wall-backed bed must point
+        # that front/foot direction into the room, leaving local -Y (the
+        # headboard/back) toward the selected wall.
+        yaw = self._yaw_for_inward_wall(wall)
         current = np.asarray(bed.transform.translation(), dtype=float)
         transform = self._grounded_transform(
             bed, x=float(current[0]), y=float(current[1]), yaw_deg=yaw
@@ -2218,7 +2221,8 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         bed_center = np.asarray(bed.transform.translation(), dtype=float)
         rotation = np.asarray(bed.transform.rotation().matrix(), dtype=float)
         lateral = rotation @ np.array([1.0, 0.0, 0.0])
-        head = rotation @ np.array([0.0, 1.0, 0.0])
+        # The headboard is the back of a +Y-front canonical bed.
+        head = rotation @ np.array([0.0, -1.0, 0.0])
         yaw = math.degrees(RollPitchYaw(bed.transform.rotation()).yaw_angle())
         gap = float(self._repair_cfg_value("nightstand_gap_m", 0.08))
 

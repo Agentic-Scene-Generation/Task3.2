@@ -133,7 +133,7 @@ asset_manager:
       optional_max_retries: 0
       validate_ambiguous_optional: true
       optional_min_similarity_score: 0.28
-      optional_min_similarity_margin: 0.04
+      optional_min_similarity_margin: 0.0
       cache_dir: "${oc.env:SCENEEXPERT_ASSET_VALIDATION_CACHE_DIR,outputs/scene_expert_asset_cache}"
       min_orientation_confidence: 0.55
     object_type_mapping:
