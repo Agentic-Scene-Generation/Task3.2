@@ -573,22 +573,39 @@ class BaseStatefulAgent(ABC):
     def _stage_budget_value(self, key: str, default: Any) -> Any:
         return self._stage_runtime_budget.get(key, default)
 
+    def _stage_output_count_contract(self) -> tuple[int, int, int]:
+        """Return (required minimum, preferred target, current stage count)."""
+        scene = getattr(self, "scene", None)
+        object_type = self.agent_type.to_object_type()
+        if scene is None or object_type is None:
+            return 0, 0, 0
+        target_minimum = max(
+            0,
+            int(getattr(scene, "scene_expert_min_output_objects", 0) or 0),
+        )
+        required_value = getattr(
+            scene,
+            "scene_expert_required_min_output_objects",
+            None,
+        )
+        required_minimum = (
+            target_minimum
+            if required_value is None
+            else max(0, int(required_value or 0))
+        )
+        current_count = len(scene.get_objects_by_type(object_type))
+        return required_minimum, target_minimum, current_count
+
     def _planner_completion_contract(self) -> str:
-        """Return a runtime planner directive for mandatory stage output."""
+        """Return a runtime planner directive for the preferred stage output."""
         if not self._stage_runtime_budget:
             return ""
-        minimum = max(
-            0,
-            int(
-                getattr(
-                    getattr(self, "scene", None),
-                    "scene_expert_min_output_objects",
-                    0,
-                )
-                or self._stage_budget_value("min_output_objects", 0)
-                or 0
-            ),
-        )
+        required_minimum, target_minimum, _ = self._stage_output_count_contract()
+        if target_minimum <= 0:
+            target_minimum = max(
+                0,
+                int(self._stage_budget_value("min_output_objects", 0) or 0),
+            )
         configured_maximum = int(
             getattr(
                 getattr(self, "scene", None),
@@ -598,20 +615,33 @@ class BaseStatefulAgent(ABC):
             or self._stage_budget_value("max_output_objects", 0)
             or 0
         )
-        if minimum <= 0:
+        if target_minimum <= 0:
             return ""
         maximum_clause = (
-            f" and no more than {max(configured_maximum, minimum)}"
+            f" and no more than {max(configured_maximum, target_minimum)}"
             if configured_maximum > 0
             else ""
         )
+        if required_minimum > 0:
+            completion_rule = (
+                f"ensure the designer places at least {required_minimum}"
+                f"{maximum_clause} stage-native objects before finish_stage. "
+                "This is an explicit user requirement, so a result below the "
+                "required minimum is not valid."
+            )
+        else:
+            completion_rule = (
+                f"ask the designer to place at least {target_minimum}"
+                f"{maximum_clause} coherent stage-native objects. This is a "
+                "preferred quality target, not an invented hard requirement: "
+                "make one genuine bounded acquisition/placement attempt, but "
+                "do not fabricate filler if no suitable asset can be placed."
+            )
         return (
             "\n\nRUNTIME STAGE COMPLETION CONTRACT: You must call "
-            "request_initial_design() and ensure the designer places at least "
-            f"{minimum}{maximum_clause} stage-native objects before finish_stage. "
-            "A zero-object result is not valid for this run, even if the generic "
-            "room guidance says decoration is optional. Rules only validate the "
-            "count; let the designer choose suitable object types and placements."
+            f"request_initial_design() and {completion_rule} Rules only validate "
+            "explicit requirements and physical safety; let the designer choose "
+            "suitable optional object types and placements."
         )
 
     def _effective_critique_round_limit(self) -> int:
@@ -1930,9 +1960,7 @@ class BaseStatefulAgent(ABC):
             object_type = self.agent_type.to_object_type()
             if object_type is not None:
                 stage_objects = self.scene.get_objects_by_type(object_type)
-                minimum = int(
-                    getattr(self.scene, "scene_expert_min_output_objects", 0) or 0
-                )
+                minimum, _, _ = self._stage_output_count_contract()
                 maximum = int(
                     getattr(self.scene, "scene_expert_max_output_objects", 0) or 0
                 )
@@ -3087,6 +3115,14 @@ class BaseStatefulAgent(ABC):
             and self.agent_type.is_placement_agent
             and not getattr(self, "_defer_stage_completion_contract", False)
         ):
+            required_minimum, target_minimum, current_count = (
+                self._stage_output_count_contract()
+            )
+            optional_target_unmet = (
+                required_minimum == 0
+                and target_minimum > 0
+                and current_count < target_minimum
+            )
             trusted_score_available = (
                 bool(
                     controller
@@ -3100,7 +3136,16 @@ class BaseStatefulAgent(ABC):
                     "visual critic did not produce a trustworthy score after "
                     "bounded compact retries"
                 )
-                if self._allow_degraded_stage_completion:
+                if optional_target_unmet:
+                    console_logger.warning(
+                        "%s; there is no committed optional stage output to "
+                        "score (%d/%d), leaving the bounded retry/diagnosis to "
+                        "the stage runtime",
+                        reason,
+                        current_count,
+                        target_minimum,
+                    )
+                elif self._allow_degraded_stage_completion:
                     console_logger.warning(
                         "%s; stage remains explicitly unscored", reason
                     )
@@ -3120,7 +3165,19 @@ class BaseStatefulAgent(ABC):
                         "visual critic quality below stage threshold: "
                         f"{visual_score:.3f} < {minimum_visual_score:.3f}"
                     )
-                    if self._allow_degraded_stage_completion:
+                    if optional_target_unmet:
+                        # The outer runtime loop owns one bounded retry for a
+                        # preferred optional target. Keep the trusted low score
+                        # as diagnosis, but do not turn absent optional decor
+                        # into a hard validation exception/traceback.
+                        console_logger.warning(
+                            "%s; preferred optional output target is unmet "
+                            "(%d/%d), leaving recovery to the stage runtime",
+                            reason,
+                            current_count,
+                            target_minimum,
+                        )
+                    elif self._allow_degraded_stage_completion:
                         console_logger.warning("%s", reason)
                         self._degraded_stage_reasons.append(reason)
                     else:

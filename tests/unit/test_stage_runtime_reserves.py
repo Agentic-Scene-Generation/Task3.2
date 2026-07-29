@@ -6,14 +6,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-try:
-    from scenesmith.agent_utils.base_stateful_agent import BaseStatefulAgent
-except ModuleNotFoundError as exc:
-    BaseStatefulAgent = None
-    _IMPORT_ERROR = exc
-else:
-    _IMPORT_ERROR = None
-
 
 def _load_budget_compatibility_agent() -> type:
     """Load the two budget methods without importing optional ACP dependencies."""
@@ -41,7 +33,9 @@ def _load_budget_compatibility_agent() -> type:
         "_begin_critic_evaluation",
         "_critic_score_call_timeout",
         "_hard_repair_design_change_limit",
+        "_planner_completion_contract",
         "_remaining_stage_seconds",
+        "_stage_output_count_contract",
         "configure_stage_runtime_budget",
     }
     methods = [
@@ -256,39 +250,57 @@ class StageRuntimeReserveTest(unittest.TestCase):
 
         self.assertEqual(2, limit)
 
-    @unittest.skipIf(
-        BaseStatefulAgent is None,
-        f"requires stateful agent dependencies: {_IMPORT_ERROR}",
-    )
-    def test_planner_contract_overrides_optional_zero_object_guidance(self) -> None:
-        budget = {"min_output_objects": 1, "max_output_objects": 3}
-        agent = SimpleNamespace(
-            _stage_runtime_budget=budget,
-            _stage_budget_value=lambda key, default: budget.get(key, default),
+    def test_optional_target_is_separate_from_required_output_minimum(self) -> None:
+        agent = BudgetCompatibilityAgent()
+        agent.agent_type = SimpleNamespace(
+            to_object_type=lambda: "wall_mounted",
+        )
+        agent.scene = SimpleNamespace(
+            scene_expert_min_output_objects=1,
+            scene_expert_required_min_output_objects=0,
+            get_objects_by_type=lambda object_type: [],
         )
 
-        contract = BaseStatefulAgent._planner_completion_contract(agent)
+        required, target, current = agent._stage_output_count_contract()
+
+        self.assertEqual((required, target, current), (0, 1, 0))
+
+    def test_planner_contract_preserves_optional_target_semantics(self) -> None:
+        budget = {"min_output_objects": 1, "max_output_objects": 3}
+        agent = BudgetCompatibilityAgent()
+        agent.scene = SimpleNamespace(
+            scene_expert_min_output_objects=1,
+            scene_expert_required_min_output_objects=0,
+            scene_expert_max_output_objects=3,
+            get_objects_by_type=lambda object_type: [],
+        )
+        agent.agent_type = SimpleNamespace(
+            to_object_type=lambda: "wall_mounted",
+        )
+        agent._stage_runtime_budget = budget
+
+        contract = agent._planner_completion_contract()
 
         self.assertIn("must call request_initial_design", contract)
         self.assertIn("at least 1 and no more than 3", contract)
-        self.assertIn("zero-object result is not valid", contract)
+        self.assertIn("preferred quality target", contract)
+        self.assertNotIn("not valid", contract)
 
-    @unittest.skipIf(
-        BaseStatefulAgent is None,
-        f"requires stateful agent dependencies: {_IMPORT_ERROR}",
-    )
     def test_prompt_requirements_raise_planner_count_contract(self) -> None:
         budget = {"min_output_objects": 1, "max_output_objects": 3}
-        agent = SimpleNamespace(
-            scene=SimpleNamespace(
-                scene_expert_min_output_objects=4,
-                scene_expert_max_output_objects=4,
-            ),
-            _stage_runtime_budget=budget,
-            _stage_budget_value=lambda key, default: budget.get(key, default),
+        agent = BudgetCompatibilityAgent()
+        agent.scene = SimpleNamespace(
+            scene_expert_min_output_objects=4,
+            scene_expert_required_min_output_objects=4,
+            scene_expert_max_output_objects=4,
+            get_objects_by_type=lambda object_type: [],
         )
+        agent.agent_type = SimpleNamespace(
+            to_object_type=lambda: "wall_mounted",
+        )
+        agent._stage_runtime_budget = budget
 
-        contract = BaseStatefulAgent._planner_completion_contract(agent)
+        contract = agent._planner_completion_contract()
 
         self.assertIn("at least 4 and no more than 4", contract)
 

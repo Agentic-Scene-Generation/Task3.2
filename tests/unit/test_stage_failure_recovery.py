@@ -130,6 +130,61 @@ class StageFailureRecoveryTest(unittest.TestCase):
 
         self.assertEqual(calls, {"run": 1})
 
+    def test_optional_zero_output_retries_then_continues_with_diagnostic(
+        self,
+    ) -> None:
+        class FakeScene:
+            text_description = "bedroom"
+            scene_expert_stage_budget = {"max_stage_regenerations": 1}
+            scene_expert_min_output_objects = 1
+            scene_expert_required_min_output_objects = 0
+
+            def __init__(self) -> None:
+                self.restore_calls = 0
+
+            @staticmethod
+            def to_state_dict() -> dict:
+                return {"objects": {}}
+
+            def restore_from_state_dict(self, state: dict) -> None:
+                del state
+                self.restore_calls += 1
+
+            @staticmethod
+            def get_objects_by_type(object_type: object) -> list:
+                del object_type
+                return []
+
+        calls = {"run": 0, "prepare": 0}
+
+        async def run_once() -> None:
+            calls["run"] += 1
+
+        async def prepare(reasons: list[str]) -> None:
+            self.assertTrue(reasons)
+            calls["prepare"] += 1
+
+        scene = FakeScene()
+        attempts = _run_sceneexpert_placement_stage(
+            stage="wall_mounted",
+            agent=SimpleNamespace(
+                admitted_stage_assets=lambda: [],
+                prepare_stage_regeneration=prepare,
+            ),
+            scene=scene,
+            run_once=run_once,
+        )
+
+        self.assertEqual(attempts, 1)
+        self.assertEqual(calls, {"run": 2, "prepare": 1})
+        self.assertEqual(scene.restore_calls, 1)
+        self.assertIn(
+            "optional_output_target_unmet",
+            scene.scene_expert_runtime_repair_events,
+        )
+        self.assertIn("wall_mounted", scene.scene_expert_stage_diagnostics)
+        self.assertFalse(hasattr(scene, "scene_expert_degraded_stage_reasons"))
+
     def test_budget_exhausted_zero_output_still_gets_fresh_planner_retry(
         self,
     ) -> None:

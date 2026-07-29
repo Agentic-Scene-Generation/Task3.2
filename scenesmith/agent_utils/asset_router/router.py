@@ -104,6 +104,38 @@ def _validation_render_has_visible_content(image_paths: list[Path]) -> bool:
     return False
 
 
+def _enforce_standalone_asset_contract(
+    *,
+    is_acceptable: bool,
+    reason: str,
+    suggestions: list[str],
+    contains_architectural_context: bool | None,
+    requested_object_is_dominant: bool | None,
+) -> tuple[bool, str, list[str]]:
+    """Make compound scene fragments ineligible even if their category matches."""
+    if contains_architectural_context is True:
+        is_acceptable = False
+        reason = (
+            "Compound scene fragment rejected: the mesh contains architectural "
+            f"context in addition to the requested asset. {reason}"
+        )
+        suggestions.append(
+            "Retrieve a standalone asset without walls, floors, room panels, "
+            "staging frames, or surrounding scene geometry"
+        )
+    if requested_object_is_dominant is False:
+        is_acceptable = False
+        reason = (
+            "Compound or mis-cropped asset rejected: the requested functional "
+            f"object does not dominate the mesh bounds. {reason}"
+        )
+        suggestions.append(
+            "Retrieve a tightly cropped standalone object whose visible geometry "
+            "fills most of its own bounding box"
+        )
+    return is_acceptable, reason, list(dict.fromkeys(suggestions))
+
+
 class AssetRouter:
     """Routes asset generation requests through LLM analysis and validation.
 
@@ -447,12 +479,34 @@ class AssetRouter:
         except (TypeError, ValueError):
             orientation_confidence = None
 
+        contains_architectural_context = response_json.get(
+            "contains_architectural_context"
+        )
+        if not isinstance(contains_architectural_context, bool):
+            contains_architectural_context = None
+        requested_object_is_dominant = response_json.get("requested_object_is_dominant")
+        if not isinstance(requested_object_is_dominant, bool):
+            requested_object_is_dominant = None
+
+        is_acceptable = bool(response_json.get("is_acceptable", False))
+        reason = str(response_json.get("reason", "Unknown"))
+        suggestions = list(response_json.get("suggestions", []) or [])
+        is_acceptable, reason, suggestions = _enforce_standalone_asset_contract(
+            is_acceptable=is_acceptable,
+            reason=reason,
+            suggestions=suggestions,
+            contains_architectural_context=contains_architectural_context,
+            requested_object_is_dominant=requested_object_is_dominant,
+        )
+
         return ValidationResult(
-            is_acceptable=response_json.get("is_acceptable", False),
-            reason=response_json.get("reason", "Unknown"),
-            suggestions=response_json.get("suggestions", []),
+            is_acceptable=is_acceptable,
+            reason=reason,
+            suggestions=suggestions,
             front_view_image_index=front_view_image_index,
             orientation_confidence=orientation_confidence,
+            contains_architectural_context=contains_architectural_context,
+            requested_object_is_dominant=requested_object_is_dominant,
         )
 
     def validate_item_types(self, items: list[AssetItem]) -> str | None:

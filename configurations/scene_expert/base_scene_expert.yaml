@@ -97,9 +97,12 @@ stage_budget:
   default:
     max_designer_iterations: 2
     max_repair_steps: 1
-    max_planner_turns: 8
-    max_designer_turns: 12
-    max_critic_turns: 6
+    # Zero means inherit each SceneSmith agent's native turn allowance. Keeping
+    # a second, smaller SceneExpert turn cap caused valid nested tool workflows
+    # to stop before their native planner/designer contract completed.
+    max_planner_turns: 0
+    max_designer_turns: 0
+    max_critic_turns: 0
     max_wall_clock_seconds: 600
     # Exclusive role-active leases. Planner time pauses while its nested
     # designer/critic tools run. max_wall_clock_seconds bounds planning/design;
@@ -149,9 +152,9 @@ stage_budget:
   floor_plan:
     max_designer_iterations: 2
     max_repair_steps: 1
-    max_planner_turns: 10
-    max_designer_turns: 14
-    max_critic_turns: 6
+    max_planner_turns: 0
+    max_designer_turns: 0
+    max_critic_turns: 0
     # SceneSmith's planner owns nested designer/critic calls. These leases cover
     # one complete nested turn instead of truncating valid tool-tail finalization.
     max_wall_clock_seconds: 600
@@ -165,12 +168,12 @@ stage_budget:
   furniture:
     max_designer_iterations: 2
     max_repair_steps: 2
-    max_planner_turns: 8
-    max_designer_turns: 16
-    max_critic_turns: 6
-    max_wall_clock_seconds: 900
-    planner_active_max_seconds: 240
-    designer_active_max_seconds: 480
+    max_planner_turns: 0
+    max_designer_turns: 0
+    max_critic_turns: 0
+    max_wall_clock_seconds: 1050
+    planner_active_max_seconds: 300
+    designer_active_max_seconds: 660
     critic_active_max_seconds: 360
     # Furniture quality gates must not inherit a nearly exhausted designer
     # deadline. Each distinct rendered candidate gets one bounded VLM window.
@@ -181,39 +184,38 @@ stage_budget:
     max_optional_object_families: 2
     max_assets_per_request: 6
     max_semantic_retries_per_family: 2
-    # Every placement stage must create at least one stage-native object. Prompt
-    # requirements may raise this effective minimum, but do not require filler
-    # objects in addition to explicitly requested furniture.
+    # Preferred agent target. Prompt-required furniture is tracked separately
+    # as the hard minimum; this value never invents a new hard requirement.
     min_output_objects: 1
   wall_mounted:
     max_designer_iterations: 1
     max_repair_steps: 1
-    max_planner_turns: 6
-    max_designer_turns: 10
-    max_critic_turns: 5
-    max_wall_clock_seconds: 420
-    planner_active_max_seconds: 150
-    designer_active_max_seconds: 240
+    max_planner_turns: 0
+    max_designer_turns: 0
+    max_critic_turns: 0
+    max_wall_clock_seconds: 600
+    planner_active_max_seconds: 240
+    designer_active_max_seconds: 360
     critic_active_max_seconds: 240
     max_asset_requests: 2
     asset_acquisition_timeout_seconds: 300
     max_optional_object_families: 3
     max_assets_per_request: 4
     max_semantic_retries_per_family: 1
-    # Decoration stages must produce a bounded, non-empty result. Explicit
-    # prompt requirements may raise the effective maximum above this value.
+    # Preferred non-empty decoration target. If the prompt did not explicitly
+    # require wall decor, exhausting this target is diagnostic, not a hard fail.
     min_output_objects: 1
     max_output_objects: 3
     max_stage_regenerations: 1
   ceiling_mounted:
     max_designer_iterations: 1
     max_repair_steps: 1
-    max_planner_turns: 6
-    max_designer_turns: 8
-    max_critic_turns: 5
-    max_wall_clock_seconds: 360
-    planner_active_max_seconds: 150
-    designer_active_max_seconds: 210
+    max_planner_turns: 0
+    max_designer_turns: 0
+    max_critic_turns: 0
+    max_wall_clock_seconds: 480
+    planner_active_max_seconds: 210
+    designer_active_max_seconds: 300
     critic_active_max_seconds: 240
     max_asset_requests: 2
     asset_acquisition_timeout_seconds: 300
@@ -227,12 +229,12 @@ stage_budget:
   manipuland:
     max_designer_iterations: 2
     max_repair_steps: 2
-    max_planner_turns: 8
-    max_designer_turns: 12
-    max_critic_turns: 6
-    max_wall_clock_seconds: 600
-    planner_active_max_seconds: 180
-    designer_active_max_seconds: 360
+    max_planner_turns: 0
+    max_designer_turns: 0
+    max_critic_turns: 0
+    max_wall_clock_seconds: 780
+    planner_active_max_seconds: 240
+    designer_active_max_seconds: 540
     critic_active_max_seconds: 300
     max_asset_requests: 4
     asset_acquisition_timeout_seconds: 300

@@ -11,6 +11,9 @@ from PIL import Image
 
 from scenesmith.agent_utils.asset_router import AssetRouter
 from scenesmith.agent_utils.asset_router.dataclasses import AnalysisResult, AssetItem
+from scenesmith.agent_utils.asset_router.router import (
+    _enforce_standalone_asset_contract,
+)
 from scenesmith.agent_utils.room import AgentType, ObjectType
 
 
@@ -39,6 +42,21 @@ class TestAssetValidationPreflight(unittest.TestCase):
             self.assertFalse(result.is_acceptable)
             self.assertIn("blank", result.reason)
             router.vlm_service.create_completion.assert_not_called()
+
+    def test_compound_architectural_asset_overrides_positive_category_match(
+        self,
+    ) -> None:
+        accepted, reason, suggestions = _enforce_standalone_asset_contract(
+            is_acceptable=True,
+            reason="The requested bed is recognizable.",
+            suggestions=[],
+            contains_architectural_context=True,
+            requested_object_is_dominant=False,
+        )
+
+        self.assertFalse(accepted)
+        self.assertIn("does not dominate", reason)
+        self.assertTrue(any("standalone" in suggestion for suggestion in suggestions))
 
 
 class TestAnalysisResultWasModified(unittest.TestCase):

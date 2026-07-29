@@ -743,12 +743,13 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
         if not furniture_data:
             console_logger.info("No furniture identified for manipuland placement")
             if self._stage_runtime_budget:
+                required_minimum, _, _ = self._stage_output_count_contract()
                 eligible_support_objects = [
                     obj
                     for obj in scene.get_objects_by_type(ObjectType.FURNITURE)
                     if not getattr(obj, "immutable", False)
                 ]
-                if not eligible_support_objects:
+                if not eligible_support_objects and required_minimum > 0:
                     raise StageValidationError(
                         stage=self.agent_type.value,
                         reasons=[
@@ -784,13 +785,20 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
             )
         ]
         if not furniture_data:
-            raise StageValidationError(
-                stage=self.agent_type.value,
-                reasons=[
-                    "missing required stage output: the analyzer selection "
-                    "contained no eligible furniture support target"
-                ],
+            required_minimum, _, _ = self._stage_output_count_contract()
+            if required_minimum > 0:
+                raise StageValidationError(
+                    stage=self.agent_type.value,
+                    reasons=[
+                        "missing required stage output: the analyzer selection "
+                        "contained no eligible furniture support target"
+                    ],
+                )
+            console_logger.warning(
+                "Manipuland analyzer selected no eligible support target; "
+                "leaving the optional output retry/diagnosis to the stage runtime"
             )
+            return
         max_target_furniture = self._get_max_target_furniture()
         if max_target_furniture > 0 and len(furniture_data) > max_target_furniture:
             original_count = len(furniture_data)
@@ -966,6 +974,21 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
                 and self._last_scored_scene_hash == self.scene.content_hash()
             )
             if not current_scene_scored:
+                required_minimum, target_minimum, current_count = (
+                    self._stage_output_count_contract()
+                )
+                optional_target_unmet = (
+                    required_minimum == 0
+                    and target_minimum > 0
+                    and current_count < target_minimum
+                )
+                if optional_target_unmet:
+                    console_logger.warning(
+                        "Manipuland stage has no committed optional output to "
+                        "score; leaving its bounded retry/diagnosis to the stage "
+                        "runtime"
+                    )
+                    return
                 raise StageValidationError(
                     stage=self.agent_type.value,
                     reasons=[
@@ -974,9 +997,7 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
                     ],
                 )
             final_visual_score = (
-                self._stage_visual_scores[-1]
-                if self._stage_visual_scores
-                else None
+                self._stage_visual_scores[-1] if self._stage_visual_scores else None
             )
             minimum_visual_score = float(
                 self._stage_budget_value("min_visual_score", 0.60) or 0.60
@@ -1018,9 +1039,7 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
         ):
             return False
 
-        threshold = float(
-            self._stage_budget_value("min_visual_score", 0.60) or 0.60
-        )
+        threshold = float(self._stage_budget_value("min_visual_score", 0.60) or 0.60)
         if self._stage_visual_scores[-1] < threshold:
             return False
 

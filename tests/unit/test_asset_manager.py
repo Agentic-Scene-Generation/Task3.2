@@ -16,6 +16,7 @@ from scenesmith.agent_utils.asset_manager import (
     AssetManager,
     AssetPathConfig,
     FailedAsset,
+    _align_hssd_request_dimensions,
 )
 from scenesmith.agent_utils.asset_router.dataclasses import ValidationResult
 from scenesmith.agent_utils.geometry_generation_server.dataclasses import (
@@ -141,6 +142,35 @@ class TestAssetManager(unittest.TestCase):
         self.assertEqual(request.object_type, ObjectType.FURNITURE)
         self.assertEqual(request.style_context, "Modern minimalist living room")
         self.assertEqual(request.operation_type, AssetOperationType.INITIAL)
+
+    def test_hssd_request_alignment_pads_missing_optional_dimensions(self):
+        request = AssetGenerationRequest(
+            object_descriptions=["Pendant lamp", "Ceiling fan"],
+            short_names=["pendant_lamp", "ceiling_fan"],
+            object_type=ObjectType.CEILING_MOUNTED,
+            desired_dimensions=[[0.4, 0.4, 0.5]],
+            style_context="modern bedroom",
+        )
+
+        aligned = _align_hssd_request_dimensions(request)
+
+        self.assertEqual(
+            aligned.desired_dimensions,
+            [[0.4, 0.4, 0.5], []],
+        )
+        self.assertEqual(aligned.object_descriptions, request.object_descriptions)
+        self.assertEqual(aligned.short_names, request.short_names)
+
+    def test_hssd_request_alignment_rejects_surplus_dimensions(self):
+        request = AssetGenerationRequest(
+            object_descriptions=["Pendant lamp"],
+            short_names=["pendant_lamp"],
+            object_type=ObjectType.CEILING_MOUNTED,
+            desired_dimensions=[[0.4, 0.4, 0.5], [1.0, 1.0, 1.0]],
+        )
+
+        with self.assertRaises(ValueError):
+            _align_hssd_request_dimensions(request)
 
     def test_create_scene_object(self):
         """Test creating SceneObject from asset paths."""

@@ -432,8 +432,18 @@ class StatefulWallAgent(BaseStatefulAgent, BaseWallAgent):
 
         if not self.wall_surfaces:
             console_logger.warning(f"No wall surfaces found for room {room_id}")
+            required_minimum = getattr(
+                scene,
+                "scene_expert_required_min_output_objects",
+                None,
+            )
             minimum = int(
-                getattr(scene, "scene_expert_min_output_objects", 0) or 0
+                (
+                    getattr(scene, "scene_expert_min_output_objects", 0)
+                    if required_minimum is None
+                    else required_minimum
+                )
+                or 0
             )
             if minimum > 0:
                 raise StageValidationError(

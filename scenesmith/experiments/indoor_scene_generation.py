@@ -398,6 +398,60 @@ def _score_postprocessed_candidate_or_pause(
     )
 
 
+def _optional_stage_output_deficit(stage: str, scene: RoomScene) -> str:
+    """Return a diagnostic when a preferred optional stage target is unmet."""
+    object_type_by_stage = {
+        "furniture": ObjectType.FURNITURE,
+        "wall_mounted": ObjectType.WALL_MOUNTED,
+        "ceiling_mounted": ObjectType.CEILING_MOUNTED,
+        "manipuland": ObjectType.MANIPULAND,
+    }
+    object_type = object_type_by_stage.get(stage)
+    if object_type is None:
+        return ""
+    target_minimum = int(getattr(scene, "scene_expert_min_output_objects", 0) or 0)
+    required_minimum = getattr(
+        scene,
+        "scene_expert_required_min_output_objects",
+        None,
+    )
+    if required_minimum is None:
+        required_minimum = target_minimum
+    required_minimum = int(required_minimum or 0)
+    if target_minimum <= required_minimum:
+        return ""
+    current_count = len(scene.get_objects_by_type(object_type))
+    if current_count >= target_minimum:
+        return ""
+    return (
+        f"preferred optional stage output unmet: {stage} produced {current_count} "
+        f"objects; target={target_minimum}, explicitly_required={required_minimum}"
+    )
+
+
+def _record_optional_stage_diagnostic(
+    *,
+    stage: str,
+    scene: RoomScene,
+    reason: str,
+    runtime_events: list[str],
+) -> None:
+    """Persist an optional-output diagnosis without degrading the whole scene."""
+    runtime_events.append("optional_output_target_unmet")
+    setattr(scene, "scene_expert_runtime_repair_events", runtime_events)
+    diagnostics = dict(getattr(scene, "scene_expert_stage_diagnostics", {}) or {})
+    stage_diagnostics = list(diagnostics.get(stage, []) or [])
+    stage_diagnostics.append(reason)
+    diagnostics[stage] = list(dict.fromkeys(stage_diagnostics))
+    setattr(scene, "scene_expert_stage_diagnostics", diagnostics)
+    console_logger.warning(
+        "%s stage exhausted its bounded agent retry without optional output; "
+        "recording a diagnostic and continuing downstream: %s",
+        stage,
+        reason,
+    )
+
+
 def _run_sceneexpert_placement_stage(
     *,
     stage: str,
@@ -420,6 +474,67 @@ def _run_sceneexpert_placement_stage(
         try:
             asyncio.run(run_once())
             _raise_if_required_assets_unavailable(stage=stage, agent=agent)
+            optional_deficit = _optional_stage_output_deficit(stage, scene)
+            if optional_deficit:
+                admitted_assets = getattr(agent, "admitted_stage_assets", None)
+                available_assets = (
+                    list(admitted_assets()) if callable(admitted_assets) else []
+                )
+                if available_assets and not placement_continuation_attempted:
+                    placement_continuation_attempted = True
+                    runtime_events.append("optional_placement_only_continuation")
+                    console_logger.warning(
+                        "%s acquired %d real asset(s) but missed its optional "
+                        "placement target; running one compact placement-only retry",
+                        stage,
+                        len(available_assets),
+                    )
+                    scene.restore_from_state_dict(copy.deepcopy(baseline_state))
+                    scene.text_description = stage_prompt
+                    prepare_placement = getattr(
+                        agent,
+                        "prepare_placement_continuation",
+                        None,
+                    )
+                    if callable(prepare_placement):
+                        asyncio.run(prepare_placement([optional_deficit]))
+                        continue
+                if regeneration_attempt < max_regenerations:
+                    regeneration_attempt += 1
+                    runtime_events.append(
+                        f"optional_stage_regeneration_{regeneration_attempt}"
+                    )
+                    console_logger.warning(
+                        "%s missed its preferred optional output target; "
+                        "requesting one fresh agent design (%d/%d)",
+                        stage,
+                        regeneration_attempt,
+                        max_regenerations,
+                    )
+                    scene.restore_from_state_dict(copy.deepcopy(baseline_state))
+                    scene.text_description = (
+                        f"{stage_prompt}\n\n"
+                        "# Preferred Optional Stage Retry\n"
+                        "Try once more to place a small coherent stage-native "
+                        "object set. This is a quality target, not a hard scene "
+                        "requirement. Resolve: "
+                        f"{optional_deficit}"
+                    )
+                    prepare_regeneration = getattr(
+                        agent,
+                        "prepare_stage_regeneration",
+                        None,
+                    )
+                    if callable(prepare_regeneration):
+                        asyncio.run(prepare_regeneration([optional_deficit]))
+                    continue
+                _record_optional_stage_diagnostic(
+                    stage=stage,
+                    scene=scene,
+                    reason=optional_deficit,
+                    runtime_events=runtime_events,
+                )
+                return regeneration_attempt
             setattr(scene, "scene_expert_runtime_repair_events", runtime_events)
             return regeneration_attempt
         except StageValidationError as exc:
@@ -1984,8 +2099,18 @@ def _generate_room(
                     f"Removed {len(removed_ids)} fallen manipuland(s) during "
                     f"final simulation: {removed_ids}"
                 )
+            required_manipuland_minimum = getattr(
+                scene,
+                "scene_expert_required_min_output_objects",
+                None,
+            )
             minimum_manipulands = int(
-                getattr(scene, "scene_expert_min_output_objects", 0) or 0
+                (
+                    getattr(scene, "scene_expert_min_output_objects", 0)
+                    if required_manipuland_minimum is None
+                    else required_manipuland_minimum
+                )
+                or 0
             )
             final_manipuland_count = len(
                 scene.get_objects_by_type(ObjectType.MANIPULAND)

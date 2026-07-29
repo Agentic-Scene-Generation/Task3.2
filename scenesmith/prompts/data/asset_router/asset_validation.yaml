@@ -1,5 +1,5 @@
 name: "asset_validation"
-version: "1.0"
+version: "1.1"
 description: "Validate generated 3D mesh matches the requested description and style"
 template_variables: ["description", "num_images"]
 prompt: |
@@ -38,6 +38,12 @@ prompt: |
      - dresser with mirror on top = REJECT (mirror sits on dresser)
      Unlike bedding which is integral to a bed's function, these objects sit ON furniture.
      Only accept if genuinely ONE object (e.g., a single table, single chair, single sofa)
+     REJECT any furniture embedded in architectural or scene context: walls, floors,
+     room corners, ceilings, door/window frames, display backdrops, large staging
+     frames, or surrounding room shells are separate scene geometry.
+     The requested functional object must dominate the mesh and fill most of its
+     rendered bounding box. REJECT a small bed/sofa/table/etc. inside a much larger
+     compound scene fragment even when the requested category is technically visible.
   4. Is the object complete? (no missing parts, not cut off at edges)
   5. Are proportions reasonable? (not severely distorted)
   6. Are all doors/drawers CLOSED? Generated meshes cannot articulate, so any
@@ -132,8 +138,11 @@ prompt: |
   {
     "is_acceptable": boolean,
     "reason": "string (brief explanation)",
-    "suggestions": ["string"] (if rejected, what to try differently)
+    "suggestions": ["string"] (if rejected, what to try differently),
+    "contains_architectural_context": boolean,
+    "requested_object_is_dominant": boolean
   }
+  Both boolean context fields are REQUIRED in every response. Do not omit them.
   </output_schema>
 
   <examples>
@@ -247,6 +256,15 @@ prompt: |
     "is_acceptable": false,
     "reason": "Mesh shows arched floor lamp with extending arm - this design is physically unstable due to off-center mass distribution. The lamp arm extends far beyond the base footprint.",
     "suggestions": ["Regenerate as a straight vertical floor lamp design with the lampshade directly above the base"]
+  }
+
+  Example 17 - Compound scene fragment (REJECT):
+  {
+    "is_acceptable": false,
+    "reason": "A small bed is embedded inside large wall and floor panels that dominate the mesh bounds",
+    "suggestions": ["Retrieve a standalone bed without surrounding architecture"],
+    "contains_architectural_context": true,
+    "requested_object_is_dominant": false
   }
   </examples>
 

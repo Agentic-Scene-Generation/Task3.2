@@ -407,15 +407,24 @@ def _check_stage_population(stage: str, scene_state_info: dict) -> list[VerifyIs
     counts = scene_state_info.get("object_counts", {}) or {}
     count = int(counts.get(object_type, 0) or 0)
     minimum = int(scene_state_info.get("stage_min_output_objects", 0) or 0)
+    required_minimum = int(
+        scene_state_info.get("stage_required_min_output_objects", minimum) or 0
+    )
     maximum = int(scene_state_info.get("stage_max_output_objects", 0) or 0)
     issues: list[VerifyIssue] = []
     if count < minimum:
+        target_semantics = (
+            "preferred optional target"
+            if required_minimum == 0 and minimum > required_minimum
+            else "required completion contract"
+        )
         issues.append(
             VerifyIssue(
                 issue_type="insufficient_stage_objects",
                 description=(
                     f"Stage '{stage}' produced {count} {object_type} objects; "
-                    f"the completion contract requires at least {minimum}"
+                    f"the {target_semantics} is at least {minimum} "
+                    f"(explicitly required: {required_minimum})"
                 ),
             )
         )

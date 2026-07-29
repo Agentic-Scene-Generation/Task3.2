@@ -1179,21 +1179,32 @@ class SceneExpertHookRunner:
             "scene_expert_required_objects",
             required_objects,
         )
+        required_min_output_objects = len(required_objects)
         if not execution_control_enabled:
             min_output_objects = 0
             max_output_objects = 0
         elif self._prompt_forbids_unrequested_objects():
-            min_output_objects = len(required_objects)
-            max_output_objects = len(required_objects)
+            min_output_objects = required_min_output_objects
+            max_output_objects = required_min_output_objects
         else:
             min_output_objects = max(
-                len(required_objects),
+                required_min_output_objects,
                 int(context.stage_budget.min_output_objects or 0),
             )
             configured_max = int(context.stage_budget.max_output_objects or 0)
             max_output_objects = (
-                max(configured_max, len(required_objects)) if configured_max > 0 else 0
+                max(configured_max, required_min_output_objects)
+                if configured_max > 0
+                else 0
             )
+        # Keep the hard prompt requirement separate from SceneExpert's preferred
+        # non-empty target. Optional decor should receive an agent retry and a
+        # diagnostic when absent, never a physics hard failure.
+        setattr(
+            scene,
+            "scene_expert_required_min_output_objects",
+            required_min_output_objects,
+        )
         setattr(scene, "scene_expert_min_output_objects", min_output_objects)
         setattr(scene, "scene_expert_max_output_objects", max_output_objects)
         if min_output_objects > 0 or max_output_objects > 0:
@@ -1202,12 +1213,14 @@ class SceneExpertHookRunner:
             )
             completion_contract = (
                 f"=== SceneExpert Stage Completion Contract: {stage} ===\n"
-                f"Add {min_output_objects} to {maximum_text} stage-native objects. "
-                "The stage must not finish below the minimum, even when every "
-                "object is optional in the raw user prompt. Prefer a small coherent "
-                "set over filler objects. If an asset request fails, choose a "
-                "semantically equivalent substitute with realistic natural "
-                "proportions and retry within the stage budget.\n"
+                f"Target {min_output_objects} to {maximum_text} stage-native "
+                f"objects; {required_min_output_objects} are explicitly required "
+                "by the user. Explicit requirements are hard completion criteria; "
+                "the remaining count is a preferred quality target. Make a genuine "
+                "bounded attempt and prefer a small coherent set over filler. If "
+                "an asset request fails, choose a semantically equivalent substitute "
+                "with realistic natural proportions and retry within the stage "
+                "budget.\n"
                 "=== End Stage Completion Contract ==="
             )
             injection_parts.append(completion_contract)
@@ -1629,6 +1642,13 @@ class SceneExpertHookRunner:
                 f"asset semantic validation remained transient-unverified: {name}"
                 for name in transient_unverified_names
             )
+            current_stage = str(getattr(scene, "scene_expert_stage", "") or "")
+            stage_diagnostics = list(
+                (getattr(scene, "scene_expert_stage_diagnostics", {}) or {}).get(
+                    current_stage, []
+                )
+                or []
+            )
             return {
                 "object_names": names,
                 "placeholder_names": placeholder_names,
@@ -1638,10 +1658,19 @@ class SceneExpertHookRunner:
                 "stage_min_output_objects": int(
                     getattr(scene, "scene_expert_min_output_objects", 0) or 0
                 ),
+                "stage_required_min_output_objects": int(
+                    getattr(
+                        scene,
+                        "scene_expert_required_min_output_objects",
+                        0,
+                    )
+                    or 0
+                ),
                 "stage_max_output_objects": int(
                     getattr(scene, "scene_expert_max_output_objects", 0) or 0
                 ),
                 "degraded_stage_reasons": list(dict.fromkeys(degraded_stage_reasons)),
+                "stage_diagnostics": stage_diagnostics,
                 "runtime_repair_events": list(
                     getattr(scene, "scene_expert_runtime_repair_events", []) or []
                 ),
@@ -1654,8 +1683,10 @@ class SceneExpertHookRunner:
                 "object_counts": {},
                 "object_placements": [],
                 "stage_min_output_objects": 0,
+                "stage_required_min_output_objects": 0,
                 "stage_max_output_objects": 0,
                 "degraded_stage_reasons": [],
+                "stage_diagnostics": [],
                 "runtime_repair_events": [],
             }
 

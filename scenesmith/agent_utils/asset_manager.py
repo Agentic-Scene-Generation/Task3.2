@@ -167,6 +167,44 @@ class AssetGenerationRequest:
     """
 
 
+def _align_hssd_request_dimensions(
+    request: AssetGenerationRequest,
+) -> AssetGenerationRequest:
+    """Pad omitted optional HSSD dimensions instead of indexing past the request."""
+    if len(request.desired_dimensions) == len(request.object_descriptions):
+        return request
+    if len(request.desired_dimensions) > len(request.object_descriptions):
+        raise ValueError(
+            "HSSD request has more dimension entries "
+            f"({len(request.desired_dimensions)}) than object descriptions "
+            f"({len(request.object_descriptions)})"
+        )
+    original_count = len(request.desired_dimensions)
+    aligned_dimensions = [
+        (
+            list(request.desired_dimensions[index])
+            if index < original_count and request.desired_dimensions[index] is not None
+            else []
+        )
+        for index in range(len(request.object_descriptions))
+    ]
+    console_logger.warning(
+        "Aligned %d HSSD descriptions with %d dimension entries; missing optional "
+        "dimensions will use semantic retrieval without a size hint",
+        len(request.object_descriptions),
+        original_count,
+    )
+    return AssetGenerationRequest(
+        object_descriptions=list(request.object_descriptions),
+        short_names=list(request.short_names),
+        object_type=request.object_type,
+        desired_dimensions=aligned_dimensions,
+        style_context=request.style_context,
+        operation_type=request.operation_type,
+        scene_id=request.scene_id,
+    )
+
+
 @dataclass
 class FailedAsset:
     """Information about a failed asset generation."""
@@ -928,7 +966,7 @@ class AssetManager:
         cache_dir = Path(cache_dir_value).expanduser()
         cache_key = hashlib.sha256(
             (
-                f"hssd-semantic-v3|{candidate_id}|{family}|"
+                f"hssd-semantic-v4|{candidate_id}|{family}|"
                 f"lenient={int(use_lenient)}"
             ).encode("utf-8")
         ).hexdigest()
@@ -956,6 +994,12 @@ class AssetManager:
                 suggestions=list(payload.get("suggestions", []) or []),
                 front_view_image_index=payload.get("front_view_image_index"),
                 orientation_confidence=payload.get("orientation_confidence"),
+                contains_architectural_context=payload.get(
+                    "contains_architectural_context"
+                ),
+                requested_object_is_dominant=payload.get(
+                    "requested_object_is_dominant"
+                ),
             )
         except Exception as exc:
             console_logger.warning(
@@ -982,7 +1026,7 @@ class AssetManager:
             return
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
-            "schema_version": "3.0",
+            "schema_version": "4.0",
             "candidate_id": candidate_id,
             "family": family,
             "is_acceptable": validation.is_acceptable,
@@ -990,6 +1034,10 @@ class AssetManager:
             "suggestions": validation.suggestions,
             "front_view_image_index": validation.front_view_image_index,
             "orientation_confidence": validation.orientation_confidence,
+            "contains_architectural_context": (
+                validation.contains_architectural_context
+            ),
+            "requested_object_is_dominant": validation.requested_object_is_dominant,
         }
         temporary = cache_path.with_name(
             f".{cache_path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
@@ -1860,6 +1908,12 @@ class AssetManager:
             raise RuntimeError(
                 "Collision client not available. Cannot generate collision geometry."
             )
+        if len(request.object_descriptions) != len(request.short_names):
+            raise ValueError(
+                f"Mismatch between descriptions ({len(request.object_descriptions)}) "
+                f"and short names ({len(request.short_names)})"
+            )
+        request = _align_hssd_request_dimensions(request)
 
         console_logger.info(
             f"Retrieving {len(request.object_descriptions)} assets from HSSD server"
