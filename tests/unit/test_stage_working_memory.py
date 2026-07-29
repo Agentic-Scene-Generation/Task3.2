@@ -40,6 +40,20 @@ class _MissingBedScene:
         return "missing-bed-scene"
 
 
+class _StudyScene:
+    def __init__(self) -> None:
+        self.objects = {
+            "desk_0": _DummyObject("desk"),
+            "office_chair_0": _DummyObject("office_chair"),
+            "guest_armchair_0": _DummyObject("guest_armchair"),
+            "guest_armchair_1": _DummyObject("guest_armchair"),
+            "bookshelf_0": _DummyObject("bookshelf"),
+        }
+
+    def content_hash(self) -> str:
+        return "study-scene"
+
+
 def _score(name: str, grade: int) -> CategoryScore:
     return CategoryScore(name=name, grade=grade, comment=f"{name} score")
 
@@ -145,6 +159,29 @@ class StageWorkingMemoryTest(unittest.TestCase):
             self.assertIn("missing required furniture bed", retrieved)
             self.assertIn("Ignore contradictory critic", retrieved)
             self.assertNotIn("critic: All required furniture is present", retrieved)
+
+    def test_required_counts_use_shared_furniture_category_hierarchy(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root_dir = Path(tmp)
+            render_dir = root_dir / "scene_renders" / "furniture" / "renders_004"
+            render_dir.mkdir(parents=True)
+
+            memory = StageWorkingMemory(root_dir, "furniture", enabled=True)
+            memory.set_required_counts({"desk": 1, "chair": 3, "bookshelf": 1})
+            record = memory.save_render_record(
+                render_dir=render_dir,
+                role="designer",
+                event="design",
+                scene=_StudyScene(),
+            )
+
+            quality = record["deterministic_quality"]
+            self.assertTrue(quality["hard_valid"])
+            self.assertEqual(
+                {"desk": 1, "chair": 3, "bookshelf": 1},
+                quality["observed_counts"],
+            )
+            self.assertEqual([], quality["missing_required_objects"])
 
 
 if __name__ == "__main__":

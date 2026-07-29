@@ -16,6 +16,7 @@ import hashlib
 from pathlib import Path
 from typing import Any
 
+from scenesmith.agent_utils.furniture_safety import furniture_category_matches
 from scenesmith.agent_utils.scoring import compute_total_score, scores_to_dict
 from scenesmith.scene_expert.context_bundle import (
     StageContextBundle,
@@ -23,12 +24,6 @@ from scenesmith.scene_expert.context_bundle import (
 )
 
 console_logger = logging.getLogger(__name__)
-
-_OBJECT_ALIASES: dict[str, tuple[str, ...]] = {
-    "bed": ("bed", "beds"),
-    "nightstand": ("nightstand", "nightstands", "bedside table", "bedside_table"),
-    "wardrobe": ("wardrobe", "wardrobes", "closet", "closets", "corner_wardrobe"),
-}
 
 
 def _now() -> str:
@@ -53,21 +48,15 @@ def _object_names(scene: Any) -> list[str]:
         return []
 
 
-def _infer_category(text: str) -> str | None:
-    normalized = str(text or "").lower().replace("_", " ")
-    for category, aliases in _OBJECT_ALIASES.items():
-        if any(alias.replace("_", " ") in normalized for alias in aliases):
-            return category
-    return None
-
-
-def _count_required_categories(object_names: list[str]) -> dict[str, int]:
-    counts = {category: 0 for category in _OBJECT_ALIASES}
-    for name in object_names:
-        category = _infer_category(name)
-        if category in counts:
-            counts[category] += 1
-    return counts
+def _count_required_categories(
+    object_names: list[str], required_categories: list[str]
+) -> dict[str, int]:
+    return {
+        category: sum(
+            furniture_category_matches(name, category) for name in object_names
+        )
+        for category in required_categories
+    }
 
 
 def _extract_grade(scores: dict[str, Any], *name_parts: str) -> float | None:
@@ -96,7 +85,7 @@ def _deterministic_quality(
         for key, value in (required_counts or {}).items()
         if int(value) > 0
     }
-    observed_counts = _count_required_categories(object_names)
+    observed_counts = _count_required_categories(object_names, list(required_counts))
     missing: list[str] = []
     for category, required in required_counts.items():
         observed = observed_counts.get(category, 0)

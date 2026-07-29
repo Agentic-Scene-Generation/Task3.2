@@ -22,19 +22,27 @@ class DummyRoomGeometry:
 
 
 class DummyRotation:
+    def __init__(self, matrix: np.ndarray | None = None):
+        self._matrix = np.eye(3) if matrix is None else np.asarray(matrix, dtype=float)
+
     def matrix(self) -> np.ndarray:
-        return np.eye(3)
+        return self._matrix
 
 
 class DummyTransform:
-    def __init__(self, translation: tuple[float, float, float] = (0.0, 0.0, 0.0)):
+    def __init__(
+        self,
+        translation: tuple[float, float, float] = (0.0, 0.0, 0.0),
+        rotation: np.ndarray | None = None,
+    ):
         self._translation = np.array(translation, dtype=float)
+        self._rotation = DummyRotation(rotation)
 
     def translation(self) -> np.ndarray:
         return self._translation
 
     def rotation(self) -> DummyRotation:
-        return DummyRotation()
+        return self._rotation
 
 
 @dataclass
@@ -167,6 +175,26 @@ class FurnitureLayoutPlanningTest(unittest.TestCase):
 
         self.assertGreater(report.penalty, 0.0)
         self.assertLess(report.score, 1.0)
+        self.assertTrue(any("expected east_wall" in issue for issue in report.issues))
+
+    def test_bed_head_is_opposite_asset_facing_arrow(self) -> None:
+        scene = make_bedroom_scene()
+        # A -90 degree yaw points the asset's +Y arrow east, while its
+        # headboard points west and therefore misses the planned east wall.
+        quarter_turn = np.array(
+            [[0.0, 1.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 0.0, 1.0]]
+        )
+        scene.objects["bed_0"] = DummyObject(
+            object_type="furniture",
+            name="bed",
+            description="Bed with headboard",
+            bbox_min=np.array([-0.8, -1.0, 0.0]),
+            bbox_max=np.array([0.8, 1.0, 1.0]),
+            transform=DummyTransform((1.4, 0.0, 0.0), quarter_turn),
+        )
+
+        report = evaluate_bedroom_layout_plausibility(scene)
+
         self.assertTrue(any("expected east_wall" in issue for issue in report.issues))
 
 

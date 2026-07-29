@@ -162,6 +162,32 @@ class TestScaleMeshToDimensions(unittest.TestCase):
             err_msg="Did not scale by average factor",
         )
 
+    def test_planar_fit_accepts_intentionally_thin_floor_covering(self):
+        mesh = trimesh.creation.box(extents=[2.0, 0.005, 1.0])
+        input_path = self.temp_path / "thin_rug.glb"
+        output_path = self.temp_path / "thin_rug_scaled.glb"
+        mesh.export(input_path)
+
+        with self.assertRaisesRegex(ValueError, "Degenerate dimension"):
+            scale_mesh_uniformly_to_dimensions(
+                mesh_path=input_path,
+                desired_dimensions=[4.0, 0.04, 2.0],
+            )
+
+        scale_mesh_uniformly_to_dimensions(
+            mesh_path=input_path,
+            desired_dimensions=[4.0, 0.04, 2.0],
+            output_path=output_path,
+            fit_axes=(0, 2),
+        )
+
+        scaled = trimesh.load(output_path, force="mesh")
+        np.testing.assert_allclose(
+            scaled.bounds[1] - scaled.bounds[0],
+            [4.0, 0.01, 2.0],
+            rtol=1e-5,
+        )
+
 
 class TestRemoveMeshFloaters(unittest.TestCase):
     """Test the remove_mesh_floaters function."""

@@ -1,0 +1,536 @@
+{
+  "schema_version": "hssd_wardrobe_front_audit@1.0",
+  "method_version": "wardrobe-multiview-manual-v1-20260727",
+  "asset_count": 17,
+  "semantic_front_count": 17,
+  "strict_positive_count": 16,
+  "nonunique_semantic_count": 1,
+  "coordinate_mapping": {
+    "asset_local_front_axis": [
+      0.0,
+      0.0,
+      1.0
+    ],
+    "front_view_image_index": 3,
+    "render_evidence_view": "back.png",
+    "week27_index_domain": [
+      0,
+      1,
+      2,
+      3
+    ],
+    "note": "For these HSSD render bundles, back.png is the camera view from the asset-local +Z access side. After the HSSD upright conversion this is week27 horizontal view index 3."
+  },
+  "assets": [
+    {
+      "hssd_id": "115400dd7dd9aa26ca595007f18b5a515626554d",
+      "category": "wardrobe",
+      "selected_render": "115400dd7dd9aa26ca595007f18b5a515626554d/back.png",
+      "selected_render_sha256": "8e106ffbceb4467d8a257e0dee7234cc6093159baa089737e4deb37aa68e3954",
+      "before": {
+        "axis": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "is_semantic": false,
+        "confidence": 0.2,
+        "front_view_image_index": null,
+        "validation_status": "pending_asset_front_audit"
+      },
+      "after": {
+        "axis": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "is_semantic": true,
+        "confidence": 0.96,
+        "front_view_image_index": 3,
+        "is_strict_positive_front": true,
+        "validation_status": "render_multiview_verified"
+      },
+      "reasoning": "The selected view shows the full drawer and cabinet-door access face; the opposite view is a plain rear panel."
+    },
+    {
+      "hssd_id": "2373e13c60de2cadf4f4d9c62760b9a169e25ef9",
+      "category": "wardrobe",
+      "selected_render": "2373e13c60de2cadf4f4d9c62760b9a169e25ef9/back.png",
+      "selected_render_sha256": "e022966ff418cbc0abb907fd316955e2900ceb3276979c12709561d07a54b967",
+      "before": {
+        "axis": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "is_semantic": false,
+        "confidence": 0.2,
+        "front_view_image_index": null,
+        "validation_status": "pending_asset_front_audit"
+      },
+      "after": {
+        "axis": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "is_semantic": true,
+        "confidence": 0.82,
+        "front_view_image_index": 3,
+        "is_strict_positive_front": false,
+        "validation_status": "render_multiview_verified"
+      },
+      "reasoning": "The selected view shows the primary doors, drawer handle, hanging bay, and shelves face-on. The corner wardrobe also exposes storage on another side, so the selected canonical front is semantic but not uniquely strict-positive."
+    },
+    {
+      "hssd_id": "2641fe1288210d5bfaf624174e89069a0cf0cef1",
+      "category": "wardrobe",
+      "selected_render": "2641fe1288210d5bfaf624174e89069a0cf0cef1/back.png",
+      "selected_render_sha256": "878ace76a48979a8f888527f2d8991e25bfa10b4b561f2ea5aa4d09383fa65ab",
+      "before": {
+        "axis": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "is_semantic": false,
+        "confidence": 0.2,
+        "front_view_image_index": null,
+        "validation_status": "pending_asset_front_audit"
+      },
+      "after": {
+        "axis": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "is_semantic": true,
+        "confidence": 0.94,
+        "front_view_image_index": 3,
+        "is_strict_positive_front": true,
+        "validation_status": "render_multiview_verified"
+      },
+      "reasoning": "The selected view shows the centered double doors and handles; the opposite view is the undecorated rear."
+    },
+    {
+      "hssd_id": "2a16223055b05a112ca63df1b5c10ca65ce31ef2",
+      "category": "wardrobe",
+      "selected_render": "2a16223055b05a112ca63df1b5c10ca65ce31ef2/back.png",
+      "selected_render_sha256": "9ef85cad52c7c75ddeb37d0bc7c9571e3dbdf14e9011f784dd015c52d258f838",
+      "before": {
+        "axis": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "is_semantic": false,
+        "confidence": 0.2,
+        "front_view_image_index": null,
+        "validation_status": "pending_asset_front_audit"
+      },
+      "after": {
+        "axis": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "is_semantic": true,
+        "confidence": 0.92,
+        "front_view_image_index": 3,
+        "is_strict_positive_front": true,
+        "validation_status": "render_multiview_verified"
+      },
+      "reasoning": "The selected view shows the complete door face and hardware; the opposite view is a plain rear panel."
+    },
+    {
+      "hssd_id": "5f1c51116d658b454806329a7be495f18190e7d1",
+      "category": "wardrobe",
+      "selected_render": "5f1c51116d658b454806329a7be495f18190e7d1/back.png",
+      "selected_render_sha256": "24f751aca0af40caa4533da08ce855d69e9d09c65c86a12ae7d35e9b14a12005",
+      "before": {
+        "axis": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "is_semantic": false,
+        "confidence": 0.2,
+        "front_view_image_index": null,
+        "validation_status": "pending_asset_front_audit"
+      },
+      "after": {
+        "axis": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "is_semantic": true,
+        "confidence": 0.9,
+        "front_view_image_index": 3,
+        "is_strict_positive_front": true,
+        "validation_status": "render_multiview_verified"
+      },
+      "reasoning": "The selected view reveals the center door seam and access hardware more clearly than the opposite panel."
+    },
+    {
+      "hssd_id": "61007b6969cbb58fbff8f8af738c834c40e67de0",
+      "category": "wardrobe",
+      "selected_render": "61007b6969cbb58fbff8f8af738c834c40e67de0/back.png",
+      "selected_render_sha256": "06ba99dc8153e1d09bfee10d16a060058e7014fb0478ad00cdd1ef2be180dcd6",
+      "before": {
+        "axis": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "is_semantic": false,
+        "confidence": 0.2,
+        "front_view_image_index": null,
+        "validation_status": "pending_asset_front_audit"
+      },
+      "after": {
+        "axis": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "is_semantic": true,
+        "confidence": 0.93,
+        "front_view_image_index": 3,
+        "is_strict_positive_front": true,
+        "validation_status": "render_multiview_verified"
+      },
+      "reasoning": "The selected view shows the wardrobe doors and lower drawer face-on; the opposite side has no access features."
+    },
+    {
+      "hssd_id": "644aecdd8cb3efa146aa57a77d6fe832d952d56e",
+      "category": "wardrobe",
+      "selected_render": "644aecdd8cb3efa146aa57a77d6fe832d952d56e/back.png",
+      "selected_render_sha256": "df86a72235c1e907d667f35e6eeb646e9ae19e02a47ed7c0a26bc27441828e3f",
+      "before": {
+        "axis": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "is_semantic": false,
+        "confidence": 0.2,
+        "front_view_image_index": null,
+        "validation_status": "pending_asset_front_audit"
+      },
+      "after": {
+        "axis": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "is_semantic": true,
+        "confidence": 0.78,
+        "front_view_image_index": 3,
+        "is_strict_positive_front": true,
+        "validation_status": "render_multiview_verified"
+      },
+      "reasoning": "The selected view is the dark mirrored/front facade, while the opposite face is wood-backed. The facade is distinct but low-detail, so confidence remains conservative."
+    },
+    {
+      "hssd_id": "7f1ffde09506f5fcb04ce049fd1ef6d1d33101c9",
+      "category": "wardrobe",
+      "selected_render": "7f1ffde09506f5fcb04ce049fd1ef6d1d33101c9/back.png",
+      "selected_render_sha256": "f40dad248a387db6a0f1c0f68f739831a51c30f05af80dfdd0e31992716d4124",
+      "before": {
+        "axis": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "is_semantic": false,
+        "confidence": 0.2,
+        "front_view_image_index": null,
+        "validation_status": "pending_asset_front_audit"
+      },
+      "after": {
+        "axis": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "is_semantic": true,
+        "confidence": 0.95,
+        "front_view_image_index": 3,
+        "is_strict_positive_front": true,
+        "validation_status": "render_multiview_verified"
+      },
+      "reasoning": "The selected view shows two doors, handles, and four drawers face-on; the opposite view is plain."
+    },
+    {
+      "hssd_id": "8165c556da0db0469632ab42ea5b335b04bd53ea",
+      "category": "wardrobe",
+      "selected_render": "8165c556da0db0469632ab42ea5b335b04bd53ea/back.png",
+      "selected_render_sha256": "e5cf7e854d6d734d39aabff33f1f710c9534a9cc068450d92a64819212a0cf3b",
+      "before": {
+        "axis": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "is_semantic": false,
+        "confidence": 0.2,
+        "front_view_image_index": null,
+        "validation_status": "pending_asset_front_audit"
+      },
+      "after": {
+        "axis": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "is_semantic": true,
+        "confidence": 0.92,
+        "front_view_image_index": 3,
+        "is_strict_positive_front": true,
+        "validation_status": "render_multiview_verified"
+      },
+      "reasoning": "The selected view shows paired door handles and front markers; the side views are narrow profiles."
+    },
+    {
+      "hssd_id": "8685af17fa7d4d5f899912196b9bd71d3c56dcba",
+      "category": "wardrobe",
+      "selected_render": "8685af17fa7d4d5f899912196b9bd71d3c56dcba/back.png",
+      "selected_render_sha256": "994c53a62bd14aff082be03bfb77b6ae578a83a56694c1de0694ecf890e0445a",
+      "before": {
+        "axis": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "is_semantic": false,
+        "confidence": 0.2,
+        "front_view_image_index": null,
+        "validation_status": "pending_asset_front_audit"
+      },
+      "after": {
+        "axis": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "is_semantic": true,
+        "confidence": 0.94,
+        "front_view_image_index": 3,
+        "is_strict_positive_front": true,
+        "validation_status": "render_multiview_verified"
+      },
+      "reasoning": "The selected view shows the woven double-door facade and handles; the opposite face is a plain panel."
+    },
+    {
+      "hssd_id": "8870a950a73c7791ab6ca03f72cf2609f4e44a3e",
+      "category": "wardrobe",
+      "selected_render": "8870a950a73c7791ab6ca03f72cf2609f4e44a3e/back.png",
+      "selected_render_sha256": "972e66745b45034d4771418184a76d66286b01a04f23174643c1edc6979a2263",
+      "before": {
+        "axis": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "is_semantic": false,
+        "confidence": 0.2,
+        "front_view_image_index": null,
+        "validation_status": "pending_asset_front_audit"
+      },
+      "after": {
+        "axis": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "is_semantic": true,
+        "confidence": 0.9,
+        "front_view_image_index": 3,
+        "is_strict_positive_front": true,
+        "validation_status": "render_multiview_verified"
+      },
+      "reasoning": "The selected broad face contains the cabinet and drawer access layout; the opposite broad face is plain."
+    },
+    {
+      "hssd_id": "8a44f5e764ca2a131f50709d1253d341a61282d4",
+      "category": "wardrobe",
+      "selected_render": "8a44f5e764ca2a131f50709d1253d341a61282d4/back.png",
+      "selected_render_sha256": "ac4d9024f82fe26f4be8ab85e8c4f33b81e33ee7f69f48f356f3c5e7378acd15",
+      "before": {
+        "axis": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "is_semantic": false,
+        "confidence": 0.2,
+        "front_view_image_index": null,
+        "validation_status": "pending_asset_front_audit"
+      },
+      "after": {
+        "axis": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "is_semantic": true,
+        "confidence": 0.88,
+        "front_view_image_index": 3,
+        "is_strict_positive_front": true,
+        "validation_status": "render_multiview_verified"
+      },
+      "reasoning": "The selected dark facade contains the paired vertical handles; the opposite face has no access hardware."
+    },
+    {
+      "hssd_id": "991a6870411fab1fabc680a306b19bae617b65af",
+      "category": "wardrobe",
+      "selected_render": "991a6870411fab1fabc680a306b19bae617b65af/back.png",
+      "selected_render_sha256": "f0bbbf52b5f54a5547e889ada71791618ed50c284061712a9e3fe2f49058e958",
+      "before": {
+        "axis": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "is_semantic": false,
+        "confidence": 0.2,
+        "front_view_image_index": null,
+        "validation_status": "pending_asset_front_audit"
+      },
+      "after": {
+        "axis": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "is_semantic": true,
+        "confidence": 0.92,
+        "front_view_image_index": 3,
+        "is_strict_positive_front": true,
+        "validation_status": "render_multiview_verified"
+      },
+      "reasoning": "The selected view shows the long paired handles on the door face; the opposite face is undecorated."
+    },
+    {
+      "hssd_id": "a9967a984dbe294a7b789d969c5f1ed6a9dbca5c",
+      "category": "wardrobe",
+      "selected_render": "a9967a984dbe294a7b789d969c5f1ed6a9dbca5c/back.png",
+      "selected_render_sha256": "70e8c061fd237c8b07ee709e0709155a90e88c8c8e016b48c62420ef2a0b0196",
+      "before": {
+        "axis": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "is_semantic": false,
+        "confidence": 0.2,
+        "front_view_image_index": null,
+        "validation_status": "pending_asset_front_audit"
+      },
+      "after": {
+        "axis": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "is_semantic": true,
+        "confidence": 0.85,
+        "front_view_image_index": 3,
+        "is_strict_positive_front": true,
+        "validation_status": "render_multiview_verified"
+      },
+      "reasoning": "The selected view shows the segmented multi-door facade; the opposite face reads as the rear panel."
+    },
+    {
+      "hssd_id": "b7cbd0dfb550c5c53d1fd17401018d8b0aa4a216",
+      "category": "wardrobe",
+      "selected_render": "b7cbd0dfb550c5c53d1fd17401018d8b0aa4a216/back.png",
+      "selected_render_sha256": "232c7b21ff617e7a5f95095f144ab4e910fc1de126bd21ac2abd45c23d198a0a",
+      "before": {
+        "axis": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "is_semantic": false,
+        "confidence": 0.2,
+        "front_view_image_index": null,
+        "validation_status": "pending_asset_front_audit"
+      },
+      "after": {
+        "axis": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "is_semantic": true,
+        "confidence": 0.95,
+        "front_view_image_index": 3,
+        "is_strict_positive_front": true,
+        "validation_status": "render_multiview_verified"
+      },
+      "reasoning": "The selected view directly exposes the two open shelving bays; the opposite face is closed and plain."
+    },
+    {
+      "hssd_id": "c081738fd50bd67e91cd3f9aa6368721985b9e40",
+      "category": "wardrobe",
+      "selected_render": "c081738fd50bd67e91cd3f9aa6368721985b9e40/back.png",
+      "selected_render_sha256": "9f8ea4cf0e5096ede15085dcf5903bae534f2b739dcce66a622dc1e8789a34e8",
+      "before": {
+        "axis": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "is_semantic": false,
+        "confidence": 0.2,
+        "front_view_image_index": null,
+        "validation_status": "pending_asset_front_audit"
+      },
+      "after": {
+        "axis": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "is_semantic": true,
+        "confidence": 0.92,
+        "front_view_image_index": 3,
+        "is_strict_positive_front": true,
+        "validation_status": "render_multiview_verified"
+      },
+      "reasoning": "The selected view shows the paired doors, handles, and lower drawers; the opposite view is a narrow rear panel."
+    },
+    {
+      "hssd_id": "c95829d613a9a780c467c06f0402984dbbc8db06",
+      "category": "wardrobe",
+      "selected_render": "c95829d613a9a780c467c06f0402984dbbc8db06/back.png",
+      "selected_render_sha256": "68bbca03a48529baede547dc3a85142797c6ee63a6a76cdfa1245de8cec40d9a",
+      "before": {
+        "axis": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "is_semantic": false,
+        "confidence": 0.2,
+        "front_view_image_index": null,
+        "validation_status": "pending_asset_front_audit"
+      },
+      "after": {
+        "axis": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "is_semantic": true,
+        "confidence": 0.9,
+        "front_view_image_index": 3,
+        "is_strict_positive_front": true,
+        "validation_status": "render_multiview_verified"
+      },
+      "reasoning": "The selected view shows the door seam and access hardware; the opposite view is a plain rear face."
+    }
+  ]
+}

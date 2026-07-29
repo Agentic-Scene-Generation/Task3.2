@@ -11,13 +11,19 @@ import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 from threading import Lock
-from typing import Callable
+
+# SceneExpert hook runner (imported lazily to avoid circular imports at module level)
+# TYPE_CHECKING block keeps the type hint available without a hard import.
+from typing import TYPE_CHECKING, Callable
 
 from agents import custom_span, trace
 from omegaconf import DictConfig, OmegaConf
 
 from scenesmith.agent_utils.articulated_retrieval_server import (
     ArticulatedRetrievalServer,
+)
+from scenesmith.agent_utils.furniture_accessibility_guard import (
+    improve_storage_front_access,
 )
 from scenesmith.agent_utils.geometry_generation_server import GeometryGenerationServer
 from scenesmith.agent_utils.house import HouseLayout, HouseScene, RoomGeometry
@@ -32,6 +38,9 @@ from scenesmith.agent_utils.sceneeval_exporter import (
     SceneEvalExportConfig,
     SceneEvalExporter,
 )
+from scenesmith.agent_utils.seating_orientation_guard import (
+    align_seating_to_nearest_surface,
+)
 from scenesmith.ceiling_agents.stateful_ceiling_agent import StatefulCeilingAgent
 from scenesmith.experiments.base_experiment import BaseExperiment
 from scenesmith.floor_plan_agents.stateful_floor_plan_agent import (
@@ -41,15 +50,17 @@ from scenesmith.furniture_agents.stateful_furniture_agent import StatefulFurnitu
 from scenesmith.manipuland_agents.stateful_manipuland_agent import (
     StatefulManipulandAgent,
 )
+from scenesmith.scenebenchmark_critic.config import critic_config_from_any
+from scenesmith.scenebenchmark_critic.api import seating_orientation_targets
+from scenesmith.scenebenchmark_critic.furniture_relation_repair import (
+    improve_furniture_relations,
+    unresolved_furniture_relation_failures,
+)
 from scenesmith.utils.logging import ConsoleLogger, FileLoggingContext
 from scenesmith.utils.openai import configure_reasoning_persistence
 from scenesmith.utils.parallel import run_parallel_isolated
 from scenesmith.utils.print_utils import bold_green, yellow
 from scenesmith.wall_agents.stateful_wall_agent import StatefulWallAgent
-
-# SceneExpert hook runner (imported lazily to avoid circular imports at module level)
-# TYPE_CHECKING block keeps the type hint available without a hard import.
-from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from scenesmith.scene_expert.hooks import SceneExpertHookRunner
@@ -402,13 +413,119 @@ async def _rescore_furniture_after_postprocessing(
         scene=scene,
         tools=critic_tools,
     )
+
+    # Projection and final deterministic relation guards define the state that
+    # later stages will consume.  An earlier best-scoring checkpoint must not
+    # silently roll this authoritative state back during the canonical rescore.
+    safety_controller = getattr(furniture_agent, "furniture_safety_controller", None)
+    if safety_controller is not None and safety_controller.enabled:
+        safety_controller.reset_best_checkpoint()
+        console_logger.info(
+            "Reset pre-postprocessing furniture checkpoint before canonical rescore"
+        )
+
     try:
         furniture_agent.rendering_manager.clear_cache()
     except Exception:
         console_logger.debug("Could not clear furniture render cache", exc_info=True)
 
+    # Do not rely on the critic model to execute its forced observe_scene tool.
+    # A skipped tool call leaves last_render_dir empty and makes the persisted
+    # furniture images describe the pre-projection state.  Render explicitly
+    # with the same profile and room bounds so the critic call can reuse it.
+    render_profile = furniture_agent._critic_render_profile_name(False)
+    with furniture_agent.rendering_manager.use_render_profile(render_profile):
+        canonical_render_dir = furniture_agent.rendering_manager.render_scene(
+            scene=scene,
+            blender_server=furniture_agent.blender_server,
+            room_bounds=furniture_agent._critic_vision_tools._get_room_bounds(),
+        )
+    if canonical_render_dir is None:
+        raise RuntimeError("Canonical furniture render returned no output directory")
+
     await furniture_agent._request_critique_impl(update_checkpoint=False)
     await furniture_agent._finalize_scene_and_scores()
+
+
+async def _apply_and_rescore_final_furniture_state(
+    furniture_agent: StatefulFurnitureAgent,
+    scene: RoomScene,
+    cfg_dict: dict,
+    previous_scene_hash: str,
+) -> bool:
+    """Apply final furniture guards before rendering the canonical stage state."""
+    _apply_final_furniture_guards(scene=scene, cfg_dict=cfg_dict)
+
+    _raise_for_unresolved_furniture_relations(scene=scene, cfg_dict=cfg_dict)
+
+    if scene.content_hash() == previous_scene_hash:
+        return False
+
+    await _rescore_furniture_after_postprocessing(
+        furniture_agent=furniture_agent,
+        scene=scene,
+    )
+    # Finalization can restore a scored checkpoint after its own physics
+    # repair. Stabilize that restored state with the same deterministic guards
+    # before deciding whether the actual persisted layout is valid.
+    _apply_final_furniture_guards(scene=scene, cfg_dict=cfg_dict)
+    _raise_for_unresolved_furniture_relations(scene=scene, cfg_dict=cfg_dict)
+    return True
+
+
+def _apply_final_furniture_guards(*, scene: RoomScene, cfg_dict: dict) -> None:
+    """Apply the idempotent guard sequence used around canonical re-scoring."""
+    align_seating_to_nearest_surface(
+        scene,
+        allowed_targets_by_seat=seating_orientation_targets(scene, config=cfg_dict),
+    )
+    if critic_config_from_any(cfg_dict).enabled:
+        improve_storage_front_access(scene, config=cfg_dict)
+        improve_furniture_relations(scene, config=cfg_dict)
+
+    # Candidate evaluation can move a wall seat while testing a relation repair.
+    align_seating_to_nearest_surface(
+        scene,
+        allowed_targets_by_seat=seating_orientation_targets(scene, config=cfg_dict),
+    )
+
+
+def _furniture_stage_hard_gate_enabled(cfg_dict: dict) -> bool:
+    furniture_cfg = cfg_dict.get("furniture_agent") or {}
+    if hasattr(furniture_cfg, "get"):
+        value = furniture_cfg.get("fail_stage_on_unresolved_hard_constraints", True)
+    else:
+        value = getattr(
+            furniture_cfg,
+            "fail_stage_on_unresolved_hard_constraints",
+            True,
+        )
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def _raise_for_unresolved_furniture_relations(
+    *,
+    scene: RoomScene,
+    cfg_dict: dict,
+) -> None:
+    """Prevent downstream stages from consuming a known-bad furniture layout."""
+    if not _furniture_stage_hard_gate_enabled(cfg_dict):
+        return
+
+    failures = unresolved_furniture_relation_failures(scene, config=cfg_dict)
+    if not failures:
+        return
+
+    details = []
+    for result in failures:
+        relation = str(result.get("relation_type") or "unknown_relation")
+        object_id = str(result.get("primary_object") or "unknown_object")
+        details.append(f"{relation}:{object_id}")
+    raise RuntimeError(
+        "Furniture stage failed with unresolved core relations: " + ", ".join(details)
+    )
 
 
 def _sync_scene_room_geometry_from_layout(
@@ -664,6 +781,51 @@ def _copy_checkpoint_for_stage(
     )
 
 
+def _apply_runtime_task_prompt(
+    house_layout: HouseLayout,
+    prompt: str,
+) -> bool:
+    """Keep user-task provenance out of persisted StageBrief text.
+
+    The floor-plan agent may receive a StageBrief-enhanced prompt, and its
+    resulting ``RoomSpec.prompt`` is persisted with the reusable geometry.
+    That text is useful while planning the floor plan, but it is not the
+    immutable user task for later stage critics.  A single-room layout has an
+    unambiguous mapping, so restore the current run's raw task there.  For a
+    multi-room layout, preserve the individual room prompts rather than guess
+    how a top-level prompt should be split across rooms.
+    """
+    task_prompt = str(prompt or "").strip()
+    if not task_prompt:
+        return False
+
+    changed = False
+    if house_layout.house_prompt != task_prompt:
+        house_layout.house_prompt = task_prompt
+        changed = True
+
+    room_ids = list(house_layout.room_ids)
+    if len(room_ids) != 1:
+        return changed
+
+    room_spec = house_layout.get_room_spec(room_ids[0])
+    if room_spec is not None and room_spec.prompt != task_prompt:
+        room_spec.prompt = task_prompt
+        changed = True
+    return changed
+
+
+def _add_manipulands_with_cleanup(
+    manipuland_agent: StatefulManipulandAgent,
+    scene: RoomScene,
+) -> None:
+    """Run the manipuland stage without leaking its native server processes."""
+    try:
+        asyncio.run(manipuland_agent.add_manipulands(scene=scene))
+    finally:
+        manipuland_agent.cleanup()
+
+
 def _generate_room(
     room_id: str,
     room_prompt: str,
@@ -836,20 +998,26 @@ def _generate_room(
                             "seconds"
                         )
 
-                if scene.content_hash() != pre_postprocess_hash:
-                    try:
-                        asyncio.run(
-                            _rescore_furniture_after_postprocessing(
-                                furniture_agent=furniture_agent,
-                                scene=scene,
-                            )
+                # Run every deterministic furniture guard before the canonical
+                # render. This also catches relation-only changes when physical
+                # projection itself was a no-op.
+                try:
+                    asyncio.run(
+                        _apply_and_rescore_final_furniture_state(
+                            furniture_agent=furniture_agent,
+                            scene=scene,
+                            cfg_dict=cfg_dict,
+                            previous_scene_hash=pre_postprocess_hash,
                         )
-                    except Exception as e:
-                        console_logger.error(
-                            "Failed to re-score post-processed furniture layout: %s",
-                            e,
-                            exc_info=True,
-                        )
+                    )
+                except Exception as e:
+                    console_logger.error(
+                        "Failed to re-score post-processed furniture layout: %s",
+                        e,
+                        exc_info=True,
+                    )
+                    if _furniture_stage_hard_gate_enabled(cfg_dict):
+                        raise
             finally:
                 # Always cleanup server subprocesses after all furniture-stage
                 # scoring/rendering that depends on the agent's Blender server.
@@ -1053,12 +1221,16 @@ def _generate_room(
             logger=logger,
             render_gpu_id=render_gpu_id,
         )
-        asyncio.run(manipuland_agent.add_manipulands(scene=scene))
+        _add_manipulands_with_cleanup(manipuland_agent, scene)
         end_time = time.time()
         console_logger.info(
             f"Manipulands added to room {room_id} in "
             f"{timedelta(seconds=end_time - start_time)}"
         )
+
+    # Final post-processing can be reached from a checkpoint resume. Reapply the
+    # seating orientation guard so the final scene cannot inherit a backward seat.
+    align_seating_to_nearest_surface(scene)
 
     # Final post-processing (projection + simulation).
     if projection_cfg["enabled"] and projection_cfg["final"]["enabled"]:
@@ -1676,7 +1848,25 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
             preload_retriever=True,  # Always preload CLIP for consistent performance.
             hssd_data_path=str(hssd_config.data_path),
             hssd_preprocessed_path=str(hssd_config.preprocessed_path),
+            hssd_retrieval_backend=str(
+                getattr(hssd_config, "retrieval_backend", "clip")
+            ),
             hssd_top_k=hssd_config.use_top_k,
+            hssd_zvec_collection_path=(
+                str(hssd_config.zvec.collection_path)
+                if "zvec" in hssd_config and hssd_config.zvec is not None
+                else None
+            ),
+            hssd_embedding_base_url=(
+                str(hssd_config.zvec.base_url)
+                if "zvec" in hssd_config and hssd_config.zvec is not None
+                else None
+            ),
+            hssd_embedding_dimension=(
+                int(hssd_config.zvec.embedding_dimension)
+                if "zvec" in hssd_config and hssd_config.zvec is not None
+                else 2048
+            ),
             clip_device=retrieval_device,
         )
 
@@ -2068,6 +2258,21 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                             house_layout_dict = json.load(f)
                         house_layout = HouseLayout.from_dict(
                             house_layout_dict, house_dir=scene_dir
+                        )
+
+                    # A floor-plan StageBrief may have been serialized into
+                    # ``house_layout.room_specs[*].prompt``.  Restore the raw
+                    # task for an unambiguous single-room run before any
+                    # downstream stage or critic reads that text.
+                    if _apply_runtime_task_prompt(house_layout, prompt):
+                        with open(house_layout_path, "w", encoding="utf-8") as f:
+                            json.dump(
+                                house_layout.to_dict(scene_dir=scene_dir),
+                                f,
+                                indent=2,
+                            )
+                        console_logger.info(
+                            "Restored runtime task prompt in house layout provenance"
                         )
 
                     # Check if we should stop after floor_plan stage.

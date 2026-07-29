@@ -128,6 +128,9 @@ class BaseExperiment(ABC):
         agent_config["scenebenchmark_critic"] = config_dict["experiment"].get(
             "scenebenchmark_critic", {}
         )
+        agent_config["stage_placement_order"] = config_dict["experiment"].get(
+            "stage_placement_order", {}
+        )
         agent_name = agent_config["_name"]
 
         if agent_name not in compatible_agents:
@@ -196,6 +199,9 @@ class BaseExperiment(ABC):
         agent_config = dict(config_dict["manipuland_agent"])
         agent_config["scenebenchmark_critic"] = config_dict["experiment"].get(
             "scenebenchmark_critic", {}
+        )
+        agent_config["stage_placement_order"] = config_dict["experiment"].get(
+            "stage_placement_order", {}
         )
         agent_name = agent_config["_name"]
 
@@ -272,6 +278,11 @@ class BaseExperiment(ABC):
         agent_config["scenebenchmark_critic"] = config_dict["experiment"].get(
             "scenebenchmark_critic", {}
         )
+        # Window repair in the wall stage reuses the floor-plan geometry builder.
+        # Keep the dependency scoped to the wall agent configuration.
+        agent_config["floor_plan_geometry_config"] = config_dict[
+            "floor_plan_agent"
+        ]
         agent_name = agent_config["_name"]
 
         if agent_name not in compatible_agents:

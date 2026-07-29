@@ -23,6 +23,12 @@ from scenesmith.agent_utils.asset_router.dataclasses import (
     GeneratedGeometry,
     ValidationResult,
 )
+from scenesmith.agent_utils.asset_router.rendered_asset_choice import (
+    choose_hssd_candidate_from_iso_renders,
+    hssd_rendered_choice_options,
+    infer_floor_covering_footprint_shape,
+    is_floor_covering_request,
+)
 from scenesmith.agent_utils.blender.constants import (
     ARTICULATED_LIGHT_ENERGY,
     MATERIAL_VALIDATION_LIGHT_ENERGY,
@@ -462,6 +468,7 @@ class AssetRouter:
         articulated_client: "ArticulatedRetrievalClient | None" = None,
         materials_client: "MaterialsRetrievalClient | None" = None,
         scene_id: str | None = None,
+        scene_prompt_context: str | None = None,
     ) -> GeneratedGeometry | ArticulatedGeometry | None:
         """Generate or retrieve geometry for item with validation and retry.
 
@@ -484,6 +491,7 @@ class AssetRouter:
             articulated_client: Client for articulated retrieval server.
             materials_client: Client for materials retrieval server (for thin coverings).
             scene_id: Optional scene identifier for fair round-robin scheduling.
+            scene_prompt_context: Original scene prompt for context-aware asset choice.
 
         Returns:
             GeneratedGeometry if successful, None if all strategies/candidates exhausted.
@@ -520,6 +528,7 @@ class AssetRouter:
                     debug_dir=debug_dir,
                     style_context=style_context,
                     scene_id=scene_id,
+                    scene_prompt_context=scene_prompt_context,
                 )
             elif strategy == "articulated":
                 result = self._try_articulated_strategy(
@@ -1397,6 +1406,7 @@ class AssetRouter:
         debug_dir: Path,
         style_context: str | None = None,
         scene_id: str | None = None,
+        scene_prompt_context: str | None = None,
     ) -> GeneratedGeometry | None:
         """Try the generated strategy with text-to-3D or library retrieval.
 
@@ -1416,6 +1426,7 @@ class AssetRouter:
             debug_dir: Directory to save debug outputs (validation renders).
             style_context: Optional style context for image generation.
             scene_id: Optional scene identifier for fair round-robin scheduling.
+            scene_prompt_context: Original scene prompt for context-aware HSSD choice.
 
         Returns:
             GeneratedGeometry if successful, None if all retries exhausted.
@@ -1433,6 +1444,7 @@ class AssetRouter:
                 geometry_dir=geometry_dir,
                 max_retries=max_retries,
                 scene_id=scene_id,
+                scene_prompt_context=scene_prompt_context,
             )
             if not hssd_candidates:
                 console_logger.warning(f"No HSSD candidates for '{item.description}'")
@@ -1535,6 +1547,7 @@ class AssetRouter:
         geometry_dir: Path,
         max_retries: int,
         scene_id: str | None = None,
+        scene_prompt_context: str | None = None,
     ) -> list["HssdRetrievalResult"] | None:
         """Fetch HSSD candidates in a single server call.
 
@@ -1544,6 +1557,7 @@ class AssetRouter:
             geometry_dir: Directory to save retrieved geometry.
             max_retries: Number of validation retries (determines num_candidates).
             scene_id: Optional scene identifier for fair round-robin scheduling.
+            scene_prompt_context: Original scene prompt for context-aware HSSD choice.
 
         Returns:
             List of HssdRetrievalResult candidates, or None if fetch failed.
@@ -1559,7 +1573,14 @@ class AssetRouter:
 
         # Request enough candidates for all retry attempts.
         # max_retries=0 means single attempt, so we need at least 1.
-        num_candidates = max(1, max_retries)
+        rendered_choice_enabled, rendered_choice_top_n, _ = (
+            self._hssd_rendered_choice_options()
+        )
+        num_candidates = max(
+            1,
+            max_retries,
+            rendered_choice_top_n if rendered_choice_enabled else 1,
+        )
 
         # Map EITHER to concrete type based on which agent is calling.
         object_type = item.object_type.value
@@ -1595,13 +1616,68 @@ class AssetRouter:
             console_logger.info(
                 f"Got {len(response.results)} HSSD candidates for '{item.description}'"
             )
-            return response.results
+            return self._rank_hssd_candidates_with_rendered_iso(
+                item=item,
+                candidates=response.results,
+                enabled=rendered_choice_enabled,
+                top_n=rendered_choice_top_n,
+                scene_prompt_context=scene_prompt_context,
+            )
 
         except FatalRetrievalError:
             raise
         except Exception as e:
             console_logger.error(f"HSSD fetch failed for '{item.description}': {e}")
             return None
+
+    def _hssd_rendered_choice_options(self) -> tuple[bool, int, Path]:
+        """Read config and environment options for rendered HSSD choice."""
+        return hssd_rendered_choice_options(self.cfg)
+
+    def _rank_hssd_candidates_with_rendered_iso(
+        self,
+        *,
+        item: AssetItem,
+        candidates: list["HssdRetrievalResult"],
+        enabled: bool,
+        top_n: int,
+        scene_prompt_context: str | None = None,
+    ) -> list["HssdRetrievalResult"]:
+        """Optionally reorder HSSD candidates using pre-rendered iso images."""
+        if not enabled or len(candidates) <= 1:
+            return candidates
+
+        _, _, rendered_assets_dir = self._hssd_rendered_choice_options()
+        openai_config = self.cfg.openai
+        choice = choose_hssd_candidate_from_iso_renders(
+            candidates=candidates,
+            object_description=item.description,
+            scene_context=scene_prompt_context,
+            vlm_service=self.vlm_service,
+            model=openai_config.model,
+            reasoning_effort=openai_config.reasoning_effort.asset_validation,
+            verbosity=openai_config.verbosity.asset_validation,
+            vision_detail=openai_config.vision_detail,
+            rendered_assets_dir=rendered_assets_dir,
+            top_n=top_n,
+            object_short_name=item.short_name,
+            requested_dimensions=item.dimensions,
+            requested_shape=(
+                infer_floor_covering_footprint_shape(item.description, item.short_name)
+                if is_floor_covering_request(item.description, item.short_name)
+                else None
+            ),
+        )
+        if choice.selected_hssd_id:
+            console_logger.info(
+                "Rendered HSSD choice selected candidate %s/%s for '%s': %s (%s)",
+                choice.selected_index,
+                len(candidates),
+                item.description,
+                choice.selected_hssd_id,
+                choice.reason,
+            )
+        return choice.candidates
 
     def _fetch_objaverse_candidates(
         self,

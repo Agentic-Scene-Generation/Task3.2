@@ -14,11 +14,17 @@ from scenesmith.scenebenchmark_critic.metrics.functional_dependency.evaluator im
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.bedside_group import (
     evaluate_bedside_group_alignment,
 )
+from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.classroom_workstation import (
+    evaluate_classroom_workstation_distribution,
+)
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.dining_place_setting import (
     evaluate_dining_place_setting_alignment,
 )
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.dining_seat import (
     evaluate_dining_seat_distribution,
+)
+from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.intent_contract import (
+    evaluate_intent_contract_extensions,
 )
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.manipuland_completeness import (
     evaluate_manipuland_completeness,
@@ -29,11 +35,23 @@ from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.m
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.room_center import (
     evaluate_room_center_alignment,
 )
+from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.study_furniture_layout import (
+    evaluate_study_furniture_layout,
+)
+from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.wall_backed_storage import (
+    evaluate_wall_backed_storage_alignment,
+)
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.workstation_alignment import (
     evaluate_workstation_focal_alignment,
 )
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.proposer import (
     augment_functional_dependency_checks,
+)
+from scenesmith.scenebenchmark_critic.metrics.interaction_clearance.builder import (
+    build_interaction_clearance_checks,
+)
+from scenesmith.scenebenchmark_critic.metrics.interaction_clearance.evaluator import (
+    evaluate_clearance,
 )
 from scenesmith.scenebenchmark_critic.metrics.spatial_accessibility.builder import (
     build_spatial_accessibility_checks,
@@ -47,12 +65,6 @@ from scenesmith.scenebenchmark_critic.metrics.visual_clearance.builder import (
 from scenesmith.scenebenchmark_critic.metrics.visual_clearance.evaluator import (
     evaluate_visual_clearance,
 )
-from scenesmith.scenebenchmark_critic.metrics.interaction_clearance.builder import (
-    build_interaction_clearance_checks,
-)
-from scenesmith.scenebenchmark_critic.metrics.interaction_clearance.evaluator import (
-    evaluate_clearance,
-)
 
 
 def _interaction_evaluator(
@@ -61,9 +73,7 @@ def _interaction_evaluator(
     return evaluate_clearance(check)
 
 
-def _spatial_evaluator(
-    case_pack: dict, check: dict, config: object
-) -> dict | None:
+def _spatial_evaluator(case_pack: dict, check: dict, config: object) -> dict | None:
     from scenesmith.scenebenchmark_critic.core.geometry import load_geometry
 
     store = load_geometry(case_pack)
@@ -81,12 +91,16 @@ METRIC_REGISTRY: dict[str, MetricPlugin] = {
         check_augmenter=augment_functional_dependency_checks,
         extension_evaluators=(
             evaluate_media_support_alignment,
+            evaluate_intent_contract_extensions,
             evaluate_bedside_group_alignment,
+            evaluate_classroom_workstation_distribution,
             evaluate_room_center_alignment,
+            evaluate_study_furniture_layout,
             evaluate_dining_seat_distribution,
             evaluate_manipuland_completeness,
             evaluate_dining_place_setting_alignment,
             evaluate_workstation_focal_alignment,
+            evaluate_wall_backed_storage_alignment,
         ),
     ),
     "spatial_accessibility": MetricPlugin(

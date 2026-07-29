@@ -85,6 +85,77 @@ class TestManipulandTools(unittest.TestCase):
             self.cfg.placement_noise.perfect_profile,
         )
 
+    def test_dining_place_setting_alignment_tool_is_available(self):
+        # 2026-07-23 修改原因：餐位对齐 critic 必须能调用实际修复工具，不能只输出
+        # 文字建议，否则盘子虽齐全仍会随机散落在餐桌上。
+        self.assertIn("align_dining_place_settings", self.manipuland_tools.tools)
+
+    def test_adjacent_dining_table_strips_are_coalesced(self):
+        # 2026-07-23 修改原因：桌面内部的 HSSD seam 不应把长边中点餐位推到
+        # S8 或 S9 的一侧；相邻条带合并后仍使用真实外轮廓做边界校验。
+        def surface(surface_id: str, x: float) -> SupportSurface:
+            return SupportSurface(
+                surface_id=UniqueID(surface_id),
+                bounding_box_min=np.array([-0.5, -0.4, 0.01]),
+                bounding_box_max=np.array([0.5, 0.4, 0.5]),
+                transform=RigidTransform(p=[x, 0.0, 0.8]),
+            )
+
+        merged = ManipulandTools._coalesce_adjacent_support_surfaces(
+            [surface("S_8", 0.0), surface("S_9", 1.0)]
+        )
+
+        self.assertEqual(len(merged), 1)
+        logical_surface = merged[0]
+        self.assertTrue(logical_surface.contains_point_2d(np.array([0.0, 0.0])))
+        self.assertTrue(logical_surface.contains_point_2d(np.array([0.99, 0.0])))
+
+    def test_disconnected_support_surfaces_are_not_coalesced(self):
+        def surface(surface_id: str, x: float) -> SupportSurface:
+            return SupportSurface(
+                surface_id=UniqueID(surface_id),
+                bounding_box_min=np.array([-0.3, -0.3, 0.01]),
+                bounding_box_max=np.array([0.3, 0.3, 0.5]),
+                transform=RigidTransform(p=[x, 0.0, 0.8]),
+            )
+
+        result = ManipulandTools._coalesce_adjacent_support_surfaces(
+            [surface("S_left", 0.0), surface("S_right", 1.0)]
+        )
+
+        self.assertEqual([str(surface.surface_id) for surface in result], ["S_left", "S_right"])
+
+    @patch.object(ManipulandTools, "_dining_position_is_valid", return_value=True)
+    def test_dining_target_uses_critic_selected_segmented_surface(self, _mock_valid):
+        # 2026-07-23 修改原因：真实 HSSD 餐桌可能由多个连续 surface strip 组成。
+        # critic 已指定餐位 strip 时，工具必须保留该指定面，不能折叠到中央条带。
+        def surface(surface_id: str, y: float) -> SupportSurface:
+            return SupportSurface(
+                surface_id=UniqueID(surface_id),
+                bounding_box_min=np.array([-0.8, -0.1, 0.0]),
+                bounding_box_max=np.array([0.8, 0.1, 0.5]),
+                transform=RigidTransform(p=[0.0, y, 0.8]),
+            )
+
+        north = surface("S_north", 0.22)
+        center = surface("S_center", 0.0)
+        plate = Mock()
+        plate.bbox_min = np.array([-0.12, -0.12, 0.0])
+        plate.bbox_max = np.array([0.12, 0.12, 0.03])
+        plate.placement_info = Mock(rotation_2d=0.0)
+
+        selected = self.manipuland_tools._select_dining_surface_position(
+            surface_map={"S_center": center, "S_north": north},
+            scene_object=plate,
+            target_xy=(0.0, 0.24),
+            preferred_surface_id="S_north",
+        )
+
+        self.assertIsNotNone(selected)
+        selected_surface, selected_position = selected
+        self.assertEqual(str(selected_surface.surface_id), "S_north")
+        self.assertLess(abs(float(selected_position[1])), 0.1)
+
     def test_move_manipuland_out_of_bounds_fails(self):
         """Test that move_manipuland fails when position is out of bounds."""
         # Create a mock object.

@@ -105,6 +105,40 @@ scenebenchmark_critic:
   fd_relation_proposer_mode: "template"
   max_fd_relation_proposals: 8
   stable_orientation_contracts: true
+  # Roll out prompt-originated constraints in observation mode first.  The
+  # contract evaluator writes ignored diagnostics until ACP replay confirms it
+  # is at least as safe as the legacy heuristic path.
+  constraint_mode: "shadow"
+  intent_compiler:
+    enabled: true
+  visual_grounding:
+    enabled: false
+  vlm_hard_gate: false
+
+# Optional soft placement-order references. Both stages are opt-in; set each
+# stage's enabled flag to true when validating the reference-guided flow.
+stage_placement_order:
+  # Legacy furniture-only aliases. Keep null unless an older run command sets
+  # experiment.stage_placement_order.enabled/cache/etc.
+  enabled: null
+  cache: null
+  fallback_enabled: null
+  max_items_per_stage: null
+  enable_thinking: null
+
+  furniture:
+    enabled: null
+    cache: true
+    fallback_enabled: true
+    max_items: 20
+    enable_thinking: false
+
+  manipuland:
+    enabled: null
+    cache: true
+    fallback_enabled: true
+    max_items_per_surface: 8
+    enable_thinking: false
 
 # Geometry generation server settings
 geometry_generation_server:

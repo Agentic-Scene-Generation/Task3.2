@@ -51,7 +51,9 @@ def format_markdown_report(payload: dict[str, Any]) -> str:
         f"- Stage: `{payload.get('stage')}`",
         f"- Gate: `{(payload.get('gate') or {}).get('label', 'n/a')}`",
         f"- Checks: {scene_summary.get('total_checks', 0)}",
-        f"- All checks / ignored: {scene_summary.get('all_checks', scene_summary.get('total_checks', 0))}/"
+        f"- All / excluded auxiliary / ignored: "
+        f"{scene_summary.get('all_checks', scene_summary.get('total_checks', 0))}/"
+        f"{scene_summary.get('excluded_auxiliary', 0)}/"
         f"{scene_summary.get('excluded_ignored', 0)}",
         f"- Pass/degraded/fail/unknown: {scene_summary.get('pass', 0)}/"
         f"{scene_summary.get('degraded', 0)}/{scene_summary.get('fail', 0)}/"
@@ -85,7 +87,7 @@ def format_markdown_report(payload: dict[str, Any]) -> str:
 def format_prompt_context(payload: dict[str, Any], *, max_issues: int = 8) -> str:
     results = payload.get("results") or []
     counted_results = [
-        result for result in results if not _is_ignored_scoring_tier(result)
+        result for result in results if not _is_non_authoritative_scoring_tier(result)
     ]
     issues = [result for result in results if _is_prompt_issue(result)][:max_issues]
     if not issues:
@@ -121,11 +123,14 @@ def _is_prompt_issue(result: dict[str, Any]) -> bool:
         "fail",
         "degraded",
         "unknown",
-    } and not _is_ignored_scoring_tier(result)
+    } and not _is_non_authoritative_scoring_tier(result)
 
 
-def _is_ignored_scoring_tier(result: dict[str, Any]) -> bool:
-    return str(result.get("scoring_tier") or "").strip().lower() == "ignored"
+def _is_non_authoritative_scoring_tier(result: dict[str, Any]) -> bool:
+    return str(result.get("scoring_tier") or "").strip().lower() in {
+        "ignored",
+        "auxiliary",
+    }
 
 
 def _gate_status(summary: dict[str, Any], config: CriticConfig) -> dict[str, Any]:

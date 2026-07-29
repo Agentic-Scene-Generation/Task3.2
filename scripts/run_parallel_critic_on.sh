@@ -3,6 +3,12 @@
 # service ports. This script intentionally has no critic-off, embedding, or VLM
 # annotation path: SceneBenchmark feedback is injected only into existing LLM
 # critic prompts.
+#
+# Shared-base replay:
+#   GENERATE_SHARED_BASE=true ... bash scripts/run_parallel_critic_on.sh
+# generates OUTPUT_ROOT/shared_base and branches the critic run from it.
+# To reuse a previous base, set BRANCH_FROM_SHARED_BASE=true and point
+# SHARED_BASE_ROOT at that directory.
 
 set -euo pipefail
 
@@ -19,7 +25,12 @@ OUTPUT_ROOT="${OUTPUT_ROOT:-$PROJECT_ROOT/outputs/critic_probe/$RUN_ID}"
 SCENE_BATCH_SIZE="${SCENE_BATCH_SIZE:-1}"
 SCENE_WORKERS_PER_PROCESS="${SCENE_WORKERS_PER_PROCESS:-1}"
 CRITIC_PROBE_PARALLEL="${CRITIC_PROBE_PARALLEL:-true}"
-CRITIC_PROBE_INNER_PARALLELISM="${CRITIC_PROBE_INNER_PARALLELISM:-2}"
+# A Qwen llama-server already reserves tens of GiB in the ACP cgroup.  Keep
+# one Python scene process by default; callers can opt into more concurrency
+# explicitly after checking the allocation budget.
+CRITIC_PROBE_INNER_PARALLELISM="${CRITIC_PROBE_INNER_PARALLELISM:-1}"
+CRITIC_PROBE_MAX_SAFE_INNER_PARALLELISM="${CRITIC_PROBE_MAX_SAFE_INNER_PARALLELISM:-1}"
+CRITIC_PROBE_ALLOW_UNSAFE_PARALLELISM="${CRITIC_PROBE_ALLOW_UNSAFE_PARALLELISM:-false}"
 CRITIC_PROBE_PORT_BASE="${CRITIC_PROBE_PORT_BASE:-9000}"
 CRITIC_PROBE_PORT_BLOCK_SIZE="${CRITIC_PROBE_PORT_BLOCK_SIZE:-400}"
 CRITIC_PROBE_SHUTDOWN_GRACE_SECONDS="${CRITIC_PROBE_SHUTDOWN_GRACE_SECONDS:-30}"
@@ -39,9 +50,26 @@ GENERATE_SHARED_BASE="${GENERATE_SHARED_BASE:-false}"
 MAX_CASES="${MAX_CASES:-0}"
 CASE_FILTER="${CASE_FILTER:-}"
 DRY_RUN="${DRY_RUN:-false}"
+CRITIC_PROBE_RENDER_FINAL_VIEWS="${CRITIC_PROBE_RENDER_FINAL_VIEWS:-false}"
+CRITIC_PROBE_FINAL_VIEW_PARALLELISM="${CRITIC_PROBE_FINAL_VIEW_PARALLELISM:-1}"
+# First run the prompt-originated system in shadow mode. Set to ``contract``
+# only after reviewing the comparison report and holdout replay.
+CRITIC_CONSTRAINT_MODE="${CRITIC_CONSTRAINT_MODE:-shadow}"
+FINAL_VIEW_PYTHON_BIN="${FINAL_VIEW_PYTHON_BIN:-$PYTHON_BIN}"
 DISABLE_ARTICULATED="${SCENEEXPERT_DISABLE_ARTICULATED:-false}"
 DISABLE_MATERIALS="${SCENEEXPERT_DISABLE_MATERIALS:-false}"
 DISABLE_BWRAP="${SCENEEXPERT_DISABLE_BWRAP:-false}"
+HSSD_RETRIEVAL_BACKEND="${HSSD_RETRIEVAL_BACKEND:-clip}"
+HSSD_RENDERED_ASSET_CHOICE="${HSSD_RENDERED_ASSET_CHOICE:-false}"
+# os.cpu_count() sees the host's 192 logical CPUs in the CCI container.  A
+# critic replay should never inherit the 32-thread YAML default implicitly:
+# each isolated decomposition server gets a small explicit cap.
+CONVEX_MAX_OMP_THREADS="${SCENEEXPERT_CONVEX_MAX_OMP_THREADS:-2}"
+
+INTERNAL_RUN_BATCH="false"
+if [ "${1:-}" = "--internal-run-batch" ]; then
+    INTERNAL_RUN_BATCH="true"
+fi
 
 # Match the classmate's vLLM run. The agent code maps these values to Qwen
 # directives: none/minimal -> /no_think, all other values -> /think.
@@ -97,6 +125,17 @@ next_stage_after() {
     esac
 }
 
+pipeline_stage_index() {
+    case "$1" in
+        floor_plan) printf '0' ;;
+        furniture) printf '1' ;;
+        wall_mounted) printf '2' ;;
+        ceiling_mounted) printf '3' ;;
+        manipuland) printf '4' ;;
+        *) return 1 ;;
+    esac
+}
+
 csv_quote() {
     local value="$1"
     value=${value//\"/\"\"}
@@ -106,9 +145,19 @@ csv_quote() {
 require_positive_integer SCENE_BATCH_SIZE "$SCENE_BATCH_SIZE"
 require_positive_integer SCENE_WORKERS_PER_PROCESS "$SCENE_WORKERS_PER_PROCESS"
 require_positive_integer CRITIC_PROBE_INNER_PARALLELISM "$CRITIC_PROBE_INNER_PARALLELISM"
+require_positive_integer CRITIC_PROBE_MAX_SAFE_INNER_PARALLELISM "$CRITIC_PROBE_MAX_SAFE_INNER_PARALLELISM"
 require_positive_integer CRITIC_PROBE_PORT_BASE "$CRITIC_PROBE_PORT_BASE"
 require_positive_integer CRITIC_PROBE_PORT_BLOCK_SIZE "$CRITIC_PROBE_PORT_BLOCK_SIZE"
 require_positive_integer CRITIC_PROBE_SHUTDOWN_GRACE_SECONDS "$CRITIC_PROBE_SHUTDOWN_GRACE_SECONDS"
+require_positive_integer CRITIC_PROBE_FINAL_VIEW_PARALLELISM "$CRITIC_PROBE_FINAL_VIEW_PARALLELISM"
+if [ -n "$CONVEX_MAX_OMP_THREADS" ]; then
+    require_positive_integer SCENEEXPERT_CONVEX_MAX_OMP_THREADS "$CONVEX_MAX_OMP_THREADS"
+fi
+
+if ! CRITIC_PROBE_ALLOW_UNSAFE_PARALLELISM="$(normalize_bool "$CRITIC_PROBE_ALLOW_UNSAFE_PARALLELISM")"; then
+    echo "ERROR: CRITIC_PROBE_ALLOW_UNSAFE_PARALLELISM must be true or false" >&2
+    exit 1
+fi
 
 if [ "$CRITIC_PROBE_PORT_BLOCK_SIZE" -lt 375 ]; then
     echo "ERROR: CRITIC_PROBE_PORT_BLOCK_SIZE must be at least 375" >&2
@@ -146,8 +195,25 @@ if ! DISABLE_BWRAP="$(normalize_bool "$DISABLE_BWRAP")"; then
     echo "ERROR: SCENEEXPERT_DISABLE_BWRAP must be true or false" >&2
     exit 1
 fi
+if [[ "$HSSD_RETRIEVAL_BACKEND" != "clip" && "$HSSD_RETRIEVAL_BACKEND" != "embedding" ]]; then
+    echo "ERROR: HSSD_RETRIEVAL_BACKEND must be clip or embedding" >&2
+    exit 1
+fi
+if ! HSSD_RENDERED_ASSET_CHOICE="$(normalize_bool "$HSSD_RENDERED_ASSET_CHOICE")"; then
+    echo "ERROR: HSSD_RENDERED_ASSET_CHOICE must be true or false" >&2
+    exit 1
+fi
 if ! FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS="$(normalize_bool "$FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS")"; then
     echo "ERROR: FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS must be true or false" >&2
+    exit 1
+fi
+if ! CRITIC_PROBE_RENDER_FINAL_VIEWS="$(normalize_bool "$CRITIC_PROBE_RENDER_FINAL_VIEWS")"; then
+    echo "ERROR: CRITIC_PROBE_RENDER_FINAL_VIEWS must be true or false" >&2
+    exit 1
+fi
+if [ "$CRITIC_PROBE_RENDER_FINAL_VIEWS" = "true" ] && [ "$SCENE_BATCH_SIZE" -ne 1 ]; then
+    echo "ERROR: immediate per-scene final rendering requires SCENE_BATCH_SIZE=1 (got $SCENE_BATCH_SIZE)" >&2
+    echo "       Set SCENE_BATCH_SIZE=1 so each completed batch maps to exactly one scene." >&2
     exit 1
 fi
 
@@ -161,6 +227,13 @@ fi
 
 if [ "$SCENE_WORKERS_PER_PROCESS" -ne 1 ]; then
     echo "ERROR: use one worker per process to avoid fork-after-bpy-import." >&2
+    exit 1
+fi
+if [ "$CRITIC_PROBE_PARALLEL" = "true" ] \
+    && [ "$CRITIC_PROBE_INNER_PARALLELISM" -gt "$CRITIC_PROBE_MAX_SAFE_INNER_PARALLELISM" ] \
+    && [ "$CRITIC_PROBE_ALLOW_UNSAFE_PARALLELISM" != "true" ]; then
+    echo "ERROR: refusing unsafe critic batch concurrency: inner=$CRITIC_PROBE_INNER_PARALLELISM (safe default max=$CRITIC_PROBE_MAX_SAFE_INNER_PARALLELISM)." >&2
+    echo "       Set CRITIC_PROBE_INNER_PARALLELISM=1, or explicitly opt in with CRITIC_PROBE_ALLOW_UNSAFE_PARALLELISM=true." >&2
     exit 1
 fi
 if [ "$CRITIC_PROBE_PARALLEL" = "true" ] && ! command -v setsid >/dev/null 2>&1; then
@@ -187,6 +260,10 @@ if [ "$BRANCH_FROM_SHARED_BASE" = "true" ] || [ "$GENERATE_SHARED_BASE" = "true"
             ;;
     esac
     BRANCH_START_STAGE="$(next_stage_after "$SHARED_BASE_STOP_STAGE")"
+    if [ "$(pipeline_stage_index "$PIPELINE_STOP_STAGE")" -le "$(pipeline_stage_index "$SHARED_BASE_STOP_STAGE")" ]; then
+        echo "ERROR: PIPELINE_STOP_STAGE must be after SHARED_BASE_STOP_STAGE when using a shared base" >&2
+        exit 1
+    fi
     if [ -z "$SHARED_BASE_ROOT" ]; then
         SHARED_BASE_ROOT="$OUTPUT_ROOT/shared_base"
     fi
@@ -203,15 +280,22 @@ export SCENEEXPERT_EXPERIMENT="$EXPERIMENT"
 export PYTHON_BIN MODEL_NAME RUN_ID OUTPUT_ROOT
 export SCENE_BATCH_SIZE SCENE_WORKERS_PER_PROCESS
 export CRITIC_PROBE_PARALLEL CRITIC_PROBE_INNER_PARALLELISM
+export CRITIC_PROBE_MAX_SAFE_INNER_PARALLELISM CRITIC_PROBE_ALLOW_UNSAFE_PARALLELISM
 export CRITIC_PROBE_PORT_BASE CRITIC_PROBE_PORT_BLOCK_SIZE
 export CRITIC_PROBE_SHUTDOWN_GRACE_SECONDS
 export CRITIC_PROBE_CONTINUE_ON_BATCH_FAILURE
+export CRITIC_PROBE_RENDER_FINAL_VIEWS
+export CRITIC_PROBE_FINAL_VIEW_PARALLELISM
+export FINAL_VIEW_PYTHON_BIN
+export CRITIC_CONSTRAINT_MODE
 export PIPELINE_STOP_STAGE BRANCH_FROM_SHARED_BASE SHARED_BASE_STOP_STAGE
 export SHARED_BASE_ROOT GENERATE_SHARED_BASE MAX_CASES CASE_FILTER DRY_RUN
 export SCENEEXPERT_DISABLE_ARTICULATED="$DISABLE_ARTICULATED"
 export SCENEEXPERT_DISABLE_MATERIALS="$DISABLE_MATERIALS"
 export SCENEEXPERT_DISABLE_BWRAP="$DISABLE_BWRAP"
 export FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS
+export HSSD_RETRIEVAL_BACKEND HSSD_RENDERED_ASSET_CHOICE
+export CONVEX_MAX_OMP_THREADS
 export FLOOR_PLAN_DESIGNER_THINKING FLOOR_PLAN_CRITIC_THINKING
 export FURNITURE_DESIGNER_THINKING FURNITURE_CRITIC_THINKING
 export WALL_DESIGNER_THINKING WALL_CRITIC_THINKING
@@ -219,6 +303,65 @@ export CEILING_DESIGNER_THINKING CEILING_CRITIC_THINKING
 export MANIPULAND_DESIGNER_THINKING MANIPULAND_CRITIC_THINKING
 
 mkdir -p "$OUTPUT_ROOT"
+
+read_cgroup_memory_value() {
+    local path value
+    for path in /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory/memory.limit_in_bytes; do
+        if [ -r "$path" ]; then
+            value=$(tr -d '[:space:]' < "$path")
+            if [ -n "$value" ] && [ "$value" != "max" ]; then
+                printf '%s\n' "$value"
+                return 0
+            fi
+        fi
+    done
+    return 1
+}
+
+read_cgroup_memory_current() {
+    local path value
+    for path in /sys/fs/cgroup/memory.current /sys/fs/cgroup/memory/memory.usage_in_bytes; do
+        if [ -r "$path" ]; then
+            value=$(tr -d '[:space:]' < "$path")
+            if [[ "$value" =~ ^[0-9]+$ ]]; then
+                printf '%s\n' "$value"
+                return 0
+            fi
+        fi
+    done
+    return 1
+}
+
+if [ "$INTERNAL_RUN_BATCH" = "false" ]; then
+    # Prevent two top-level probes from sharing one llama-server/cgroup.  The
+    # descriptor stays locked until this script exits, while internal batch
+    # children inherit the lock owner and do not try to acquire it again.
+    LOCK_FILE="${CRITIC_PROBE_LOCK_FILE:-${TMPDIR:-/tmp}/scenesmith_critic_probe.lock}"
+    mkdir -p "$(dirname "$LOCK_FILE")"
+    if ! command -v flock >/dev/null 2>&1; then
+        echo "ERROR: flock is required to prevent overlapping critic probes" >&2
+        exit 1
+    fi
+    exec 9>"$LOCK_FILE"
+    if ! flock -n 9; then
+        echo "ERROR: another critic probe already owns $LOCK_FILE" >&2
+        echo "       Wait for it to finish or inspect its process/log before retrying." >&2
+        exit 1
+    fi
+
+    if memory_limit_bytes=$(read_cgroup_memory_value) \
+        && memory_current_bytes=$(read_cgroup_memory_current); then
+        # Refuse a new run when less than 15% of the cgroup remains.  This is
+        # intentionally a startup guard; an explicit override is available for
+        # allocations whose memory is accounted outside this cgroup.
+        if [ "${CRITIC_PROBE_ALLOW_HIGH_MEMORY_START:-0}" != "1" ] \
+            && [ "$memory_current_bytes" -gt $((memory_limit_bytes * 85 / 100)) ]; then
+            echo "ERROR: cgroup memory is already at ${memory_current_bytes}/${memory_limit_bytes} bytes; refusing a new critic probe." >&2
+            echo "       Set CRITIC_PROBE_ALLOW_HIGH_MEMORY_START=1 only after verifying stale processes are gone." >&2
+            exit 1
+        fi
+    fi
+fi
 
 echo "========== PARALLEL CRITIC-ON PROBE =========="
 echo "project: $PROJECT_ROOT"
@@ -231,7 +374,17 @@ echo "batch size: $SCENE_BATCH_SIZE"
 echo "parallel batches: $CRITIC_PROBE_PARALLEL ($CRITIC_PROBE_INNER_PARALLELISM)"
 echo "port allocation: base=$CRITIC_PROBE_PORT_BASE block=$CRITIC_PROBE_PORT_BLOCK_SIZE"
 echo "continue after batch failure: $CRITIC_PROBE_CONTINUE_ON_BATCH_FAILURE"
+echo "final-view parallelism: $CRITIC_PROBE_FINAL_VIEW_PARALLELISM"
 echo "fail unresolved furniture hard constraints: $FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS"
+echo "HSSD retrieval: backend=$HSSD_RETRIEVAL_BACKEND rendered_asset_choice=$HSSD_RENDERED_ASSET_CHOICE"
+if [ -n "$CONVEX_MAX_OMP_THREADS" ]; then
+    echo "convex decomposition max OMP threads: $CONVEX_MAX_OMP_THREADS"
+fi
+if [ "$INTERNAL_RUN_BATCH" = "false" ] \
+    && memory_limit_bytes=$(read_cgroup_memory_value) \
+    && memory_current_bytes=$(read_cgroup_memory_current); then
+    echo "cgroup memory: current=$memory_current_bytes limit=$memory_limit_bytes"
+fi
 echo "thinking profile: floor_plan=${FLOOR_PLAN_DESIGNER_THINKING}/${FLOOR_PLAN_CRITIC_THINKING}, furniture=${FURNITURE_DESIGNER_THINKING}/${FURNITURE_CRITIC_THINKING}, wall=${WALL_DESIGNER_THINKING}/${WALL_CRITIC_THINKING}, ceiling=${CEILING_DESIGNER_THINKING}/${CEILING_CRITIC_THINKING}, manipuland=${MANIPULAND_DESIGNER_THINKING}/${MANIPULAND_CRITIC_THINKING}"
 echo "shared base: $BRANCH_FROM_SHARED_BASE (generate=$GENERATE_SHARED_BASE)"
 echo "==============================================="
@@ -243,6 +396,10 @@ CASES=(
     "default_living_room|ACP default scene 1|A living room with a two-seater sofa against the wall, a square rug in the middle in front of the sofa, and two large plants on the floor near the sofa."
     "default_classroom|ACP default scene 2|A classroom with six student desks, each with a chair. A teacher's desk sits at the front near the chalkboard, which hangs on the wall."
     "default_rustic_bedroom|ACP default scene 3|A bedroom featuring rustic farmhouse decor with exposed wooden beams."
+    "living_room_media_bottleneck|sofa-coffee-table-TV functional relation and living-room circulation bottleneck|A living room with a sofa against the back wall facing a TV stand and television on the opposite wall, a coffee table centered between the sofa and TV stand, two armchairs flanking the coffee table near each end of the sofa, and a floor lamp beside one armchair. A remote control and a few magazines lie on the coffee table, and a small rug lies between the coffee table and TV stand."
+    "study_desk_access_crunch|desk-chair-monitor functional relation and study access|A study with a desk centered against the back wall, an office chair tucked under the desk, a computer monitor on the desk, two guest chairs against the side wall with their usable fronts perpendicular to the wall and facing into the room, and a bookshelf on the adjacent wall with its usable front perpendicular to the wall and facing into the room. A desk lamp and a notebook sit on the desk, a pen holder next to the monitor, and a small trash can beside the desk."
+    "bedroom_bedside_blockage|bed-nightstand-lamp functional relation and bed-side/wardrobe accessibility|A bedroom with a bed centered on the main wall, a nightstand with a table lamp on each side of the bed, a dresser against the opposite wall directly facing the bed, and a wardrobe placed next to the dresser. An alarm clock sits on one nightstand, a book on the other, and a small wastebasket near the dresser."
+    "dining_room_service_squeeze|dining table-chair-place-setting relation and dining/sideboard accessibility|A dining room with a dining table in the center, four dining chairs arranged around it with one on each side, a sideboard against the wall behind the chairs on one side, and table settings for four including plates, cutlery, and glasses. A centerpiece vase with flowers sits in the middle of the table, and a set of coasters sits on the sideboard."
 )
 
 COMMON_ARGS=(
@@ -255,6 +412,7 @@ COMMON_ARGS=(
     "experiment.scenebenchmark_critic.inject_into_llm_critic=true"
     "experiment.scenebenchmark_critic.fd_relation_proposer_mode=template"
     "experiment.scenebenchmark_critic.max_fd_relation_proposals=8"
+    "experiment.scenebenchmark_critic.constraint_mode=${CRITIC_CONSTRAINT_MODE}"
     "floor_plan_agent.openai.reasoning_effort.designer=${FLOOR_PLAN_DESIGNER_THINKING}"
     "floor_plan_agent.openai.reasoning_effort.critic=${FLOOR_PLAN_CRITIC_THINKING}"
     "furniture_agent.openai.reasoning_effort.designer=${FURNITURE_DESIGNER_THINKING}"
@@ -265,7 +423,24 @@ COMMON_ARGS=(
     "ceiling_agent.openai.reasoning_effort.critic=${CEILING_CRITIC_THINKING}"
     "manipuland_agent.openai.reasoning_effort.designer=${MANIPULAND_DESIGNER_THINKING}"
     "manipuland_agent.openai.reasoning_effort.critic=${MANIPULAND_CRITIC_THINKING}"
+    "furniture_agent.asset_manager.hssd.retrieval_backend=${HSSD_RETRIEVAL_BACKEND}"
+    "wall_agent.asset_manager.hssd.retrieval_backend=${HSSD_RETRIEVAL_BACKEND}"
+    "ceiling_agent.asset_manager.hssd.retrieval_backend=${HSSD_RETRIEVAL_BACKEND}"
+    "manipuland_agent.asset_manager.hssd.retrieval_backend=${HSSD_RETRIEVAL_BACKEND}"
+    "furniture_agent.asset_manager.hssd.rendered_asset_choice.enabled=${HSSD_RENDERED_ASSET_CHOICE}"
+    "wall_agent.asset_manager.hssd.rendered_asset_choice.enabled=${HSSD_RENDERED_ASSET_CHOICE}"
+    "ceiling_agent.asset_manager.hssd.rendered_asset_choice.enabled=${HSSD_RENDERED_ASSET_CHOICE}"
+    "manipuland_agent.asset_manager.hssd.rendered_asset_choice.enabled=${HSSD_RENDERED_ASSET_CHOICE}"
 )
+
+if [ -n "$CONVEX_MAX_OMP_THREADS" ]; then
+    COMMON_ARGS+=(
+        "furniture_agent.collision_geometry.max_omp_threads=${CONVEX_MAX_OMP_THREADS}"
+        "wall_agent.collision_geometry.max_omp_threads=${CONVEX_MAX_OMP_THREADS}"
+        "ceiling_agent.collision_geometry.max_omp_threads=${CONVEX_MAX_OMP_THREADS}"
+        "manipuland_agent.collision_geometry.max_omp_threads=${CONVEX_MAX_OMP_THREADS}"
+    )
+fi
 
 if [ "$DISABLE_ARTICULATED" = "true" ]; then
     COMMON_ARGS+=(
@@ -336,6 +511,8 @@ run_batch() {
     local critic_enabled=true
     local start_stage=""
     local resume_from=""
+    local shared_base_batch_root=""
+    local asset_choice_audit_path="$run_root/hydra/asset_choice_audit.jsonl"
 
     build_port_args "$batch_index"
     mkdir -p "$run_root"
@@ -350,11 +527,28 @@ run_batch() {
         critic_enabled=false
     elif [ "$BRANCH_FROM_SHARED_BASE" = "true" ]; then
         start_stage="$BRANCH_START_STAGE"
-        resume_from="$SHARED_BASE_ROOT/$batch_label"
+        shared_base_batch_root="$SHARED_BASE_ROOT/$batch_label"
+        # This script puts Hydra's scene directory below a per-batch
+        # ``hydra`` directory to avoid latest-run symlink races.  The
+        # single-room probe uses the batch directory directly, so accept both
+        # layouts when replaying a shared base.
+        if [ -d "$shared_base_batch_root/hydra" ]; then
+            resume_from="$shared_base_batch_root/hydra"
+        else
+            resume_from="$shared_base_batch_root"
+        fi
         if [ ! -d "$resume_from" ]; then
             echo "ERROR: missing reusable shared-base batch: $resume_from" >&2
             exit 1
         fi
+        for entry in "${batch_entries[@]}"; do
+            IFS='|' read -r scene_index _case_id _critic_goal _prompt <<< "$entry"
+            if [ ! -d "$resume_from/scene_$(printf '%03d' "$scene_index")" ]; then
+                echo "ERROR: shared-base scene directory not found: $resume_from/scene_$(printf '%03d' "$scene_index")" >&2
+                echo "       Expected the shared base under $shared_base_batch_root/hydra or $shared_base_batch_root." >&2
+                exit 1
+            fi
+        done
     fi
 
     local cmd=(
@@ -364,8 +558,6 @@ run_batch() {
         "experiment.tasks=[generate_scenes]"
         "experiment.pipeline.stop_stage=${stop_stage}"
         "experiment.scenebenchmark_critic.enabled=${critic_enabled}"
-        # main.py maintains a latest-run symlink two parents above the Hydra
-        # output. Keep that parent unique per batch to avoid symlink races.
         "hydra.run.dir=${run_root}/hydra"
         "experiment.csv_path=${batch_csv}"
     )
@@ -378,9 +570,35 @@ run_batch() {
         return 0
     fi
     if [ "$DISABLE_BWRAP" = "true" ]; then
-        PATH="$PYTHON_EXEC_DIR:/usr/local/sbin:/usr/local/bin" "${cmd[@]}"
+        HSSD_RENDERED_ASSET_CHOICE_AUDIT_PATH="$asset_choice_audit_path" \
+            PATH="$PYTHON_EXEC_DIR:/usr/local/sbin:/usr/local/bin" "${cmd[@]}"
     else
-        "${cmd[@]}"
+        HSSD_RENDERED_ASSET_CHOICE_AUDIT_PATH="$asset_choice_audit_path" "${cmd[@]}"
+    fi
+
+    # Render only the scene represented by this completed batch. Immediate
+    # rendering keeps usable views available even when a later batch fails.
+    # Rendering is best-effort: a renderer/Blender failure must not change the
+    # already successful scene-generation result.
+    if [ "$run_kind" = "critic_on" ] \
+        && [ "$CRITIC_PROBE_RENDER_FINAL_VIEWS" = "true" ] \
+        && [ "$PIPELINE_STOP_STAGE" = "manipuland" ]; then
+        for entry in "${batch_entries[@]}"; do
+            IFS='|' read -r scene_index _case_id _critic_goal _prompt <<< "$entry"
+            local scene_dir="$run_root/hydra/scene_$(printf '%03d' "$scene_index")"
+            local blend_path="$scene_dir/combined_house/house.blend"
+            if [ ! -f "$blend_path" ]; then
+                echo "WARNING: completed $run_kind/$batch_label has no final blend; skipping render: $blend_path" >&2
+                continue
+            fi
+            echo "[$run_kind/$batch_label] rendering final views for scene $(printf '%03d' "$scene_index")"
+            if "$FINAL_VIEW_PYTHON_BIN" "$SCRIPT_DIR/render_critic_final_views.py" \
+                --parallelism 1 -- "$blend_path"; then
+                echo "[$run_kind/$batch_label] final views ready: $scene_dir/critic_final_views"
+            else
+                echo "WARNING: final-view rendering failed for $blend_path; continuing" >&2
+            fi
+        done
     fi
 }
 
@@ -390,6 +608,7 @@ run_batches() {
     local active_labels=()
     local failed_group_pids=()
     local batch_index=0
+    local source_batch_index=0
     local selected=0
     local batch_entries=()
     local batch_failure=0
@@ -547,13 +766,20 @@ run_batches() {
         IFS='|' read -r case_id critic_goal prompt <<< "${CASES[$index]}"
         if [ -n "$CASE_FILTER" ] && [[ "$case_id" != *"$CASE_FILTER"* ]]; then continue; fi
         if [ "$MAX_CASES" -gt 0 ] && [ "$selected" -ge "$MAX_CASES" ]; then break; fi
+        source_batch_index=$((index / SCENE_BATCH_SIZE + 1))
+        if [ "${#batch_entries[@]}" -gt 0 ] && [ "$batch_index" -ne "$source_batch_index" ]; then
+            launch
+            batch_entries=()
+            batch_index=0
+        fi
+        if [ "$batch_index" -eq 0 ]; then batch_index="$source_batch_index"; fi
         batch_entries+=("$index|$case_id|$critic_goal|$prompt")
         selected=$((selected + 1))
         if [ "${#batch_entries[@]}" -eq "$SCENE_BATCH_SIZE" ]; then
-            batch_index=$((batch_index + 1)); launch; batch_entries=()
+            launch; batch_entries=(); batch_index=0
         fi
     done
-    if [ "${#batch_entries[@]}" -gt 0 ]; then batch_index=$((batch_index + 1)); launch; fi
+    if [ "${#batch_entries[@]}" -gt 0 ]; then launch; fi
     while [ "${#active_pids[@]}" -gt 0 ]; do wait_one; done
     # A failed parallel batch can leave native descendants behind even though
     # its shell leader has exited. Reap those groups after other batches finish.
@@ -576,4 +802,8 @@ if [ "$GENERATE_SHARED_BASE" = "true" ]; then
     run_batches shared_base
 fi
 run_batches critic_on
+if [ "$CRITIC_PROBE_RENDER_FINAL_VIEWS" = "true" ] \
+    && [ "$PIPELINE_STOP_STAGE" != "manipuland" ]; then
+    echo "skipping final combined-house views: pipeline stops at $PIPELINE_STOP_STAGE"
+fi
 echo "critic-on probe complete: $OUTPUT_ROOT"

@@ -1,0 +1,98 @@
+{
+  "schema_version": "hssd_wardrobe_front_audit@1.0",
+  "method_version": "wardrobe-multiview-manual-v1-20260727",
+  "coordinate_mapping": {
+    "asset_local_front_axis": [0.0, 0.0, 1.0],
+    "front_view_image_index": 3,
+    "render_evidence_view": "back.png",
+    "week27_index_domain": [0, 1, 2, 3],
+    "note": "For these HSSD render bundles, back.png is the camera view from the asset-local +Z access side. After the HSSD upright conversion this is week27 horizontal view index 3."
+  },
+  "assets": {
+    "115400dd7dd9aa26ca595007f18b5a515626554d": {
+      "confidence": 0.96,
+      "strict_positive": true,
+      "reasoning": "The selected view shows the full drawer and cabinet-door access face; the opposite view is a plain rear panel."
+    },
+    "2373e13c60de2cadf4f4d9c62760b9a169e25ef9": {
+      "confidence": 0.82,
+      "strict_positive": false,
+      "reasoning": "The selected view shows the primary doors, drawer handle, hanging bay, and shelves face-on. The corner wardrobe also exposes storage on another side, so the selected canonical front is semantic but not uniquely strict-positive."
+    },
+    "2641fe1288210d5bfaf624174e89069a0cf0cef1": {
+      "confidence": 0.94,
+      "strict_positive": true,
+      "reasoning": "The selected view shows the centered double doors and handles; the opposite view is the undecorated rear."
+    },
+    "2a16223055b05a112ca63df1b5c10ca65ce31ef2": {
+      "confidence": 0.92,
+      "strict_positive": true,
+      "reasoning": "The selected view shows the complete door face and hardware; the opposite view is a plain rear panel."
+    },
+    "5f1c51116d658b454806329a7be495f18190e7d1": {
+      "confidence": 0.90,
+      "strict_positive": true,
+      "reasoning": "The selected view reveals the center door seam and access hardware more clearly than the opposite panel."
+    },
+    "61007b6969cbb58fbff8f8af738c834c40e67de0": {
+      "confidence": 0.93,
+      "strict_positive": true,
+      "reasoning": "The selected view shows the wardrobe doors and lower drawer face-on; the opposite side has no access features."
+    },
+    "644aecdd8cb3efa146aa57a77d6fe832d952d56e": {
+      "confidence": 0.78,
+      "strict_positive": true,
+      "reasoning": "The selected view is the dark mirrored/front facade, while the opposite face is wood-backed. The facade is distinct but low-detail, so confidence remains conservative."
+    },
+    "7f1ffde09506f5fcb04ce049fd1ef6d1d33101c9": {
+      "confidence": 0.95,
+      "strict_positive": true,
+      "reasoning": "The selected view shows two doors, handles, and four drawers face-on; the opposite view is plain."
+    },
+    "8165c556da0db0469632ab42ea5b335b04bd53ea": {
+      "confidence": 0.92,
+      "strict_positive": true,
+      "reasoning": "The selected view shows paired door handles and front markers; the side views are narrow profiles."
+    },
+    "8685af17fa7d4d5f899912196b9bd71d3c56dcba": {
+      "confidence": 0.94,
+      "strict_positive": true,
+      "reasoning": "The selected view shows the woven double-door facade and handles; the opposite face is a plain panel."
+    },
+    "8870a950a73c7791ab6ca03f72cf2609f4e44a3e": {
+      "confidence": 0.90,
+      "strict_positive": true,
+      "reasoning": "The selected broad face contains the cabinet and drawer access layout; the opposite broad face is plain."
+    },
+    "8a44f5e764ca2a131f50709d1253d341a61282d4": {
+      "confidence": 0.88,
+      "strict_positive": true,
+      "reasoning": "The selected dark facade contains the paired vertical handles; the opposite face has no access hardware."
+    },
+    "991a6870411fab1fabc680a306b19bae617b65af": {
+      "confidence": 0.92,
+      "strict_positive": true,
+      "reasoning": "The selected view shows the long paired handles on the door face; the opposite face is undecorated."
+    },
+    "a9967a984dbe294a7b789d969c5f1ed6a9dbca5c": {
+      "confidence": 0.85,
+      "strict_positive": true,
+      "reasoning": "The selected view shows the segmented multi-door facade; the opposite face reads as the rear panel."
+    },
+    "b7cbd0dfb550c5c53d1fd17401018d8b0aa4a216": {
+      "confidence": 0.95,
+      "strict_positive": true,
+      "reasoning": "The selected view directly exposes the two open shelving bays; the opposite face is closed and plain."
+    },
+    "c081738fd50bd67e91cd3f9aa6368721985b9e40": {
+      "confidence": 0.92,
+      "strict_positive": true,
+      "reasoning": "The selected view shows the paired doors, handles, and lower drawers; the opposite view is a narrow rear panel."
+    },
+    "c95829d613a9a780c467c06f0402984dbbc8db06": {
+      "confidence": 0.90,
+      "strict_positive": true,
+      "reasoning": "The selected view shows the door seam and access hardware; the opposite view is a plain rear face."
+    }
+  }
+}

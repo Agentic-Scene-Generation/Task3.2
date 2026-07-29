@@ -647,6 +647,46 @@ class TestFurnitureTools(BaseAgentToolsTest):
         )
         self.assertIn("out of floor plan bounds", result["message"])
 
+    def test_position_only_move_preserves_current_yaw(self):
+        """Omitting yaw must not undo a wall/snapping orientation."""
+        self.mock_scene.room_geometry = Mock()
+        self.mock_scene.room_geometry.length = 10.0
+        self.mock_scene.room_geometry.width = 8.0
+        furniture_obj = SceneObject(
+            object_id=UniqueID("nightstand"),
+            object_type=ObjectType.FURNITURE,
+            name="Nightstand",
+            description="Wall-backed nightstand",
+            transform=RigidTransform(
+                RollPitchYaw(0.0, 0.0, math.radians(90.0)), [0.0, 0.0, 0.0]
+            ),
+            bbox_min=np.array([-0.2, -0.2, 0.0]),
+            bbox_max=np.array([0.2, 0.2, 0.5]),
+            immutable=False,
+        )
+        self.mock_scene.get_object.return_value = furniture_obj
+        moved = []
+        self.mock_scene.move_object.side_effect = (
+            lambda object_id, new_transform: moved.append(new_transform)
+        )
+
+        result = json.loads(
+            self.furniture_tools._move_furniture_impl(
+                object_id="nightstand",
+                x=1.0,
+                y=1.0,
+                z=0.0,
+                roll=0.0,
+                pitch=0.0,
+                yaw=None,
+            )
+        )
+
+        self.assertTrue(result["success"], result)
+        self.assertEqual(len(moved), 1)
+        yaw = math.degrees(RollPitchYaw(moved[0].rotation()).yaw_angle())
+        self.assertAlmostEqual(yaw, 90.0, places=6)
+
     def test_bounds_check_before_noise_application(self):
         """Test that bounds are checked before placement noise is applied."""
         self.mock_scene.room_geometry = Mock()

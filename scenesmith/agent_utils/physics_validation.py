@@ -215,26 +215,26 @@ def compute_scene_collisions(
         scene_graph_context
     )
 
-    # Use broadphase collision detection (all objects are free bodies now).
-    # This uses Drake's internal broadphase (BVH) for efficient filtering.
+    # Query only penetrating pairs.  The signed-distance query is more general,
+    # but it also asks Drake's mesh distance backend to process every candidate
+    # pair.  Generated convex decompositions can contain many small pieces, and
+    # that path has occasionally crashed in native geometry code.  Penetration
+    # queries provide the exact data needed here (IDs + positive depth) while
+    # avoiding the extra closest-point computation.
     try:
         inspector = query_object.inspector()
-        all_signed_distance_pairs = (
-            query_object.ComputeSignedDistancePairwiseClosestPoints(
-                max_distance=0.0  # Only penetrating pairs (distance < 0).
-            )
-        )
+        all_penetration_pairs = query_object.ComputePointPairPenetration()
 
-        # Filter by penetration threshold.
-        signed_distance_pairs = [
+        # PenetrationAsPointPair.depth is positive for penetrating pairs.
+        penetration_pairs = [
             pair
-            for pair in all_signed_distance_pairs
-            if pair.distance <= -penetration_threshold
+            for pair in all_penetration_pairs
+            if pair.depth >= penetration_threshold
         ]
 
         console_logger.debug(
-            f"Broadphase found {len(all_signed_distance_pairs)} penetrating pairs, "
-            f"{len(signed_distance_pairs)} above threshold"
+            f"Broadphase found {len(all_penetration_pairs)} penetrating pairs, "
+            f"{len(penetration_pairs)} above threshold"
         )
     except Exception as e:
         error_msg = f"Physics validation failed: {str(e)}"
@@ -244,7 +244,7 @@ def compute_scene_collisions(
     # Convert to CollisionPair objects with filtering and deduplication.
     collisions = []
     seen_pairs = set()  # Track unique collision pairs to avoid duplicates
-    for pair in signed_distance_pairs:
+    for pair in penetration_pairs:
         # Map geometry IDs to object names and IDs.
         object_a_info = _get_object_info_from_geometry_id(
             geometry_id=pair.id_A, scene=scene, query_object=query_object
@@ -259,7 +259,7 @@ def compute_scene_collisions(
         )
         if is_floor_collision:
             # Skip floor collisions that are within tolerance.
-            penetration_depth = abs(pair.distance)
+            penetration_depth = float(pair.depth)
             if penetration_depth <= floor_penetration_tolerance:
                 continue
             non_floor_info = (
@@ -301,7 +301,7 @@ def compute_scene_collisions(
             object_a_id=object_a_info["id"],
             object_b_name=object_b_info["name"],
             object_b_id=object_b_info["id"],
-            penetration_depth=abs(pair.distance),
+            penetration_depth=float(pair.depth),
         )
 
         # Post-computation filtering: Apply distance-based filtering.

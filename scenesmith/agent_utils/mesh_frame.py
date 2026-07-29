@@ -15,6 +15,16 @@ def scene_dimensions_to_gltf_y_up(dimensions: Sequence[float]) -> list[float]:
     return [width, height, depth]
 
 
+def gltf_y_up_dimensions_to_scene_z_up(
+    dimensions: Sequence[float],
+) -> list[float]:
+    """Map glTF Y-up extents to SceneSmith ``[width, depth, height]``."""
+    if len(dimensions) != 3:
+        raise ValueError(f"Expected three dimensions, got {dimensions}")
+    width, height, depth = (float(value) for value in dimensions)
+    return [width, depth, height]
+
+
 def gltf_y_up_bounds_to_scene_z_up(
     bounds: Sequence[Sequence[float]],
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -34,6 +44,7 @@ def validate_uniform_dimension_fit(
     *,
     min_ratio: float = 0.5,
     max_ratio: float = 1.75,
+    fit_axes: Sequence[int] = (0, 1, 2),
 ) -> None:
     """Reject a retrieved mesh whose proportions cannot fit uniformly."""
     actual = np.asarray(actual_dimensions, dtype=float)
@@ -44,7 +55,12 @@ def validate_uniform_dimension_fit(
         raise ValueError(
             f"Dimensions must be positive, got actual={actual}, requested={requested}"
         )
-    ratios = actual / requested
+    normalized_fit_axes = tuple(dict.fromkeys(int(axis) for axis in fit_axes))
+    if not normalized_fit_axes or any(
+        axis not in {0, 1, 2} for axis in normalized_fit_axes
+    ):
+        raise ValueError(f"fit_axes must contain axes 0, 1, or 2, got {fit_axes}")
+    ratios = (actual / requested)[list(normalized_fit_axes)]
     if np.any(ratios < min_ratio) or np.any(ratios > max_ratio):
         raise ValueError(
             "Uniformly scaled asset does not fit requested proportions: "

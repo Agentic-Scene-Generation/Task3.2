@@ -12,11 +12,14 @@ from pathlib import Path
 from typing import Any
 
 from agents import Agent, FunctionTool, Runner, RunResult, custom_span
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 
 from scenesmith.agent_utils.base_stateful_agent import (
     BaseStatefulAgent,
     log_agent_usage,
+)
+from scenesmith.agent_utils.manipuland_placement_order import (
+    build_manipuland_placement_order_reference,
 )
 from scenesmith.agent_utils.physical_feasibility import (
     apply_per_furniture_postprocessing,
@@ -36,14 +39,30 @@ from scenesmith.agent_utils.scoring import (
     ManipulandCritiqueWithScores,
     log_agent_response,
 )
+from scenesmith.agent_utils.stage_placement_order_config import (
+    append_placement_order_reference,
+)
 from scenesmith.agent_utils.support_surface_extraction import (
     SupportSurfaceExtractionConfig,
 )
 from scenesmith.agent_utils.workflow_tools import WorkflowTools
 from scenesmith.manipuland_agents.base_manipuland_agent import BaseManipulandAgent
+from scenesmith.manipuland_agents.cross_stage_inventory import (
+    existing_floor_covering_ids,
+    is_floor_target,
+    is_single_floor_covering_request,
+)
 from scenesmith.manipuland_agents.tools.manipuland_tools import ManipulandTools
 from scenesmith.manipuland_agents.tools.vision_tools import ManipulandVisionTools
 from scenesmith.prompts.registry import ManipulandAgentPrompts
+from scenesmith.scenebenchmark_critic import room_scene_to_case_pack
+from scenesmith.scenebenchmark_critic.manipuland_targets import (
+    classify_manipuland_furniture,
+    infer_prompt_manipuland_obligations,
+)
+from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.dining_place_setting import (
+    evaluate_dining_place_setting_alignment,
+)
 from scenesmith.utils.logging import BaseLogger
 
 console_logger = logging.getLogger(__name__)
@@ -114,6 +133,8 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
 
         # Context image for manipuland designer initialization (per-furniture).
         self.manipuland_context_image_path: Path | None = None
+        # Cleared and rebuilt for each furniture item when enabled.
+        self._placement_order_reference: str = ""
 
     def _render_furniture_for_context(self) -> Path:
         """Render furniture with clean angled front view for context image input.
@@ -402,7 +423,7 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
         if not selection:
             raise ValueError("No current furniture selection set")
 
-        return super()._create_planner_agent(
+        planner = super()._create_planner_agent(
             tools=tools,
             prompt_enum=planner_prompt_enum,
             furniture_description=furniture_description,
@@ -414,6 +435,12 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
             reset_total_sum_threshold=total_threshold,
             early_finish_min_score=self.cfg.early_finish_min_score,
         )
+        if self._placement_order_reference and isinstance(planner.instructions, str):
+            planner.instructions = append_placement_order_reference(
+                planner.instructions,
+                self._placement_order_reference,
+            )
+        return planner
 
     def _create_tools_for_furniture(
         self, furniture_id: UniqueID
@@ -468,6 +495,14 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
         return {
             "has_reference_image": self.manipuland_context_image_path is not None,
         }
+
+    def _build_initial_design_input(self, instruction: str) -> str | list[dict]:
+        """Append the current soft reference only when one was generated."""
+        instruction = append_placement_order_reference(
+            instruction,
+            self._placement_order_reference,
+        )
+        return super()._build_initial_design_input(instruction)
 
     def _get_design_change_prompt_enum(self) -> Any:
         """Get the prompt enum for design change instruction.
@@ -537,6 +572,7 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
         # Clear pending images from previous furniture iteration.
         # This prevents image leakage if session callback somehow doesn't trigger.
         self.pending_images = []
+        self._placement_order_reference = ""
 
         furniture_id = furniture_selection.furniture_id
 
@@ -643,6 +679,11 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
                 response=result.final_output, agent_name="PLANNER (MANIPULAND)"
             )
 
+        # The final critic can identify a bad one-to-one dining assignment even
+        # when the planner does not execute its repair recommendation. Enforce the
+        # same deterministic contract before the final scored critique.
+        self._enforce_dining_place_setting_alignment(furniture_id)
+
         # Compute final critique and scores for completed furniture.
         # Check if scene changed since last checkpoint to avoid redundant critique.
         current_scene_hash = self.scene.content_hash()
@@ -664,6 +705,51 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
         console_logger.info(
             f"Completed manipuland placement for furniture {furniture_id}"
         )
+
+    def _enforce_dining_place_setting_alignment(self, furniture_id: UniqueID) -> bool:
+        """Repair a failed dining place-setting contract before final scoring."""
+        table_id = str(furniture_id)
+
+        def current_result() -> dict[str, Any] | None:
+            case_pack = room_scene_to_case_pack(
+                self.scene, stage="dining_place_setting_final_repair"
+            )
+            return next(
+                (
+                    result
+                    for result in evaluate_dining_place_setting_alignment(case_pack)
+                    if str(result.get("primary_object") or "") == table_id
+                ),
+                None,
+            )
+
+        before = current_result()
+        if before is None or before.get("label") != "fail":
+            return False
+
+        console_logger.info(
+            "Applying deterministic dining place-setting alignment for %s",
+            table_id,
+        )
+        self.manipuland_tools._align_dining_place_settings_impl(table_id=table_id)
+
+        after = current_result()
+        if after is not None and after.get("label") == "pass":
+            console_logger.info(
+                "Deterministic dining place-setting alignment passed for %s",
+                table_id,
+            )
+            return True
+
+        unresolved = (
+            "metric produced no result" if after is None else after.get("reason")
+        )
+        console_logger.warning(
+            "Dining place-setting alignment remains unresolved for %s: %s",
+            table_id,
+            unresolved,
+        )
+        return False
 
     def _get_final_scores_directory(self) -> Path:
         """Get the directory path for saving per-furniture manipuland placement state.
@@ -720,6 +806,14 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
 
         # Phase 1: Initial analysis - identify which furniture to populate.
         furniture_data = await self._analyze_furniture_for_placement(scene)
+        furniture_data = self._recover_prompt_required_manipuland_targets(
+            scene=scene,
+            furniture_data=furniture_data,
+        )
+        furniture_data = self._skip_realized_floor_covering_targets(
+            scene=scene,
+            furniture_data=furniture_data,
+        )
 
         if not furniture_data:
             console_logger.info("No furniture identified for manipuland placement")
@@ -831,6 +925,28 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
                     furniture_description = (
                         furniture_obj.description if furniture_obj else "furniture"
                     )
+                    scene_prompt = getattr(
+                        self.scene,
+                        "scene_expert_original_description",
+                        self.scene.text_description,
+                    )
+                    self._placement_order_reference = (
+                        build_manipuland_placement_order_reference(
+                            cfg=self.cfg,
+                            scene_prompt=scene_prompt,
+                            scene_dir=self.scene.scene_dir,
+                            vlm_service=self.vlm_service,
+                            model=self.cfg.openai.model,
+                            furniture_id=furniture_id,
+                            furniture_description=furniture_description,
+                            suggested_items=furniture_selection.suggested_items,
+                            prompt_constraints=furniture_selection.prompt_constraints,
+                            style_notes=furniture_selection.style_notes,
+                            support_surfaces={
+                                str(surface.surface_id): surface for surface in surfaces
+                            },
+                        )
+                    )
 
                     # Create agents and sessions.
                     self._setup_furniture_agents(
@@ -877,6 +993,87 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
             return max(0, int(value or 0))
         except Exception:
             return 0
+
+    def _skip_realized_floor_covering_targets(
+        self,
+        *,
+        scene: RoomScene,
+        furniture_data: list[FurnitureSelection],
+    ) -> list[FurnitureSelection]:
+        """Skip floor assignments already realized by an earlier scene stage."""
+        existing_ids = existing_floor_covering_ids(scene)
+        if not existing_ids:
+            return furniture_data
+
+        retained: list[FurnitureSelection] = []
+        for selection in furniture_data:
+            if is_floor_target(
+                scene, selection.furniture_id
+            ) and is_single_floor_covering_request(selection.suggested_items):
+                console_logger.info(
+                    "Skipping redundant floor-covering target %s; already realized by %s",
+                    selection.furniture_id,
+                    existing_ids,
+                )
+                continue
+            retained.append(selection)
+        return retained
+
+    def _recover_prompt_required_manipuland_targets(
+        self,
+        *,
+        scene: RoomScene,
+        furniture_data: list[FurnitureSelection],
+    ) -> list[FurnitureSelection]:
+        """Add fallback targets for explicit, non-optional prompt obligations."""
+        description = str(
+            getattr(scene, "scene_expert_original_description", "")
+            or getattr(scene, "text_description", "")
+            or ""
+        )
+        obligations = infer_prompt_manipuland_obligations(description)
+        if not obligations:
+            return furniture_data
+
+        recovered = list(furniture_data)
+        for obligation in obligations:
+            selected_ids = {
+                selection.furniture_id
+                for selection in recovered
+                if classify_manipuland_furniture(
+                    scene.get_object(selection.furniture_id), selection.furniture_id
+                )
+                == obligation.category
+            }
+            missing = max(0, obligation.target_count - len(selected_ids))
+            if missing <= 0:
+                continue
+            candidates = [
+                obj
+                for object_id, obj in scene.objects.items()
+                if object_id not in selected_ids
+                and not getattr(obj, "immutable", False)
+                and classify_manipuland_furniture(obj, object_id) == obligation.category
+            ]
+            candidates.sort(key=lambda obj: str(obj.object_id))
+            for obj in candidates[:missing]:
+                recovered.append(
+                    FurnitureSelection(
+                        furniture_id=obj.object_id,
+                        suggested_items=f"REQUIRED: {obligation.required_items}",
+                        prompt_constraints=(
+                            "Deterministic critic recovery: this furniture has "
+                            "explicit small-object obligations in the scene prompt."
+                        ),
+                        style_notes="Follow the requested quantity and distribution exactly.",
+                    )
+                )
+                console_logger.warning(
+                    "Recovered prompt-required manipuland target omitted by VLM: %s (%s)",
+                    obj.object_id,
+                    obligation.category,
+                )
+        return recovered
 
     def _select_manipuland_targets(
         self,

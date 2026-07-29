@@ -17,6 +17,35 @@ from scenesmith.scenebenchmark_critic.metrics.functional_dependency.profiles imp
 )
 
 
+_CLASSROOM_STUDENT_OBJECT_RE = re.compile(
+    r"\b(?:student|classroom[_\s-]*student)[_\s-]*(chair|desk)[_\s-]*(\d+)\b",
+    re.IGNORECASE,
+)
+
+
+def _classroom_student_role(obj: dict[str, Any]) -> tuple[str, int] | None:
+    """Return the indexed student-chair/desk role encoded by an asset identity."""
+    for key in ("id", "name", "category", "category_norm", "asset_id"):
+        value = str(obj.get(key) or "")
+        match = _CLASSROOM_STUDENT_OBJECT_RE.search(value)
+        if match is None:
+            continue
+        return match.group(1).lower(), int(match.group(2))
+    return None
+
+
+def _is_classroom_student_pair(subject: dict[str, Any], target: dict[str, Any]) -> bool:
+    """Whether a student chair and desk share the same explicit instance index."""
+    subject_role = _classroom_student_role(subject)
+    target_role = _classroom_student_role(target)
+    return bool(
+        subject_role
+        and target_role
+        and subject_role == ("chair", target_role[1])
+        and target_role[0] == "desk"
+    )
+
+
 def _is_work_surface_target(target: dict[str, Any]) -> bool:
     profile = object_function_profile(target)
     category = object_category(target)
@@ -317,6 +346,12 @@ def _is_directional_facing_subject(subject: dict[str, Any]) -> bool:
         return False
     if _is_seating_subject(subject) or _is_media_target(subject):
         return True
+    # ``semantic_name`` intentionally preserves role identity (for example,
+    # ``student_desk`` versus ``teachers_desk``).  A desk still has a usable
+    # front for a paired-seat contract even when its generic functional hint
+    # describes the top surface rather than front access.
+    if _semantic_name_has_family(subject, "desk"):
+        return True
     if (
         profile.source == "explicit"
         and profile.is_small_placeable
@@ -543,6 +578,13 @@ def _is_actionable_seating_surface_pair(
     if gap is None:
         return False
 
+    # Classroom assets encode the intended chair-desk pairing in their indexed
+    # identities. Keep this relation actionable even after a bad layout has
+    # separated the pair beyond the generic proximity threshold, so the critic
+    # reports a concrete failure instead of treating the chair as independent.
+    if _is_classroom_student_pair(subject, target):
+        return True
+
     subject_category = object_category(subject)
     target_category = object_category(target)
     subject_profile = object_function_profile(subject)
@@ -627,6 +669,14 @@ def _normalized_category_phrases(obj: dict[str, Any]) -> list[str]:
         if normalized:
             phrases.append(normalized)
     return phrases
+
+
+def _semantic_name_has_family(obj: dict[str, Any], family: str) -> bool:
+    """Match a controlled semantic identity by whole snake-case token."""
+    metadata = obj.get("metadata") or {}
+    value = str(metadata.get("semantic_name") or "").strip().lower()
+    tokens = [token for token in re.split(r"[_\s-]+", value) if token]
+    return family in tokens
 
 
 def _category_surface_family_match(obj: dict[str, Any]) -> bool:

@@ -4,7 +4,7 @@ import tempfile
 import unittest
 
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import scenesmith.experiments.indoor_scene_generation as scene_generation
 from scenesmith.experiments.indoor_scene_generation import (
@@ -115,6 +115,29 @@ class TestSceneTaskIsolation(unittest.TestCase):
 
         self.assertEqual(call_count, 1)
         self.assertFalse((self.output_dir / "failed_attempts").exists())
+
+
+class TestManipulandAgentCleanup(unittest.TestCase):
+    """Manipuland services must not survive a completed or failed scene."""
+
+    def test_cleanup_runs_after_success(self) -> None:
+        agent = MagicMock()
+        agent.add_manipulands = AsyncMock()
+        scene = MagicMock()
+
+        scene_generation._add_manipulands_with_cleanup(agent, scene)
+
+        agent.add_manipulands.assert_awaited_once_with(scene=scene)
+        agent.cleanup.assert_called_once_with()
+
+    def test_cleanup_runs_after_failure(self) -> None:
+        agent = MagicMock()
+        agent.add_manipulands = AsyncMock(side_effect=RuntimeError("stage failed"))
+
+        with self.assertRaisesRegex(RuntimeError, "stage failed"):
+            scene_generation._add_manipulands_with_cleanup(agent, MagicMock())
+
+        agent.cleanup.assert_called_once_with()
 
 
 class TestWorkerReasoningPersistenceBootstrap(unittest.TestCase):

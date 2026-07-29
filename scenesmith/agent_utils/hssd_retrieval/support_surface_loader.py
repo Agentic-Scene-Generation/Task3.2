@@ -190,28 +190,39 @@ def _filter_surfaces_by_layer_spacing(
     ]
     surfaces_with_heights.sort(key=lambda x: x[1])
 
-    # Compute spacing to next layer above for each surface.
-    # Build dict: height -> spacing_to_next_layer.
-    layer_heights = {}
-    for i in range(len(surfaces_with_heights) - 1):
-        current_height = surfaces_with_heights[i][1]
-        next_height = surfaces_with_heights[i + 1][1]
-        spacing = next_height - current_height
-        layer_heights[current_height] = spacing
+    # Group coplanar pieces before measuring vertical spacing. HSSD often splits a
+    # tabletop into adjacent mesh pieces at the same height. Treating each piece as
+    # a separate layer gives all but the last one zero clearance; using height as a
+    # dictionary key then also gives the last piece that same zero clearance.
+    layer_height_tolerance_m = 1e-4
+    layers: list[list[tuple[SupportSurface, float]]] = []
+    for surface_with_height in surfaces_with_heights:
+        if (
+            not layers
+            or surface_with_height[1] - layers[-1][0][1] > layer_height_tolerance_m
+        ):
+            layers.append([surface_with_height])
+        else:
+            layers[-1].append(surface_with_height)
 
-    # Filter surfaces by spacing.
+    # Filter complete layers by spacing to the next distinct layer above.
     filtered = []
-    for surface, height in surfaces_with_heights:
-        # Get spacing to layer above (use top_clearance if no layer above).
-        space_above = layer_heights.get(height, top_clearance)
+    for layer_index, layer in enumerate(layers):
+        height = max(item[1] for item in layer)
+        if layer_index + 1 < len(layers):
+            next_height = min(item[1] for item in layers[layer_index + 1])
+            space_above = next_height - height
+        else:
+            space_above = top_clearance
 
         if space_above >= min_spacing:
-            filtered.append(surface)
+            filtered.extend(surface for surface, _ in layer)
         else:
-            console_logger.debug(
-                f"Filtering surface {surface.surface_id}: spacing to layer above "
-                f"{space_above:.3f}m < minimum {min_spacing:.3f}m"
-            )
+            for surface, _ in layer:
+                console_logger.debug(
+                    f"Filtering surface {surface.surface_id}: spacing to layer above "
+                    f"{space_above:.3f}m < minimum {min_spacing:.3f}m"
+                )
 
     console_logger.info(
         f"Layer spacing filtering: {len(surfaces)} → {len(filtered)} surfaces"

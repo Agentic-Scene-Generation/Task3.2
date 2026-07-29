@@ -80,7 +80,9 @@ def aggregate_results(
         scoring_tier = _normalize_scoring_tier(
             result.get("scoring_tier") or check.get("scoring_tier")
         )
-        counted = scoring_tier != "ignored"
+        # Auxiliary observations remain visible in diagnostic summaries, but
+        # only deterministic core checks may affect score aggregation or gates.
+        counted = scoring_tier == "core"
         row = _object_result_row(
             result, check, subject_id, metric, label, scoring_tier, counted
         )

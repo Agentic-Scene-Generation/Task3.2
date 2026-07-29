@@ -1,12 +1,23 @@
 """Unit tests for the asset router module."""
 
+import base64
+import json
+import os
+import tempfile
 import unittest
 
-from unittest.mock import MagicMock
+from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 from scenesmith.agent_utils.asset_router import AssetRouter
 from scenesmith.agent_utils.asset_router.dataclasses import AnalysisResult, AssetItem
+from scenesmith.agent_utils.asset_router.rendered_asset_choice import (
+    choose_hssd_candidate_from_iso_renders,
+    infer_floor_covering_footprint_shape,
+)
+from scenesmith.agent_utils.hssd_retrieval_server.dataclasses import HssdRetrievalResult
 from scenesmith.agent_utils.room import AgentType, ObjectType
+from scenesmith.agent_utils.semantic_names import semantic_name_candidates_for_request
 
 
 class TestAnalysisResultWasModified(unittest.TestCase):
@@ -143,6 +154,456 @@ class TestAssetRouterItemTypeValidation(unittest.TestCase):
         error = router.validate_item_types(items)
         assert error is not None
         assert "manipuland" in error.lower()
+
+
+class TestRenderedHssdAssetChoice(unittest.TestCase):
+    """Test VLM-assisted selection among rendered HSSD candidates."""
+
+    _PNG_1X1 = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/"
+        "x8AAwMCAO+/p9sAAAAASUVORK5CYII="
+    )
+
+    def _candidate(
+        self,
+        hssd_id: str,
+        name: str,
+        score: float,
+        size: tuple[float, float, float] = (1.0, 0.5, 0.6),
+    ) -> HssdRetrievalResult:
+        return HssdRetrievalResult(
+            mesh_path=f"/tmp/{hssd_id}.glb",
+            hssd_id=hssd_id,
+            object_name=name,
+            similarity_score=score,
+            size=size,
+            category="bedroom",
+        )
+
+    def _write_iso(self, root: Path, hssd_id: str) -> None:
+        asset_dir = root / hssd_id
+        asset_dir.mkdir(parents=True, exist_ok=True)
+        (asset_dir / "iso.png").write_bytes(self._PNG_1X1)
+
+    def _write_view(self, root: Path, hssd_id: str, view_name: str) -> None:
+        asset_dir = root / hssd_id
+        asset_dir.mkdir(parents=True, exist_ok=True)
+        (asset_dir / f"{view_name}.png").write_bytes(self._PNG_1X1)
+
+    def test_reorders_candidates_when_vlm_selects_rendered_iso(self) -> None:
+        candidates = [
+            self._candidate("asset_a", "generic bed", 0.91),
+            self._candidate("asset_b", "wood nightstand", 0.89),
+            self._candidate("asset_c", "small table", 0.87),
+        ]
+        vlm_service = MagicMock()
+        vlm_service.create_completion.return_value = (
+            '{"selected_index": 2, "selected_hssd_id": "asset_b", '
+            '"reason": "closest bedside table"}'
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            for candidate in candidates:
+                self._write_iso(root, candidate.hssd_id)
+
+            choice = choose_hssd_candidate_from_iso_renders(
+                candidates=candidates,
+                object_description="wooden nightstand beside a bed",
+                scene_context=(
+                    "A bedroom with a bed centered on the main wall and a "
+                    "nightstand with a table lamp on each side of the bed."
+                ),
+                vlm_service=vlm_service,
+                model="test-model",
+                reasoning_effort="low",
+                verbosity="low",
+                vision_detail="low",
+                rendered_assets_dir=root,
+                top_n=3,
+            )
+
+        self.assertEqual(
+            [candidate.hssd_id for candidate in choice.candidates],
+            ["asset_b", "asset_a", "asset_c"],
+        )
+        self.assertEqual(choice.selected_hssd_id, "asset_b")
+        self.assertEqual(choice.selected_index, 2)
+        self.assertEqual(choice.used_image_count, 3)
+        vlm_service.create_completion.assert_called_once()
+        prompt = vlm_service.create_completion.call_args.kwargs["messages"][0][
+            "content"
+        ][0]["text"]
+        self.assertIn("Original scene prompt", prompt)
+        self.assertIn("nightstand with a table lamp", prompt)
+
+    def test_writes_rendered_choice_audit(self) -> None:
+        candidates = [
+            self._candidate("asset_audit_a", "generic wardrobe", 0.91),
+            self._candidate("asset_audit_b", "wood wardrobe", 0.89),
+        ]
+        vlm_service = MagicMock()
+        vlm_service.create_completion.return_value = (
+            '{"selected_index": 2, "selected_hssd_id": "asset_audit_b", '
+            '"reason": "visible doors"}'
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            audit_path = root / "audit.jsonl"
+            for candidate in candidates:
+                self._write_iso(root, candidate.hssd_id)
+
+            with patch.dict(
+                os.environ,
+                {"HSSD_RENDERED_ASSET_CHOICE_AUDIT_PATH": str(audit_path)},
+            ):
+                choice = choose_hssd_candidate_from_iso_renders(
+                    candidates=candidates,
+                    object_description="wardrobe with double doors",
+                    scene_context="bedroom",
+                    vlm_service=vlm_service,
+                    model="test-model",
+                    reasoning_effort="low",
+                    verbosity="low",
+                    vision_detail="low",
+                    rendered_assets_dir=root,
+                    top_n=2,
+                )
+
+            self.assertEqual(choice.selected_hssd_id, "asset_audit_b")
+            event = json.loads(audit_path.read_text(encoding="utf-8"))
+            self.assertEqual(event["image_policy"], "one_composite_per_candidate")
+            self.assertEqual(event["status"], "selected")
+            self.assertEqual(event["selected_index"], 2)
+            self.assertEqual(event["selected_hssd_id"], "asset_audit_b")
+            self.assertEqual(len(event["candidates"]), 2)
+            self.assertEqual(
+                event["candidates"][0]["evidence_views"][0]["label"], "iso"
+            )
+
+    def test_uses_only_task_compiler_semantic_name_candidates(self) -> None:
+        candidates = [
+            self._candidate("student_asset", "school desk", 0.91),
+            self._candidate("teacher_asset", "teacher desk", 0.89),
+        ]
+        vlm_service = MagicMock()
+        vlm_service.create_completion.return_value = (
+            '{"selected_index": 1, "selected_hssd_id": "student_asset", '
+            '"semantic_name": "student_desk", "reason": "student-sized desk"}'
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            for candidate in candidates:
+                self._write_iso(root, candidate.hssd_id)
+            choice = choose_hssd_candidate_from_iso_renders(
+                candidates=candidates,
+                object_description="compact desk for a student",
+                object_short_name="desk",
+                semantic_name_candidates=["student_desk", "teacher_desk", "desk"],
+                scene_context="A classroom with student desks and a teacher desk.",
+                vlm_service=vlm_service,
+                model="test-model",
+                reasoning_effort="low",
+                verbosity="low",
+                vision_detail="low",
+                rendered_assets_dir=root,
+                top_n=2,
+            )
+
+        self.assertEqual(choice.semantic_name, "student_desk")
+        prompt = vlm_service.create_completion.call_args.kwargs["messages"][0][
+            "content"
+        ][0]["text"]
+        self.assertIn('"student_desk"', prompt)
+        self.assertIn('"semantic_name"', prompt)
+
+    def test_invalid_or_missing_semantic_name_falls_back_to_short_name(self) -> None:
+        candidates = [
+            self._candidate("student_asset", "school desk", 0.91),
+            self._candidate("teacher_asset", "teacher desk", 0.89),
+        ]
+        vlm_service = MagicMock()
+        vlm_service.create_completion.return_value = (
+            '{"selected_index": 1, "selected_hssd_id": "student_asset", '
+            '"semantic_name": "invented_desk", "reason": "wrong label"}'
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            for candidate in candidates:
+                self._write_iso(root, candidate.hssd_id)
+            choice = choose_hssd_candidate_from_iso_renders(
+                candidates=candidates,
+                object_description="compact desk for a student",
+                object_short_name="desk",
+                semantic_name_candidates=["student_desk", "teacher_desk", "desk"],
+                scene_context=None,
+                vlm_service=vlm_service,
+                model="test-model",
+                reasoning_effort="low",
+                verbosity="low",
+                vision_detail="low",
+                rendered_assets_dir=root,
+                top_n=2,
+            )
+
+        self.assertEqual(choice.semantic_name, "desk")
+
+    def test_task_compiler_candidates_preserve_stage_roles_and_short_name(self) -> None:
+        task_spec = {
+            "required_large_objects": [
+                "student desk",
+                "student desk",
+                "teacher's desk",
+            ],
+            "intent_constraints": [
+                {"subjects": {"category": "student_chair", "count": 6}}
+            ],
+        }
+        candidates = semantic_name_candidates_for_request(
+            task_spec, ["desk", "student_chair"], ObjectType.FURNITURE
+        )
+
+        self.assertEqual(
+            candidates,
+            [
+                ["student_desk", "teacher_desk", "student_chair", "desk"],
+                ["student_desk", "teacher_desk", "student_chair"],
+            ],
+        )
+
+    @patch(
+        "scenesmith.scenebenchmark_critic.asset_library_annotations."
+        "get_hssd_asset_annotations"
+    )
+    def test_adds_verified_scenebenchmark_front_view(self, mock_annotations) -> None:
+        candidates = [
+            self._candidate("a" * 40, "wardrobe", 0.91),
+            self._candidate("b" * 40, "wardrobe", 0.89),
+        ]
+        mock_annotations.return_value = {
+            "canonical_front": {
+                "asset_local_front_axis": "+X",
+                "canonical_orientation_is_semantic_front": True,
+                "is_strict_front": True,
+            }
+        }
+        vlm_service = MagicMock()
+        vlm_service.create_completion.return_value = (
+            '{"selected_index": 1, "selected_hssd_id": "'
+            + "a" * 40
+            + '", "reason": "visible doors"}'
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            for candidate in candidates:
+                self._write_iso(root, candidate.hssd_id)
+                self._write_view(root, candidate.hssd_id, "right")
+            choice = choose_hssd_candidate_from_iso_renders(
+                candidates=candidates,
+                object_description="modern double-door wardrobe",
+                scene_context="A bedroom with storage furniture.",
+                vlm_service=vlm_service,
+                model="test-model",
+                reasoning_effort="none",
+                verbosity="low",
+                vision_detail="low",
+                rendered_assets_dir=root,
+                top_n=2,
+            )
+
+        content = vlm_service.create_completion.call_args.kwargs["messages"][0][
+            "content"
+        ]
+        labels = [item["text"] for item in content if item["type"] == "text"]
+        evidence_labels = [
+            label for label in labels if label.startswith("CANDIDATE_INDEX=")
+        ]
+        self.assertEqual(choice.used_image_count, 2)
+        self.assertEqual(
+            len([item for item in content if item["type"] == "image_url"]), 2
+        )
+        self.assertTrue(
+            any(
+                "SceneBenchmark semantic-front +X (right)" in label
+                for label in evidence_labels
+            )
+        )
+        self.assertFalse(any("fallback-axis" in label for label in evidence_labels))
+
+    @patch(
+        "scenesmith.scenebenchmark_critic.asset_library_annotations."
+        "get_hssd_asset_annotations"
+    )
+    def test_adds_both_sides_of_strict_fallback_axis(self, mock_annotations) -> None:
+        candidates = [
+            self._candidate("c" * 40, "wardrobe", 0.91),
+            self._candidate("d" * 40, "wardrobe", 0.89),
+        ]
+        mock_annotations.return_value = {
+            "canonical_front": {
+                "asset_local_front_axis": [0.0, 0.0, 1.0],
+                "canonical_orientation_is_semantic_front": False,
+                "is_strict_front": True,
+            }
+        }
+        vlm_service = MagicMock()
+        vlm_service.create_completion.return_value = (
+            '{"selected_index": 1, "selected_hssd_id": "'
+            + "c" * 40
+            + '", "reason": "doors visible on fallback-axis view"}'
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            for candidate in candidates:
+                self._write_iso(root, candidate.hssd_id)
+                self._write_view(root, candidate.hssd_id, "back")
+                self._write_view(root, candidate.hssd_id, "front")
+            choice = choose_hssd_candidate_from_iso_renders(
+                candidates=candidates,
+                object_description="modern double-door wardrobe",
+                scene_context="A bedroom with storage furniture.",
+                vlm_service=vlm_service,
+                model="test-model",
+                reasoning_effort="none",
+                verbosity="low",
+                vision_detail="low",
+                rendered_assets_dir=root,
+                top_n=2,
+            )
+
+        content = vlm_service.create_completion.call_args.kwargs["messages"][0][
+            "content"
+        ]
+        labels = [item["text"] for item in content if item["type"] == "text"]
+        self.assertEqual(choice.used_image_count, 2)
+        self.assertEqual(
+            len([item for item in content if item["type"] == "image_url"]), 2
+        )
+        self.assertTrue(any("fallback-axis -Y (back)" in label for label in labels))
+        self.assertTrue(any("fallback-axis +Y (front)" in label for label in labels))
+
+    def test_keeps_retrieval_order_when_too_few_iso_images_exist(self) -> None:
+        candidates = [
+            self._candidate("asset_a", "generic bed", 0.91),
+            self._candidate("asset_b", "wood nightstand", 0.89),
+        ]
+        vlm_service = MagicMock()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._write_iso(root, "asset_a")
+
+            choice = choose_hssd_candidate_from_iso_renders(
+                candidates=candidates,
+                object_description="wooden nightstand beside a bed",
+                scene_context="A bedroom with matching bedside furniture.",
+                vlm_service=vlm_service,
+                model="test-model",
+                reasoning_effort="low",
+                verbosity="low",
+                vision_detail="low",
+                rendered_assets_dir=root,
+                top_n=2,
+            )
+
+        self.assertEqual(choice.candidates, candidates)
+        self.assertIsNone(choice.selected_hssd_id)
+        self.assertEqual(choice.used_image_count, 1)
+        vlm_service.create_completion.assert_not_called()
+
+    def test_floor_covering_prompt_keeps_planar_shape_and_thickness_semantics(
+        self,
+    ) -> None:
+        candidates = [
+            self._candidate("asset_a", "rectangular rug", 0.91),
+            self._candidate("asset_b", "round carpet", 0.89),
+        ]
+        vlm_service = MagicMock()
+        vlm_service.create_completion.return_value = (
+            '{"selected_index": 1, "selected_hssd_id": "asset_a", '
+            '"reason": "rectangular aspect ratio"}'
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            for candidate in candidates:
+                self._write_iso(root, candidate.hssd_id)
+            choose_hssd_candidate_from_iso_renders(
+                candidates=candidates,
+                object_description="low-pile patterned area rug",
+                object_short_name="area_rug",
+                requested_dimensions=[2.4, 1.6, 0.02],
+                requested_shape="rectangular",
+                scene_context="A living room with a rug under the coffee table.",
+                vlm_service=vlm_service,
+                model="test-model",
+                reasoning_effort="low",
+                verbosity="low",
+                vision_detail="low",
+                rendered_assets_dir=root,
+                top_n=2,
+            )
+
+        prompt = vlm_service.create_completion.call_args.kwargs["messages"][0][
+            "content"
+        ][0]["text"]
+        self.assertIn("(2.4, 1.6, 0.02)", prompt)
+        self.assertIn("Requested footprint shape: rectangular", prompt)
+        self.assertIn("near-zero visual thickness is expected", prompt)
+
+    def test_square_floor_covering_rejects_incompatible_vlm_choice(self) -> None:
+        candidates = [
+            self._candidate(
+                "rectangular_rug", "patterned rug", 0.91, size=(1.6, 2.5, 0.01)
+            ),
+            self._candidate("square_rug", "woven rug", 0.89, size=(2.0, 2.2, 0.01)),
+            self._candidate("runner", "rug runner", 0.87, size=(0.8, 2.4, 0.01)),
+        ]
+        vlm_service = MagicMock()
+        vlm_service.create_completion.return_value = (
+            '{"selected_index": 1, "selected_hssd_id": "rectangular_rug", '
+            '"reason": "best visible pattern"}'
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            for candidate in candidates:
+                self._write_iso(root, candidate.hssd_id)
+            choice = choose_hssd_candidate_from_iso_renders(
+                candidates=candidates,
+                object_description="geometric square rug",
+                object_short_name="area_rug",
+                requested_dimensions=[2.0, 2.0, 0.02],
+                requested_shape="square",
+                scene_context="A living room with a square rug.",
+                vlm_service=vlm_service,
+                model="test-model",
+                reasoning_effort="low",
+                verbosity="low",
+                vision_detail="low",
+                rendered_assets_dir=root,
+                top_n=3,
+            )
+
+        self.assertEqual(choice.selected_hssd_id, "square_rug")
+        self.assertEqual(choice.selected_index, 2)
+        self.assertEqual(choice.candidates[0].hssd_id, "square_rug")
+        self.assertIn("square footprint guard", choice.reason)
+        vlm_service.create_completion.assert_called_once()
+
+    def test_infers_explicit_square_floor_covering_shape(self) -> None:
+        self.assertEqual(
+            infer_floor_covering_footprint_shape(
+                "Geometric patterned square rug", "area_rug"
+            ),
+            "square",
+        )
+        self.assertEqual(
+            infer_floor_covering_footprint_shape("Round bath mat"), "circular"
+        )
 
 
 class TestAnalysisResponseParsing(unittest.TestCase):

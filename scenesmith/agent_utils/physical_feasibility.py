@@ -105,6 +105,55 @@ def compute_tilt_angle_degrees(transform: RigidTransform) -> float:
     return float(np.degrees(np.arccos(cos_tilt)))
 
 
+def _restore_collectively_unstable_instances(
+    scene: RoomScene,
+    pre_simulation_transforms: dict[UniqueID, RigidTransform],
+    fallen_ids: list[UniqueID],
+    tilt_threshold_degrees: float,
+) -> list[UniqueID]:
+    """Keep an intact set when one shared collision proxy topples every copy.
+
+    A bad SDF/collision proxy can make every instance of one asset fall during a
+    single simulation pass.  Restoring that set is safer than deleting an
+    otherwise valid repeated furniture group.  Genuine isolated falls retain
+    the existing removal behaviour.
+    """
+    fallen_set = set(fallen_ids)
+    groups: dict[str, list[UniqueID]] = {}
+    for obj in scene.objects.values():
+        if obj.object_type != ObjectType.FURNITURE:
+            continue
+        asset_path = obj.sdf_path or obj.geometry_path
+        if asset_path is None or obj.object_id not in pre_simulation_transforms:
+            continue
+        groups.setdefault(str(asset_path), []).append(obj.object_id)
+
+    restored: list[UniqueID] = []
+    for asset_path, object_ids in groups.items():
+        if len(object_ids) < 2 or not all(
+            obj_id in fallen_set for obj_id in object_ids
+        ):
+            continue
+        if any(
+            compute_tilt_angle_degrees(pre_simulation_transforms[obj_id])
+            > tilt_threshold_degrees
+            for obj_id in object_ids
+        ):
+            continue
+        for obj_id in object_ids:
+            obj = scene.get_object(obj_id)
+            if obj is not None:
+                obj.transform = pre_simulation_transforms[obj_id]
+                restored.append(obj_id)
+        console_logger.warning(
+            "Restored %d collectively unstable furniture instance(s) for shared "
+            "collision proxy %s",
+            len(object_ids),
+            asset_path,
+        )
+    return restored
+
+
 def _create_drake_plant_for_ik(
     scene: RoomScene,
     builder: DiagramBuilder,
@@ -1459,6 +1508,16 @@ def apply_forward_simulation(
                 return EventStatus.ReachedTermination(None, "timeout")
             return EventStatus.DidNothing()
 
+        # Track upright source poses so a shared bad collision proxy cannot
+        # erase every repeated instance of an otherwise valid asset.
+        pre_simulation_transforms = {
+            obj.object_id: RigidTransform(
+                R=obj.transform.rotation(), p=obj.transform.translation()
+            )
+            for obj in scene.objects.values()
+            if obj.object_type == ObjectType.FURNITURE
+        }
+
         # Run simulation.
         simulator = Simulator(diagram, context)
         simulator.set_monitor(timeout_monitor)
@@ -1509,8 +1568,22 @@ def apply_forward_simulation(
                         f"Removing fallen furniture {obj_id}: "
                         f"tilt={tilt_angle:.1f}° > threshold={fallen_tilt_threshold_degrees}°"
                     )
-                    scene.remove_object(obj_id)
                     removed_ids.append(obj_id)
+
+            restored_ids = _restore_collectively_unstable_instances(
+                scene,
+                pre_simulation_transforms,
+                removed_ids,
+                fallen_tilt_threshold_degrees,
+            )
+            if restored_ids:
+                restored_set = set(restored_ids)
+                removed_ids = [
+                    obj_id for obj_id in removed_ids if obj_id not in restored_set
+                ]
+
+            for obj_id in removed_ids:
+                scene.remove_object(obj_id)
 
             if removed_ids:
                 console_logger.info(

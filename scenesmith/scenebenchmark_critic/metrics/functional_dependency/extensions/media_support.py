@@ -6,6 +6,8 @@ import math
 
 from typing import Any
 
+from scenesmith.scenebenchmark_critic.intent_contract import contract_relation_requested
+
 MEDIA_CATEGORIES = {
     "display",
     "screen",
@@ -25,6 +27,10 @@ SUPPORT_CATEGORIES = {
 
 def evaluate_media_support_alignment(case_pack: dict[str, Any]) -> list[dict[str, Any]]:
     """Report wall-mounted media that is not centered over a matching console."""
+    if str(
+        case_pack.get("intent_contract_mode") or "legacy"
+    ) == "contract" and not contract_relation_requested(case_pack, "on_top_of"):
+        return []
     geometry = case_pack.get("scene_geometry") or {}
     objects = [obj for obj in geometry.get("objects") or [] if isinstance(obj, dict)]
     media = [obj for obj in objects if _is_wall_media(obj)]
@@ -224,7 +230,10 @@ def _support_surface_id(
     for relation in relations:
         if not isinstance(relation, dict):
             continue
-        if str(relation.get("subject_id") or relation.get("subject") or "") != support_id:
+        if (
+            str(relation.get("subject_id") or relation.get("subject") or "")
+            != support_id
+        ):
             continue
         target = str(relation.get("target_surface_id") or "")
         if target:
@@ -339,9 +348,7 @@ def _bbox_center(box: dict[str, Any]) -> list[float] | None:
     minimum, maximum = box.get("min"), box.get("max")
     if not _valid_vec(minimum) or not _valid_vec(maximum):
         return None
-    return [
-        (float(minimum[index]) + float(maximum[index])) / 2.0 for index in range(3)
-    ]
+    return [(float(minimum[index]) + float(maximum[index])) / 2.0 for index in range(3)]
 
 
 def _bbox_span(box: dict[str, Any], axis: int) -> float:

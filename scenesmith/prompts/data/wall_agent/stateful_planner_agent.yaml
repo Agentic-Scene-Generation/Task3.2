@@ -5,6 +5,7 @@ template_variables:
   [
     "room_description",
     "wall_count",
+    "required_wall_objects",
     "max_critique_rounds",
     "reset_single_category_threshold",
     "reset_total_sum_threshold",
@@ -32,6 +33,9 @@ prompt: |
   {{ room_description }}
 
   Number of walls to decorate: {{ wall_count }}
+
+  Explicit wall-object requirements (authoritative):
+  {{ required_wall_objects }}
 
   # Wall Coordinate System
   Wall objects use a 2D coordinate system per wall:
