@@ -1123,6 +1123,13 @@ class AssetManager:
                 and index < len(request.semantic_name_candidates)
                 else None
             ),
+            # Keep a per-room, machine-readable trail for the observability UI.
+            audit_path=self.output_dir / "audit" / "hssd_rendered_choice.jsonl",
+            retrieval_backend=str(
+                (self.cfg.asset_manager.get("hssd", {}) or {}).get(
+                    "retrieval_backend", "unknown"
+                )
+            ),
         )
         if choice.selected_hssd_id:
             console_logger.info(

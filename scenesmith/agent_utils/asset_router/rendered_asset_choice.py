@@ -300,11 +300,15 @@ def _write_choice_audit(
     verbosity: str,
     vision_detail: str,
     status: str,
+    audit_path: Path | None = None,
     **details: object,
 ) -> None:
     """Append a complete rendered-choice decision to the optional JSONL audit."""
     audit_path_raw = os.environ.get("HSSD_RENDERED_ASSET_CHOICE_AUDIT_PATH", "").strip()
-    if not audit_path_raw:
+    resolved_audit_path = audit_path or (
+        Path(audit_path_raw) if audit_path_raw else None
+    )
+    if resolved_audit_path is None:
         return
 
     candidate_records = []
@@ -355,14 +359,13 @@ def _write_choice_audit(
     event.update(details)
 
     try:
-        audit_path = Path(audit_path_raw)
-        audit_path.parent.mkdir(parents=True, exist_ok=True)
-        with audit_path.open("a", encoding="utf-8") as stream:
+        resolved_audit_path.parent.mkdir(parents=True, exist_ok=True)
+        with resolved_audit_path.open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(event, ensure_ascii=False, default=str) + "\n")
             stream.flush()
     except Exception as exc:  # pragma: no cover - audit must never break retrieval
         console_logger.warning(
-            "Could not write HSSD choice audit %s: %s", audit_path_raw, exc
+            "Could not write HSSD choice audit %s: %s", resolved_audit_path, exc
         )
 
 
@@ -481,6 +484,8 @@ def choose_hssd_candidate_from_iso_renders(
     requested_dimensions: list[float] | tuple[float, ...] | None = None,
     requested_shape: str | None = None,
     semantic_name_candidates: list[str] | None = None,
+    audit_path: Path | None = None,
+    retrieval_backend: str | None = None,
 ) -> RenderedAssetChoice:
     """Optionally reorder candidates using pre-rendered HSSD visual evidence."""
     fallback_semantic_name = normalize_semantic_name(object_short_name)
@@ -493,6 +498,7 @@ def choose_hssd_candidate_from_iso_renders(
         allowed_semantic_names.append(fallback_semantic_name)
     if top_n <= 1 or len(candidates) <= 1:
         _write_choice_audit(
+            audit_path=audit_path,
             object_description=object_description,
             scene_context=scene_context,
             object_short_name=object_short_name,
@@ -506,6 +512,7 @@ def choose_hssd_candidate_from_iso_renders(
             verbosity=verbosity,
             vision_detail=vision_detail,
             status="skipped",
+            retrieval_backend=retrieval_backend,
             reason="top_n_or_candidate_count_too_small",
         )
         return RenderedAssetChoice(
@@ -553,6 +560,7 @@ def choose_hssd_candidate_from_iso_renders(
     )
     if len(evidence_records) <= 1:
         _write_choice_audit(
+            audit_path=audit_path,
             object_description=object_description,
             scene_context=scene_context,
             object_short_name=object_short_name,
@@ -566,6 +574,7 @@ def choose_hssd_candidate_from_iso_renders(
             verbosity=verbosity,
             vision_detail=vision_detail,
             status="insufficient_evidence",
+            retrieval_backend=retrieval_backend,
             used_image_count=used_image_count,
             used_view_count=used_view_count,
         )
@@ -695,6 +704,7 @@ def choose_hssd_candidate_from_iso_renders(
         )
     except Exception as exc:
         _write_choice_audit(
+            audit_path=audit_path,
             object_description=object_description,
             scene_context=scene_context,
             object_short_name=object_short_name,
@@ -708,6 +718,7 @@ def choose_hssd_candidate_from_iso_renders(
             verbosity=verbosity,
             vision_detail=vision_detail,
             status="vlm_error",
+            retrieval_backend=retrieval_backend,
             used_image_count=used_image_count,
             used_view_count=used_view_count,
             error=str(exc),
@@ -755,6 +766,7 @@ def choose_hssd_candidate_from_iso_renders(
 
     if selected_candidate is None:
         _write_choice_audit(
+            audit_path=audit_path,
             object_description=object_description,
             scene_context=scene_context,
             object_short_name=object_short_name,
@@ -768,6 +780,7 @@ def choose_hssd_candidate_from_iso_renders(
             verbosity=verbosity,
             vision_detail=vision_detail,
             status="invalid_selection",
+            retrieval_backend=retrieval_backend,
             used_image_count=used_image_count,
             used_view_count=used_view_count,
             raw_response=response_text,
@@ -838,6 +851,7 @@ def choose_hssd_candidate_from_iso_renders(
 
     original_index = candidates.index(selected_candidate) + 1
     _write_choice_audit(
+        audit_path=audit_path,
         object_description=object_description,
         scene_context=scene_context,
         object_short_name=object_short_name,
@@ -851,6 +865,7 @@ def choose_hssd_candidate_from_iso_renders(
         verbosity=verbosity,
         vision_detail=vision_detail,
         status="selected",
+        retrieval_backend=retrieval_backend,
         used_image_count=used_image_count,
         used_view_count=used_view_count,
         raw_response=response_text,

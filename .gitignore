@@ -55,6 +55,7 @@ vllm_server.log
 # Misc
 meeting_notes.md
 *.pdf
+.playwright-cli/
 
 # local
 local/
