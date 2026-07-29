@@ -331,7 +331,7 @@ def unresolved_furniture_relation_failures(
         not in {"ignored", "auxiliary"}
         and (
             str(result.get("relation_type") or "") in _REPAIRABLE_RELATIONS
-            or _is_media_on_support_result(scene, result)
+            or _is_required_media_on_support_result(payload, scene, result)
             or _is_paired_surface_facing_result(payload, result)
         )
     ]
@@ -526,7 +526,7 @@ def _repair_targets(scene: RoomScene, payload: dict[str, Any]) -> list[_RepairTa
             continue
 
         relation = str(result.get("relation_type") or "")
-        media_on_support = _is_media_on_support_result(scene, result)
+        media_on_support = _is_required_media_on_support_result(payload, scene, result)
         if relation == _PAIRED_SURFACE_RELATION:
             if not _is_paired_surface_facing_result(payload, result):
                 continue
@@ -973,6 +973,36 @@ def _is_media_on_support_result(scene: RoomScene, result: dict[str, Any]) -> boo
         and not (_object_semantic_names(subject) & _MEDIA_SUPPORT_NAMES)
         and _object_semantic_names(support) & _MEDIA_SUPPORT_NAMES
     )
+
+
+def _is_required_media_on_support_result(
+    payload: dict[str, Any], scene: RoomScene, result: dict[str, Any]
+) -> bool:
+    """Allow media support repair only for a hard prompt contract.
+
+    A television and a media console commonly appear together, but the prompt
+    may intentionally describe a floor-standing TV, a wall-mounted display, or
+    two independent objects.  In contract mode, generic dependency proposals
+    must therefore remain critic evidence unless an explicit prompt relation
+    authorized this physical support requirement.
+    """
+    if not _is_media_on_support_result(scene, result):
+        return False
+    case_pack = payload.get("case_pack") or {}
+    if str(case_pack.get("intent_contract_mode") or "legacy") != "contract":
+        return True
+    check_id = str(result.get("check_id") or "")
+    for check in case_pack.get("checks") or []:
+        if not isinstance(check, dict) or str(check.get("check_id") or "") != check_id:
+            continue
+        constraint = (check.get("evidence") or {}).get("intent_constraint") or {}
+        return bool(
+            check.get("check_source") == "intent_contract"
+            and str(constraint.get("relation") or "") == "on_top_of"
+            and str(constraint.get("source") or "") == "explicit_prompt"
+            and str(constraint.get("strength") or "") == "hard"
+        )
+    return False
 
 
 def _object_semantic_names(obj: SceneObject) -> set[str]:

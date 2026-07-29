@@ -980,7 +980,7 @@ def test_living_room_prompt_extracts_two_anchor_relations() -> None:
     assert all(is_hard_constraint(row) for row in constraints.values())
 
 
-def test_media_furniture_ontology_supports_freestanding_television() -> None:
+def test_media_furniture_ontology_keeps_freestanding_television_auxiliary() -> None:
     prompt = (
         "A living room with a sofa facing a TV stand and television on the "
         "opposite wall."
@@ -990,7 +990,7 @@ def test_media_furniture_ontology_supports_freestanding_television() -> None:
     support = next(
         row
         for row in contract["constraints"]
-        if row["relation"] == "on_top_of" and row["source"] == "room_ontology"
+        if row["relation"] == "on_top_of" and row["source"] == "model_inferred"
     )
 
     assert support["subjects"] == {
@@ -1003,7 +1003,8 @@ def test_media_furniture_ontology_supports_freestanding_television() -> None:
         "count": 1,
         "quantifier": "all",
     }
-    assert is_hard_constraint(support)
+    assert support["source"] == "model_inferred"
+    assert not is_hard_constraint(support)
 
     objects = [
         _record("television_0", "television", (0.0, 0.0, 0.8)),

@@ -69,6 +69,10 @@ from scenesmith.agent_utils.turn_trimming_session import TurnTrimmingSession
 from scenesmith.prompts import prompt_registry
 from scenesmith.scenebenchmark_critic import evaluate_room_scene
 from scenesmith.scenebenchmark_critic.config import critic_config_from_any
+from scenesmith.scenebenchmark_critic.furniture_relation_repair import (
+    unresolved_furniture_relation_failures,
+)
+from scenesmith.scenebenchmark_critic.intent_contract import constraint_mode
 from scenesmith.scenebenchmark_critic.prompt_context import format_agent_prompt_context
 from scenesmith.utils.logging import BaseLogger
 from scenesmith.utils.openai import (
@@ -548,6 +552,57 @@ class BaseStatefulAgent(ABC):
             scene=self.scene,
             physics_context=physics_context,
         )
+
+    def _checkpoint_eligible_furniture_hard_state(
+        self, hard_state: HardStateEvaluation | None
+    ) -> HardStateEvaluation | None:
+        """Add contract failures only when deciding whether to retain a checkpoint.
+
+        Prompt-relation failures need a regular critic/design loop, not the
+        physics hard-fail fast path.  Applying them to the latter skips the
+        critic before it can ask the designer to repair the layout.  They do,
+        however, disqualify a state from becoming a rollback checkpoint.
+        """
+        if hard_state is None or not hard_state.hard_valid:
+            return hard_state
+        cfg = getattr(self, "cfg", None)
+        if cfg is None:
+            return hard_state
+        critic_config = critic_config_from_any(cfg)
+        if (
+            not critic_config.enabled
+            or not critic_config.metric_enabled("functional_dependency")
+            or constraint_mode(critic_config) != "contract"
+        ):
+            return hard_state
+        try:
+            relation_failures = unresolved_furniture_relation_failures(
+                self.scene,
+                config=critic_config,
+            )
+        except Exception:
+            console_logger.warning(
+                "Could not evaluate contract furniture relations for checkpoint safety",
+                exc_info=True,
+            )
+            return hard_state
+
+        relation_reasons = [
+            "unresolved prompt-core furniture relation: "
+            f"{str(result.get('relation_type') or 'unknown_relation')}:"
+            f"{str(result.get('primary_object') or 'unknown_object')}"
+            for result in relation_failures
+        ]
+        if not relation_reasons:
+            return hard_state
+        checkpoint_state = copy.deepcopy(hard_state)
+        checkpoint_state.hard_reasons.extend(
+            reason
+            for reason in relation_reasons
+            if reason not in checkpoint_state.hard_reasons
+        )
+        checkpoint_state.hard_valid = False
+        return checkpoint_state
 
     def _critic_fast_path_cfg(self) -> Any:
         return _cfg_get(self.cfg, "critic_fast_path", {})
@@ -1096,7 +1151,8 @@ class BaseStatefulAgent(ABC):
         controller.begin_designer_call(call_kind=call_kind)
         pre_state = copy.deepcopy(self.scene.to_state_dict())
         pre_hard = self._evaluate_current_furniture_hard_state()
-        if pre_hard and pre_hard.hard_valid:
+        pre_checkpoint_hard = self._checkpoint_eligible_furniture_hard_state(pre_hard)
+        if pre_checkpoint_hard and pre_checkpoint_hard.hard_valid:
             controller.remember_hard_valid_scene_state(
                 scene_state=pre_state,
                 source=f"pre-{call_kind}",
@@ -1105,7 +1161,9 @@ class BaseStatefulAgent(ABC):
         return {
             "call_kind": call_kind,
             "pre_state": pre_state,
-            "pre_hard_valid": bool(pre_hard and pre_hard.hard_valid),
+            "pre_hard_valid": bool(
+                pre_checkpoint_hard and pre_checkpoint_hard.hard_valid
+            ),
         }
 
     def _restore_furniture_scene_state(self, scene_state: dict[str, Any]) -> None:
@@ -1138,7 +1196,8 @@ class BaseStatefulAgent(ABC):
                     call_kind,
                     "; ".join(repair_actions),
                 )
-            if hard_eval and hard_eval.hard_valid:
+            checkpoint_hard = self._checkpoint_eligible_furniture_hard_state(hard_eval)
+            if checkpoint_hard and checkpoint_hard.hard_valid:
                 controller.remember_hard_valid_scene_state(
                     scene_state=copy.deepcopy(self.scene.to_state_dict()),
                     source=f"post-{call_kind}",
@@ -1200,12 +1259,15 @@ class BaseStatefulAgent(ABC):
         hard_state_evaluation = self._evaluate_current_furniture_hard_state(
             physics_context=physics_context
         )
+        checkpoint_hard_state = self._checkpoint_eligible_furniture_hard_state(
+            hard_state_evaluation
+        )
         candidate_state = copy.deepcopy(self.scene.to_state_dict())
         decision = controller.consider_candidate(
             scores=scores,
             scene_state=candidate_state,
             render_dir=images_dir,
-            hard_state_evaluation=hard_state_evaluation,
+            hard_state_evaluation=checkpoint_hard_state,
         )
 
         checkpoint_scores: CritiqueWithScores | None = None

@@ -689,7 +689,7 @@ def test_freestanding_television_repair_restores_media_support(tmp_path: Path) -
         tmp_path,
         tv_stand,
         television,
-        text="A living room with a television and a TV stand.",
+        text="A living room with a television placed on a TV stand.",
     )
     scene.room_type = "living_room"
     config = CriticConfig(
@@ -758,6 +758,45 @@ def test_floor_plant_support_failure_is_not_repaired_or_hard_gated(
                 "diagnostics": {},
             }
         ]
+    }
+    monkeypatch.setattr(furniture_relation_repair, "_evaluate", lambda *_: payload)
+
+    assert unresolved_furniture_relation_failures(scene, config=config) == []
+    assert improve_furniture_relations(scene, config=config) == []
+
+
+def test_implicit_media_support_failure_is_not_repaired_or_hard_gated(
+    tmp_path: Path, monkeypatch
+) -> None:
+    tv_stand = _object("tv_stand_0", "tv_stand", (0.0, 1.1, 0.3), (1.4, 0.5, 0.6))
+    television = _object(
+        "television_0", "television", (1.6, -0.2, 0.31), (0.9, 0.18, 0.6)
+    )
+    scene = _scene(
+        tmp_path,
+        tv_stand,
+        television,
+        text="A living room with a television and a TV stand.",
+    )
+    scene.room_type = "living_room"
+    config = CriticConfig(
+        enabled=True,
+        metrics=("functional_dependency",),
+        constraint_mode="contract",
+    )
+    payload = {
+        "case_pack": {"intent_contract_mode": "contract", "checks": []},
+        "results": [
+            {
+                "check_id": "fd_television_0_tv_stand_0_object_on_support",
+                "label": "fail",
+                "scoring_tier": "core",
+                "relation_type": "object_on_support",
+                "primary_object": "television_0",
+                "selected_related_objects": ["tv_stand_0"],
+                "diagnostics": {},
+            }
+        ],
     }
     monkeypatch.setattr(furniture_relation_repair, "_evaluate", lambda *_: payload)
 

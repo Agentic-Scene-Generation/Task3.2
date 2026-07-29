@@ -938,8 +938,9 @@ def _room_ontology_constraints(room_type: str, lowered: str) -> list[dict[str, A
                 "on_top_of",
                 {"category": "television", "count": 1, "quantifier": "all"},
                 {"category": "tv_stand", "count": 1, "quantifier": "all"},
-                source="room_ontology",
-                evidence_span="freestanding television and media-support pairing",
+                source="model_inferred",
+                confidence=0.7,
+                evidence_span="possible freestanding television and media-support pairing",
             )
         )
     return constraints

@@ -71,6 +71,55 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         StatefulFurnitureAgent is None,
         f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
     )
+    def test_contract_relation_failure_only_disqualifies_checkpoint(self) -> None:
+        agent = object.__new__(StatefulFurnitureAgent)
+        agent.scene = SimpleNamespace()
+        agent.cfg = {
+            "scenebenchmark_critic": {
+                "enabled": True,
+                "metrics": ["functional_dependency"],
+                "constraint_mode": "contract",
+            }
+        }
+        agent.furniture_safety_controller = SimpleNamespace(
+            enabled=True,
+            evaluate_scene_state=lambda **_kwargs: SimpleNamespace(
+                hard_valid=True,
+                hard_reasons=[],
+                soft_reasons=[],
+            ),
+        )
+
+        module = "scenesmith.agent_utils.base_stateful_agent"
+        with patch(f"{module}.unresolved_furniture_relation_failures") as unresolved:
+            unresolved.return_value = [
+                {
+                    "relation_type": "centered_between_alignment",
+                    "primary_object": "coffee_table_0",
+                }
+            ]
+
+            physical_evaluation = agent._evaluate_current_furniture_hard_state(
+                physics_context="No physics violations detected."
+            )
+            evaluation = agent._checkpoint_eligible_furniture_hard_state(
+                physical_evaluation
+            )
+
+        self.assertTrue(physical_evaluation.hard_valid)
+        self.assertFalse(evaluation.hard_valid)
+        self.assertEqual(
+            evaluation.hard_reasons,
+            [
+                "unresolved prompt-core furniture relation: "
+                "centered_between_alignment:coffee_table_0"
+            ],
+        )
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
     def test_shallow_collision_repair_preserves_wall_anchor_axis(self) -> None:
         agent = object.__new__(StatefulFurnitureAgent)
         chair = _FakeFurniture("guest_chair_0", (-1.57, 0.0, 0.45), (0.70, 0.70, 0.90))
