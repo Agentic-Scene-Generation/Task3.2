@@ -71,6 +71,15 @@ def _listening_tcp_pids(port: int) -> set[int]:
 
 def _command_runs_this_script(command: list[str], cwd: Path) -> bool:
     script_path = Path(__file__).resolve()
+    module_name = "tools.critic_probe_web"
+    for index, argument in enumerate(command[1:], start=1):
+        if argument == "-m" and index + 1 < len(command):
+            if command[index + 1] == module_name:
+                return True
+        if argument == "-c" and index + 1 < len(command):
+            inline_program = command[index + 1]
+            if module_name in inline_program and "create_app" in inline_program:
+                return True
     for argument in command[1:]:
         candidate = Path(argument)
         if candidate.name != script_path.name:

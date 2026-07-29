@@ -7,6 +7,7 @@ from time import sleep
 from PIL import Image
 
 from tools.critic_probe_web import _command_runs_this_script, create_app
+from tools.release_web_dev_server import _command_runs_this_vite
 
 
 def write(path: Path, contents: str) -> None:
@@ -23,6 +24,44 @@ def test_identifies_only_the_same_web_server_script() -> None:
     assert not _command_runs_this_script(
         [".venv/bin/python", "tools/another_service.py"], project_root
     )
+    assert _command_runs_this_script(
+        [
+            ".venv/bin/python",
+            "-m",
+            "tools.critic_probe_web",
+        ],
+        project_root,
+    )
+    assert _command_runs_this_script(
+        [
+            ".venv/bin/python",
+            "-c",
+            "from tools.critic_probe_web import create_app; create_app().run()",
+        ],
+        project_root,
+    )
+    assert not _command_runs_this_script(
+        [
+            ".venv/bin/python",
+            "-c",
+            "from tools.critic_probe_web import _read_json; print('diagnostic')",
+        ],
+        project_root,
+    )
+
+
+def test_identifies_only_vite_from_this_web_project(tmp_path: Path) -> None:
+    web_root = tmp_path / "web"
+    cwd = web_root
+    expected = web_root / "node_modules" / "vite" / "bin" / "vite.js"
+    other = tmp_path / "other" / "node_modules" / "vite" / "bin" / "vite.js"
+
+    assert _command_runs_this_vite(["node", str(expected)], cwd, web_root)
+    assert _command_runs_this_vite(
+        ["node", "node_modules/vite/bin/vite.js"], cwd, web_root
+    )
+    assert not _command_runs_this_vite(["node", str(other)], cwd, web_root)
+    assert not _command_runs_this_vite(["node", "server.js"], cwd, web_root)
 
 
 def test_indexes_scene_and_rejects_paths_outside_probe_root(tmp_path: Path) -> None:
