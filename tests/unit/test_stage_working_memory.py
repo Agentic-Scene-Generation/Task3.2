@@ -183,6 +183,35 @@ class StageWorkingMemoryTest(unittest.TestCase):
             )
             self.assertEqual([], quality["missing_required_objects"])
 
+    def test_planner_orchestration_records_dispatch_and_resume(self) -> None:
+        with TemporaryDirectory() as tmp:
+            memory = StageWorkingMemory(Path(tmp), "furniture", enabled=True)
+
+            memory.record_planner_orchestration(
+                call_id="furniture:request_initial_design:001",
+                phase="dispatch",
+                operation="request_initial_design",
+                child_agent="designer",
+                status="started",
+            )
+            memory.record_planner_orchestration(
+                call_id="furniture:request_initial_design:001",
+                phase="resume",
+                operation="request_initial_design",
+                child_agent="designer",
+                status="completed",
+            )
+
+            records = [
+                json.loads(line)
+                for line in memory.debug_orchestration_path.read_text(
+                    encoding="utf-8"
+                ).splitlines()
+            ]
+            self.assertEqual(["dispatch", "resume"], [row["phase"] for row in records])
+            self.assertEqual("designer", records[0]["child_agent"])
+            self.assertTrue(records[0]["created_at"].endswith("Z"))
+
 
 if __name__ == "__main__":
     unittest.main()

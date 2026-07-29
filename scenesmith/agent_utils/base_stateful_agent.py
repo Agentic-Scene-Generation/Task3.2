@@ -14,7 +14,7 @@ import time
 
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 import yaml
 
@@ -209,6 +209,7 @@ class BaseStatefulAgent(ABC):
         self._planner_critique_tool_calls = 0
         self._planner_design_change_tool_calls = 0
         self._planner_budget_exhausted = False
+        self._planner_orchestration_calls = 0
         self._critic_failed = False
         working_memory_cfg = _cfg_get(cfg, "stage_working_memory", {})
         working_memory_enabled = bool(_cfg_get(working_memory_cfg, "enabled", True))
@@ -244,6 +245,76 @@ class BaseStatefulAgent(ABC):
             console_logger.warning(
                 "Failed to record timing %s/%s: %s", module, event, e
             )
+
+    def _record_planner_orchestration(
+        self,
+        *,
+        call_id: str,
+        phase: str,
+        operation: str,
+        child_agent: str,
+        status: str,
+        detail: dict[str, Any] | None = None,
+    ) -> None:
+        try:
+            self.stage_working_memory.record_planner_orchestration(
+                call_id=call_id,
+                phase=phase,
+                operation=operation,
+                child_agent=child_agent,
+                status=status,
+                detail=detail,
+            )
+        except Exception as exc:
+            console_logger.warning(
+                "Failed to record Planner orchestration %s/%s: %s",
+                operation,
+                phase,
+                exc,
+            )
+
+    async def _run_planner_delegation(
+        self,
+        *,
+        operation: str,
+        child_agent: str,
+        action: Callable[[], Awaitable[Any]],
+        detail: dict[str, Any] | None = None,
+    ) -> Any:
+        """Run one Planner delegation with explicit dispatch/resume audit events."""
+        self._planner_orchestration_calls += 1
+        call_id = (
+            f"{self.agent_type.value}:{operation}:"
+            f"{self._planner_orchestration_calls:03d}"
+        )
+        self._record_planner_orchestration(
+            call_id=call_id,
+            phase="dispatch",
+            operation=operation,
+            child_agent=child_agent,
+            status="started",
+            detail=detail,
+        )
+        try:
+            result = await action()
+        except Exception as exc:
+            self._record_planner_orchestration(
+                call_id=call_id,
+                phase="resume",
+                operation=operation,
+                child_agent=child_agent,
+                status="failed",
+                detail={"error": f"{type(exc).__name__}: {exc}"},
+            )
+            raise
+        self._record_planner_orchestration(
+            call_id=call_id,
+            phase="resume",
+            operation=operation,
+            child_agent=child_agent,
+            status="completed",
+        )
+        return result
 
     def _retrieve_working_memory_for_designer(self, query: str) -> str:
         """Fetch compact online memory to inject into the next designer call."""
@@ -1030,9 +1101,11 @@ class BaseStatefulAgent(ABC):
         try:
             hard_eval = self._evaluate_current_furniture_hard_state()
             call_kind = transaction["call_kind"]
-            hard_eval, _, repair_actions = self._try_deterministic_repair_for_hard_state(
-                hard_eval,
-                source=f"post-{call_kind}-transaction",
+            hard_eval, _, repair_actions = (
+                self._try_deterministic_repair_for_hard_state(
+                    hard_eval,
+                    source=f"post-{call_kind}-transaction",
+                )
             )
             if repair_actions:
                 console_logger.info(
@@ -1312,7 +1385,7 @@ class BaseStatefulAgent(ABC):
         )
 
     def _create_sessions(self, session_prefix: str = "") -> tuple[Session, Session]:
-        """Create designer and critic sessions for persistent conversation history.
+        """Create planner, designer, and critic persistent conversation history.
 
         Sessions are optionally wrapped with TurnTrimmingSession for memory
         management if session_memory is enabled in config.
@@ -1321,10 +1394,13 @@ class BaseStatefulAgent(ABC):
             session_prefix: Optional prefix for session IDs (e.g., furniture ID).
 
         Returns:
-            Tuple of (designer_session, critic_session).
+            Tuple of (designer_session, critic_session). The Planner session is
+            assigned to ``self.planner_session`` because existing subclasses
+            already unpack this method's two-value return.
         """
         designer_id = f"{session_prefix}designer" if session_prefix else "designer"
         critic_id = f"{session_prefix}critic" if session_prefix else "critic"
+        planner_id = f"{session_prefix}planner" if session_prefix else "planner"
 
         designer_sqlite = SQLiteSession(
             session_id=designer_id,
@@ -1333,6 +1409,10 @@ class BaseStatefulAgent(ABC):
         critic_sqlite = SQLiteSession(
             session_id=critic_id,
             db_path=self.logger.output_dir / f"{critic_id}.db",
+        )
+        planner_sqlite = SQLiteSession(
+            session_id=planner_id,
+            db_path=self.logger.output_dir / f"{planner_id}.db",
         )
 
         # Wrap with memory management if configured.
@@ -1349,11 +1429,65 @@ class BaseStatefulAgent(ABC):
             critic_session: Session = TurnTrimmingSession(
                 wrapped_session=critic_sqlite, cfg=self.cfg
             )
+            planner_session: Session = TurnTrimmingSession(
+                wrapped_session=planner_sqlite, cfg=self.cfg
+            )
         else:
             designer_session = designer_sqlite
             critic_session = critic_sqlite
+            planner_session = planner_sqlite
 
+        self.planner_session = planner_session
         return designer_session, critic_session
+
+    async def _run_planner_workflow(
+        self, *, runner_input: Any, max_turns: int
+    ) -> RunResult:
+        """Run and audit the stage Planner, including its persisted tool history."""
+        planner_start = time.time()
+        audit_prompt = {
+            "instructions": getattr(self.planner, "instructions", ""),
+            "runner_input": runner_input,
+        }
+        try:
+            async with self._reasoning_persistence_context_for_session(
+                self.planner_session
+            ):
+                result = await Runner.run(
+                    starting_agent=self.planner,
+                    input=runner_input,
+                    session=self.planner_session,
+                    max_turns=max_turns,
+                    run_config=self._create_run_config(),
+                )
+        except Exception as exc:
+            self._record_module_timing(
+                "planner",
+                "coordinate_stage",
+                planner_start,
+                extra={"status": "failed", "error": type(exc).__name__},
+            )
+            self._record_llm_call_debug(
+                agent_role="planner",
+                event="coordinate_stage",
+                prompt=audit_prompt,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            raise
+        self._record_module_timing(
+            "planner",
+            "coordinate_stage",
+            planner_start,
+            extra={"status": "completed"},
+        )
+        self._record_llm_call_debug(
+            agent_role="planner",
+            event="coordinate_stage",
+            prompt=audit_prompt,
+            output=result.final_output or "",
+            result=result,
+        )
+        return result
 
     @staticmethod
     def _session_db_path_for(session: Any) -> str | Path | None:
@@ -1878,7 +2012,11 @@ class BaseStatefulAgent(ABC):
             "Auto-scoring planner-level design attempt after %s", attempt_label
         )
         try:
-            critique = await self._request_critique_impl(update_checkpoint=True)
+            critique = await self._run_planner_delegation(
+                operation=f"auto_score_after_{attempt_label.replace(' ', '_')}",
+                child_agent="critic",
+                action=lambda: self._request_critique_impl(update_checkpoint=True),
+            )
         except Exception as exc:
             self._critic_failed = True
             console_logger.exception(
@@ -1942,7 +2080,11 @@ class BaseStatefulAgent(ABC):
                     "completed."
                 )
             self._planner_initial_design_tool_calls += 1
-            result = await self._request_initial_design_impl()
+            result = await self._run_planner_delegation(
+                operation="request_initial_design",
+                child_agent="designer",
+                action=self._request_initial_design_impl,
+            )
             result += await self._score_design_attempt_if_configured("initial design")
             return self._truncate_planner_tool_output(
                 result,
@@ -1980,7 +2122,11 @@ class BaseStatefulAgent(ABC):
 
             self._planner_critique_tool_calls += 1
             try:
-                result = await self._request_critique_impl()
+                result = await self._run_planner_delegation(
+                    operation="request_critique",
+                    child_agent="critic",
+                    action=self._request_critique_impl,
+                )
             except Exception as exc:
                 self._critic_failed = True
                 console_logger.exception("Planner-requested critic scoring failed")
@@ -2043,7 +2189,12 @@ class BaseStatefulAgent(ABC):
                     f"{self._pending_hard_repair_hint}"
                 )
 
-            result = await self._request_design_change_impl(instruction)
+            result = await self._run_planner_delegation(
+                operation="request_design_change",
+                child_agent="designer",
+                action=lambda: self._request_design_change_impl(instruction),
+                detail={"instruction": instruction},
+            )
             if hard_repair_allowance:
                 self._hard_repair_design_change_calls += 1
             result += await self._score_design_attempt_if_configured("design change")

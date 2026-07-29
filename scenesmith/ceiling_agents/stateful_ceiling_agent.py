@@ -366,11 +366,9 @@ class StatefulCeilingAgent(BaseStatefulAgent, BaseCeilingAgent):
             prompt_enum=planner_runner_prompt,
         )
 
-        result: RunResult = await Runner.run(
-            starting_agent=self.planner,
-            input=runner_instruction,
+        result: RunResult = await self._run_planner_workflow(
+            runner_input=runner_instruction,
             max_turns=self.cfg.agents.planner_agent.max_turns,
-            run_config=self._create_run_config(),
         )
         log_agent_usage(result=result, agent_name="PLANNER (CEILING)")
 

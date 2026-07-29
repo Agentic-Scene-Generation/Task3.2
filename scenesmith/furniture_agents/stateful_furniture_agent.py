@@ -429,11 +429,9 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         # Run the furniture placement workflow.
         result: RunResult | None = None
         try:
-            result = await Runner.run(
-                starting_agent=self.planner,
-                input=runner_instruction,
+            result = await self._run_planner_workflow(
+                runner_input=runner_instruction,
                 max_turns=self.cfg.agents.planner_agent.max_turns,
-                run_config=self._create_run_config(),
             )
         except MaxTurnsExceeded as error:
             self._recover_from_planner_turn_limit(error)

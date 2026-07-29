@@ -13,6 +13,7 @@ import logging
 import os
 import time
 import hashlib
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,10 @@ console_logger = logging.getLogger(__name__)
 
 def _now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _now_precise() -> str:
+    return datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def _compact(text: str, max_chars: int = 700) -> str:
@@ -205,6 +210,15 @@ class StageWorkingMemory:
         self.debug_llm_path = (
             self.scene_root_dir / "scene_expert" / "timing" / "llm_calls.jsonl"
         )
+        self.debug_orchestration_path = (
+            self.scene_root_dir
+            / "scene_expert"
+            / "timing"
+            / "planner_orchestration.jsonl"
+        )
+        self.debug_llm_payload_dir = (
+            self.scene_root_dir / "scene_expert" / "audit" / "llm_payloads"
+        )
         self.debug_context_dir = (
             self.scene_root_dir / "scene_expert" / "context_bundles" / stage
         )
@@ -224,6 +238,8 @@ class StageWorkingMemory:
             self.debug_timing_path.touch(exist_ok=True)
             self.debug_llm_path.parent.mkdir(parents=True, exist_ok=True)
             self.debug_llm_path.touch(exist_ok=True)
+            self.debug_orchestration_path.touch(exist_ok=True)
+            self.debug_llm_payload_dir.mkdir(parents=True, exist_ok=True)
             self.debug_context_dir.mkdir(parents=True, exist_ok=True)
             if self.public_events_path is not None:
                 self.public_events_path.parent.mkdir(parents=True, exist_ok=True)
@@ -341,6 +357,31 @@ class StageWorkingMemory:
             error=error,
         )
         payload = record.model_dump()
+        safe_name = "".join(
+            character if character.isalnum() or character in ("-", "_") else "_"
+            for character in f"{agent_role}_{event}"
+        )
+        payload_path = self.debug_llm_payload_dir / (
+            f"{int(time.time() * 1000)}_{safe_name}.json"
+        )
+        try:
+            _write_json(
+                payload_path,
+                {
+                    "schema_version": "1.0",
+                    "created_at": _now(),
+                    "stage": self.stage,
+                    "agent_role": agent_role,
+                    "event": event,
+                    "prompt": prompt,
+                    "output": output,
+                    "raw_response": raw_response,
+                    "error": error,
+                },
+            )
+            payload["payload_ref"] = str(payload_path.relative_to(self.scene_root_dir))
+        except Exception as exc:
+            console_logger.warning("Failed to persist full LLM audit payload: %s", exc)
         _append_jsonl(self.debug_llm_path, payload)
         if self.public_events_path is not None:
             event_payload = {
@@ -351,6 +392,44 @@ class StageWorkingMemory:
                 "payload": payload,
             }
             _append_jsonl(self.public_events_path, event_payload)
+
+    def record_planner_orchestration(
+        self,
+        *,
+        call_id: str,
+        phase: str,
+        operation: str,
+        child_agent: str,
+        status: str,
+        detail: dict[str, Any] | None = None,
+    ) -> None:
+        """Persist a Planner-to-child dispatch or child-to-Planner resume."""
+        if not self.enabled:
+            return
+        record = {
+            "schema_version": "1.0",
+            "created_at": _now_precise(),
+            "stage": self.stage,
+            "actor": "planner",
+            "call_id": call_id,
+            "phase": phase,
+            "operation": operation,
+            "child_agent": child_agent,
+            "status": status,
+            "detail": detail or {},
+        }
+        _append_jsonl(self.debug_orchestration_path, record)
+        if self.public_events_path is not None:
+            _append_jsonl(
+                self.public_events_path,
+                {
+                    "schema_version": "1.0",
+                    "created_at": record["created_at"],
+                    "event_type": "planner_orchestration",
+                    "stage": self.stage,
+                    "payload": record,
+                },
+            )
 
     def retrieve_for_designer(
         self,
