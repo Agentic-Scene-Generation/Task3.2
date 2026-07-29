@@ -290,6 +290,146 @@ def test_exposes_full_llm_audit_from_scene_trace(tmp_path: Path) -> None:
     assert payload["tool_calls"][0]["output"][0]["image_url"]["kind"] == "image_payload"
 
 
+def test_exposes_benchmark_evaluation_and_repairs(tmp_path: Path) -> None:
+    room = tmp_path / "run_a" / "batch_001" / "scene_000" / "room_bedroom"
+    write(room / "action_log.json", "[]")
+    write(
+        room / "timing_stats.jsonl",
+        json.dumps(
+            {
+                "created_at": "2026-07-28T12:00:01Z",
+                "stage": "furniture",
+                "module": "deterministic_repair",
+                "event": "after_critique",
+                "elapsed_sec": 0.2,
+                "extra": {
+                    "attempt": 1,
+                    "repaired": True,
+                    "actions": ["moved wardrobe"],
+                    "hard_reasons": ["wardrobe collision"],
+                },
+            }
+        )
+        + "\n",
+    )
+    write(
+        room / "scene_expert" / "timing" / "scenebenchmark_critic_timing.jsonl",
+        json.dumps(
+            {
+                "created_at": "2026-07-28T12:00:02Z",
+                "stage": "furniture",
+                "status": "ok",
+                "details": {"result_count": 1},
+                "steps": {"check_execution_wall_sec": 0.1},
+                "evaluation": {
+                    "results": [
+                        {
+                            "check_id": "window_clearance__wardrobe_0",
+                            "metric": "functional_dependency",
+                            "label": "fail",
+                            "reason": "wardrobe blocks the window",
+                            "repair_advice": "move wardrobe away from the opening",
+                        }
+                    ],
+                    "summary": {"scene_summary": {"fail": 1}},
+                    "gate": {"blocked": True, "label": "fail"},
+                },
+            }
+        )
+        + "\n",
+    )
+    write(
+        room.parent / "scene_expert" / "timing" / "repair_events.jsonl",
+        json.dumps(
+            {
+                "created_at": "2026-07-28T12:00:03Z",
+                "stage": "furniture",
+                "source": "initial_design",
+                "strategy": "prompt_contract_furniture_relations",
+                "status": "accepted",
+                "trigger_reasons": ["window_clearance__wardrobe_0"],
+                "actions": ["wardrobe_0:window_clearance"],
+                "affected_objects": [
+                    {
+                        "object_id": "wardrobe_0",
+                        "before": {"xy": [-1.8, -1.7]},
+                        "after": {"xy": [0.58, -1.7]},
+                    }
+                ],
+            }
+        )
+        + "\n",
+    )
+
+    payload = (
+        create_app(tmp_path)
+        .test_client()
+        .get("/api/scene", query_string={"path": str(room.relative_to(tmp_path))})
+        .get_json()
+    )
+    benchmark = next(
+        event for event in payload["audit_events"] if event["kind"] == "benchmark"
+    )
+    repairs = [event for event in payload["audit_events"] if event["kind"] == "repair"]
+
+    assert benchmark["evaluation"]["results"][0]["reason"] == (
+        "wardrobe blocks the window"
+    )
+    assert len(repairs) == 2
+    assert repairs[0]["id"].startswith("legacy-repair:")
+    assert repairs[0]["repair"]["actions"] == ["moved wardrobe"]
+    assert repairs[1]["repair"]["affected_objects"][0]["after"]["xy"] == [
+        0.58,
+        -1.7,
+    ]
+
+
+def test_exposes_full_task_compiler_input_and_output(tmp_path: Path) -> None:
+    room = tmp_path / "run_a" / "batch_001" / "scene_000" / "room_bedroom"
+    write(room / "timing_stats.jsonl", "")
+    write(
+        room.parent / "scene_expert" / "timing" / "scene_expert_llm_calls.jsonl",
+        json.dumps(
+            {
+                "created_at": "2026-07-28T12:00:02Z",
+                "stage": "task_compiler",
+                "agent_role": "task_compiler",
+                "event": "compile",
+                "elapsed_sec": 1.25,
+                "status": "ok",
+                "input": [
+                    {"role": "system", "content": "Extract a scene task."},
+                    {"role": "user", "content": "A bedroom with a bed."},
+                ],
+                "output": '{"room_type":"bedroom"}',
+                "prompt_chars": 48,
+                "output_chars": 24,
+            }
+        )
+        + "\n",
+    )
+
+    client = create_app(tmp_path).test_client()
+    path = str(room.relative_to(tmp_path))
+    scene = client.get("/api/scene", query_string={"path": path}).get_json()
+    compiler_event = next(
+        event for event in scene["audit_events"] if event["actor"] == "task_compiler"
+    )
+    detail = client.get(
+        "/api/audit-event",
+        query_string={"path": path, "event_id": compiler_event["id"]},
+    ).get_json()
+
+    assert compiler_event["title"] == "TaskCompiler"
+    assert compiler_event["elapsed_sec"] == 1.25
+    assert compiler_event["audit_status"] == "full_inline_audit"
+    assert detail["provenance"] == "full_inline_audit"
+    assert detail["input"][1]["content"] == "A bedroom with a bed."
+    assert detail["output"] == '{"room_type":"bedroom"}'
+    assert detail["has_full_input"] is True
+    assert detail["has_full_output"] is True
+
+
 def test_exposes_planner_orchestration_and_full_session_trace(tmp_path: Path) -> None:
     room = (
         tmp_path

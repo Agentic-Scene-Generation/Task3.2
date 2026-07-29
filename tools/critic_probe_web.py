@@ -203,13 +203,18 @@ def _room_directories(run_root: Path) -> list[Path]:
         "*/*/hydra/scene_*/room_*/action_log.json",
         "*/*/hydra/*/room_*/action_log.json",
         "*/hydra/scene_*/room_*/action_log.json",
+        "*/*/hydra/scene_*/room_*/timing_stats.jsonl",
+        "*/*/hydra/*/room_*/timing_stats.jsonl",
+        "*/hydra/scene_*/room_*/timing_stats.jsonl",
     )
-    paths = {
-        action_log.parent
-        for pattern in patterns
-        for action_log in run_root.glob(pattern)
-    }
+    paths = {marker.parent for pattern in patterns for marker in run_root.glob(pattern)}
     return sorted(paths)
+
+
+def _is_room_directory(path: Path) -> bool:
+    return path.is_dir() and (
+        (path / "action_log.json").is_file() or (path / "timing_stats.jsonl").is_file()
+    )
 
 
 def _scene_identity(run_root: Path, room_dir: Path) -> dict[str, str]:
@@ -278,14 +283,16 @@ def _llm_records(room_dir: Path) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     seen: set[Path] = set()
     for audit_root in (room_dir, room_dir.parent):
-        path = audit_root / "scene_expert" / "timing" / "llm_calls.jsonl"
-        if path in seen:
-            continue
-        seen.add(path)
-        for row in _read_jsonl(path):
-            row["source"] = "llm"
-            row["_audit_root"] = "." if audit_root == room_dir else ".."
-            records.append(row)
+        for filename in ("llm_calls.jsonl", "scene_expert_llm_calls.jsonl"):
+            path = audit_root / "scene_expert" / "timing" / filename
+            if path in seen:
+                continue
+            seen.add(path)
+            for row in _read_jsonl(path):
+                row["source"] = "llm"
+                row["_audit_root"] = "." if audit_root == room_dir else ".."
+                row["_audit_file"] = filename
+                records.append(row)
     return sorted(records, key=lambda row: str(row.get("created_at", "")))
 
 
@@ -308,6 +315,22 @@ def _benchmark_records(room_dir: Path) -> list[dict[str, Any]]:
     for row in rows:
         row["source"] = "scenebenchmark"
     return rows
+
+
+def _repair_records(room_dir: Path) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    seen: set[Path] = set()
+    for audit_root in (room_dir, room_dir.parent):
+        path = audit_root / "scene_expert" / "timing" / "repair_events.jsonl"
+        if path in seen:
+            continue
+        seen.add(path)
+        records.extend(
+            row
+            for row in _read_jsonl(path)
+            if not row.get("room") or row.get("room") == room_dir.name
+        )
+    return sorted(records, key=lambda row: str(row.get("created_at", "")))
 
 
 def _parse_time(value: str | None) -> datetime | None:
@@ -500,8 +523,46 @@ def _timing_for_llm(
 
 def _audit_events(room_dir: Path) -> list[dict[str, Any]]:
     timings = _timing_records(room_dir)
+    repair_records = _repair_records(room_dir)
+    has_structured_hard_repairs = any(
+        row.get("strategy") == "deterministic_hard_state" for row in repair_records
+    )
     events: list[dict[str, Any]] = []
     for index, row in enumerate(timings):
+        if row.get("module") == "deterministic_repair":
+            if has_structured_hard_repairs:
+                continue
+            extra = row.get("extra", {})
+            repair = {
+                "source": row.get("event", "hard_state"),
+                "strategy": "deterministic_hard_state",
+                "status": "accepted" if extra.get("repaired") else "rejected",
+                "attempt": extra.get("attempt"),
+                "trigger_reasons": extra.get("hard_reasons", []),
+                "actions": extra.get("actions", []),
+                "affected_objects": [],
+                "detail": {
+                    "legacy_timing_record": True,
+                    "max_attempts": extra.get("max_attempts"),
+                },
+            }
+            events.append(
+                {
+                    "id": f"legacy-repair:{index}",
+                    "kind": "repair",
+                    "source": "timing",
+                    "created_at": row.get("created_at"),
+                    "stage": row.get("stage", "furniture"),
+                    "actor": "deterministic repair",
+                    "function": row.get("event", "deterministic_repair"),
+                    "title": "Automatic furniture repair",
+                    "elapsed_sec": row.get("elapsed_sec"),
+                    "audit_status": repair["status"],
+                    "detail": repair,
+                    "repair": repair,
+                }
+            )
+            continue
         events.append(
             {
                 "id": f"timing:{index}",
@@ -533,6 +594,33 @@ def _audit_events(room_dir: Path) -> list[dict[str, Any]]:
                 "audit_status": str(row.get("status", "unknown")),
                 "detail": row.get("details", {}),
                 "metrics": row.get("steps", {}),
+                "evaluation": row.get("evaluation", {}),
+            }
+        )
+    for index, row in enumerate(repair_records):
+        repair = {
+            "source": row.get("source", "automatic_repair"),
+            "strategy": row.get("strategy", "automatic_repair"),
+            "status": row.get("status", "unknown"),
+            "attempt": row.get("attempt"),
+            "trigger_reasons": row.get("trigger_reasons", []),
+            "actions": row.get("actions", []),
+            "affected_objects": row.get("affected_objects", []),
+            "detail": row.get("detail", {}),
+        }
+        events.append(
+            {
+                "id": f"repair:{index}",
+                "kind": "repair",
+                "source": "repair_event",
+                "created_at": row.get("created_at"),
+                "stage": row.get("stage", "furniture"),
+                "actor": "deterministic repair",
+                "function": repair["strategy"],
+                "title": str(repair["strategy"]).replace("_", " "),
+                "audit_status": repair["status"],
+                "detail": repair,
+                "repair": repair,
             }
         )
     dispatch_times: dict[str, datetime] = {}
@@ -590,7 +678,7 @@ def _audit_events(room_dir: Path) -> list[dict[str, Any]]:
     for index, row in enumerate(_llm_records(room_dir)):
         timing = _timing_for_llm(row, timings)
         end_time = _parse_time(str(row.get("created_at", "")))
-        elapsed = timing.get("elapsed_sec") if timing else None
+        elapsed = timing.get("elapsed_sec") if timing else row.get("elapsed_sec")
         started_at = None
         if end_time is not None and isinstance(elapsed, (int, float)):
             started_at = (end_time - timedelta(seconds=float(elapsed))).isoformat()
@@ -604,10 +692,20 @@ def _audit_events(room_dir: Path) -> list[dict[str, Any]]:
                 "stage": row.get("stage", "unknown"),
                 "actor": row.get("agent_role", "LLM"),
                 "function": row.get("event", "llm_call"),
-                "title": str(row.get("event", "llm call")).replace("_", " "),
+                "title": (
+                    "TaskCompiler"
+                    if row.get("agent_role") == "task_compiler"
+                    else str(row.get("event", "llm call")).replace("_", " ")
+                ),
                 "elapsed_sec": elapsed,
                 "audit_status": (
-                    "full_payload" if row.get("payload_ref") else "session_trace"
+                    "full_payload"
+                    if row.get("payload_ref")
+                    else (
+                        "full_inline_audit"
+                        if "input" in row or "output" in row
+                        else "session_trace"
+                    )
                 ),
                 "token_usage": row.get("token_usage", {}),
                 "prompt_chars": row.get("prompt_chars", 0),
@@ -811,13 +909,46 @@ def _payload_for_llm_event(room_dir: Path, event_id: str) -> dict[str, Any] | No
     timing = _timing_for_llm(call, timings)
     completed_at = str(call.get("created_at", ""))
     completed = _parse_time(completed_at)
-    elapsed = timing.get("elapsed_sec") if timing else None
+    elapsed = timing.get("elapsed_sec") if timing else call.get("elapsed_sec")
     started_at = None
     if completed is not None and isinstance(elapsed, (int, float)):
         started_at = (completed - timedelta(seconds=float(elapsed))).isoformat()
     trace = _session_trace(
         room_dir, started_at, completed_at, str(event.get("actor", ""))
     )
+    if "input" in call or "output" in call:
+        inline_input = _audit_value(call.get("input", call.get("prompt_excerpt", "")))
+        inline_output = _audit_value(call.get("output", call.get("output_excerpt", "")))
+        messages = [
+            {
+                "agent": event.get("actor", "LLM"),
+                "database": call.get("_audit_file", "inline audit"),
+                "message_id": 0,
+                "created_at": event.get("started_at") or event.get("created_at"),
+                "direction": "input",
+                "content": inline_input,
+            },
+            {
+                "agent": event.get("actor", "LLM"),
+                "database": call.get("_audit_file", "inline audit"),
+                "message_id": 1,
+                "created_at": event.get("created_at"),
+                "direction": "output",
+                "content": inline_output,
+            },
+        ]
+        return {
+            "event": event,
+            "provenance": "full_inline_audit",
+            "input": inline_input,
+            "output": inline_output,
+            "reasoning": [],
+            "tool_calls": [],
+            "messages": messages,
+            "session_databases": [call.get("_audit_file", "inline audit")],
+            "has_full_input": "input" in call,
+            "has_full_output": "output" in call,
+        }
     payload_ref = call.get("payload_ref")
     if isinstance(payload_ref, str) and payload_ref:
         audit_root = (room_dir / str(call.get("_audit_root", "."))).resolve()
@@ -1037,7 +1168,7 @@ def create_app(probe_root: Path = DEFAULT_PROBE_ROOT) -> Flask:
         root = app.config["PROBE_ROOT"]
         relative_path = request.args.get("path", "")
         room = _safe_relative_path(root, relative_path)
-        if not room.is_dir() or not (room / "action_log.json").exists():
+        if not _is_room_directory(room):
             abort(404)
         action_log = _action_records(room)
         timings = _timing_records(room)
@@ -1063,7 +1194,7 @@ def create_app(probe_root: Path = DEFAULT_PROBE_ROOT) -> Flask:
         relative_path = request.args.get("path", "")
         event_id = request.args.get("event_id", "")
         room = _safe_relative_path(root, relative_path)
-        if not room.is_dir() or not (room / "action_log.json").exists():
+        if not _is_room_directory(room):
             abort(404)
         if event_id.startswith("llm:"):
             payload = _payload_for_llm_event(room, event_id)

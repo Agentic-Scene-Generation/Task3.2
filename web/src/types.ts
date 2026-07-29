@@ -47,7 +47,7 @@ export type TimedEvent = {
 
 export type AuditEvent = {
   id: string;
-  kind: "llm" | "system" | "benchmark" | "tool" | "orchestration";
+  kind: "llm" | "system" | "benchmark" | "tool" | "orchestration" | "repair";
   source: string;
   created_at?: string;
   started_at?: string;
@@ -60,6 +60,8 @@ export type AuditEvent = {
   token_usage?: Record<string, number>;
   detail?: Record<string, unknown>;
   metrics?: Record<string, unknown>;
+  evaluation?: BenchmarkEvaluation;
+  repair?: RepairAudit;
   prompt_chars?: number;
   output_chars?: number;
   has_error?: boolean;
@@ -69,6 +71,35 @@ export type AuditEvent = {
     phase: "dispatch" | "resume";
     child_agent: string;
   };
+};
+
+export type BenchmarkResult = {
+  check_id?: string;
+  metric?: string;
+  label?: string;
+  primary_object?: string;
+  related_objects?: string[];
+  reason?: string;
+  repair_advice?: string;
+  evidence?: unknown;
+  [key: string]: unknown;
+};
+
+export type BenchmarkEvaluation = {
+  results?: BenchmarkResult[];
+  summary?: Record<string, unknown>;
+  gate?: Record<string, unknown>;
+};
+
+export type RepairAudit = {
+  source?: string;
+  strategy?: string;
+  status?: string;
+  attempt?: number | null;
+  trigger_reasons?: string[];
+  actions?: string[];
+  affected_objects?: Array<Record<string, unknown>>;
+  detail?: Record<string, unknown>;
 };
 
 export type AuditDetail = {

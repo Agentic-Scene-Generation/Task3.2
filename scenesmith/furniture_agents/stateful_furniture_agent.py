@@ -631,6 +631,49 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             f"{fix.subject_id}->{fix.target_id}:seating_orientation"
             for fix in seating_fixes
         ]
+        affected_objects = [
+            {
+                "object_id": fix.object_id,
+                "relation_type": fix.relation_type,
+                "check_id": getattr(fix, "check_id", None),
+                "before": {
+                    "xy": list(getattr(fix, "old_xy", ()) or ()),
+                    "yaw_deg": getattr(fix, "old_yaw_deg", None),
+                },
+                "after": {
+                    "xy": list(getattr(fix, "new_xy", ()) or ()),
+                    "yaw_deg": getattr(fix, "new_yaw_deg", None),
+                },
+            }
+            for fix in relation_fixes
+        ] + [
+            {
+                "object_id": fix.subject_id,
+                "target_id": fix.target_id,
+                "relation_type": "seating_orientation",
+                "before": {"yaw_deg": getattr(fix, "old_yaw_deg", None)},
+                "after": {"yaw_deg": getattr(fix, "new_yaw_deg", None)},
+                "angle_to_target_deg": getattr(fix, "angle_to_target_deg", None),
+            }
+            for fix in seating_fixes
+        ]
+        working_memory = getattr(self, "stage_working_memory", None)
+        if working_memory is not None:
+            working_memory.record_repair_event(
+                source="initial_design",
+                strategy="prompt_contract_furniture_relations",
+                status="accepted",
+                trigger_reasons=[
+                    str(item.get("check_id") or item["relation_type"])
+                    for item in affected_objects
+                ],
+                actions=actions,
+                affected_objects=affected_objects,
+                detail={
+                    "relation_fix_count": len(relation_fixes),
+                    "seating_fix_count": len(seating_fixes),
+                },
+            )
         console_logger.info(
             "Initial prompt-contract furniture repair before first critique: %s",
             "; ".join(actions),

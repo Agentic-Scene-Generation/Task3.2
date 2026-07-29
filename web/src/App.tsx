@@ -344,7 +344,7 @@ function App() {
         {loading && !detail ? <div className="loading"><LoaderCircle className="spin" size={24} /> Loading critic probe data</div> : <>
           <section className="metrics-strip">
             <Metric icon={<Clock3 size={17} />} label="Events" value={String(allEvents.length)} subtext={`${detail?.actions.length ?? 0} tool actions`} />
-            <Metric icon={<Bot size={17} />} label="LLM calls" value={String(allEvents.filter((event) => event.kind === "llm").length)} subtext="planner, designer and critic" />
+            <Metric icon={<Bot size={17} />} label="LLM calls" value={String(allEvents.filter((event) => event.kind === "llm").length)} subtext="task compiler, planner, designer and critic" />
             <Metric icon={<ImageIcon size={17} />} label="Snapshots" value={String(renders.length)} subtext="rendered scene states" />
             <Metric icon={<Command size={17} />} label="Quality" value={qualityValue(detail)} subtext={qualityCaption(detail)} emphasis />
           </section>

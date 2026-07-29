@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import re
+import time
 from pathlib import Path
 
 from scenesmith.scene_expert.context_bundle import build_llm_call_debug_record
@@ -307,17 +308,38 @@ class TaskCompiler:
         """
         console_logger.info(f"TaskCompiler: compiling prompt: {prompt[:100]}...")
         user_message = f"Extract scene requirements from: {prompt}"
+        messages = [
+            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "user", "content": user_message},
+        ]
+        started_at = time.perf_counter()
 
-        response = self._client.chat.completions.create(
-            model=self._model,
-            messages=[
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": user_message},
-            ],
-            temperature=self._temperature,
-            max_tokens=self._max_tokens,
-            extra_body=chat_template_kwargs_from_effort("none"),
-        )
+        try:
+            response = self._client.chat.completions.create(
+                model=self._model,
+                messages=messages,
+                temperature=self._temperature,
+                max_tokens=self._max_tokens,
+                extra_body=chat_template_kwargs_from_effort("none"),
+            )
+        except Exception as exc:
+            record = build_llm_call_debug_record(
+                stage="task_compiler",
+                agent_role="task_compiler",
+                event="compile",
+                prompt=messages,
+                error=f"{type(exc).__name__}: {exc}",
+            ).model_dump()
+            record.update(
+                {
+                    "input": messages,
+                    "output": "",
+                    "elapsed_sec": round(time.perf_counter() - started_at, 6),
+                    "status": "error",
+                }
+            )
+            _append_llm_debug(record)
+            raise
 
         message = response.choices[0].message
         raw = message.content
@@ -329,26 +351,46 @@ class TaskCompiler:
             if isinstance(extra, dict):
                 raw = extra.get("reasoning_content")
         console_logger.debug(f"TaskCompiler raw response: {raw}")
-        _append_llm_debug(
-            build_llm_call_debug_record(
-                stage="task_compiler",
-                agent_role="task_compiler",
-                event="compile",
-                prompt=user_message,
-                output=raw or "",
-                raw_response=response,
-            ).model_dump()
+        record = build_llm_call_debug_record(
+            stage="task_compiler",
+            agent_role="task_compiler",
+            event="compile",
+            prompt=messages,
+            output=raw or "",
+            raw_response=response,
+        ).model_dump()
+        record.update(
+            {
+                "input": messages,
+                "output": raw or "",
+                "elapsed_sec": round(time.perf_counter() - started_at, 6),
+                "status": "ok",
+            }
         )
+        usage = getattr(response, "usage", None)
+        if usage is not None:
+            usage_payload = (
+                usage.model_dump() if hasattr(usage, "model_dump") else vars(usage)
+            )
+            record["token_usage"] = {
+                str(key): int(value)
+                for key, value in usage_payload.items()
+                if isinstance(value, int)
+            }
 
         try:
             data = _extract_json_from_text(raw)
             task_spec = SceneTaskSpec.model_validate(data)
+            _append_llm_debug(record)
             console_logger.info(
                 f"TaskCompiler: room_type={task_spec.room_type}, style={task_spec.style}, "
                 f"large_objects={task_spec.required_large_objects}"
             )
             return task_spec
         except Exception as e:
+            record["status"] = "error"
+            record["error"] = f"{type(e).__name__}: {e}"
+            _append_llm_debug(record)
             raise ValueError(
                 f"TaskCompiler failed to parse model response: {e}\nRaw: {raw}"
             ) from e

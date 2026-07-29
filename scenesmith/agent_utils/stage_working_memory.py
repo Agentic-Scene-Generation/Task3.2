@@ -216,6 +216,9 @@ class StageWorkingMemory:
             / "timing"
             / "planner_orchestration.jsonl"
         )
+        self.debug_repair_path = (
+            self.scene_root_dir / "scene_expert" / "timing" / "repair_events.jsonl"
+        )
         self.debug_llm_payload_dir = (
             self.scene_root_dir / "scene_expert" / "audit" / "llm_payloads"
         )
@@ -239,6 +242,7 @@ class StageWorkingMemory:
             self.debug_llm_path.parent.mkdir(parents=True, exist_ok=True)
             self.debug_llm_path.touch(exist_ok=True)
             self.debug_orchestration_path.touch(exist_ok=True)
+            self.debug_repair_path.touch(exist_ok=True)
             self.debug_llm_payload_dir.mkdir(parents=True, exist_ok=True)
             self.debug_context_dir.mkdir(parents=True, exist_ok=True)
             if self.public_events_path is not None:
@@ -430,6 +434,40 @@ class StageWorkingMemory:
                     "payload": record,
                 },
             )
+
+    def record_repair_event(
+        self,
+        *,
+        source: str,
+        strategy: str,
+        status: str,
+        attempt: int | None = None,
+        trigger_reasons: list[str] | None = None,
+        actions: list[str] | None = None,
+        affected_objects: list[dict[str, Any]] | None = None,
+        detail: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Persist one structured automatic-repair decision for audit."""
+        if not self.enabled:
+            return {}
+        record = {
+            "schema_version": "scenesmith.repair_event.v1",
+            "created_at": _now_precise(),
+            "stage": self.stage,
+            "room": (
+                self.root_dir.name if self.root_dir.name.startswith("room_") else ""
+            ),
+            "source": source,
+            "strategy": strategy,
+            "status": status,
+            "attempt": attempt,
+            "trigger_reasons": trigger_reasons or [],
+            "actions": actions or [],
+            "affected_objects": affected_objects or [],
+            "detail": detail or {},
+        }
+        _append_jsonl(self.debug_repair_path, record)
+        return record
 
     def retrieve_for_designer(
         self,

@@ -59,6 +59,31 @@ def _score(name: str, grade: int) -> CategoryScore:
 
 
 class StageWorkingMemoryTest(unittest.TestCase):
+    def test_repair_event_is_saved_with_pose_changes(self) -> None:
+        with TemporaryDirectory() as tmp:
+            memory = StageWorkingMemory(Path(tmp) / "room_bedroom", "furniture")
+            record = memory.record_repair_event(
+                source="initial_design",
+                strategy="prompt_contract_furniture_relations",
+                status="accepted",
+                trigger_reasons=["window_clearance__wardrobe_0"],
+                actions=["wardrobe_0:window_clearance"],
+                affected_objects=[
+                    {
+                        "object_id": "wardrobe_0",
+                        "before": {"xy": [-1.8, -1.7]},
+                        "after": {"xy": [0.58, -1.7]},
+                    }
+                ],
+            )
+
+            rows = memory.debug_repair_path.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(1, len(rows))
+            saved = json.loads(rows[0])
+            self.assertEqual(record, saved)
+            self.assertEqual("accepted", saved["status"])
+            self.assertEqual([0.58, -1.7], saved["affected_objects"][0]["after"]["xy"])
+
     def test_score_total_and_stage_canonicalization(self) -> None:
         scores = FurnitureCritiqueWithScores(
             critique="layout is usable",

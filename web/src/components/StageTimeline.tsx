@@ -7,7 +7,7 @@ export type TimelineGroup = {
   events: AuditEvent[];
 };
 
-type AgentRole = "designer" | "planner" | "critic" | "renderer" | "system";
+type AgentRole = "compiler" | "designer" | "planner" | "critic" | "renderer" | "system";
 
 type TimelineSegment = {
   role: AgentRole;
@@ -21,6 +21,7 @@ type FlowStep = {
 };
 
 const AGENT_LABELS: Record<AgentRole, string> = {
+  compiler: "Task Compiler",
   designer: "Designer",
   planner: "Planner",
   critic: "Critic",
@@ -52,6 +53,7 @@ function classifyAgent(event: AuditEvent): AgentRole {
   const actor = event.actor.toLowerCase();
   const stage = event.stage.toLowerCase();
   const functionName = event.function.toLowerCase();
+  if (actor.includes("task_compiler")) return "compiler";
   if (actor.includes("designer")) return "designer";
   if (actor.includes("planner")) return "planner";
   if (actor.includes("critic") || stage.includes("critic") || functionName.includes("critique")) return "critic";
@@ -62,6 +64,7 @@ function classifyAgent(event: AuditEvent): AgentRole {
 function eventIcon(event: AuditEvent) {
   const name = event.function;
   if (event.kind === "orchestration") return <Workflow size={15} />;
+  if (event.kind === "repair") return <Wrench size={15} />;
   if (event.kind === "tool" || name.includes("add_") || name.includes("move_") || name.includes("snap_")) return <Wrench size={15} />;
   if (event.kind === "llm" || name.includes("critic")) return <Bot size={15} />;
   if (event.kind === "benchmark") return <CircleDot size={15} />;

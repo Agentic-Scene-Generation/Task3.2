@@ -608,6 +608,7 @@ class BaseStatefulAgent(ABC):
         all_actions: list[str] = []
         max_attempts = self._deterministic_repair_max_attempts()
         for attempt in range(1, max_attempts + 1):
+            trigger_reasons = list(current_state.hard_reasons or [])
             before_hash = self.scene.content_hash() if self.scene is not None else ""
             repair_start = time.time()
             repaired, actions = self._attempt_deterministic_repair(current_state)
@@ -622,10 +623,19 @@ class BaseStatefulAgent(ABC):
                     "attempted": True,
                     "repaired": bool(repaired),
                     "actions": actions,
-                    "hard_reasons": current_state.hard_reasons,
+                    "hard_reasons": trigger_reasons,
                 },
             )
             if not repaired:
+                self.stage_working_memory.record_repair_event(
+                    source=source,
+                    strategy="deterministic_hard_state",
+                    status="rejected",
+                    attempt=attempt,
+                    trigger_reasons=trigger_reasons,
+                    actions=actions,
+                    detail={"reason": "repair_not_applied"},
+                )
                 break
 
             console_logger.info(
@@ -641,6 +651,22 @@ class BaseStatefulAgent(ABC):
             repaired_hard_state = self._evaluate_current_hard_state(
                 physics_context=physics_context
             )
+            after_hash = self.scene.content_hash() if self.scene is not None else ""
+            resolved = bool(repaired_hard_state and repaired_hard_state.hard_valid)
+            self.stage_working_memory.record_repair_event(
+                source=source,
+                strategy="deterministic_hard_state",
+                status="accepted" if after_hash != before_hash else "rejected",
+                attempt=attempt,
+                trigger_reasons=trigger_reasons,
+                actions=actions,
+                detail={
+                    "resolved": resolved,
+                    "remaining_hard_reasons": list(
+                        getattr(repaired_hard_state, "hard_reasons", None) or []
+                    ),
+                },
+            )
             if repaired_hard_state is not None and repaired_hard_state.hard_valid:
                 console_logger.info(
                     "Deterministic repair resolved hard-check failure from %s "
@@ -650,7 +676,6 @@ class BaseStatefulAgent(ABC):
                 )
                 return repaired_hard_state, physics_context, all_actions
 
-            after_hash = self.scene.content_hash() if self.scene is not None else ""
             current_state = repaired_hard_state or current_state
             if after_hash == before_hash:
                 console_logger.info(

@@ -75,6 +75,7 @@ def _record_critic_timing(
     started_at: float,
     steps: dict[str, Any],
     details: dict[str, Any] | None = None,
+    evaluation: dict[str, Any] | None = None,
     error: str | None = None,
 ) -> None:
     """Append one independent timing record; never affect critic execution."""
@@ -95,6 +96,8 @@ def _record_critic_timing(
     }
     if error:
         record["error"] = error
+    if evaluation is not None:
+        record["evaluation"] = evaluation
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8", newline="\n") as stream:
@@ -173,6 +176,11 @@ def evaluate_room_scene(
                 "case_pack_check_count": len(case_pack.get("checks") or []),
                 "result_count": len(results),
             },
+            evaluation={
+                "results": payload.get("results", []),
+                "summary": payload.get("summary", {}),
+                "gate": payload.get("gate", {}),
+            },
         )
         return payload
     except Exception as exc:
@@ -240,6 +248,11 @@ def evaluate_house_scene(
                 "include_object_types": [
                     str(item) for item in (include_object_types or [])
                 ],
+            },
+            evaluation={
+                "results": payload.get("results", []),
+                "summary": payload.get("summary", {}),
+                "gate": payload.get("gate", {}),
             },
         )
         return payload
