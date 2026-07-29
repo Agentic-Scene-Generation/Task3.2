@@ -683,6 +683,52 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         StatefulFurnitureAgent is None,
         f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
     )
+    def test_polygon_room_skips_rectangle_only_bedroom_anchor_repairs(self) -> None:
+        agent = object.__new__(StatefulFurnitureAgent)
+        agent.scene = SimpleNamespace(
+            room_id="polygon_bedroom",
+            room_type="bedroom",
+            text_description="A bedroom with a bed, nightstands, and wardrobe.",
+            scene_expert_original_description=(
+                "A bedroom with a bed, nightstands, and wardrobe."
+            ),
+            room_geometry=SimpleNamespace(
+                footprint_vertices=[
+                    (-3.0, -2.0),
+                    (3.0, -2.0),
+                    (3.0, 0.0),
+                    (0.0, 0.0),
+                    (0.0, 2.0),
+                    (-3.0, 2.0),
+                ]
+            ),
+        )
+        agent.furniture_safety_controller = SimpleNamespace(required_counts={})
+        agent._repair_forbidden_zone_conflicts = lambda include_windows=False: False
+        called: list[str] = []
+        agent._anchor_existing_bed = lambda: called.append("bed") or True
+        agent._repair_bedside_nightstands = (
+            lambda: called.append("nightstand") or True
+        )
+        agent._repair_wardrobe_wall_anchor = (
+            lambda: called.append("wardrobe") or True
+        )
+
+        repaired, actions = agent._attempt_deterministic_repair(
+            SimpleNamespace(
+                hard_valid=False,
+                hard_reasons=["collisions"],
+            )
+        )
+
+        self.assertFalse(repaired)
+        self.assertEqual(actions, [])
+        self.assertEqual(called, [])
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
     def test_snap_transform_to_wall_copies_readonly_translation(self) -> None:
         agent = self._make_agent()
         agent._bounds_for_transform = lambda _obj, _transform: (
