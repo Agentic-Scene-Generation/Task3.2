@@ -153,6 +153,19 @@ class Harness:
 
     def _get_stage_budget(self, stage: str) -> StageBudget:
         """Get per-stage budget from config."""
+        execution_control = getattr(self._cfg, "execution_control", None)
+        if execution_control is not None and not bool(
+            getattr(execution_control, "enabled", True)
+        ):
+            native_values = StageBudget().model_dump()
+            for field_name, value in list(native_values.items()):
+                if isinstance(value, bool):
+                    native_values[field_name] = False
+                elif isinstance(value, (int, float)):
+                    native_values[field_name] = 0
+            native_values["execution_control_enabled"] = False
+            native_values["execution_control_profile"] = "scenesmith_native"
+            return StageBudget(**native_values)
         stage_cfg = getattr(self._cfg, "stage_budget", None)
         if stage_cfg is None:
             return StageBudget()

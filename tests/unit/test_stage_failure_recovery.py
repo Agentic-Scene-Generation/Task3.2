@@ -44,7 +44,7 @@ class StageFailureRecoveryTest(unittest.TestCase):
         )
         self.assertTrue(_is_retryable_scene_failure("worker exitcode=-11"))
 
-    def test_exhausted_stage_retries_then_pauses_without_committing(self) -> None:
+    def test_exhausted_stage_retries_export_degraded_incomplete(self) -> None:
         class FakeScene:
             text_description = "bedroom"
             scene_expert_stage_budget = {"max_stage_regenerations": 1}
@@ -86,20 +86,22 @@ class StageFailureRecoveryTest(unittest.TestCase):
                 stage_working_memory=SimpleNamespace(scene_root_dir=Path(tmp)),
             )
 
-            with self.assertRaises(ScenePausedError):
-                _run_sceneexpert_placement_stage(
-                    stage="wall_mounted",
-                    agent=agent,
-                    scene=scene,
-                    run_once=run_once,
-                )
+            _run_sceneexpert_placement_stage(
+                stage="wall_mounted",
+                agent=agent,
+                scene=scene,
+                run_once=run_once,
+            )
 
             self.assertEqual(calls, {"run": 2, "prepare": 1})
             self.assertEqual(scene.restore_calls, 1)
             manifest = (
-                Path(tmp) / "scene_expert" / "resume" / "pause_manifest.json"
+                Path(tmp) / "scene_expert" / "degraded" / "degraded_manifest.json"
             ).read_text(encoding="utf-8")
-            self.assertIn('"resume_action": "retry_stage_asset_acquisition"', manifest)
+            self.assertIn('"status": "DEGRADED_INCOMPLETE"', manifest)
+            self.assertIn(
+                '"recommended_resume_action": "retry_stage_asset_acquisition"', manifest
+            )
 
     def test_disabled_sceneexpert_does_not_add_recovery_attempts(self) -> None:
         class FakeScene:
@@ -168,21 +170,18 @@ class StageFailureRecoveryTest(unittest.TestCase):
             calls["prepare"] += 1
 
         with TemporaryDirectory() as tmp:
-            with self.assertRaises(ScenePausedError):
-                _run_sceneexpert_placement_stage(
-                    stage="wall_mounted",
-                    agent=SimpleNamespace(
-                        _stage_runtime_exhausted=True,
-                        _planner_budget_exhausted=True,
-                        prepare_stage_regeneration=prepare,
-                        admitted_stage_assets=lambda: [],
-                        stage_working_memory=SimpleNamespace(
-                            scene_root_dir=Path(tmp)
-                        ),
-                    ),
-                    scene=FakeScene(Path(tmp)),
-                    run_once=run_once,
-                )
+            _run_sceneexpert_placement_stage(
+                stage="wall_mounted",
+                agent=SimpleNamespace(
+                    _stage_runtime_exhausted=True,
+                    _planner_budget_exhausted=True,
+                    prepare_stage_regeneration=prepare,
+                    admitted_stage_assets=lambda: [],
+                    stage_working_memory=SimpleNamespace(scene_root_dir=Path(tmp)),
+                ),
+                scene=FakeScene(Path(tmp)),
+                run_once=run_once,
+            )
 
         self.assertEqual({"run": 2, "prepare": 1}, calls)
 
@@ -233,7 +232,7 @@ class StageFailureRecoveryTest(unittest.TestCase):
         self.assertEqual({"run": 2, "placement": 1}, calls)
         self.assertEqual(1, scene.restore_calls)
 
-    def test_missing_required_asset_family_blocks_stage_commit(self) -> None:
+    def test_missing_required_asset_family_exports_degraded_scene(self) -> None:
         class FakeScene:
             text_description = "bedroom"
             scene_expert_stage_budget = {"max_stage_regenerations": 0}
@@ -265,24 +264,23 @@ class StageFailureRecoveryTest(unittest.TestCase):
             async def run_once() -> None:
                 return None
 
-            with self.assertRaises(ScenePausedError):
-                _run_sceneexpert_placement_stage(
-                    stage="furniture",
-                    agent=SimpleNamespace(
-                        **vars(agent),
-                        stage_working_memory=SimpleNamespace(
-                            scene_root_dir=Path(tmp)
-                        ),
-                    ),
-                    scene=scene,
-                    run_once=run_once,
-                )
+            _run_sceneexpert_placement_stage(
+                stage="furniture",
+                agent=SimpleNamespace(
+                    **vars(agent),
+                    stage_working_memory=SimpleNamespace(scene_root_dir=Path(tmp)),
+                ),
+                scene=scene,
+                run_once=run_once,
+            )
 
             manifest = (
-                Path(tmp) / "scene_expert" / "resume" / "pause_manifest.json"
+                Path(tmp) / "scene_expert" / "degraded" / "degraded_manifest.json"
             ).read_text(encoding="utf-8")
-            self.assertIn('"role": "asset"', manifest)
-            self.assertIn('"resume_action": "retry_stage_asset_acquisition"', manifest)
+            self.assertIn('"responsible_role": "asset"', manifest)
+            self.assertIn(
+                '"recommended_resume_action": "retry_stage_asset_acquisition"', manifest
+            )
             self.assertIn('"unavailable_required_asset_families": [', manifest)
             self.assertIn('"bed"', manifest)
 
@@ -330,9 +328,7 @@ class StageFailureRecoveryTest(unittest.TestCase):
                     stage="wall_mounted",
                     agent=SimpleNamespace(
                         retry_final_critic_evaluation=retry_critic,
-                        stage_working_memory=SimpleNamespace(
-                            scene_root_dir=Path(tmp)
-                        ),
+                        stage_working_memory=SimpleNamespace(scene_root_dir=Path(tmp)),
                         _last_score_provenance={"score_source": "unavailable"},
                     ),
                     scene=scene,
@@ -381,9 +377,7 @@ class StageFailureRecoveryTest(unittest.TestCase):
                 stage="manipuland",
                 agent=SimpleNamespace(
                     retry_final_critic_evaluation=retry_critic,
-                    stage_working_memory=SimpleNamespace(
-                        scene_root_dir=Path(tmp)
-                    ),
+                    stage_working_memory=SimpleNamespace(scene_root_dir=Path(tmp)),
                     _last_score_provenance={"score_source": "vlm_critic"},
                 ),
                 scene=scene,

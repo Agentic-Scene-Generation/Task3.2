@@ -78,6 +78,22 @@ class MeshFrameTest(unittest.TestCase):
                 maximum_dimensions=[3.5, 1.3, 1.3],
             )
 
+    def test_family_envelope_makes_designer_dimensions_a_soft_target(self) -> None:
+        scale, normalized = choose_uniform_scale_for_contract(
+            [1.10, 0.63, 0.75],
+            [0.60, 0.80, 0.75],
+            min_ratio=0.75,
+            max_ratio=1.35,
+            minimum_dimensions=[0.90, 0.45, 0.60],
+            maximum_dimensions=[1.30, 0.85, 0.95],
+            enforce_requested_ratio=False,
+        )
+
+        actual = np.asarray([1.10, 0.63, 0.75]) * scale
+        np.testing.assert_allclose(normalized, [0.90, 0.80, 0.75])
+        self.assertTrue(np.all(actual >= [0.90, 0.45, 0.60]))
+        self.assertTrue(np.all(actual <= [1.30, 0.85, 0.95]))
+
     def test_scene_dimensions_are_reordered_for_gltf_scaling(self) -> None:
         self.assertEqual(
             scene_dimensions_to_gltf_y_up([1.6, 2.05, 0.8]),

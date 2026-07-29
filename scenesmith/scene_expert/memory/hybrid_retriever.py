@@ -153,9 +153,7 @@ class HybridMemoryRetriever:
                 if isinstance(record, FailureCase)
             ],
             skill_names=[
-                record.skill_name
-                for _, record in skills
-                if isinstance(record, Skill)
+                record.skill_name for _, record in skills if isinstance(record, Skill)
             ],
         ).deduplicated()
 
@@ -278,7 +276,9 @@ class HybridMemoryRetriever:
             return True
         task_objects = task_required_objects(task_spec, stage)
         if not task_objects:
-            return True
+            # Object-bearing success memory cannot invent furniture for a task
+            # that has no explicit object requirement in this stage.
+            return False
         return (
             object_overlap(record_objects, task_objects)
             >= self._object_overlap_threshold

@@ -45,7 +45,10 @@ from scenesmith.agent_utils.scoring import (
     scores_to_dict,
 )
 from scenesmith.agent_utils.stage_working_memory import StageWorkingMemory
-from scenesmith.scene_expert.task_compiler import _fallback_spec_from_prompt
+from scenesmith.scene_expert.task_compiler import (
+    _fallback_spec_from_prompt,
+    _ground_compiled_spec,
+)
 from scenesmith.scene_expert.prompt_context import strip_sceneexpert_injected_blocks
 from scenesmith.scene_expert.verifier import (
     FullVerifier,
@@ -147,6 +150,36 @@ class SceneExpertMemoryTest(unittest.TestCase):
             spec.required_large_objects,
         )
         self.assertIn("sleeping_zone", spec.functional_zones)
+
+    def test_task_compiler_keeps_unmentioned_typical_object_as_suggestion(self) -> None:
+        compiled = SceneTaskSpec(
+            room_type="farmhouse bedroom",
+            style="rustic",
+            required_large_objects=["bed", "nightstand"],
+            required_ceiling_objects=["exposed beam"],
+        )
+
+        grounded = _ground_compiled_spec(
+            "A rustic farmhouse bedroom with exposed wooden beams.",
+            compiled,
+        )
+
+        self.assertNotIn("nightstand", grounded.required_large_objects)
+        self.assertIn("nightstand", grounded.suggested_large_objects)
+        self.assertEqual(["exposed beam"], grounded.required_ceiling_objects)
+
+    def test_task_compiler_preserves_classroom_role_counts(self) -> None:
+        spec = _fallback_spec_from_prompt(
+            "A classroom with six student desks, each with a chair. "
+            "A teacher's desk sits at the front near the chalkboard."
+        )
+
+        self.assertEqual("classroom", spec.room_type)
+        self.assertEqual(6, spec.required_large_objects.count("student desk"))
+        self.assertEqual(6, spec.required_large_objects.count("chair"))
+        self.assertEqual(1, spec.required_large_objects.count("teacher desk"))
+        self.assertNotIn("desk", spec.required_large_objects)
+        self.assertEqual(["blackboard"], spec.required_wall_objects)
 
     def test_repair_taxonomy_classifies_core_hard_failures(self) -> None:
         failures = classify_hard_reasons(

@@ -15,6 +15,14 @@ enabled: false   # Default: off. Set true in ablation_3/4/5 experiment configs.
 #   "full"           → harness_memory + LoRA model (model ID differs, behavior same)
 mode: "disabled"
 
+# One control plane for every SceneExpert override of SceneSmith execution.
+# Set SCENEEXPERT_EXECUTION_CONTROL_ENABLED=false to keep the SceneExpert
+# requirements/memory/verifier wrapper while restoring each SceneSmith agent's
+# native turn, token, timeout, retry, and asset-acquisition defaults.
+execution_control:
+  enabled: ${oc.decode:${oc.env:SCENEEXPERT_EXECUTION_CONTROL_ENABLED,true}}
+  profile: "${oc.env:SCENEEXPERT_EXECUTION_PROFILE,quality}"
+
 # Direct structured calls made by SceneExpert itself. These roles share one
 # local OpenAI-compatible client, but each role has an explicit bounded budget.
 structured_llm:
@@ -123,6 +131,13 @@ stage_budget:
     # Blocking retrieval/canonicalization has its own service deadline and is
     # excluded from planner/designer active inference time.
     asset_acquisition_timeout_seconds: 300
+    # Required functional assets use bounded semantic verification. Distinct
+    # candidates are tried before the one family-level transient retry.
+    asset_validation_timeout_seconds: 90
+    asset_validation_total_timeout_seconds: 300
+    asset_validation_max_output_tokens: 512
+    asset_validation_max_candidates: 4
+    asset_validation_family_retries: 1
     max_optional_object_families: 3
     max_assets_per_request: 6
     max_semantic_retries_per_family: 2

@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
-
 # ---------------------------------------------------------------------------
 # TaskCompiler output
 # ---------------------------------------------------------------------------
@@ -38,6 +37,18 @@ class SceneTaskSpec(BaseModel):
     required_small_objects: list[str] = Field(
         default_factory=list,
         description="Manipuland-scale objects required (books, cups, etc.)",
+    )
+    required_architectural_features: list[str] = Field(
+        default_factory=list,
+        description="Explicit structural features such as windows and exposed beams",
+    )
+    suggested_large_objects: list[str] = Field(default_factory=list)
+    suggested_wall_objects: list[str] = Field(default_factory=list)
+    suggested_ceiling_objects: list[str] = Field(default_factory=list)
+    suggested_small_objects: list[str] = Field(default_factory=list)
+    requirement_sources: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description="Grounding provenance for explicit and model-suggested objects",
     )
     functional_zones: list[str] = Field(
         default_factory=list,
@@ -118,6 +129,8 @@ class MemoryPack(BaseModel):
 class StageBudget(BaseModel):
     """Per-stage execution budget."""
 
+    execution_control_enabled: bool = True
+    execution_control_profile: str = "quality"
     max_designer_iterations: int = 2
     max_repair_steps: int = 1
     max_planner_turns: int = 8
@@ -138,6 +151,11 @@ class StageBudget(BaseModel):
     critical_retry_budget_multiplier: float = 1.5
     max_asset_requests: int = 0
     asset_acquisition_timeout_seconds: int = 300
+    asset_validation_timeout_seconds: float = 90.0
+    asset_validation_total_timeout_seconds: float = 240.0
+    asset_validation_max_output_tokens: int = 512
+    asset_validation_max_candidates: int = 4
+    asset_validation_family_retries: int = 1
     max_optional_object_families: int = 0
     max_assets_per_request: int = 0
     max_semantic_retries_per_family: int = 2
@@ -277,6 +295,8 @@ class FullVerifyReport(BaseModel):
     expected_stages: list[str] = Field(default_factory=list)
     completed_stages: list[str] = Field(default_factory=list)
     missing_stages: list[str] = Field(default_factory=list)
+    outcome_status: str = "COMPLETE"
+    degraded_reasons: list[str] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------

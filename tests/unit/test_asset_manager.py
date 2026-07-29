@@ -378,7 +378,7 @@ class TestAssetManager(unittest.TestCase):
         call_kwargs = manager._thin_covering_router.validate_asset.call_args.kwargs
         self.assertTrue(call_kwargs["use_lenient"])
         self.assertAlmostEqual(call_kwargs["timeout_seconds"], 42, delta=0.1)
-        self.assertEqual(call_kwargs["max_retries"], 1)
+        self.assertEqual(call_kwargs["max_retries"], 0)
         self.assertEqual(manager._calibrated_hssd_front_axis("sofa_asset"), "-X")
 
     def test_direct_hssd_validation_is_not_spent_on_unconfigured_family(self):
@@ -454,6 +454,68 @@ class TestAssetManager(unittest.TestCase):
                 description="upholstered bed",
                 short_name="bed",
             )
+
+    def test_sceneexpert_required_family_advances_candidates_before_retry(self):
+        manager = object.__new__(AssetManager)
+        manager.cfg = OmegaConf.create(
+            {
+                "asset_manager": {
+                    "hssd": {
+                        "semantic_validation": {
+                            "enabled": True,
+                            "families": ["bed"],
+                            "critical_families": ["bed"],
+                            "max_candidates": 4,
+                            "timeout_seconds": 90,
+                        }
+                    }
+                }
+            }
+        )
+        manager.debug_dir = self.temp_dir / "debug"
+        manager._runtime_gate = MagicMock(required_families={"bed"})
+        manager._execution_control_enabled = True
+        manager._asset_validation_runtime = {
+            "asset_validation_max_candidates": 4,
+            "asset_validation_timeout_seconds": 30,
+            "asset_validation_total_timeout_seconds": 90,
+            "asset_validation_family_retries": 1,
+            "asset_validation_max_output_tokens": 256,
+        }
+        manager._thin_covering_router = MagicMock()
+        manager._thin_covering_router.validate_asset.return_value = ValidationResult(
+            False,
+            "Validation call failed: upstream timeout",
+        )
+        candidates = [
+            HssdRetrievalResult(
+                mesh_path=str(self.temp_dir / f"bed_{index}.glb"),
+                hssd_id=f"bed_{index}",
+                object_name="bed",
+                similarity_score=0.9 - index * 0.01,
+                size=(1.6, 2.0, 0.8),
+                category="large_objects",
+            )
+            for index in range(2)
+        ]
+
+        selected = manager._select_direct_hssd_candidate(
+            candidates=candidates,
+            description="upholstered bed",
+            short_name="bed",
+        )
+
+        self.assertEqual("bed_0", selected.hssd_id)
+        self.assertEqual(3, manager._thin_covering_router.validate_asset.call_count)
+        first_two_meshes = [
+            call.kwargs["mesh_path"].name
+            for call in manager._thin_covering_router.validate_asset.call_args_list[:2]
+        ]
+        self.assertEqual(["bed_0.glb", "bed_1.glb"], first_two_meshes)
+        self.assertEqual(
+            "semantic_unverified_transient",
+            manager._direct_hssd_admission_states["bed_0"],
+        )
 
     def test_optional_hssd_validation_outage_uses_deterministic_candidate(self):
         manager = object.__new__(AssetManager)

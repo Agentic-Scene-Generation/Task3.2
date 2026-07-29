@@ -27,14 +27,37 @@ def resolve_scene_expert_config(cfg_dict: Mapping[str, Any]) -> dict:
     return deep_merge_dicts(root_cfg, experiment_cfg)
 
 
+def scene_expert_execution_control_enabled(
+    cfg_dict: Mapping[str, Any],
+) -> bool:
+    """Return whether SceneExpert may override native SceneSmith execution limits.
+
+    Requirement grounding, memory retrieval, verification, and tracing are not
+    execution-budget features and remain active when this switch is disabled.
+    Only turn, token, deadline, retry, and acquisition-count overrides are
+    gated here.
+    """
+    scene_expert_cfg = resolve_scene_expert_config(cfg_dict)
+    if not bool(scene_expert_cfg.get("enabled", False)):
+        return False
+    control = scene_expert_cfg.get("execution_control", {}) or {}
+    return bool(control.get("enabled", True))
+
+
 def resolve_scene_expert_stage_budget(
     cfg_dict: Mapping[str, Any], stage: str
 ) -> dict[str, object]:
     """Resolve the effective default-plus-stage execution budget."""
     scene_expert_cfg = resolve_scene_expert_config(cfg_dict)
-    if not bool(scene_expert_cfg.get("enabled", False)):
+    if not scene_expert_execution_control_enabled(cfg_dict):
         return {}
     stage_budgets = scene_expert_cfg.get("stage_budget", {}) or {}
     default_budget = stage_budgets.get("default", {}) or {}
     stage_budget = stage_budgets.get(stage, {}) or {}
-    return {**dict(default_budget), **dict(stage_budget)}
+    control = scene_expert_cfg.get("execution_control", {}) or {}
+    return {
+        **dict(default_budget),
+        **dict(stage_budget),
+        "execution_control_enabled": True,
+        "execution_control_profile": str(control.get("profile", "quality")),
+    }

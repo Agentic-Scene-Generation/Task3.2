@@ -45,6 +45,7 @@ from scenesmith.scene_expert.memory.schemas import FailureCase, SuccessCase
 from scenesmith.scene_expert.memory.text_builder import build_embedding_text
 from scenesmith.scene_expert.repair_controller import RepairController
 from scenesmith.scene_expert.repair_taxonomy import classify_hard_reasons
+from scenesmith.scene_expert.runtime_state import persist_degraded_incomplete
 from scenesmith.scene_expert.schemas import (
     FullVerifyReport,
     MemoryPack,
@@ -344,6 +345,8 @@ class SceneExpertHookRunner:
             task_spec=self._task_spec.model_dump(),
         )
         self._stage_reports: list[StageVerifyReport] = []
+        self._pending_success_cases: list[SuccessCase] = []
+        self._degraded_incomplete_reasons: list[str] = []
         self._expected_stages: list[str] = []
         self._completed_stages: list[str] = list(self._stage_order_baseline)
         self._qwen_calls = 0
@@ -357,9 +360,7 @@ class SceneExpertHookRunner:
         }
         self._current_stage_brief: StageBrief | None = None
         self._current_execution_evidence = StageExecutionEvidence(
-            task_spec_source=str(
-                self._task_spec_status.get("source", "unknown")
-            )
+            task_spec_source=str(self._task_spec_status.get("source", "unknown"))
         )
         self._stage_start_time: float = 0.0
         # Original text_description per stage (so we can restore if needed)
@@ -394,9 +395,7 @@ class SceneExpertHookRunner:
             ),
         }
         return StageExecutionEvidence(
-            task_spec_source=str(
-                self._task_spec_status.get("source", "unknown")
-            ),
+            task_spec_source=str(self._task_spec_status.get("source", "unknown")),
             stage_brief_source=stage_brief_source,
             retrieved_memory_ids=memory_ids,
             context_bundle_hash=stable_hash(context_payload),
@@ -534,9 +533,7 @@ class SceneExpertHookRunner:
             return
         try:
             quality = self._stage_score_quality(verify_report)
-            critic_feedback = parse_critic_feedback(
-                verify_report.critique_summary
-            )
+            critic_feedback = parse_critic_feedback(verify_report.critique_summary)
             event = {
                 "schema_version": "1.0",
                 "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -576,8 +573,7 @@ class SceneExpertHookRunner:
             ):
                 success_summary = (
                     critic_feedback.summary
-                    if critic_feedback.status == "PASS"
-                    and critic_feedback.summary
+                    if critic_feedback.status == "PASS" and critic_feedback.summary
                     else (
                         f"{stage} passed with trustworthy visual quality "
                         f"{quality:.2f} and deterministic constraints satisfied."
@@ -632,7 +628,9 @@ class SceneExpertHookRunner:
                     case = case.model_copy(
                         update={"embedding_text": build_embedding_text(case)}
                     )
-                self._memory_store.add_success_case(case)
+                # Success memory is transactional at scene scope. A later
+                # incomplete stage invalidates the scene's success outcome.
+                self._pending_success_cases.append(case)
             elif not verify_report.pass_stage and verify_report.issues:
                 reasons = [
                     issue.description or issue.issue_type
@@ -652,9 +650,7 @@ class SceneExpertHookRunner:
                 if not deterministic and not repair_verified:
                     return
                 primary_finding = (
-                    critic_feedback.findings[0]
-                    if critic_feedback.findings
-                    else None
+                    critic_feedback.findings[0] if critic_feedback.findings else None
                 )
                 failure_description = (
                     feedback_issue_text(primary_finding)
@@ -672,8 +668,7 @@ class SceneExpertHookRunner:
                 )
                 failure_object = (
                     primary_finding.object_ids[0]
-                    if primary_finding is not None
-                    and primary_finding.object_ids
+                    if primary_finding is not None and primary_finding.object_ids
                     else verify_report.issues[0].object_name
                 )
                 repair_text = (
@@ -1003,7 +998,8 @@ class SceneExpertHookRunner:
         self._stage_start_time = time.time()
         self._qwen_calls = 0
         self._current_memory_status = {"source": "disabled", "degraded": False}
-        setattr(scene, "scene_expert_degraded_stage_reasons", [])
+        if not hasattr(scene, "scene_expert_degraded_stage_reasons"):
+            setattr(scene, "scene_expert_degraded_stage_reasons", [])
         setattr(scene, "scene_expert_runtime_repair_events", [])
 
         # Save original text_description for restoration after stage
@@ -1155,7 +1151,11 @@ class SceneExpertHookRunner:
             )
         setattr(scene, "scene_expert_task_spec", self._task_spec.model_dump())
         setattr(scene, "scene_expert_stage", stage)
-        setattr(scene, "scene_expert_stage_budget", context.stage_budget.model_dump())
+        execution_control_enabled = bool(context.stage_budget.execution_control_enabled)
+        effective_stage_budget = (
+            context.stage_budget.model_dump() if execution_control_enabled else {}
+        )
+        setattr(scene, "scene_expert_stage_budget", effective_stage_budget)
         required_by_stage = {
             "furniture": self._task_spec.required_large_objects,
             "wall_mounted": self._task_spec.required_wall_objects,
@@ -1168,7 +1168,10 @@ class SceneExpertHookRunner:
             "scene_expert_required_objects",
             required_objects,
         )
-        if self._prompt_forbids_unrequested_objects():
+        if not execution_control_enabled:
+            min_output_objects = 0
+            max_output_objects = 0
+        elif self._prompt_forbids_unrequested_objects():
             min_output_objects = len(required_objects)
             max_output_objects = len(required_objects)
         else:
@@ -1178,9 +1181,7 @@ class SceneExpertHookRunner:
             )
             configured_max = int(context.stage_budget.max_output_objects or 0)
             max_output_objects = (
-                max(configured_max, len(required_objects))
-                if configured_max > 0
-                else 0
+                max(configured_max, len(required_objects)) if configured_max > 0 else 0
             )
         setattr(scene, "scene_expert_min_output_objects", min_output_objects)
         setattr(scene, "scene_expert_max_output_objects", max_output_objects)
@@ -1247,6 +1248,21 @@ class SceneExpertHookRunner:
 
         # Extract lightweight scene state info for rule checks
         scene_state_info = self._extract_scene_state_info_from_scene(scene)
+        for reason in scene_state_info.get("degraded_stage_reasons", []):
+            if reason not in self._degraded_incomplete_reasons:
+                self._degraded_incomplete_reasons.append(reason)
+        degraded_manifest = (
+            self._scene_debug_dir / "degraded" / "degraded_manifest.json"
+        )
+        if self._degraded_incomplete_reasons and not degraded_manifest.exists():
+            persist_degraded_incomplete(
+                scene_root_dir=self._scene_debug_dir.parent,
+                reasons=self._degraded_incomplete_reasons,
+                metadata={
+                    "last_stage": stage,
+                    "failure_code": "semantic_validation_unverified",
+                },
+            )
 
         # Verify stage
         verify_report: StageVerifyReport | None = None
@@ -1352,6 +1368,19 @@ class SceneExpertHookRunner:
             )
         except Exception as e:
             console_logger.warning(f"FullVerifier failed: {e}")
+        if self._degraded_incomplete_reasons:
+            full_report = full_report.model_copy(
+                update={
+                    "pass_scene": False,
+                    "outcome_status": "DEGRADED_INCOMPLETE",
+                    "degraded_reasons": list(self._degraded_incomplete_reasons),
+                }
+            )
+            self._pending_success_cases.clear()
+        elif self._memory_store is not None:
+            for case in self._pending_success_cases:
+                self._memory_store.add_success_case(case)
+            self._pending_success_cases.clear()
 
         # Save trace
         final_path = Path(final_scene_path)
@@ -1389,6 +1418,8 @@ class SceneExpertHookRunner:
                     full_report=full_report,
                     related_old_memory=related_old_memory,
                 )
+                if self._degraded_incomplete_reasons:
+                    ops = [op for op in ops if op.memory_type == "failure_case"]
                 self._trace_logger.save_memory_update_ops(ops, full_report)
                 self._memory_store.apply_updates(ops)
                 self._trace_logger.record_component_status(
@@ -1541,6 +1572,12 @@ class SceneExpertHookRunner:
                 for obj in scene.objects.values()
                 if (getattr(obj, "metadata", {}) or {}).get("repair_placeholder")
             ]
+            transient_unverified_names = [
+                obj.name
+                for obj in scene.objects.values()
+                if (getattr(obj, "metadata", {}) or {}).get("semantic_admission_state")
+                == "semantic_unverified_transient"
+            ]
             object_counts: dict[str, int] = {}
             object_placements: list[dict[str, Any]] = []
             for object_id, obj in scene.objects.items():
@@ -1574,9 +1611,17 @@ class SceneExpertHookRunner:
                     )
                 except Exception:
                     continue
+            degraded_stage_reasons = list(
+                getattr(scene, "scene_expert_degraded_stage_reasons", []) or []
+            )
+            degraded_stage_reasons.extend(
+                f"asset semantic validation remained transient-unverified: {name}"
+                for name in transient_unverified_names
+            )
             return {
                 "object_names": names,
                 "placeholder_names": placeholder_names,
+                "transient_unverified_asset_names": transient_unverified_names,
                 "object_counts": object_counts,
                 "object_placements": object_placements,
                 "stage_min_output_objects": int(
@@ -1585,9 +1630,7 @@ class SceneExpertHookRunner:
                 "stage_max_output_objects": int(
                     getattr(scene, "scene_expert_max_output_objects", 0) or 0
                 ),
-                "degraded_stage_reasons": list(
-                    getattr(scene, "scene_expert_degraded_stage_reasons", []) or []
-                ),
+                "degraded_stage_reasons": list(dict.fromkeys(degraded_stage_reasons)),
                 "runtime_repair_events": list(
                     getattr(scene, "scene_expert_runtime_repair_events", []) or []
                 ),
@@ -1596,6 +1639,7 @@ class SceneExpertHookRunner:
             return {
                 "object_names": [],
                 "placeholder_names": [],
+                "transient_unverified_asset_names": [],
                 "object_counts": {},
                 "object_placements": [],
                 "stage_min_output_objects": 0,

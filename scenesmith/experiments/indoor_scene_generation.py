@@ -48,6 +48,7 @@ from scenesmith.scene_expert.runtime_state import (
     ScenePausedError,
     is_scene_paused_error,
     mark_retryable_pause_resolved,
+    persist_degraded_incomplete,
     persist_retryable_pause,
 )
 from scenesmith.utils.logging import ConsoleLogger, FileLoggingContext
@@ -88,6 +89,10 @@ STAGE_ASSET_DIRS = {
 
 _SCENE_STATUS_FILENAME = "scene_status.json"
 _SCENE_SUCCESS_MARKER = "_SUCCESS"
+
+
+def _scene_has_degraded_incomplete_outcome(scene_dir: Path) -> bool:
+    return (scene_dir / "scene_expert" / "degraded" / "degraded_manifest.json").exists()
 
 
 def _write_scene_status(
@@ -258,7 +263,7 @@ def _pause_unscored_scene_candidate(
     raise ScenePausedError(stage, reason, str(manifest_path))
 
 
-def _pause_incomplete_placement_stage(
+def _mark_incomplete_placement_stage_degraded(
     *,
     stage: str,
     agent: Any,
@@ -266,21 +271,17 @@ def _pause_incomplete_placement_stage(
     reasons: list[str],
     runtime_events: list[str],
 ) -> None:
-    """Pause before committing a stage that lacks a real placed output."""
+    """Mark an exhausted placement stage incomplete while allowing export."""
     available_assets_fn = getattr(agent, "admitted_stage_assets", None)
     available_assets = (
         list(available_assets_fn()) if callable(available_assets_fn) else []
     )
-    asset_ids = [
-        str(getattr(asset, "object_id", "")) for asset in available_assets
-    ]
+    asset_ids = [str(getattr(asset, "object_id", "")) for asset in available_assets]
     unavailable_families_fn = getattr(
         agent, "unavailable_required_asset_families", None
     )
     unavailable_families = (
-        list(unavailable_families_fn())
-        if callable(unavailable_families_fn)
-        else []
+        list(unavailable_families_fn()) if callable(unavailable_families_fn) else []
     )
     if unavailable_families or not available_assets:
         failure_code = "asset_unavailable"
@@ -291,10 +292,17 @@ def _pause_incomplete_placement_stage(
         role = "designer"
         resume_action = "retry_stage_placement"
 
-    runtime_events.append(f"paused_retryable_{failure_code}")
+    runtime_events.append(f"degraded_incomplete_{failure_code}")
     setattr(scene, "scene_expert_runtime_repair_events", runtime_events)
     details = "; ".join(str(item) for item in reasons if str(item).strip())
     reason = f"{failure_code}: {details}"
+    degraded_reasons = list(
+        getattr(scene, "scene_expert_degraded_stage_reasons", []) or []
+    )
+    degraded_reasons.append(f"[{stage}] {reason}")
+    degraded_reasons = list(dict.fromkeys(degraded_reasons))
+    setattr(scene, "scene_expert_degraded_stage_reasons", degraded_reasons)
+    setattr(scene, "scene_expert_outcome_status", "DEGRADED_INCOMPLETE")
     working_memory = getattr(agent, "stage_working_memory", None)
     scene_root_dir = getattr(
         working_memory,
@@ -302,16 +310,15 @@ def _pause_incomplete_placement_stage(
         getattr(scene, "scene_dir", Path.cwd()),
     )
     content_hash = getattr(scene, "content_hash", None)
-    manifest_path = persist_retryable_pause(
+    manifest_path = persist_degraded_incomplete(
         scene_root_dir=scene_root_dir,
-        stage=stage,
-        role=role,
-        reason=reason,
-        resume_action=resume_action,
-        candidate_state=scene.to_state_dict(),
-        candidate_hash=(content_hash() if callable(content_hash) else ""),
-        attempt_count=1,
+        reasons=degraded_reasons,
         metadata={
+            "last_stage": stage,
+            "failure_code": failure_code,
+            "responsible_role": role,
+            "recommended_resume_action": resume_action,
+            "candidate_hash": content_hash() if callable(content_hash) else "",
             "room_id": str(getattr(scene, "room_id", "")),
             "room_dir": str(getattr(scene, "scene_dir", "")),
             "available_admitted_asset_ids": asset_ids,
@@ -319,7 +326,13 @@ def _pause_incomplete_placement_stage(
             "runtime_events": list(runtime_events),
         },
     )
-    raise ScenePausedError(stage, reason, str(manifest_path))
+    console_logger.error(
+        "[DEGRADED_INCOMPLETE] stage=%s: %s; final scene export remains enabled "
+        "(manifest=%s)",
+        stage,
+        reason,
+        manifest_path,
+    )
 
 
 def _raise_if_required_assets_unavailable(*, stage: str, agent: Any) -> None:
@@ -509,23 +522,22 @@ def _run_sceneexpert_placement_stage(
                     raise
                 console_logger.error(
                     "%s stage exhausted %d regeneration(s) without a valid real "
-                    "placed output; pausing this scene before downstream commit: %s",
+                    "placed output; exporting an explicit degraded scene: %s",
                     stage,
                     regeneration_attempt,
                     "; ".join(exc.reasons),
                 )
-                _pause_incomplete_placement_stage(
+                _mark_incomplete_placement_stage_degraded(
                     stage=stage,
                     agent=agent,
                     scene=scene,
                     reasons=list(exc.reasons),
                     runtime_events=runtime_events,
                 )
+                return regeneration_attempt
 
             regeneration_attempt += 1
-            runtime_events.append(
-                f"full_stage_regeneration_{regeneration_attempt}"
-            )
+            runtime_events.append(f"full_stage_regeneration_{regeneration_attempt}")
             console_logger.warning(
                 "%s stage failed its completion contract; restoring the stage "
                 "input checkpoint and requesting a new agent design (%d/%d): %s",
@@ -1546,15 +1558,13 @@ def _generate_room(
                     furniture_agent, "_evaluate_current_hard_state", None
                 )
                 selected_hard_state = (
-                    evaluate_hard_state()
-                    if callable(evaluate_hard_state)
-                    else None
+                    evaluate_hard_state() if callable(evaluate_hard_state) else None
                 )
                 if (
                     selected_hard_state is not None
                     and not selected_hard_state.hard_valid
                 ):
-                    _pause_incomplete_placement_stage(
+                    _mark_incomplete_placement_stage_degraded(
                         stage="furniture",
                         agent=furniture_agent,
                         scene=scene,
@@ -2068,7 +2078,7 @@ def _generate_room(
                         "Manipuland post-processing rescue did not produce a "
                         "verified minimum-output scene; pausing before final commit"
                     )
-                    _pause_incomplete_placement_stage(
+                    _mark_incomplete_placement_stage_degraded(
                         stage="manipuland",
                         agent=manipuland_agent,
                         scene=scene,
@@ -3170,17 +3180,19 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                             "Scene generation completed successfully in "
                             f"{timedelta(seconds=time.time() - scene_generation_start_time)}"
                         )
+                        degraded = _scene_has_degraded_incomplete_outcome(scene_dir)
                         _write_scene_status(
                             output_dir=output_dir,
                             scene_id=scene_id,
                             prompt=prompt,
-                            status="completed",
+                            status=("degraded_incomplete" if degraded else "completed"),
                             attempt=attempt,
                         )
                         mark_retryable_pause_resolved(scene_dir)
-                        (scene_dir / _SCENE_SUCCESS_MARKER).write_text(
-                            "completed\n", encoding="utf-8"
-                        )
+                        if not degraded:
+                            (scene_dir / _SCENE_SUCCESS_MARKER).write_text(
+                                "completed\n", encoding="utf-8"
+                            )
                         return
 
                     # Stages 2-4: Furniture, wall objects, and manipulands (per-room).
@@ -3308,15 +3320,19 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                 console_logger.error(f"Scene generation failed: {e}")
                 raise
 
+        degraded = _scene_has_degraded_incomplete_outcome(scene_dir)
         _write_scene_status(
             output_dir=output_dir,
             scene_id=scene_id,
             prompt=prompt,
-            status="completed",
+            status="degraded_incomplete" if degraded else "completed",
             attempt=attempt,
         )
         mark_retryable_pause_resolved(scene_dir)
-        (scene_dir / _SCENE_SUCCESS_MARKER).write_text("completed\n", encoding="utf-8")
+        if not degraded:
+            (scene_dir / _SCENE_SUCCESS_MARKER).write_text(
+                "completed\n", encoding="utf-8"
+            )
 
     def _run_serial_generation(
         self,

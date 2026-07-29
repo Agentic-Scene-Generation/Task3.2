@@ -285,6 +285,7 @@ class AssetRouter:
         use_lenient: bool = False,
         timeout_seconds: float | None = None,
         max_retries: int | None = None,
+        max_output_tokens: int | None = None,
     ) -> ValidationResult:
         """Validate a generated asset using VLM.
 
@@ -303,6 +304,7 @@ class AssetRouter:
                 accepts minor imperfections common in library assets.
             timeout_seconds: Optional deadline for this asset-only VLM request.
             max_retries: Optional retry count for this asset-only VLM request.
+            max_output_tokens: Optional compact response cap.
 
         Returns:
             ValidationResult with acceptance decision and reasoning.
@@ -392,6 +394,7 @@ class AssetRouter:
                 vision_detail=vision_detail,
                 timeout_seconds=timeout_seconds,
                 max_retries=max_retries,
+                max_output_tokens=max_output_tokens,
             )
             elapsed = time.time() - start_time
             response_json = json.loads(response_text)

@@ -3,6 +3,7 @@ import unittest
 from scenesmith.scene_expert.config_utils import (
     resolve_scene_expert_config,
     resolve_scene_expert_stage_budget,
+    scene_expert_execution_control_enabled,
 )
 
 
@@ -12,6 +13,7 @@ class SceneExpertConfigUtilsTest(unittest.TestCase):
             "scene_expert": {
                 "enabled": False,
                 "mode": "disabled",
+                "execution_control": {"enabled": True, "profile": "quality"},
                 "stage_budget": {
                     "default": {
                         "max_designer_iterations": 2,
@@ -28,9 +30,7 @@ class SceneExpertConfigUtilsTest(unittest.TestCase):
                 "scene_expert": {
                     "enabled": True,
                     "mode": "harness_memory",
-                    "stage_budget": {
-                        "default": {"max_designer_iterations": 1}
-                    },
+                    "stage_budget": {"default": {"max_designer_iterations": 1}},
                 }
             },
         }
@@ -54,6 +54,17 @@ class SceneExpertConfigUtilsTest(unittest.TestCase):
         self.assertEqual(budget["max_wall_clock_seconds"], 600)
         self.assertEqual(budget["max_planner_turns"], 8)
         self.assertEqual(budget["max_critic_turns"], 4)
+        self.assertTrue(budget["execution_control_enabled"])
+        self.assertEqual(budget["execution_control_profile"], "quality")
+
+    def test_master_execution_switch_restores_native_budget(self) -> None:
+        self.cfg["experiment"]["scene_expert"]["execution_control"] = {"enabled": False}
+
+        self.assertFalse(scene_expert_execution_control_enabled(self.cfg))
+        self.assertEqual(
+            resolve_scene_expert_stage_budget(self.cfg, "furniture"),
+            {},
+        )
 
 
 if __name__ == "__main__":

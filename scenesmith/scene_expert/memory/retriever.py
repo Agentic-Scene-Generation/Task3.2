@@ -12,7 +12,6 @@ from scenesmith.scene_expert.memory.schemas import FailureCase, Skill, SuccessCa
 from scenesmith.scene_expert.memory.store import FastMemoryStore
 from scenesmith.scene_expert.schemas import MemoryPack, SceneTaskSpec
 
-
 _ALIASES = {
     "卧室": ["bedroom"],
     "客厅": ["living_room", "living", "room"],
@@ -148,9 +147,7 @@ class MemoryRetriever:
         failure_hints, failure_ids = self._retrieve_failure(
             task_spec, stage, query_tokens
         )
-        skill_texts, skill_names = self._retrieve_skills(
-            task_spec, stage, query_tokens
-        )
+        skill_texts, skill_names = self._retrieve_skills(task_spec, stage, query_tokens)
 
         return MemoryPack(
             success_hints=success_hints,
@@ -172,9 +169,17 @@ class MemoryRetriever:
             to be injected directly into the designer prompt.
         """
         scored: list[tuple[float, SuccessCase]] = []
+        required_tokens = _stage_required_object_tokens(task_spec, stage)
         for case in self._store.success_cases:
             if case.stage != stage or not _room_type_matches(
                 case.room_type, task_spec.room_type
+            ):
+                continue
+            case_object_tokens = set(
+                _tokenize(" ".join(case.required_objects or case.task_signature))
+            )
+            if case_object_tokens and not (
+                required_tokens and case_object_tokens & required_tokens
             ):
                 continue
             candidate_tokens = _tokenize(
@@ -209,9 +214,7 @@ class MemoryRetriever:
             ):
                 continue
             case_object_tokens = set(_tokenize(case.object))
-            if case_object_tokens and not (
-                case_object_tokens & task_object_tokens
-            ):
+            if case_object_tokens and not (case_object_tokens & task_object_tokens):
                 continue
             candidate_tokens = _tokenize(
                 " ".join(
@@ -223,9 +226,7 @@ class MemoryRetriever:
 
         scored.sort(key=lambda x: x[0], reverse=True)
         top = [
-            (score, case)
-            for score, case in scored[: self._max_failure]
-            if score > 0
+            (score, case) for score, case in scored[: self._max_failure] if score > 0
         ]
         return (
             [case.to_hint_text() for _, case in top],
@@ -260,9 +261,7 @@ class MemoryRetriever:
 
         scored.sort(key=lambda x: x[0], reverse=True)
         top = [
-            (score, skill)
-            for score, skill in scored[: self._max_skills]
-            if score > 0
+            (score, skill) for score, skill in scored[: self._max_skills] if score > 0
         ]
         return (
             [skill.to_procedure_text() for _, skill in top],

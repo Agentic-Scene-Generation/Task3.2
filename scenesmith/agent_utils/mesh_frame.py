@@ -155,6 +155,7 @@ def choose_uniform_scale_for_contract(
     max_ratio: float,
     minimum_dimensions: Sequence[float] | None = None,
     maximum_dimensions: Sequence[float] | None = None,
+    enforce_requested_ratio: bool = True,
 ) -> tuple[float, np.ndarray]:
     """Choose one feasible uniform scale under the shared dimension contract.
 
@@ -193,8 +194,11 @@ def choose_uniform_scale_for_contract(
             f"Invalid family size bounds: minimum={minimum}, maximum={maximum}"
         )
 
-    lower = float(np.max(min_ratio * normalized / source))
-    upper = float(np.min(max_ratio * normalized / source))
+    lower = 0.0
+    upper = float("inf")
+    if enforce_requested_ratio:
+        lower = float(np.max(min_ratio * normalized / source))
+        upper = float(np.min(max_ratio * normalized / source))
     if minimum is not None:
         lower = max(lower, float(np.max(minimum / source)))
     if maximum is not None:

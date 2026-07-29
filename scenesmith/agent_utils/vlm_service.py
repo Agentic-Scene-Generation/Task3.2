@@ -45,6 +45,7 @@ class VLMService:
         vision_detail: str = "auto",
         timeout_seconds: float | None = None,
         max_retries: int | None = None,
+        max_output_tokens: int | None = None,
     ) -> str:
         """Create completion using appropriate API based on model type.
 
@@ -60,6 +61,7 @@ class VLMService:
             vision_detail: Image resolution detail ("low", "high", "auto").
             timeout_seconds: Optional request timeout override.
             max_retries: Optional OpenAI client retry override.
+            max_output_tokens: Optional response-token cap for this call.
 
         Returns:
             Response content as string.
@@ -92,6 +94,8 @@ class VLMService:
                 },
                 "text": {"verbosity": verbosity},
             }
+            if max_output_tokens is not None:
+                kwargs["max_output_tokens"] = max(1, int(max_output_tokens))
             if self.service_tier:
                 kwargs["service_tier"] = self.service_tier
             response = client.responses.create(**kwargs)
@@ -127,6 +131,8 @@ class VLMService:
                 directive=thinking_directive_from_effort(reasoning_effort),
             )
             kwargs = {"model": model, "messages": messages}
+            if max_output_tokens is not None:
+                kwargs["max_tokens"] = max(1, int(max_output_tokens))
 
             # Add response format if specified.
             if response_format:

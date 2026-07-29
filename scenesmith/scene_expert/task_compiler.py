@@ -68,6 +68,7 @@ _ROOM_TYPE_KEYWORDS: dict[str, list[str]] = {
     "living room": ["living room", "living", "sofa", "couch", "tv", "coffee table"],
     "kitchen": ["kitchen", "stove", "oven", "fridge", "sink", "counter"],
     "bathroom": ["bathroom", "toilet", "bathtub", "shower", "sink"],
+    "classroom": ["classroom", "student desk", "teacher desk", "blackboard"],
     "office": ["office", "desk", "chair", "computer", "monitor", "study"],
     "dining room": ["dining room", "dining", "dining table", "chairs"],
     "garage": ["garage", "car", "workbench", "tools"],
@@ -77,8 +78,8 @@ _ROOM_TYPE_KEYWORDS: dict[str, list[str]] = {
 _STYLE_KEYWORDS: dict[str, list[str]] = {
     "modern": ["modern", "contemporary", "sleek", "minimalist"],
     "cozy": ["cozy", "warm", "comfortable", "homey"],
-    "industrial": ["industrial", "metal", "raw", "exposed"],
     "farmhouse": ["farmhouse", "rustic", "country", "wooden"],
+    "industrial": ["industrial", "metal", "raw", "exposed"],
     "scandinavian": ["scandinavian", "nordic", "simple", "functional"],
     "luxury": ["luxury", "elegant", "upscale", "premium"],
 }
@@ -104,8 +105,25 @@ _OBJECT_ALIASES: dict[str, tuple[str, list[str], str]] = {
     ),
     "wardrobe": ("large", ["wardrobe", "wardrobes", "closet", "closets"], "wardrobe"),
     "sofa": ("large", ["sofa", "sofas", "couch", "couches"], "sofa"),
-    "table": ("large", ["table", "tables", "desk", "desks"], "table"),
+    "student desk": (
+        "large",
+        ["student desk", "student desks", "school desk", "school desks"],
+        "student desk",
+    ),
+    "teacher desk": (
+        "large",
+        ["teacher desk", "teacher desks", "teacher's desk", "instructor desk"],
+        "teacher desk",
+    ),
+    "desk": ("large", ["desk", "desks", "work desk", "work desks"], "desk"),
+    "table": ("large", ["table", "tables"], "table"),
     "chair": ("large", ["chair", "chairs"], "chair"),
+    "rug": ("large", ["rug", "rugs", "carpet", "carpets"], "rug"),
+    "plant": (
+        "large",
+        ["plant", "plants", "potted plant", "potted plants"],
+        "plant",
+    ),
     "painting": ("wall", ["painting", "paintings", "artwork", "artworks"], "painting"),
     "mirror": ("wall", ["mirror", "mirrors"], "mirror"),
     "shelf": (
@@ -113,13 +131,36 @@ _OBJECT_ALIASES: dict[str, tuple[str, list[str], str]] = {
         ["shelf", "shelves", "floating shelf", "floating shelves"],
         "shelf",
     ),
+    "blackboard": (
+        "wall",
+        ["blackboard", "blackboards", "chalkboard", "chalkboards"],
+        "blackboard",
+    ),
     "ceiling light": (
         "ceiling",
         ["ceiling light", "ceiling lights", "pendant light", "pendant lights", "lamp"],
         "ceiling light",
     ),
+    "exposed beam": (
+        "ceiling",
+        [
+            "exposed beam",
+            "exposed beams",
+            "ceiling beam",
+            "ceiling beams",
+            "beam",
+            "beams",
+        ],
+        "exposed beam",
+    ),
     "book": ("small", ["book", "books"], "book"),
-    "plant": ("small", ["plant", "plants"], "plant"),
+    "blanket": (
+        "small",
+        ["blanket", "blankets", "throw blanket", "throw blankets"],
+        "blanket",
+    ),
+    "window": ("architectural", ["window", "windows"], "window"),
+    "door": ("architectural", ["door", "doors", "doorway", "doorways"], "door"),
 }
 
 
@@ -127,20 +168,20 @@ def _extract_count_before_alias(text: str, alias: str) -> int:
     """Return a conservative count for an object mention in fallback parsing."""
     alias_pattern = re.escape(alias.lower()).replace(r"\ ", r"\s+")
     number_pattern = "|".join([r"\d+", *map(re.escape, _NUMBER_WORDS)])
-    pattern = (
-        rf"(?:(?P<count>{number_pattern})\s+)?" rf"(?:\w+\s+){{0,2}}{alias_pattern}\b"
+    counted_pattern = (
+        rf"\b(?P<count>{number_pattern})\s+" rf"(?:\w+\s+){{0,2}}{alias_pattern}\b"
     )
     best = 0
-    for match in re.finditer(pattern, text):
-        count_text = match.groupdict().get("count")
-        if not count_text:
-            count = 1
-        elif count_text.isdigit():
+    for match in re.finditer(counted_pattern, text):
+        count_text = match.group("count")
+        if count_text.isdigit():
             count = int(count_text)
         else:
             count = _NUMBER_WORDS.get(count_text, 1)
         best = max(best, count)
-    return best
+    if best:
+        return best
+    return 1 if re.search(rf"\b{alias_pattern}\b", text) else 0
 
 
 def _extract_required_objects_from_prompt(prompt_lower: str) -> dict[str, list[str]]:
@@ -150,14 +191,116 @@ def _extract_required_objects_from_prompt(prompt_lower: str) -> dict[str, list[s
         "wall": [],
         "ceiling": [],
         "small": [],
+        "architectural": [],
     }
     for _, (bucket, aliases, canonical) in _OBJECT_ALIASES.items():
         count = 0
+        search_text = prompt_lower
+        if canonical == "desk":
+            search_text = re.sub(
+                r"\b(?:student|pupil|school|teacher(?:'s)?|instructor)\s+desks?\b",
+                " ",
+                search_text,
+            )
         for alias in aliases:
-            count = max(count, _extract_count_before_alias(prompt_lower, alias))
+            count = max(count, _extract_count_before_alias(search_text, alias))
         if count > 0:
             required[bucket].extend([canonical] * count)
+    student_desk_count = required["large"].count("student desk")
+    if student_desk_count and re.search(
+        r"\beach\s+(?:student\s+desk\s+)?(?:comes\s+)?with\s+(?:a|one)\s+chair\b",
+        prompt_lower,
+    ):
+        required["large"] = [value for value in required["large"] if value != "chair"]
+        required["large"].extend(["chair"] * student_desk_count)
     return required
+
+
+def _canonical_explicit_name(value: str) -> str:
+    """Map a model object phrase to the family used by prompt grounding."""
+    normalized = " ".join(re.sub(r"[^a-z0-9]+", " ", value.lower()).split())
+    for _, (_, aliases, canonical) in _OBJECT_ALIASES.items():
+        if any(
+            re.search(rf"\b{re.escape(phrase)}\b", normalized)
+            for phrase in [canonical, *aliases]
+        ):
+            return canonical
+    return normalized
+
+
+def _ground_compiled_spec(prompt: str, task_spec: SceneTaskSpec) -> SceneTaskSpec:
+    """Keep inferred room contents as suggestions, not hard requirements."""
+    prompt_lower = prompt.lower()
+    explicit = _extract_required_objects_from_prompt(prompt_lower)
+    model_buckets = {
+        "large": list(task_spec.required_large_objects),
+        "wall": list(task_spec.required_wall_objects),
+        "ceiling": list(task_spec.required_ceiling_objects),
+        "small": list(task_spec.required_small_objects),
+    }
+    suggested: dict[str, list[str]] = {key: [] for key in model_buckets}
+    all_explicit_families = {
+        _canonical_explicit_name(value)
+        for bucket_values in explicit.values()
+        for value in bucket_values
+    }
+    for bucket, values in model_buckets.items():
+        explicit_families = {
+            _canonical_explicit_name(value) for value in explicit[bucket]
+        }
+        for value in values:
+            family = _canonical_explicit_name(value)
+            normalized_value = " ".join(
+                re.sub(r"[^a-z0-9]+", " ", str(value).lower()).split()
+            )
+            directly_mentioned = bool(
+                normalized_value
+                and re.search(rf"\b{re.escape(normalized_value)}\b", prompt_lower)
+            )
+            if family in all_explicit_families:
+                continue
+            if directly_mentioned:
+                explicit[bucket].append(value)
+                explicit_families.add(family)
+                all_explicit_families.add(family)
+            elif value not in suggested[bucket]:
+                suggested[bucket].append(value)
+
+    sources = {
+        "explicit_prompt": [
+            *explicit["large"],
+            *explicit["wall"],
+            *explicit["ceiling"],
+            *explicit["small"],
+            *explicit["architectural"],
+        ],
+        "model_suggestion": [
+            *suggested["large"],
+            *suggested["wall"],
+            *suggested["ceiling"],
+            *suggested["small"],
+        ],
+    }
+    grounded = task_spec.model_copy(
+        update={
+            "required_large_objects": explicit["large"],
+            "required_wall_objects": explicit["wall"],
+            "required_ceiling_objects": explicit["ceiling"],
+            "required_small_objects": explicit["small"],
+            "required_architectural_features": explicit["architectural"],
+            "suggested_large_objects": suggested["large"],
+            "suggested_wall_objects": suggested["wall"],
+            "suggested_ceiling_objects": suggested["ceiling"],
+            "suggested_small_objects": suggested["small"],
+            "requirement_sources": sources,
+        }
+    )
+    console_logger.info(
+        "TaskCompiler grounding: explicit=%s suggestions=%s",
+        sources["explicit_prompt"],
+        sources["model_suggestion"],
+    )
+    return grounded
 
 
 def _fallback_spec_from_prompt(prompt: str) -> SceneTaskSpec:
@@ -209,6 +352,17 @@ def _fallback_spec_from_prompt(prompt: str) -> SceneTaskSpec:
         required_wall_objects=required["wall"],
         required_ceiling_objects=required["ceiling"],
         required_small_objects=required["small"],
+        required_architectural_features=required["architectural"],
+        requirement_sources={
+            "explicit_prompt": [
+                *required["large"],
+                *required["wall"],
+                *required["ceiling"],
+                *required["small"],
+                *required["architectural"],
+            ],
+            "model_suggestion": [],
+        },
         functional_zones=functional_zones,
         interaction_constraints=interaction_constraints,
         aesthetic_constraints=["balanced placement", "clear walking paths"],
@@ -285,7 +439,7 @@ class TaskCompiler:
                 "TaskCompiler structured call failed after bounded recovery: "
                 f"{result.final_error_kind}: {result.final_error}"
             )
-        task_spec = result.value
+        task_spec = _ground_compiled_spec(prompt, result.value)
         console_logger.info(
             f"TaskCompiler: room_type={task_spec.room_type}, style={task_spec.style}, "
             f"large_objects={task_spec.required_large_objects}"

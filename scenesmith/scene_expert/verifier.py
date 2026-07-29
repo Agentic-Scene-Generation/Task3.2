@@ -198,9 +198,10 @@ def _find_scores_yaml(stage_output_dir: str, stage: str = "") -> Path | None:
             root / "final_floor_plan" / "scores.yaml",
             root / "floor_plans" / "final_floor_plan" / "scores.yaml",
         ):
-            if candidate.exists() or (
-                candidate.parent / "score_provenance.yaml"
-            ).exists():
+            if (
+                candidate.exists()
+                or (candidate.parent / "score_provenance.yaml").exists()
+            ):
                 return candidate
 
     # Try stage-specific known path first.
@@ -630,6 +631,22 @@ class StageVerifier:
                     )
                 )
 
+            transient_unverified = [
+                str(name)
+                for name in scene_state_info.get("transient_unverified_asset_names", [])
+                if str(name).strip()
+            ]
+            if transient_unverified:
+                issues.append(
+                    VerifyIssue(
+                        issue_type="asset_semantic_unverified",
+                        description=(
+                            "Asset VLM transport remained unavailable after the "
+                            "family retry: " + ", ".join(transient_unverified)
+                        ),
+                    )
+                )
+
             if stage == "furniture":
                 placeholder_names = sorted(
                     {
@@ -813,9 +830,7 @@ class StageVerifier:
             plausibility_score is None or plausibility_score >= self._pass_threshold
         )
         visual_avg_score = (
-            sum(visual_scores.values()) / len(visual_scores)
-            if visual_scores
-            else None
+            sum(visual_scores.values()) / len(visual_scores) if visual_scores else None
         )
         pass_score_gate = (
             visual_avg_score is None or visual_avg_score >= self._pass_threshold
@@ -855,11 +870,7 @@ class StageVerifier:
             f"plausibility={plausibility_score if plausibility_score is not None else 'n/a'} "
             f"source={score_source}",
             stage,
-            (
-                f"{visual_avg_score:.2f}"
-                if visual_avg_score is not None
-                else "n/a"
-            ),
+            (f"{visual_avg_score:.2f}" if visual_avg_score is not None else "n/a"),
         )
 
         return StageVerifyReport(
@@ -968,8 +979,7 @@ class FullVerifier:
             if key in visual_scores_by_category
         ]
         overall = (
-            sum(visual_avg(key) for key in visual_dimensions)
-            / len(visual_dimensions)
+            sum(visual_avg(key) for key in visual_dimensions) / len(visual_dimensions)
             if visual_dimensions
             else 0.0
         )

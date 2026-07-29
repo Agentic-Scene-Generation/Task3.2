@@ -11,7 +11,6 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-
 SCENE_PAUSED_MARKER = "[SCENE_PAUSED_RETRYABLE]"
 
 
@@ -28,6 +27,16 @@ class ScenePauseManifest(BaseModel):
     candidate_state_path: str = ""
     render_dir: str = ""
     attempt_count: int = 0
+    created_at: str
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class DegradedSceneManifest(BaseModel):
+    """Auditable non-success outcome that remains exportable."""
+
+    schema_version: str = "1.0"
+    status: str = "DEGRADED_INCOMPLETE"
+    reasons: list[str] = Field(default_factory=list)
     created_at: str
     metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -96,6 +105,26 @@ def persist_retryable_pause(
         metadata=dict(metadata or {}),
     )
     manifest_path = pause_dir / "pause_manifest.json"
+    _write_json_atomic(manifest_path, manifest.model_dump())
+    return manifest_path
+
+
+def persist_degraded_incomplete(
+    *,
+    scene_root_dir: str | Path,
+    reasons: list[str],
+    metadata: dict[str, Any] | None = None,
+) -> Path:
+    """Persist an exportable incomplete outcome without pausing the task."""
+    scene_root = Path(scene_root_dir)
+    degraded_dir = scene_root / "scene_expert" / "degraded"
+    degraded_dir.mkdir(parents=True, exist_ok=True)
+    manifest = DegradedSceneManifest(
+        reasons=list(dict.fromkeys(str(reason) for reason in reasons if str(reason))),
+        created_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        metadata=dict(metadata or {}),
+    )
+    manifest_path = degraded_dir / "degraded_manifest.json"
     _write_json_atomic(manifest_path, manifest.model_dump())
     return manifest_path
 

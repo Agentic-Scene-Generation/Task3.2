@@ -427,7 +427,12 @@ class AssetManager:
         self._direct_hssd_validation_results: dict[str, ValidationResult] = {}
         self._direct_hssd_semantic_cache: dict[str, ValidationResult] = {}
         self._execution_clock: object | None = None
-        self._asset_acquisition_timeout_seconds = 300
+        # Native HSSD client default. SceneExpert may replace it only through
+        # the explicit execution-control plane.
+        self._asset_acquisition_timeout_seconds = 3600
+        self._execution_control_enabled = False
+        self._asset_validation_runtime: dict[str, object] = {}
+        self._direct_hssd_admission_states: dict[str, str] = {}
         self._reuse_only = False
 
     def configure_runtime_budget(
@@ -440,9 +445,17 @@ class AssetManager:
     ) -> None:
         """Configure per-stage acquisition limits supplied by SceneExpert."""
         self._execution_clock = execution_clock
-        self._asset_acquisition_timeout_seconds = max(
-            30,
-            int(budget.get("asset_acquisition_timeout_seconds", 300) or 300),
+        self._execution_control_enabled = bool(
+            budget.get("execution_control_enabled", bool(budget))
+        )
+        self._asset_validation_runtime = dict(budget)
+        self._asset_acquisition_timeout_seconds = (
+            max(
+                30,
+                int(budget.get("asset_acquisition_timeout_seconds", 300) or 300),
+            )
+            if self._execution_control_enabled
+            else 3600
         )
         self._runtime_gate.configure(
             stage=stage,
@@ -728,9 +741,7 @@ class AssetManager:
                 str(value).lower()
                 for value in list(validation_cfg.get("families", []) or [])
             }
-            max_candidates = max(
-                1, int(validation_cfg.get("max_candidates", 2) or 2)
-            )
+            max_candidates = max(1, int(validation_cfg.get("max_candidates", 2) or 2))
             use_lenient = bool(validation_cfg.get("use_lenient", False))
             timeout_seconds = float(
                 validation_cfg.get("timeout_seconds", 180.0) or 180.0
@@ -755,6 +766,55 @@ class AssetManager:
             max_retries = max(0, int(getattr(validation_cfg, "max_retries", 0) or 0))
             min_orientation_confidence = float(
                 getattr(validation_cfg, "min_orientation_confidence", 0.55) or 0.55
+            )
+
+        if bool(getattr(self, "_execution_control_enabled", False)):
+            runtime = dict(getattr(self, "_asset_validation_runtime", {}) or {})
+            max_candidates = max(
+                1,
+                min(
+                    4,
+                    int(
+                        runtime.get(
+                            "asset_validation_max_candidates",
+                            max_candidates,
+                        )
+                        or max_candidates
+                    ),
+                ),
+            )
+            timeout_seconds = max(
+                1.0,
+                float(
+                    runtime.get(
+                        "asset_validation_timeout_seconds",
+                        timeout_seconds,
+                    )
+                    or timeout_seconds
+                ),
+            )
+            # Retries are scheduled once per family by the candidate
+            # transaction; individual HTTP calls never own hidden retries.
+            max_retries = 0
+        else:
+            timeout_seconds = float(
+                getattr(
+                    self.cfg.asset_manager,
+                    "hssd_vlm_timeout_seconds",
+                    timeout_seconds,
+                )
+                or timeout_seconds
+            )
+            max_retries = max(
+                0,
+                int(
+                    getattr(
+                        self.cfg.asset_manager,
+                        "hssd_vlm_max_retries",
+                        0,
+                    )
+                    or 0
+                ),
             )
 
         family = semantic_asset_family(description, short_name)
@@ -792,7 +852,15 @@ class AssetManager:
                 self._hssd_validation_config_value("critical_families", []) or []
             )
         }
-        return self._is_required_hssd_family(family) or family in configured
+        required_families = set(
+            getattr(getattr(self, "_runtime_gate", None), "required_families", set())
+            or set()
+        )
+        if required_families:
+            return self._is_required_hssd_family(family)
+        if bool(getattr(self, "_execution_control_enabled", False)):
+            return False
+        return family in configured
 
     def _optional_hssd_candidate_is_ambiguous(
         self,
@@ -818,10 +886,7 @@ class AssetManager:
         )
         selected_score = float(candidates[0].similarity_score)
         competing_scores = sorted(
-            (
-                float(candidate.similarity_score)
-                for candidate in candidates[1:]
-            ),
+            (float(candidate.similarity_score) for candidate in candidates[1:]),
             reverse=True,
         )
         return selected_score < minimum_score or (
@@ -1034,6 +1099,8 @@ class AssetManager:
         the already retrieved top candidates directly with the existing VLM.
         """
         excluded = set(excluded_candidate_ids or set())
+        if not hasattr(self, "_direct_hssd_admission_states"):
+            self._direct_hssd_admission_states = {}
         candidates = [
             candidate for candidate in candidates if candidate.hssd_id not in excluded
         ]
@@ -1083,12 +1150,9 @@ class AssetManager:
         )
         if not enabled and not critical_family and not validate_ambiguous_optional:
             return candidates[0]
-        if (
-            not critical_family
-            and not self._optional_hssd_candidate_is_ambiguous(
-                candidates,
-                proportion_match_found=proportion_match_found,
-            )
+        if not critical_family and not self._optional_hssd_candidate_is_ambiguous(
+            candidates,
+            proportion_match_found=proportion_match_found,
         ):
             console_logger.info(
                 "Accepted optional HSSD candidate %s for '%s' from deterministic "
@@ -1112,17 +1176,55 @@ class AssetManager:
             return candidates[0]
 
         infrastructure_failures = 0
+        attempted_candidates = 0
+        transient_candidate: HssdRetrievalResult | None = None
         considered = candidates[: min(4, max_candidates)]
         validation_started = time.monotonic()
-        total_validation_seconds = max(
-            timeout_seconds,
-            float(
+        configured_total_seconds = timeout_seconds
+        execution_control_enabled = bool(
+            getattr(self, "_execution_control_enabled", False)
+        )
+        runtime_validation = dict(getattr(self, "_asset_validation_runtime", {}) or {})
+        if execution_control_enabled:
+            configured_total_seconds = runtime_validation.get(
+                "asset_validation_total_timeout_seconds",
                 self._hssd_validation_config_value(
                     "total_timeout_seconds",
                     timeout_seconds * (2 if critical_family else 1),
-                )
-                or timeout_seconds
-            ),
+                ),
+            )
+        total_validation_seconds = max(
+            timeout_seconds,
+            float(configured_total_seconds or timeout_seconds),
+        )
+        family_retry_count = (
+            max(
+                0,
+                int(
+                    runtime_validation.get(
+                        "asset_validation_family_retries",
+                        1,
+                    )
+                    or 0
+                ),
+            )
+            if critical_family and execution_control_enabled
+            else (1 if critical_family and max_retries > 0 else 0)
+        )
+        family_retry_semantic_rejected = False
+        max_output_tokens = (
+            max(
+                1,
+                int(
+                    runtime_validation.get(
+                        "asset_validation_max_output_tokens",
+                        512,
+                    )
+                    or 512
+                ),
+            )
+            if execution_control_enabled
+            else None
         )
         if validation_deadline is not None:
             total_validation_seconds = min(
@@ -1151,41 +1253,20 @@ class AssetManager:
                 / f"hssd_{candidate_index:02d}_{candidate.hssd_id[:12]}_validation"
             )
             if validation is None:
-                allowed_retries = (
-                    max(1, max_retries)
-                    if critical_family
-                    else max(
-                        0,
-                        int(
-                            self._hssd_validation_config_value(
-                                "optional_max_retries",
-                                0,
-                            )
-                            or 0
-                        ),
-                    )
-                )
+                # Distinct candidates are more informative than repeatedly
+                # calling the same timed-out candidate. HTTP retries are zero;
+                # one explicit family retry is reserved below.
+                allowed_retries = 0
                 remaining_seconds = total_validation_seconds - (
                     time.monotonic() - validation_started
                 )
                 if remaining_seconds <= 1.0:
-                    if not critical_family:
-                        console_logger.warning(
-                            "Optional HSSD semantic validation deadline expired "
-                            "for '%s'; accepting deterministic dimension/CLIP "
-                            "candidate %s",
-                            description,
-                            candidates[0].hssd_id,
-                        )
-                        return candidates[0]
-                    raise TimeoutError(
-                        "HSSD semantic validation exhausted its shared "
-                        f"{total_validation_seconds:.0f}s deadline for "
-                        f"'{description}'"
-                    )
+                    break
+                remaining_candidates = len(considered) - candidate_index
+                fair_slots = remaining_candidates + family_retry_count
                 per_attempt_timeout = min(
                     timeout_seconds,
-                    remaining_seconds / (allowed_retries + 1),
+                    remaining_seconds / max(1, fair_slots),
                 )
                 validation = validation_router.validate_asset(
                     mesh_path=mesh_path,
@@ -1194,6 +1275,7 @@ class AssetManager:
                     use_lenient=use_lenient,
                     timeout_seconds=max(1.0, per_attempt_timeout),
                     max_retries=allowed_retries,
+                    max_output_tokens=max_output_tokens,
                 )
                 validation_reason = str(validation.reason or "")
                 if not validation_reason.startswith(
@@ -1216,6 +1298,7 @@ class AssetManager:
                     orientation_results = {}
                     self._direct_hssd_validation_results = orientation_results
                 orientation_results[candidate.hssd_id] = validation
+                self._direct_hssd_admission_states[candidate.hssd_id] = "vlm_verified"
                 console_logger.info(
                     "Direct HSSD semantic validation selected candidate %s for '%s'",
                     candidate.hssd_id,
@@ -1223,9 +1306,12 @@ class AssetManager:
                 )
                 return candidate
 
+            attempted_candidates += 1
             reason = str(validation.reason or "")
             if reason.startswith(("Rendering failed", "Validation call failed")):
                 infrastructure_failures += 1
+                if transient_candidate is None:
+                    transient_candidate = candidate
             console_logger.warning(
                 "Rejected HSSD candidate %s for '%s': %s",
                 candidate.hssd_id,
@@ -1233,7 +1319,56 @@ class AssetManager:
                 reason,
             )
 
-        if infrastructure_failures == len(considered):
+        if (
+            critical_family
+            and transient_candidate is not None
+            and family_retry_count > 0
+        ):
+            remaining_seconds = total_validation_seconds - (
+                time.monotonic() - validation_started
+            )
+            if remaining_seconds > 1.0:
+                retry_dir = (
+                    self.debug_dir
+                    / short_name
+                    / f"hssd_family_retry_{transient_candidate.hssd_id[:12]}"
+                )
+                retry_validation = validation_router.validate_asset(
+                    mesh_path=Path(transient_candidate.mesh_path),
+                    description=description,
+                    output_dir=retry_dir,
+                    use_lenient=use_lenient,
+                    timeout_seconds=max(1.0, min(timeout_seconds, remaining_seconds)),
+                    max_retries=0,
+                    max_output_tokens=max_output_tokens,
+                )
+                if retry_validation.is_acceptable:
+                    self._direct_hssd_validation_results[
+                        transient_candidate.hssd_id
+                    ] = retry_validation
+                    self._direct_hssd_admission_states[transient_candidate.hssd_id] = (
+                        "vlm_verified_after_family_retry"
+                    )
+                    return transient_candidate
+                retry_reason = str(retry_validation.reason or "")
+                if not retry_reason.startswith(
+                    ("Rendering failed", "Validation call failed")
+                ):
+                    family_retry_semantic_rejected = True
+                    retry_cache_key = f"{transient_candidate.hssd_id}|{family}"
+                    self._direct_hssd_semantic_cache[retry_cache_key] = retry_validation
+                    self._save_persistent_hssd_validation(
+                        candidate_id=transient_candidate.hssd_id,
+                        family=family,
+                        use_lenient=use_lenient,
+                        validation=retry_validation,
+                    )
+
+        if (
+            attempted_candidates > 0
+            and infrastructure_failures == attempted_candidates
+            and not family_retry_semantic_rejected
+        ):
             if not critical_family and bool(
                 getattr(
                     self.cfg.asset_manager,
@@ -1248,9 +1383,34 @@ class AssetManager:
                     candidates[0].hssd_id,
                 )
                 return candidates[0]
+            if (
+                critical_family
+                and transient_candidate is not None
+                and execution_control_enabled
+            ):
+                # Transport unavailability is not semantic rejection. Preserve
+                # deterministic CLIP/dimension evidence, export the state for
+                # audit, and keep success-memory admission disabled downstream.
+                self._direct_hssd_admission_states[transient_candidate.hssd_id] = (
+                    "semantic_unverified_transient"
+                )
+                console_logger.warning(
+                    "Required HSSD family '%s' exhausted one isolated VLM retry; "
+                    "admitting deterministic candidate %s as transient-unverified",
+                    family,
+                    transient_candidate.hssd_id,
+                )
+                return transient_candidate
             raise TimeoutError(
                 "HSSD semantic validation infrastructure was unavailable for "
                 f"all {len(considered)} candidate(s) of '{description}'"
+            )
+        if attempted_candidates == 0:
+            if not critical_family:
+                return candidates[0]
+            raise TimeoutError(
+                "HSSD semantic validation had no executable time remaining for "
+                f"'{description}'"
             )
 
         raise ValueError(
@@ -1368,12 +1528,10 @@ class AssetManager:
             return
         minimum, maximum = configured
         below = any(
-            float(value) + 1e-3 < lower
-            for value, lower in zip(dimensions, minimum)
+            float(value) + 1e-3 < lower for value, lower in zip(dimensions, minimum)
         )
         above = any(
-            float(value) - 1e-3 > upper
-            for value, upper in zip(dimensions, maximum)
+            float(value) - 1e-3 > upper for value, upper in zip(dimensions, maximum)
         )
         if below or above:
             raise ValueError(
@@ -1438,6 +1596,11 @@ class AssetManager:
                 max_ratio=max_ratio,
                 minimum_dimensions=minimum,
                 maximum_dimensions=maximum,
+                # A designer dimension is an approximate preference. Once a
+                # family-specific real-world envelope exists, that envelope is
+                # the hard contract and the target only chooses the closest
+                # feasible *uniform* scale.
+                enforce_requested_ratio=configured is None,
             )
             # Preserve exact source proportions: the scaler receives the dimensions
             # produced by one chosen scalar, never independent per-axis targets.
@@ -1458,12 +1621,13 @@ class AssetManager:
         bbox_min, bbox_max = gltf_y_up_bounds_to_scene_z_up(mesh.bounds)
         if desired_dimensions is not None:
             actual_dimensions = bbox_max - bbox_min
-            validate_uniform_dimension_fit(
-                actual_dimensions,
-                normalized_target,
-                min_ratio=min_ratio,
-                max_ratio=max_ratio,
-            )
+            if configured is None:
+                validate_uniform_dimension_fit(
+                    actual_dimensions,
+                    normalized_target,
+                    min_ratio=min_ratio,
+                    max_ratio=max_ratio,
+                )
             if configured is not None:
                 self._validate_configured_asset_size(
                     dimensions=actual_dimensions,
@@ -1616,6 +1780,10 @@ class AssetManager:
                 "uniform_scaling_only": True,
                 "source_to_canonical_scale": float(applied_scale),
                 "candidate_attempt": candidate_attempt,
+                "semantic_admission_state": self._direct_hssd_admission_states.get(
+                    mesh_id,
+                    "deterministic",
+                ),
             },
             # The final glTF and SDF already contain applied_scale.
             # SceneObject.scale_factor is reserved for later mutations.
@@ -1705,7 +1873,16 @@ class AssetManager:
         # Create batch requests for HSSD server with client-specified output dirs.
         retrieval_requests = [
             HssdRetrievalServerRequest(
-                object_description=request.object_descriptions[index],
+                # Retrieve by the canonical functional family. Style and
+                # placement adjectives remain soft evidence for bounded VLM
+                # reranking; they must not collapse library recall.
+                object_description=(
+                    semantic_asset_family(
+                        request.object_descriptions[index],
+                        request.short_names[index],
+                    ).replace("_", " ")
+                    or request.object_descriptions[index]
+                ),
                 object_type=request.object_type.value,
                 desired_dimensions=(
                     tuple(request.desired_dimensions[index])
@@ -1760,9 +1937,13 @@ class AssetManager:
                 transaction_seconds = max(
                     timeout_seconds,
                     float(
-                        self._hssd_validation_config_value(
-                            "total_timeout_seconds",
-                            timeout_seconds,
+                        (
+                            getattr(self, "_asset_validation_runtime", {}).get(
+                                "asset_validation_total_timeout_seconds",
+                                timeout_seconds,
+                            )
+                            if bool(getattr(self, "_execution_control_enabled", False))
+                            else timeout_seconds
                         )
                         or timeout_seconds
                     ),
@@ -1781,9 +1962,7 @@ class AssetManager:
                             validation_deadline=validation_deadline,
                         )
                     except Exception as selection_error:
-                        candidate_errors.append(
-                            f"selection: {selection_error}"
-                        )
+                        candidate_errors.append(f"selection: {selection_error}")
                         break
                     try:
                         scene_obj = self._prepare_hssd_candidate(

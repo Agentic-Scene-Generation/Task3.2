@@ -70,6 +70,26 @@ class TestVLMService(unittest.TestCase):
         self.assertEqual(call_args[1]["model"], model)
 
     @patch("scenesmith.agent_utils.vlm_service.OpenAI")
+    def test_chat_completion_accepts_asset_response_token_cap(self, mock_openai_class):
+        mock_openai_client = Mock()
+        mock_openai_class.return_value = mock_openai_client
+        mock_response = Mock()
+        mock_response.choices = [Mock(message=Mock(content='{"ok": true}'))]
+        mock_openai_client.chat.completions.create.return_value = mock_response
+
+        service = VLMService()
+        service.create_completion(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": "Validate asset"}],
+            reasoning_effort="none",
+            verbosity="low",
+            max_output_tokens=256,
+        )
+
+        kwargs = mock_openai_client.chat.completions.create.call_args.kwargs
+        self.assertEqual(256, kwargs["max_tokens"])
+
+    @patch("scenesmith.agent_utils.vlm_service.OpenAI")
     def test_create_completion_with_reasoning_effort_and_verbosity(
         self, mock_openai_class
     ):
