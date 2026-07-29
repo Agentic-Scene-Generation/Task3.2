@@ -104,13 +104,20 @@ class CriticFeedback(BaseModel):
         return _truncate("\n".join(lines), max_chars)
 
 
-def critic_feedback_contract() -> str:
+def critic_feedback_contract(stage: str = "") -> str:
     """Return the SceneExpert-only contract appended to existing critic prompts."""
 
-    return """\
+    scope_rule = _STAGE_SCOPE_RULES.get(
+        stage,
+        "Evaluate only objects and relationships owned by the current stage.",
+    )
+    return f"""\
 # SceneExpert Compact Repair-Brief Contract
 
 Keep the existing structured score fields and their one-sentence comments.
+Current stage: {stage or "unspecified"}
+Stage ownership: {scope_rule}
+Never create findings or score penalties for objects owned by another stage.
 In the `critique` field, do NOT write essay-style sections. Return exactly:
 
 STATUS: PASS | REPAIR_REQUIRED
@@ -157,6 +164,149 @@ _DIRECT_STAGE_RUBRICS = {
     ),
 }
 
+_STAGE_SCOPE_RULES = {
+    "floor_plan": (
+        "Own only room footprints and dimensions, walls, doors, windows, openings, "
+        "floor surfaces/materials, architectural circulation, connectivity, and "
+        "daylight. Furniture and all decorative/ceiling/manipuland objects are "
+        "downstream and are absent by design. Never report missing furniture or "
+        "penalize furniture placement, orientation, furniture clearance, or "
+        "furniture completeness. A window finding is in scope only as a change to "
+        "the window/opening itself."
+    ),
+    "furniture": (
+        "Own only large furniture assets, their poses, functional relationships, "
+        "clearance, reachability, and interaction with existing architecture. Do "
+        "not penalize absent wall decorations, ceiling fixtures, or manipulands."
+    ),
+    "wall_mounted": (
+        "Own only wall-mounted assets and their mounting, spacing, accessibility, "
+        "and interaction with existing openings/furniture. Do not redesign upstream "
+        "architecture/furniture or require ceiling/manipuland objects."
+    ),
+    "ceiling_mounted": (
+        "Own only ceiling-mounted assets and their coverage, spacing, clearance, "
+        "and mounting. Do not redesign upstream stages or require manipulands."
+    ),
+    "manipuland": (
+        "Own only small supported/manipulable objects and their support, usability, "
+        "spacing, and completeness. Treat all upstream geometry as fixed context."
+    ),
+}
+
+_STAGE_CATEGORY_EXCLUSIONS = {
+    "floor_plan": (
+        "missing_furniture",
+        "furniture_missing",
+        "furniture_completeness",
+        "furniture_layout",
+        "furniture_orientation",
+        "missing_wall_object",
+        "missing_ceiling",
+        "missing_manipuland",
+        "decor_completeness",
+    ),
+    "furniture": (
+        "missing_wall_object",
+        "missing_ceiling",
+        "missing_manipuland",
+        "wall_decor_completeness",
+        "ceiling_completeness",
+        "manipuland_completeness",
+    ),
+    "wall_mounted": (
+        "missing_ceiling",
+        "missing_manipuland",
+        "ceiling_completeness",
+        "manipuland_completeness",
+    ),
+    "ceiling_mounted": (
+        "missing_manipuland",
+        "manipuland_completeness",
+    ),
+}
+
+_STAGE_CATEGORY_REQUIREMENTS = {
+    "floor_plan": (
+        "room",
+        "footprint",
+        "dimension",
+        "proportion",
+        "geometry",
+        "layout",
+        "shape",
+        "boundary",
+        "wall",
+        "door",
+        "window",
+        "opening",
+        "floor",
+        "material",
+        "circulation",
+        "flow",
+        "connectivity",
+        "access",
+        "daylight",
+        "lighting",
+        "architecture",
+    ),
+}
+
+
+def critic_finding_is_in_stage_scope(
+    finding: CriticFinding,
+    stage: str,
+) -> bool:
+    """Return whether a critic finding belongs to the current stage contract."""
+    category = re.sub(
+        r"[^a-z0-9_]+",
+        "_",
+        str(finding.category or "").casefold(),
+    ).strip("_")
+    if any(marker in category for marker in _STAGE_CATEGORY_EXCLUSIONS.get(stage, ())):
+        return False
+    required_markers = _STAGE_CATEGORY_REQUIREMENTS.get(stage, ())
+    if not required_markers:
+        return True
+    evidence = " ".join(
+        [
+            category,
+            *finding.object_ids,
+        ]
+    ).casefold()
+    return any(marker in evidence for marker in required_markers)
+
+
+def scope_critic_feedback(
+    feedback: CriticFeedback,
+    stage: str,
+) -> CriticFeedback:
+    """Drop structured cross-stage findings before planner/verifier consumption."""
+    if not feedback.structured:
+        return feedback
+    scoped_findings = [
+        finding
+        for finding in feedback.findings
+        if critic_finding_is_in_stage_scope(finding, stage)
+    ]
+    if len(scoped_findings) == len(feedback.findings):
+        return feedback
+    status = feedback.status
+    summary = feedback.summary
+    if not scoped_findings:
+        status = "PASS"
+        summary = (
+            f"No actionable `{stage}` issue remains after enforcing the stage "
+            "ownership contract."
+        )
+    return feedback.model_copy(
+        update={
+            "status": status,
+            "summary": summary,
+            "findings": scoped_findings,
+        }
+    )
+
 
 def direct_critic_scoring_instructions(
     *,
@@ -177,6 +327,10 @@ def direct_critic_scoring_instructions(
         stage,
         "Judge realism, functionality, layout quality, completeness, and prompt adherence.",
     )
+    scope_rule = _STAGE_SCOPE_RULES.get(
+        stage,
+        "Evaluate only objects and relationships owned by the current stage.",
+    )
     context = str(scene_context or "").strip()
     if len(context) > 8000:
         context = context[:8000].rstrip() + "\n...[scene context truncated]..."
@@ -191,6 +345,12 @@ tools, and never emit a checklist.
 Evaluation rubric:
 {rubric}
 
+Authoritative stage ownership:
+{scope_rule}
+The scene/task context may describe downstream requirements. Those requirements
+are context only until their owning stage and must not lower a current-stage
+score or create a finding.
+
 Required score categories: {categories}
 Score every category from 0 through 10 using a stable scale: 0-2 unusable,
 3-5 major repair required, 6-7 acceptable with issues, 8-9 strong, 10 exceptional.
@@ -204,7 +364,7 @@ Scene/task context:
 Return exactly the structured object required by the response schema in one
 response. Do not output Markdown, code fences, analysis, or prose outside it.
 
-{critic_feedback_contract()}
+{critic_feedback_contract(stage)}
 """.strip()
 
 

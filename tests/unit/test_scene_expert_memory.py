@@ -382,6 +382,71 @@ class SceneExpertMemoryTest(unittest.TestCase):
         self.assertAlmostEqual(25 / 30, mapped["semantic"])
         self.assertAlmostEqual(0.85, mapped["aesthetic"])
 
+    def test_floor_plan_verifier_ignores_cross_stage_furniture_finding(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scores_dir = root / "final_floor_plan"
+            scores_dir.mkdir(parents=True)
+            (scores_dir / "scores.yaml").write_text(
+                """
+Room Proportions:
+  grade: 8
+Spatial Flow:
+  grade: 8
+Natural Lighting:
+  grade: 8
+Material Consistency:
+  grade: 8
+Prompt Following:
+  grade: 8
+Summary: |-
+  STATUS: REPAIR_REQUIRED
+  SUMMARY: Furniture is absent and a window needs revision.
+  FINDING 1
+  SEVERITY: BLOCKING
+  CATEGORY: missing_furniture
+  OBJECTS: bedroom
+  OBSERVATION: No bed is visible.
+  REASON: The room brief requests a bed.
+  REQUIRED_CHANGE: Place a bed.
+  PRESERVE: walls
+  ACCEPTANCE_CHECK: A bed is visible.
+  END_FINDING
+  FINDING 2
+  SEVERITY: BLOCKING
+  CATEGORY: window_placement
+  OBJECTS: window_2
+  OBSERVATION: The window is too close to the exterior door.
+  REASON: The opening layout is architecturally awkward.
+  REQUIRED_CHANGE: Move window_2 along its wall.
+  PRESERVE: window_1
+  ACCEPTANCE_CHECK: Door and window openings have safe separation.
+  END_FINDING
+""".strip(),
+                encoding="utf-8",
+            )
+            (scores_dir / "score_provenance.yaml").write_text(
+                "score_source: vlm_critic\n"
+                "vlm_scoring_performed: true\n"
+                "score_scale: 0-10\n",
+                encoding="utf-8",
+            )
+
+            report = StageVerifier(pass_threshold=0.6).verify(
+                stage="floor_plan",
+                stage_output_dir=str(root),
+                task_spec=SceneTaskSpec(
+                    room_type="bedroom",
+                    style="modern",
+                    required_large_objects=["bed"],
+                ),
+                scene_state_info={"room_count": 1},
+            )
+
+            issue_types = {issue.issue_type for issue in report.issues}
+            self.assertNotIn("critic_missing_furniture", issue_types)
+            self.assertIn("critic_window_placement", issue_types)
+
     def test_hard_check_synthetic_grades_are_not_visual_quality_scores(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)

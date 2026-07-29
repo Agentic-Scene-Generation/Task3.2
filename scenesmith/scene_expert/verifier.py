@@ -19,6 +19,7 @@ import yaml
 
 from scenesmith.agent_utils.room_size_policy import normalize_room_dimensions
 from scenesmith.scene_expert.critic_feedback import (
+    critic_finding_is_in_stage_scope,
     feedback_issue_text,
     feedback_repair_text,
     parse_critic_feedback,
@@ -675,6 +676,13 @@ class StageVerifier:
         # heuristics below remain only for artifacts produced before this contract.
         critic_feedback = parse_critic_feedback(critique_summary)
         for finding in critic_feedback.findings:
+            if not critic_finding_is_in_stage_scope(finding, stage):
+                console_logger.info(
+                    "Ignored out-of-scope critic finding for stage %s: %s",
+                    stage,
+                    finding.category,
+                )
+                continue
             if finding.severity not in {"blocking", "critical", "hard", "major"}:
                 continue
             category = re.sub(r"[^a-z0-9_]+", "_", finding.category.casefold()).strip(

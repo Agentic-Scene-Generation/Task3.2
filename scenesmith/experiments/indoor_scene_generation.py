@@ -341,9 +341,7 @@ def _raise_if_required_assets_unavailable(*, stage: str, agent: Any) -> None:
         agent, "unavailable_required_asset_families", None
     )
     unavailable_families = (
-        list(unavailable_families_fn())
-        if callable(unavailable_families_fn)
-        else []
+        list(unavailable_families_fn()) if callable(unavailable_families_fn) else []
     )
     if not unavailable_families:
         return
@@ -606,9 +604,7 @@ def _write_batch_summary(
             "prompt": prompt_map[scene_id],
             "status": status,
             "root_error": (
-                ""
-                if status == "completed"
-                else _root_error_summary(str(error))
+                "" if status == "completed" else _root_error_summary(str(error))
             ),
             "scene_status_path": str(output_dir / task_id / _SCENE_STATUS_FILENAME),
         }
@@ -618,9 +614,7 @@ def _write_batch_summary(
         "experiment_run_id": experiment_run_id,
         "updated_at": datetime.now().astimezone().isoformat(),
         "total_scenes": len(scenes),
-        "completed_scenes": sum(
-            1 for item in scenes if item["status"] == "completed"
-        ),
+        "completed_scenes": sum(1 for item in scenes if item["status"] == "completed"),
         "failed_scenes": sum(1 for item in scenes if item["status"] == "failed"),
         "paused_retryable_scenes": sum(
             1 for item in scenes if item["status"] == "paused_retryable"
@@ -881,9 +875,7 @@ def _export_scene_blend_file(
                 if render_snapshots
                 else None
             ),
-            rendering_mode=str(
-                visualization_cfg.get("rendering_mode", "furniture")
-            ),
+            rendering_mode=str(visualization_cfg.get("rendering_mode", "furniture")),
             render_taa_samples=int(
                 visualization_cfg.get(
                     "taa_samples",
@@ -1278,9 +1270,7 @@ def _generate_room(
                     0, int(recovery_cfg.get("max_stage_regenerations", 1) or 0)
                 )
                 continue_after_exhaustion = bool(
-                    recovery_cfg.get(
-                        "continue_after_repairable_exhaustion", True
-                    )
+                    recovery_cfg.get("continue_after_repairable_exhaustion", True)
                 )
                 empty_stage_state = scene.to_state_dict()
                 stage_prompt = scene.text_description
@@ -1371,8 +1361,8 @@ def _generate_room(
                             except StageValidationError as retry_exc:
                                 exc = retry_exc
 
-                        critic_still_unavailable = (
-                            _is_critic_unavailable_validation(exc)
+                        critic_still_unavailable = _is_critic_unavailable_validation(
+                            exc
                         )
                         if critic_only_retry_attempted and critic_still_unavailable:
                             _pause_unscored_scene_candidate(
@@ -1431,9 +1421,7 @@ def _generate_room(
                                 None,
                             )
                             if callable(prepare_placement):
-                                asyncio.run(
-                                    prepare_placement(list(exc.reasons))
-                                )
+                                asyncio.run(prepare_placement(list(exc.reasons)))
                                 continue
                         if (
                             repairable
@@ -1459,9 +1447,7 @@ def _generate_room(
                                 + "; ".join(exc.reasons)
                             )
                             asyncio.run(
-                                furniture_agent.prepare_stage_regeneration(
-                                    exc.reasons
-                                )
+                                furniture_agent.prepare_stage_regeneration(exc.reasons)
                             )
                             continue
 
@@ -2004,10 +1990,7 @@ def _generate_room(
             final_manipuland_count = len(
                 scene.get_objects_by_type(ObjectType.MANIPULAND)
             )
-            if (
-                minimum_manipulands > 0
-                and final_manipuland_count < minimum_manipulands
-            ):
+            if minimum_manipulands > 0 and final_manipuland_count < minimum_manipulands:
                 reason = (
                     "final physics post-processing removed required manipulands: "
                     f"{final_manipuland_count} remain, "
@@ -2028,9 +2011,7 @@ def _generate_room(
                 )
                 try:
                     manipuland_agent.scene = scene
-                    asyncio.run(
-                        manipuland_agent.prepare_stage_regeneration([reason])
-                    )
+                    asyncio.run(manipuland_agent.prepare_stage_regeneration([reason]))
                     asyncio.run(manipuland_agent.add_manipulands(scene=scene))
                     scene = manipuland_agent.scene
                     post_rescue_state = scene.to_state_dict()
@@ -2303,51 +2284,104 @@ def _generate_floor_plan_worker(
                 if callable(configure_runtime_budget):
                     configure_runtime_budget(floor_plan_budget)
                 pause_reason = ""
+                pause_attempt_count = 0
                 try:
-                    house_layout = asyncio.run(
-                        floor_plan_agent.generate_house_layout(
-                            prompt=prompt,
-                            output_dir=scene_path / "floor_plans",
-                        )
+                    active_prompt = prompt
+                    regeneration_attempt = 0
+                    max_stage_regenerations = max(
+                        0, int(floor_plan_budget.get("max_stage_regenerations", 0) or 0)
                     )
-                    if (
-                        floor_plan_budget
-                        and getattr(
-                            floor_plan_agent,
-                            "_last_score_provenance",
-                            {},
-                        ).get("score_source")
-                        != "vlm_critic"
-                    ):
-                        console_logger.warning(
-                            "Floor-plan output is usable but visually unscored; "
-                            "retrying one compact critic with an expanded critical "
-                            "budget"
+                    while True:
+                        house_layout = asyncio.run(
+                            floor_plan_agent.generate_house_layout(
+                                prompt=active_prompt,
+                                output_dir=scene_path / "floor_plans",
+                            ),
                         )
-                        try:
-                            asyncio.run(
-                                floor_plan_agent.retry_final_critic_evaluation()
+                        if (
+                            floor_plan_budget
+                            and getattr(
+                                floor_plan_agent,
+                                "_last_score_provenance",
+                                {},
+                            ).get("score_source")
+                            != "vlm_critic"
+                        ):
+                            console_logger.warning(
+                                "Floor-plan output is usable but visually unscored; "
+                                "retrying one compact critic with an expanded critical "
+                                "budget"
                             )
-                            house_layout = floor_plan_agent.layout
-                        except Exception:
-                            console_logger.exception(
-                                "Expanded floor-plan critic retry failed; retaining "
-                                "the usable layout as explicitly unscored"
-                            )
-                        if getattr(
-                            floor_plan_agent,
-                            "_last_score_provenance",
-                            {},
-                        ).get("score_source") != "vlm_critic":
-                            console_logger.error(
-                                "Floor-plan visual critic remained unavailable after "
-                                "the single expanded retry; downstream verification "
-                                "will pause this scene before downstream generation"
-                            )
+                            try:
+                                asyncio.run(
+                                    floor_plan_agent.retry_final_critic_evaluation()
+                                )
+                                house_layout = floor_plan_agent.layout
+                            except Exception:
+                                console_logger.exception(
+                                    "Expanded floor-plan critic retry failed; retaining "
+                                    "the usable layout as explicitly unscored"
+                                )
+                            if (
+                                getattr(
+                                    floor_plan_agent,
+                                    "_last_score_provenance",
+                                    {},
+                                ).get("score_source")
+                                != "vlm_critic"
+                            ):
+                                console_logger.error(
+                                    "Floor-plan visual critic remained unavailable after "
+                                    "the single expanded retry; downstream verification "
+                                    "will pause this scene before downstream generation"
+                                )
+                                pause_reason = (
+                                    "Floor-plan visual critic did not produce a "
+                                    "trustworthy score after the isolated retry."
+                                )
+                                pause_attempt_count = 2
+
+                        if pause_reason:
+                            break
+                        repair_brief = (
+                            floor_plan_agent.unresolved_critic_repair_brief()
+                            if floor_plan_budget
+                            else ""
+                        )
+                        if not repair_brief:
+                            break
+                        if regeneration_attempt >= max_stage_regenerations:
                             pause_reason = (
-                                "Floor-plan visual critic did not produce a "
-                                "trustworthy score after the isolated retry."
+                                "Floor-plan critic retained stage-owned actionable "
+                                "findings after the bounded full-planner regeneration: "
+                                + " ".join(repair_brief.split())[:1200]
                             )
+                            pause_attempt_count = regeneration_attempt + 1
+                            break
+
+                        regeneration_attempt += 1
+                        console_logger.warning(
+                            "Floor-plan final critic retained stage-owned findings; "
+                            "restarting the native SceneSmith planner/designer/critic "
+                            "workflow (%d/%d)",
+                            regeneration_attempt,
+                            max_stage_regenerations,
+                        )
+                        asyncio.run(
+                            floor_plan_agent.prepare_stage_regeneration([repair_brief])
+                        )
+                        if callable(configure_runtime_budget):
+                            configure_runtime_budget(floor_plan_budget)
+                        active_prompt = (
+                            f"{prompt}\n\n"
+                            "# Mandatory Floor-Plan Regeneration\n"
+                            "The previous candidate was rejected by the final "
+                            "current-stage critic. Produce a genuinely revised "
+                            "architectural layout through the normal planner, "
+                            "designer, and critic workflow. Address this repair "
+                            "brief without placing downstream-stage objects:\n"
+                            f"{repair_brief}"
+                        )
                 finally:
                     floor_plan_agent.cleanup()
 
@@ -2369,7 +2403,7 @@ def _generate_floor_plan_worker(
                             "final_render_dir",
                             None,
                         ),
-                        attempt_count=2,
+                        attempt_count=max(1, pause_attempt_count),
                         metadata={
                             "score_provenance": dict(
                                 getattr(

@@ -36,7 +36,10 @@ from scenesmith.scene_expert.critic_feedback import (
     feedback_repair_text,
     parse_critic_feedback,
 )
-from scenesmith.scene_expert.global_planner import GlobalPlanner
+from scenesmith.scene_expert.global_planner import (
+    GlobalPlanner,
+    enforce_stage_brief_scope,
+)
 from scenesmith.scene_expert.harness import STAGE_ORDER, Harness
 from scenesmith.scene_expert.memory.retriever import MemoryRetriever
 from scenesmith.scene_expert.memory.store import FastMemoryStore
@@ -844,6 +847,10 @@ class SceneExpertHookRunner:
                     self._current_stage_brief,
                     self._current_memory_pack,
                 )
+                self._current_stage_brief = enforce_stage_brief_scope(
+                    self._current_stage_brief,
+                    self._task_spec,
+                )
                 planner_status = dict(self._global_planner.last_call_status)
                 stage_brief_source = str(planner_status.get("source", "unknown"))
                 self._qwen_calls += int(planner_status.get("attempt_count", 0))
@@ -879,7 +886,7 @@ class SceneExpertHookRunner:
         memory_directives = _format_memory_directives(self._current_memory_pack)
         if self._current_stage_brief is None and memory_directives:
             injection_parts.append(memory_directives)
-        if self._current_memory_pack.placement_reference:
+        if stage != "floor_plan" and self._current_memory_pack.placement_reference:
             injection_parts.append(self._current_memory_pack.placement_reference)
         injection_text = "\n\n".join(injection_parts)
         enhanced = self._prompt
@@ -1085,6 +1092,10 @@ class SceneExpertHookRunner:
                 self._current_stage_brief = _apply_memory_to_stage_brief(
                     self._current_stage_brief,
                     self._current_memory_pack,
+                )
+                self._current_stage_brief = enforce_stage_brief_scope(
+                    self._current_stage_brief,
+                    self._task_spec,
                 )
                 planner_status = dict(self._global_planner.last_call_status)
                 stage_brief_source = str(planner_status.get("source", "unknown"))

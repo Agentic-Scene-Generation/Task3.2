@@ -7,12 +7,17 @@ from types import SimpleNamespace
 from pydantic import BaseModel
 
 from scenesmith.agent_utils.scoring import FloorPlanCritiqueWithScores
-from scenesmith.scene_expert.global_planner import GlobalPlanner, _format_task_spec
+from scenesmith.scene_expert.global_planner import (
+    GlobalPlanner,
+    _format_task_spec,
+    enforce_stage_brief_scope,
+)
 from scenesmith.scene_expert.schemas import (
     FullVerifyReport,
     HarnessContext,
     MemoryPack,
     SceneTaskSpec,
+    StageBrief,
     StageExecutionEvidence,
 )
 from scenesmith.scene_expert.structured_llm import (
@@ -101,9 +106,7 @@ class SceneExpertStructuredLLMTest(unittest.TestCase):
 
         self.assertTrue(result.success)
         call = fake.calls[0]
-        self.assertFalse(
-            call["extra_body"]["chat_template_kwargs"]["enable_thinking"]
-        )
+        self.assertFalse(call["extra_body"]["chat_template_kwargs"]["enable_thinking"])
         self.assertTrue(call["messages"][0]["content"].startswith("/no_think\n"))
         self.assertEqual("json_schema", call["response_format"]["type"])
 
@@ -125,9 +128,7 @@ class SceneExpertStructuredLLMTest(unittest.TestCase):
                 )
             },
         }
-        client, fake, profile = self._client(
-            [_response(content=json.dumps(payload))]
-        )
+        client, fake, profile = self._client([_response(content=json.dumps(payload))])
 
         result = client.complete(
             role="test",
@@ -229,7 +230,10 @@ class SceneExpertStructuredLLMTest(unittest.TestCase):
     def test_bad_request_downgrades_json_schema_once(self):
         bad_request = type("BadRequestError", (Exception,), {})
         client, fake, profile = self._client(
-            [bad_request("json_schema unsupported"), _response(content='{"value":"ok"}')]
+            [
+                bad_request("json_schema unsupported"),
+                _response(content='{"value":"ok"}'),
+            ]
         )
 
         result = client.complete(
@@ -286,6 +290,41 @@ class SceneExpertStructuredLLMTest(unittest.TestCase):
         fallback_text = " ".join(fallback.constraints_for_designer)
         self.assertIn("Do not place furniture during floor_plan", fallback_text)
         self.assertNotIn("Ensure these objects are present", fallback_text)
+        fallback_checks = " ".join(fallback.checks_for_critic)
+        self.assertIn("room footprint", fallback_checks)
+        self.assertIn("Do not evaluate furniture", fallback_checks)
+        self.assertNotIn("Verify all required objects", fallback_checks)
+
+        scoped = enforce_stage_brief_scope(
+            StageBrief(
+                stage="floor_plan",
+                stage_objective="Design the bedroom and place its bed",
+                recommended_skills=["bed placement", "architectural circulation"],
+                constraints_for_designer=[
+                    "Place the bed and two nightstands now",
+                    "Keep the bedroom footprint compact",
+                    "Reserve adequate downstream capacity; do not place furniture",
+                ],
+                checks_for_critic=["Verify the bed is present"],
+                failure_patterns_to_avoid=["Missing wardrobe"],
+            ),
+            SceneTaskSpec(
+                room_type="bedroom",
+                style="modern",
+                required_large_objects=["bed", "nightstand", "wardrobe"],
+            ),
+        )
+        self.assertEqual(
+            [
+                "Keep the bedroom footprint compact",
+                "Reserve adequate downstream capacity; do not place furniture",
+            ],
+            scoped.constraints_for_designer,
+        )
+        self.assertEqual(["architectural circulation"], scoped.recommended_skills)
+        self.assertNotIn("place its bed", scoped.stage_objective)
+        self.assertEqual([], scoped.failure_patterns_to_avoid)
+        self.assertNotIn("bed is present", " ".join(scoped.checks_for_critic))
 
     def test_trace_exposes_fallback_and_stage_injection_evidence(self):
         with TemporaryDirectory() as tmp:

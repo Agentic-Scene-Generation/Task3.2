@@ -72,6 +72,7 @@ from scenesmith.scene_expert.critic_feedback import (
     critic_feedback_contract,
     direct_critic_scoring_instructions,
     parse_critic_feedback,
+    scope_critic_feedback,
 )
 from scenesmith.scene_expert.exceptions import StageValidationError
 from scenesmith.scene_expert.structured_llm import (
@@ -300,9 +301,7 @@ class BaseStatefulAgent(ABC):
         )
         if callable(configure_asset_budget):
             configure_asset_budget(
-                stage=str(
-                    getattr(scene, "scene_expert_stage", self.agent_type.value)
-                ),
+                stage=str(getattr(scene, "scene_expert_stage", self.agent_type.value)),
                 budget=self._stage_runtime_budget,
                 required_objects=list(
                     getattr(scene, "scene_expert_required_objects", []) or []
@@ -326,9 +325,7 @@ class BaseStatefulAgent(ABC):
         )
         if callable(configure_asset_budget):
             configure_asset_budget(
-                stage=str(
-                    getattr(scene, "scene_expert_stage", self.agent_type.value)
-                ),
+                stage=str(getattr(scene, "scene_expert_stage", self.agent_type.value)),
                 budget=self._stage_runtime_budget,
                 required_objects=list(
                     getattr(scene, "scene_expert_required_objects", []) or []
@@ -458,9 +455,7 @@ class BaseStatefulAgent(ABC):
             for asset in list_assets()
             if getattr(asset, "object_type", None) == target_type
             and not bool(
-                (getattr(asset, "metadata", {}) or {}).get(
-                    "repair_placeholder", False
-                )
+                (getattr(asset, "metadata", {}) or {}).get("repair_placeholder", False)
             )
         ]
 
@@ -889,9 +884,7 @@ class BaseStatefulAgent(ABC):
         if self._external_operation_depth > 1:
             return {"owner": False, "label": label}
         lease = (
-            self._agent_execution_leases[-1]
-            if self._agent_execution_leases
-            else None
+            self._agent_execution_leases[-1] if self._agent_execution_leases else None
         )
         if lease is not None:
             lease.pause()
@@ -908,9 +901,7 @@ class BaseStatefulAgent(ABC):
         """Resume the inference clocks after one blocking tool operation."""
         if self._external_operation_depth <= 0:
             return
-        owner = bool(
-            isinstance(token, dict) and token.get("owner", False)
-        )
+        owner = bool(isinstance(token, dict) and token.get("owner", False))
         self._external_operation_depth -= 1
         if not owner:
             return
@@ -940,8 +931,7 @@ class BaseStatefulAgent(ABC):
         )
         if role == "critic" and critic_evaluation_started_at is not None:
             evaluation_limit = float(
-                self._stage_budget_value("critic_evaluation_max_seconds", 0.0)
-                or 0.0
+                self._stage_budget_value("critic_evaluation_max_seconds", 0.0) or 0.0
             )
             if evaluation_limit > 0:
                 return evaluation_limit - (
@@ -1507,12 +1497,8 @@ class BaseStatefulAgent(ABC):
             hard_check_passed = False
         elif score_source == "vlm_critic":
             hard_check_passed = True
-        elif (
-            "DETERMINISTIC HARD CHECKS PASSED" in critique_upper
-            or (
-                "LAYOUT=OK" in critique_upper
-                and "CONNECTIVITY=OK" in critique_upper
-            )
+        elif "DETERMINISTIC HARD CHECKS PASSED" in critique_upper or (
+            "LAYOUT=OK" in critique_upper and "CONNECTIVITY=OK" in critique_upper
         ):
             hard_check_passed = True
         elif "LAYOUT=" in critique_upper or "CONNECTIVITY=" in critique_upper:
@@ -1524,9 +1510,7 @@ class BaseStatefulAgent(ABC):
             "schema_version": "1.0",
             "score_source": score_source,
             "vlm_scoring_performed": score_source == "vlm_critic",
-            "score_scale": (
-                "none" if score_source == "critic_fallback" else "0-10"
-            ),
+            "score_scale": ("none" if score_source == "critic_fallback" else "0-10"),
             "hard_check_passed": hard_check_passed,
             "scores_semantics": score_semantics,
             "decision_scores_file": (
@@ -1674,10 +1658,13 @@ class BaseStatefulAgent(ABC):
     def _sceneexpert_critic_feedback_contract(self) -> str:
         if not self._stage_runtime_budget:
             return ""
-        return critic_feedback_contract()
+        return critic_feedback_contract(str(self.agent_type.value))
 
     def _remember_critic_feedback(self, critique: str) -> CriticFeedback:
-        feedback = parse_critic_feedback(critique)
+        feedback = scope_critic_feedback(
+            parse_critic_feedback(critique),
+            str(self.agent_type.value),
+        )
         self._last_critic_feedback = feedback
         return feedback
 
@@ -1693,6 +1680,22 @@ class BaseStatefulAgent(ABC):
     def _critic_feedback_for_designer(self, max_chars: int = 5000) -> str:
         feedback = getattr(self, "_last_critic_feedback", CriticFeedback())
         return feedback.to_designer_text(max_chars=max_chars)
+
+    def unresolved_critic_repair_brief(self, max_chars: int = 5000) -> str:
+        """Return current-stage blocking/major findings for bounded regeneration."""
+        feedback = getattr(self, "_last_critic_feedback", CriticFeedback())
+        if not feedback.structured or feedback.status != "REPAIR_REQUIRED":
+            return ""
+        actionable = [
+            finding
+            for finding in feedback.findings
+            if finding.severity in {"blocking", "critical", "hard", "major"}
+        ]
+        if not actionable:
+            return ""
+        return feedback.model_copy(update={"findings": actionable}).to_designer_text(
+            max_chars=max_chars
+        )
 
     def _hard_repair_design_change_limit(self) -> int:
         configured_limit = int(
@@ -2340,8 +2343,7 @@ class BaseStatefulAgent(ABC):
             if render_dir is not None:
                 for image_path in sorted(render_dir.glob("*.png")):
                     fallback_image_urls.append(
-                        "data:image/png;base64,"
-                        + encode_image_to_base64(image_path)
+                        "data:image/png;base64," + encode_image_to_base64(image_path)
                     )
         else:
             observe_start = time.time()
@@ -2373,9 +2375,7 @@ class BaseStatefulAgent(ABC):
         for output in outputs:
             image_url = getattr(output, "image_url", None)
             if image_url and len(image_parts) < max_images:
-                image_parts.append(
-                    {"type": "input_image", "image_url": str(image_url)}
-                )
+                image_parts.append({"type": "input_image", "image_url": str(image_url)})
             text_output = getattr(output, "text", None)
             if text_output:
                 notes.append(str(text_output))
@@ -3045,9 +3045,7 @@ class BaseStatefulAgent(ABC):
                         "remaining pipeline and verifier can continue: %s",
                         reasons,
                     )
-                    self._degraded_stage_reasons = list(
-                        final_hard_state.hard_reasons
-                    )
+                    self._degraded_stage_reasons = list(final_hard_state.hard_reasons)
                 else:
                     console_logger.error(
                         "Furniture stage failed with unresolved deterministic hard "
@@ -3117,10 +3115,7 @@ class BaseStatefulAgent(ABC):
                 minimum_visual_score = float(
                     self._stage_budget_value("min_visual_score", 0.60) or 0.60
                 )
-                if (
-                    visual_score is not None
-                    and visual_score < minimum_visual_score
-                ):
+                if visual_score is not None and visual_score < minimum_visual_score:
                     reason = (
                         "visual critic quality below stage threshold: "
                         f"{visual_score:.3f} < {minimum_visual_score:.3f}"
@@ -3386,7 +3381,10 @@ class BaseStatefulAgent(ABC):
         )
 
     def _planner_budget_hint_after_design_change(self) -> str:
-        if self._planner_design_change_tool_calls < self._effective_critique_round_limit():
+        if (
+            self._planner_design_change_tool_calls
+            < self._effective_critique_round_limit()
+        ):
             return ""
         self._planner_budget_exhausted = True
         return (
@@ -3537,7 +3535,10 @@ class BaseStatefulAgent(ABC):
                     "of re-scoring an unchanged layout."
                 )
 
-            if self._planner_critique_tool_calls >= self._effective_critique_round_limit():
+            if (
+                self._planner_critique_tool_calls
+                >= self._effective_critique_round_limit()
+            ):
                 return self._planner_budget_stop_message("request_critique")
 
             self._planner_critique_tool_calls += 1
@@ -3605,8 +3606,14 @@ class BaseStatefulAgent(ABC):
                     f"{self._pending_hard_repair_hint}"
                 )
 
+            # Every request immediately following a critic result is a bounded,
+            # evidence-backed repair transaction. Give it the fresh designer
+            # lease already reserved for mandatory hard-check repair; otherwise
+            # the initial design consumes the lease and the most actionable
+            # correction is cancelled with only its tail budget remaining.
+            evidence_backed_repair = counts_as_critique_cycle
             previous_phase = self._stage_runtime_phase
-            if hard_repair_allowance:
+            if hard_repair_allowance or evidence_backed_repair:
                 previous_phase = self._begin_mandatory_repair_transaction()
             try:
                 result = await self._request_design_change_impl(instruction)
@@ -4222,9 +4229,7 @@ class BaseStatefulAgent(ABC):
         )
 
         # Compute score deltas and format for planner if we have previous scores.
-        trusted_visual_score = (
-            response_provenance.get("score_source") == "vlm_critic"
-        )
+        trusted_visual_score = response_provenance.get("score_source") == "vlm_critic"
         score_change_msg = ""
         if trusted_visual_score and self.previous_scores is not None:
             score_change_msg = format_score_deltas_for_planner(
@@ -4364,8 +4369,7 @@ class BaseStatefulAgent(ABC):
             safety_msg = self._end_furniture_design_transaction(transaction)
             return (
                 "Designer execution budget was exhausted. Preserve the current "
-                "candidate and continue to deterministic validation."
-                + safety_msg
+                "candidate and continue to deterministic validation." + safety_msg
             )
         log_agent_usage(result=result, agent_name="DESIGNER (CHANGE)")
         self._record_llm_call_debug(
@@ -4509,8 +4513,7 @@ class BaseStatefulAgent(ABC):
             safety_msg = self._end_furniture_design_transaction(transaction)
             return (
                 "Designer execution budget was exhausted. Preserve all objects "
-                "already created and continue to deterministic validation."
-                + safety_msg
+                "already created and continue to deterministic validation." + safety_msg
             )
         log_agent_usage(result=result, agent_name="DESIGNER (INITIAL)")
         self._record_llm_call_debug(

@@ -10,6 +10,7 @@ a structured text brief for the SceneSmith designer agent.
 from __future__ import annotations
 
 import logging
+import re
 
 from scenesmith.scene_expert.schemas import (
     HarnessContext,
@@ -65,6 +66,145 @@ _STAGE_DESCRIPTIONS = {
     "ceiling_mounted": "Place ceiling-mounted objects (lights, fans) on the ceiling.",
     "manipuland": "Place small manipulable objects (books, cups, plants) on furniture surfaces.",
 }
+
+_STAGE_CRITIC_CHECKS = {
+    "floor_plan": [
+        "Verify room footprint, dimensions, wall geometry, and floor layout",
+        "Verify doors/openings provide valid access and room connectivity",
+        "Verify windows/openings have architecturally reasonable placement and daylight",
+        "Do not evaluate furniture, wall decor, ceiling fixtures, or manipulands",
+    ],
+    "furniture": [
+        "Verify prompt-required furniture is present with correct semantic assets",
+        "Verify furniture poses, orientation, functional relationships, and clearance",
+        "Verify furniture is collision-free, reachable, and inside the room",
+        "Do not require wall decor, ceiling fixtures, or manipulands",
+    ],
+    "wall_mounted": [
+        "Verify stage-required wall-mounted objects are present and correctly mounted",
+        "Verify mounting height, spacing, opening clearance, and visual balance",
+        "Do not redesign furniture or require ceiling/manipuland objects",
+    ],
+    "ceiling_mounted": [
+        "Verify stage-required ceiling objects are present and correctly mounted",
+        "Verify coverage, spacing, clearance, and visual balance",
+        "Do not redesign upstream stages or require manipulands",
+    ],
+    "manipuland": [
+        "Verify stage-required small objects are present on valid support surfaces",
+        "Verify support, usability, local spacing, and collision-free placement",
+        "Treat all upstream architecture and furniture as fixed context",
+    ],
+}
+
+_COMMON_DOWNSTREAM_OBJECT_TERMS = {
+    "furniture",
+    "wall decor",
+    "ceiling fixture",
+    "manipuland",
+    "bed",
+    "nightstand",
+    "wardrobe",
+    "dresser",
+    "sofa",
+    "couch",
+    "table",
+    "chair",
+    "desk",
+    "rug",
+    "plant",
+    "cabinet",
+    "shelf",
+    "books",
+    "cup",
+}
+
+
+def _contains_term(text: str, term: str) -> bool:
+    normalized_term = str(term or "").casefold().strip()
+    if not normalized_term:
+        return False
+    return bool(
+        re.search(
+            rf"(?<![a-z0-9_]){re.escape(normalized_term)}(?![a-z0-9_])",
+            text,
+        )
+    )
+
+
+def _floor_plan_rule_mentions_downstream_placement(
+    text: str,
+    task_spec: SceneTaskSpec,
+) -> bool:
+    lowered = str(text or "").casefold()
+    object_terms = {
+        *_COMMON_DOWNSTREAM_OBJECT_TERMS,
+        *(
+            str(value).casefold()
+            for value in (
+                task_spec.required_large_objects
+                + task_spec.required_wall_objects
+                + task_spec.required_ceiling_objects
+                + task_spec.required_small_objects
+            )
+            if str(value).strip()
+        ),
+    }
+    if not any(_contains_term(lowered, term) for term in object_terms):
+        return False
+    capacity_only = any(
+        marker in lowered
+        for marker in ("reserve", "capacity", "accommodate", "plan space")
+    ) and any(
+        marker in lowered for marker in ("do not place", "downstream", "later stage")
+    )
+    return not capacity_only
+
+
+def enforce_stage_brief_scope(
+    stage_brief: StageBrief,
+    task_spec: SceneTaskSpec,
+) -> StageBrief:
+    """Make stage ownership deterministic after LLM and memory augmentation."""
+    stage = stage_brief.stage
+    constraints = list(stage_brief.constraints_for_designer)
+    failures = list(stage_brief.failure_patterns_to_avoid)
+    recommended_skills = list(stage_brief.recommended_skills)
+    stage_objective = stage_brief.stage_objective
+    if stage == "floor_plan":
+        stage_objective = (
+            f"Complete the floor_plan stage for a {task_spec.room_type}: "
+            f"{_STAGE_DESCRIPTIONS['floor_plan']}"
+        )
+        constraints = [
+            value
+            for value in constraints
+            if not _floor_plan_rule_mentions_downstream_placement(value, task_spec)
+        ]
+        recommended_skills = [
+            value
+            for value in recommended_skills
+            if not _floor_plan_rule_mentions_downstream_placement(value, task_spec)
+        ]
+        failures = [
+            value
+            for value in failures
+            if not _floor_plan_rule_mentions_downstream_placement(value, task_spec)
+        ]
+    return stage_brief.model_copy(
+        update={
+            "stage_objective": stage_objective,
+            "recommended_skills": recommended_skills,
+            "constraints_for_designer": constraints,
+            "checks_for_critic": list(
+                _STAGE_CRITIC_CHECKS.get(
+                    stage,
+                    stage_brief.checks_for_critic,
+                )
+            ),
+            "failure_patterns_to_avoid": failures,
+        }
+    )
 
 
 def _format_memory_for_prompt(memory_pack: MemoryPack) -> str:
@@ -197,7 +337,10 @@ class GlobalPlanner:
                     "GlobalPlanner structured call failed after bounded recovery: "
                     f"{result.final_error_kind}: {result.final_error}"
                 )
-            brief = result.value.model_copy(update={"stage": stage})
+            brief = enforce_stage_brief_scope(
+                result.value.model_copy(update={"stage": stage}),
+                context.task_spec,
+            )
             console_logger.info(
                 f"GlobalPlanner: brief for {stage}: {len(brief.constraints_for_designer)} constraints, "
                 f"{len(brief.failure_patterns_to_avoid)} failure patterns"
@@ -277,14 +420,14 @@ class GlobalPlanner:
         constraints.append(f"Follow {context.task_spec.style} aesthetic style")
         constraints.append("Maintain clear walking paths and avoid overcrowding")
 
-        return StageBrief(
-            stage=stage,
-            stage_objective=f"Complete the {stage} stage for a {context.task_spec.room_type}",
-            recommended_skills=[],
-            constraints_for_designer=constraints,
-            checks_for_critic=[
-                "Verify all required objects are present",
-                "Check for collisions",
-            ],
-            failure_patterns_to_avoid=[],
+        return enforce_stage_brief_scope(
+            StageBrief(
+                stage=stage,
+                stage_objective=f"Complete the {stage} stage for a {context.task_spec.room_type}",
+                recommended_skills=[],
+                constraints_for_designer=constraints,
+                checks_for_critic=list(_STAGE_CRITIC_CHECKS.get(stage, [])),
+                failure_patterns_to_avoid=[],
+            ),
+            context.task_spec,
         )

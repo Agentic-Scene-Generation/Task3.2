@@ -13,6 +13,7 @@ from scenesmith.scene_expert.critic_feedback import (
     direct_critic_scoring_instructions,
     feedback_repair_text,
     parse_critic_feedback,
+    scope_critic_feedback,
 )
 from scenesmith.scene_expert.harness import Harness
 from scenesmith.scene_expert.runtime_state import (
@@ -84,6 +85,66 @@ END_FINDING
         self.assertIn("Required score categories: room_proportions", instructions)
         self.assertIn("Return exactly the structured object", instructions)
         self.assertIn("modern bedroom", instructions)
+        self.assertIn("Furniture and all decorative", instructions)
+        self.assertIn("must not lower a current-stage", instructions)
+
+    def test_floor_plan_scope_drops_missing_furniture_but_keeps_window_issue(
+        self,
+    ) -> None:
+        feedback = parse_critic_feedback(
+            """
+STATUS: REPAIR_REQUIRED
+SUMMARY: Furniture is absent and a window needs revision.
+FINDING 1
+SEVERITY: BLOCKING
+CATEGORY: missing_furniture
+OBJECTS: bedroom
+OBSERVATION: No bed is visible.
+REASON: The room brief requests a bed.
+REQUIRED_CHANGE: Place a bed.
+PRESERVE: walls
+ACCEPTANCE_CHECK: A bed is visible.
+END_FINDING
+FINDING 2
+SEVERITY: BLOCKING
+CATEGORY: window_placement
+OBJECTS: window_2
+OBSERVATION: The window is too close to the exterior door.
+REASON: The opening layout is architecturally awkward.
+REQUIRED_CHANGE: Move window_2 along its wall.
+PRESERVE: window_1
+ACCEPTANCE_CHECK: Door and window openings have safe separation.
+END_FINDING
+""".strip()
+        )
+
+        scoped = scope_critic_feedback(feedback, "floor_plan")
+
+        self.assertEqual(["window_placement"], [f.category for f in scoped.findings])
+        self.assertEqual("REPAIR_REQUIRED", scoped.status)
+
+    def test_floor_plan_scope_drops_ambiguous_missing_bed_finding(self) -> None:
+        feedback = parse_critic_feedback(
+            """
+STATUS: REPAIR_REQUIRED
+SUMMARY: A required object is absent.
+FINDING 1
+SEVERITY: BLOCKING
+CATEGORY: missing_required_object
+OBJECTS: bed_0
+OBSERVATION: No bed is visible.
+REASON: The downstream room brief requests a bed.
+REQUIRED_CHANGE: Place a bed.
+PRESERVE: walls
+ACCEPTANCE_CHECK: A bed is visible.
+END_FINDING
+""".strip()
+        )
+
+        scoped = scope_critic_feedback(feedback, "floor_plan")
+
+        self.assertEqual([], scoped.findings)
+        self.assertEqual("PASS", scoped.status)
 
     def test_legacy_critic_text_remains_available_as_fallback(self) -> None:
         feedback = parse_critic_feedback(
