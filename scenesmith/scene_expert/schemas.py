@@ -154,6 +154,7 @@ class StageBudget(BaseModel):
     asset_validation_timeout_seconds: float = 90.0
     asset_validation_total_timeout_seconds: float = 240.0
     asset_validation_max_output_tokens: int = 512
+    asset_validation_retry_max_output_tokens: int = 1024
     asset_validation_max_candidates: int = 4
     asset_validation_family_retries: int = 1
     max_optional_object_families: int = 0

@@ -136,6 +136,7 @@ stage_budget:
     asset_validation_timeout_seconds: 90
     asset_validation_total_timeout_seconds: 300
     asset_validation_max_output_tokens: 512
+    asset_validation_retry_max_output_tokens: 1024
     asset_validation_max_candidates: 4
     asset_validation_family_retries: 1
     max_optional_object_families: 3

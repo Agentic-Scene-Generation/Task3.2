@@ -7,10 +7,15 @@ from openai import OpenAI
 from scenesmith.agent_utils.thinking import (
     prepend_text_thinking_directive,
     responses_api_reasoning_effort,
+    thinking_enabled_from_effort,
     thinking_directive_from_effort,
 )
 
 console_logger = logging.getLogger(__name__)
+
+
+class VLMCompletionTruncatedError(RuntimeError):
+    """The model exhausted its output budget before emitting a final answer."""
 
 
 class VLMService:
@@ -126,6 +131,7 @@ class VLMService:
             messages = self._add_vision_detail_to_messages(
                 messages=messages, vision_detail=vision_detail
             )
+            thinking_enabled = thinking_enabled_from_effort(reasoning_effort)
             messages = self._prepend_thinking_directive(
                 messages=messages,
                 directive=thinking_directive_from_effort(reasoning_effort),
@@ -133,6 +139,16 @@ class VLMService:
             kwargs = {"model": model, "messages": messages}
             if max_output_tokens is not None:
                 kwargs["max_tokens"] = max(1, int(max_output_tokens))
+            if "qwen" in model.lower():
+                # Qwen3.5 does not support Qwen3's /think and /no_think soft
+                # switch. vLLM must receive the chat-template hard switch or
+                # hidden reasoning can consume the entire response budget
+                # before the JSON answer is emitted.
+                kwargs["extra_body"] = {
+                    "chat_template_kwargs": {
+                        "enable_thinking": thinking_enabled,
+                    }
+                }
 
             # Add response format if specified.
             if response_format:
@@ -143,13 +159,23 @@ class VLMService:
                 kwargs["service_tier"] = self.service_tier
 
             response = client.chat.completions.create(**kwargs)
-            content = response.choices[0].message.content
+            choice = response.choices[0]
+            content = choice.message.content
+            finish_reason = str(choice.finish_reason or "")
+            if finish_reason == "length":
+                reasoning = getattr(choice.message, "reasoning_content", None)
+                raise VLMCompletionTruncatedError(
+                    f"VLM output truncated at max_output_tokens="
+                    f"{max_output_tokens or 'server_default'} before a complete "
+                    f"answer was emitted (content_chars={len(content or '')}, "
+                    f"reasoning_chars={len(reasoning or '')})"
+                )
 
             # Validate response content.
             if not content or not content.strip():
                 raise RuntimeError(
                     f"Empty response from {model} (Chat API). "
-                    f"Finish reason: {response.choices[0].finish_reason}, "
+                    f"Finish reason: {finish_reason}, "
                     f"Content type: {type(content).__name__}, "
                     f"Content repr: {repr(content)}"
                 )

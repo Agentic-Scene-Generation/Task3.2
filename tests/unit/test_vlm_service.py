@@ -5,7 +5,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from scenesmith.agent_utils.vlm_service import VLMService
+from scenesmith.agent_utils.vlm_service import (
+    VLMCompletionTruncatedError,
+    VLMService,
+)
 
 
 class TestVLMService(unittest.TestCase):
@@ -88,6 +91,81 @@ class TestVLMService(unittest.TestCase):
 
         kwargs = mock_openai_client.chat.completions.create.call_args.kwargs
         self.assertEqual(256, kwargs["max_tokens"])
+
+    @patch("scenesmith.agent_utils.vlm_service.OpenAI")
+    def test_qwen_no_think_uses_vllm_chat_template_hard_switch(self, mock_openai_class):
+        mock_openai_client = Mock()
+        mock_openai_class.return_value = mock_openai_client
+        mock_response = Mock()
+        mock_response.choices = [
+            Mock(
+                message=Mock(content='{"is_acceptable": true}'),
+                finish_reason="stop",
+            )
+        ]
+        mock_openai_client.chat.completions.create.return_value = mock_response
+
+        service = VLMService()
+        service.create_completion(
+            model="Qwen/Qwen3.5-35B-A3B",
+            messages=[{"role": "user", "content": "Return JSON."}],
+            reasoning_effort="none",
+            verbosity="low",
+            max_output_tokens=512,
+        )
+
+        kwargs = mock_openai_client.chat.completions.create.call_args.kwargs
+        self.assertFalse(
+            kwargs["extra_body"]["chat_template_kwargs"]["enable_thinking"]
+        )
+        self.assertTrue(kwargs["messages"][0]["content"].startswith("/no_think\n"))
+
+    @patch("scenesmith.agent_utils.vlm_service.OpenAI")
+    def test_qwen_thinking_effort_enables_vllm_chat_template(self, mock_openai_class):
+        mock_openai_client = Mock()
+        mock_openai_class.return_value = mock_openai_client
+        mock_response = Mock()
+        mock_response.choices = [
+            Mock(message=Mock(content="done"), finish_reason="stop")
+        ]
+        mock_openai_client.chat.completions.create.return_value = mock_response
+
+        service = VLMService()
+        service.create_completion(
+            model="Qwen/Qwen3.5-35B-A3B",
+            messages=[{"role": "user", "content": "Analyze."}],
+            reasoning_effort="low",
+            verbosity="low",
+        )
+
+        kwargs = mock_openai_client.chat.completions.create.call_args.kwargs
+        self.assertTrue(kwargs["extra_body"]["chat_template_kwargs"]["enable_thinking"])
+
+    @patch("scenesmith.agent_utils.vlm_service.OpenAI")
+    def test_length_finish_reason_is_typed_truncation(self, mock_openai_class):
+        mock_openai_client = Mock()
+        mock_openai_class.return_value = mock_openai_client
+        mock_response = Mock()
+        mock_response.choices = [
+            Mock(
+                message=Mock(content=None, reasoning_content="hidden reasoning"),
+                finish_reason="length",
+            )
+        ]
+        mock_openai_client.chat.completions.create.return_value = mock_response
+
+        service = VLMService()
+        with self.assertRaisesRegex(
+            VLMCompletionTruncatedError,
+            "max_output_tokens=512",
+        ):
+            service.create_completion(
+                model="Qwen/Qwen3.5-35B-A3B",
+                messages=[{"role": "user", "content": "Return JSON."}],
+                reasoning_effort="none",
+                verbosity="low",
+                max_output_tokens=512,
+            )
 
     @patch("scenesmith.agent_utils.vlm_service.OpenAI")
     def test_create_completion_with_reasoning_effort_and_verbosity(

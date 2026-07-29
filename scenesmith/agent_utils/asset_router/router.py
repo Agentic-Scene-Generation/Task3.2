@@ -54,7 +54,10 @@ from scenesmith.agent_utils.thin_covering_generator import (
     create_rectangular_thin_covering_glb,
     infer_thin_covering_shape,
 )
-from scenesmith.agent_utils.vlm_service import VLMService
+from scenesmith.agent_utils.vlm_service import (
+    VLMCompletionTruncatedError,
+    VLMService,
+)
 from scenesmith.prompts import AssetRouterPrompts, prompt_manager
 from scenesmith.utils.openai import encode_image_to_base64
 
@@ -347,6 +350,7 @@ class AssetRouter:
                 is_acceptable=False,
                 reason=f"Rendering failed: {e}",
                 suggestions=["Check mesh file validity"],
+                failure_kind="rendering",
             )
 
         # Encode images for VLM.
@@ -402,12 +406,29 @@ class AssetRouter:
                 f"Router validation completed in {elapsed:.1f}s for "
                 f"'{description}':\n{response_json}"
             )
+        except VLMCompletionTruncatedError as e:
+            console_logger.warning(f"VLM validation output was truncated: {e}")
+            return ValidationResult(
+                is_acceptable=False,
+                reason=f"Validation output truncated: {e}",
+                suggestions=["Retry validation with a larger response budget"],
+                failure_kind="length",
+            )
+        except json.JSONDecodeError as e:
+            console_logger.warning(f"VLM validation returned invalid JSON: {e}")
+            return ValidationResult(
+                is_acceptable=False,
+                reason=f"Validation JSON invalid: {e}",
+                suggestions=["Retry validation with compact JSON output"],
+                failure_kind="invalid_json",
+            )
         except Exception as e:
             console_logger.error(f"VLM validation failed: {e}")
             return ValidationResult(
                 is_acceptable=False,
                 reason=f"Validation call failed: {e}",
                 suggestions=["Retry validation"],
+                failure_kind="infrastructure",
             )
 
         # Parse response.

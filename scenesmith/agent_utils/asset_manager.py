@@ -98,6 +98,21 @@ if TYPE_CHECKING:
 
 console_logger = logging.getLogger(__name__)
 
+_RETRYABLE_ASSET_VALIDATION_FAILURES = frozenset(
+    {"rendering", "length", "invalid_json", "infrastructure"}
+)
+
+
+def _asset_validation_is_retryable(validation: ValidationResult) -> bool:
+    """Classify transport/render/format failures separately from semantic rejection."""
+    failure_kind = str(getattr(validation, "failure_kind", "") or "")
+    if failure_kind in _RETRYABLE_ASSET_VALIDATION_FAILURES:
+        return True
+    # Backward compatibility for cached/test results written before failure_kind
+    # became part of the validation contract.
+    reason = str(validation.reason or "")
+    return reason.startswith(("Rendering failed", "Validation call failed"))
+
 
 @dataclass
 class AssetPathConfig:
@@ -1226,6 +1241,21 @@ class AssetManager:
             if execution_control_enabled
             else None
         )
+        retry_max_output_tokens = (
+            max(
+                int(max_output_tokens or 1),
+                int(
+                    runtime_validation.get(
+                        "asset_validation_retry_max_output_tokens",
+                        max(1024, int(max_output_tokens or 512) * 2),
+                    )
+                    or max(1024, int(max_output_tokens or 512) * 2)
+                ),
+            )
+            if execution_control_enabled
+            else None
+        )
+        active_max_output_tokens = max_output_tokens
         if validation_deadline is not None:
             total_validation_seconds = min(
                 total_validation_seconds,
@@ -1275,12 +1305,11 @@ class AssetManager:
                     use_lenient=use_lenient,
                     timeout_seconds=max(1.0, per_attempt_timeout),
                     max_retries=allowed_retries,
-                    max_output_tokens=max_output_tokens,
+                    max_output_tokens=active_max_output_tokens,
                 )
-                validation_reason = str(validation.reason or "")
-                if not validation_reason.startswith(
-                    ("Rendering failed", "Validation call failed")
-                ):
+                if getattr(validation, "failure_kind", None) == "length":
+                    active_max_output_tokens = retry_max_output_tokens
+                if not _asset_validation_is_retryable(validation):
                     # Infrastructure outcomes are retryable and must not poison
                     # the semantic cache for a later isolated stage retry.
                     validation_cache[validation_cache_key] = validation
@@ -1308,7 +1337,7 @@ class AssetManager:
 
             attempted_candidates += 1
             reason = str(validation.reason or "")
-            if reason.startswith(("Rendering failed", "Validation call failed")):
+            if _asset_validation_is_retryable(validation):
                 infrastructure_failures += 1
                 if transient_candidate is None:
                     transient_candidate = candidate
@@ -1340,7 +1369,7 @@ class AssetManager:
                     use_lenient=use_lenient,
                     timeout_seconds=max(1.0, min(timeout_seconds, remaining_seconds)),
                     max_retries=0,
-                    max_output_tokens=max_output_tokens,
+                    max_output_tokens=active_max_output_tokens,
                 )
                 if retry_validation.is_acceptable:
                     self._direct_hssd_validation_results[
@@ -1350,10 +1379,7 @@ class AssetManager:
                         "vlm_verified_after_family_retry"
                     )
                     return transient_candidate
-                retry_reason = str(retry_validation.reason or "")
-                if not retry_reason.startswith(
-                    ("Rendering failed", "Validation call failed")
-                ):
+                if not _asset_validation_is_retryable(retry_validation):
                     family_retry_semantic_rejected = True
                     retry_cache_key = f"{transient_candidate.hssd_id}|{family}"
                     self._direct_hssd_semantic_cache[retry_cache_key] = retry_validation
@@ -1418,9 +1444,7 @@ class AssetManager:
             f"validation for '{description}'"
         )
 
-    def _direct_hssd_candidate_count(
-        self, description: str, short_name: str
-    ) -> int:
+    def _direct_hssd_candidate_count(self, description: str, short_name: str) -> int:
         enabled, max_candidates, _, _, _, _ = self._hssd_semantic_validation_settings(
             description, short_name
         )
@@ -3679,9 +3703,7 @@ class AssetManager:
 
         revoked = 0
         for registered in self.registry.list_all():
-            if not (
-                self._asset_identity_signatures(registered) & invalid_signatures
-            ):
+            if not (self._asset_identity_signatures(registered) & invalid_signatures):
                 continue
             metadata = getattr(registered, "metadata", None)
             if metadata is None:

@@ -517,6 +517,66 @@ class TestAssetManager(unittest.TestCase):
             manager._direct_hssd_admission_states["bed_0"],
         )
 
+    def test_sceneexpert_truncation_expands_later_candidate_output_budget(self):
+        manager = object.__new__(AssetManager)
+        manager.cfg = OmegaConf.create(
+            {
+                "asset_manager": {
+                    "hssd": {
+                        "semantic_validation": {
+                            "enabled": True,
+                            "families": ["nightstand"],
+                            "critical_families": ["nightstand"],
+                            "max_candidates": 4,
+                            "timeout_seconds": 90,
+                        }
+                    }
+                }
+            }
+        )
+        manager.debug_dir = self.temp_dir / "debug"
+        manager._runtime_gate = MagicMock(required_families={"nightstand"})
+        manager._execution_control_enabled = True
+        manager._asset_validation_runtime = {
+            "asset_validation_max_candidates": 4,
+            "asset_validation_timeout_seconds": 30,
+            "asset_validation_total_timeout_seconds": 90,
+            "asset_validation_family_retries": 1,
+            "asset_validation_max_output_tokens": 256,
+            "asset_validation_retry_max_output_tokens": 1024,
+        }
+        manager._thin_covering_router = MagicMock()
+        manager._thin_covering_router.validate_asset.side_effect = [
+            ValidationResult(
+                False,
+                "Validation output truncated",
+                failure_kind="length",
+            ),
+            ValidationResult(True, "Recognizable nightstand"),
+        ]
+        candidates = [
+            HssdRetrievalResult(
+                mesh_path=str(self.temp_dir / f"nightstand_{index}.glb"),
+                hssd_id=f"nightstand_{index}",
+                object_name="nightstand",
+                similarity_score=0.9 - index * 0.01,
+                size=(0.5, 0.4, 0.55),
+                category="large_objects",
+            )
+            for index in range(2)
+        ]
+
+        selected = manager._select_direct_hssd_candidate(
+            candidates=candidates,
+            description="wooden nightstand with drawer",
+            short_name="nightstand",
+        )
+
+        self.assertEqual("nightstand_1", selected.hssd_id)
+        calls = manager._thin_covering_router.validate_asset.call_args_list
+        self.assertEqual(256, calls[0].kwargs["max_output_tokens"])
+        self.assertEqual(1024, calls[1].kwargs["max_output_tokens"])
+
     def test_optional_hssd_validation_outage_uses_deterministic_candidate(self):
         manager = object.__new__(AssetManager)
         manager.cfg = OmegaConf.create(

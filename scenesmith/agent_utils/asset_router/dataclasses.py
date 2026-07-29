@@ -90,6 +90,9 @@ class ValidationResult:
     orientation_confidence: float | None = None
     """Confidence in ``front_view_image_index`` on a 0-1 scale."""
 
+    failure_kind: str | None = None
+    """Machine-readable failure class for retry/admission policy."""
+
 
 @dataclass
 class GeneratedGeometry:
