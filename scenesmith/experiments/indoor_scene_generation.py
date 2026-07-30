@@ -721,10 +721,16 @@ def _restore_stage_candidate(
     agent: Any,
     scene: RoomScene,
     runtime_events: list[str],
-) -> None:
+) -> bool:
     """Restore geometry and score provenance from the same candidate snapshot."""
 
-    scene.restore_from_state_dict(copy.deepcopy(candidate["scene_state"]))
+    current_hash = candidate_state_hash(scene)
+    saved_hash = str(candidate.get("candidate_hash", "") or "")
+    geometry_changed = (
+        not current_hash or not saved_hash or current_hash != saved_hash
+    )
+    if geometry_changed:
+        scene.restore_from_state_dict(copy.deepcopy(candidate["scene_state"]))
     agent.previous_scores = copy.deepcopy(candidate.get("previous_scores"))
     agent._last_score_provenance = copy.deepcopy(
         candidate.get("score_provenance", {})
@@ -734,12 +740,14 @@ def _restore_stage_candidate(
     agent._last_trusted_critic_candidate = copy.deepcopy(
         candidate.get("last_trusted_critic_candidate")
     )
-    rendering_manager = getattr(agent, "rendering_manager", None)
-    clear_cache = getattr(rendering_manager, "clear_cache", None)
-    if callable(clear_cache):
-        clear_cache()
-    runtime_events.append("restored_best_stage_candidate")
+    if geometry_changed:
+        rendering_manager = getattr(agent, "rendering_manager", None)
+        clear_cache = getattr(rendering_manager, "clear_cache", None)
+        if callable(clear_cache):
+            clear_cache()
+        runtime_events.append("restored_best_stage_candidate")
     setattr(scene, "scene_expert_runtime_repair_events", runtime_events)
+    return geometry_changed
 
 
 def _optional_candidate_is_usable(candidate: dict[str, Any] | None) -> bool:

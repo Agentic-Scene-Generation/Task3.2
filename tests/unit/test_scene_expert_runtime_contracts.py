@@ -18,6 +18,7 @@ from scenesmith.scene_expert.critic_feedback import (
 from scenesmith.scene_expert.harness import Harness
 from scenesmith.scene_expert.runtime_state import (
     ScenePausedError,
+    candidate_state_hash,
     is_scene_paused_error,
     mark_retryable_pause_resolved,
     persist_retryable_pause,
@@ -235,6 +236,52 @@ END_FINDING
 
 
 class NestedPlannerBudgetTest(unittest.IsolatedAsyncioTestCase):
+    @unittest.skipIf(
+        BaseStatefulAgent is None,
+        f"requires OpenAI Agents SDK: {_BASE_AGENT_IMPORT_ERROR}",
+    )
+    async def test_semantic_noop_retry_is_sceneexpert_only_and_progress_aware(
+        self,
+    ) -> None:
+        scene = SimpleNamespace(to_state_dict=lambda: {"objects": {}})
+        admitted_assets = ()
+        agent = SimpleNamespace(
+            _stage_runtime_budget={"max_wall_clock_seconds": 60.0},
+            scene=scene,
+            _admitted_stage_asset_ids=lambda: admitted_assets,
+        )
+        scene_hash = candidate_state_hash(scene)
+        result = SimpleNamespace(final_output="I reviewed the scene.")
+
+        self.assertTrue(
+            BaseStatefulAgent._should_retry_initial_design_semantic_noop(
+                agent,
+                result=result,
+                scene_hash_before=scene_hash,
+                admitted_assets_before=(),
+            )
+        )
+
+        agent._stage_runtime_budget = {}
+        self.assertFalse(
+            BaseStatefulAgent._should_retry_initial_design_semantic_noop(
+                agent,
+                result=result,
+                scene_hash_before=scene_hash,
+                admitted_assets_before=(),
+            )
+        )
+        agent._stage_runtime_budget = {"max_wall_clock_seconds": 60.0}
+        admitted_assets = ("asset_1",)
+        self.assertFalse(
+            BaseStatefulAgent._should_retry_initial_design_semantic_noop(
+                agent,
+                result=result,
+                scene_hash_before=scene_hash,
+                admitted_assets_before=(),
+            )
+        )
+
     @unittest.skipIf(
         BaseStatefulAgent is None,
         f"requires OpenAI Agents SDK: {_BASE_AGENT_IMPORT_ERROR}",

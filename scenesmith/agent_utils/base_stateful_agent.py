@@ -461,6 +461,40 @@ class BaseStatefulAgent(ABC):
             )
         ]
 
+    def _admitted_stage_asset_ids(self) -> tuple[str, ...]:
+        """Return a stable identity snapshot for semantic no-op detection."""
+
+        try:
+            assets = self.admitted_stage_assets()
+        except Exception:
+            return ()
+        return tuple(
+            sorted(
+                str(getattr(asset, "object_id", "") or "")
+                for asset in assets
+                if str(getattr(asset, "object_id", "") or "")
+            )
+        )
+
+    def _should_retry_initial_design_semantic_noop(
+        self,
+        *,
+        result: Any,
+        scene_hash_before: str,
+        admitted_assets_before: tuple[str, ...],
+    ) -> bool:
+        """Detect a designer turn that made no observable stage progress.
+
+        This recovery belongs to the SceneExpert SLA only. Native SceneSmith and
+        disabled ablations retain their original single-call behavior.
+        """
+
+        return bool(
+            self._stage_runtime_budget
+            and candidate_state_hash(self.scene) == scene_hash_before
+            and self._admitted_stage_asset_ids() == admitted_assets_before
+        )
+
     def unavailable_required_asset_families(self) -> list[str]:
         """Return required semantic families with no admitted cached asset."""
         asset_manager = getattr(self, "asset_manager", None)
@@ -4673,6 +4707,8 @@ class BaseStatefulAgent(ABC):
         # Designer runs with initial design instruction.
         designer_start = time.time()
         render_dir_before = self.rendering_manager.last_render_dir
+        scene_hash_before = candidate_state_hash(self.scene)
+        admitted_assets_before = self._admitted_stage_asset_ids()
         try:
             result = await self._run_agent_with_stage_sla(
                 starting_agent=self.designer,
@@ -4700,15 +4736,106 @@ class BaseStatefulAgent(ABC):
                 "Designer execution budget was exhausted. Preserve all objects "
                 "already created and continue to deterministic validation." + safety_msg
             )
-        log_agent_usage(result=result, agent_name="DESIGNER (INITIAL)")
-        self._record_llm_call_debug(
-            agent_role="designer",
-            event="request_initial_design",
-            prompt=input_message,
-            output=result.final_output or "",
+        first_attempt_elapsed = time.time() - designer_start
+        semantic_noop = self._should_retry_initial_design_semantic_noop(
             result=result,
-            elapsed_sec=time.time() - designer_start,
+            scene_hash_before=scene_hash_before,
+            admitted_assets_before=admitted_assets_before,
         )
+        if semantic_noop:
+            self._record_llm_call_debug(
+                agent_role="designer",
+                event="request_initial_design_semantic_noop",
+                prompt=input_message,
+                output=result.final_output or "",
+                result=result,
+                elapsed_sec=first_attempt_elapsed,
+            )
+            runtime_events = list(
+                getattr(
+                    self.scene,
+                    "scene_expert_runtime_repair_events",
+                    [],
+                )
+                or []
+            )
+            runtime_events.append("designer_semantic_noop_retry")
+            setattr(
+                self.scene,
+                "scene_expert_runtime_repair_events",
+                list(dict.fromkeys(runtime_events)),
+            )
+            retry_instruction = (
+                instruction
+                + "\n\n# Required Semantic No-Op Recovery\n"
+                "Your previous response did not change the scene or admit any "
+                "asset. Make one concrete attempt now: use the "
+                "available tools to retrieve or list an appropriate stage-native "
+                "asset, place it with a valid pose, verify that the scene changed, "
+                "and only then return a concise summary. Do not return an empty "
+                "response."
+            )
+            retry_input = self._build_initial_design_input(retry_instruction)
+            retry_started = time.time()
+            try:
+                retry_result = await self._run_agent_with_stage_sla(
+                    starting_agent=self.designer,
+                    input=retry_input,
+                    role="designer",
+                    event="request_initial_design_noop_retry",
+                    session=self.designer_session,
+                    configured_max_turns=self.cfg.agents.designer_agent.max_turns,
+                    run_config=self._create_run_config(),
+                )
+            except Exception as exc:
+                self._record_llm_call_debug(
+                    agent_role="designer",
+                    event="request_initial_design_noop_retry",
+                    prompt=retry_input,
+                    error=f"{type(exc).__name__}: {exc}",
+                    elapsed_sec=time.time() - retry_started,
+                )
+                console_logger.warning(
+                    "Designer semantic no-op retry failed; preserving the original "
+                    "empty attempt for outer stage recovery: %s: %s",
+                    type(exc).__name__,
+                    exc,
+                )
+            else:
+                if retry_result is not None:
+                    result = retry_result
+                self._record_module_timing(
+                    "designer",
+                    "request_initial_design_noop_retry",
+                    retry_started,
+                )
+                self._record_llm_call_debug(
+                    agent_role="designer",
+                    event="request_initial_design_noop_retry",
+                    prompt=retry_input,
+                    output=(
+                        ""
+                        if retry_result is None
+                        else retry_result.final_output or ""
+                    ),
+                    result=retry_result,
+                    error=(
+                        "execution budget exhausted"
+                        if retry_result is None
+                        else ""
+                    ),
+                    elapsed_sec=time.time() - retry_started,
+                )
+        log_agent_usage(result=result, agent_name="DESIGNER (INITIAL)")
+        if not semantic_noop:
+            self._record_llm_call_debug(
+                agent_role="designer",
+                event="request_initial_design",
+                prompt=input_message,
+                output=result.final_output or "",
+                result=result,
+                elapsed_sec=first_attempt_elapsed,
+            )
 
         if result.final_output:
             log_agent_response(

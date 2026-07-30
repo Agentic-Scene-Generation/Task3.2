@@ -12,6 +12,7 @@ from unittest.mock import patch
 import numpy as np
 
 from scripts.build_memory_index import build_memory_indexes
+from scripts.clean_memory_stage_attribution import clean_failure_bank
 from scenesmith.scene_expert.memory.embedding import (
     SceneMemoryEmbedder,
     resolve_memory_embedding_model_dir,
@@ -178,6 +179,120 @@ class SceneExpertMemoryTest(unittest.TestCase):
 
         self.assertEqual(op.target_id, "")
         self.assertEqual(op.content, {})
+
+    def test_store_persists_success_and_failure_updates_without_id_mutation(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as tmp:
+            store = FastMemoryStore(tmp)
+            store.add_success_case(
+                SuccessCase(
+                    case_id="success_1",
+                    room_type="bedroom",
+                    stage="furniture",
+                    successful_pattern=["bed faces into the room"],
+                )
+            )
+            store.add_failure_case(
+                FailureCase(
+                    failure_id="failure_1",
+                    room_type="bedroom",
+                    stage="furniture",
+                    object="wardrobe",
+                    failure_type="collision",
+                    bad_pattern="wardrobe intersects nightstand",
+                )
+            )
+
+            store.apply_updates(
+                [
+                    MemoryUpdateOp(
+                        op="UPDATE",
+                        memory_type="success_case",
+                        target_id="success_1",
+                        content={
+                            "case_id": "must_not_replace_identity",
+                            "positive_guidance": [
+                                "Preserve a clear bed-to-door circulation path."
+                            ],
+                            "usage_count": 3,
+                        },
+                    ),
+                    MemoryUpdateOp(
+                        op="UPDATE",
+                        memory_type="failure_case",
+                        target_id="failure_1",
+                        content={
+                            "failure_id": "must_not_replace_identity",
+                            "repair_action": "Move wardrobe to a free wall segment.",
+                            "repair_verified": True,
+                            "repeat_count": 2,
+                        },
+                    ),
+                ]
+            )
+
+            reloaded = FastMemoryStore(tmp)
+
+        self.assertEqual(
+            ["success_1"],
+            [case.case_id for case in reloaded.success_cases],
+        )
+        self.assertEqual(3, reloaded.success_cases[0].usage_count)
+        self.assertIn(
+            "clear bed-to-door",
+            reloaded.success_cases[0].positive_guidance[0],
+        )
+        self.assertEqual(
+            ["failure_1"],
+            [case.failure_id for case in reloaded.failure_cases],
+        )
+        self.assertTrue(reloaded.failure_cases[0].repair_verified)
+        self.assertEqual(2, reloaded.failure_cases[0].repeat_count)
+
+    def test_stage_attribution_cleanup_is_exact_auditable_and_dry_run_first(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as tmp:
+            store = FastMemoryStore(tmp)
+            for failure_id in ("polluted_stage_failure", "retained_failure"):
+                store.add_failure_case(
+                    FailureCase(
+                        failure_id=failure_id,
+                        room_type="bedroom",
+                        stage="furniture",
+                        object="bed",
+                        failure_type="collision",
+                        bad_pattern=failure_id,
+                    )
+                )
+            failure_path = Path(tmp) / "failure_cases.jsonl"
+            original = failure_path.read_text(encoding="utf-8")
+
+            dry_run = clean_failure_bank(
+                memory_dir=tmp,
+                failure_ids={"polluted_stage_failure", "missing_failure"},
+            )
+            self.assertEqual("DRY_RUN", dry_run["status"])
+            self.assertEqual(["polluted_stage_failure"], dry_run["removed_failure_ids"])
+            self.assertEqual(["missing_failure"], dry_run["missing_failure_ids"])
+            self.assertEqual(original, failure_path.read_text(encoding="utf-8"))
+
+            applied = clean_failure_bank(
+                memory_dir=tmp,
+                failure_ids={"polluted_stage_failure", "missing_failure"},
+                apply=True,
+            )
+            retained = [
+                json.loads(line)["failure_id"]
+                for line in failure_path.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            self.assertEqual("APPLIED", applied["status"])
+            self.assertEqual(["retained_failure"], retained)
+            self.assertTrue(applied["index_rebuild_required"])
+            self.assertTrue(Path(str(applied["backup_path"])).is_file())
+            self.assertTrue(Path(str(applied["report_path"])).is_file())
 
     def test_task_compiler_fallback_preserves_required_bedroom_objects(self) -> None:
         spec = _fallback_spec_from_prompt(

@@ -1554,6 +1554,9 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             and comparison.get("deterministic_candidate", {}).get("score_source")
             == "vlm_critic"
         ):
+            # Hard validity establishes physics safety, not visual/functional
+            # quality. Keep an unscored recovery degraded so it cannot become
+            # false success memory; only a trustworthy VLM critic closes it.
             self._close_recovered_furniture_degradation(
                 comparison=comparison,
                 recovered_reasons=[

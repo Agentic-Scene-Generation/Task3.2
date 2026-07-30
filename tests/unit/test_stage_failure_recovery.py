@@ -242,6 +242,11 @@ class StageFailureRecoveryTest(unittest.TestCase):
             def content_hash(self) -> str:
                 return "empty-stage"
 
+            @staticmethod
+            def get_objects_by_type(object_type: object) -> list:
+                del object_type
+                return []
+
         calls = {
             "run": 0,
             "prepare": 0,
@@ -289,6 +294,11 @@ class StageFailureRecoveryTest(unittest.TestCase):
             @staticmethod
             def to_state_dict() -> dict:
                 return {"objects": {}}
+
+            @staticmethod
+            def get_objects_by_type(object_type: object) -> list:
+                del object_type
+                return []
 
         calls = {"run": 0}
 
@@ -522,6 +532,11 @@ class StageFailureRecoveryTest(unittest.TestCase):
             def content_hash() -> str:
                 return "empty-stage"
 
+            @staticmethod
+            def get_objects_by_type(object_type: object) -> list:
+                del object_type
+                return []
+
         calls = {"run": 0, "prepare": 0}
 
         async def run_once() -> None:
@@ -570,6 +585,11 @@ class StageFailureRecoveryTest(unittest.TestCase):
                 del state
                 self.restore_calls += 1
 
+            @staticmethod
+            def get_objects_by_type(object_type: object) -> list:
+                del object_type
+                return []
+
         calls = {"run": 0, "placement": 0}
 
         async def run_once() -> None:
@@ -617,6 +637,11 @@ class StageFailureRecoveryTest(unittest.TestCase):
             @staticmethod
             def content_hash() -> str:
                 return "partial-furniture-stage"
+
+            @staticmethod
+            def get_objects_by_type(object_type: object) -> list:
+                del object_type
+                return []
 
         agent = SimpleNamespace(
             admitted_stage_assets=lambda: [
