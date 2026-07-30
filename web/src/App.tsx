@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useDeferredValue, useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   Activity,
+  Check,
   ArrowLeftRight,
   ArrowDownUp,
   Bot,
@@ -11,6 +12,7 @@ import {
   CircleDot,
   Clock3,
   Command,
+  Copy,
   Image as ImageIcon,
   LoaderCircle,
   PanelLeftClose,
@@ -27,6 +29,26 @@ import type { Action, AuditEvent, Diff, Render, Run, Scene, SceneDetail, TimedEv
 
 const API_REFRESH_MS = 5000;
 type SortOrder = "asc" | "desc";
+const EVENT_FILTER_OPTIONS = ["all", "attention", "llm", "benchmark", "tool", "repair", "orchestration", "system"] as const;
+type EventFilter = (typeof EVENT_FILTER_OPTIONS)[number];
+
+function queryValue(name: string): string {
+  return new URLSearchParams(window.location.search).get(name) ?? "";
+}
+
+function initialView(): "review" | "diff" | "actions" {
+  const value = queryValue("view");
+  return value === "diff" || value === "actions" ? value : "review";
+}
+
+function initialSortOrder(): SortOrder {
+  return queryValue("order") === "desc" ? "desc" : "asc";
+}
+
+function initialEventFilter(): EventFilter {
+  const value = queryValue("kind");
+  return EVENT_FILTER_OPTIONS.includes(value as EventFilter) ? value as EventFilter : "all";
+}
 
 async function getJson<T>(url: string): Promise<T> {
   const response = await fetch(url);
@@ -145,23 +167,50 @@ function legacyAuditEvents(detail: SceneDetail | null): AuditEvent[] {
   return [...systemEvents, ...llmEvents];
 }
 
+function eventNeedsAttention(event: AuditEvent): boolean {
+  const benchmarkFailed = event.evaluation?.results?.some((result) => {
+    const label = result.label?.toLowerCase();
+    return label === "fail" || label === "degraded";
+  });
+  return Boolean(event.has_error || benchmarkFailed || event.kind === "repair");
+}
+
+function eventSearchText(event: AuditEvent): string {
+  return [
+    event.title,
+    event.function,
+    event.actor,
+    event.stage,
+    event.kind,
+    event.audit_status,
+    event.detail ? JSON.stringify(event.detail) : "",
+    event.metrics ? JSON.stringify(event.metrics) : "",
+    event.evaluation ? JSON.stringify(event.evaluation) : "",
+    event.repair ? JSON.stringify(event.repair) : "",
+  ].join(" ").toLowerCase();
+}
+
 function App() {
   const [runs, setRuns] = useState<Run[]>([]);
   const [scenes, setScenes] = useState<Scene[]>([]);
-  const [selectedRun, setSelectedRun] = useState("");
-  const [selectedScene, setSelectedScene] = useState("");
+  const [selectedRun, setSelectedRun] = useState(() => queryValue("run"));
+  const [selectedScene, setSelectedScene] = useState(() => queryValue("scene"));
   const [detail, setDetail] = useState<SceneDetail | null>(null);
-  const [selectedRender, setSelectedRender] = useState("");
-  const [comparisonRender, setComparisonRender] = useState("");
+  const [selectedRender, setSelectedRender] = useState(() => queryValue("render"));
+  const [comparisonRender, setComparisonRender] = useState(() => queryValue("compare"));
   const [diff, setDiff] = useState<Diff | null>(null);
   const [drawerEvent, setDrawerEvent] = useState<AuditEvent | Action | null>(null);
   const [search, setSearch] = useState("");
-  const [stageFilter, setStageFilter] = useState("all");
-  const [sortOrder, setSortOrder] = useState<SortOrder>("asc");
-  const [view, setView] = useState<"review" | "diff" | "actions">("review");
+  const [eventSearch, setEventSearch] = useState(() => queryValue("q"));
+  const deferredEventSearch = useDeferredValue(eventSearch);
+  const [stageFilter, setStageFilter] = useState(() => queryValue("stage") || "all");
+  const [eventFilter, setEventFilter] = useState<EventFilter>(initialEventFilter);
+  const [sortOrder, setSortOrder] = useState<SortOrder>(initialSortOrder);
+  const [view, setView] = useState<"review" | "diff" | "actions">(initialView);
   const [sidebarOpen, setSidebarOpen] = useState(() => window.innerWidth > 760);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [linkCopied, setLinkCopied] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -170,7 +219,7 @@ function App() {
         const payload = await getJson<{ runs: Run[] }>("/api/runs");
         if (cancelled) return;
         setRuns(payload.runs);
-        setSelectedRun((current) => current || payload.runs[0]?.id || "");
+        setSelectedRun((current) => payload.runs.some((run) => run.id === current) ? current : payload.runs[0]?.id || "");
         setError("");
       } catch (reason) {
         if (!cancelled) setError(reason instanceof Error ? reason.message : "Unable to load probe runs");
@@ -216,8 +265,8 @@ function App() {
         if (cancelled) return;
         setDetail(payload);
         const chronological = sortByTime(payload.renders, "asc");
-        setSelectedRender((current) => payload.renders.some((render) => render.id === current) ? current : chronological[0]?.id || "");
-        setComparisonRender((current) => payload.renders.some((render) => render.id === current) ? current : chronological[1]?.id || "");
+        setSelectedRender((current) => payload.renders.some((render) => render.id === current) ? current : chronological.at(-1)?.id || "");
+        setComparisonRender((current) => payload.renders.some((render) => render.id === current) ? current : chronological.at(-2)?.id || "");
       } catch (reason) {
         if (!cancelled) setError(reason instanceof Error ? reason.message : "Unable to load scene details");
       }
@@ -241,11 +290,24 @@ function App() {
     return sortByTime(values, "asc");
   }, [detail]);
   const stages = useMemo(() => ["all", ...new Set(allEvents.map((event) => event.stage || "system"))], [allEvents]);
+  const attentionCount = useMemo(() => allEvents.filter(eventNeedsAttention).length, [allEvents]);
   const visibleEvents = useMemo(
-    () => sortByTime(allEvents.filter((event) => stageFilter === "all" || event.stage === stageFilter), sortOrder),
-    [allEvents, sortOrder, stageFilter],
+    () => sortByTime(allEvents.filter((event) => {
+      const matchesStage = stageFilter === "all" || event.stage === stageFilter;
+      const matchesType = eventFilter === "all"
+        || (eventFilter === "attention" ? eventNeedsAttention(event) : event.kind === eventFilter);
+      const matchesSearch = !deferredEventSearch.trim() || eventSearchText(event).includes(deferredEventSearch.trim().toLowerCase());
+      return matchesStage && matchesType && matchesSearch;
+    }), sortOrder),
+    [allEvents, deferredEventSearch, eventFilter, sortOrder, stageFilter],
   );
   const visibleScenes = scenes.filter((scene) => `${scene.room} ${scene.batch} ${scene.scene}`.toLowerCase().includes(search.trim().toLowerCase()));
+  const visibleActions = useMemo(() => {
+    const visibleActionIds = new Set(visibleEvents
+      .filter((event) => event.id.startsWith("tool-action:"))
+      .map((event) => event.id));
+    return (detail?.actions ?? []).filter((action) => visibleActionIds.has(`tool-action:${action.step_number}`));
+  }, [detail?.actions, visibleEvents]);
   const timelineGroups = useMemo<TimelineGroup[]>(() => {
     if (!chronologicalRenders.length) return [{ id: "unassigned", events: visibleEvents }];
     const groups: TimelineGroup[] = chronologicalRenders.map((render, index) => {
@@ -272,6 +334,46 @@ function App() {
   }, [chronologicalRenders, sortOrder, visibleEvents]);
 
   const timelineEvents = visibleEvents;
+
+  useEffect(() => {
+    setStageFilter((current) => stages.includes(current) ? current : "all");
+  }, [stages]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const target = event.target;
+      if (
+        event.key !== "/"
+        || event.metaKey
+        || event.ctrlKey
+        || event.altKey
+        || target instanceof HTMLInputElement
+        || target instanceof HTMLTextAreaElement
+        || target instanceof HTMLSelectElement
+      ) return;
+      event.preventDefault();
+      document.getElementById("event-search")?.focus();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
+  useEffect(() => {
+    const params = new URLSearchParams();
+    if (selectedRun) params.set("run", selectedRun);
+    if (selectedScene) params.set("scene", selectedScene);
+    if (selectedRender) params.set("render", selectedRender);
+    if (comparisonRender) params.set("compare", comparisonRender);
+    if (view !== "review") params.set("view", view);
+    if (stageFilter !== "all") params.set("stage", stageFilter);
+    if (eventFilter !== "all") params.set("kind", eventFilter);
+    if (eventSearch.trim()) params.set("q", eventSearch.trim());
+    if (sortOrder !== "asc") params.set("order", sortOrder);
+    const nextLocation = `${window.location.pathname}${params.size ? `?${params.toString()}` : ""}`;
+    if (nextLocation !== `${window.location.pathname}${window.location.search}`) {
+      window.history.replaceState(null, "", nextLocation);
+    }
+  }, [comparisonRender, eventFilter, eventSearch, selectedRender, selectedRun, selectedScene, sortOrder, stageFilter, view]);
 
   useEffect(() => {
     if (view !== "review" || !selectedRender) return;
@@ -303,8 +405,19 @@ function App() {
     window.location.reload();
   };
 
+  const copyAuditLink = async () => {
+    try {
+      await navigator.clipboard.writeText(window.location.href);
+      setLinkCopied(true);
+      window.setTimeout(() => setLinkCopied(false), 1800);
+    } catch {
+      setError("Unable to copy the current audit link.");
+    }
+  };
+
   return (
     <main className="app-shell">
+      <a className="skip-link" href="#audit-workspace">Skip to audit workspace</a>
       <aside className={`sidebar ${sidebarOpen ? "is-open" : ""}`}>
         <div className="brand-row">
           <div className="brand-mark"><Sparkles size={17} /></div>
@@ -330,14 +443,15 @@ function App() {
               <span className="scene-meta">{scene.batch.replace("batch_", "B")} <span className={`status-inline ${scene.status}`}>{scene.status}</span></span>
             </button>
           ))}
+          {!visibleScenes.length && <div className="sidebar-empty">No scenes match this filter.</div>}
         </div>
         <div className="sidebar-footer"><CircleDot size={14} /><span>Polling every 5s</span></div>
       </aside>
 
-      <section className="workspace">
+      <section className="workspace" id="audit-workspace">
         <header className="topbar">
           <div className="context"><button className="icon-button nav-toggle" onClick={() => setSidebarOpen((value) => !value)} aria-label="Toggle navigation">{sidebarOpen ? <PanelLeftClose size={18} /> : <PanelLeftOpen size={18} />}</button><div><div className="crumb">{selectedRun || "Loading run"} <ChevronRight size={14} /> {activeScene?.batch ?? ""}</div><h1>{activeScene ? `${activeScene.room} / ${activeScene.scene}` : "Critic review"}</h1></div></div>
-          <div className="top-actions"><span className={`status-pill ${activeScene?.status ?? "running"}`}><span className="status-dot" />{activeScene?.status ?? "loading"}</span><button className="icon-button" onClick={refresh} title="Refresh data" aria-label="Refresh data"><RefreshCw size={17} /></button></div>
+          <div className="top-actions"><span className={`status-pill ${activeScene?.status ?? "running"}`}><span className="status-dot" />{activeScene?.status ?? "loading"}</span><button className="icon-button" onClick={() => void copyAuditLink()} title="Copy a link to this audit view" aria-label="Copy a link to this audit view">{linkCopied ? <Check size={17} /> : <Copy size={17} />}</button><button className="icon-button" onClick={refresh} title="Refresh data" aria-label="Refresh data"><RefreshCw size={17} /></button><span className="sr-only" aria-live="polite">{linkCopied ? "Audit link copied" : ""}</span></div>
         </header>
 
         {error && <div className="error-banner">{error}</div>}
@@ -355,9 +469,9 @@ function App() {
             <button className={view === "actions" ? "active" : ""} onClick={() => setView("actions")}><Wrench size={16} />Tool log</button>
           </nav>
 
-          {view === "review" && <ReviewView currentRender={currentRender} renders={renders} selectedRender={selectedRender} setSelectedRender={setSelectedRender} sortOrder={sortOrder} setSortOrder={setSortOrder} groups={timelineGroups} stages={stages} stageFilter={stageFilter} setStageFilter={setStageFilter} onOpenEvent={setDrawerEvent} />}
+          {view === "review" && <ReviewView currentRender={currentRender} renders={renders} selectedRender={selectedRender} setSelectedRender={setSelectedRender} sortOrder={sortOrder} setSortOrder={setSortOrder} groups={timelineGroups} stages={stages} stageFilter={stageFilter} setStageFilter={setStageFilter} eventSearch={eventSearch} setEventSearch={setEventSearch} eventFilter={eventFilter} setEventFilter={setEventFilter} visibleEventCount={visibleEvents.length} totalEventCount={allEvents.length} attentionCount={attentionCount} onOpenEvent={setDrawerEvent} />}
           {view === "diff" && <DiffView beforeRender={beforeRender} currentRender={currentRender} renders={renders} comparisonRender={comparisonRender} selectedRender={selectedRender} setComparisonRender={setComparisonRender} setSelectedRender={setSelectedRender} diff={diff} />}
-          {view === "actions" && <ActionView actions={detail?.actions ?? []} onOpenAction={(action) => setDrawerEvent(actionAuditEvents([action])[0])} />}
+          {view === "actions" && <ActionView actions={visibleActions} totalActions={detail?.actions.length ?? 0} onOpenAction={(action) => setDrawerEvent(actionAuditEvents([action])[0])} />}
         </>}
       </section>
       {drawerEvent && ("tool_name" in drawerEvent
@@ -390,7 +504,7 @@ function SceneFrame({ render, side = false }: { render?: Render; side?: boolean 
   return <div className="scene-frame">{path ? <img src={imageUrl(path)!} alt={`${render?.label} ${side ? "side" : "top"} render`} /> : <div className="empty-frame"><ImageIcon size={22} /><span>{side ? "Side render unavailable" : "Top render unavailable"}</span></div>}<span className="frame-label">{side ? "Side" : "Top"}</span></div>;
 }
 
-function ReviewView({ currentRender, renders, selectedRender, setSelectedRender, sortOrder, setSortOrder, groups, stages, stageFilter, setStageFilter, onOpenEvent }: { currentRender?: Render; renders: Render[]; selectedRender: string; setSelectedRender: (value: string) => void; sortOrder: SortOrder; setSortOrder: (value: SortOrder) => void; groups: TimelineGroup[]; stages: string[]; stageFilter: string; setStageFilter: (value: string) => void; onOpenEvent: (event: AuditEvent) => void }) {
+function ReviewView({ currentRender, renders, selectedRender, setSelectedRender, sortOrder, setSortOrder, groups, stages, stageFilter, setStageFilter, eventSearch, setEventSearch, eventFilter, setEventFilter, visibleEventCount, totalEventCount, attentionCount, onOpenEvent }: { currentRender?: Render; renders: Render[]; selectedRender: string; setSelectedRender: (value: string) => void; sortOrder: SortOrder; setSortOrder: (value: SortOrder) => void; groups: TimelineGroup[]; stages: string[]; stageFilter: string; setStageFilter: (value: string) => void; eventSearch: string; setEventSearch: (value: string) => void; eventFilter: EventFilter; setEventFilter: (value: EventFilter) => void; visibleEventCount: number; totalEventCount: number; attentionCount: number; onOpenEvent: (event: AuditEvent) => void }) {
   return (
     <div className="review-grid">
       <section className="render-panel">
@@ -400,7 +514,7 @@ function ReviewView({ currentRender, renders, selectedRender, setSelectedRender,
         </div>
         <div className="render-grid"><SceneFrame render={currentRender} /><SceneFrame render={currentRender} side /></div>
       </section>
-      <StageTimeline groups={groups} selectedRender={selectedRender} stages={stages} stageFilter={stageFilter} setStageFilter={setStageFilter} onOpenEvent={onOpenEvent} />
+      <StageTimeline groups={groups} selectedRender={selectedRender} stages={stages} stageFilter={stageFilter} setStageFilter={setStageFilter} eventSearch={eventSearch} setEventSearch={setEventSearch} eventFilter={eventFilter} setEventFilter={setEventFilter} visibleEventCount={visibleEventCount} totalEventCount={totalEventCount} attentionCount={attentionCount} onOpenEvent={onOpenEvent} />
     </div>
   );
 }
@@ -412,7 +526,7 @@ function DiffView({ beforeRender, currentRender, renders, comparisonRender, sele
 
 function DeltaList({ title, values, tone }: { title: string; values: string[]; tone: string }) { return <div className={`delta-list ${tone}`}><span>{title}</span><strong>{values.length}</strong><div>{values.length ? values.map((value) => <code key={value}>{value}</code>) : <small>No changes</small>}</div></div>; }
 
-function ActionView({ actions, onOpenAction }: { actions: Action[]; onOpenAction: (action: Action) => void }) { return <section className="action-panel"><div className="panel-heading"><div><span className="eyebrow">Designer tool calls</span><h2>Action log</h2></div><span className="count-label">{actions.length} steps</span></div><div className="action-table"><div className="table-head"><span>#</span><span>Tool</span><span>Arguments</span><span>Time</span></div>{actions.map((action) => <button key={action.step_number} className="table-row" onClick={() => onOpenAction(action)}><span>{String(action.step_number).padStart(2, "0")}</span><span><Box size={15} />{action.tool_name.replaceAll("_", " ")}</span><code>{JSON.stringify(action.arguments)}</code><time>{formatTime(action.timestamp).slice(-8)}</time></button>)}</div></section>; }
+function ActionView({ actions, totalActions, onOpenAction }: { actions: Action[]; totalActions: number; onOpenAction: (action: Action) => void }) { return <section className="action-panel"><div className="panel-heading"><div><span className="eyebrow">Designer tool calls</span><h2>Action log</h2></div><span className="count-label">{actions.length === totalActions ? `${actions.length} steps` : `${actions.length} of ${totalActions} steps`}</span></div><div className="action-table"><div className="table-head"><span>#</span><span>Tool</span><span>Arguments</span><span>Time</span></div>{actions.map((action) => <button key={action.step_number} className="table-row" onClick={() => onOpenAction(action)}><span>{String(action.step_number).padStart(2, "0")}</span><span><Box size={15} />{action.tool_name.replaceAll("_", " ")}</span><code>{JSON.stringify(action.arguments)}</code><time>{formatTime(action.timestamp).slice(-8)}</time></button>)}{!actions.length && <div className="empty-list">No tool actions match the current audit filters.</div>}</div></section>; }
 
 function ActionDrawer({ value, onClose }: { value: Action; onClose: () => void }) { return <div className="drawer-backdrop" onMouseDown={onClose}><aside className="event-drawer" onMouseDown={(event) => event.stopPropagation()}><header><div><span className="eyebrow">Tool action</span><h2>{value.tool_name}</h2></div><button className="icon-button" onClick={onClose} aria-label="Close detail"><X size={19} /></button></header><div className="drawer-body"><DetailBlock label="Timestamp" value={formatTime(value.timestamp)} /><DetailBlock label="Arguments" value={JSON.stringify(value.arguments, null, 2)} code /><DetailBlock label="Raw action" value={JSON.stringify(value, null, 2)} code /></div></aside></div>; }
 

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ChevronDown, ChevronUp, LoaderCircle, X } from "lucide-react";
 import type { AssetEvidenceView, AuditDetail, AuditEvent, BenchmarkEvaluation, RepairAudit } from "../types";
 
@@ -127,11 +127,49 @@ function PhysicsContextAudit({ event }: { event: AuditEvent }) {
 export function AuditEventDrawer({ event, scenePath, events, onNavigate, onClose }: { event: AuditEvent; scenePath: string; events: AuditEvent[]; onNavigate: (event: AuditEvent) => void; onClose: () => void }) {
   const [detail, setDetail] = useState<AuditDetail | null>(null);
   const [error, setError] = useState("");
+  const drawerRef = useRef<HTMLElement>(null);
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const onCloseRef = useRef(onClose);
   const isLegacyLlm = event.kind === "llm" && event.id.startsWith("legacy-llm:");
   const fallbackInput = event.detail?.prompt_excerpt;
   const fallbackOutput = event.detail?.output_excerpt;
   const hasLocalExcerpt = fallbackInput !== undefined || fallbackOutput !== undefined;
   const shouldLoadDetail = (event.kind === "llm" || event.kind === "tool") && !isLegacyLlm;
+
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  }, [onClose]);
+
+  useEffect(() => {
+    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const focusDrawerControl = () => closeButtonRef.current?.focus();
+    const handleKeyDown = (keyboardEvent: KeyboardEvent) => {
+      if (keyboardEvent.key === "Escape") {
+        keyboardEvent.preventDefault();
+        onCloseRef.current();
+        return;
+      }
+      if (keyboardEvent.key !== "Tab" || !drawerRef.current) return;
+      const focusable = Array.from(drawerRef.current.querySelectorAll<HTMLElement>("button:not([disabled]), [href], input, select, textarea, [tabindex]:not([tabindex='-1'])"))
+        .filter((element) => !element.hasAttribute("disabled"));
+      if (!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable.at(-1)!;
+      if (keyboardEvent.shiftKey && document.activeElement === first) {
+        keyboardEvent.preventDefault();
+        last.focus();
+      } else if (!keyboardEvent.shiftKey && document.activeElement === last) {
+        keyboardEvent.preventDefault();
+        first.focus();
+      }
+    };
+    focusDrawerControl();
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown);
+      opener?.focus();
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -155,5 +193,5 @@ export function AuditEventDrawer({ event, scenePath, events, onNavigate, onClose
   const previousEvent = eventIndex > 0 ? events[eventIndex - 1] : undefined;
   const nextEvent = eventIndex >= 0 ? events[eventIndex + 1] : undefined;
 
-  return <div className="drawer-backdrop" onMouseDown={onClose}><aside className="event-drawer" onMouseDown={(mouseEvent) => mouseEvent.stopPropagation()}><header><div><span className="eyebrow">{audit.kind} audit event</span><h2>{audit.title}</h2></div><div className="drawer-actions"><button className="icon-button" onClick={() => previousEvent && onNavigate(previousEvent)} disabled={!previousEvent} title="Open previous event" aria-label="Open previous event"><ChevronUp size={18} /></button><button className="icon-button" onClick={() => nextEvent && onNavigate(nextEvent)} disabled={!nextEvent} title="Open next event" aria-label="Open next event"><ChevronDown size={18} /></button><button className="icon-button" onClick={onClose} aria-label="Close detail"><X size={19} /></button></div></header><div className="drawer-body"><div className="audit-summary"><span>{provenance.replaceAll("_", " ")}</span>{event.checkpoint_state === "active" && <span>active at selected snapshot</span>}{isLlm && <span>{detail?.has_full_input ? "full input" : "excerpt fallback"}</span>}{isLlm && <span>{detail?.has_full_output ? "full output" : "excerpt fallback"}</span>}</div><div className="audit-facts"><DetailBlock label="Completed" value={formatTime(audit.created_at)} /><DetailBlock label="Started" value={formatTime(audit.started_at)} /><DetailBlock label="Duration" value={formatDuration(audit.elapsed_sec)} /><DetailBlock label="Stage" value={formatStage(audit.stage)} /><DetailBlock label="Agent / role" value={audit.actor} /><DetailBlock label="Function / event" value={audit.function} /></div>{audit.token_usage && Object.keys(audit.token_usage).length > 0 && <DetailBlock label="Token usage" value={audit.token_usage} code />}{audit.function === "physics_context" && <PhysicsContextAudit event={audit} />}{audit.kind !== "llm" && audit.kind !== "benchmark" && audit.kind !== "repair" && audit.function !== "physics_context" && audit.detail && Object.keys(audit.detail).length > 0 && <DetailBlock label="Recorded detail" value={audit.detail} code />}{audit.kind === "benchmark" && <BenchmarkAudit evaluation={audit.evaluation} />}{audit.kind === "repair" && <RepairAuditView repair={audit.repair} />}{!isLlm && audit.metrics && Object.keys(audit.metrics).length > 0 && <DetailBlock label="Deterministic metrics" value={audit.metrics} code />}{error && <div className="error-banner">{error}</div>}{isLlm && hasLocalExcerpt && !detail && <><div className="excerpt-note">Full audit record is unavailable for this older run; showing captured excerpts.</div><DetailBlock label="LLM input excerpt" value={fallbackInput} code /><DetailBlock label="LLM output excerpt" value={fallbackOutput} code /></>}{shouldLoadDetail && !detail && !error && !(isLlm && hasLocalExcerpt) && <div className="audit-loading"><LoaderCircle className="spin" size={18} /> Loading full audit record</div>}{isLlm && detail && <><ConversationTrace messages={detail.messages ?? []} /><DetailBlock label={detail.has_full_input ? "Full LLM input" : "LLM input excerpt"} value={detail.input} code /><DetailBlock label={detail.has_full_output ? "Full LLM output" : "LLM output excerpt"} value={detail.output} code />{detail.raw_response !== undefined && <DetailBlock label="Raw model response" value={detail.raw_response} code />}{detail.reasoning.length > 0 && <DetailBlock label="Reasoning" value={detail.reasoning} code />}{detail.tool_calls.length > 0 && <section className="detail-block"><span>Function calls</span>{detail.tool_calls.map((call, index) => <div className="tool-call" key={`${call.name}-${index}`}><strong>{call.name}</strong>{call.database && <small>{call.database}</small>}<DetailBlock label="Arguments" value={call.arguments} code /><DetailBlock label="Result" value={call.output} code /></div>)}</section>}{detail.metrics && Object.keys(detail.metrics).length > 0 && <DetailBlock label="Deterministic metrics" value={detail.metrics} code />}{detail.session_databases && <DetailBlock label="Audit source databases" value={detail.session_databases.join(", ")} />}</>}{audit.kind === "tool" && detail?.selection_trace && <SelectionTrace trace={detail.selection_trace} />}</div></aside></div>;
+  return <div className="drawer-backdrop" onMouseDown={onClose}><aside className="event-drawer" ref={drawerRef} role="dialog" aria-modal="true" aria-labelledby="audit-event-title" onMouseDown={(mouseEvent) => mouseEvent.stopPropagation()}><header><div><span className="eyebrow">{audit.kind} audit event</span><h2 id="audit-event-title">{audit.title}</h2></div><div className="drawer-actions"><button className="icon-button" onClick={() => previousEvent && onNavigate(previousEvent)} disabled={!previousEvent} title="Open previous event" aria-label="Open previous event"><ChevronUp size={18} /></button><button className="icon-button" onClick={() => nextEvent && onNavigate(nextEvent)} disabled={!nextEvent} title="Open next event" aria-label="Open next event"><ChevronDown size={18} /></button><button className="icon-button" ref={closeButtonRef} onClick={onClose} aria-label="Close detail"><X size={19} /></button></div></header><div className="drawer-body"><div className="audit-summary"><span>{provenance.replaceAll("_", " ")}</span>{event.checkpoint_state === "active" && <span>active at selected snapshot</span>}{isLlm && <span>{detail?.has_full_input ? "full input" : "excerpt fallback"}</span>}{isLlm && <span>{detail?.has_full_output ? "full output" : "excerpt fallback"}</span>}</div><div className="audit-facts"><DetailBlock label="Completed" value={formatTime(audit.created_at)} /><DetailBlock label="Started" value={formatTime(audit.started_at)} /><DetailBlock label="Duration" value={formatDuration(audit.elapsed_sec)} /><DetailBlock label="Stage" value={formatStage(audit.stage)} /><DetailBlock label="Agent / role" value={audit.actor} /><DetailBlock label="Function / event" value={audit.function} /></div>{audit.token_usage && Object.keys(audit.token_usage).length > 0 && <DetailBlock label="Token usage" value={audit.token_usage} code />}{audit.function === "physics_context" && <PhysicsContextAudit event={audit} />}{audit.kind !== "llm" && audit.kind !== "benchmark" && audit.kind !== "repair" && audit.function !== "physics_context" && audit.detail && Object.keys(audit.detail).length > 0 && <DetailBlock label="Recorded detail" value={audit.detail} code />}{audit.kind === "benchmark" && <BenchmarkAudit evaluation={audit.evaluation} />}{audit.kind === "repair" && <RepairAuditView repair={audit.repair} />}{!isLlm && audit.metrics && Object.keys(audit.metrics).length > 0 && <DetailBlock label="Deterministic metrics" value={audit.metrics} code />}{error && <div className="error-banner">{error}</div>}{isLlm && hasLocalExcerpt && !detail && <><div className="excerpt-note">Full audit record is unavailable for this older run; showing captured excerpts.</div><DetailBlock label="LLM input excerpt" value={fallbackInput} code /><DetailBlock label="LLM output excerpt" value={fallbackOutput} code /></>}{shouldLoadDetail && !detail && !error && !(isLlm && hasLocalExcerpt) && <div className="audit-loading"><LoaderCircle className="spin" size={18} /> Loading full audit record</div>}{isLlm && detail && <><ConversationTrace messages={detail.messages ?? []} /><DetailBlock label={detail.has_full_input ? "Full LLM input" : "LLM input excerpt"} value={detail.input} code /><DetailBlock label={detail.has_full_output ? "Full LLM output" : "LLM output excerpt"} value={detail.output} code />{detail.raw_response !== undefined && <DetailBlock label="Raw model response" value={detail.raw_response} code />}{detail.reasoning.length > 0 && <DetailBlock label="Reasoning" value={detail.reasoning} code />}{detail.tool_calls.length > 0 && <section className="detail-block"><span>Function calls</span>{detail.tool_calls.map((call, index) => <div className="tool-call" key={`${call.name}-${index}`}><strong>{call.name}</strong>{call.database && <small>{call.database}</small>}<DetailBlock label="Arguments" value={call.arguments} code /><DetailBlock label="Result" value={call.output} code /></div>)}</section>}{detail.metrics && Object.keys(detail.metrics).length > 0 && <DetailBlock label="Deterministic metrics" value={detail.metrics} code />}{detail.session_databases && <DetailBlock label="Audit source databases" value={detail.session_databases.join(", ")} />}</>}{audit.kind === "tool" && detail?.selection_trace && <SelectionTrace trace={detail.selection_trace} />}</div></aside></div>;
 }
