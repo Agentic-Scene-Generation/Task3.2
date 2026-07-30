@@ -779,7 +779,17 @@ class BaseStatefulAgent(ABC):
             current_furniture_id=current_furniture_id,
             agent_type=self.agent_type,
         )
-        self._record_module_timing("critic", "physics_context", physics_start)
+        max_audit_chars = 12000
+        self._record_module_timing(
+            "critic",
+            "physics_context",
+            physics_start,
+            extra={
+                "physics_context": physics_context[:max_audit_chars],
+                "physics_context_chars": len(physics_context),
+                "physics_context_truncated": len(physics_context) > max_audit_chars,
+            },
+        )
         self._critic_candidate_cache["physics_context"] = physics_context
         return physics_context
 
