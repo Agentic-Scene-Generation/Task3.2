@@ -51,6 +51,7 @@ from scenesmith.agent_utils.physics_validation import compute_scene_collisions
 from scenesmith.agent_utils.room import (
     ObjectType,
     RoomScene,
+    SceneObject,
     UniqueID,
     deserialize_rigid_transform,
     serialize_rigid_transform,
@@ -103,6 +104,49 @@ def compute_tilt_angle_degrees(transform: RigidTransform) -> float:
     # Compute angle between vectors.
     cos_tilt = np.clip(np.dot(object_up, world_up), -1.0, 1.0)
     return float(np.degrees(np.arccos(cos_tilt)))
+
+
+def _furniture_simulation_instability_reason(
+    obj: SceneObject,
+    pre_simulation_transform: RigidTransform,
+    tilt_threshold_degrees: float,
+) -> str | None:
+    """Describe a furniture pose that cannot be a plausible settled result."""
+    translation = np.asarray(obj.transform.translation(), dtype=float)
+    rotation = np.asarray(obj.transform.rotation().matrix(), dtype=float)
+    if not np.all(np.isfinite(translation)) or not np.all(np.isfinite(rotation)):
+        return "non-finite simulated pose"
+
+    tilt_angle = compute_tilt_angle_degrees(obj.transform)
+    if tilt_angle > tilt_threshold_degrees:
+        return (
+            f"tilt={tilt_angle:.1f}deg > " f"threshold={tilt_threshold_degrees:.1f}deg"
+        )
+
+    displacement = float(
+        np.linalg.norm(translation - pre_simulation_transform.translation())
+    )
+    try:
+        extent = float(
+            np.linalg.norm(
+                np.asarray(obj.bbox_max, dtype=float)
+                - np.asarray(obj.bbox_min, dtype=float)
+            )
+        )
+    except (TypeError, ValueError):
+        extent = 0.0
+    if not np.isfinite(extent) or extent < 0.0:
+        extent = 0.0
+    # Dynamic settling should be local. A multi-object-length jump indicates a
+    # broken collision proxy or numerical explosion, even when the final local
+    # up-axis happens to remain below the tilt threshold.
+    displacement_limit = max(1.0, 2.0 * extent)
+    if displacement > displacement_limit:
+        return (
+            f"displacement={displacement:.2f}m > "
+            f"scale-aware limit={displacement_limit:.2f}m"
+        )
+    return None
 
 
 def _restore_collectively_unstable_instances(
@@ -1509,7 +1553,7 @@ def apply_forward_simulation(
             operation_name="Simulation",
         )
 
-        # Detect and remove fallen furniture if enabled.
+        # Detect and remove physically unstable furniture if enabled.
         removed_ids: list[UniqueID] = []
         if remove_fallen_furniture:
             # Only check furniture objects (not manipulands, walls, etc.).
@@ -1522,11 +1566,18 @@ def apply_forward_simulation(
                 obj = scene.get_object(obj_id)
                 if obj is None:
                     continue
-                tilt_angle = compute_tilt_angle_degrees(obj.transform)
-                if tilt_angle > fallen_tilt_threshold_degrees:
+                pre_simulation_transform = pre_simulation_transforms.get(obj_id)
+                if pre_simulation_transform is None:
+                    continue
+                instability_reason = _furniture_simulation_instability_reason(
+                    obj,
+                    pre_simulation_transform,
+                    fallen_tilt_threshold_degrees,
+                )
+                if instability_reason is not None:
                     console_logger.warning(
-                        f"Removing fallen furniture {obj_id}: "
-                        f"tilt={tilt_angle:.1f}° > threshold={fallen_tilt_threshold_degrees}°"
+                        f"Removing physically unstable furniture {obj_id}: "
+                        f"{instability_reason}"
                     )
                     removed_ids.append(obj_id)
 

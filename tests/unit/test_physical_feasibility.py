@@ -13,6 +13,7 @@ from pydrake.all import RigidTransform, RollPitchYaw, RotationMatrix
 from scenesmith.agent_utils.house import RoomGeometry
 from scenesmith.agent_utils.physical_feasibility import (
     _apply_floor_penetration_fallback,
+    _furniture_simulation_instability_reason,
     _get_colliding_object_ids,
     _restore_collectively_unstable_instances,
     apply_forward_simulation,
@@ -867,6 +868,114 @@ class TestFallenFurnitureRemoval(PhysicalFeasibilityTestCase):
                     compute_tilt_angle_degrees(scene.get_object(object_id).transform),
                     0.0,
                     places=5,
+                )
+
+    def test_catastrophic_translation_is_unstable_below_tilt_threshold(self) -> None:
+        obj = SceneObject(
+            object_id=UniqueID("plant_0"),
+            object_type=ObjectType.FURNITURE,
+            name="plant",
+            description="Test floor plant",
+            transform=RigidTransform(
+                R=RotationMatrix(RollPitchYaw(np.radians(35.0), 0.0, 0.0)),
+                p=[11.0, -3.0, -376.0],
+            ),
+            sdf_path=TEST_DATA_DIR / "simple_box.sdf",
+            bbox_min=np.asarray([-0.3, -0.35, 0.0]),
+            bbox_max=np.asarray([0.3, 0.35, 1.1]),
+        )
+
+        reason = _furniture_simulation_instability_reason(
+            obj,
+            RigidTransform(p=[-1.2, -0.9, 0.0]),
+            tilt_threshold_degrees=45.0,
+        )
+
+        self.assertIsNotNone(reason)
+        self.assertIn("displacement=", reason)
+
+    def test_local_settling_motion_remains_valid(self) -> None:
+        obj = SceneObject(
+            object_id=UniqueID("plant_0"),
+            object_type=ObjectType.FURNITURE,
+            name="plant",
+            description="Test floor plant",
+            transform=RigidTransform(
+                R=RotationMatrix(RollPitchYaw(np.radians(3.7), 0.0, 0.0)),
+                p=[-1.198, -0.897, -0.002],
+            ),
+            sdf_path=TEST_DATA_DIR / "simple_box.sdf",
+            bbox_min=np.asarray([-0.3, -0.35, 0.0]),
+            bbox_max=np.asarray([0.3, 0.35, 1.1]),
+        )
+
+        reason = _furniture_simulation_instability_reason(
+            obj,
+            RigidTransform(p=[-1.2, -0.9, 0.0]),
+            tilt_threshold_degrees=45.0,
+        )
+
+        self.assertIsNone(reason)
+
+    def test_repeated_proxy_restores_mixed_catastrophic_failures(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            scene = RoomScene(
+                room_geometry=self.room_geometry,
+                scene_dir=Path(tmp_dir),
+                text_description="Repeated unstable furniture group",
+            )
+            box_sdf_path = TEST_DATA_DIR / "simple_box.sdf"
+            original_transforms = {
+                UniqueID("plant_0"): RigidTransform(p=[-1.2, -0.9, 0.0]),
+                UniqueID("plant_1"): RigidTransform(p=[1.2, -0.9, 0.0]),
+            }
+            simulated_transforms = {
+                UniqueID("plant_0"): RigidTransform(
+                    R=RotationMatrix(RollPitchYaw(np.radians(35.0), 0.0, 0.0)),
+                    p=[11.0, -3.0, -376.0],
+                ),
+                UniqueID("plant_1"): RigidTransform(
+                    R=RotationMatrix(RollPitchYaw(np.radians(172.0), 0.0, 0.0)),
+                    p=[1.16, -1.17, 1.14],
+                ),
+            }
+            for object_id, transform in simulated_transforms.items():
+                scene.add_object(
+                    SceneObject(
+                        object_id=object_id,
+                        object_type=ObjectType.FURNITURE,
+                        name="plant",
+                        description="Repeated test plant",
+                        transform=transform,
+                        sdf_path=box_sdf_path,
+                        bbox_min=np.asarray([-0.3, -0.35, 0.0]),
+                        bbox_max=np.asarray([0.3, 0.35, 1.1]),
+                    )
+                )
+
+            unstable_ids = [
+                object_id
+                for object_id in original_transforms
+                if _furniture_simulation_instability_reason(
+                    scene.get_object(object_id),
+                    original_transforms[object_id],
+                    tilt_threshold_degrees=45.0,
+                )
+                is not None
+            ]
+            restored = _restore_collectively_unstable_instances(
+                scene,
+                original_transforms,
+                unstable_ids,
+                tilt_threshold_degrees=45.0,
+            )
+
+            self.assertEqual(unstable_ids, list(original_transforms))
+            self.assertEqual(restored, list(original_transforms))
+            for object_id, transform in original_transforms.items():
+                np.testing.assert_allclose(
+                    scene.get_object(object_id).transform.GetAsMatrix4(),
+                    transform.GetAsMatrix4(),
                 )
 
 
