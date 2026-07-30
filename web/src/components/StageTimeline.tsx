@@ -77,7 +77,13 @@ function isWorker(role: AgentRole): boolean {
   return role === "designer" || role === "critic";
 }
 
-function coordinationFlow(segments: TimelineSegment[]): FlowStep[] {
+function hasRecordedPlanner(segments: TimelineSegment[]): boolean {
+  // Orchestration events are the authoritative record of Planner delegation.
+  // A Planner segment can be separated from workers by renders or checkpoints.
+  return segments.some((segment) => segment.role === "planner");
+}
+
+function coordinationFlow(segments: TimelineSegment[], plannerRecorded: boolean): FlowStep[] {
   const observed = segments
     .filter((segment) => segment.role !== "system")
     .map((segment) => ({ role: segment.role, count: segment.events.length, inferred: false }));
@@ -88,6 +94,7 @@ function coordinationFlow(segments: TimelineSegment[]): FlowStep[] {
     if (
       isWorker(step.role)
       && (index === 0 || previous?.role !== "planner")
+      && !plannerRecorded
     ) {
       flow.push({ role: "planner", count: 0, inferred: true });
     }
@@ -110,13 +117,13 @@ function segmentEvents(events: AuditEvent[]): TimelineSegment[] {
 }
 
 function AgentHandoff({ segments }: { segments: TimelineSegment[] }) {
-  const agents = coordinationFlow(segments);
+  const agents = coordinationFlow(segments, hasRecordedPlanner(segments));
   if (!agents.length) return null;
   return <div className="agent-handoff" aria-label="Agent coordination sequence"><span>Coordination flow</span><div>{agents.map((step, index) => <span className={`agent-handoff-step${step.inferred ? " inferred" : ""}`} key={`${step.role}-${index}`}><b className={`agent-badge ${step.role}`}>{AGENT_LABELS[step.role]}</b><small>{step.inferred ? "not recorded" : step.count}</small>{index < agents.length - 1 && <ArrowRight size={12} />}</span>)}</div></div>;
 }
 
-function AgentTransition({ from, to }: { from: AgentRole; to: AgentRole }) {
-  const needsPlanner = isWorker(from) && isWorker(to);
+function AgentTransition({ from, to, plannerRecorded }: { from: AgentRole; to: AgentRole; plannerRecorded: boolean }) {
+  const needsPlanner = isWorker(from) && isWorker(to) && !plannerRecorded;
   return <div className="agent-transition"><span>{AGENT_LABELS[from]}</span><ArrowRight size={12} />{needsPlanner && <><b className="agent-badge planner">Planner</b><small>not recorded</small><ArrowRight size={12} /></>}<span>{AGENT_LABELS[to]}</span></div>;
 }
 
@@ -140,7 +147,8 @@ export function StageTimeline({ groups, selectedRender, stages, stageFilter, set
     <div className="timeline">
       {groups.map((group) => {
         const segments = segmentEvents(group.events);
-        return <section className={`timeline-group ${group.id === selectedRender ? "selected" : ""}`} id={`timeline-snapshot-${group.id}`} key={group.id}><div className="timeline-group-heading"><div><strong>{group.render ? group.render.label : "After latest checkpoint"}</strong><small>{group.render ? formatTime(group.render.created_at) : "Events completed after the newest render"}</small></div><span>{group.events.length} events</span></div><AgentHandoff segments={segments} />{segments.map((segment, index) => <div key={`${segment.role}-${index}`}>{index > 0 && <AgentTransition from={segments[index - 1].role} to={segment.role} />}<AgentSegment segment={segment} onOpenEvent={onOpenEvent} /></div>)}{!group.events.length && <div className="empty-group">No events in this checkpoint range.</div>}</section>;
+        const plannerRecorded = hasRecordedPlanner(segments);
+        return <section className={`timeline-group ${group.id === selectedRender ? "selected" : ""}`} id={`timeline-snapshot-${group.id}`} key={group.id}><div className="timeline-group-heading"><div><strong>{group.render ? group.render.label : "After latest checkpoint"}</strong><small>{group.render ? formatTime(group.render.created_at) : "Events completed after the newest render"}</small></div><span>{group.events.length} events</span></div><AgentHandoff segments={segments} />{segments.map((segment, index) => <div key={`${segment.role}-${index}`}>{index > 0 && <AgentTransition from={segments[index - 1].role} to={segment.role} plannerRecorded={plannerRecorded} />}<AgentSegment segment={segment} onOpenEvent={onOpenEvent} /></div>)}{!group.events.length && <div className="empty-group">No events in this checkpoint range.</div>}</section>;
       })}
       {!groups.length && <div className="empty-list">No events match this stage.</div>}
     </div>
