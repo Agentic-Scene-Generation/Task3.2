@@ -286,7 +286,7 @@ function App() {
   }, [selectedRender, view]);
 
   useEffect(() => {
-    if (!beforeRender || !currentRender || beforeRender.state_path === currentRender.state_path) {
+    if (!beforeRender || !currentRender || !beforeRender.state_path || !currentRender.state_path || beforeRender.state_path === currentRender.state_path) {
       setDiff(null);
       return;
     }
@@ -406,7 +406,8 @@ function ReviewView({ currentRender, renders, selectedRender, setSelectedRender,
 }
 
 function DiffView({ beforeRender, currentRender, renders, comparisonRender, selectedRender, setComparisonRender, setSelectedRender, diff }: { beforeRender?: Render; currentRender?: Render; renders: Render[]; comparisonRender: string; selectedRender: string; setComparisonRender: (value: string) => void; setSelectedRender: (value: string) => void; diff: Diff | null }) {
-  return <section className="diff-panel"><div className="panel-heading"><div><span className="eyebrow">Checkpoint comparison</span><h2>Scene diff</h2></div><div className="diff-selects"><RenderSelect label="Before" renders={renders} value={comparisonRender} onChange={setComparisonRender} /><ArrowLeftRight size={18} /><RenderSelect label="After" renders={renders} value={selectedRender} onChange={setSelectedRender} /></div></div><div className="diff-images"><SceneFrame render={beforeRender} /><SceneFrame render={currentRender} /></div><div className="delta-grid"><DeltaList title="Added" values={diff?.added.map((item) => item.object_id) ?? []} tone="positive" /><DeltaList title="Moved or rotated" values={diff?.changed.map((item) => item.object_id) ?? []} tone="warning" /><DeltaList title="Removed" values={diff?.removed.map((item) => item.object_id) ?? []} tone="negative" /></div></section>;
+  const hasComparableStates = Boolean(beforeRender?.state_path && currentRender?.state_path);
+  return <section className="diff-panel"><div className="panel-heading"><div><span className="eyebrow">Checkpoint comparison</span><h2>Scene diff</h2></div><div className="diff-selects"><RenderSelect label="Before" renders={renders} value={comparisonRender} onChange={setComparisonRender} /><ArrowLeftRight size={18} /><RenderSelect label="After" renders={renders} value={selectedRender} onChange={setSelectedRender} /></div></div>{!hasComparableStates && <div className="excerpt-note">Final views are rendered from the completed Blender scene and have no JSON checkpoint for object-level comparison.</div>}<div className="diff-images"><SceneFrame render={beforeRender} /><SceneFrame render={currentRender} /></div><div className="delta-grid"><DeltaList title="Added" values={diff?.added.map((item) => item.object_id) ?? []} tone="positive" /><DeltaList title="Moved or rotated" values={diff?.changed.map((item) => item.object_id) ?? []} tone="warning" /><DeltaList title="Removed" values={diff?.removed.map((item) => item.object_id) ?? []} tone="negative" /></div></section>;
 }
 
 function DeltaList({ title, values, tone }: { title: string; values: string[]; tone: string }) { return <div className={`delta-list ${tone}`}><span>{title}</span><strong>{values.length}</strong><div>{values.length ? values.map((value) => <code key={value}>{value}</code>) : <small>No changes</small>}</div></div>; }

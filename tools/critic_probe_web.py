@@ -248,30 +248,59 @@ def _stage_from_render_dir(render_dir: Path) -> str:
 
 def _render_records(probe_root: Path, room_dir: Path) -> list[dict[str, Any]]:
     render_root = room_dir / "scene_renders"
-    if not render_root.is_dir():
-        return []
     records: list[dict[str, Any]] = []
-    for state_path in sorted(render_root.rglob("scene_state.json")):
-        render_dir = state_path.parent
-        top_image = next(iter(sorted(render_dir.glob("*top*.png"))), None)
-        side_image = next(iter(sorted(render_dir.glob("*side*.png"))), None)
-        score_path = render_dir / "scores.yaml"
+    if render_root.is_dir():
+        for state_path in sorted(render_root.rglob("scene_state.json")):
+            render_dir = state_path.parent
+            top_image = next(iter(sorted(render_dir.glob("*top*.png"))), None)
+            side_image = next(iter(sorted(render_dir.glob("*side*.png"))), None)
+            score_path = render_dir / "scores.yaml"
+            records.append(
+                {
+                    "id": str(render_dir.relative_to(room_dir)),
+                    "stage": _stage_from_render_dir(render_dir),
+                    "label": f"{_stage_from_render_dir(render_dir)} / {render_dir.name}",
+                    "state_path": str(state_path.relative_to(probe_root)),
+                    "top_image": (
+                        str(top_image.relative_to(probe_root)) if top_image else None
+                    ),
+                    "side_image": (
+                        str(side_image.relative_to(probe_root)) if side_image else None
+                    ),
+                    "has_scores": score_path.is_file(),
+                    # The scene state is written once per snapshot. Directory mtimes
+                    # can be changed later by score files or auxiliary renders.
+                    "created_at": _iso_mtime(state_path),
+                }
+            )
+
+    final_view_dir = room_dir.parent / "critic_final_views"
+    final_top = final_view_dir / "00_top.png"
+    final_side = final_view_dir / "01_side.png"
+    if final_top.is_file() or final_side.is_file():
+        final_images = [path for path in (final_top, final_side) if path.is_file()]
         records.append(
             {
-                "id": str(render_dir.relative_to(room_dir)),
-                "stage": _stage_from_render_dir(render_dir),
-                "label": f"{_stage_from_render_dir(render_dir)} / {render_dir.name}",
-                "state_path": str(state_path.relative_to(probe_root)),
+                "id": "critic_final_views",
+                "stage": "final_view",
+                "label": "Final view",
+                # Final views are rendered from house.blend and have no matching
+                # scene_state.json, so they intentionally cannot be diffed.
+                "state_path": None,
                 "top_image": (
-                    str(top_image.relative_to(probe_root)) if top_image else None
+                    str(final_top.relative_to(probe_root))
+                    if final_top.is_file()
+                    else None
                 ),
                 "side_image": (
-                    str(side_image.relative_to(probe_root)) if side_image else None
+                    str(final_side.relative_to(probe_root))
+                    if final_side.is_file()
+                    else None
                 ),
-                "has_scores": score_path.is_file(),
-                # The scene state is written once per snapshot. Directory mtimes
-                # can be changed later by score files or auxiliary renders.
-                "created_at": _iso_mtime(state_path),
+                "has_scores": False,
+                "created_at": _iso_mtime(
+                    max(final_images, key=lambda path: path.stat().st_mtime)
+                ),
             }
         )
     return sorted(records, key=lambda record: record["created_at"], reverse=True)

@@ -24,7 +24,7 @@ export type Render = {
   id: string;
   stage: string;
   label: string;
-  state_path: string;
+  state_path: string | null;
   top_image: string | null;
   side_image: string | null;
   has_scores: boolean;

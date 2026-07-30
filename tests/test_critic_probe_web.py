@@ -153,6 +153,36 @@ def test_returns_newest_render_first(tmp_path: Path) -> None:
     assert payload["renders"][0]["id"].endswith("renders_002")
 
 
+def test_exposes_scene_final_views_as_snapshot(tmp_path: Path) -> None:
+    room = (
+        tmp_path
+        / "run_a"
+        / "critic_on"
+        / "batch_001"
+        / "hydra"
+        / "scene_000"
+        / "room_bedroom"
+    )
+    write(room / "action_log.json", "[]")
+    write(room.parent / "critic_final_views" / "00_top.png", "top")
+    write(room.parent / "critic_final_views" / "01_side.png", "side")
+    app = create_app(tmp_path)
+
+    payload = (
+        app.test_client()
+        .get("/api/scene", query_string={"path": str(room.relative_to(tmp_path))})
+        .get_json()
+    )
+
+    final_view = next(
+        item for item in payload["renders"] if item["id"] == "critic_final_views"
+    )
+    assert final_view["label"] == "Final view"
+    assert final_view["state_path"] is None
+    assert final_view["top_image"].endswith("critic_final_views/00_top.png")
+    assert final_view["side_image"].endswith("critic_final_views/01_side.png")
+
+
 def test_normalizes_naive_action_timestamps_to_utc(tmp_path: Path) -> None:
     room = (
         tmp_path
