@@ -26,10 +26,10 @@ You MUST output valid JSON matching this exact schema:
 {
   "room_type": "string — primary room type (e.g. bedroom, kitchen, living room, office)",
   "style": "string — aesthetic style (e.g. cozy modern, industrial, minimalist, farmhouse)",
-  "required_large_objects": ["list of furniture-scale objects that must be in the room"],
+  "required_large_objects": ["list of floor-supported layout objects (furniture, rugs, floor plants) that must be in the room"],
   "required_wall_objects": ["list of wall-mounted objects (paintings, mirrors, shelves, lights)"],
   "required_ceiling_objects": ["list of ceiling-mounted objects (lights, fans, sprinklers)"],
-  "required_small_objects": ["list of small manipulable objects (books, cups, plants, tools)"],
+  "required_small_objects": ["list of hand-scale or surface-placed objects (books, cups, tools)"],
   "functional_zones": ["list of spatial zones within the room (e.g. sleeping_zone, working_zone)"],
   "interaction_constraints": [
     "constraints about robot reachability, clearance, support surfaces",
@@ -95,6 +95,11 @@ _NUMBER_WORDS: dict[str, int] = {
     "five": 5,
     "six": 6,
 }
+
+# Only families with a stable pair semantics receive a deterministic quantity
+# when the prompt uses an unquantified plural. Generic plurals such as
+# "exposed beams" do not imply an exact count.
+_PAIRED_PLURAL_FAMILIES = {"nightstand"}
 
 _OBJECT_ALIASES: dict[str, tuple[str, list[str], str]] = {
     "bed": ("large", ["bed", "beds"], "bed"),
@@ -164,8 +169,13 @@ _OBJECT_ALIASES: dict[str, tuple[str, list[str], str]] = {
 }
 
 
-def _extract_count_before_alias(text: str, alias: str) -> int:
-    """Return a conservative count for an object mention in fallback parsing."""
+def _extract_count_before_alias(
+    text: str,
+    alias: str,
+    *,
+    unquantified_plural_minimum: int = 1,
+) -> int:
+    """Return a conservative minimum count for an object mention."""
     alias_pattern = re.escape(alias.lower()).replace(r"\ ", r"\s+")
     number_pattern = "|".join([r"\d+", *map(re.escape, _NUMBER_WORDS)])
     counted_pattern = (
@@ -181,7 +191,14 @@ def _extract_count_before_alias(text: str, alias: str) -> int:
         best = max(best, count)
     if best:
         return best
-    return 1 if re.search(rf"\b{alias_pattern}\b", text) else 0
+    if not re.search(rf"\b{alias_pattern}\b", text):
+        return 0
+    # The current schema represents quantity by repeated canonical names.
+    # An explicit plural therefore means at least two instances even when the
+    # prompt omits an exact numeral (for example, "rattan nightstands").
+    final_word = alias.lower().split()[-1]
+    plural = final_word.endswith(("s", "es")) and not final_word.endswith("ss")
+    return max(1, unquantified_plural_minimum) if plural else 1
 
 
 def _extract_required_objects_from_prompt(prompt_lower: str) -> dict[str, list[str]]:
@@ -203,7 +220,16 @@ def _extract_required_objects_from_prompt(prompt_lower: str) -> dict[str, list[s
                 search_text,
             )
         for alias in aliases:
-            count = max(count, _extract_count_before_alias(search_text, alias))
+            count = max(
+                count,
+                _extract_count_before_alias(
+                    search_text,
+                    alias,
+                    unquantified_plural_minimum=(
+                        2 if canonical in _PAIRED_PLURAL_FAMILIES else 1
+                    ),
+                ),
+            )
         if count > 0:
             required[bucket].extend([canonical] * count)
     student_desk_count = required["large"].count("student desk")

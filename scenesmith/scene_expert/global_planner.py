@@ -61,10 +61,16 @@ Guidelines:
 
 _STAGE_DESCRIPTIONS = {
     "floor_plan": "Generate room geometry: walls, doors, windows, and room dimensions.",
-    "furniture": "Place large furniture (beds, sofas, tables, wardrobes) in the room.",
+    "furniture": (
+        "Place floor-supported layout objects (beds, sofas, tables, wardrobes, "
+        "rugs, floor lamps, and full-size floor plants) in the room."
+    ),
     "wall_mounted": "Place wall-mounted objects (paintings, mirrors, shelves, lights) on walls.",
     "ceiling_mounted": "Place ceiling-mounted objects (lights, fans) on the ceiling.",
-    "manipuland": "Place small manipulable objects (books, cups, plants) on furniture surfaces.",
+    "manipuland": (
+        "Place hand-scale or tabletop objects (books, cups, small decor) on "
+        "furniture surfaces; do not duplicate floor plants or rugs."
+    ),
 }
 
 _STAGE_CRITIC_CHECKS = {

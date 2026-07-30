@@ -4,11 +4,33 @@ from types import SimpleNamespace
 
 from scenesmith.agent_utils.asset_runtime import (
     AssetRuntimeGate,
+    canonical_requirement_family,
+    is_floor_layout_family,
+    placement_role_contract,
     semantic_asset_family,
 )
 
 
 class AssetRuntimeGateTest(unittest.TestCase):
+    def test_furniture_role_is_floor_placement_not_narrow_taxonomy(self) -> None:
+        contract = placement_role_contract("furniture")
+
+        self.assertIn("floor-supported", contract)
+        self.assertIn("floor plants", contract)
+        self.assertTrue(is_floor_layout_family("large potted plant"))
+        self.assertTrue(is_floor_layout_family("woven rug"))
+        self.assertFalse(is_floor_layout_family("coffee mug"))
+
+    def test_scene_instance_ids_share_requirement_family(self) -> None:
+        self.assertEqual(
+            canonical_requirement_family("student_desk_5"),
+            "student_desk",
+        )
+        self.assertEqual(
+            canonical_requirement_family("teacher_desk_0"),
+            "teacher_desk",
+        )
+
     def test_floor_covering_variants_share_the_rug_family(self) -> None:
         for description in ("square rug", "hallway runner", "woven floor mat"):
             with self.subTest(description=description):

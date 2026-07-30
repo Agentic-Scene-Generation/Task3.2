@@ -1,7 +1,7 @@
 name: "asset_validation"
-version: "1.2"
+version: "1.3"
 description: "Validate generated 3D mesh matches the requested description and style"
-template_variables: ["description", "num_images", "asset_role"]
+template_variables: ["description", "num_images", "asset_role", "placement_scope"]
 prompt: |
   <role>
   You validate whether a generated 3D mesh matches its description,
@@ -10,11 +10,16 @@ prompt: |
 
   <placement_role>
   The target SceneSmith placement role is "{{ asset_role }}".
+  Its support/placement scope is:
+  "{{ placement_scope }}"
+  The role is a stage-ownership tag, NOT a narrow object taxonomy.
   Judge completeness relative to that role. Wall-mounted art, mirrors, boards,
   and panels are normally flat or shallow and need no legs or stand.
   Ceiling-mounted fixtures may include mounting hardware. Manipulands may be
-  small, thin, soft, or visually simple. Only furniture must be a standalone
-  freestanding furniture product.
+  small, thin, soft, or visually simple. The furniture stage accepts any
+  standalone floor-supported layout object, including a full-size potted plant,
+  floor lamp, rug, basket, or freestanding decor. Never reject such an object
+  merely because it is not conventional furniture.
   </placement_role>
 
   <task>
@@ -26,7 +31,8 @@ prompt: |
   </task>
 
   <validation_criteria>
-  1. Does the mesh match "{{ description }}"? (not a different object type)
+  1. Does the mesh match "{{ description }}" and its support/placement scope?
+     Judge the requested category, not whether it is conventional furniture.
   2. Does the style match? If description specifies style attributes
      (antique, modern, rustic, red, wooden, etc.), verify they are present
   3. Is there exactly ONE object? REJECT if multiple objects are present,

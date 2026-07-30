@@ -97,6 +97,51 @@ _STYLE_WORDS = {
     "brown",
 }
 
+# ``ObjectType`` is a placement-stage ownership tag in SceneSmith, not a narrow
+# furniture ontology.  Keep the user-facing scope text in one place so request
+# analysis and visual admission cannot disagree about floor-supported decor.
+_PLACEMENT_ROLE_CONTRACTS: dict[str, str] = {
+    "furniture": (
+        "floor_placed: standalone floor-supported objects that participate in the "
+        "room layout, including conventional furniture, floor plants in pots, "
+        "floor lamps, rugs, baskets, and other freestanding decor"
+    ),
+    "wall_mounted": (
+        "wall_mounted: objects whose intended support is a wall, including art, "
+        "mirrors, boards, shelves, sconces, and mounted planters"
+    ),
+    "ceiling_mounted": (
+        "ceiling_mounted: objects whose intended support is the ceiling, including "
+        "lights, fans, projectors, and hanging decor"
+    ),
+    "manipuland": (
+        "surface_placed: hand-scale or tabletop objects placed on furniture or "
+        "other support surfaces; this excludes full-size floor plants and rugs"
+    ),
+}
+
+_FLOOR_LAYOUT_FAMILIES = frozenset({"plant", "rug", "floor_lamp"})
+
+# Bump whenever semantic admission meaning changes.  Persistent HSSD decisions
+# must never outlive the prompt/placement contract that produced them.
+ASSET_SEMANTIC_CONTRACT_VERSION = "6.0"
+
+
+def placement_role_contract(role: str) -> str:
+    """Return the support/placement scope represented by a SceneSmith role."""
+
+    normalized = str(role).strip().lower()
+    return _PLACEMENT_ROLE_CONTRACTS.get(
+        normalized,
+        f"{normalized or 'unknown'}: use the requested object's declared support mode",
+    )
+
+
+def is_floor_layout_family(description: str, short_name: str = "") -> bool:
+    """Return whether a family belongs to the floor-placement stage."""
+
+    return semantic_asset_family(description, short_name) in _FLOOR_LAYOUT_FAMILIES
+
 
 def semantic_asset_family(description: str, short_name: str = "") -> str:
     """Map stylistic variants to a stable object family for reuse and budgets."""
@@ -123,6 +168,17 @@ def semantic_asset_family(description: str, short_name: str = "") -> str:
         if token not in _STYLE_WORDS
     ]
     return "_".join(tokens[:4]) or "unknown"
+
+
+def canonical_requirement_family(value: str) -> str:
+    """Map a requirement phrase or scene instance ID to one stable family."""
+
+    normalized = re.sub(
+        r"(?:[\s_-]+(?:instance[\s_-]*)?\d+)+$",
+        "",
+        str(value).strip().lower(),
+    )
+    return semantic_asset_family(normalized)
 
 
 @dataclass

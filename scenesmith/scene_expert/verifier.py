@@ -13,11 +13,13 @@ from __future__ import annotations
 
 import logging
 import re
+from collections import Counter
 from pathlib import Path
 
 import yaml
 
 from scenesmith.agent_utils.room_size_policy import normalize_room_dimensions
+from scenesmith.agent_utils.asset_runtime import canonical_requirement_family
 from scenesmith.scene_expert.critic_feedback import (
     critic_finding_is_in_stage_scope,
     feedback_issue_text,
@@ -374,20 +376,28 @@ def _check_required_objects(
     if not stage_required:
         return issues
 
-    present_objects = scene_state_info.get("object_names", [])
-    present_lower = [o.lower() for o in present_objects]
+    required_counts = Counter(
+        canonical_requirement_family(required) for required in stage_required
+    )
+    present_counts = Counter(
+        canonical_requirement_family(present)
+        for present in scene_state_info.get("object_names", [])
+    )
 
-    for required in stage_required:
-        req_lower = required.lower()
-        # Fuzzy: check if any present object contains the required name as substring
-        if not any(req_lower in p or p in req_lower for p in present_lower):
-            issues.append(
-                VerifyIssue(
-                    issue_type="missing_object",
-                    object_name=required,
-                    description=f"Required object '{required}' for stage '{stage}' not found in scene",
-                )
+    for family, required_count in required_counts.items():
+        missing_count = max(0, required_count - present_counts.get(family, 0))
+        if not missing_count:
+            continue
+        issues.append(
+            VerifyIssue(
+                issue_type="missing_object",
+                object_name=family,
+                description=(
+                    f"Required family '{family}' for stage '{stage}' is missing "
+                    f"{missing_count} of {required_count} instance(s)"
+                ),
             )
+        )
 
     return issues
 

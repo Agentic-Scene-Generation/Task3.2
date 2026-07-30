@@ -1,7 +1,7 @@
 name: "asset_validation_lenient"
-version: "3.1"
+version: "3.2"
 description: "Lenient validation and orientation calibration for dataset assets"
-template_variables: ["description", "num_images", "asset_role"]
+template_variables: ["description", "num_images", "asset_role", "placement_scope"]
 prompt: |
   <role>
   You validate whether a retrieved 3D mesh is semantically correct for the request.
@@ -10,15 +10,21 @@ prompt: |
 
   <placement_role>
   The target SceneSmith placement role is "{{ asset_role }}".
+  Its support/placement scope is:
+  "{{ placement_scope }}"
+  The role is a stage-ownership tag, NOT a narrow object taxonomy.
   Judge completeness relative to that role:
   - wall_mounted assets such as paintings, canvases, mirrors, boards, and thin
     shelves are expected to be flat or shallow. They do NOT need legs, a stand,
     or freestanding furniture depth.
   - ceiling_mounted lights may include a canopy, cord, or mounting plate.
   - manipulands may be small, thin, soft, or visually simple.
-  - furniture should be a standalone functional furniture product.
+  - furniture means any standalone floor-supported layout object. It includes
+    conventional furniture as well as floor plants in pots, floor lamps, rugs,
+    baskets, and other freestanding decor.
   Never reject a role-correct mounted or small object for lacking freestanding
-  furniture structure.
+  furniture structure. Never reject a floor plant merely because it is not
+  conventional furniture.
   </placement_role>
 
   <task>
@@ -65,7 +71,8 @@ prompt: |
   - Placement adjectives: "corner", "against-wall", "front-of-room" - ignore
     unless the request explicitly requires an intrinsic shape such as "L-shaped"
 
-  Focus ONLY on: Is this the RIGHT TYPE of object for "{{ asset_role }}"?
+  Focus ONLY on: Is this the RIGHT TYPE for "{{ description }}", and is its
+  support/mount mode compatible with "{{ placement_scope }}"?
   </style_guidance>
 
   <orientation_contract>

@@ -194,6 +194,23 @@ class TestAssetRouterItemTypeValidation(unittest.TestCase):
         assert error is not None
         assert "manipuland" in error.lower()
 
+    def test_floor_plant_is_normalized_to_furniture_stage_ownership(self) -> None:
+        router = AssetRouter(
+            agent_type=AgentType.FURNITURE, vlm_service=MagicMock(), cfg=MagicMock()
+        )
+        item = AssetItem(
+            description="large indoor potted floor plant",
+            short_name="plant",
+            dimensions=[0.5, 0.5, 1.6],
+            object_type=ObjectType.MANIPULAND,
+            strategies=["hssd"],
+        )
+
+        error = router.validate_item_types([item])
+
+        self.assertIsNone(error)
+        self.assertEqual(ObjectType.FURNITURE, item.object_type)
+
     def test_thin_covering_uses_generated_fallback_without_material_server(
         self,
     ) -> None:
@@ -234,6 +251,37 @@ class TestAssetRouterItemTypeValidation(unittest.TestCase):
         self.assertIs(result, generated)
         router._try_generated_thin_covering.assert_not_called()
         router._generate_procedural_floor_covering_fallback.assert_called_once()
+
+    def test_floor_covering_fallback_builds_complete_pbr_material(self) -> None:
+        router = object.__new__(AssetRouter)
+        generated = MagicMock()
+        router._generate_thin_covering_geometry = MagicMock(return_value=generated)
+        item = AssetItem(
+            description="square woven rug",
+            short_name="rug",
+            dimensions=[1.8, 1.8, 0.03],
+            object_type=ObjectType.FURNITURE,
+            strategies=["thin_covering"],
+            thin_covering_type="tileable",
+        )
+
+        with TemporaryDirectory() as tmp:
+            result = router._generate_procedural_floor_covering_fallback(
+                item=item,
+                width=1.8,
+                depth=1.8,
+                thickness=0.003,
+                geometry_dir=Path(tmp),
+                shape="rectangular",
+            )
+            material_path = router._generate_thin_covering_geometry.call_args.kwargs[
+                "material_path"
+            ]
+
+            self.assertIs(result, generated)
+            self.assertTrue(any(material_path.glob("*_Color.png")))
+            self.assertTrue(any(material_path.glob("*_NormalGL.png")))
+            self.assertTrue(any(material_path.glob("*_Roughness.png")))
 
 
 class TestAnalysisResponseParsing(unittest.TestCase):

@@ -53,11 +53,51 @@ from scenesmith.scene_expert.prompt_context import strip_sceneexpert_injected_bl
 from scenesmith.scene_expert.verifier import (
     FullVerifier,
     StageVerifier,
+    _check_required_objects,
     _map_scenesmith_scores,
 )
 
 
 class SceneExpertMemoryTest(unittest.TestCase):
+    def test_stage_verifier_matches_canonical_families_and_counts(self) -> None:
+        spec = SceneTaskSpec(
+            room_type="classroom",
+            style="standard",
+            required_large_objects=[
+                *(["student desk"] * 6),
+                *(["chair"] * 6),
+                "teacher desk",
+            ],
+        )
+        scene_state_info = {
+            "object_names": [
+                *[f"student_desk_{index}" for index in range(6)],
+                *[f"chair_{index}" for index in range(6)],
+                "teacher_desk_0",
+            ]
+        }
+
+        issues = _check_required_objects(spec, "furniture", scene_state_info)
+
+        self.assertEqual([], issues)
+
+    def test_stage_verifier_reports_one_compact_quantity_gap(self) -> None:
+        spec = SceneTaskSpec(
+            room_type="bedroom",
+            style="standard",
+            required_large_objects=["bed", "nightstand", "nightstand"],
+        )
+
+        issues = _check_required_objects(
+            spec,
+            "furniture",
+            {"object_names": ["bed_0", "nightstand_0"]},
+        )
+
+        self.assertEqual(1, len(issues))
+        self.assertEqual("nightstand", issues[0].object_name)
+        self.assertIn("missing 1 of 2", issues[0].description)
+
     def test_transient_floor_plan_context_is_not_reused_as_room_prompt(self) -> None:
         prompt = (
             "A living room with a sofa, rug, and two plants.\n\n"
@@ -150,6 +190,13 @@ class SceneExpertMemoryTest(unittest.TestCase):
             spec.required_large_objects,
         )
         self.assertIn("sleeping_zone", spec.functional_zones)
+
+    def test_task_compiler_treats_unquantified_plural_as_minimum_two(self) -> None:
+        spec = _fallback_spec_from_prompt(
+            "A farmhouse bedroom with a bed and rattan nightstands."
+        )
+
+        self.assertEqual(2, spec.required_large_objects.count("nightstand"))
 
     def test_task_compiler_keeps_unmentioned_typical_object_as_suggestion(self) -> None:
         compiled = SceneTaskSpec(

@@ -27,6 +27,10 @@ from scenesmith.agent_utils.asset_router.dataclasses import (
     GeneratedGeometry,
     ValidationResult,
 )
+from scenesmith.agent_utils.asset_runtime import (
+    is_floor_layout_family,
+    placement_role_contract,
+)
 from scenesmith.agent_utils.blender.constants import (
     ARTICULATED_LIGHT_ENERGY,
     MATERIAL_VALIDATION_LIGHT_ENERGY,
@@ -399,6 +403,7 @@ class AssetRouter:
             description=description,
             num_images=len(image_paths),
             asset_role=self.agent_type.value,
+            placement_scope=placement_role_contract(self.agent_type.value),
         )
 
         # Build message with images.
@@ -525,6 +530,16 @@ class AssetRouter:
         for item in items:
             # EITHER type is allowed in both agents.
             if item.object_type == ObjectType.EITHER:
+                continue
+
+            # The furniture ObjectType owns the floor-placement stage. Correct
+            # narrow ontology output from the request-analysis LLM instead of
+            # rejecting a valid floor plant/rug/lamp transaction.
+            if (
+                self.agent_type == AgentType.FURNITURE
+                and is_floor_layout_family(item.description, item.short_name)
+            ):
+                item.object_type = ObjectType.FURNITURE
                 continue
 
             # Check if item type matches agent type.
@@ -861,6 +876,7 @@ class AssetRouter:
             description=description,
             num_images=len(image_paths),
             asset_role=self.agent_type.value,
+            placement_scope=placement_role_contract(self.agent_type.value),
         )
 
         # Build message with images.
@@ -1170,7 +1186,10 @@ class AssetRouter:
         """Create a local woven rug when both material backends are unavailable."""
         geometry_dir.mkdir(parents=True, exist_ok=True)
         safe_name = re.sub(r"[^a-zA-Z0-9_-]+", "_", item.short_name).strip("_")
-        texture_path = geometry_dir / f"{safe_name or 'rug'}_woven_fallback.png"
+        material_dir = geometry_dir / f"{safe_name or 'rug'}_woven_fallback_material"
+        material_dir.mkdir(parents=True, exist_ok=True)
+        material_name = safe_name or "rug"
+        texture_path = material_dir / f"{material_name}_Color.png"
         size = 512
         image = Image.new("RGB", (size, size), color=(128, 96, 74))
         draw = ImageDraw.Draw(image)
@@ -1185,13 +1204,19 @@ class AssetRouter:
             width=max(3, border // 3),
         )
         image.save(texture_path)
+        Image.new("RGB", (size, size), color=(128, 128, 255)).save(
+            material_dir / f"{material_name}_NormalGL.png"
+        )
+        Image.new("L", (size, size), color=210).save(
+            material_dir / f"{material_name}_Roughness.png"
+        )
         console_logger.warning(
-            "Using local woven texture fallback for floor covering '%s'",
+            "Using local PBR woven material fallback for floor covering '%s'",
             item.description,
         )
         return self._generate_thin_covering_geometry(
             item=item,
-            material_path=texture_path,
+            material_path=material_dir,
             width=width,
             second_dim=depth,
             thickness=thickness,

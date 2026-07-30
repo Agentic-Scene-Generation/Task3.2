@@ -30,7 +30,11 @@ from scenesmith.agent_utils.asset_router.dataclasses import (
     ModificationInfo,
     ValidationResult,
 )
-from scenesmith.agent_utils.asset_runtime import AssetRuntimeGate, semantic_asset_family
+from scenesmith.agent_utils.asset_runtime import (
+    ASSET_SEMANTIC_CONTRACT_VERSION,
+    AssetRuntimeGate,
+    semantic_asset_family,
+)
 from scenesmith.agent_utils.convex_decomposition_server import ConvexDecompositionClient
 from scenesmith.agent_utils.geometry_generation_server.client import (
     GeometryGenerationClient,
@@ -1006,7 +1010,8 @@ class AssetManager:
         agent_type = getattr(getattr(self, "agent_type", None), "value", "unknown")
         cache_key = hashlib.sha256(
             (
-                f"hssd-semantic-v5|{candidate_id}|{family}|role={agent_type}|"
+                f"hssd-semantic-v{ASSET_SEMANTIC_CONTRACT_VERSION}|"
+                f"{candidate_id}|{family}|role={agent_type}|"
                 f"lenient={int(use_lenient)}"
             ).encode("utf-8")
         ).hexdigest()
@@ -1066,7 +1071,7 @@ class AssetManager:
             return
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
-            "schema_version": "5.0",
+            "schema_version": ASSET_SEMANTIC_CONTRACT_VERSION,
             "candidate_id": candidate_id,
             "family": family,
             "is_acceptable": validation.is_acceptable,
