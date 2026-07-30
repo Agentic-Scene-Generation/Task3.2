@@ -9,6 +9,7 @@ from __future__ import annotations
 from functools import lru_cache
 from io import BytesIO
 import json
+import math
 import os
 import re
 import signal
@@ -203,6 +204,21 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
 
 def _iso_mtime(path: Path) -> str:
     return datetime.fromtimestamp(path.stat().st_mtime, UTC).isoformat()
+
+
+def _json_safe(value: Any) -> Any:
+    """Convert Python-only numeric values before sending browser JSON."""
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(item) for item in value]
+    return value
+
+
+def _json_response(payload: Any) -> Any:
+    return jsonify(_json_safe(payload))
 
 
 def _room_directories(run_root: Path) -> list[Path]:
@@ -1141,7 +1157,7 @@ def create_app(probe_root: Path = DEFAULT_PROBE_ROOT) -> Flask:
     def runs() -> Any:
         root = app.config["PROBE_ROOT"]
         if not root.is_dir():
-            return jsonify({"runs": []})
+            return _json_response({"runs": []})
         records = []
         for child in sorted(
             (item for item in root.iterdir() if item.is_dir()),
@@ -1167,7 +1183,7 @@ def create_app(probe_root: Path = DEFAULT_PROBE_ROOT) -> Flask:
                     ),
                 }
             )
-        return jsonify({"runs": records})
+        return _json_response({"runs": records})
 
     @app.get("/api/runs/<run_id>/scenes")
     def scenes(run_id: str) -> Any:
@@ -1199,7 +1215,7 @@ def create_app(probe_root: Path = DEFAULT_PROBE_ROOT) -> Flask:
                     "score_summary": _score_summary(room).get("grades", {}),
                 }
             )
-        return jsonify({"scenes": records})
+        return _json_response({"scenes": records})
 
     @app.get("/api/scene")
     def scene_detail() -> Any:
@@ -1212,7 +1228,7 @@ def create_app(probe_root: Path = DEFAULT_PROBE_ROOT) -> Flask:
         timings = _timing_records(room)
         llm_calls = _llm_records(room)
         audit_events = _audit_events(room)
-        return jsonify(
+        return _json_response(
             {
                 "path": relative_path,
                 "actions": action_log,
@@ -1238,7 +1254,7 @@ def create_app(probe_root: Path = DEFAULT_PROBE_ROOT) -> Flask:
             payload = _payload_for_llm_event(room, event_id)
             if payload is None:
                 abort(404)
-            return jsonify(payload)
+            return _json_response(payload)
         if event_id.startswith("tool-action:"):
             try:
                 step_number = int(event_id.removeprefix("tool-action:"))
@@ -1266,7 +1282,7 @@ def create_app(probe_root: Path = DEFAULT_PROBE_ROOT) -> Flask:
                 "audit_status": "tool_action",
                 "detail": action,
             }
-            return jsonify(
+            return _json_response(
                 {
                     "event": event,
                     "provenance": "action_log",
@@ -1283,7 +1299,7 @@ def create_app(probe_root: Path = DEFAULT_PROBE_ROOT) -> Flask:
         )
         if event is None:
             abort(404)
-        return jsonify(
+        return _json_response(
             {
                 "event": event,
                 "provenance": event["source"],
@@ -1304,7 +1320,7 @@ def create_app(probe_root: Path = DEFAULT_PROBE_ROOT) -> Flask:
             abort(404)
         if not before.is_file() or not after.is_file():
             abort(404)
-        return jsonify(_scene_diff(before, after))
+        return _json_response(_scene_diff(before, after))
 
     @app.get("/api/image")
     def image() -> Any:

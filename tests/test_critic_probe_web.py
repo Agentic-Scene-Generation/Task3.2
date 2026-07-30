@@ -183,6 +183,38 @@ def test_exposes_scene_final_views_as_snapshot(tmp_path: Path) -> None:
     assert final_view["side_image"].endswith("critic_final_views/01_side.png")
 
 
+def test_replaces_non_finite_audit_numbers_with_json_null(tmp_path: Path) -> None:
+    room = (
+        tmp_path
+        / "run_a"
+        / "critic_on"
+        / "batch_001"
+        / "hydra"
+        / "scene_000"
+        / "room_bedroom"
+    )
+    write(room / "action_log.json", "[]")
+    write(
+        room / "timing_stats.jsonl",
+        '{"stage":"furniture","module":"critic","event":"physics_context",'
+        '"extra":{"stance_m":Infinity}}\n',
+    )
+    app = create_app(tmp_path)
+
+    response = app.test_client().get(
+        "/api/scene", query_string={"path": str(room.relative_to(tmp_path))}
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    physics_event = next(
+        item
+        for item in payload["audit_events"]
+        if item["function"] == "physics_context"
+    )
+    assert physics_event["detail"]["stance_m"] is None
+
+
 def test_normalizes_naive_action_timestamps_to_utc(tmp_path: Path) -> None:
     room = (
         tmp_path
