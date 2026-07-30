@@ -411,6 +411,9 @@ def _check_stage_population(stage: str, scene_state_info: dict) -> list[VerifyIs
         scene_state_info.get("stage_required_min_output_objects", minimum) or 0
     )
     maximum = int(scene_state_info.get("stage_max_output_objects", 0) or 0)
+    required_maximum = int(
+        scene_state_info.get("stage_required_max_output_objects", maximum) or 0
+    )
     issues: list[VerifyIssue] = []
     if count < minimum:
         target_semantics = (
@@ -429,12 +432,18 @@ def _check_stage_population(stage: str, scene_state_info: dict) -> list[VerifyIs
             )
         )
     if maximum > 0 and count > maximum:
+        maximum_semantics = (
+            "required completion contract"
+            if required_maximum > 0 and maximum == required_maximum
+            else "preferred optional target"
+        )
         issues.append(
             VerifyIssue(
                 issue_type="excessive_stage_objects",
                 description=(
                     f"Stage '{stage}' produced {count} {object_type} objects; "
-                    f"the completion contract allows at most {maximum}"
+                    f"the {maximum_semantics} allows at most {maximum} "
+                    f"(explicit maximum: {required_maximum or 'unbounded'})"
                 ),
             )
         )

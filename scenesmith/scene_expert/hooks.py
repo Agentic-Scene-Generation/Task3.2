@@ -1183,9 +1183,11 @@ class SceneExpertHookRunner:
         if not execution_control_enabled:
             min_output_objects = 0
             max_output_objects = 0
+            required_max_output_objects = 0
         elif self._prompt_forbids_unrequested_objects():
             min_output_objects = required_min_output_objects
             max_output_objects = required_min_output_objects
+            required_max_output_objects = required_min_output_objects
         else:
             min_output_objects = max(
                 required_min_output_objects,
@@ -1197,6 +1199,7 @@ class SceneExpertHookRunner:
                 if configured_max > 0
                 else 0
             )
+            required_max_output_objects = 0
         # Keep the hard prompt requirement separate from SceneExpert's preferred
         # non-empty target. Optional decor should receive an agent retry and a
         # diagnostic when absent, never a physics hard failure.
@@ -1207,6 +1210,11 @@ class SceneExpertHookRunner:
         )
         setattr(scene, "scene_expert_min_output_objects", min_output_objects)
         setattr(scene, "scene_expert_max_output_objects", max_output_objects)
+        setattr(
+            scene,
+            "scene_expert_required_max_output_objects",
+            required_max_output_objects,
+        )
         if min_output_objects > 0 or max_output_objects > 0:
             maximum_text = (
                 str(max_output_objects) if max_output_objects > 0 else "unbounded"
@@ -1669,6 +1677,14 @@ class SceneExpertHookRunner:
                 "stage_max_output_objects": int(
                     getattr(scene, "scene_expert_max_output_objects", 0) or 0
                 ),
+                "stage_required_max_output_objects": int(
+                    getattr(
+                        scene,
+                        "scene_expert_required_max_output_objects",
+                        0,
+                    )
+                    or 0
+                ),
                 "degraded_stage_reasons": list(dict.fromkeys(degraded_stage_reasons)),
                 "stage_diagnostics": stage_diagnostics,
                 "runtime_repair_events": list(
@@ -1685,6 +1701,7 @@ class SceneExpertHookRunner:
                 "stage_min_output_objects": 0,
                 "stage_required_min_output_objects": 0,
                 "stage_max_output_objects": 0,
+                "stage_required_max_output_objects": 0,
                 "degraded_stage_reasons": [],
                 "stage_diagnostics": [],
                 "runtime_repair_events": [],

@@ -1304,7 +1304,7 @@ def add_wall_labels_to_top_view(
         scene = bpy.context.scene
 
         # Load font.
-        font = load_annotation_font(image_with=img.width, base_font_size_divisor=70)
+        font = load_annotation_font(image_width=img.width, base_font_size_divisor=70)
 
         for wall_data in wall_surfaces:
             surface_id = wall_data.get(

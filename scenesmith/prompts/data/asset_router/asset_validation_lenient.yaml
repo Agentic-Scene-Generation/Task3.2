@@ -1,16 +1,29 @@
 name: "asset_validation_lenient"
-version: "3.0"
+version: "3.1"
 description: "Lenient validation and orientation calibration for dataset assets"
-template_variables: ["description", "num_images"]
+template_variables: ["description", "num_images", "asset_role"]
 prompt: |
   <role>
   You validate whether a retrieved 3D mesh is semantically correct for the request.
   This is for pre-existing dataset objects with limited cosmetic variation.
   </role>
 
+  <placement_role>
+  The target SceneSmith placement role is "{{ asset_role }}".
+  Judge completeness relative to that role:
+  - wall_mounted assets such as paintings, canvases, mirrors, boards, and thin
+    shelves are expected to be flat or shallow. They do NOT need legs, a stand,
+    or freestanding furniture depth.
+  - ceiling_mounted lights may include a canopy, cord, or mounting plate.
+  - manipulands may be small, thin, soft, or visually simple.
+  - furniture should be a standalone functional furniture product.
+  Never reject a role-correct mounted or small object for lacking freestanding
+  furniture structure.
+  </placement_role>
+
   <task>
   Analyze the {{ num_images }} multi-view renders:
-  1. Identify what object TYPE is shown (wardrobe, dresser, cabinet, etc.)
+  1. Identify what object TYPE is shown
   2. Compare to "{{ description }}" - focus on OBJECT TYPE, not style
   3. Check structural criteria below
   </task>
@@ -20,7 +33,7 @@ prompt: |
   1. Object TYPE matches (wardrobe→wardrobe, dresser→dresser, cabinet→cabinet)
   2. Basic structure is present (doors/drawers if expected)
   3. Object is complete (not cut off or missing major parts)
-  4. Single furniture asset (not multiple separate furniture items)
+  4. Single role-correct asset (not multiple separate functional objects)
      EXCEPTIONS:
      - Beds with bedding (mattress, blankets, pillows) count as one asset
      - Sofas with integral seat/back cushions or decorative throw pillows count as
@@ -34,7 +47,7 @@ prompt: |
      surrounding room shells are never intrinsic parts of furniture.
 
   REJECT only if:
-  1. Wrong object category: "wardrobe" but shows bookshelf/desk/chair
+  1. Wrong object category: the requested category is not the visible object
   2. Completely wrong structure: "3-door" but has no doors at all
   3. Wrong material category: "wooden" but clearly metal industrial
   4. Compound scene fragment: the requested bed/sofa/table/etc. is accompanied by
@@ -52,7 +65,7 @@ prompt: |
   - Placement adjectives: "corner", "against-wall", "front-of-room" - ignore
     unless the request explicitly requires an intrinsic shape such as "L-shaped"
 
-  Focus ONLY on: Is this the RIGHT TYPE of furniture?
+  Focus ONLY on: Is this the RIGHT TYPE of object for "{{ asset_role }}"?
   </style_guidance>
 
   <orientation_contract>

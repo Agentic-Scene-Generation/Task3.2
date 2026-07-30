@@ -1961,8 +1961,18 @@ class BaseStatefulAgent(ABC):
             if object_type is not None:
                 stage_objects = self.scene.get_objects_by_type(object_type)
                 minimum, _, _ = self._stage_output_count_contract()
+                required_maximum_value = getattr(
+                    self.scene,
+                    "scene_expert_required_max_output_objects",
+                    None,
+                )
                 maximum = int(
-                    getattr(self.scene, "scene_expert_max_output_objects", 0) or 0
+                    (
+                        getattr(self.scene, "scene_expert_max_output_objects", 0)
+                        if required_maximum_value is None
+                        else required_maximum_value
+                    )
+                    or 0
                 )
                 if len(stage_objects) < minimum:
                     hard_reasons.append(

@@ -185,6 +185,57 @@ class StageFailureRecoveryTest(unittest.TestCase):
         self.assertIn("wall_mounted", scene.scene_expert_stage_diagnostics)
         self.assertFalse(hasattr(scene, "scene_expert_degraded_stage_reasons"))
 
+    def test_preferred_maximum_overage_is_not_a_hard_stage_failure(self) -> None:
+        class FakeScene:
+            text_description = "bedroom"
+            scene_expert_stage_budget = {"max_stage_regenerations": 1}
+            scene_expert_min_output_objects = 1
+            scene_expert_required_min_output_objects = 0
+            scene_expert_max_output_objects = 3
+            scene_expert_required_max_output_objects = 0
+
+            def __init__(self) -> None:
+                self.restore_calls = 0
+
+            @staticmethod
+            def to_state_dict() -> dict:
+                return {"objects": {}}
+
+            def restore_from_state_dict(self, state: dict) -> None:
+                del state
+                self.restore_calls += 1
+
+            @staticmethod
+            def get_objects_by_type(object_type: object) -> list:
+                del object_type
+                return [object(), object(), object(), object()]
+
+        calls = {"run": 0, "prepare": 0}
+
+        async def run_once() -> None:
+            calls["run"] += 1
+
+        async def prepare(reasons: list[str]) -> None:
+            self.assertIn("preferred optional stage output exceeded", reasons[0])
+            calls["prepare"] += 1
+
+        scene = FakeScene()
+        attempts = _run_sceneexpert_placement_stage(
+            stage="wall_mounted",
+            agent=SimpleNamespace(
+                admitted_stage_assets=lambda: [],
+                prepare_stage_regeneration=prepare,
+            ),
+            scene=scene,
+            run_once=run_once,
+        )
+
+        self.assertEqual(1, attempts)
+        self.assertEqual({"run": 2, "prepare": 1}, calls)
+        self.assertEqual(1, scene.restore_calls)
+        self.assertIn("wall_mounted", scene.scene_expert_stage_diagnostics)
+        self.assertFalse(hasattr(scene, "scene_expert_degraded_stage_reasons"))
+
     def test_budget_exhausted_zero_output_still_gets_fresh_planner_retry(
         self,
     ) -> None:

@@ -9,6 +9,21 @@ from typing import Any
 
 
 _FAMILY_ALIASES: dict[str, tuple[str, ...]] = {
+    # Match specific functional roles before broader furniture aliases. For
+    # example, "bedside table lamp" must not collapse to "nightstand" merely
+    # because it contains the phrase "bedside table".
+    "table_lamp": (
+        "bedside table lamp",
+        "lamp for bedside table",
+        "bedside lamp",
+        "table lamp",
+        "desk lamp",
+        "reading lamp",
+    ),
+    "wall_sconce": ("wall sconce", "wall lamp", "wall light"),
+    "blanket": ("throw blanket", "knit blanket", "blanket"),
+    "book": ("hardcover book", "paperback book", "book"),
+    "shelf": ("floating shelf", "wall shelf", "shelf"),
     "nightstand": ("nightstand", "bedside table", "bedside cabinet", "床头柜"),
     "wardrobe": ("wardrobe", "closet", "armoire", "衣柜"),
     "bookshelf": ("bookshelf", "bookcase", "书架"),

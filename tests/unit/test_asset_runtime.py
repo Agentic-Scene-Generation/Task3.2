@@ -36,6 +36,23 @@ class AssetRuntimeGateTest(unittest.TestCase):
         self.assertEqual(semantic_asset_family("two nightstands"), "nightstand")
         self.assertEqual(semantic_asset_family("built-in wardrobes"), "wardrobe")
 
+    def test_specific_small_object_roles_do_not_collapse_to_furniture(self) -> None:
+        self.assertEqual(
+            semantic_asset_family("modern bedside table lamp with white shade"),
+            "table_lamp",
+        )
+        self.assertEqual(
+            semantic_asset_family("lamp for bedside table"),
+            "table_lamp",
+        )
+        self.assertEqual(
+            semantic_asset_family("chunky knit throw blanket"),
+            "blanket",
+        )
+        self.assertEqual(semantic_asset_family("hardcover book"), "book")
+        self.assertEqual(semantic_asset_family("floating wooden shelf"), "shelf")
+        self.assertEqual(semantic_asset_family("modern wall sconce"), "wall_sconce")
+
     def test_required_family_survives_optional_budget(self) -> None:
         gate = AssetRuntimeGate()
         gate.configure(

@@ -1,12 +1,21 @@
 name: "asset_validation"
-version: "1.1"
+version: "1.2"
 description: "Validate generated 3D mesh matches the requested description and style"
-template_variables: ["description", "num_images"]
+template_variables: ["description", "num_images", "asset_role"]
 prompt: |
   <role>
   You validate whether a generated 3D mesh matches its description,
   including style attributes.
   </role>
+
+  <placement_role>
+  The target SceneSmith placement role is "{{ asset_role }}".
+  Judge completeness relative to that role. Wall-mounted art, mirrors, boards,
+  and panels are normally flat or shallow and need no legs or stand.
+  Ceiling-mounted fixtures may include mounting hardware. Manipulands may be
+  small, thin, soft, or visually simple. Only furniture must be a standalone
+  freestanding furniture product.
+  </placement_role>
 
   <task>
   Analyze the {{ num_images }} multi-view renders step by step:

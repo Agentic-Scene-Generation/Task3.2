@@ -17,6 +17,7 @@ from scenesmith.agent_utils.asset_manager import (
     AssetPathConfig,
     FailedAsset,
     _align_hssd_request_dimensions,
+    _optional_hssd_dimension_contract,
 )
 from scenesmith.agent_utils.asset_router.dataclasses import ValidationResult
 from scenesmith.agent_utils.geometry_generation_server.dataclasses import (
@@ -172,6 +173,16 @@ class TestAssetManager(unittest.TestCase):
         with self.assertRaises(ValueError):
             _align_hssd_request_dimensions(request)
 
+    def test_optional_hssd_dimensions_distinguish_omitted_from_malformed(self):
+        self.assertIsNone(_optional_hssd_dimension_contract([]))
+        self.assertIsNone(_optional_hssd_dimension_contract(None))
+        self.assertEqual(
+            _optional_hssd_dimension_contract([1, 2, 3]),
+            [1.0, 2.0, 3.0],
+        )
+        with self.assertRaisesRegex(ValueError, "exactly"):
+            _optional_hssd_dimension_contract([1, 2])
+
     def test_create_scene_object(self):
         """Test creating SceneObject from asset paths."""
         config = AssetPathConfig(
@@ -203,6 +214,63 @@ class TestAssetManager(unittest.TestCase):
         self.assertEqual(self.asset_manager.output_dir, self.output_dir)
         self.assertEqual(self.asset_manager.logger, self.mock_logger)
 
+    def test_runtime_required_family_extends_configured_critical_families(self):
+        manager = object.__new__(AssetManager)
+        manager.cfg = OmegaConf.create(
+            {
+                "asset_manager": {
+                    "hssd": {
+                        "semantic_validation": {
+                            "critical_families": ["bed", "sofa"],
+                        }
+                    }
+                }
+            }
+        )
+        manager._runtime_gate = MagicMock(required_families={"blanket"})
+
+        self.assertTrue(manager._is_critical_hssd_family("bed"))
+        self.assertTrue(manager._is_critical_hssd_family("blanket"))
+        self.assertFalse(manager._is_critical_hssd_family("wall_art"))
+
+    def test_critical_hssd_acceptance_requires_explicit_standalone_evidence(self):
+        manager = object.__new__(AssetManager)
+        manager.cfg = OmegaConf.create(
+            {
+                "asset_manager": {
+                    "hssd": {
+                        "semantic_validation": {
+                            "enabled": True,
+                            "families": ["bed"],
+                            "critical_families": ["bed"],
+                            "max_candidates": 1,
+                        }
+                    }
+                }
+            }
+        )
+        manager.debug_dir = self.temp_dir / "debug"
+        manager._thin_covering_router = MagicMock()
+        manager._thin_covering_router.validate_asset.return_value = ValidationResult(
+            True,
+            "Bed category is visible but standalone fields were omitted",
+        )
+        candidate = HssdRetrievalResult(
+            mesh_path=str(self.temp_dir / "compound_bed.glb"),
+            hssd_id="compound_bed",
+            object_name="bed",
+            similarity_score=0.95,
+            size=(1.6, 2.0, 0.8),
+            category="large_objects",
+        )
+
+        with self.assertRaisesRegex(ValueError, "failed visual semantic validation"):
+            manager._select_direct_hssd_candidate(
+                candidates=[candidate],
+                description="standalone upholstered bed",
+                short_name="bed",
+            )
+
     def test_direct_hssd_semantic_validation_skips_wall_like_bed(self):
         manager = object.__new__(AssetManager)
         manager.cfg = OmegaConf.create(
@@ -224,7 +292,12 @@ class TestAssetManager(unittest.TestCase):
         manager._thin_covering_router = MagicMock()
         manager._thin_covering_router.validate_asset.side_effect = [
             ValidationResult(False, "Looks like two wall panels"),
-            ValidationResult(True, "Recognizable upholstered bed"),
+            ValidationResult(
+                True,
+                "Recognizable upholstered bed",
+                contains_architectural_context=False,
+                requested_object_is_dominant=True,
+            ),
         ]
         candidates = [
             HssdRetrievalResult(
@@ -289,6 +362,8 @@ class TestAssetManager(unittest.TestCase):
         manager._thin_covering_router.validate_asset.return_value = ValidationResult(
             True,
             "Recognizable complete bed",
+            contains_architectural_context=False,
+            requested_object_is_dominant=True,
         )
         compact_bed = HssdRetrievalResult(
             mesh_path=str(self.temp_dir / "compact_bed.glb"),
@@ -387,6 +462,8 @@ class TestAssetManager(unittest.TestCase):
             "Recognizable sofa with integral cushions",
             front_view_image_index=4,
             orientation_confidence=0.9,
+            contains_architectural_context=False,
+            requested_object_is_dominant=True,
         )
         sofa = HssdRetrievalResult(
             mesh_path=str(self.temp_dir / "sofa.glb"),
@@ -529,23 +606,19 @@ class TestAssetManager(unittest.TestCase):
             for index in range(2)
         ]
 
-        selected = manager._select_direct_hssd_candidate(
-            candidates=candidates,
-            description="upholstered bed",
-            short_name="bed",
-        )
+        with self.assertRaisesRegex(TimeoutError, "infrastructure was unavailable"):
+            manager._select_direct_hssd_candidate(
+                candidates=candidates,
+                description="upholstered bed",
+                short_name="bed",
+            )
 
-        self.assertEqual("bed_0", selected.hssd_id)
         self.assertEqual(3, manager._thin_covering_router.validate_asset.call_count)
         first_two_meshes = [
             call.kwargs["mesh_path"].name
             for call in manager._thin_covering_router.validate_asset.call_args_list[:2]
         ]
         self.assertEqual(["bed_0.glb", "bed_1.glb"], first_two_meshes)
-        self.assertEqual(
-            "semantic_unverified_transient",
-            manager._direct_hssd_admission_states["bed_0"],
-        )
 
     def test_sceneexpert_truncation_expands_later_candidate_output_budget(self):
         manager = object.__new__(AssetManager)
@@ -582,7 +655,12 @@ class TestAssetManager(unittest.TestCase):
                 "Validation output truncated",
                 failure_kind="length",
             ),
-            ValidationResult(True, "Recognizable nightstand"),
+            ValidationResult(
+                True,
+                "Recognizable nightstand",
+                contains_architectural_context=False,
+                requested_object_is_dominant=True,
+            ),
         ]
         candidates = [
             HssdRetrievalResult(
@@ -728,6 +806,8 @@ class TestAssetManager(unittest.TestCase):
         first._thin_covering_router.validate_asset.return_value = ValidationResult(
             True,
             "Recognizable complete bed",
+            contains_architectural_context=False,
+            requested_object_is_dominant=True,
         )
         second = object.__new__(AssetManager)
         second.cfg = cfg

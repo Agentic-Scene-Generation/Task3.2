@@ -480,6 +480,13 @@ class StatefulWallAgent(BaseStatefulAgent, BaseWallAgent):
                 # Run multi-agent workflow.
                 await self._run_wall_workflow()
 
+            except StageValidationError as e:
+                console_logger.warning(
+                    "Wall stage returned a recoverable validation result for %s: %s",
+                    room_id,
+                    e,
+                )
+                raise
             except Exception as e:
                 console_logger.error(
                     f"Error during wall decoration for {room_id}: {e}",

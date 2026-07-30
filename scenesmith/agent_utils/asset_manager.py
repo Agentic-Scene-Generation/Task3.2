@@ -114,6 +114,37 @@ def _asset_validation_is_retryable(validation: ValidationResult) -> bool:
     return reason.startswith(("Rendering failed", "Validation call failed"))
 
 
+def _enforce_critical_hssd_validation_contract(
+    validation: ValidationResult,
+    *,
+    critical_family: bool,
+) -> ValidationResult:
+    """Require explicit standalone evidence before admitting critical assets."""
+    if not validation.is_acceptable or not critical_family:
+        return validation
+    if (
+        validation.contains_architectural_context is False
+        and validation.requested_object_is_dominant is True
+    ):
+        return validation
+    return ValidationResult(
+        is_acceptable=False,
+        reason=(
+            "Critical HSSD admission response omitted explicit standalone asset "
+            "evidence; both contains_architectural_context=false and "
+            "requested_object_is_dominant=true are required"
+        ),
+        suggestions=[
+            "Retry semantic validation or retrieve another standalone candidate"
+        ],
+        front_view_image_index=validation.front_view_image_index,
+        orientation_confidence=validation.orientation_confidence,
+        contains_architectural_context=validation.contains_architectural_context,
+        requested_object_is_dominant=validation.requested_object_is_dominant,
+        failure_kind="invalid_contract",
+    )
+
+
 @dataclass
 class AssetPathConfig:
     """Configuration for asset file paths and metadata."""
@@ -203,6 +234,20 @@ def _align_hssd_request_dimensions(
         operation_type=request.operation_type,
         scene_id=request.scene_id,
     )
+
+
+def _optional_hssd_dimension_contract(
+    dimensions: list[float] | tuple[float, ...] | None,
+) -> list[float] | None:
+    """Normalize an omitted size hint while rejecting malformed dimensions."""
+    if dimensions is None or len(dimensions) == 0:
+        return None
+    if len(dimensions) != 3:
+        raise ValueError(
+            "HSSD desired dimensions must be omitted or contain exactly "
+            f"[width, depth, height]; received {list(dimensions)}"
+        )
+    return [float(value) for value in dimensions]
 
 
 @dataclass
@@ -890,15 +935,13 @@ class AssetManager:
         except Exception:
             return getattr(validation_cfg, key, default)
 
-    def _is_required_hssd_family(self, family: str) -> bool:
-        required_families = getattr(
-            getattr(self, "_runtime_gate", None),
-            "required_families",
-            set(),
-        )
-        return family in set(required_families or set())
-
     def _is_critical_hssd_family(self, family: str) -> bool:
+        """Return whether a family requires verified semantic admission.
+
+        Runtime-required families extend the configured high-impact set. They
+        must never replace it: a scene that explicitly requires a blanket still
+        needs a selected bed or sofa to pass the configured critical contract.
+        """
         configured = {
             str(value).lower()
             for value in list(
@@ -909,11 +952,7 @@ class AssetManager:
             getattr(getattr(self, "_runtime_gate", None), "required_families", set())
             or set()
         )
-        if required_families:
-            return self._is_required_hssd_family(family)
-        if bool(getattr(self, "_execution_control_enabled", False)):
-            return False
-        return family in configured
+        return family in configured or family in required_families
 
     def _optional_hssd_candidate_is_ambiguous(
         self,
@@ -964,9 +1003,10 @@ class AssetManager:
         if not cache_dir_value:
             return None
         cache_dir = Path(cache_dir_value).expanduser()
+        agent_type = getattr(getattr(self, "agent_type", None), "value", "unknown")
         cache_key = hashlib.sha256(
             (
-                f"hssd-semantic-v4|{candidate_id}|{family}|"
+                f"hssd-semantic-v5|{candidate_id}|{family}|role={agent_type}|"
                 f"lenient={int(use_lenient)}"
             ).encode("utf-8")
         ).hexdigest()
@@ -1026,7 +1066,7 @@ class AssetManager:
             return
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
-            "schema_version": "4.0",
+            "schema_version": "5.0",
             "candidate_id": candidate_id,
             "family": family,
             "is_acceptable": validation.is_acceptable,
@@ -1161,6 +1201,7 @@ class AssetManager:
         For a small configurable set of high-impact furniture families, validate
         the already retrieved top candidates directly with the existing VLM.
         """
+        desired_dimensions = _optional_hssd_dimension_contract(desired_dimensions)
         excluded = set(excluded_candidate_ids or set())
         if not hasattr(self, "_direct_hssd_admission_states"):
             self._direct_hssd_admission_states = {}
@@ -1367,6 +1408,19 @@ class AssetManager:
                         use_lenient=use_lenient,
                         validation=validation,
                     )
+            contracted_validation = _enforce_critical_hssd_validation_contract(
+                validation,
+                critical_family=critical_family,
+            )
+            if contracted_validation is not validation:
+                validation = contracted_validation
+                validation_cache[validation_cache_key] = validation
+                self._save_persistent_hssd_validation(
+                    candidate_id=candidate.hssd_id,
+                    family=family,
+                    use_lenient=use_lenient,
+                    validation=validation,
+                )
             if validation.is_acceptable:
                 orientation_results = getattr(
                     self, "_direct_hssd_validation_results", None
@@ -1419,6 +1473,10 @@ class AssetManager:
                     max_retries=0,
                     max_output_tokens=active_max_output_tokens,
                 )
+                retry_validation = _enforce_critical_hssd_validation_contract(
+                    retry_validation,
+                    critical_family=critical_family,
+                )
                 if retry_validation.is_acceptable:
                     self._direct_hssd_validation_results[
                         transient_candidate.hssd_id
@@ -1457,24 +1515,6 @@ class AssetManager:
                     candidates[0].hssd_id,
                 )
                 return candidates[0]
-            if (
-                critical_family
-                and transient_candidate is not None
-                and execution_control_enabled
-            ):
-                # Transport unavailability is not semantic rejection. Preserve
-                # deterministic CLIP/dimension evidence, export the state for
-                # audit, and keep success-memory admission disabled downstream.
-                self._direct_hssd_admission_states[transient_candidate.hssd_id] = (
-                    "semantic_unverified_transient"
-                )
-                console_logger.warning(
-                    "Required HSSD family '%s' exhausted one isolated VLM retry; "
-                    "admitting deterministic candidate %s as transient-unverified",
-                    family,
-                    transient_candidate.hssd_id,
-                )
-                return transient_candidate
             raise TimeoutError(
                 "HSSD semantic validation infrastructure was unavailable for "
                 f"all {len(considered)} candidate(s) of '{description}'"
@@ -1496,7 +1536,8 @@ class AssetManager:
         enabled, max_candidates, _, _, _, _ = self._hssd_semantic_validation_settings(
             description, short_name
         )
-        if enabled:
+        family = semantic_asset_family(description, short_name)
+        if enabled or self._is_critical_hssd_family(family):
             return min(4, max_candidates)
         hssd_cfg = getattr(self.cfg.asset_manager, "hssd", None)
         try:
@@ -1728,7 +1769,9 @@ class AssetManager:
         """Prepare one HSSD candidate as an atomic admission transaction."""
         description = request.object_descriptions[index]
         short_name = request.short_names[index]
-        desired_dimensions = request.desired_dimensions[index]
+        desired_dimensions = _optional_hssd_dimension_contract(
+            request.desired_dimensions[index]
+        )
         server_mesh_path = Path(result.mesh_path)
         mesh_id = result.hssd_id
 
@@ -2007,6 +2050,9 @@ class AssetManager:
                     len(response.results),
                 )
                 candidates = list(response.results[:max_candidates])
+                desired_dimensions = _optional_hssd_dimension_contract(
+                    request.desired_dimensions[index]
+                )
                 excluded_candidate_ids: set[str] = set()
                 candidate_errors: list[str] = []
                 _, _, _, timeout_seconds, _, _ = (
@@ -2035,7 +2081,7 @@ class AssetManager:
                             candidates=candidates,
                             description=desc,
                             short_name=short_name,
-                            desired_dimensions=request.desired_dimensions[index],
+                            desired_dimensions=desired_dimensions,
                             excluded_candidate_ids=excluded_candidate_ids,
                             validation_deadline=validation_deadline,
                         )
@@ -2064,14 +2110,43 @@ class AssetManager:
                             result.hssd_id,
                             desc,
                             candidate_error,
-                            exc_info=True,
                         )
 
                 if scene_obj is None:
-                    raise ValueError(
+                    failure_detail = (
                         "All bounded HSSD candidate transactions failed for "
                         f"'{desc}': {' | '.join(candidate_errors)}"
                     )
+                    if any(
+                        marker in failure_detail.lower()
+                        for marker in (
+                            "timeout",
+                            "no executable time",
+                            "infrastructure",
+                        )
+                    ):
+                        failure_kind = "validation_unavailable"
+                    elif "visual semantic validation" in failure_detail.lower():
+                        failure_kind = "semantic_mismatch"
+                    elif not candidates:
+                        failure_kind = "retrieval_empty"
+                    else:
+                        failure_kind = "candidate_preparation"
+                    console_logger.warning(
+                        "HSSD asset unavailable after bounded candidate admission "
+                        "(kind=%s, description=%r): %s",
+                        failure_kind,
+                        desc,
+                        failure_detail,
+                    )
+                    failed_assets.append(
+                        FailedAsset(
+                            index=index,
+                            description=desc,
+                            error_message=f"[{failure_kind}] {failure_detail}",
+                        )
+                    )
+                    continue
                 successful_objects.append(scene_obj)
                 console_logger.info(
                     "HSSD asset transaction committed: %s (candidate %s)",

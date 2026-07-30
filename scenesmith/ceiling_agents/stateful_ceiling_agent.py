@@ -30,6 +30,7 @@ from scenesmith.ceiling_agents.base_ceiling_agent import BaseCeilingAgent
 from scenesmith.ceiling_agents.tools.ceiling_tools import CeilingTools
 from scenesmith.ceiling_agents.tools.vision_tools import CeilingVisionTools
 from scenesmith.prompts.registry import CeilingAgentPrompts
+from scenesmith.scene_expert.exceptions import StageValidationError
 from scenesmith.utils.logging import BaseLogger
 
 console_logger = logging.getLogger(__name__)
@@ -463,6 +464,13 @@ class StatefulCeilingAgent(BaseStatefulAgent, BaseCeilingAgent):
                 # Run multi-agent workflow.
                 await self._run_ceiling_workflow()
 
+            except StageValidationError as e:
+                console_logger.warning(
+                    "Ceiling stage returned a recoverable validation result for %s: %s",
+                    scene.room_id,
+                    e,
+                )
+                raise
             except Exception as e:
                 console_logger.error(
                     f"Error during ceiling decoration for {scene.room_id}: {e}",

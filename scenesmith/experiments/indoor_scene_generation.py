@@ -398,8 +398,8 @@ def _score_postprocessed_candidate_or_pause(
     )
 
 
-def _optional_stage_output_deficit(stage: str, scene: RoomScene) -> str:
-    """Return a diagnostic when a preferred optional stage target is unmet."""
+def _preferred_stage_population_issue(stage: str, scene: RoomScene) -> str:
+    """Return a diagnostic when a preferred optional population bound is missed."""
     object_type_by_stage = {
         "furniture": ObjectType.FURNITURE,
         "wall_mounted": ObjectType.WALL_MOUNTED,
@@ -418,15 +418,34 @@ def _optional_stage_output_deficit(stage: str, scene: RoomScene) -> str:
     if required_minimum is None:
         required_minimum = target_minimum
     required_minimum = int(required_minimum or 0)
-    if target_minimum <= required_minimum:
-        return ""
     current_count = len(scene.get_objects_by_type(object_type))
-    if current_count >= target_minimum:
-        return ""
-    return (
-        f"preferred optional stage output unmet: {stage} produced {current_count} "
-        f"objects; target={target_minimum}, explicitly_required={required_minimum}"
+    if target_minimum > required_minimum and current_count < target_minimum:
+        return (
+            f"preferred optional stage output unmet: {stage} produced {current_count} "
+            f"objects; target={target_minimum}, explicitly_required={required_minimum}"
+        )
+
+    target_maximum = int(getattr(scene, "scene_expert_max_output_objects", 0) or 0)
+    required_maximum_value = getattr(
+        scene,
+        "scene_expert_required_max_output_objects",
+        None,
     )
+    required_maximum = int(
+        (target_maximum if required_maximum_value is None else required_maximum_value)
+        or 0
+    )
+    if (
+        target_maximum > 0
+        and target_maximum > required_maximum
+        and current_count > target_maximum
+    ):
+        return (
+            f"preferred optional stage output exceeded: {stage} produced "
+            f"{current_count} objects; preferred_max={target_maximum}, "
+            f"explicit_max={required_maximum or 'unbounded'}"
+        )
+    return ""
 
 
 def _record_optional_stage_diagnostic(
@@ -445,8 +464,8 @@ def _record_optional_stage_diagnostic(
     diagnostics[stage] = list(dict.fromkeys(stage_diagnostics))
     setattr(scene, "scene_expert_stage_diagnostics", diagnostics)
     console_logger.warning(
-        "%s stage exhausted its bounded agent retry without optional output; "
-        "recording a diagnostic and continuing downstream: %s",
+        "%s stage exhausted its bounded agent retry outside the preferred optional "
+        "population range; recording a diagnostic and continuing downstream: %s",
         stage,
         reason,
     )
@@ -474,8 +493,8 @@ def _run_sceneexpert_placement_stage(
         try:
             asyncio.run(run_once())
             _raise_if_required_assets_unavailable(stage=stage, agent=agent)
-            optional_deficit = _optional_stage_output_deficit(stage, scene)
-            if optional_deficit:
+            population_issue = _preferred_stage_population_issue(stage, scene)
+            if population_issue:
                 admitted_assets = getattr(agent, "admitted_stage_assets", None)
                 available_assets = (
                     list(admitted_assets()) if callable(admitted_assets) else []
@@ -497,7 +516,7 @@ def _run_sceneexpert_placement_stage(
                         None,
                     )
                     if callable(prepare_placement):
-                        asyncio.run(prepare_placement([optional_deficit]))
+                        asyncio.run(prepare_placement([population_issue]))
                         continue
                 if regeneration_attempt < max_regenerations:
                     regeneration_attempt += 1
@@ -516,9 +535,9 @@ def _run_sceneexpert_placement_stage(
                         f"{stage_prompt}\n\n"
                         "# Preferred Optional Stage Retry\n"
                         "Try once more to place a small coherent stage-native "
-                        "object set. This is a quality target, not a hard scene "
-                        "requirement. Resolve: "
-                        f"{optional_deficit}"
+                        "object set within the preferred population range. This "
+                        "is a quality target, not a hard scene requirement. Resolve: "
+                        f"{population_issue}"
                     )
                     prepare_regeneration = getattr(
                         agent,
@@ -526,12 +545,12 @@ def _run_sceneexpert_placement_stage(
                         None,
                     )
                     if callable(prepare_regeneration):
-                        asyncio.run(prepare_regeneration([optional_deficit]))
+                        asyncio.run(prepare_regeneration([population_issue]))
                     continue
                 _record_optional_stage_diagnostic(
                     stage=stage,
                     scene=scene,
-                    reason=optional_deficit,
+                    reason=population_issue,
                     runtime_events=runtime_events,
                 )
                 return regeneration_attempt
@@ -2147,8 +2166,9 @@ def _generate_room(
                     ) = run_final_postprocessing(scene)
                     if not rescue_projection_success:
                         scene.restore_from_state_dict(post_rescue_state)
-                        raise RuntimeError(
-                            "final projection failed after manipuland rescue"
+                        raise StageValidationError(
+                            stage="manipuland",
+                            reasons=["final projection failed after manipuland rescue"],
                         )
                     remaining_after_rescue = len(
                         scene.get_objects_by_type(ObjectType.MANIPULAND)
@@ -2179,6 +2199,23 @@ def _generate_room(
                     )
                 except ScenePausedError:
                     raise
+                except StageValidationError as rescue_exc:
+                    console_logger.warning(
+                        "Manipuland post-processing rescue remained incomplete; "
+                        "exporting the permitted degraded final scene: %s",
+                        rescue_exc,
+                    )
+                    _mark_incomplete_placement_stage_degraded(
+                        stage="manipuland",
+                        agent=manipuland_agent,
+                        scene=scene,
+                        reasons=[
+                            reason
+                            + "; focused rescue failed: "
+                            + f"{type(rescue_exc).__name__}: {rescue_exc}"
+                        ],
+                        runtime_events=runtime_events,
+                    )
                 except Exception as rescue_exc:
                     console_logger.exception(
                         "Manipuland post-processing rescue did not produce a "

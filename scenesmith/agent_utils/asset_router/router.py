@@ -398,6 +398,7 @@ class AssetRouter:
             prompt_name=prompt_name,
             description=description,
             num_images=len(image_paths),
+            asset_role=self.agent_type.value,
         )
 
         # Build message with images.
@@ -859,6 +860,7 @@ class AssetRouter:
             prompt_name=prompt_name,
             description=description,
             num_images=len(image_paths),
+            asset_role=self.agent_type.value,
         )
 
         # Build message with images.
