@@ -350,6 +350,7 @@ def build_llm_call_debug_record(
     result: Any = None,
     raw_response: Any = None,
     error: str = "",
+    elapsed_sec: float = 0.0,
 ) -> LLMCallDebugRecord:
     prompt_text = _stringify_prompt(prompt)
     output_text = _stringify_prompt(output)
@@ -370,6 +371,7 @@ def build_llm_call_debug_record(
             else ""
         ),
         error=error,
+        elapsed_sec=max(0.0, float(elapsed_sec or 0.0)),
     )
 
 

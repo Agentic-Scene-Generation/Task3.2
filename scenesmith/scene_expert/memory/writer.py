@@ -52,7 +52,6 @@ _DETERMINISTIC_FAILURE_KEYWORDS = (
     "geometry failure",
 )
 _SYSTEM_PROMPT = """\
-/think
 You are the memory_writer for SceneExpert, a 3D scene generation system.
 Your job is to analyze a completed scene generation trace and extract reusable knowledge
 to update the long-term memory system.
@@ -95,6 +94,7 @@ Rules:
   procedure. Prefer NOOP over inventing a vague skill.
 - Focus on patterns that generalize to other rooms of the same type, not one-off details.
 - Extract one memory entry per distinct lesson learned. Avoid redundancy with existing memory.
+- Return at most five update operations, prioritizing one high-value lesson per stage.
 - Treat normalized `finding=` records as the authoritative critic evidence.
 - A success pattern must describe a verified relationship that worked; never copy
   unresolved critic findings or optional recommendations into successful_pattern.
@@ -108,7 +108,7 @@ Rules:
 
 
 class _MemoryUpdateEnvelope(BaseModel):
-    updates: list[dict[str, Any]] = Field(default_factory=list)
+    updates: list[dict[str, Any]] = Field(default_factory=list, max_length=5)
 
 
 class MemoryWriter:

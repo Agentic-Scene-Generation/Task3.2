@@ -19,6 +19,8 @@ from scenesmith.scene_expert.exceptions import StageValidationError
 from scenesmith.scene_expert.runtime_state import (
     ScenePausedError,
     candidate_state_hash,
+    mark_degraded_stage_recovered,
+    persist_degraded_incomplete,
     split_degraded_stage_reasons,
 )
 
@@ -84,6 +86,71 @@ class StageFailureRecoveryTest(unittest.TestCase):
         self.assertEqual(2, len(all_reasons))
         self.assertEqual(["[wall_mounted] optional asset unavailable"], current)
         self.assertEqual(["[furniture] visual critic unavailable"], upstream)
+
+    def test_legacy_unscoped_degraded_reason_is_diagnostic_only(self) -> None:
+        _, current, upstream = split_degraded_stage_reasons(
+            ["legacy nightstand collision"],
+            current_stage="ceiling_mounted",
+        )
+
+        self.assertEqual([], current)
+        self.assertEqual(["legacy nightstand collision"], upstream)
+
+    def test_authoritative_recovery_removes_only_origin_stage_blockers(self) -> None:
+        with TemporaryDirectory() as tmp:
+            scene = SimpleNamespace(
+                scene_expert_degraded_stage_reasons=[
+                    "[furniture] nightstand overlaps bed",
+                    "[wall_mounted] no wall decor",
+                ],
+                scene_expert_outcome_status="DEGRADED_INCOMPLETE",
+            )
+            persist_degraded_incomplete(
+                scene_root_dir=tmp,
+                reasons=list(scene.scene_expert_degraded_stage_reasons),
+            )
+
+            mark_degraded_stage_recovered(
+                scene=scene,
+                scene_root_dir=tmp,
+                stage="furniture",
+                recovered_reasons=["nightstand overlaps bed"],
+                evidence={"selection": "deterministic_candidate"},
+            )
+
+            self.assertEqual(
+                ["[wall_mounted] no wall decor"],
+                scene.scene_expert_degraded_stage_reasons,
+            )
+            self.assertEqual(
+                "DEGRADED_INCOMPLETE",
+                scene.scene_expert_outcome_status,
+            )
+            manifest_path = (
+                Path(tmp)
+                / "scene_expert"
+                / "degraded"
+                / "degraded_manifest.json"
+            )
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(["[wall_mounted] no wall decor"], payload["reasons"])
+            self.assertTrue(
+                (
+                    Path(tmp)
+                    / "scene_expert"
+                    / "degraded"
+                    / "last_recovered_furniture.json"
+                ).exists()
+            )
+
+            mark_degraded_stage_recovered(
+                scene=scene,
+                scene_root_dir=tmp,
+                stage="wall_mounted",
+            )
+            self.assertEqual([], scene.scene_expert_degraded_stage_reasons)
+            self.assertEqual("COMPLETE", scene.scene_expert_outcome_status)
+            self.assertFalse(manifest_path.exists())
 
     def test_batch_summary_preserves_degraded_and_orphaned_outcomes(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -295,6 +362,90 @@ class StageFailureRecoveryTest(unittest.TestCase):
             scene.scene_expert_runtime_repair_events,
         )
         self.assertIn("wall_mounted", scene.scene_expert_stage_diagnostics)
+        self.assertFalse(hasattr(scene, "scene_expert_degraded_stage_reasons"))
+
+    def test_optional_stage_restores_nonempty_best_candidate_after_bad_retry(
+        self,
+    ) -> None:
+        class FakeScene:
+            text_description = "bedroom"
+            scene_expert_stage_budget = {"max_stage_regenerations": 1}
+            scene_expert_min_output_objects = 1
+            scene_expert_required_min_output_objects = 0
+
+            def __init__(self) -> None:
+                self.object_count = 0
+                self.restore_calls = 0
+
+            def to_state_dict(self) -> dict:
+                return {"object_count": self.object_count}
+
+            def restore_from_state_dict(self, state: dict) -> None:
+                self.object_count = int(state["object_count"])
+                self.restore_calls += 1
+
+            def get_objects_by_type(self, object_type: object) -> list:
+                del object_type
+                return [object() for _ in range(self.object_count)]
+
+        scene = FakeScene()
+        calls = {"run": 0, "prepare": 0}
+
+        async def run_once() -> None:
+            calls["run"] += 1
+            if calls["run"] == 1:
+                scene.object_count = 1
+                agent.previous_scores = SimpleNamespace()
+                agent._last_score_provenance = {
+                    "score_source": "vlm_critic",
+                    "candidate_hash": candidate_state_hash(scene),
+                }
+                raise StageValidationError(
+                    stage="ceiling_mounted",
+                    reasons=[
+                        "visual critic quality below stage threshold: 0.475 < 0.600"
+                    ],
+                )
+            scene.object_count = 0
+            agent.previous_scores = None
+            agent._last_score_provenance = {}
+            raise StageValidationError(
+                stage="ceiling_mounted",
+                reasons=["missing required stage output: produced 0 objects"],
+            )
+
+        async def prepare(reasons: list[str]) -> None:
+            self.assertTrue(reasons)
+            calls["prepare"] += 1
+
+        agent = SimpleNamespace(
+            prepare_stage_regeneration=prepare,
+            admitted_stage_assets=lambda: [],
+            _evaluate_current_hard_state=lambda: SimpleNamespace(
+                hard_valid=True,
+                hard_reasons=[],
+            ),
+            _last_score_provenance={},
+            previous_scores=None,
+            final_render_dir=None,
+            checkpoint_render_dir=None,
+            _last_trusted_critic_candidate=None,
+            _normalized_visual_score=lambda scores: 0.475,
+        )
+        attempts = _run_sceneexpert_placement_stage(
+            stage="ceiling_mounted",
+            agent=agent,
+            scene=scene,
+            run_once=run_once,
+        )
+
+        self.assertEqual(1, attempts)
+        self.assertEqual({"run": 2, "prepare": 1}, calls)
+        self.assertEqual(1, scene.object_count)
+        self.assertIn(
+            "restored_best_stage_candidate",
+            scene.scene_expert_runtime_repair_events,
+        )
         self.assertFalse(hasattr(scene, "scene_expert_degraded_stage_reasons"))
 
     def test_preferred_maximum_overage_is_not_a_hard_stage_failure(self) -> None:

@@ -48,6 +48,7 @@ from scenesmith.scene_expert.repair_taxonomy import (
     FailureCategory,
     build_repair_plan,
 )
+from scenesmith.scene_expert.runtime_state import mark_degraded_stage_recovered
 from scenesmith.agent_utils.room import (
     AgentType,
     ObjectType,
@@ -503,6 +504,56 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             Furniture-specific design change instruction prompt.
         """
         return FurnitureAgentPrompts.DESIGNER_CRITIQUE_INSTRUCTION_STATEFUL
+
+    def _design_change_authoritative_spatial_context(self) -> str:
+        """Inject exact current AABBs so repair does not rely on stale chat state."""
+
+        if self.scene is None:
+            return ""
+        lines = [
+            "# Authoritative Current Furniture Geometry",
+            (
+                "These world-frame bounds describe the candidate being repaired. "
+                "Use the exact object IDs and compute a positive clearance before "
+                "moving anything; do not estimate footprints from the render."
+            ),
+        ]
+        room_bounds = self._room_bounds_xy()
+        if room_bounds is not None:
+            min_x, min_y, max_x, max_y = room_bounds
+            lines.append(
+                "furnishable_room_xy="
+                f"x[{min_x:.3f},{max_x:.3f}] "
+                f"y[{min_y:.3f},{max_y:.3f}]"
+            )
+        furniture = list(self.scene.get_objects_by_type(ObjectType.FURNITURE))
+        for obj in furniture[:16]:
+            bounds = obj.compute_world_bounds()
+            if bounds is None:
+                lines.append(
+                    f"- id={obj.object_id}; name={obj.name}; world_bounds=unavailable"
+                )
+                continue
+            world_min = np.asarray(bounds[0], dtype=float)
+            world_max = np.asarray(bounds[1], dtype=float)
+            center = (world_min + world_max) / 2.0
+            lines.append(
+                f"- id={obj.object_id}; name={obj.name}; "
+                f"center_xy=({center[0]:.3f},{center[1]:.3f}); "
+                f"x=[{world_min[0]:.3f},{world_max[0]:.3f}]; "
+                f"y=[{world_min[1]:.3f},{world_max[1]:.3f}]; "
+                f"z=[{world_min[2]:.3f},{world_max[2]:.3f}]"
+            )
+        if len(furniture) > 16:
+            lines.append(
+                f"- {len(furniture) - 16} additional furniture objects omitted"
+            )
+        lines.append(
+            "Repair acceptance: preserve all required categories; every furniture "
+            "AABB must remain inside furnishable_room_xy and must not overlap "
+            "another furniture AABB or a door/window clearance zone."
+        )
+        return "\n".join(lines)
 
     def _set_placement_noise_profile(self, mode: PlacementNoiseMode) -> None:
         """Set placement noise profile for furniture tools.
@@ -1101,8 +1152,14 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                             "independent visual critic confirmed that the agent "
                             f"candidate meets the quality target: {refreshed_reason}"
                         )
-                        self._write_fallback_comparison(comparison)
                         self.restore_agent_candidate(agent_candidate)
+                        self._close_recovered_furniture_degradation(
+                            comparison=comparison,
+                            recovered_reasons=list(
+                                getattr(self, "_degraded_stage_reasons", []) or []
+                            ),
+                        )
+                        self._write_fallback_comparison(comparison)
                         await self._finalize_scene_and_scores()
                         return comparison
                     comparison["trigger"] = refreshed_reason
@@ -1491,6 +1548,20 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         finally:
             self._stage_runtime_phase = "agent"
 
+        if (
+            comparison.get("selection") == "deterministic_candidate"
+            and comparison.get("deterministic_hard_valid", False)
+            and comparison.get("deterministic_candidate", {}).get("score_source")
+            == "vlm_critic"
+        ):
+            self._close_recovered_furniture_degradation(
+                comparison=comparison,
+                recovered_reasons=[
+                    *list(comparison.get("agent_hard_reasons", []) or []),
+                    *list(getattr(self, "_degraded_stage_reasons", []) or []),
+                ],
+            )
+
         # Preserve the diagnostic render path even when the controller restores
         # the incumbent after scoring.
         comparison["selected_scene_hash"] = self.scene.content_hash()
@@ -1504,6 +1575,41 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         finally:
             self._freeze_selected_fallback_candidate = False
         return comparison
+
+    def _close_recovered_furniture_degradation(
+        self,
+        *,
+        comparison: dict[str, Any],
+        recovered_reasons: list[object],
+    ) -> None:
+        """Make the selected hard-valid candidate authoritative for run state."""
+
+        working_memory = getattr(self, "stage_working_memory", None)
+        scene_root_dir = getattr(
+            working_memory,
+            "scene_root_dir",
+            getattr(self.scene, "scene_dir", self.logger.output_dir),
+        )
+        mark_degraded_stage_recovered(
+            scene=self.scene,
+            scene_root_dir=scene_root_dir,
+            stage=AgentType.FURNITURE.value,
+            recovered_reasons=recovered_reasons,
+            evidence={
+                "selection": comparison.get("selection"),
+                "selection_reason": comparison.get("selection_reason"),
+                "selection_evidence_level": comparison.get(
+                    "selection_evidence_level",
+                    "",
+                ),
+                "deterministic_hard_valid": comparison.get(
+                    "deterministic_hard_valid"
+                ),
+                "selected_scene_hash": self.scene.content_hash(),
+            },
+        )
+        self._degraded_stage_reasons = []
+        self._allow_degraded_stage_completion = False
 
     def _write_fallback_comparison(self, comparison: dict[str, Any]) -> Path:
         output_path = (

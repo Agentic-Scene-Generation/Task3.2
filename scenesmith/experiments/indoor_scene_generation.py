@@ -46,6 +46,7 @@ from scenesmith.scene_expert.config_utils import resolve_scene_expert_stage_budg
 from scenesmith.scene_expert.exceptions import StageValidationError
 from scenesmith.scene_expert.runtime_state import (
     ScenePausedError,
+    candidate_state_hash,
     is_scene_paused_error,
     mark_retryable_pause_resolved,
     persist_degraded_incomplete,
@@ -600,10 +601,168 @@ def _record_optional_stage_diagnostic(
     diagnostics[stage] = list(dict.fromkeys(stage_diagnostics))
     setattr(scene, "scene_expert_stage_diagnostics", diagnostics)
     console_logger.warning(
-        "%s stage exhausted its bounded agent retry outside the preferred optional "
-        "population range; recording a diagnostic and continuing downstream: %s",
+        "%s stage exhausted its bounded optional-output refinement; recording "
+        "a diagnostic and continuing downstream with the best usable candidate: %s",
         stage,
         reason,
+    )
+
+
+def _capture_stage_candidate(
+    *,
+    stage: str,
+    agent: Any,
+    scene: RoomScene,
+) -> dict[str, Any] | None:
+    """Snapshot one placement candidate with commensurate acceptance evidence."""
+
+    object_type_by_stage = {
+        "furniture": ObjectType.FURNITURE,
+        "wall_mounted": ObjectType.WALL_MOUNTED,
+        "ceiling_mounted": ObjectType.CEILING_MOUNTED,
+        "manipuland": ObjectType.MANIPULAND,
+    }
+    object_type = object_type_by_stage.get(stage)
+    if object_type is None:
+        return None
+    try:
+        scene_state = copy.deepcopy(scene.to_state_dict())
+        current_count = len(scene.get_objects_by_type(object_type))
+    except Exception:
+        return None
+
+    required_minimum = max(
+        0,
+        int(
+            getattr(
+                scene,
+                "scene_expert_required_min_output_objects",
+                0,
+            )
+            or 0
+        ),
+    )
+    target_minimum = max(
+        required_minimum,
+        int(getattr(scene, "scene_expert_min_output_objects", 0) or 0),
+    )
+    hard_state_fn = getattr(agent, "_evaluate_current_hard_state", None)
+    try:
+        hard_state = hard_state_fn() if callable(hard_state_fn) else None
+        hard_valid = bool(hard_state is None or hard_state.hard_valid)
+        hard_reasons = list(getattr(hard_state, "hard_reasons", []) or [])
+    except Exception:
+        hard_valid = False
+        hard_reasons = ["hard-state evaluation failed while ranking candidate"]
+
+    provenance = copy.deepcopy(
+        getattr(agent, "_last_score_provenance", {}) or {}
+    )
+    scores = copy.deepcopy(getattr(agent, "previous_scores", None))
+    candidate_hash = candidate_state_hash(scene)
+    trusted_score = None
+    normalize_score = getattr(agent, "_normalized_visual_score", None)
+    if (
+        provenance.get("score_source") == "vlm_critic"
+        and scores is not None
+        and candidate_hash
+        and provenance.get("candidate_hash") == candidate_hash
+        and callable(normalize_score)
+    ):
+        try:
+            trusted_score = normalize_score(scores)
+        except Exception:
+            trusted_score = None
+
+    capped_count = min(current_count, target_minimum) if target_minimum else current_count
+    rank = (
+        int(hard_valid),
+        int(current_count >= required_minimum),
+        int(target_minimum > 0 and current_count >= target_minimum),
+        capped_count,
+        -1.0 if trusted_score is None else float(trusted_score),
+    )
+    return {
+        "scene_state": scene_state,
+        "candidate_hash": candidate_hash,
+        "hard_valid": hard_valid,
+        "hard_reasons": hard_reasons,
+        "required_minimum": required_minimum,
+        "target_minimum": target_minimum,
+        "current_count": current_count,
+        "trusted_visual_score": trusted_score,
+        "rank": rank,
+        "previous_scores": scores,
+        "score_provenance": provenance,
+        "final_render_dir": getattr(agent, "final_render_dir", None),
+        "checkpoint_render_dir": getattr(agent, "checkpoint_render_dir", None),
+        "last_trusted_critic_candidate": copy.deepcopy(
+            getattr(agent, "_last_trusted_critic_candidate", None)
+        ),
+    }
+
+
+def _prefer_stage_candidate(
+    incumbent: dict[str, Any] | None,
+    candidate: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Keep the best observed candidate; retries may never erase it."""
+
+    if candidate is None:
+        return incumbent
+    if incumbent is None or tuple(candidate["rank"]) > tuple(incumbent["rank"]):
+        return candidate
+    return incumbent
+
+
+def _restore_stage_candidate(
+    *,
+    candidate: dict[str, Any],
+    agent: Any,
+    scene: RoomScene,
+    runtime_events: list[str],
+) -> None:
+    """Restore geometry and score provenance from the same candidate snapshot."""
+
+    scene.restore_from_state_dict(copy.deepcopy(candidate["scene_state"]))
+    agent.previous_scores = copy.deepcopy(candidate.get("previous_scores"))
+    agent._last_score_provenance = copy.deepcopy(
+        candidate.get("score_provenance", {})
+    )
+    agent.final_render_dir = candidate.get("final_render_dir")
+    agent.checkpoint_render_dir = candidate.get("checkpoint_render_dir")
+    agent._last_trusted_critic_candidate = copy.deepcopy(
+        candidate.get("last_trusted_critic_candidate")
+    )
+    rendering_manager = getattr(agent, "rendering_manager", None)
+    clear_cache = getattr(rendering_manager, "clear_cache", None)
+    if callable(clear_cache):
+        clear_cache()
+    runtime_events.append("restored_best_stage_candidate")
+    setattr(scene, "scene_expert_runtime_repair_events", runtime_events)
+
+
+def _optional_candidate_is_usable(candidate: dict[str, Any] | None) -> bool:
+    """Return whether optional placement should survive exhausted refinement."""
+
+    if candidate is None or not candidate.get("hard_valid", False):
+        return False
+    failure_reasons = [
+        str(reason).lower()
+        for reason in candidate.get("failure_reasons", [])
+        if str(reason).strip()
+    ]
+    quality_only_failure = bool(failure_reasons) and all(
+        "visual critic quality below stage threshold" in reason
+        for reason in failure_reasons
+    )
+    return bool(
+        quality_only_failure
+        and int(candidate.get("required_minimum", 0)) == 0
+        and int(candidate.get("target_minimum", 0)) > 0
+        and int(candidate.get("current_count", 0))
+        >= int(candidate.get("target_minimum", 0))
+        and candidate.get("trusted_visual_score") is not None
     )
 
 
@@ -625,11 +784,16 @@ def _run_sceneexpert_placement_stage(
     placement_continuation_attempted = False
     runtime_events: list[str] = []
     previous_failure_snapshot: dict[str, Any] | None = None
+    best_candidate: dict[str, Any] | None = None
 
     while True:
         try:
             asyncio.run(run_once())
             _raise_if_required_assets_unavailable(stage=stage, agent=agent)
+            best_candidate = _prefer_stage_candidate(
+                best_candidate,
+                _capture_stage_candidate(stage=stage, agent=agent, scene=scene),
+            )
             population_issue = _preferred_stage_population_issue(stage, scene)
             if population_issue:
                 admitted_assets = getattr(agent, "admitted_stage_assets", None)
@@ -684,6 +848,43 @@ def _run_sceneexpert_placement_stage(
                     if callable(prepare_regeneration):
                         asyncio.run(prepare_regeneration([population_issue]))
                     continue
+                if best_candidate is not None:
+                    _restore_stage_candidate(
+                        candidate=best_candidate,
+                        agent=agent,
+                        scene=scene,
+                        runtime_events=runtime_events,
+                    )
+                    population_issue = _preferred_stage_population_issue(stage, scene)
+                    if not population_issue:
+                        if _optional_candidate_is_usable(best_candidate):
+                            finalize_retained = getattr(
+                                agent,
+                                "finalize_retained_optional_candidate",
+                                None,
+                            )
+                            if callable(finalize_retained):
+                                asyncio.run(
+                                    finalize_retained(
+                                        list(
+                                            best_candidate.get(
+                                                "failure_reasons",
+                                                [],
+                                            )
+                                        )
+                                    )
+                                )
+                            _record_optional_stage_diagnostic(
+                                stage=stage,
+                                scene=scene,
+                                reason=(
+                                    "a later retry regressed to an empty optional "
+                                    "stage; restored the earlier hard-valid "
+                                    "non-empty candidate"
+                                ),
+                                runtime_events=runtime_events,
+                            )
+                        return regeneration_attempt
                 _record_optional_stage_diagnostic(
                     stage=stage,
                     scene=scene,
@@ -696,6 +897,17 @@ def _run_sceneexpert_placement_stage(
         except StageValidationError as exc:
             if not _is_repairable_stage_validation(exc):
                 raise
+            failed_candidate = _capture_stage_candidate(
+                stage=stage,
+                agent=agent,
+                scene=scene,
+            )
+            if failed_candidate is not None:
+                failed_candidate["failure_reasons"] = list(exc.reasons)
+            best_candidate = _prefer_stage_candidate(
+                best_candidate,
+                failed_candidate,
+            )
             failure_kind = _stage_validation_kind(exc, agent)
             critic_only = failure_kind == "critic_unavailable"
             if critic_only and not critic_retry_attempted:
@@ -815,6 +1027,31 @@ def _run_sceneexpert_placement_stage(
             if regeneration_attempt >= max_regenerations:
                 if not recovery_enabled:
                     raise
+                if _optional_candidate_is_usable(best_candidate):
+                    _restore_stage_candidate(
+                        candidate=best_candidate,
+                        agent=agent,
+                        scene=scene,
+                        runtime_events=runtime_events,
+                    )
+                    finalize_retained = getattr(
+                        agent,
+                        "finalize_retained_optional_candidate",
+                        None,
+                    )
+                    if callable(finalize_retained):
+                        asyncio.run(finalize_retained(list(exc.reasons)))
+                    _record_optional_stage_diagnostic(
+                        stage=stage,
+                        scene=scene,
+                        reason=(
+                            "bounded refinement exhausted; retained the best "
+                            "hard-valid non-empty optional-stage candidate: "
+                            + "; ".join(exc.reasons)
+                        ),
+                        runtime_events=runtime_events,
+                    )
+                    return regeneration_attempt
                 console_logger.error(
                     "%s stage exhausted %d regeneration(s) without a valid real "
                     "placed output; exporting an explicit degraded scene: %s",

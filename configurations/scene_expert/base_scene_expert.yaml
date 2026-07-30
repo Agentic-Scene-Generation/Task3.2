@@ -44,7 +44,10 @@ structured_llm:
       max_attempts: 2
       response_format: "json_schema"
     memory_writer:
-      thinking_mode: "low"
+      # Memory extraction is bounded schema transcription, not open-ended
+      # reasoning. Disabling hidden thinking preserves output tokens for the
+      # required JSON and avoids reasoning-only/length failures.
+      thinking_mode: "none"
       max_tokens: ${oc.env:SCENEEXPERT_MEMORY_WRITER_MAX_TOKENS,2048}
       retry_max_tokens: ${oc.env:SCENEEXPERT_MEMORY_WRITER_MAX_TOKENS,2048}
       timeout_seconds: 90

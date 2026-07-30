@@ -282,6 +282,7 @@ class BaseStatefulAgent(ABC):
         self._last_trusted_critic_candidate: dict[str, Any] | None = None
         self._critical_retry_compact_context = False
         self._critical_retry_budget_expanded = False
+        self._accept_optional_quality_diagnostic = False
         self._stage_role_active_consumed: dict[str, float] = {}
         self._agent_execution_leases: list[_AgentExecutionLease] = []
         self._stage_external_paused_seconds = 0.0
@@ -559,17 +560,75 @@ class BaseStatefulAgent(ABC):
             self._critical_retry_compact_context = False
             self._stage_runtime_phase = "agent"
 
+    async def finalize_retained_optional_candidate(
+        self,
+        reasons: list[str],
+    ) -> None:
+        """Commit a hard-valid optional candidate after bounded quality retries."""
+
+        self._accept_optional_quality_diagnostic = True
+        try:
+            await self._finalize_scene_and_scores()
+        finally:
+            self._accept_optional_quality_diagnostic = False
+        console_logger.warning(
+            "Committed the best hard-valid %s candidate after optional refinement "
+            "exhaustion: %s",
+            self.agent_type.value,
+            "; ".join(str(reason) for reason in reasons),
+        )
+
     async def complete_repair_exhausted_stage(self, reasons: list[str]) -> None:
         """Persist a diagnosed degraded stage instead of aborting the pipeline."""
         self._allow_degraded_stage_completion = True
-        self._degraded_stage_reasons = list(reasons)
+        stage = str(self.agent_type.value)
+        scoped_reasons = [
+            reason
+            if str(reason).lstrip().startswith(f"[{stage}]")
+            else f"[{stage}] {str(reason).strip()}"
+            for reason in reasons
+            if str(reason).strip()
+        ]
+        self._degraded_stage_reasons = list(
+            dict.fromkeys([*self._degraded_stage_reasons, *scoped_reasons])
+        )
         if self.scene is not None:
+            existing_reasons = list(
+                getattr(
+                    self.scene,
+                    "scene_expert_degraded_stage_reasons",
+                    [],
+                )
+                or []
+            )
             setattr(
                 self.scene,
                 "scene_expert_degraded_stage_reasons",
-                list(reasons),
+                list(dict.fromkeys([*existing_reasons, *scoped_reasons])),
             )
         await self._finalize_scene_and_scores()
+        final_scoped_reasons = [
+            reason
+            if str(reason).lstrip().startswith(f"[{stage}]")
+            else f"[{stage}] {str(reason).strip()}"
+            for reason in self._degraded_stage_reasons
+            if str(reason).strip()
+        ]
+        self._degraded_stage_reasons = list(dict.fromkeys(final_scoped_reasons))
+        if self.scene is not None:
+            existing_reasons = list(
+                getattr(
+                    self.scene,
+                    "scene_expert_degraded_stage_reasons",
+                    [],
+                )
+                or []
+            )
+            setattr(
+                self.scene,
+                "scene_expert_degraded_stage_reasons",
+                list(dict.fromkeys([*existing_reasons, *final_scoped_reasons])),
+            )
 
     def _stage_budget_value(self, key: str, default: Any) -> Any:
         return self._stage_runtime_budget.get(key, default)
@@ -862,6 +921,7 @@ class BaseStatefulAgent(ABC):
                 event=event,
                 prompt=evidence_text,
                 output=repr(result.value),
+                elapsed_sec=elapsed,
             )
             return result.value
 
@@ -881,6 +941,7 @@ class BaseStatefulAgent(ABC):
                 f"{status['final_error_kind']}: {status['final_error']} "
                 f"attempts={status['attempt_count']}"
             ),
+            elapsed_sec=elapsed,
         )
         return None
 
@@ -1153,6 +1214,7 @@ class BaseStatefulAgent(ABC):
                 event=f"{event}_budget_exhausted",
                 prompt=input,
                 error=f"{type(exc).__name__}: {exc}",
+                elapsed_sec=time.time() - start_time,
             )
             console_logger.warning(
                 "%s/%s reached its execution budget (%s: %s); preserving the "
@@ -1285,6 +1347,7 @@ class BaseStatefulAgent(ABC):
         output: Any = "",
         result: Any = None,
         error: str = "",
+        elapsed_sec: float = 0.0,
     ) -> None:
         try:
             self.stage_working_memory.record_llm_call(
@@ -1294,6 +1357,7 @@ class BaseStatefulAgent(ABC):
                 output=output,
                 result=result,
                 error=error,
+                elapsed_sec=elapsed_sec,
             )
         except Exception as e:
             console_logger.warning("Failed to record LLM call debug: %s", e)
@@ -3206,7 +3270,19 @@ class BaseStatefulAgent(ABC):
                         "visual critic quality below stage threshold: "
                         f"{visual_score:.3f} < {minimum_visual_score:.3f}"
                     )
-                    if optional_target_unmet:
+                    optional_quality_diagnostic = bool(
+                        self._accept_optional_quality_diagnostic
+                        and required_minimum == 0
+                        and target_minimum > 0
+                        and current_count >= target_minimum
+                    )
+                    if optional_quality_diagnostic:
+                        console_logger.warning(
+                            "%s; retaining this hard-valid non-empty optional "
+                            "candidate after bounded agent refinement",
+                            reason,
+                        )
+                    elif optional_target_unmet:
                         # The outer runtime loop owns one bounded retry for a
                         # preferred optional target. Keep the trusted low score
                         # as diagnosis, but do not turn absent optional decor
@@ -4403,6 +4479,11 @@ class BaseStatefulAgent(ABC):
             Prompt enum for domain-specific design change instruction.
         """
 
+    def _design_change_authoritative_spatial_context(self) -> str:
+        """Return compact geometry evidence for a repair turn, when available."""
+
+        return ""
+
     async def _request_design_change_impl(self, instruction: str) -> str:
         """Implementation for design change request.
 
@@ -4429,6 +4510,9 @@ class BaseStatefulAgent(ABC):
                 "changes, preserve constraints, or acceptance checks.\n"
                 + critic_feedback
             )
+        spatial_context = self._design_change_authoritative_spatial_context()
+        if spatial_context:
+            full_instruction += "\n\n" + spatial_context
         memory_context = self._retrieve_working_memory_for_designer(instruction)
         if memory_context:
             full_instruction += "\n\n" + memory_context
@@ -4459,6 +4543,7 @@ class BaseStatefulAgent(ABC):
                 event="request_design_change",
                 prompt=full_instruction,
                 error=f"{type(exc).__name__}: {exc}",
+                elapsed_sec=time.time() - designer_start,
             )
             self._end_furniture_design_transaction(transaction)
             raise
@@ -4476,6 +4561,7 @@ class BaseStatefulAgent(ABC):
             prompt=full_instruction,
             output=result.final_output or "",
             result=result,
+            elapsed_sec=time.time() - designer_start,
         )
 
         if result.final_output:
@@ -4603,6 +4689,7 @@ class BaseStatefulAgent(ABC):
                 event="request_initial_design",
                 prompt=input_message,
                 error=f"{type(exc).__name__}: {exc}",
+                elapsed_sec=time.time() - designer_start,
             )
             self._end_furniture_design_transaction(transaction)
             raise
@@ -4620,6 +4707,7 @@ class BaseStatefulAgent(ABC):
             prompt=input_message,
             output=result.final_output or "",
             result=result,
+            elapsed_sec=time.time() - designer_start,
         )
 
         if result.final_output:

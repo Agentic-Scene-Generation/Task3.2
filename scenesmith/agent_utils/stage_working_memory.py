@@ -438,6 +438,7 @@ class StageWorkingMemory:
         result: Any = None,
         raw_response: Any = None,
         error: str = "",
+        elapsed_sec: float = 0.0,
     ) -> None:
         """Persist prompt/response metadata for one LLM call."""
         if not self.enabled:
@@ -451,6 +452,7 @@ class StageWorkingMemory:
             result=result,
             raw_response=raw_response,
             error=error,
+            elapsed_sec=elapsed_sec,
         )
         payload = record.model_dump()
         _append_jsonl(self.debug_llm_path, payload)

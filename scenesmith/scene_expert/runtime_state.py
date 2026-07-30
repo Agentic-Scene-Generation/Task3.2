@@ -158,8 +158,12 @@ def split_degraded_stage_reasons(
         all_reasons.append(reason)
         match = _STAGE_REASON_PATTERN.match(reason)
         if match is None:
-            # Legacy/unscoped reasons originate from the active stage.
-            current_reasons.append(reason)
+            # Unscoped reasons are legacy accumulated history.  Treating them
+            # as a fresh blocker for every downstream stage makes a recovered
+            # furniture failure fail wall, ceiling, and manipuland in turn.
+            # New writers always add an origin-stage prefix; legacy text remains
+            # visible as upstream diagnostic evidence only.
+            upstream_reasons.append(reason)
             continue
         origin_stage = match.group("stage")
         if not current_stage or origin_stage == current_stage:
@@ -167,6 +171,138 @@ def split_degraded_stage_reasons(
         else:
             upstream_reasons.append(reason)
     return all_reasons, current_reasons, upstream_reasons
+
+
+def mark_degraded_stage_recovered(
+    *,
+    scene: object,
+    scene_root_dir: str | Path,
+    stage: str,
+    recovered_reasons: list[object] | None = None,
+    evidence: dict[str, Any] | None = None,
+) -> Path | None:
+    """Close one stage's stale degraded state after an authoritative recovery.
+
+    A degraded marker describes the candidate that failed, not an immutable
+    property of the scene.  When a later hard-valid candidate is selected, this
+    transaction removes only that stage's blockers, preserves unrelated stage
+    history, and archives the recovery evidence before closing an empty active
+    manifest.
+    """
+
+    stage_name = str(stage or "").strip()
+    if not stage_name:
+        return None
+    normalized_recovered: set[str] = set()
+    for raw_reason in recovered_reasons or []:
+        reason = str(raw_reason or "").strip()
+        if not reason:
+            continue
+        normalized_recovered.add(reason)
+        match = _STAGE_REASON_PATTERN.match(reason)
+        if match is not None and match.group("stage") == stage_name:
+            normalized_recovered.add(match.group("reason").strip())
+
+    def belongs_to_recovered_stage(raw_reason: object) -> bool:
+        reason = str(raw_reason or "").strip()
+        if not reason:
+            return False
+        match = _STAGE_REASON_PATTERN.match(reason)
+        if match is not None:
+            return match.group("stage") == stage_name
+        # Defensive migration for markers written before stage scoping was
+        # introduced.  Never delete arbitrary unscoped history.
+        return reason in normalized_recovered
+
+    scene_reasons = list(
+        getattr(scene, "scene_expert_degraded_stage_reasons", []) or []
+    )
+    removed_scene_reasons = [
+        str(reason)
+        for reason in scene_reasons
+        if belongs_to_recovered_stage(reason)
+    ]
+    remaining_scene_reasons = [
+        str(reason)
+        for reason in scene_reasons
+        if not belongs_to_recovered_stage(reason)
+    ]
+    setattr(
+        scene,
+        "scene_expert_degraded_stage_reasons",
+        list(dict.fromkeys(remaining_scene_reasons)),
+    )
+    degraded_dir = Path(scene_root_dir) / "scene_expert" / "degraded"
+    manifest_path = degraded_dir / "degraded_manifest.json"
+    manifest_payload: dict[str, Any] = {}
+    if manifest_path.exists():
+        try:
+            parsed = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if isinstance(parsed, dict):
+                manifest_payload = parsed
+        except (OSError, ValueError, TypeError):
+            manifest_payload = {}
+
+    manifest_reasons = list(manifest_payload.get("reasons", []) or [])
+    removed_manifest_reasons = [
+        str(reason)
+        for reason in manifest_reasons
+        if belongs_to_recovered_stage(reason)
+    ]
+    remaining_manifest_reasons = [
+        str(reason)
+        for reason in manifest_reasons
+        if not belongs_to_recovered_stage(reason)
+    ]
+    removed_reasons = list(
+        dict.fromkeys(
+            [
+                *removed_scene_reasons,
+                *removed_manifest_reasons,
+                *sorted(normalized_recovered),
+            ]
+        )
+    )
+    if not removed_reasons and not manifest_path.exists():
+        return None
+
+    degraded_dir.mkdir(parents=True, exist_ok=True)
+    recovery_record = {
+        "schema_version": "1.0",
+        "status": "RECOVERED",
+        "stage": stage_name,
+        "recovered_at": time.strftime(
+            "%Y-%m-%dT%H:%M:%SZ",
+            time.gmtime(),
+        ),
+        "recovered_reasons": removed_reasons,
+        "remaining_reasons": list(
+            dict.fromkeys([*remaining_scene_reasons, *remaining_manifest_reasons])
+        ),
+        "evidence": dict(evidence or {}),
+    }
+    setattr(
+        scene,
+        "scene_expert_outcome_status",
+        "DEGRADED_INCOMPLETE"
+        if recovery_record["remaining_reasons"]
+        else "COMPLETE",
+    )
+    recovered_path = degraded_dir / f"last_recovered_{stage_name}.json"
+    _write_json_atomic(recovered_path, recovery_record)
+
+    remaining_reasons = recovery_record["remaining_reasons"]
+    if manifest_path.exists():
+        if remaining_reasons:
+            manifest_payload["reasons"] = remaining_reasons
+            manifest_payload["metadata"] = {
+                **dict(manifest_payload.get("metadata", {}) or {}),
+                "last_recovery": recovery_record,
+            }
+            _write_json_atomic(manifest_path, manifest_payload)
+        else:
+            manifest_path.unlink(missing_ok=True)
+    return recovered_path
 
 
 def candidate_state_hash(scene: object) -> str:

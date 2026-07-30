@@ -65,6 +65,26 @@ def _score(name: str, grade: int) -> CategoryScore:
 
 
 class StageWorkingMemoryTest(unittest.TestCase):
+    def test_llm_debug_record_preserves_measured_elapsed_time(self) -> None:
+        with TemporaryDirectory() as tmp:
+            memory = StageWorkingMemory(
+                root_dir=Path(tmp),
+                stage="furniture",
+                enabled=True,
+            )
+            memory.record_llm_call(
+                agent_role="designer",
+                event="request_design_change",
+                prompt="move nightstand_0",
+                output="moved",
+                elapsed_sec=12.345,
+            )
+
+            payload = json.loads(
+                memory.debug_llm_path.read_text(encoding="utf-8").splitlines()[0]
+            )
+            self.assertAlmostEqual(12.345, payload["elapsed_sec"], places=3)
+
     def test_score_total_and_stage_canonicalization(self) -> None:
         scores = FurnitureCritiqueWithScores(
             critique="layout is usable",
