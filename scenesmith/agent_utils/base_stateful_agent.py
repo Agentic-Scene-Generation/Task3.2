@@ -75,6 +75,7 @@ from scenesmith.scene_expert.critic_feedback import (
     scope_critic_feedback,
 )
 from scenesmith.scene_expert.exceptions import StageValidationError
+from scenesmith.scene_expert.runtime_state import candidate_state_hash
 from scenesmith.scene_expert.structured_llm import (
     SceneExpertStructuredLLMClient,
     StructuredLLMProfile,
@@ -1508,6 +1509,7 @@ class BaseStatefulAgent(ABC):
             marker in critique_upper
             for marker in (
                 "CRITIC DEGRADED",
+                "CONSERVATIVE FALLBACK",
                 "TRANSIENT LOCAL VLM TIMEOUT",
                 "VISUAL CRITIC UNAVAILABLE",
             )
@@ -1536,6 +1538,8 @@ class BaseStatefulAgent(ABC):
         else:
             hard_check_passed = None
 
+        candidate_hash = candidate_state_hash(getattr(self, "scene", None))
+
         provenance = {
             "schema_version": "1.0",
             "score_source": score_source,
@@ -1548,6 +1552,7 @@ class BaseStatefulAgent(ABC):
             ),
             "source_scores_file": source_filename,
             "hard_check_evidence": str(physics_context or ""),
+            "candidate_hash": candidate_hash,
         }
         return provenance
 
@@ -3133,13 +3138,39 @@ class BaseStatefulAgent(ABC):
                 and target_minimum > 0
                 and current_count < target_minimum
             )
+            current_candidate_hash = candidate_state_hash(self.scene)
+            controller_candidate_hash = ""
+            controller_render_dir = getattr(controller, "best_render_dir", None)
+            if controller_render_dir is not None:
+                provenance_path = Path(controller_render_dir) / "score_provenance.yaml"
+                try:
+                    controller_provenance = (
+                        yaml.safe_load(provenance_path.read_text(encoding="utf-8"))
+                        or {}
+                    )
+                    controller_candidate_hash = str(
+                        controller_provenance.get("candidate_hash", "") or ""
+                    )
+                except (OSError, TypeError, ValueError, yaml.YAMLError):
+                    controller_candidate_hash = ""
+            controller_score_available = bool(
+                controller
+                and getattr(controller, "enabled", False)
+                and getattr(controller, "best_score_source", "") == "vlm_critic"
+                and getattr(controller, "best_scores", None) is not None
+                and bool(current_candidate_hash)
+                and bool(controller_candidate_hash)
+                and controller_candidate_hash == current_candidate_hash
+            )
+            direct_score_available = bool(
+                self._last_score_provenance.get("score_source") == "vlm_critic"
+                and self.previous_scores is not None
+                and bool(current_candidate_hash)
+                and self._last_score_provenance.get("candidate_hash")
+                == current_candidate_hash
+            )
             trusted_score_available = (
-                bool(
-                    controller
-                    and getattr(controller, "enabled", False)
-                    and getattr(controller, "best_score_source", "") == "vlm_critic"
-                )
-                or self._last_score_provenance.get("score_source") == "vlm_critic"
+                controller_score_available or direct_score_available
             )
             if not trusted_score_available:
                 reason = (

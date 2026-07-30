@@ -588,6 +588,26 @@ Summary: |-
         self.assertEqual(["furniture"], full_report.completed_stages)
         self.assertFalse(full_report.pass_scene)
 
+    def test_full_verifier_marks_unmeasured_walkability_explicitly(self) -> None:
+        report = StageVerifyReport(
+            stage="furniture",
+            pass_stage=True,
+            visual_scores={"semantic": 0.9},
+            rule_scores={"physics": 1.0},
+        )
+
+        full_report = FullVerifier(pass_threshold=0.7).verify([report])
+
+        self.assertEqual(1.0, full_report.collision_free_rate)
+        self.assertEqual(1.0, full_report.stability_score)
+        self.assertIsNone(full_report.walkable_area_ratio)
+        self.assertTrue(full_report.measured_metrics["collision_free_rate"])
+        self.assertFalse(full_report.measured_metrics["walkable_area_ratio"])
+        self.assertEqual(
+            "unmeasured",
+            full_report.metric_sources["walkable_area_ratio"],
+        )
+
     def test_full_verifier_counts_each_room_stage_invocation(self) -> None:
         report = StageVerifyReport(
             stage="furniture",
@@ -732,6 +752,76 @@ Summary: |-
             )
 
             self.assertEqual("critic_fallback", report.score_source)
+            self.assertFalse(report.pass_stage)
+
+    def test_upstream_degradation_is_informational_for_current_stage(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scores_dir = root / "scene_states" / "wall"
+            scores_dir.mkdir(parents=True)
+            (scores_dir / "scores.yaml").write_text(
+                "Realism:\n  grade: 8\nFunctionality:\n  grade: 8\n",
+                encoding="utf-8",
+            )
+            (scores_dir / "score_provenance.yaml").write_text(
+                "score_source: vlm_critic\nvlm_scoring_performed: true\n",
+                encoding="utf-8",
+            )
+
+            report = StageVerifier(pass_threshold=0.6).verify(
+                stage="wall_mounted",
+                stage_output_dir=str(root),
+                task_spec=SceneTaskSpec(room_type="bedroom", style="standard"),
+                scene_state_info={
+                    "object_names": ["painting_0"],
+                    "object_counts": {"wall_mounted": 1},
+                    "stage_min_output_objects": 1,
+                    "upstream_degraded_stage_reasons": [
+                        "[furniture] visual critic unavailable"
+                    ],
+                },
+            )
+
+            self.assertTrue(report.pass_stage)
+            self.assertNotIn(
+                "degraded_stage",
+                {issue.issue_type for issue in report.issues},
+            )
+            self.assertIn(
+                "upstream_degraded_stage",
+                {issue.issue_type for issue in report.informational_issues},
+            )
+
+    def test_stale_score_candidate_hash_is_not_reused(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scores_dir = root / "scene_states" / "furniture"
+            scores_dir.mkdir(parents=True)
+            (scores_dir / "scores.yaml").write_text(
+                "Realism:\n  grade: 9\nFunctionality:\n  grade: 9\n",
+                encoding="utf-8",
+            )
+            (scores_dir / "score_provenance.yaml").write_text(
+                "score_source: vlm_critic\n"
+                "vlm_scoring_performed: true\n"
+                "candidate_hash: old-layout\n",
+                encoding="utf-8",
+            )
+
+            report = StageVerifier(pass_threshold=0.6).verify(
+                stage="furniture",
+                stage_output_dir=str(root),
+                task_spec=SceneTaskSpec(room_type="bedroom", style="standard"),
+                scene_state_info={
+                    "object_names": ["bed_0"],
+                    "candidate_hash": "final-layout",
+                },
+            )
+
+            self.assertEqual("stale_evidence", report.score_source)
+            self.assertEqual({}, report.visual_scores)
+            self.assertEqual({}, report.rule_scores)
+            self.assertFalse(report.vlm_scoring_performed)
             self.assertFalse(report.pass_stage)
 
     def test_full_verifier_gates_low_plausibility_even_with_high_average(

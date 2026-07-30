@@ -95,6 +95,54 @@ def _scene_has_degraded_incomplete_outcome(scene_dir: Path) -> bool:
     return (scene_dir / "scene_expert" / "degraded" / "degraded_manifest.json").exists()
 
 
+def _read_scene_status(scene_dir: Path) -> dict[str, Any]:
+    status_path = scene_dir / _SCENE_STATUS_FILENAME
+    if not status_path.exists():
+        return {}
+    try:
+        payload = json.loads(status_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _process_is_alive(pid: object) -> bool:
+    try:
+        process_id = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if process_id <= 0:
+        return False
+    try:
+        os.kill(process_id, 0)
+    except (OSError, ProcessLookupError):
+        return False
+    return True
+
+
+def _reconcile_missing_worker_result(scene_dir: Path) -> tuple[str, str]:
+    """Classify a worker that vanished without returning a terminal result."""
+
+    persisted = _read_scene_status(scene_dir)
+    status = str(persisted.get("status", "") or "").strip().casefold()
+    if status == "running" and not _process_is_alive(persisted.get("pid")):
+        return (
+            "orphaned",
+            "Scene worker exited while scene_status.json remained running",
+        )
+    if status in {
+        "completed",
+        "degraded_incomplete",
+        "paused_retryable",
+        "failed",
+        "orphaned",
+    }:
+        if status == "completed" and _scene_has_degraded_incomplete_outcome(scene_dir):
+            status = "degraded_incomplete"
+        return status, str(persisted.get("error", "") or "")
+    return "failed", "Missing worker result"
+
+
 def _write_scene_status(
     output_dir: Path,
     scene_id: int,
@@ -195,6 +243,16 @@ def _stage_validation_kind(
     text = " ".join(error.reasons).lower()
     if _is_critic_unavailable_validation(error):
         return "critic_unavailable"
+    unavailable_families_fn = getattr(
+        agent,
+        "unavailable_required_asset_families",
+        None,
+    )
+    unavailable_families = (
+        list(unavailable_families_fn()) if callable(unavailable_families_fn) else []
+    )
+    if unavailable_families or "required asset unavailable" in text:
+        return "asset_unavailable"
     if any(
         marker in text
         for marker in (
@@ -220,6 +278,84 @@ def _stage_validation_kind(
     ):
         return "execution_budget"
     return "repairable_quality"
+
+
+def _stage_recovery_snapshot(
+    *,
+    stage: str,
+    agent: Any,
+    scene: RoomScene,
+    reasons: list[str],
+) -> dict[str, Any]:
+    """Capture the small set of observables that can justify another retry."""
+
+    object_type_by_stage = {
+        "furniture": ObjectType.FURNITURE,
+        "wall_mounted": ObjectType.WALL_MOUNTED,
+        "ceiling_mounted": ObjectType.CEILING_MOUNTED,
+        "manipuland": ObjectType.MANIPULAND,
+    }
+    object_type = object_type_by_stage.get(stage)
+    placed_count = (
+        len(scene.get_objects_by_type(object_type)) if object_type is not None else 0
+    )
+    admitted_assets_fn = getattr(agent, "admitted_stage_assets", None)
+    admitted_assets = list(admitted_assets_fn()) if callable(admitted_assets_fn) else []
+    unavailable_families_fn = getattr(
+        agent,
+        "unavailable_required_asset_families",
+        None,
+    )
+    unavailable_families = (
+        list(unavailable_families_fn()) if callable(unavailable_families_fn) else []
+    )
+    hard_state_fn = getattr(agent, "_evaluate_current_hard_state", None)
+    try:
+        hard_state = hard_state_fn() if callable(hard_state_fn) else None
+    except Exception:
+        hard_state = None
+    hard_issue_count = len(getattr(hard_state, "hard_reasons", []) or [])
+    requirement_summary_fn = getattr(agent, "requirement_fulfillment_summary", None)
+    try:
+        requirement_summary = (
+            requirement_summary_fn() if callable(requirement_summary_fn) else {}
+        )
+    except Exception:
+        requirement_summary = {}
+    normalized_reasons = tuple(
+        sorted(
+            " ".join(str(reason or "").casefold().split())
+            for reason in reasons
+            if str(reason or "").strip()
+        )
+    )
+    return {
+        "placed_count": placed_count,
+        "admitted_asset_count": len(admitted_assets),
+        "unavailable_required_count": len(unavailable_families),
+        "required_missing_count": int(requirement_summary.get("missing_total", 0) or 0),
+        "hard_issue_count": hard_issue_count,
+        "reason_signature": normalized_reasons,
+    }
+
+
+def _stage_recovery_made_progress(
+    before: dict[str, Any],
+    after: dict[str, Any],
+) -> bool:
+    """Return whether a retry improved any acceptance-relevant observable."""
+
+    return bool(
+        int(after.get("placed_count", 0)) > int(before.get("placed_count", 0))
+        or int(after.get("admitted_asset_count", 0))
+        > int(before.get("admitted_asset_count", 0))
+        or int(after.get("unavailable_required_count", 0))
+        < int(before.get("unavailable_required_count", 0))
+        or int(after.get("required_missing_count", 0))
+        < int(before.get("required_missing_count", 0))
+        or int(after.get("hard_issue_count", 0))
+        < int(before.get("hard_issue_count", 0))
+    )
 
 
 def _pause_unscored_scene_candidate(
@@ -488,6 +624,7 @@ def _run_sceneexpert_placement_stage(
     critic_retry_attempted = False
     placement_continuation_attempted = False
     runtime_events: list[str] = []
+    previous_failure_snapshot: dict[str, Any] | None = None
 
     while True:
         try:
@@ -612,8 +749,34 @@ def _run_sceneexpert_placement_stage(
             # A structural surface absence cannot benefit from another layout
             # proposal. Critic transport failure is handled as a resumable scene
             # pause below; it must not trigger a redesign of a hard-valid scene.
-            if failure_kind == "structural_unavailable":
+            current_failure_snapshot = _stage_recovery_snapshot(
+                stage=stage,
+                agent=agent,
+                scene=scene,
+                reasons=list(exc.reasons),
+            )
+            repeated_without_progress = bool(
+                previous_failure_snapshot is not None
+                and not _stage_recovery_made_progress(
+                    previous_failure_snapshot,
+                    current_failure_snapshot,
+                )
+            )
+            previous_failure_snapshot = current_failure_snapshot
+
+            if failure_kind in {"structural_unavailable", "asset_unavailable"}:
                 regeneration_attempt = max_regenerations
+                runtime_events.append(f"blocked_{failure_kind}")
+            elif repeated_without_progress:
+                regeneration_attempt = max_regenerations
+                runtime_events.append("blocked_no_retry_progress")
+                console_logger.warning(
+                    "%s recovery produced no progress in placed objects, admitted "
+                    "assets, required-family availability, requirement gaps, or "
+                    "hard-issue count; "
+                    "skipping another identical full-stage regeneration",
+                    stage,
+                )
 
             missing_output = any(
                 marker in " ".join(exc.reasons).lower()
@@ -729,17 +892,18 @@ def _write_batch_summary(
     prompt_map = {scene_id: prompt for scene_id, prompt in prompts_with_ids}
     for scene_id, prompt in prompts_with_ids:
         task_id = f"scene_{scene_id:03d}"
-        status, error = results.get(
-            task_id,
-            ("failed", "Missing worker result"),
-        )
+        scene_dir = output_dir / task_id
+        if task_id in results:
+            status, error = results[task_id]
+        else:
+            status, error = _reconcile_missing_worker_result(scene_dir)
+        if status == "completed" and _scene_has_degraded_incomplete_outcome(scene_dir):
+            status = "degraded_incomplete"
         existing_scenes[task_id] = {
             "scene_id": task_id,
             "prompt": prompt_map[scene_id],
             "status": status,
-            "root_error": (
-                "" if status == "completed" else _root_error_summary(str(error))
-            ),
+            "root_error": ("" if error is None else _root_error_summary(str(error))),
             "scene_status_path": str(output_dir / task_id / _SCENE_STATUS_FILENAME),
         }
 
@@ -753,6 +917,10 @@ def _write_batch_summary(
         "paused_retryable_scenes": sum(
             1 for item in scenes if item["status"] == "paused_retryable"
         ),
+        "degraded_incomplete_scenes": sum(
+            1 for item in scenes if item["status"] == "degraded_incomplete"
+        ),
+        "orphaned_scenes": sum(1 for item in scenes if item["status"] == "orphaned"),
         "scenes": scenes,
     }
     temporary_path = summary_path.with_suffix(".json.tmp")
@@ -3643,8 +3811,19 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                 scene_id, prompt, _ = metadata
                 success, result_or_error = results[task_id]
                 if success:
-                    final_results[task_id] = ("completed", None)
-                    console_logger.info(f"Completed {task_id} on attempt {attempt}")
+                    scene_dir = self.output_dir / task_id
+                    status = (
+                        "degraded_incomplete"
+                        if _scene_has_degraded_incomplete_outcome(scene_dir)
+                        else "completed"
+                    )
+                    final_results[task_id] = (status, None)
+                    console_logger.info(
+                        "%s %s on attempt %d",
+                        "Exported" if status == "degraded_incomplete" else "Completed",
+                        task_id,
+                        attempt,
+                    )
                     continue
 
                 error = str(result_or_error)

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
 import time
 
 from pathlib import Path
@@ -12,6 +14,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 SCENE_PAUSED_MARKER = "[SCENE_PAUSED_RETRYABLE]"
+_STAGE_REASON_PATTERN = re.compile(r"^\[(?P<stage>[a-z_]+)\]\s*(?P<reason>.*)$")
 
 
 class ScenePauseManifest(BaseModel):
@@ -131,6 +134,59 @@ def persist_degraded_incomplete(
 
 def is_scene_paused_error(value: object) -> bool:
     return SCENE_PAUSED_MARKER in str(value or "")
+
+
+def split_degraded_stage_reasons(
+    reasons: list[object],
+    *,
+    current_stage: str,
+) -> tuple[list[str], list[str], list[str]]:
+    """Separate current-stage blockers from upstream diagnostic history.
+
+    Runtime placement failures are persisted on the scene so the final outcome
+    remains auditable.  That accumulated history must not be reinterpreted as a
+    fresh failure of every downstream stage.
+    """
+
+    all_reasons: list[str] = []
+    current_reasons: list[str] = []
+    upstream_reasons: list[str] = []
+    for raw_reason in reasons:
+        reason = str(raw_reason or "").strip()
+        if not reason or reason in all_reasons:
+            continue
+        all_reasons.append(reason)
+        match = _STAGE_REASON_PATTERN.match(reason)
+        if match is None:
+            # Legacy/unscoped reasons originate from the active stage.
+            current_reasons.append(reason)
+            continue
+        origin_stage = match.group("stage")
+        if not current_stage or origin_stage == current_stage:
+            current_reasons.append(reason)
+        else:
+            upstream_reasons.append(reason)
+    return all_reasons, current_reasons, upstream_reasons
+
+
+def candidate_state_hash(scene: object) -> str:
+    """Hash candidate geometry and objects without mutable prompt text."""
+
+    try:
+        room_geometry = getattr(scene, "room_geometry")
+        hash_objects = getattr(scene, "_hash_objects")
+        payload: Any = {
+            "room_geometry": room_geometry.content_hash(),
+            "objects": hash_objects(),
+        }
+    except (AttributeError, TypeError, ValueError):
+        try:
+            payload = dict(getattr(scene, "to_state_dict")())
+            payload.pop("text_description", None)
+        except (AttributeError, TypeError, ValueError):
+            return ""
+    serialized = json.dumps(payload, sort_keys=True, default=str)
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
 def mark_retryable_pause_resolved(scene_root_dir: str | Path) -> Path | None:

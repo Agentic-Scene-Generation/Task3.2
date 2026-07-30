@@ -359,6 +359,21 @@ class SceneExpertStructuredLLMTest(unittest.TestCase):
         self.assertTrue(evidence["designer_prompt_contains_brief"])
         self.assertEqual(["success_1"], evidence["retrieved_memory_ids"])
 
+    def test_trace_status_matches_degraded_final_outcome(self):
+        with TemporaryDirectory() as tmp:
+            logger = TraceLogger(
+                output_dir=tmp,
+                scene_index=0,
+                prompt="A bedroom.",
+            )
+            trace = logger.finalize(
+                FullVerifyReport(outcome_status="DEGRADED_INCOMPLETE"),
+                exports={},
+            )
+
+        self.assertEqual("degraded_incomplete", trace["status"])
+        self.assertTrue(trace["degraded"])
+
 
 if __name__ == "__main__":
     unittest.main()

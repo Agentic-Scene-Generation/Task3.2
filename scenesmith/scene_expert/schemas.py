@@ -259,6 +259,13 @@ class StageVerifyReport(BaseModel):
         description="Deterministic rule metrics kept separate from VLM quality",
     )
     issues: list[VerifyIssue] = Field(default_factory=list)
+    informational_issues: list[VerifyIssue] = Field(
+        default_factory=list,
+        description=(
+            "Non-blocking upstream or diagnostic findings retained for trace and "
+            "memory without changing this stage's acceptance decision"
+        ),
+    )
     repair_suggestions: list[str] = Field(default_factory=list)
     critique_summary: str = Field(
         default="",
@@ -286,9 +293,18 @@ class FullVerifyReport(BaseModel):
     aesthetic_score: float = 0.0
     plausibility_score: float = 0.0
     style_consistency: float = 0.0
-    collision_free_rate: float = 0.0
-    stability_score: float = 0.0
-    walkable_area_ratio: float = 0.0
+    collision_free_rate: float | None = Field(
+        default=None,
+        description="Measured deterministic/visual collision score; None when absent",
+    )
+    stability_score: float | None = Field(
+        default=None,
+        description="Measured deterministic physics score; None when absent",
+    )
+    walkable_area_ratio: float | None = Field(
+        default=None,
+        description="Measured walkability score; None when no channel produced it",
+    )
     reachability_score: float = 0.0
     support_relation_accuracy: float = 0.0
     overall_score: float = 0.0
@@ -298,6 +314,8 @@ class FullVerifyReport(BaseModel):
     missing_stages: list[str] = Field(default_factory=list)
     outcome_status: str = "COMPLETE"
     degraded_reasons: list[str] = Field(default_factory=list)
+    measured_metrics: dict[str, bool] = Field(default_factory=dict)
+    metric_sources: dict[str, str] = Field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------

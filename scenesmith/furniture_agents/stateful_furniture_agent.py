@@ -75,7 +75,10 @@ REPAIR_ASSET_SPECS: dict[str, tuple[str, list[float]]] = {
         "Compact standard double bed with headboard, mattress, pillows, and bedding",
         [1.60, 2.05, 0.80],
     ),
-    "twin_bed": ("Compact single twin bed with mattress and headboard", [1.0, 2.0, 0.75]),
+    "twin_bed": (
+        "Compact single twin bed with mattress and headboard",
+        [1.0, 2.0, 0.75],
+    ),
     "nightstand": ("Compact bedside nightstand with drawer", [0.45, 0.42, 0.55]),
     "wardrobe": ("Compact wardrobe closet with simple doors", [0.90, 0.55, 2.00]),
     "dresser": ("Low dresser chest with storage drawers", [1.10, 0.48, 0.85]),
@@ -464,10 +467,12 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         """Add deterministic room-aware functional guidance to initial design."""
         safety_cfg = getattr(self.cfg, "furniture_safety_controller", None)
         bedroom_cfg = getattr(safety_cfg, "bedroom_layout", None)
-        guidance_blocks = [format_bedroom_anchor_guidance(
-            scene=self.scene,
-            cfg=bedroom_cfg,
-        )]
+        guidance_blocks = [
+            format_bedroom_anchor_guidance(
+                scene=self.scene,
+                cfg=bedroom_cfg,
+            )
+        ]
         guidance_blocks.append(
             format_functional_layout_guidance(
                 scene=self.scene,
@@ -595,9 +600,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 )
         replaced_invalid = self._replace_invalid_furniture_assets(hard_state)
         if replaced_invalid:
-            actions.append(
-                f"replaced {replaced_invalid} invalid furniture asset(s)"
-            )
+            actions.append(f"replaced {replaced_invalid} invalid furniture asset(s)")
         relation_changed = False
         if (
             FailureCategory.DOOR_OR_OPENING_CLEARANCE in repair_plan.categories
@@ -897,6 +900,67 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             "required_counts": observed_counts,
         }
 
+    def requirement_fulfillment_summary(self) -> dict[str, Any]:
+        """Return prompt-required furniture coverage for candidate selection."""
+
+        required_counts = {
+            str(category): max(0, int(count))
+            for category, count in dict(
+                getattr(
+                    self.furniture_safety_controller,
+                    "required_counts",
+                    {},
+                )
+                or {}
+            ).items()
+            if int(count) > 0
+        }
+        observed_counts = {
+            category: len(self._furniture_by_category(category))
+            for category in required_counts
+        }
+        missing_counts = {
+            category: max(0, required_counts[category] - observed_counts[category])
+            for category in required_counts
+        }
+        return {
+            "required_counts": required_counts,
+            "observed_counts": observed_counts,
+            "missing_counts": missing_counts,
+            "missing_total": sum(missing_counts.values()),
+        }
+
+    @staticmethod
+    def requirement_fulfillment_dominates(
+        incumbent: dict[str, Any],
+        challenger: dict[str, Any],
+    ) -> bool:
+        """Return whether challenger Pareto-improves required object coverage."""
+
+        categories = set(incumbent.get("missing_counts", {})) | set(
+            challenger.get("missing_counts", {})
+        )
+        if not categories:
+            return False
+        incumbent_gaps = {
+            category: int(incumbent.get("missing_counts", {}).get(category, 0))
+            for category in categories
+        }
+        challenger_gaps = {
+            category: int(challenger.get("missing_counts", {}).get(category, 0))
+            for category in categories
+        }
+        return bool(
+            all(
+                challenger_gaps[category] <= incumbent_gaps[category]
+                for category in categories
+            )
+            and any(
+                challenger_gaps[category] < incumbent_gaps[category]
+                for category in categories
+            )
+        )
+
     def postprocessing_regression_reason(
         self,
         guard: dict[str, Any],
@@ -908,9 +972,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         ):
             return "post-processing introduced deterministic hard violations"
 
-        for category, before_count in dict(
-            guard.get("required_counts", {})
-        ).items():
+        for category, before_count in dict(guard.get("required_counts", {})).items():
             after_count = len(self._furniture_by_category(category))
             if after_count < int(before_count):
                 return (
@@ -967,6 +1029,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         self.restore_agent_candidate(agent_candidate)
         agent_hash = self.scene.content_hash()
         agent_hard_state = self._evaluate_current_hard_state()
+        agent_requirement_fulfillment = self.requirement_fulfillment_summary()
         agent_render_dir = self.persist_agent_best_candidate(agent_candidate)
 
         comparison: dict[str, Any] = {
@@ -985,6 +1048,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             "agent_hard_reasons": (
                 [] if agent_hard_state is None else agent_hard_state.hard_reasons
             ),
+            "agent_requirement_fulfillment": agent_requirement_fulfillment,
             "deterministic_actions": [],
             "deterministic_candidate": {
                 "score_source": "not_generated",
@@ -1160,6 +1224,17 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             if deterministic_hard_state is None
             else deterministic_hard_state.hard_reasons
         )
+        deterministic_requirement_fulfillment = self.requirement_fulfillment_summary()
+        comparison["deterministic_requirement_fulfillment"] = (
+            deterministic_requirement_fulfillment
+        )
+        comparison["deterministic_requirement_dominates"] = bool(
+            comparison["deterministic_hard_valid"]
+            and self.requirement_fulfillment_dominates(
+                agent_requirement_fulfillment,
+                deterministic_requirement_fulfillment,
+            )
+        )
         self.logger.log_scene(
             scene=self.scene,
             name="furniture_deterministic_candidate",
@@ -1215,7 +1290,46 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                         physics_context=self._get_cached_physics_context(),
                         event="fallback_deterministic_critic",
                     )
-                if not comparison["agent_hard_valid"]:
+                if comparison["deterministic_requirement_dominates"]:
+                    # L1 evidence (hard checks + prompt-required object counts)
+                    # outranks an unavailable or subjective L3 visual score.
+                    self.scene.restore_from_state_dict(deterministic_state)
+                    self.rendering_manager.clear_cache()
+                    comparison["selection"] = "deterministic_candidate"
+                    comparison["selection_evidence_level"] = (
+                        "L1_required_object_dominance"
+                    )
+                    comparison["selection_reason"] = (
+                        "hard-valid deterministic candidate strictly reduced "
+                        "prompt-required object deficits without regressing any "
+                        "required category"
+                    )
+                    controller = self.furniture_safety_controller
+                    deterministic_scores = (
+                        deterministic_candidate.get("scores")
+                        if deterministic_candidate is not None
+                        else None
+                    )
+                    deterministic_weighted_score = (
+                        deterministic_candidate.get("weighted_score")
+                        if deterministic_candidate is not None
+                        else None
+                    )
+                    controller.best_scene_state = copy.deepcopy(deterministic_state)
+                    controller.best_scores = copy.deepcopy(deterministic_scores)
+                    controller.best_score_source = (
+                        "vlm_critic"
+                        if deterministic_candidate is not None
+                        else "unscored_hard_valid"
+                    )
+                    controller.best_render_dir = deterministic_render_dir
+                    controller.best_weighted_score = float(
+                        deterministic_weighted_score or 0.0
+                    )
+                    controller.best_reasons = [
+                        "deterministic fallback improved required object coverage"
+                    ]
+                elif not comparison["agent_hard_valid"]:
                     # Physical validity dominates visual score availability.
                     # Preserve the repaired candidate even when the VLM transport
                     # times out; reverting to a known colliding scene is never a
@@ -1223,6 +1337,9 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                     self.scene.restore_from_state_dict(deterministic_state)
                     self.rendering_manager.clear_cache()
                     comparison["selection"] = "deterministic_candidate"
+                    comparison["selection_evidence_level"] = (
+                        "L1_hard_constraint_recovery"
+                    )
                     comparison["selection_reason"] = (
                         "deterministic candidate resolved agent hard violations"
                     )
@@ -1265,9 +1382,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                     )
                 else:
                     agent_score = agent_candidate.get("weighted_score")
-                    deterministic_score = deterministic_candidate.get(
-                        "weighted_score"
-                    )
+                    deterministic_score = deterministic_candidate.get("weighted_score")
                     minimum_delta = float(
                         getattr(
                             self.furniture_safety_controller,
@@ -1275,12 +1390,18 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                             0.05,
                         )
                     )
-                    if self.deterministic_candidate_improves(
-                        agent_candidate,
-                        deterministic_candidate,
-                        minimum_delta=minimum_delta,
-                    ) and self.scene.content_hash() == deterministic_hash:
+                    if (
+                        self.deterministic_candidate_improves(
+                            agent_candidate,
+                            deterministic_candidate,
+                            minimum_delta=minimum_delta,
+                        )
+                        and self.scene.content_hash() == deterministic_hash
+                    ):
                         comparison["selection"] = "deterministic_candidate"
+                        comparison["selection_evidence_level"] = (
+                            "L3_vlm_quality_improvement"
+                        )
                         comparison["selection_reason"] = (
                             "hard-valid deterministic candidate improved the "
                             "trusted critic score by "
@@ -1288,9 +1409,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                             f"(required {minimum_delta:.3f})"
                         )
                         controller = self.furniture_safety_controller
-                        controller.best_scene_state = copy.deepcopy(
-                            deterministic_state
-                        )
+                        controller.best_scene_state = copy.deepcopy(deterministic_state)
                         controller.best_scores = copy.deepcopy(
                             deterministic_candidate["scores"]
                         )
@@ -1309,8 +1428,14 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         except Exception as exc:
             preserve_hard_recovery = (
                 deterministic_state is not None
-                and not comparison["agent_hard_valid"]
                 and comparison.get("deterministic_hard_valid", False)
+                and (
+                    not comparison["agent_hard_valid"]
+                    or comparison.get(
+                        "deterministic_requirement_dominates",
+                        False,
+                    )
+                )
             )
             if preserve_hard_recovery:
                 console_logger.exception(
@@ -1326,12 +1451,27 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 controller.best_render_dir = deterministic_render_dir
                 controller.best_weighted_score = 0.0
                 controller.best_reasons = [
-                    "deterministic fallback resolved agent hard violations"
+                    (
+                        "deterministic fallback improved required object coverage"
+                        if comparison.get(
+                            "deterministic_requirement_dominates",
+                            False,
+                        )
+                        else "deterministic fallback resolved agent hard violations"
+                    )
                 ]
                 comparison["selection"] = "deterministic_candidate"
+                comparison["selection_evidence_level"] = (
+                    "L1_required_object_dominance"
+                    if comparison.get(
+                        "deterministic_requirement_dominates",
+                        False,
+                    )
+                    else "L1_hard_constraint_recovery"
+                )
                 comparison["selection_reason"] = (
-                    "deterministic candidate resolved agent hard violations; "
-                    "visual critic failed"
+                    "deterministic candidate preserved on L1 evidence after "
+                    "the visual critic failed"
                 )
             else:
                 console_logger.exception(
@@ -1435,9 +1575,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         if is_bedroom_scene(self.scene):
             bedroom_actions = self._repair_bedroom_layout()
             if bedroom_actions:
-                return "normalized bedroom fallback: " + "; ".join(
-                    bedroom_actions
-                )
+                return "normalized bedroom fallback: " + "; ".join(bedroom_actions)
         family = functional_layout_family(self.scene)
         if family == "living_room" and self._repair_living_room_layout():
             return "normalized sofa, rug, and plants into one conversation zone"
@@ -1504,9 +1642,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         sofa = sofas[0]
         yaw = self._yaw_for_inward_wall(wall)
         transform = self._grounded_transform(sofa, x=0.0, y=0.0, yaw_deg=yaw)
-        wall_margin = float(
-            self._repair_cfg_value("functional_wall_margin_m", 0.18)
-        )
+        wall_margin = float(self._repair_cfg_value("functional_wall_margin_m", 0.18))
         transform = self._snap_transform_to_wall(
             sofa,
             transform,
@@ -1555,9 +1691,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 plant_dims = self._local_size(plant, [0.60, 0.60, 1.20])
                 target = (
                     sofa_center
-                    + lateral
-                    * side
-                    * (sofa_dims[0] / 2.0 + plant_dims[0] / 2.0 + 0.15)
+                    + lateral * side * (sofa_dims[0] / 2.0 + plant_dims[0] / 2.0 + 0.15)
                     + forward * 0.05
                 )
                 plant_transform = self._grounded_transform(
@@ -1614,9 +1748,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         teacher_depth = 0.70
         if teacher_desks:
             teacher = teacher_desks[0]
-            teacher_depth = float(
-                self._local_size(teacher, [1.40, 0.70, 0.75])[1]
-            )
+            teacher_depth = float(self._local_size(teacher, [1.40, 0.70, 0.75])[1])
             teacher_transform = self._grounded_transform(
                 teacher,
                 x=float(wall_center[0]),
@@ -1633,9 +1765,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 self.scene.move_object(teacher.object_id, teacher_transform)
                 changed = True
             metadata = dict(getattr(teacher, "metadata", {}) or {})
-            metadata.update(
-                {"functional_zone": "classroom_front", "front_wall": wall}
-            )
+            metadata.update({"functional_zone": "classroom_front", "front_wall": wall})
             teacher.metadata = metadata
 
         safety_cfg = getattr(self.cfg, "furniture_safety_controller", None)
@@ -1649,8 +1779,8 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             ),
         )
         sample_dims = self._local_size(desks[0], [0.70, 0.55, 0.75])
-        lateral_room_span = (max_x - min_x) if wall in ("north", "south") else (
-            max_y - min_y
+        lateral_room_span = (
+            (max_x - min_x) if wall in ("north", "south") else (max_y - min_y)
         )
         column_spacing = min(
             max(float(sample_dims[0]) + 0.45, 1.15),
@@ -1692,9 +1822,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 y=float(chair_xy[1]),
                 yaw_deg=student_yaw,
             )
-            chair_transform = self._fit_transform_inside_room(
-                chair, chair_transform
-            )
+            chair_transform = self._fit_transform_inside_room(chair, chair_transform)
             if not self._transform_close(chair.transform, chair_transform):
                 self.scene.move_object(chair.object_id, chair_transform)
                 changed = True
@@ -2084,9 +2212,10 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                     asset.object_id,
                 )
                 continue
-            if self._category_for_object(
-                getattr(asset, "object_id", ""), asset
-            ) != category:
+            if (
+                self._category_for_object(getattr(asset, "object_id", ""), asset)
+                != category
+            ):
                 console_logger.warning(
                     "Deterministic repair rejected asset %s because it does not "
                     "satisfy requested semantic family %s",
@@ -2431,9 +2560,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             return np.asarray(zone_min, dtype=float), np.asarray(zone_max, dtype=float)
 
         opening_type_raw = getattr(opening, "opening_type", "")
-        opening_type = str(
-            getattr(opening_type_raw, "value", opening_type_raw)
-        ).lower()
+        opening_type = str(getattr(opening_type_raw, "value", opening_type_raw)).lower()
         if opening_type != "open":
             return None
         try:

@@ -81,6 +81,34 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         StatefulFurnitureAgent is None,
         f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
     )
+    def test_required_object_coverage_dominates_without_vlm_score(self) -> None:
+        incumbent = {
+            "missing_counts": {"sofa": 0, "plant": 2, "rug": 1},
+            "missing_total": 3,
+        }
+        challenger = {
+            "missing_counts": {"sofa": 0, "plant": 0, "rug": 1},
+            "missing_total": 1,
+        }
+
+        self.assertTrue(
+            StatefulFurnitureAgent.requirement_fulfillment_dominates(
+                incumbent,
+                challenger,
+            )
+        )
+        challenger["missing_counts"]["sofa"] = 1
+        self.assertFalse(
+            StatefulFurnitureAgent.requirement_fulfillment_dominates(
+                incumbent,
+                challenger,
+            )
+        )
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
     def test_quality_regeneration_requires_scene_expert_and_trusted_score(self) -> None:
         agent = object.__new__(StatefulFurnitureAgent)
         agent.scene = SimpleNamespace(scene_expert_stage_budget={"enabled": True})
@@ -247,9 +275,7 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         agent = object.__new__(StatefulFurnitureAgent)
         agent.scene = SimpleNamespace()
         agent._stage_runtime_budget = {"max_stage_regenerations": 1}
-        agent.furniture_safety_controller = SimpleNamespace(
-            required_counts={"bed": 1}
-        )
+        agent.furniture_safety_controller = SimpleNamespace(required_counts={"bed": 1})
         calls: list[str] = []
         agent._ensure_required_furniture_asset = (
             lambda category: calls.append(category) or 1
@@ -296,12 +322,8 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         agent._bedroom_layout_cfg = lambda: SimpleNamespace()
         calls: list[str] = []
         agent._anchor_existing_bed = lambda: calls.append("bed") or True
-        agent._repair_bedside_nightstands = (
-            lambda: calls.append("nightstands") or True
-        )
-        agent._repair_wardrobe_wall_anchor = (
-            lambda: calls.append("wardrobe") or True
-        )
+        agent._repair_bedside_nightstands = lambda: calls.append("nightstands") or True
+        agent._repair_wardrobe_wall_anchor = lambda: calls.append("wardrobe") or True
 
         with patch(
             "scenesmith.furniture_agents.stateful_furniture_agent."
@@ -328,12 +350,8 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         agent._bedroom_layout_cfg = lambda: SimpleNamespace()
         calls: list[str] = []
         agent._anchor_existing_bed = lambda: calls.append("bed") or True
-        agent._repair_bedside_nightstands = (
-            lambda: calls.append("nightstands") or True
-        )
-        agent._repair_wardrobe_wall_anchor = (
-            lambda: calls.append("wardrobe") or True
-        )
+        agent._repair_bedside_nightstands = lambda: calls.append("nightstands") or True
+        agent._repair_wardrobe_wall_anchor = lambda: calls.append("wardrobe") or True
 
         with patch(
             "scenesmith.furniture_agents.stateful_furniture_agent."
@@ -426,12 +444,8 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         agent._repair_forbidden_zone_conflicts = lambda include_windows=False: False
         calls: list[str] = []
         agent._anchor_existing_bed = lambda: calls.append("bed") or True
-        agent._repair_bedside_nightstands = (
-            lambda: calls.append("nightstands") or True
-        )
-        agent._repair_wardrobe_wall_anchor = (
-            lambda: calls.append("wardrobe") or True
-        )
+        agent._repair_bedside_nightstands = lambda: calls.append("nightstands") or True
+        agent._repair_wardrobe_wall_anchor = lambda: calls.append("wardrobe") or True
         agent._repair_structured_collisions = lambda _state: 0
 
         repaired, _ = agent._attempt_deterministic_repair(
@@ -469,23 +483,17 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         agent.furniture_safety_controller = SimpleNamespace(required_counts={})
         agent._category_for_object = lambda _object_id, _obj: "bed"
         agent._replace_invalid_furniture_assets = lambda _state: 1
-        agent._repair_forbidden_zone_conflicts = (
-            lambda include_windows=False: False
-        )
+        agent._repair_forbidden_zone_conflicts = lambda include_windows=False: False
         calls: list[str] = []
         agent._anchor_existing_bed = lambda: calls.append("bed") or True
-        agent._repair_bedside_nightstands = (
-            lambda: calls.append("nightstands") or True
-        )
+        agent._repair_bedside_nightstands = lambda: calls.append("nightstands") or True
         agent._repair_wardrobe_wall_anchor = lambda: False
         agent._repair_structured_collisions = lambda _state: 0
 
         repaired, actions = agent._attempt_deterministic_repair(
             SimpleNamespace(
                 hard_valid=False,
-                hard_reasons=[
-                    "required bed asset bed_0 has unusable dimensions"
-                ],
+                hard_reasons=["required bed asset bed_0 has unusable dimensions"],
                 issues=[
                     SimpleNamespace(
                         issue_type="asset_invalid",

@@ -48,7 +48,11 @@ from scenesmith.scene_expert.memory.schemas import FailureCase, SuccessCase
 from scenesmith.scene_expert.memory.text_builder import build_embedding_text
 from scenesmith.scene_expert.repair_controller import RepairController
 from scenesmith.scene_expert.repair_taxonomy import classify_hard_reasons
-from scenesmith.scene_expert.runtime_state import persist_degraded_incomplete
+from scenesmith.scene_expert.runtime_state import (
+    candidate_state_hash,
+    persist_degraded_incomplete,
+    split_degraded_stage_reasons,
+)
 from scenesmith.scene_expert.schemas import (
     FullVerifyReport,
     MemoryPack,
@@ -1280,7 +1284,7 @@ class SceneExpertHookRunner:
 
         # Extract lightweight scene state info for rule checks
         scene_state_info = self._extract_scene_state_info_from_scene(scene)
-        for reason in scene_state_info.get("degraded_stage_reasons", []):
+        for reason in scene_state_info.get("all_degraded_stage_reasons", []):
             if reason not in self._degraded_incomplete_reasons:
                 self._degraded_incomplete_reasons.append(reason)
         degraded_manifest = (
@@ -1594,6 +1598,7 @@ class SceneExpertHookRunner:
     def _extract_scene_state_info_from_scene(self, scene: RoomScene) -> dict:
         """Extract object names and degraded assets for rule-based checks."""
         try:
+            current_stage = str(getattr(scene, "scene_expert_stage", "") or "")
             names = [
                 obj.name
                 for obj in scene.objects.values()
@@ -1604,11 +1609,26 @@ class SceneExpertHookRunner:
                 for obj in scene.objects.values()
                 if (getattr(obj, "metadata", {}) or {}).get("repair_placeholder")
             ]
-            transient_unverified_names = [
-                obj.name
+            transient_unverified_assets = [
+                (
+                    obj.name,
+                    str(
+                        getattr(
+                            getattr(obj, "object_type", None),
+                            "value",
+                            getattr(obj, "object_type", ""),
+                        )
+                        or ""
+                    ),
+                )
                 for obj in scene.objects.values()
                 if (getattr(obj, "metadata", {}) or {}).get("semantic_admission_state")
                 == "semantic_unverified_transient"
+            ]
+            transient_unverified_names = [
+                name
+                for name, origin_stage in transient_unverified_assets
+                if not origin_stage or origin_stage == current_stage
             ]
             object_counts: dict[str, int] = {}
             object_placements: list[dict[str, Any]] = []
@@ -1643,14 +1663,22 @@ class SceneExpertHookRunner:
                     )
                 except Exception:
                     continue
-            degraded_stage_reasons = list(
+            accumulated_degraded_reasons = list(
                 getattr(scene, "scene_expert_degraded_stage_reasons", []) or []
             )
-            degraded_stage_reasons.extend(
-                f"asset semantic validation remained transient-unverified: {name}"
-                for name in transient_unverified_names
+            accumulated_degraded_reasons.extend(
+                (f"[{origin_stage}] " if origin_stage else "")
+                + f"asset semantic validation remained transient-unverified: {name}"
+                for name, origin_stage in transient_unverified_assets
             )
-            current_stage = str(getattr(scene, "scene_expert_stage", "") or "")
+            (
+                all_degraded_reasons,
+                current_degraded_reasons,
+                upstream_degraded_reasons,
+            ) = split_degraded_stage_reasons(
+                accumulated_degraded_reasons,
+                current_stage=current_stage,
+            )
             stage_diagnostics = list(
                 (getattr(scene, "scene_expert_stage_diagnostics", {}) or {}).get(
                     current_stage, []
@@ -1685,7 +1713,10 @@ class SceneExpertHookRunner:
                     )
                     or 0
                 ),
-                "degraded_stage_reasons": list(dict.fromkeys(degraded_stage_reasons)),
+                "all_degraded_stage_reasons": all_degraded_reasons,
+                "degraded_stage_reasons": current_degraded_reasons,
+                "upstream_degraded_stage_reasons": upstream_degraded_reasons,
+                "candidate_hash": candidate_state_hash(scene),
                 "stage_diagnostics": stage_diagnostics,
                 "runtime_repair_events": list(
                     getattr(scene, "scene_expert_runtime_repair_events", []) or []
@@ -1702,7 +1733,10 @@ class SceneExpertHookRunner:
                 "stage_required_min_output_objects": 0,
                 "stage_max_output_objects": 0,
                 "stage_required_max_output_objects": 0,
+                "all_degraded_stage_reasons": [],
                 "degraded_stage_reasons": [],
+                "upstream_degraded_stage_reasons": [],
+                "candidate_hash": "",
                 "stage_diagnostics": [],
                 "runtime_repair_events": [],
             }

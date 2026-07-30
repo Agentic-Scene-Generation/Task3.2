@@ -1,3 +1,4 @@
+import json
 import unittest
 
 from pathlib import Path
@@ -10,12 +11,123 @@ from scenesmith.experiments.indoor_scene_generation import (
     _raise_if_required_assets_unavailable,
     _run_sceneexpert_placement_stage,
     _score_postprocessed_candidate_or_pause,
+    _stage_recovery_made_progress,
+    _stage_validation_kind,
+    _write_batch_summary,
 )
 from scenesmith.scene_expert.exceptions import StageValidationError
-from scenesmith.scene_expert.runtime_state import ScenePausedError
+from scenesmith.scene_expert.runtime_state import (
+    ScenePausedError,
+    candidate_state_hash,
+    split_degraded_stage_reasons,
+)
 
 
 class StageFailureRecoveryTest(unittest.TestCase):
+    def test_candidate_hash_ignores_mutable_prompt_injection(self) -> None:
+        scene = SimpleNamespace(
+            text_description="injected stage brief",
+            to_state_dict=lambda: {
+                "text_description": "injected stage brief",
+                "objects": {"bed_0": {"position": [1.0, 2.0, 0.0]}},
+            },
+        )
+
+        injected_hash = candidate_state_hash(scene)
+        scene.text_description = "original user prompt"
+        scene.to_state_dict = lambda: {
+            "text_description": "original user prompt",
+            "objects": {"bed_0": {"position": [1.0, 2.0, 0.0]}},
+        }
+
+        self.assertEqual(injected_hash, candidate_state_hash(scene))
+
+    def test_required_asset_unavailable_is_not_retried_as_layout_failure(self) -> None:
+        error = StageValidationError(
+            stage="furniture",
+            reasons=[
+                "required asset unavailable: no semantically admitted real HSSD "
+                "asset for family 'plant'"
+            ],
+        )
+        agent = SimpleNamespace(unavailable_required_asset_families=lambda: ["plant"])
+
+        self.assertEqual("asset_unavailable", _stage_validation_kind(error, agent))
+
+    def test_retry_progress_requires_acceptance_relevant_improvement(self) -> None:
+        before = {
+            "placed_count": 0,
+            "admitted_asset_count": 1,
+            "unavailable_required_count": 0,
+            "required_missing_count": 1,
+            "hard_issue_count": 2,
+            "reason_signature": ("collision at x=1",),
+        }
+        renamed_only = dict(
+            before,
+            reason_signature=("collision at x=2",),
+        )
+        improved = dict(before, hard_issue_count=1)
+
+        self.assertFalse(_stage_recovery_made_progress(before, renamed_only))
+        self.assertTrue(_stage_recovery_made_progress(before, improved))
+
+    def test_degraded_reasons_are_scoped_to_the_origin_stage(self) -> None:
+        all_reasons, current, upstream = split_degraded_stage_reasons(
+            [
+                "[furniture] visual critic unavailable",
+                "[wall_mounted] optional asset unavailable",
+            ],
+            current_stage="wall_mounted",
+        )
+
+        self.assertEqual(2, len(all_reasons))
+        self.assertEqual(["[wall_mounted] optional asset unavailable"], current)
+        self.assertEqual(["[furniture] visual critic unavailable"], upstream)
+
+    def test_batch_summary_preserves_degraded_and_orphaned_outcomes(self) -> None:
+        with TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            degraded_manifest = (
+                output_dir
+                / "scene_000"
+                / "scene_expert"
+                / "degraded"
+                / "degraded_manifest.json"
+            )
+            degraded_manifest.parent.mkdir(parents=True)
+            degraded_manifest.write_text(
+                '{"status": "DEGRADED_INCOMPLETE"}',
+                encoding="utf-8",
+            )
+            orphan_status = output_dir / "scene_001" / "scene_status.json"
+            orphan_status.parent.mkdir(parents=True)
+            orphan_status.write_text(
+                json.dumps(
+                    {
+                        "status": "running",
+                        "pid": 2_147_483_647,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            _write_batch_summary(
+                output_dir=output_dir,
+                experiment_run_id="run-test",
+                prompts_with_ids=[(0, "bedroom"), (1, "living room")],
+                results={"scene_000": ("completed", None)},
+            )
+
+            payload = json.loads(
+                (output_dir / "batch_summary.json").read_text(encoding="utf-8")
+            )
+            statuses = {item["scene_id"]: item["status"] for item in payload["scenes"]}
+            self.assertEqual("degraded_incomplete", statuses["scene_000"])
+            self.assertEqual("orphaned", statuses["scene_001"])
+            self.assertEqual(1, payload["degraded_incomplete_scenes"])
+            self.assertEqual(1, payload["orphaned_scenes"])
+
     def test_collision_and_missing_content_are_repairable(self) -> None:
         error = StageValidationError(
             stage="furniture",

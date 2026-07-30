@@ -278,7 +278,9 @@ class MemoryWriter:
     def _normalize_update_op(raw_op: Any) -> dict[str, Any]:
         """Normalize common local-model JSON nulls before schema validation."""
         if not isinstance(raw_op, dict):
-            raise TypeError(f"Memory update must be an object, got {type(raw_op).__name__}")
+            raise TypeError(
+                f"Memory update must be an object, got {type(raw_op).__name__}"
+            )
         op = dict(raw_op)
         if op.get("content") is None:
             op["content"] = {}
@@ -474,13 +476,18 @@ class MemoryWriter:
         full_report: FullVerifyReport,
         related_old_memory: str,
     ) -> str:
+        def format_metric(value: float | None) -> str:
+            return "unmeasured" if value is None else f"{value:.2f}"
+
         score_str = (
             f"overall={full_report.overall_score:.2f}, "
             f"semantic={full_report.semantic_score:.2f}, "
             f"aesthetic={full_report.aesthetic_score:.2f}, "
             f"plausibility={full_report.plausibility_score:.2f}, "
             f"reachability={full_report.reachability_score:.2f}, "
-            f"physics={full_report.collision_free_rate:.2f}"
+            f"physics={format_metric(full_report.collision_free_rate)}, "
+            f"stability={format_metric(full_report.stability_score)}, "
+            f"walkability={format_metric(full_report.walkable_area_ratio)}"
         )
         parts = [
             "## Scene Generation Trace Summary",
@@ -517,8 +524,7 @@ class MemoryWriter:
                 if (
                     not full_report.pass_scene
                     or full_report.missing_stages
-                    or full_report.overall_score
-                    < SUCCESS_MEMORY_MIN_OVERALL_SCORE
+                    or full_report.overall_score < SUCCESS_MEMORY_MIN_OVERALL_SCORE
                 ):
                     console_logger.info(
                         "MemoryWriter: dropped success_case because the final "

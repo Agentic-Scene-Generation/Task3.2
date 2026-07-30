@@ -571,6 +571,7 @@ class StageVerifier:
         console_logger.info(f"StageVerifier: verifying stage '{stage}'")
 
         issues: list[VerifyIssue] = []
+        informational_issues: list[VerifyIssue] = []
         repair_suggestions: list[str] = []
 
         # --- 1. Load SceneSmith scores ---
@@ -586,6 +587,27 @@ class StageVerifier:
             raw_scores,
         )
         score_source = str(provenance.get("score_source", "unknown"))
+        scored_candidate_hash = str(provenance.get("candidate_hash", "") or "")
+        current_candidate_hash = str(
+            (scene_state_info or {}).get("candidate_hash", "") or ""
+        )
+        stale_score_evidence = bool(
+            scored_candidate_hash
+            and current_candidate_hash
+            and scored_candidate_hash != current_candidate_hash
+        )
+        if stale_score_evidence:
+            score_source = "stale_evidence"
+            provenance = dict(provenance)
+            provenance.update(
+                {
+                    "score_source": score_source,
+                    "vlm_scoring_performed": False,
+                    "hard_check_passed": None,
+                    "current_candidate_hash": current_candidate_hash,
+                    "stale_candidate_hash": scored_candidate_hash,
+                }
+            )
         vlm_scoring_performed = bool(
             provenance.get("vlm_scoring_performed", score_source == "vlm_critic")
         )
@@ -656,6 +678,23 @@ class StageVerifier:
                         description=(
                             f"Stage '{stage}' exhausted runtime recovery: "
                             + "; ".join(degraded_reasons)
+                        ),
+                    )
+                )
+            upstream_degraded_reasons = [
+                str(reason)
+                for reason in scene_state_info.get(
+                    "upstream_degraded_stage_reasons", []
+                )
+                if str(reason).strip()
+            ]
+            if upstream_degraded_reasons:
+                informational_issues.append(
+                    VerifyIssue(
+                        issue_type="upstream_degraded_stage",
+                        description=(
+                            "Upstream stage degradation retained for final outcome "
+                            "provenance only: " + "; ".join(upstream_degraded_reasons)
                         ),
                     )
                 )
@@ -916,6 +955,7 @@ class StageVerifier:
             visual_scores=visual_scores,
             rule_scores=rule_scores,
             issues=issues,
+            informational_issues=informational_issues,
             repair_suggestions=repair_suggestions,
             critique_summary=critique_summary,
             score_source=score_source,
@@ -984,20 +1024,22 @@ class FullVerifier:
             for category, score in report.rule_scores.items():
                 rule_scores_by_category.setdefault(category, []).append(score)
 
-        def visual_avg(key: str) -> float:
+        def visual_avg(key: str) -> float | None:
             vals = visual_scores_by_category.get(key, [])
-            return sum(vals) / len(vals) if vals else 0.0
+            return sum(vals) / len(vals) if vals else None
 
         def rule_avg(key: str) -> float | None:
             vals = rule_scores_by_category.get(key, [])
-            return sum(vals) / len(vals) if vals else None
+            if not vals or len(vals) != len(stage_reports):
+                return None
+            return sum(vals) / len(vals)
 
-        semantic = visual_avg("semantic")
-        aesthetic = visual_avg("aesthetic")
-        plausibility = visual_avg("plausibility")
+        semantic = visual_avg("semantic") or 0.0
+        aesthetic = visual_avg("aesthetic") or 0.0
+        plausibility = visual_avg("plausibility") or 0.0
         visual_physics = visual_avg("physics")
         hard_physics = rule_avg("physics")
-        interaction = visual_avg("interaction")
+        interaction = visual_avg("interaction") or 0.0
         walkability = visual_avg("walkability")
 
         # Overall remains a visual-quality metric. Hard physics gates acceptance
@@ -1015,16 +1057,35 @@ class FullVerifier:
             if key in visual_scores_by_category
         ]
         overall = (
-            sum(visual_avg(key) for key in visual_dimensions) / len(visual_dimensions)
+            sum(
+                score
+                for key in visual_dimensions
+                if (score := visual_avg(key)) is not None
+            )
+            / len(visual_dimensions)
             if visual_dimensions
             else 0.0
         )
 
         has_plausibility = "plausibility" in visual_scores_by_category
         pass_plausibility = not has_plausibility or plausibility >= self._pass_threshold
-        collision_free_rate = (
-            hard_physics if hard_physics is not None else visual_physics
-        )
+        collision_free_rate = hard_physics
+        measured_metrics = {
+            "collision_free_rate": collision_free_rate is not None,
+            "stability_score": hard_physics is not None,
+            "walkable_area_ratio": walkability is not None,
+        }
+        metric_sources = {
+            "collision_free_rate": (
+                "deterministic_hard_check" if hard_physics is not None else "unmeasured"
+            ),
+            "stability_score": (
+                "deterministic_hard_check" if hard_physics is not None else "unmeasured"
+            ),
+            "walkable_area_ratio": (
+                "vlm_critic" if walkability is not None else "unmeasured"
+            ),
+        }
 
         report = FullVerifyReport(
             semantic_score=semantic,
@@ -1032,8 +1093,8 @@ class FullVerifier:
             plausibility_score=plausibility,
             style_consistency=aesthetic,  # proxy
             collision_free_rate=collision_free_rate,
-            stability_score=visual_physics,  # VLM physics-quality proxy
-            walkable_area_ratio=walkability if walkability > 0 else 0.0,
+            stability_score=hard_physics,
+            walkable_area_ratio=walkability,
             reachability_score=interaction,
             support_relation_accuracy=interaction,  # proxy
             overall_score=overall,
@@ -1047,15 +1108,18 @@ class FullVerifier:
             expected_stages=expected,
             completed_stages=completed,
             missing_stages=missing,
+            measured_metrics=measured_metrics,
+            metric_sources=metric_sources,
         )
 
         console_logger.info(
             "FullVerifier: "
             f"semantic={semantic:.2f} aesthetic={aesthetic:.2f} "
             f"plausibility_score={plausibility:.2f} "
-            f"visual_physics={visual_physics:.2f} "
+            f"visual_physics={visual_physics if visual_physics is not None else 'n/a'} "
             f"hard_physics={hard_physics if hard_physics is not None else 'n/a'} "
-            f"interaction={interaction:.2f} walkability={walkability:.2f} "
+            f"interaction={interaction:.2f} "
+            f"walkability={walkability if walkability is not None else 'n/a'} "
             f"overall={overall:.2f} pass={'YES' if report.pass_scene else 'NO'}"
         )
         return report

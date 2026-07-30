@@ -209,13 +209,21 @@ class TraceLogger:
         """Set the final report and return the full trace dict (before saving)."""
         self._full_report = full_report
         self._exports = exports
+        outcome_status = str(full_report.outcome_status or "COMPLETE").casefold()
+        trace_status = (
+            "degraded_incomplete"
+            if outcome_status == "degraded_incomplete"
+            else "completed"
+        )
 
         trace = {
             "schema_version": self.SCHEMA_VERSION,
             "trace_id": self._trace_id,
             "scene_id": self._scene_id,
-            "status": "completed",
-            "degraded": bool(self._degraded_components()),
+            "status": trace_status,
+            "degraded": bool(
+                self._degraded_components() or trace_status == "degraded_incomplete"
+            ),
             "degraded_components": self._degraded_components(),
             "component_status": self._component_status,
             "experiment_name": self._experiment_name,
@@ -333,12 +341,10 @@ class TraceLogger:
             if entry.verify_report:
                 passed = "PASS" if entry.verify_report.pass_stage else "FAIL"
                 visual_scores = ", ".join(
-                    f"{k}={v:.2f}"
-                    for k, v in entry.verify_report.visual_scores.items()
+                    f"{k}={v:.2f}" for k, v in entry.verify_report.visual_scores.items()
                 )
                 rule_scores = ", ".join(
-                    f"{k}={v:.2f}"
-                    for k, v in entry.verify_report.rule_scores.items()
+                    f"{k}={v:.2f}" for k, v in entry.verify_report.rule_scores.items()
                 )
                 stage_line += (
                     f" verify={passed} visual_scores=({visual_scores}) "
@@ -359,9 +365,7 @@ class TraceLogger:
 
             # Include critic summary — the most informative per-stage content.
             if entry.verify_report and entry.verify_report.critique_summary:
-                feedback = parse_critic_feedback(
-                    entry.verify_report.critique_summary
-                )
+                feedback = parse_critic_feedback(entry.verify_report.critique_summary)
                 if feedback.structured:
                     lines.append(
                         f"    Critic: status={feedback.status} "
