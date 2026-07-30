@@ -149,6 +149,111 @@ class TestFinalFurnitureRescore(unittest.TestCase):
         )
         rescore.assert_awaited_once()
 
+    def test_inventory_added_by_rescore_receives_one_physical_revalidation(self):
+        furniture_type = SimpleNamespace(value="furniture")
+
+        class FakeScene:
+            def __init__(self):
+                self.objects = {"sofa_0": SimpleNamespace(object_type=furniture_type)}
+
+            def content_hash(self) -> str:
+                return ",".join(sorted(self.objects))
+
+        scene = FakeScene()
+        rescore_calls = 0
+
+        async def rescore(*, furniture_agent, scene):
+            nonlocal rescore_calls
+            rescore_calls += 1
+            furniture_agent.scene = scene
+            if rescore_calls == 1:
+                scene.objects["plant_repair_0"] = SimpleNamespace(
+                    object_type=furniture_type
+                )
+
+        module = "scenesmith.experiments.indoor_scene_generation"
+        physical = MagicMock(return_value=(scene, True, []))
+        agent = SimpleNamespace(scene=scene)
+        with (
+            patch(f"{module}._apply_final_furniture_guards"),
+            patch(f"{module}._raise_for_unresolved_furniture_relations"),
+            patch(
+                f"{module}._rescore_furniture_after_postprocessing",
+                new=AsyncMock(side_effect=rescore),
+            ) as rescore_mock,
+            patch(f"{module}._run_furniture_physical_postprocessing", physical),
+        ):
+            changed = asyncio.run(
+                _apply_and_rescore_final_furniture_state(
+                    furniture_agent=agent,
+                    scene=scene,
+                    cfg_dict={},
+                    previous_scene_hash="pre-simulation",
+                    physically_validated_furniture_ids=frozenset({"sofa_0"}),
+                )
+            )
+
+        self.assertTrue(changed)
+        self.assertEqual(rescore_mock.await_count, 2)
+        physical.assert_called_once_with(scene=scene, cfg_dict={})
+        self.assertEqual(set(scene.objects), {"sofa_0", "plant_repair_0"})
+
+    def test_repeated_inventory_repair_after_revalidation_fails_stage(self):
+        furniture_type = SimpleNamespace(value="furniture")
+
+        class FakeScene:
+            def __init__(self):
+                self.objects = {"sofa_0": SimpleNamespace(object_type=furniture_type)}
+
+            def content_hash(self) -> str:
+                return ",".join(sorted(self.objects))
+
+        scene = FakeScene()
+        rescore_calls = 0
+
+        async def rescore(*, furniture_agent, scene):
+            nonlocal rescore_calls
+            rescore_calls += 1
+            furniture_agent.scene = scene
+            scene.objects[f"plant_repair_{rescore_calls}"] = SimpleNamespace(
+                object_type=furniture_type
+            )
+
+        def remove_unstable_repair(*, scene, cfg_dict):
+            del scene.objects["plant_repair_1"]
+            return scene, True, ["plant_repair_1"]
+
+        module = "scenesmith.experiments.indoor_scene_generation"
+        agent = SimpleNamespace(scene=scene)
+        with (
+            patch(f"{module}._apply_final_furniture_guards"),
+            patch(f"{module}._raise_for_unresolved_furniture_relations"),
+            patch(
+                f"{module}._rescore_furniture_after_postprocessing",
+                new=AsyncMock(side_effect=rescore),
+            ),
+            patch(
+                f"{module}._run_furniture_physical_postprocessing",
+                side_effect=remove_unstable_repair,
+            ) as physical,
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "refusing to persist unvalidated furniture: plant_repair_2",
+            ):
+                asyncio.run(
+                    _apply_and_rescore_final_furniture_state(
+                        furniture_agent=agent,
+                        scene=scene,
+                        cfg_dict={},
+                        previous_scene_hash="pre-simulation",
+                        physically_validated_furniture_ids=frozenset({"sofa_0"}),
+                    )
+                )
+
+        physical.assert_called_once_with(scene=scene, cfg_dict={})
+        self.assertEqual(rescore_calls, 2)
+
     def test_unresolved_core_relation_blocks_furniture_stage(self):
         module = "scenesmith.experiments.indoor_scene_generation"
         failures = [

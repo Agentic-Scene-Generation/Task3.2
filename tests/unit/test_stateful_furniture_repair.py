@@ -528,6 +528,28 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         StatefulFurnitureAgent is None,
         f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
     )
+    def test_role_specific_counts_replace_covered_generic_inventory(self) -> None:
+        agent = object.__new__(StatefulFurnitureAgent)
+        agent.scene = SimpleNamespace(objects={})
+        agent.furniture_safety_controller = SimpleNamespace(
+            required_counts={
+                "desk": 7,
+                "student_desk": 6,
+                "teacher_desk": 1,
+                "chair": 6,
+                "student_chair": 6,
+            }
+        )
+
+        self.assertEqual(
+            agent._repair_required_counts(),
+            {"student_desk": 6, "teacher_desk": 1, "student_chair": 6},
+        )
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
     def test_broad_chair_repair_count_includes_armchairs(self) -> None:
         agent = object.__new__(StatefulFurnitureAgent)
         furniture_type = SimpleNamespace(value="furniture")

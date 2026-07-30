@@ -583,6 +583,16 @@ class FurnitureSafetyController:
                         )
                         if re.search(pattern, text):
                             counts[target] = max(counts.get(target, 0), source_count)
+                            source_match = re.fullmatch(
+                                rf"({'|'.join(DISTINCT_FURNITURE_ROLES)})_(desk|chair)",
+                                source,
+                            )
+                            if source_match and target in {"desk", "chair"}:
+                                role_target = f"{source_match.group(1)}_{target}"
+                                if role_target in DEFAULT_ALIASES:
+                                    counts[role_target] = max(
+                                        counts.get(role_target, 0), source_count
+                                    )
                             found = True
                             break
                     if found:

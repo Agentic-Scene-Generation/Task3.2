@@ -1352,15 +1352,15 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             if count > 0:
                 semantic_counts[category] = max(semantic_counts.get(category, 0), count)
         if semantic_counts:
-            for generic in ("desk", "chair"):
-                specialized = sum(
-                    count
-                    for category, count in semantic_counts.items()
-                    if category.endswith(f"_{generic}")
-                )
-                if specialized:
-                    counts.pop(generic, None)
             counts.update(semantic_counts)
+        for generic in ("desk", "chair"):
+            specialized = sum(
+                count
+                for category, count in counts.items()
+                if category != generic and category.endswith(f"_{generic}")
+            )
+            if specialized and counts.get(generic, 0) <= specialized:
+                counts.pop(generic, None)
         return counts
 
     @staticmethod

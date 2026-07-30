@@ -67,15 +67,19 @@ def evaluate_classroom_workstation_distribution(
         room_type=room_type,
         room_bounds=room_bounds,
     )
-    if len(assignments) != len(seats):
+    student_surface_ids = {str(surface["id"]) for surface in cohort.student_surfaces}
+    student_assignments = [
+        assignment
+        for assignment in assignments
+        if assignment.surface_id in student_surface_ids
+    ]
+    if len(student_assignments) != len(cohort.student_surfaces):
         return []
     objects_by_id = {str(obj["id"]): obj for obj in objects}
     assignment_by_surface = {
-        assignment.surface_id: assignment for assignment in assignments
+        assignment.surface_id: assignment for assignment in student_assignments
     }
-    if set(assignment_by_surface) != {
-        str(surface["id"]) for surface in cohort.student_surfaces
-    }:
+    if set(assignment_by_surface) != student_surface_ids:
         return []
 
     instructional_surface, instructional_front = _instructional_anchor(

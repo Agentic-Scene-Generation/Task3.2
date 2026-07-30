@@ -24,8 +24,8 @@ def _object(
     yaw: float = 0.0,
     target_relations: list[str] | None = None,
 ) -> dict:
-    is_seating = category in {"chair", "office_chair"}
-    is_surface = category in {"desk", "table"}
+    is_seating = category in {"chair", "office_chair"} or category.endswith("_chair")
+    is_surface = category in {"desk", "table"} or category.endswith("_desk")
     cx, cy = center
     sx, sy = size
     hints = {
@@ -154,6 +154,74 @@ def test_generic_classroom_family_excludes_front_center_teacher_desk() -> None:
     assert len(assignments) == 6
     assert "desk_2" not in {assignment.surface_id for assignment in assignments}
     assert "desk_6" in {assignment.surface_id for assignment in assignments}
+
+
+def test_classroom_roles_never_use_teacher_chair_as_missing_student_seat() -> None:
+    student_desks = [
+        _object(
+            f"student_desk_{index}",
+            "student_desk",
+            (-2.0 + (index % 3) * 2.0, 1.0 - (index // 3) * 2.0),
+            (1.1, 0.6),
+        )
+        for index in range(6)
+    ]
+    student_chairs = [
+        _object(
+            f"student_chair_{index}",
+            "student_chair",
+            (-2.0 + (index % 3) * 2.0, 0.3 - (index // 3) * 2.0),
+            (0.5, 0.5),
+        )
+        for index in range(5)
+    ]
+    objects = [
+        _object("teacher_desk_0", "teacher_desk", (0.0, 4.0), (1.5, 0.8)),
+        _object("teacher_chair_0", "teacher_chair", (2.0, -2.0), (0.6, 0.6)),
+        *student_desks,
+        *student_chairs,
+    ]
+    task = (
+        "A classroom with six student desks, each with a chair. A teacher's desk "
+        "sits at the front."
+    )
+
+    assignments = assign_work_seats_to_surfaces(
+        objects,
+        task_instruction=task,
+        room_type="classroom",
+        room_bounds=(-4.0, -5.0, 4.0, 5.0),
+    )
+    pairs = {item.seat_id: item.surface_id for item in assignments}
+
+    assert pairs["teacher_chair_0"] == "teacher_desk_0"
+    assert all(
+        pairs[f"student_chair_{index}"].startswith("student_desk_")
+        for index in range(5)
+    )
+    assert len(set(pairs.values()) & {desk["id"] for desk in student_desks}) == 5
+
+    objects.append(
+        _object(
+            "student_chair_5",
+            "student_chair",
+            (2.0, -2.7),
+            (0.5, 0.5),
+        )
+    )
+    complete = assign_work_seats_to_surfaces(
+        objects,
+        task_instruction=task,
+        room_type="classroom",
+        room_bounds=(-4.0, -5.0, 4.0, 5.0),
+    )
+    complete_pairs = {item.seat_id: item.surface_id for item in complete}
+
+    assert len(complete_pairs) == 7
+    assert complete_pairs["teacher_chair_0"] == "teacher_desk_0"
+    assert {complete_pairs[f"student_chair_{index}"] for index in range(6)} == {
+        desk["id"] for desk in student_desks
+    }
 
 
 def test_plain_office_chair_uses_function_annotations_without_student_label() -> None:

@@ -57,6 +57,8 @@ _WORK_CONTEXT_HINTS = (
     "workstation",
 )
 _CLASSROOM_CONTEXT_HINTS = ("classroom", "school", "student chair", "student desk")
+_INSTRUCTOR_ROLE_TOKENS = ("teacher", "instructor", "lecturer", "professor", "faculty")
+_LEARNER_ROLE_TOKENS = ("student", "learner", "pupil")
 _DINING_CONTEXT_HINTS = (
     "dining",
     "restaurant",
@@ -140,6 +142,31 @@ def assign_work_seats_to_surfaces(
 
     context = f"{room_type} {task_instruction}".lower()
     classroom_context = any(hint in context for hint in _CLASSROOM_CONTEXT_HINTS)
+    if classroom_context:
+        classroom = classroom_surface_cohort(
+            all_surfaces,
+            seat_count=len(seats),
+            room_bounds=resolved_room_bounds,
+        )
+        if classroom is not None:
+            student_seats, instructor_seats = _classroom_seat_cohorts(seats)
+            student_assignments = _assign_seat_surface_cohort(
+                student_seats,
+                list(classroom.student_surfaces),
+                fixed_pairs=fixed_pairs,
+                room_bounds=resolved_room_bounds,
+            )
+            instructor_assignments = _assign_seat_surface_cohort(
+                instructor_seats,
+                [classroom.teacher_surface],
+                fixed_pairs=fixed_pairs,
+                room_bounds=resolved_room_bounds,
+            )
+            return sorted(
+                [*student_assignments, *instructor_assignments],
+                key=lambda item: item.seat_id,
+            )
+
     surfaces = _surface_cohort(
         all_surfaces,
         seat_count=len(seats),
@@ -148,8 +175,24 @@ def assign_work_seats_to_surfaces(
     )
     if not surfaces:
         return []
-    seats.sort(key=_object_id)
-    surfaces.sort(key=_object_id)
+    return _assign_seat_surface_cohort(
+        seats,
+        surfaces,
+        fixed_pairs=fixed_pairs,
+        room_bounds=resolved_room_bounds,
+    )
+
+
+def _assign_seat_surface_cohort(
+    seats: list[dict[str, Any]],
+    surfaces: list[dict[str, Any]],
+    *,
+    fixed_pairs: dict[str, str] | None,
+    room_bounds: tuple[float, float, float, float] | None,
+) -> list[SeatSurfaceAssignment]:
+    """Assign one role-compatible seat/surface cohort without cross-role fallback."""
+    seats = sorted(seats, key=_object_id)
+    surfaces = sorted(surfaces, key=_object_id)
 
     seats_by_id = {_object_id(obj): obj for obj in seats}
     surfaces_by_id = {_object_id(obj): obj for obj in surfaces}
@@ -176,15 +219,13 @@ def assign_work_seats_to_surfaces(
         surface = surfaces_by_id.get(str(surface_id))
         if seat is None or surface is None or surface_id in used_surfaces:
             continue
-        fixed.append(_pair_assignment(seat, surface, resolved_room_bounds))
+        fixed.append(_pair_assignment(seat, surface, room_bounds))
         used_seats.add(str(seat_id))
         used_surfaces.add(str(surface_id))
 
     free_seats = [obj for obj in seats if _object_id(obj) not in used_seats]
     free_surfaces = [obj for obj in surfaces if _object_id(obj) not in used_surfaces]
-    assigned = _minimum_cost_pairs(
-        free_seats, free_surfaces, room_bounds=resolved_room_bounds
-    )
+    assigned = _minimum_cost_pairs(free_seats, free_surfaces, room_bounds=room_bounds)
     return sorted([*fixed, *assigned], key=lambda item: item.seat_id)
 
 
@@ -338,7 +379,7 @@ def classroom_surface_cohort(
     instead the desk closest to a room boundary and closest to that wall's lateral
     centerline. This remains stable after the student grid is spread through the room.
     """
-    if seat_count < 2 or len(surfaces) != seat_count + 1 or room_bounds is None:
+    if room_bounds is None:
         return None
     min_x, min_y, max_x, max_y = room_bounds
     span_x, span_y = max_x - min_x, max_y - min_y
@@ -354,8 +395,12 @@ def classroom_surface_cohort(
     explicit = [
         surface
         for surface in surfaces
-        if any(token in _identity(surface) for token in ("teacher", "instructor"))
+        if _has_role_token(surface, _INSTRUCTOR_ROLE_TOKENS)
     ]
+    if len(explicit) > 1:
+        return None
+    if not explicit and (seat_count < 2 or len(surfaces) != seat_count + 1):
+        return None
     ranked: list[tuple[float, float, str, dict[str, Any], tuple[float, float]]] = []
     candidates = explicit or surfaces
     for surface in candidates:
@@ -381,9 +426,30 @@ def classroom_surface_cohort(
             key=_object_id,
         )
     )
-    if len(students) != seat_count:
+    if not explicit and len(students) != seat_count:
         return None
     return ClassroomSurfaceCohort(students, teacher, front)
+
+
+def _classroom_seat_cohorts(
+    seats: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Partition explicit instructional roles before geometry-based assignment."""
+    instructors = [
+        seat for seat in seats if _has_role_token(seat, _INSTRUCTOR_ROLE_TOKENS)
+    ]
+    learners = [seat for seat in seats if _has_role_token(seat, _LEARNER_ROLE_TOKENS)]
+    if learners:
+        return learners, instructors
+    return [seat for seat in seats if seat not in instructors], instructors
+
+
+def _has_role_token(obj: dict[str, Any], tokens: tuple[str, ...]) -> bool:
+    identity = _identity(obj)
+    return any(
+        re.search(rf"(?:^|[^a-z0-9]){re.escape(token)}(?:[^a-z0-9]|$)", identity)
+        for token in tokens
+    )
 
 
 def _minimum_cost_pairs(

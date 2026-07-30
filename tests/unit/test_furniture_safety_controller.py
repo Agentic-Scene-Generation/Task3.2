@@ -572,7 +572,37 @@ class FurnitureSafetyControllerTest(unittest.TestCase):
 
         self.assertEqual(controller.required_counts.get("desk"), 7)
         self.assertEqual(controller.required_counts.get("chair"), 6)
+        self.assertEqual(controller.required_counts.get("student_chair"), 6)
         self.assertNotIn("table", controller.required_counts)
+
+    def test_teacher_chair_cannot_satisfy_role_specific_student_inventory(self) -> None:
+        controller = FurnitureSafetyController({"enabled": True})
+        controller.reset_for_scene(
+            "A classroom with six student desks, each with a chair. A teacher's "
+            "desk sits at the front."
+        )
+        objects = {
+            "teacher_chair_0": SimpleNamespace(
+                name="teacher_chair", description="teacher armchair", immutable=False
+            ),
+            **{
+                f"student_chair_{index}": SimpleNamespace(
+                    name="student_chair",
+                    description="student classroom chair",
+                    immutable=False,
+                )
+                for index in range(5)
+            },
+        }
+
+        evaluation = controller.evaluate_scene_state(
+            SimpleNamespace(objects=objects, room_geometry=None)
+        )
+
+        self.assertIn(
+            "missing required student_chair: expected 6, found 5",
+            evaluation.hard_reasons,
+        )
 
     def test_living_room_prompt_tracks_rug_and_plant_counts(self) -> None:
         controller = FurnitureSafetyController({"enabled": True})

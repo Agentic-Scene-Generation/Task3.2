@@ -447,11 +447,67 @@ async def _rescore_furniture_after_postprocessing(
     await furniture_agent._finalize_scene_and_scores()
 
 
+def _furniture_object_ids(scene: RoomScene) -> frozenset[str]:
+    """Return the furniture identities represented by the current scene state."""
+    object_ids: set[str] = set()
+    for object_id, obj in getattr(scene, "objects", {}).items():
+        object_type = getattr(obj, "object_type", None)
+        value = getattr(object_type, "value", object_type)
+        if str(value).lower() == ObjectType.FURNITURE.value:
+            object_ids.add(str(object_id))
+    return frozenset(object_ids)
+
+
+def _run_furniture_physical_postprocessing(
+    *,
+    scene: RoomScene,
+    cfg_dict: dict,
+    simulation_html_path: Path | None = None,
+) -> tuple[RoomScene, bool, list[str]]:
+    """Run the configured furniture projection and dynamic validation once."""
+    projection_cfg = cfg_dict["experiment"]["projection"]
+    furniture_cfg = projection_cfg["furniture"]
+    sim_cfg = projection_cfg["simulation"]
+    physics_cfg = cfg_dict["furniture_agent"]["physics_validation"]
+    return apply_physical_feasibility_postprocessing(
+        scene=scene,
+        weld_furniture=False,
+        projection_enabled=True,
+        projection_influence_distance=furniture_cfg["influence_distance"],
+        projection_solver_name=furniture_cfg["solver_name"],
+        projection_iteration_limit=furniture_cfg["iteration_limit"],
+        projection_time_limit_s=furniture_cfg["time_limit_s"],
+        projection_xy_only=furniture_cfg["xy_only"],
+        projection_fix_rotation=furniture_cfg["fix_rotation"],
+        simulation_enabled=sim_cfg["enabled"],
+        simulation_time_s=sim_cfg["simulation_time_s"],
+        simulation_time_step_s=sim_cfg["time_step_s"],
+        simulation_timeout_s=sim_cfg["timeout_s"],
+        simulation_html_path=simulation_html_path,
+        remove_fallen_furniture=physics_cfg["remove_fallen_furniture"],
+        fallen_tilt_threshold_degrees=physics_cfg["fallen_tilt_threshold_degrees"],
+    )
+
+
+def _raise_for_unvalidated_furniture(
+    *,
+    scene: RoomScene,
+    physically_validated_ids: frozenset[str],
+) -> None:
+    added_ids = sorted(_furniture_object_ids(scene) - physically_validated_ids)
+    if added_ids:
+        raise RuntimeError(
+            "Furniture inventory changed after its bounded physical revalidation; "
+            "refusing to persist unvalidated furniture: " + ", ".join(added_ids)
+        )
+
+
 async def _apply_and_rescore_final_furniture_state(
     furniture_agent: StatefulFurnitureAgent,
     scene: RoomScene,
     cfg_dict: dict,
     previous_scene_hash: str,
+    physically_validated_furniture_ids: frozenset[str] | None = None,
 ) -> bool:
     """Apply final furniture guards before rendering the canonical stage state."""
     _apply_final_furniture_guards(scene=scene, cfg_dict=cfg_dict)
@@ -470,6 +526,56 @@ async def _apply_and_rescore_final_furniture_state(
     # before deciding whether the actual persisted layout is valid.
     _apply_final_furniture_guards(scene=scene, cfg_dict=cfg_dict)
     _raise_for_unresolved_furniture_relations(scene=scene, cfg_dict=cfg_dict)
+
+    newly_added_ids = (
+        _furniture_object_ids(scene) - physically_validated_furniture_ids
+        if physically_validated_furniture_ids is not None
+        else frozenset()
+    )
+    if newly_added_ids:
+        console_logger.info(
+            "Canonical furniture repair added/replaced %d object(s); running one "
+            "bounded physical revalidation: %s",
+            len(newly_added_ids),
+            sorted(newly_added_ids),
+        )
+        scene, projection_success, removed_ids = _run_furniture_physical_postprocessing(
+            scene=scene,
+            cfg_dict=cfg_dict,
+        )
+        furniture_agent.scene = scene
+        if removed_ids:
+            console_logger.warning(
+                "Bounded furniture revalidation removed %d unstable object(s): %s",
+                len(removed_ids),
+                removed_ids,
+            )
+        if not projection_success:
+            raise RuntimeError(
+                "Furniture projection failed during bounded post-repair revalidation"
+            )
+
+        revalidated_ids = _furniture_object_ids(scene)
+        _apply_final_furniture_guards(scene=scene, cfg_dict=cfg_dict)
+        _raise_for_unvalidated_furniture(
+            scene=scene,
+            physically_validated_ids=revalidated_ids,
+        )
+        _raise_for_unresolved_furniture_relations(scene=scene, cfg_dict=cfg_dict)
+
+        # Refresh the canonical render/scores for the physically authoritative
+        # state. Any inventory repair triggered by this pass is deliberately not
+        # simulated in a loop; it fails the stage below instead.
+        await _rescore_furniture_after_postprocessing(
+            furniture_agent=furniture_agent,
+            scene=scene,
+        )
+        _apply_final_furniture_guards(scene=scene, cfg_dict=cfg_dict)
+        _raise_for_unvalidated_furniture(
+            scene=scene,
+            physically_validated_ids=revalidated_ids,
+        )
+        _raise_for_unresolved_furniture_relations(scene=scene, cfg_dict=cfg_dict)
     return True
 
 
@@ -926,6 +1032,7 @@ def _generate_room(
                 )
 
                 pre_postprocess_hash = scene.content_hash()
+                physically_validated_furniture_ids = None
 
                 # Furniture post-processing (projection + simulation).
                 if projection_cfg["enabled"] and projection_cfg["furniture"]["enabled"]:
@@ -949,34 +1056,14 @@ def _generate_room(
                             / "furniture_simulation.html"
                         )
 
-                    # Get fallen furniture config from physics_validation.
-                    physics_val_cfg = cfg_dict["furniture_agent"]["physics_validation"]
                     scene, projection_success, removed_ids = (
-                        apply_physical_feasibility_postprocessing(
+                        _run_furniture_physical_postprocessing(
                             scene=scene,
-                            weld_furniture=False,
-                            projection_enabled=True,
-                            projection_influence_distance=furniture_cfg[
-                                "influence_distance"
-                            ],
-                            projection_solver_name=furniture_cfg["solver_name"],
-                            projection_iteration_limit=furniture_cfg["iteration_limit"],
-                            projection_time_limit_s=furniture_cfg["time_limit_s"],
-                            projection_xy_only=furniture_cfg["xy_only"],
-                            projection_fix_rotation=furniture_cfg["fix_rotation"],
-                            simulation_enabled=sim_cfg["enabled"],
-                            simulation_time_s=sim_cfg["simulation_time_s"],
-                            simulation_time_step_s=sim_cfg["time_step_s"],
-                            simulation_timeout_s=sim_cfg["timeout_s"],
+                            cfg_dict=cfg_dict,
                             simulation_html_path=furniture_sim_html_path,
-                            remove_fallen_furniture=physics_val_cfg[
-                                "remove_fallen_furniture"
-                            ],
-                            fallen_tilt_threshold_degrees=physics_val_cfg[
-                                "fallen_tilt_threshold_degrees"
-                            ],
                         )
                     )
+                    physically_validated_furniture_ids = _furniture_object_ids(scene)
                     postprocess_end_time = time.time()
                     if removed_ids:
                         console_logger.info(
@@ -1004,6 +1091,9 @@ def _generate_room(
                             scene=scene,
                             cfg_dict=cfg_dict,
                             previous_scene_hash=pre_postprocess_hash,
+                            physically_validated_furniture_ids=(
+                                physically_validated_furniture_ids
+                            ),
                         )
                     )
                 except Exception as e:
