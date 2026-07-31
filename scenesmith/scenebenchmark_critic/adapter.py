@@ -24,6 +24,7 @@ from scenesmith.scenebenchmark_critic.asset_library_annotations import (
 from scenesmith.scenebenchmark_critic.evaluator import build_all_checks
 from scenesmith.scenebenchmark_critic.intent_contract import (
     attach_intent_contract_to_case_pack,
+    set_contract_mode,
 )
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.constants import (
     BEDS,
@@ -320,6 +321,7 @@ def room_scene_to_case_pack(
     *,
     stage: str = "adhoc",
     metrics: tuple[str, ...] | list[str] | None = None,
+    intent_contract_mode: str = "legacy",
 ) -> dict[str, Any]:
     scene_geometry = _room_scene_geometry(scene)
     case_pack = {
@@ -335,7 +337,9 @@ def room_scene_to_case_pack(
     # SceneExpert may append memory and a StageBrief to ``text_description``;
     # those instructions must never become critic hard constraints.
     attach_intent_contract_to_case_pack(scene, case_pack)
+    set_contract_mode(case_pack, intent_contract_mode)
     case_pack["checks"] = build_all_checks(case_pack, metrics=metrics)
+    case_pack["_checks_built_intent_contract_mode"] = case_pack["intent_contract_mode"]
     return case_pack
 
 
@@ -345,6 +349,7 @@ def house_scene_to_case_pack(
     stage: str = "adhoc",
     metrics: tuple[str, ...] | list[str] | None = None,
     include_object_types: list[ObjectType] | tuple[ObjectType, ...] | None = None,
+    intent_contract_mode: str = "legacy",
 ) -> dict[str, Any]:
     objects: list[dict[str, Any]] = []
     rooms: list[dict[str, Any]] = []
@@ -378,7 +383,9 @@ def house_scene_to_case_pack(
         },
         "checks": [],
     }
+    set_contract_mode(case_pack, intent_contract_mode)
     case_pack["checks"] = build_all_checks(case_pack, metrics=metrics)
+    case_pack["_checks_built_intent_contract_mode"] = case_pack["intent_contract_mode"]
     return case_pack
 
 

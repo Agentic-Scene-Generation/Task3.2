@@ -596,6 +596,28 @@ def _apply_final_furniture_guards(*, scene: RoomScene, cfg_dict: dict) -> None:
     )
 
 
+def _apply_final_wall_functional_guards(*, scene: RoomScene, cfg_dict: dict) -> None:
+    """Resolve contracts whose wall-mounted endpoint appears after furniture."""
+    critic_config = critic_config_from_any(cfg_dict)
+    if (
+        not critic_config.enabled
+        or str(critic_config.constraint_mode).strip().lower() != "contract"
+    ):
+        return
+    fixes = improve_furniture_relations(
+        scene,
+        config=cfg_dict,
+        allowed_relation_types={"instructional_surface_alignment"},
+    )
+    if fixes:
+        console_logger.info(
+            "Post-wall functional contract repair moved %d object(s): %s",
+            len(fixes),
+            ", ".join(f"{fix.object_id}:{fix.relation_type}" for fix in fixes),
+        )
+    _raise_for_unresolved_furniture_relations(scene=scene, cfg_dict=cfg_dict)
+
+
 def _furniture_stage_hard_gate_enabled(cfg_dict: dict) -> bool:
     furniture_cfg = cfg_dict.get("furniture_agent") or {}
     if hasattr(furniture_cfg, "get"):
@@ -1181,6 +1203,7 @@ def _generate_room(
             )
             try:
                 asyncio.run(wall_agent.add_wall_objects(scene=scene))
+                _apply_final_wall_functional_guards(scene=scene, cfg_dict=cfg_dict)
             finally:
                 # Always cleanup server subprocesses.
                 wall_agent.cleanup()

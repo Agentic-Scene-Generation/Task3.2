@@ -63,7 +63,16 @@ DEFAULT_ALIASES = {
         "visitor armchairs",
     ],
     "student_desk": ["student desk", "student desks"],
-    "teacher_desk": ["teacher desk", "teacher desks", "teacher's desk"],
+    "teacher_desk": [
+        "teacher desk",
+        "teacher desks",
+        "teacher's desk",
+        "teachers desk",
+        "teachers' desk",
+        "instructor desk",
+        "instructor desks",
+        "instructor's desk",
+    ],
     "dining_chair": ["dining chair", "dining chairs"],
     "student_chair": ["student chair", "student chairs"],
     "armchair": ["armchair", "armchairs", "arm chair", "arm chairs"],
@@ -276,24 +285,64 @@ def _is_non_furniture_table_reference(text: str, end: int) -> bool:
 
 
 def _has_unnegated_collision(text: str) -> bool:
-    terms = ("collision", "collisions", "colliding", "penetration")
-    negations = (
-        "no collision",
-        "no collisions",
-        "zero collision",
-        "zero collisions",
-        "without collision",
-        "without collisions",
-        "no new collision",
-        "no new collisions",
+    normalized = text.lower()
+    negated_patterns = (
+        r"\b(?:no|zero)\s+(?:(?:new|remaining|detectable|physical)\s+)?"
+        r"(?:collisions?|penetration)\b",
+        r"\b0\s+(?:collisions?|penetration)\b",
+        r"\bno\s+(?:(?:physics|physical)\s+)?violations?\s+"
+        r"(?:or|and)\s+(?:collisions?|penetration)\b",
+        r"\bwithout\s+(?:any\s+|new\s+)?(?:collisions?|penetration)\b",
+        r"\bfree\s+of\s+(?:any\s+)?(?:collisions?|penetration)\b",
+        r"\b(?:collisions?|penetration)[ -]free\b",
+        r"\bnon[ -]?colliding\b",
+        r"\b(?:collisions?|penetration)\s*(?:is|are|was|were|has been|have been)?"
+        r"\s*(?:absent|resolved|cleared|not detected)\b",
+        r"\bcollision\s+(?:check|test|validation)\s+" r"(?:passes|passed|is clear)\b",
+        r"\bcollision\s+count\s*(?:is|=|:)\s*(?:zero|0)\b",
+        r"\bcollisions?\s*(?:is|are|=|:)\s*(?:none|zero|0)\b",
     )
-    for term in terms:
-        for match in re.finditer(re.escape(term), text):
-            window = text[max(0, match.start() - 24) : match.end() + 24]
-            if any(negation in window for negation in negations):
-                continue
-            return True
-    return False
+    for pattern in negated_patterns:
+        normalized = re.sub(pattern, " ", normalized)
+    return (
+        re.search(r"\b(?:collisions?|colliding|penetration)\b", normalized) is not None
+    )
+
+
+def _has_unnegated_door_blockage(text: str) -> bool:
+    normalized = text.lower()
+    opening = r"(?:doors?|doorways?|door\s+swings?|open\s+connections?)"
+    negated_patterns = (
+        rf"\bno\s+(?:blocked|obstructed)\s+{opening}\b",
+        rf"\bno\s+{opening}\s+(?:is\s+|are\s+)?(?:blocked|obstructed)\b",
+        rf"\b{opening}\s+(?:is\s+|are\s+|remains?\s+)?"
+        r"(?:clear|unblocked|unobstructed|accessible)\b",
+        rf"\b(?:does\s+not|doesn't|do\s+not|don't|not)\s+"
+        rf"(?:block|obstruct)\s+(?:the\s+)?(?:\w+\s+){{0,2}}{opening}\b",
+        rf"\bwithout\s+(?:\w+\s+){{0,2}}(?:blocking|obstructing)\s+"
+        rf"(?:the\s+)?(?:\w+\s+){{0,2}}{opening}\b",
+        rf"\bnothing\s+(?:is\s+)?(?:blocking|obstructing)\s+"
+        rf"(?:the\s+)?(?:\w+\s+){{0,2}}{opening}\b",
+        rf"\b{opening}\s+clearance\s+(?:is\s+|remains?\s+)?"
+        r"(?:adequate|sufficient|maintained|clear|unobstructed|passes|passed)\b",
+        rf"\b(?:adequate|sufficient)\s+{opening}\s+clearance\b",
+    )
+    for pattern in negated_patterns:
+        normalized = re.sub(pattern, " ", normalized)
+
+    asserted_patterns = (
+        rf"\b(?:blocked|obstructed)\s+(?:the\s+)?(?:\w+\s+){{0,2}}{opening}\b",
+        rf"\b{opening}\s+(?:is\s+|are\s+|remains?\s+)?"
+        r"(?:blocked|obstructed|inaccessible)\b",
+        rf"\b(?:blocks|obstructs)\s+(?:the\s+)?(?:\w+\s+){{0,2}}{opening}\b",
+        rf"\b{opening}\s+clearance\s+(?:is\s+)?"
+        r"(?:insufficient|inadequate|violated|violation|violations|failing|failed)\b",
+        rf"\b(?:insufficient|inadequate|violated|failing|failed)\s+"
+        rf"{opening}\s+clearance\b",
+        rf"\b{opening}\b[^.;:\n]{{0,24}}\b(?:cannot|can't|unable\s+to)\s+"
+        r"(?:fully\s+)?open\b",
+    )
+    return any(re.search(pattern, normalized) for pattern in asserted_patterns)
 
 
 class FurnitureSafetyController:
@@ -971,8 +1020,12 @@ class FurnitureSafetyController:
                 )
         return ""
 
-    def evaluate_scores(self, scores: CritiqueWithScores) -> SafetyEvaluation:
-        """Compute weighted score and classify hard vs soft issues."""
+    def evaluate_scores(
+        self,
+        scores: CritiqueWithScores,
+        hard_state_evaluation: HardStateEvaluation | None = None,
+    ) -> SafetyEvaluation:
+        """Compute quality while keeping deterministic hard evidence authoritative."""
         score_by_name = {
             _normalize_score_name(score.name): score for score in scores.get_scores()
         }
@@ -1027,22 +1080,19 @@ class FurnitureSafetyController:
                     f"{self.reachability_hard_min}"
                 )
 
-        if _has_unnegated_collision(text):
-            hard_reasons.append("physics collision indicated by critique")
-
-        door_terms = (
-            "door blocked",
-            "blocked door",
-            "doorway blocked",
-            "blocks the door",
-            "blocks door",
-            "door clearance",
-            "open connection blocked",
-        )
-        if any(term in text for term in door_terms):
-            hard_reasons.append(
-                "door or open-connection blockage indicated by critique"
-            )
+        # Free-form critic prose is only a fallback when no deterministic hard
+        # state is available. Physics and opening-clearance checks are structured
+        # upstream, so wording such as "collision-free" must not override them.
+        if hard_state_evaluation is None:
+            if _has_unnegated_collision(text):
+                hard_reasons.append("physics collision indicated by critique")
+            if _has_unnegated_door_blockage(text):
+                hard_reasons.append(
+                    "door or open-connection blockage indicated by critique"
+                )
+        else:
+            hard_reasons.extend(hard_state_evaluation.hard_reasons)
+            soft_reasons.extend(hard_state_evaluation.soft_reasons)
 
         if "window" in text and not hard_reasons:
             soft_reasons.append(
@@ -1052,7 +1102,10 @@ class FurnitureSafetyController:
 
         return SafetyEvaluation(
             weighted_score=weighted_score,
-            hard_valid=not hard_reasons,
+            hard_valid=(
+                not hard_reasons
+                and (hard_state_evaluation is None or hard_state_evaluation.hard_valid)
+            ),
             hard_reasons=hard_reasons,
             soft_reasons=soft_reasons,
         )
@@ -1480,13 +1533,11 @@ class FurnitureSafetyController:
         hard_state_evaluation: HardStateEvaluation | None = None,
     ) -> CandidateDecision:
         """Evaluate a critiqued candidate and update/rollback best state metadata."""
-        evaluation = self.evaluate_scores(scores)
+        evaluation = self.evaluate_scores(
+            scores,
+            hard_state_evaluation=hard_state_evaluation,
+        )
         if hard_state_evaluation is not None:
-            evaluation.hard_reasons.extend(hard_state_evaluation.hard_reasons)
-            evaluation.soft_reasons.extend(hard_state_evaluation.soft_reasons)
-            evaluation.hard_valid = (
-                evaluation.hard_valid and hard_state_evaluation.hard_valid
-            )
             if hard_state_evaluation.weighted_score_penalty > 0:
                 raw_score = evaluation.weighted_score
                 evaluation.weighted_score = max(

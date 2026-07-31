@@ -52,7 +52,15 @@ def prepare_case_pack(
     config: CriticConfig | Any | None = None,
 ) -> tuple[CriticConfig, tuple[Any, ...]]:
     critic_config = _coerce_config(config)
-    set_contract_mode(case_pack, constraint_mode(critic_config))
+    resolved_mode = constraint_mode(critic_config)
+    checks_built_mode = case_pack.get("_checks_built_intent_contract_mode")
+    set_contract_mode(case_pack, resolved_mode)
+    if checks_built_mode is not None and str(checks_built_mode) != resolved_mode:
+        # Adapter-built checks include mode-sensitive asset priors. Rebuild
+        # them when an embedding caller changes mode at evaluation time while
+        # preserving hand-authored case packs that have no adapter marker.
+        case_pack["checks"] = build_all_checks(case_pack, metrics=critic_config.metrics)
+        case_pack["_checks_built_intent_contract_mode"] = resolved_mode
     # Contract checks are inserted before legacy plugin augmenters.  In shadow
     # mode they are deliberately ignored for scoring, which gives replay logs a
     # side-by-side comparison without changing the current repair loop.

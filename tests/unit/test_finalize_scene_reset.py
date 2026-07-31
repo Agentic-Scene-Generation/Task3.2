@@ -6,10 +6,12 @@ import tempfile
 import unittest
 
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
 from scenesmith.agent_utils.base_stateful_agent import BaseStatefulAgent
+from scenesmith.agent_utils.furniture_safety import HardStateEvaluation
 from scenesmith.agent_utils.placement_noise import PlacementNoiseMode
 from scenesmith.agent_utils.room import AgentType
 from scenesmith.agent_utils.scoring import CategoryScore, FurnitureCritiqueWithScores
@@ -285,6 +287,65 @@ class TestFinalizeSceneReset(unittest.TestCase):
 
         # No reset should occur since there's nothing to compare against.
         mock_scene.restore_from_state_dict.assert_not_called()
+
+    def test_finalize_keeps_hard_valid_scene_over_unscored_snapshot(self):
+        mock_scene = MagicMock()
+        mock_rendering_manager = MagicMock()
+        agent = self._create_testable_agent(mock_scene, mock_rendering_manager)
+        agent.cfg.get.side_effect = lambda key, default=None: (
+            False if key == "fail_stage_on_unresolved_hard_constraints" else default
+        )
+        agent.furniture_safety_controller = SimpleNamespace(
+            enabled=True,
+            best_scene_state={"state": "bed-only-baseline"},
+            best_scores=None,
+            best_render_dir=None,
+            best_weighted_score=0.0,
+        )
+        agent._evaluate_current_hard_state = MagicMock(
+            return_value=HardStateEvaluation(hard_valid=True)
+        )
+        agent.previous_scores = None
+        agent.checkpoint_scores = None
+        agent.checkpoint_render_dir = None
+        agent.final_render_dir = None
+
+        asyncio.run(agent._finalize_scene_and_scores())
+
+        mock_scene.restore_from_state_dict.assert_not_called()
+        agent._evaluate_current_hard_state.assert_called_once_with()
+
+    def test_finalize_uses_unscored_snapshot_to_rescue_hard_invalid_scene(self):
+        mock_scene = MagicMock()
+        mock_rendering_manager = MagicMock()
+        agent = self._create_testable_agent(mock_scene, mock_rendering_manager)
+        agent.cfg.get.side_effect = lambda key, default=None: (
+            False if key == "fail_stage_on_unresolved_hard_constraints" else default
+        )
+        agent.furniture_safety_controller = SimpleNamespace(
+            enabled=True,
+            best_scene_state={"state": "hard-valid-baseline"},
+            best_scores=None,
+            best_render_dir=None,
+            best_weighted_score=0.0,
+        )
+        agent._evaluate_current_hard_state = MagicMock(
+            return_value=HardStateEvaluation(
+                hard_valid=False,
+                hard_reasons=["wardrobe collision"],
+            )
+        )
+        agent.previous_scores = None
+        agent.checkpoint_scores = None
+        agent.checkpoint_render_dir = None
+        agent.final_render_dir = None
+
+        asyncio.run(agent._finalize_scene_and_scores())
+
+        mock_scene.restore_from_state_dict.assert_called_once_with(
+            {"state": "hard-valid-baseline"}
+        )
+        mock_rendering_manager.clear_cache.assert_called_once_with()
 
 
 if __name__ == "__main__":

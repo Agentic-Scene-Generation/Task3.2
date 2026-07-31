@@ -42,6 +42,10 @@ from scenesmith.scenebenchmark_critic.metrics.functional_dependency.support impo
 from scenesmith.scenebenchmark_critic.metrics.interaction_clearance import (
     evaluator as clearance_source,
 )
+from scenesmith.scenebenchmark_critic.intent_contract import (
+    bound_ids,
+    contract_constraints,
+)
 
 ACCESS_AFFORDANCES = {"sittable", "openable", "supportable", "sleepable", "graspable"}
 ACCESS_AFFORDANCE_PRIORITY = (
@@ -236,7 +240,13 @@ def build_checks(
                 excluded_work_seat_ids=work_cohort_ids,
             )
         )
-        checks.extend(_build_dependency_annotation_checks(objects, seen_check_ids))
+        checks.extend(
+            _build_dependency_annotation_checks(
+                case_pack,
+                objects,
+                seen_check_ids,
+            )
+        )
         checks.extend(
             _build_seat_surface_assignment_checks(case_pack, objects, seen_check_ids)
         )
@@ -746,9 +756,14 @@ def _build_seat_surface_assignment_checks(
 
 
 def _build_dependency_annotation_checks(
-    objects: dict[str, dict[str, Any]], seen_check_ids: set[str]
+    case_pack: dict[str, Any],
+    objects: dict[str, dict[str, Any]],
+    seen_check_ids: set[str],
 ) -> list[dict[str, Any]]:
     checks: list[dict[str, Any]] = []
+    contract_orientation_subjects = _hard_contract_orientation_subjects(
+        case_pack, objects
+    )
     for subject in objects.values():
         subject_id = str(subject.get("id") or "")
         for source_key, source_name in (
@@ -763,6 +778,12 @@ def _build_dependency_annotation_checks(
                 )
                 relation_type = _normalize_dependency_relation_type(relation_type)
                 if not relation_type:
+                    continue
+                if (
+                    source_key == "orientation_dependencies"
+                    and relation_type == "furniture_faces_furniture"
+                    and subject_id in contract_orientation_subjects
+                ):
                     continue
                 if _orientation_dependency_is_support_prior(
                     subject, dependency, relation_type
@@ -828,6 +849,22 @@ def _build_dependency_annotation_checks(
                 )
                 seen_check_ids.add(check_id)
     return checks
+
+
+def _hard_contract_orientation_subjects(
+    case_pack: dict[str, Any], objects: dict[str, dict[str, Any]]
+) -> set[str]:
+    """Return subjects whose usable front is owned by a hard intent contract."""
+    if str(case_pack.get("intent_contract_mode") or "legacy") != "contract":
+        return set()
+    subject_ids: set[str] = set()
+    for constraint in contract_constraints(
+        case_pack,
+        relations=("operation_zone_at_wall", "instructional_surface_alignment"),
+        include_auxiliary=False,
+    ):
+        subject_ids.update(bound_ids(constraint.get("subjects"), objects.values()))
+    return subject_ids
 
 
 def _dependency_annotation_items(

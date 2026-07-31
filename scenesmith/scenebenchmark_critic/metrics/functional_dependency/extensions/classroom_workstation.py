@@ -19,7 +19,11 @@ from scenesmith.scenebenchmark_critic.metrics.functional_dependency.seat_surface
     room_bounds_from_case_pack,
     work_seat_candidates,
 )
-from scenesmith.scenebenchmark_critic.intent_contract import contract_relation_requested
+from scenesmith.scenebenchmark_critic.intent_contract import (
+    bound_ids,
+    contract_constraints,
+    contract_relation_requested,
+)
 
 RELATION_TYPE = "classroom_workstation_distribution"
 _CLASSROOM_HINTS = ("classroom", "school", "student desk", "student chair")
@@ -98,10 +102,19 @@ def evaluate_classroom_workstation_distribution(
     if layout is None:
         return []
     workstation_slots, teacher_slot = layout
+    teacher_id = str(cohort.teacher_surface["id"])
+    teacher_managed_by_contract = teacher_id in _operation_zone_subject_ids(
+        case_pack, objects
+    )
+    if teacher_managed_by_contract:
+        teacher_slot = {
+            **teacher_slot,
+            "aligned": True,
+            "managed_by_contract": "operation_zone_at_wall",
+        }
     all_aligned = (
         all(slot["aligned"] for slot in workstation_slots) and teacher_slot["aligned"]
     )
-    teacher_id = str(cohort.teacher_surface["id"])
     related = sorted(
         {
             teacher_id,
@@ -114,7 +127,7 @@ def evaluate_classroom_workstation_distribution(
         for slot in workstation_slots
         if not slot["aligned"]
     ]
-    if not teacher_slot["aligned"]:
+    if not teacher_managed_by_contract and not teacher_slot["aligned"]:
         failures.append(f"`{teacher_id}` is outside the separate front teacher zone")
     reason = (
         "Student desks form an evenly distributed classroom grid and each chair "
@@ -158,6 +171,19 @@ def evaluate_classroom_workstation_distribution(
             "scoring_tier": "core",
         }
     ]
+
+
+def _operation_zone_subject_ids(
+    case_pack: dict[str, Any], objects: list[dict[str, Any]]
+) -> set[str]:
+    subject_ids: set[str] = set()
+    for constraint in contract_constraints(
+        case_pack,
+        relations=("operation_zone_at_wall",),
+        include_auxiliary=False,
+    ):
+        subject_ids.update(bound_ids(constraint.get("subjects"), objects))
+    return subject_ids
 
 
 def _layout_targets(

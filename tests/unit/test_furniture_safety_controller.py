@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from scenesmith.agent_utils.furniture_safety import (
     FurnitureSafetyController,
+    HardStateEvaluation,
     furniture_object_category_matches,
 )
 from scenesmith.agent_utils.scoring import CategoryScore, CritiqueWithScores
@@ -115,6 +116,80 @@ class FurnitureSafetyControllerTest(unittest.TestCase):
         self.assertFalse(collision_eval.hard_valid)
         self.assertTrue(clean_eval.hard_valid)
 
+    def test_collision_free_and_clear_door_language_is_not_hard(self) -> None:
+        controller = FurnitureSafetyController({"enabled": True})
+
+        evaluation = controller.evaluate_scores(
+            make_scores(
+                critique=(
+                    "The bedside group is collision-free with 0 collisions. No "
+                    "blocked doorways or windows remain, and door clearance is "
+                    "sufficient."
+                )
+            )
+        )
+
+        self.assertTrue(evaluation.hard_valid)
+        self.assertEqual(evaluation.hard_reasons, [])
+
+    def test_asserted_door_blockage_is_hard_without_deterministic_state(self) -> None:
+        controller = FurnitureSafetyController({"enabled": True})
+
+        evaluation = controller.evaluate_scores(
+            make_scores(critique="The wardrobe blocks the west door.")
+        )
+
+        self.assertFalse(evaluation.hard_valid)
+        self.assertIn(
+            "door or open-connection blockage indicated by critique",
+            evaluation.hard_reasons,
+        )
+
+        clearance_evaluation = controller.evaluate_scores(
+            make_scores(critique="A door clearance violation remains.")
+        )
+        self.assertFalse(clearance_evaluation.hard_valid)
+
+    def test_deterministic_hard_state_overrides_free_form_issue_language(self) -> None:
+        controller = FurnitureSafetyController({"enabled": True})
+
+        decision = controller.consider_candidate(
+            make_scores(
+                critique="A collision remains and the wardrobe blocks the west door."
+            ),
+            {"state": "complete-bedroom"},
+            None,
+            hard_state_evaluation=HardStateEvaluation(hard_valid=True),
+        )
+
+        self.assertTrue(decision.accepted)
+        self.assertTrue(decision.evaluation.hard_valid)
+        self.assertEqual(controller.best_scene_state, {"state": "complete-bedroom"})
+
+    def test_deterministic_hard_failure_overrides_clean_free_form_language(
+        self,
+    ) -> None:
+        controller = FurnitureSafetyController({"enabled": True})
+
+        decision = controller.consider_candidate(
+            make_scores(
+                critique="No collisions remain and all doorways are unobstructed."
+            ),
+            {"state": "blocked-bedroom"},
+            None,
+            hard_state_evaluation=HardStateEvaluation(
+                hard_valid=False,
+                hard_reasons=["door swing clearance violation"],
+            ),
+        )
+
+        self.assertFalse(decision.accepted)
+        self.assertFalse(decision.evaluation.hard_valid)
+        self.assertIn(
+            "door swing clearance violation",
+            decision.evaluation.hard_reasons,
+        )
+
     def test_required_object_removal_is_blocked(self) -> None:
         controller = FurnitureSafetyController({"enabled": True})
         controller.reset_for_scene(
@@ -163,6 +238,30 @@ class FurnitureSafetyControllerTest(unittest.TestCase):
                     "desk",
                 )
             )
+
+    def test_plural_teacher_asset_name_satisfies_teacher_desk_inventory(self) -> None:
+        controller = FurnitureSafetyController({"enabled": True})
+        controller.reset_for_scene("A classroom with a teacher's desk.")
+        scene = SimpleNamespace(
+            room_type="classroom",
+            text_description=controller.scene_description,
+            room_geometry=None,
+            objects={
+                "teachers_desk_0": SimpleNamespace(
+                    name="teachers_desk",
+                    description="wooden instructor desk with drawer storage",
+                    immutable=False,
+                )
+            },
+        )
+
+        evaluation = controller.evaluate_scene_state(scene)
+
+        self.assertTrue(evaluation.hard_valid)
+        self.assertNotIn(
+            "missing required teacher_desk: expected 1, found 0",
+            evaluation.hard_reasons,
+        )
 
     def test_role_specific_chair_satisfies_generic_chair_inventory(self) -> None:
         self.assertTrue(

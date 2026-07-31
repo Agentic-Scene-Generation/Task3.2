@@ -26,7 +26,6 @@ from scenesmith.scenebenchmark_critic.metrics.functional_dependency.orientation_
 from scenesmith.scenebenchmark_critic.intent_contract import constraint_mode
 from scenesmith.scenebenchmark_critic.intent_contract import (
     contract_seating_targets,
-    set_contract_mode,
 )
 from scenesmith.scenebenchmark_critic.evaluator import run_case_pack_checks
 from scenesmith.scenebenchmark_critic.reports import (
@@ -130,7 +129,10 @@ def evaluate_room_scene(
         # Asset annotation/VLM filtering stays outside this branch, so no model
         # request is made while building prompt feedback.
         case_pack = room_scene_to_case_pack(
-            scene, stage=stage, metrics=list(critic_config.metrics)
+            scene,
+            stage=stage,
+            metrics=list(critic_config.metrics),
+            intent_contract_mode=constraint_mode(critic_config),
         )
         timing_steps["case_pack_build_sec"] = round(time.perf_counter() - step_start, 6)
         step_start = time.perf_counter()
@@ -214,6 +216,7 @@ def evaluate_house_scene(
             stage=stage,
             metrics=list(critic_config.metrics),
             include_object_types=include_object_types,
+            intent_contract_mode=constraint_mode(critic_config),
         )
         timing_steps["case_pack_build_sec"] = round(time.perf_counter() - step_start, 6)
         check_timing: dict[str, Any] = {}
@@ -338,8 +341,11 @@ def seating_orientation_targets(
     critic_config = _coerce_config(config)
     if constraint_mode(critic_config) != "contract":
         return None
-    case_pack = room_scene_to_case_pack(scene, metrics=("functional_dependency",))
-    set_contract_mode(case_pack, "contract")
+    case_pack = room_scene_to_case_pack(
+        scene,
+        metrics=("functional_dependency",),
+        intent_contract_mode="contract",
+    )
     return contract_seating_targets(case_pack)
 
 

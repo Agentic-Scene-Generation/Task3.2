@@ -6,6 +6,7 @@ import math
 import xml.etree.ElementTree as ET
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -15,6 +16,7 @@ from pydrake.math import RigidTransform, RollPitchYaw
 from scenesmith.agent_utils.house import RoomGeometry
 from scenesmith.agent_utils.room import ObjectType, RoomScene, SceneObject, UniqueID
 from scenesmith.scenebenchmark_critic.api import evaluate_room_scene
+from scenesmith.scenebenchmark_critic import adapter, evaluator
 from scenesmith.scenebenchmark_critic.config import CriticConfig
 from scenesmith.scenebenchmark_critic.evaluator import run_case_pack_checks
 from scenesmith.scenebenchmark_critic.furniture_relation_repair import (
@@ -32,6 +34,9 @@ from scenesmith.scenebenchmark_critic.intent_contract import (
 )
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.intent_contract import (
     evaluate_intent_contract_extensions,
+)
+from scenesmith.scenebenchmark_critic.metrics.functional_dependency.builder import (
+    build_checks,
 )
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.study_furniture_layout import (
     evaluate_study_furniture_layout,
@@ -65,6 +70,98 @@ def _explicit_constraint(
         "source": "explicit_prompt",
         "strength": "hard",
     }
+
+
+@pytest.mark.parametrize("mode", ("contract", "shadow"))
+def test_room_adapter_sets_controlled_mode_before_building_checks(
+    monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    observed: list[str] = []
+    scene = SimpleNamespace(
+        room_id="training",
+        room_type="classroom",
+        text_description="An instructional room.",
+    )
+    monkeypatch.setattr(
+        adapter,
+        "_room_scene_geometry",
+        lambda _scene: {"rooms": [], "objects": [], "relations": []},
+    )
+    monkeypatch.setattr(
+        adapter,
+        "attach_intent_contract_to_case_pack",
+        lambda _scene, case_pack: case_pack.setdefault(
+            "intent_contract", {"constraints": []}
+        ),
+    )
+
+    def capture(case_pack: dict, metrics: object = None) -> list[dict]:
+        observed.append(str(case_pack.get("intent_contract_mode")))
+        assert case_pack["intent_contract"]["mode"] == mode
+        return []
+
+    monkeypatch.setattr(adapter, "build_all_checks", capture)
+
+    case_pack = adapter.room_scene_to_case_pack(scene, intent_contract_mode=mode)
+
+    assert observed == [mode]
+    assert case_pack["intent_contract_mode"] == mode
+    assert case_pack["_checks_built_intent_contract_mode"] == mode
+
+
+def test_house_adapter_sets_shadow_mode_before_building_checks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: list[str] = []
+    house = SimpleNamespace(
+        rooms={},
+        layout=SimpleNamespace(house_prompt="A shared instructional building."),
+    )
+
+    def capture(case_pack: dict, metrics: object = None) -> list[dict]:
+        observed.append(str(case_pack.get("intent_contract_mode")))
+        return []
+
+    monkeypatch.setattr(adapter, "build_all_checks", capture)
+
+    case_pack = adapter.house_scene_to_case_pack(house, intent_contract_mode="shadow")
+
+    assert observed == ["shadow"]
+    assert case_pack["intent_contract_mode"] == "shadow"
+    assert case_pack["_checks_built_intent_contract_mode"] == "shadow"
+
+
+def test_prepare_rebuilds_adapter_checks_when_contract_mode_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    case_pack = {
+        "intent_contract": {"constraints": []},
+        "intent_contract_mode": "legacy",
+        "_checks_built_intent_contract_mode": "legacy",
+        "scene_geometry": {"rooms": [], "objects": [], "relations": []},
+        "checks": [{"check_id": "legacy_check"}],
+    }
+    observed_modes: list[str] = []
+
+    def rebuild(case_pack: dict, metrics: object = None) -> list[dict]:
+        observed_modes.append(str(case_pack.get("intent_contract_mode")))
+        return [{"check_id": "contract_check"}]
+
+    monkeypatch.setattr(evaluator, "build_all_checks", rebuild)
+    monkeypatch.setattr(evaluator, "get_metric_plugins", lambda _metrics: ())
+
+    evaluator.prepare_case_pack(
+        case_pack,
+        CriticConfig(
+            enabled=True,
+            metrics=("functional_dependency",),
+            constraint_mode="contract",
+        ),
+    )
+
+    assert observed_modes == ["contract"]
+    assert case_pack["checks"] == [{"check_id": "contract_check"}]
+    assert case_pack["_checks_built_intent_contract_mode"] == "contract"
 
 
 @pytest.mark.parametrize(
@@ -379,6 +476,197 @@ def test_teacher_desk_at_front_does_not_infer_wall_constraint() -> None:
         check.get("relation_type") == "back_against_wall"
         for check in case_pack["checks"]
     )
+
+
+def test_task_spec_instructional_topology_enables_controlled_functional_contract() -> (
+    None
+):
+    prompt = "A flexible training space for a lesson."
+    task_spec = {
+        "required_large_objects": ["student desk", "chair", "instructor desk"],
+        "required_wall_objects": ["whiteboard"],
+        "functional_zones": ["teaching_zone", "student_seating_zone"],
+    }
+
+    contract = build_intent_contract(
+        prompt, room_type="training_room", task_spec=task_spec
+    )
+
+    assert {
+        ("operation_zone_at_wall", "teacher_desk", "wall"),
+        (
+            "instructional_surface_alignment",
+            "instructional_surface",
+            "teacher_desk",
+        ),
+    } <= _relations(contract)
+    profile_rows = [
+        row
+        for row in contract["constraints"]
+        if row["relation"]
+        in {"operation_zone_at_wall", "instructional_surface_alignment"}
+    ]
+    assert profile_rows
+    assert all(row["source"] == "room_ontology" for row in profile_rows)
+    assert all(is_hard_constraint(row) for row in profile_rows)
+
+
+def test_instructional_contract_requires_presenter_audience_and_focal_surface() -> None:
+    contract = build_intent_contract(
+        "A study with a desk and a whiteboard.",
+        room_type="study",
+        task_spec={
+            "required_large_objects": ["desk"],
+            "required_wall_objects": ["whiteboard"],
+            "functional_zones": ["working_zone"],
+        },
+    )
+
+    assert not any(
+        row["relation"] in {"operation_zone_at_wall", "instructional_surface_alignment"}
+        for row in contract["constraints"]
+    )
+
+    unbound_presenter = build_intent_contract(
+        "A classroom where a teacher supervises students at six student desks "
+        "with a whiteboard.",
+        room_type="classroom",
+        task_spec={
+            "required_large_objects": ["student desk", "student chair"],
+            "required_wall_objects": ["whiteboard"],
+            "functional_zones": ["teaching_zone", "student_seating_zone"],
+        },
+    )
+    assert not any(
+        row["relation"] in {"operation_zone_at_wall", "instructional_surface_alignment"}
+        for row in unbound_presenter["constraints"]
+    )
+
+
+def test_hard_operation_contract_overrides_conflicting_asset_facing_prior() -> None:
+    prompt = (
+        "A classroom with six student desks, each with a chair. A teacher's desk "
+        "sits at the front near the chalkboard."
+    )
+    teacher = _record(
+        "teacher_desk_0",
+        "desk",
+        (1.5, 1.5, 0.4),
+        (1.4, 0.7, 0.8),
+        name="teacher desk",
+        yaw_deg=180.0,
+    )
+    teacher["functional_hints"] = {
+        "orientation_dependencies": [
+            {
+                "relation_type": "front_faces",
+                "target_category": "chair",
+                "target_kind": "object_category",
+                "source": "asset_annotations",
+            }
+        ]
+    }
+    case_pack = {
+        "task_instruction": prompt,
+        "room_type": "classroom",
+        "intent_contract": build_intent_contract(prompt, room_type="classroom"),
+        "intent_contract_mode": "contract",
+        "scene_geometry": {
+            "objects": [
+                teacher,
+                _record(
+                    "student_chair_0",
+                    "chair",
+                    (1.5, 0.4, 0.45),
+                    name="student chair",
+                ),
+            ]
+        },
+    }
+
+    contract_checks = build_checks(case_pack, metrics=("functional_dependency",))
+
+    assert not any(
+        check.get("subject_id") == "teacher_desk_0"
+        and check.get("check_source") == "asset_orientation_dependency"
+        for check in contract_checks
+    )
+
+    case_pack["intent_contract_mode"] = "shadow"
+    shadow_checks = build_checks(case_pack, metrics=("functional_dependency",))
+    assert any(
+        check.get("subject_id") == "teacher_desk_0"
+        and check.get("check_source") == "asset_orientation_dependency"
+        for check in shadow_checks
+    )
+
+
+def test_ambiguous_teacher_desks_keep_asset_facing_priors() -> None:
+    prompt = (
+        "A classroom with six student desks, each with a chair. A teacher's desk "
+        "sits at the front near the chalkboard."
+    )
+    teachers = []
+    for index in range(2):
+        teacher = _record(
+            f"teacher_desk_{index}",
+            "desk",
+            (float(index), 1.5, 0.4),
+            name="teacher desk",
+        )
+        teacher["functional_hints"] = {
+            "orientation_dependencies": [
+                {
+                    "relation_type": "front_faces",
+                    "target_category": "chair",
+                    "target_kind": "object_category",
+                    "source": "asset_annotations",
+                }
+            ]
+        }
+        teachers.append(teacher)
+    case_pack = {
+        "task_instruction": prompt,
+        "room_type": "classroom",
+        "intent_contract": build_intent_contract(prompt, room_type="classroom"),
+        "intent_contract_mode": "contract",
+        "scene_geometry": {
+            "objects": [
+                *teachers,
+                _record("student_chair_0", "chair", name="student chair"),
+            ]
+        },
+    }
+
+    checks = build_checks(case_pack, metrics=("functional_dependency",))
+
+    assert {
+        check.get("subject_id")
+        for check in checks
+        if check.get("check_source") == "asset_orientation_dependency"
+    } == {"teacher_desk_0", "teacher_desk_1"}
+
+
+def test_role_specific_student_chair_satisfies_generic_chair_selector() -> None:
+    assert bound_ids(
+        {"category": "chair", "count": 1, "quantifier": "at_least"},
+        [_record("student_chair_0", "student_chair", name="student chair")],
+    ) == ["student_chair_0"]
+
+
+@pytest.mark.parametrize(
+    "asset_category",
+    ("teachers_desk", "teacher's desk", "instructor_desk"),
+)
+def test_teacher_desk_selector_normalizes_asset_category_aliases(
+    asset_category: str,
+) -> None:
+    teacher = _record("presenter_surface_0", asset_category, name="work surface")
+
+    assert bound_ids(
+        {"category": "teacher_desk", "count": 1, "quantifier": "all"},
+        [teacher],
+    ) == ["presenter_surface_0"]
 
 
 def test_explicit_teacher_desk_against_wall_remains_a_core_constraint() -> None:

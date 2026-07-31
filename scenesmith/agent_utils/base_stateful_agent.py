@@ -1721,11 +1721,20 @@ class BaseStatefulAgent(ABC):
         of _get_final_scores_directory().
         """
         controller = getattr(self, "furniture_safety_controller", None)
+        should_restore_best = False
         if (
             controller
             and controller.enabled
             and controller.best_scene_state is not None
         ):
+            should_restore_best = controller.best_scores is not None
+            if not should_restore_best:
+                current_hard_state = self._evaluate_current_hard_state()
+                should_restore_best = (
+                    current_hard_state is None or not current_hard_state.hard_valid
+                )
+
+        if should_restore_best:
             self._restore_furniture_scene_state(controller.best_scene_state)
             self.scene_checkpoint = copy.deepcopy(controller.best_scene_state)
             if controller.best_scores is not None:
@@ -1736,6 +1745,16 @@ class BaseStatefulAgent(ABC):
             console_logger.info(
                 "Final furniture scene restored to best hard-valid checkpoint "
                 f"(weighted_score={controller.best_weighted_score:.3f})."
+            )
+        elif (
+            controller
+            and controller.enabled
+            and controller.best_scene_state is not None
+            and controller.best_scores is None
+        ):
+            console_logger.info(
+                "Final furniture scene retained because the current state is "
+                "deterministically hard-valid and the rollback snapshot is unscored."
             )
 
         # Check if final scores warrant resetting to previous checkpoint.

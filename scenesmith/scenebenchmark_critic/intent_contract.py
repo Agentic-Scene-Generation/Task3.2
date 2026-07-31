@@ -46,11 +46,24 @@ VALID_RELATIONS = frozenset(
         "distributed_evenly",
         "one_per_side",
         "clear_access",
+        "operation_zone_at_wall",
+        "instructional_surface_alignment",
     }
 )
 HARD_SOURCES = frozenset({"explicit_prompt", "room_ontology"})
 
 _CATEGORY_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "instructional_surface",
+        (
+            "chalkboard",
+            "blackboard",
+            "whiteboard",
+            "projection screen",
+            "projector screen",
+            "teaching screen",
+        ),
+    ),
     ("student_desk", ("student desk",)),
     ("teacher_desk", ("teacher desk", "instructor desk")),
     ("office_chair", ("office chair", "desk chair", "task chair")),
@@ -185,7 +198,9 @@ def build_intent_contract(
 
     constraints.extend(_explicit_required_count_constraints(normalized_prompt))
     constraints.extend(_explicit_prompt_constraints(normalized_prompt, lowered))
-    constraints.extend(_room_ontology_constraints(normalized_room, lowered))
+    constraints.extend(
+        _room_ontology_constraints(normalized_room, lowered, task_spec=task_spec)
+    )
     constraints = _deduplicate_constraints(constraints)
     return {
         "schema_version": SCHEMA_VERSION,
@@ -284,7 +299,7 @@ def selected_ids(
     """
     if not isinstance(selector, dict):
         return []
-    category = str(selector.get("category") or "").lower()
+    category = _normalize_selector_category(selector.get("category"))
     role = str(selector.get("role") or "").lower()
     ids: list[str] = []
     for obj in objects:
@@ -906,7 +921,12 @@ def _explicit_required_count_constraints(prompt: str) -> list[dict[str, Any]]:
     return constraints
 
 
-def _room_ontology_constraints(room_type: str, lowered: str) -> list[dict[str, Any]]:
+def _room_ontology_constraints(
+    room_type: str,
+    lowered: str,
+    *,
+    task_spec: Any | None = None,
+) -> list[dict[str, Any]]:
     constraints: list[dict[str, Any]] = []
     if room_type == "bedroom":
         constraints.append(
@@ -928,6 +948,42 @@ def _room_ontology_constraints(room_type: str, lowered: str) -> list[dict[str, A
                 evidence_span="bedroom sleeping-surface anchor",
             )
         )
+    if _instructional_workstation_topology(room_type, lowered, task_spec):
+        # This is a role-level functional profile, not a classroom coordinate
+        # recipe. The furniture-stage relation reserves the operator's side of
+        # a presenter work surface against whichever wall becomes the teaching
+        # front. The wall-stage relation then binds a later-created board or
+        # screen to that same presenter centerline.
+        constraints.extend(
+            (
+                _constraint(
+                    "operation_zone_at_wall",
+                    {
+                        "category": "teacher_desk",
+                        "count": 1,
+                        "quantifier": "all",
+                    },
+                    {"category": "wall"},
+                    source="room_ontology",
+                    evidence_span="presenter workstation operation-zone ontology",
+                ),
+                _constraint(
+                    "instructional_surface_alignment",
+                    {
+                        "category": "instructional_surface",
+                        "count": 1,
+                        "quantifier": "all",
+                    },
+                    {
+                        "category": "teacher_desk",
+                        "count": 1,
+                        "quantifier": "all",
+                    },
+                    source="room_ontology",
+                    evidence_span="instructional focal-surface alignment ontology",
+                ),
+            )
+        )
     if (
         _MEDIA_SUPPORT_PATTERN.search(lowered)
         and _TELEVISION_PATTERN.search(lowered)
@@ -944,6 +1000,56 @@ def _room_ontology_constraints(room_type: str, lowered: str) -> list[dict[str, A
             )
         )
     return constraints
+
+
+def _instructional_workstation_topology(
+    room_type: str,
+    prompt: str,
+    task_spec: Any | None,
+) -> bool:
+    """Recognize a presenter/audience/focal-surface topology without poses."""
+
+    def values(field: str) -> list[str]:
+        if isinstance(task_spec, dict):
+            raw = task_spec.get(field) or []
+        else:
+            raw = getattr(task_spec, field, []) or [] if task_spec is not None else []
+        return [str(item).lower().replace("_", " ") for item in raw]
+
+    large_objects = values("required_large_objects")
+    wall_objects = values("required_wall_objects")
+    inventory = " ".join((prompt, *large_objects, *wall_objects))
+    zones = " ".join(values("functional_zones"))
+    presenter_surface_pattern = re.compile(
+        r"\b(?:teacher(?:'s|s')?|instructor(?:'s|s')?)\s+"
+        r"(?:desk|table|workstation)\b"
+    )
+    has_presenter_surface = any(
+        presenter_surface_pattern.search(item) is not None
+        for item in (prompt, *large_objects)
+    )
+    has_focal_surface = any(
+        token in inventory
+        for token in (
+            "chalkboard",
+            "blackboard",
+            "whiteboard",
+            "projection screen",
+            "projector screen",
+            "teaching screen",
+        )
+    )
+    has_audience = any(token in inventory for token in ("student", "audience"))
+    has_teaching_zone = any(
+        token in zones
+        for token in ("teaching zone", "instruction zone", "lecture zone")
+    )
+    return (
+        has_presenter_surface
+        and has_focal_surface
+        and has_audience
+        and (room_type == "classroom" or has_teaching_zone)
+    )
 
 
 def _prompt_explicitly_wall_mounts_television(prompt: str) -> bool:
@@ -1178,12 +1284,15 @@ def _role_matches_object(role: str, obj: dict[str, Any]) -> bool:
 
 
 def _selector_matches_object(category: str, role: str, obj: dict[str, Any]) -> bool:
-    object_cat = object_category(obj)
+    category = _normalize_selector_category(category)
+    object_cat = _normalize_selector_category(object_category(obj))
     metadata = obj.get("metadata") if isinstance(obj.get("metadata"), dict) else {}
-    semantic_name = str(metadata.get("semantic_name") or "").lower()
+    semantic_name = _normalize_selector_category(metadata.get("semantic_name"))
     if semantic_name == category:
         return _role_matches_object(role, obj)
-    base_category = str(obj.get("category_norm") or obj.get("category") or "").lower()
+    base_category = _normalize_selector_category(
+        obj.get("category_norm") or obj.get("category")
+    )
     identity = " ".join(
         str(obj.get(key) or "").lower().replace("_", " ")
         for key in ("id", "name", "description")
@@ -1195,9 +1304,23 @@ def _selector_matches_object(category: str, role: str, obj: dict[str, Any]) -> b
     )
     normalized_category = category.replace("_", " ")
     category_matches = {
+        "instructional_surface": any(
+            token in identity
+            for token in (
+                "chalkboard",
+                "blackboard",
+                "whiteboard",
+                "projection screen",
+                "projector screen",
+                "teaching screen",
+            )
+        ),
         "student_desk": base_category == "desk" and "student" in identity,
-        "teacher_desk": base_category == "desk"
-        and ("teacher" in identity or "instructor" in identity),
+        "teacher_desk": base_category == "teacher_desk"
+        or (
+            base_category == "desk"
+            and ("teacher" in identity or "instructor" in identity)
+        ),
         "guest_chair": base_category in {"chair", "armchair", "office_chair"}
         and ("guest" in identity or "visitor" in identity),
         "student_chair": base_category in {"chair", "office_chair", "dining_chair"}
@@ -1224,7 +1347,17 @@ def _selector_matches_object(category: str, role: str, obj: dict[str, Any]) -> b
         ),
         "table": base_category in {"table", "dining_table", "coffee_table", "desk"},
         "chair": base_category
-        in {"chair", "office_chair", "dining_chair", "armchair", "stool", "bench"},
+        in {
+            "chair",
+            "office_chair",
+            "dining_chair",
+            "student_chair",
+            "guest_chair",
+            "teacher_chair",
+            "armchair",
+            "stool",
+            "bench",
+        },
         "wall": base_category == "wall",
         "room": False,
     }.get(category)
@@ -1237,6 +1370,23 @@ def _selector_matches_object(category: str, role: str, obj: dict[str, Any]) -> b
     if not category_matches:
         return False
     return _role_matches_object(role, obj)
+
+
+def _normalize_selector_category(value: Any) -> str:
+    """Canonicalize known asset/prompt spellings used by semantic selectors."""
+    normalized = re.sub(
+        r"[^a-z0-9]+",
+        "_",
+        str(value or "").strip().lower().replace("\u2019", "'"),
+    ).strip("_")
+    if normalized in {
+        "teacher_desk",
+        "teachers_desk",
+        "teacher_s_desk",
+        "instructor_desk",
+    }:
+        return "teacher_desk"
+    return normalized
 
 
 def _fd_relation_for_constraint(

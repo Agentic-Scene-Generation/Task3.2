@@ -51,6 +51,8 @@ def evaluate_intent_contract_extensions(
             "between",
             "in_front_of",
             "flanking",
+            "operation_zone_at_wall",
+            "instructional_surface_alignment",
         ),
     ):
         relation = str(constraint.get("relation") or "")
@@ -69,6 +71,14 @@ def evaluate_intent_contract_extensions(
                 case_pack=case_pack,
                 objects=objects,
                 tier=tier,
+            )
+        elif relation == "operation_zone_at_wall":
+            result = _evaluate_operation_zone_at_wall(
+                constraint, geometry, objects, tier
+            )
+        elif relation == "instructional_surface_alignment":
+            result = _evaluate_instructional_surface_alignment(
+                constraint, geometry, objects, tier
             )
         else:
             result = _evaluate_flanking(constraint, objects, tier)
@@ -307,6 +317,187 @@ def _evaluate_centered_on_wall(
             )
         )
     return results
+
+
+def _evaluate_operation_zone_at_wall(
+    constraint: dict[str, Any],
+    geometry: dict[str, Any],
+    objects: list[dict[str, Any]],
+    tier: str,
+) -> list[dict[str, Any]]:
+    """Center a work surface while reserving its wall-side operator zone."""
+    bounds = _room_bounds(geometry)
+    subject_ids = bound_ids(constraint.get("subjects"), objects)
+    walls = [obj for obj in objects if object_category(obj) == "wall"]
+    if bounds is None or len(subject_ids) != 1 or not walls:
+        return []
+    by_id = {str(obj["id"]): obj for obj in objects}
+    subject_id = subject_ids[0]
+    subject = by_id.get(subject_id)
+    center = bbox_center_xy(subject) if subject is not None else None
+    if subject is None or center is None:
+        return []
+
+    wall = min(
+        walls,
+        key=lambda item: (_wall_normal_distance(center, item), str(item.get("id"))),
+    )
+    frame = _wall_frame(wall, bounds)
+    if frame is None:
+        return []
+    normal_axis, tangent_axis, inward, inner_face, wall_center = frame
+    wallward = [0.0, 0.0]
+    wallward[normal_axis] = -inward
+    wallward_xy = (float(wallward[0]), float(wallward[1]))
+    subject_half_depth = _projected_half_extent(subject, front_vector(subject))
+    room_depth = bounds[2 + normal_axis] - bounds[normal_axis]
+    required_clearance = min(1.0, max(0.65, 0.10 * room_depth))
+    target = [float(center[0]), float(center[1])]
+    target[tangent_axis] = float(wall_center[tangent_axis])
+    target[normal_axis] = inner_face + inward * (
+        subject_half_depth + required_clearance
+    )
+    target_xy = (float(target[0]), float(target[1]))
+    target_yaw = math.degrees(math.atan2(-wallward_xy[0], wallward_xy[1]))
+
+    tangent_error = abs(center[tangent_axis] - target_xy[tangent_axis])
+    normal_error = abs(center[normal_axis] - target_xy[normal_axis])
+    observed_clearance = max(
+        0.0,
+        inward * (center[normal_axis] - inner_face) - subject_half_depth,
+    )
+    facing_error = _front_error_deg(subject, wallward_xy)
+    allowed_tangent = max(
+        0.18, 0.05 * min(bounds[2] - bounds[0], bounds[3] - bounds[1])
+    )
+    allowed_normal = 0.15
+    aligned = (
+        tangent_error <= allowed_tangent
+        and normal_error <= allowed_normal
+        and facing_error <= 15.0
+    )
+    return [
+        _result(
+            constraint,
+            suffix=f"{subject_id}__{wall['id']}",
+            label="pass" if aligned else "fail",
+            primary=subject_id,
+            related=[str(wall["id"])],
+            relation_type="operation_zone_at_wall",
+            tier=tier,
+            reason=(
+                f"`{subject_id}` must be centered on its functional wall with its "
+                f"usable front facing the wall and a {required_clearance:.2f}m "
+                f"operator zone between them; tangent error is {tangent_error:.2f}m, "
+                f"normal error is {normal_error:.2f}m, facing error is "
+                f"{facing_error:.0f}deg, and current clearance is "
+                f"{observed_clearance:.2f}m."
+            ),
+            diagnostics={
+                "wall_id": str(wall["id"]),
+                "target_center_xy_m": [round(value, 6) for value in target_xy],
+                "target_yaw_deg": round(target_yaw, 6),
+                "tangent_error_m": round(tangent_error, 6),
+                "allowed_tangent_error_m": round(allowed_tangent, 6),
+                "normal_error_m": round(normal_error, 6),
+                "allowed_normal_error_m": allowed_normal,
+                "facing_error_deg": round(facing_error, 6),
+                "allowed_facing_error_deg": 15.0,
+                "operation_clearance_m": round(observed_clearance, 6),
+                "required_operation_clearance_m": round(required_clearance, 6),
+            },
+        )
+    ]
+
+
+def _evaluate_instructional_surface_alignment(
+    constraint: dict[str, Any],
+    geometry: dict[str, Any],
+    objects: list[dict[str, Any]],
+    tier: str,
+) -> list[dict[str, Any]]:
+    """Keep a later-created focal surface on its presenter wall and centerline."""
+    bounds = _room_bounds(geometry)
+    subject_ids = bound_ids(constraint.get("subjects"), objects)
+    target_ids = bound_ids(constraint.get("targets"), objects)
+    walls = [obj for obj in objects if object_category(obj) == "wall"]
+    if bounds is None or len(subject_ids) != 1 or len(target_ids) != 1 or not walls:
+        return []
+    by_id = {str(obj["id"]): obj for obj in objects}
+    subject_id, target_id = subject_ids[0], target_ids[0]
+    subject, target = by_id.get(subject_id), by_id.get(target_id)
+    subject_center = bbox_center_xy(subject) if subject is not None else None
+    target_center = bbox_center_xy(target) if target is not None else None
+    if (
+        subject is None
+        or target is None
+        or subject_center is None
+        or target_center is None
+    ):
+        return []
+
+    subject_wall = min(
+        walls,
+        key=lambda item: (
+            _wall_normal_distance(subject_center, item),
+            str(item.get("id")),
+        ),
+    )
+    target_wall = min(
+        walls,
+        key=lambda item: (
+            _wall_normal_distance(target_center, item),
+            str(item.get("id")),
+        ),
+    )
+    frame = _wall_frame(target_wall, bounds)
+    if frame is None:
+        return []
+    normal_axis, tangent_axis, inward, inner_face, _ = frame
+    target_xy = [float(subject_center[0]), float(subject_center[1])]
+    target_xy[tangent_axis] = float(target_center[tangent_axis])
+    if str(subject_wall["id"]) == str(target_wall["id"]):
+        target_xy[normal_axis] = float(subject_center[normal_axis])
+    else:
+        target_xy[normal_axis] = inner_face
+    inward_vector = [0.0, 0.0]
+    inward_vector[normal_axis] = inward
+    target_yaw = math.degrees(math.atan2(-inward_vector[0], inward_vector[1]))
+    tangent_error = abs(subject_center[tangent_axis] - target_center[tangent_axis])
+    same_wall = str(subject_wall["id"]) == str(target_wall["id"])
+    facing_error = _front_error_deg(subject, tuple(inward_vector))
+    allowed_tangent = max(
+        0.15, 0.04 * min(bounds[2] - bounds[0], bounds[3] - bounds[1])
+    )
+    aligned = same_wall and tangent_error <= allowed_tangent and facing_error <= 20.0
+    return [
+        _result(
+            constraint,
+            suffix=f"{subject_id}__{target_id}",
+            label="pass" if aligned else "fail",
+            primary=subject_id,
+            related=[target_id, str(target_wall["id"])],
+            relation_type="instructional_surface_alignment",
+            tier=tier,
+            reason=(
+                f"`{subject_id}` must share the presenter wall and centerline of "
+                f"`{target_id}`; same-wall={same_wall}, tangent error is "
+                f"{tangent_error:.2f}m, and inward-facing error is "
+                f"{facing_error:.0f}deg."
+            ),
+            diagnostics={
+                "subject_wall_id": str(subject_wall["id"]),
+                "presenter_wall_id": str(target_wall["id"]),
+                "target_center_xy_m": [round(value, 6) for value in target_xy],
+                "target_yaw_deg": round(target_yaw, 6),
+                "same_wall": same_wall,
+                "tangent_error_m": round(tangent_error, 6),
+                "allowed_tangent_error_m": round(allowed_tangent, 6),
+                "facing_error_deg": round(facing_error, 6),
+                "allowed_facing_error_deg": 20.0,
+            },
+        )
+    ]
 
 
 def _evaluate_in_front_of(
@@ -641,6 +832,55 @@ def _wall_distance_sq(center: tuple[float, float], wall: dict[str, Any]) -> floa
     if wall_center is None:
         return math.inf
     return (center[0] - wall_center[0]) ** 2 + (center[1] - wall_center[1]) ** 2
+
+
+def _wall_normal_distance(center: tuple[float, float], wall: dict[str, Any]) -> float:
+    wall_bbox = wall.get("bbox_world") or {}
+    wall_center = wall_bbox.get("center") or []
+    wall_size = wall_bbox.get("size") or []
+    if len(wall_center) < 2 or len(wall_size) < 2:
+        return math.inf
+    normal_axis = 0 if float(wall_size[0]) <= float(wall_size[1]) else 1
+    return abs(float(center[normal_axis]) - float(wall_center[normal_axis]))
+
+
+def _wall_frame(
+    wall: dict[str, Any],
+    bounds: tuple[float, float, float, float],
+) -> tuple[int, int, float, float, tuple[float, float]] | None:
+    wall_bbox = wall.get("bbox_world") or {}
+    wall_center = wall_bbox.get("center") or []
+    wall_size = wall_bbox.get("size") or []
+    if len(wall_center) < 2 or len(wall_size) < 2:
+        return None
+    normal_axis = 0 if float(wall_size[0]) <= float(wall_size[1]) else 1
+    tangent_axis = 1 - normal_axis
+    room_center = (
+        (bounds[0] + bounds[2]) / 2.0,
+        (bounds[1] + bounds[3]) / 2.0,
+    )
+    wall_coord = float(wall_center[normal_axis])
+    inward = 1.0 if room_center[normal_axis] >= wall_coord else -1.0
+    inner_face = wall_coord + inward * float(wall_size[normal_axis]) / 2.0
+    return (
+        normal_axis,
+        tangent_axis,
+        inward,
+        inner_face,
+        (float(wall_center[0]), float(wall_center[1])),
+    )
+
+
+def _front_error_deg(obj: dict[str, Any], target_front: tuple[float, float]) -> float:
+    current = front_vector(obj)
+    current_norm = math.hypot(*current)
+    target_norm = math.hypot(*target_front)
+    if current_norm <= 1e-6 or target_norm <= 1e-6:
+        return 180.0
+    dot = (current[0] * target_front[0] + current[1] * target_front[1]) / (
+        current_norm * target_norm
+    )
+    return math.degrees(math.acos(max(-1.0, min(1.0, dot))))
 
 
 def _tier(constraint: dict[str, Any], mode: str) -> str:

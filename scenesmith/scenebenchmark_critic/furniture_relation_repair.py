@@ -6,19 +6,29 @@ import logging
 import math
 import re
 
+from collections.abc import Collection
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from pydrake.math import RigidTransform, RollPitchYaw
+from pydrake.math import RigidTransform, RollPitchYaw, RotationMatrix
 
 from scenesmith.agent_utils.furniture_accessibility_guard import (
     improve_storage_front_access,
 )
-from scenesmith.agent_utils.room import ObjectType, RoomScene, SceneObject, UniqueID
+from scenesmith.agent_utils.room import (
+    ObjectType,
+    PlacementInfo,
+    RoomScene,
+    SceneObject,
+    UniqueID,
+)
 from scenesmith.scenebenchmark_critic.api import evaluate_room_scene
 from scenesmith.scenebenchmark_critic.config import CriticConfig, critic_config_from_any
+
+if TYPE_CHECKING:
+    from scenesmith.wall_agents.tools.wall_surface import WallSurface
 
 console_logger = logging.getLogger(__name__)
 
@@ -32,6 +42,8 @@ _REPAIRABLE_RELATIONS = {
     "dining_seat_distribution",
     "flanking",
     "front_axis_alignment",
+    "instructional_surface_alignment",
+    "operation_zone_at_wall",
     "room_center_alignment",
     "seating_to_work_surface",
     "study_furniture_layout",
@@ -81,6 +93,7 @@ class _RepairTarget:
     group_object_ids: tuple[str, ...] = ()
     member_poses: tuple[_RepairPose, ...] = ()
     target_center_z: float | None = None
+    target_wall_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -109,6 +122,7 @@ class _ScenePoseSnapshot:
     """
 
     object_transforms: dict[UniqueID, RigidTransform]
+    object_placements: dict[UniqueID, PlacementInfo | None]
     surface_states: dict[
         UniqueID,
         tuple[list[Any], tuple[tuple[Any, RigidTransform], ...]],
@@ -121,10 +135,12 @@ class _ScenePoseSnapshot:
             tuple[list[Any], tuple[tuple[Any, RigidTransform], ...]],
         ] = {}
         object_transforms: dict[UniqueID, RigidTransform] = {}
+        object_placements: dict[UniqueID, PlacementInfo | None] = {}
         for object_id, obj in scene.objects.items():
             object_transforms[object_id] = RigidTransform(
                 R=obj.transform.rotation(), p=obj.transform.translation()
             )
+            object_placements[object_id] = _copy_placement_info(obj.placement_info)
             surfaces = obj.support_surfaces
             surface_states[object_id] = (
                 surfaces,
@@ -139,7 +155,7 @@ class _ScenePoseSnapshot:
                     for surface in surfaces
                 ),
             )
-        return cls(object_transforms, surface_states)
+        return cls(object_transforms, object_placements, surface_states)
 
     def restore(self, scene: RoomScene) -> None:
         for object_id, transform in self.object_transforms.items():
@@ -147,6 +163,9 @@ class _ScenePoseSnapshot:
             if obj is None:
                 continue
             obj.transform = transform
+            obj.placement_info = _copy_placement_info(
+                self.object_placements.get(object_id)
+            )
             surfaces, states = self.surface_states[object_id]
             # Preserve the original list identity, but also restore its
             # contents in case an evaluator mutated the container in place.
@@ -156,6 +175,17 @@ class _ScenePoseSnapshot:
                 surface.transform = surface_transform
 
 
+def _copy_placement_info(placement: PlacementInfo | None) -> PlacementInfo | None:
+    if placement is None:
+        return None
+    return PlacementInfo(
+        parent_surface_id=placement.parent_surface_id,
+        position_2d=np.asarray(placement.position_2d, dtype=float).copy(),
+        rotation_2d=float(placement.rotation_2d),
+        placement_method=str(placement.placement_method),
+    )
+
+
 def improve_furniture_relations(
     scene: RoomScene,
     *,
@@ -163,8 +193,14 @@ def improve_furniture_relations(
     max_repairs: int = 8,
     max_translation_m: float = 3.0,
     max_candidate_evaluations: int = 64,
+    allowed_relation_types: Collection[str] | None = None,
 ) -> list[FurnitureRelationFix]:
-    """Apply critic targets only when the whole-scene evaluation improves."""
+    """Apply selected critic targets when the whole-scene evaluation improves.
+
+    ``allowed_relation_types=None`` preserves the historical behavior of repairing
+    every supported relation. Callers may provide a narrow allowlist for a delayed
+    stage that owns only one relation family.
+    """
     critic_config = (
         config if isinstance(config, CriticConfig) else critic_config_from_any(config)
     )
@@ -183,6 +219,11 @@ def improve_furniture_relations(
     except (TypeError, ValueError):
         configured_budget = max_candidate_evaluations
     candidate_budget = max(1, configured_budget)
+    relation_allowlist = (
+        None
+        if allowed_relation_types is None
+        else frozenset(str(value) for value in allowed_relation_types)
+    )
     candidate_evaluations = 0
     fixes: list[FurnitureRelationFix] = []
     for _ in range(max_repairs):
@@ -190,10 +231,17 @@ def improve_furniture_relations(
         baseline_score = _score_payload(baseline_payload)
         accepted = False
         for target in _repair_targets(scene, baseline_payload):
+            if (
+                relation_allowlist is not None
+                and target.relation_type not in relation_allowlist
+            ):
+                continue
             if candidate_evaluations >= candidate_budget:
                 break
             obj = scene.objects.get(UniqueID(target.object_id))
-            if obj is None or obj.object_type != ObjectType.FURNITURE:
+            if obj is None or not _repair_target_type_allowed(
+                obj, target.relation_type
+            ):
                 continue
             current_center = _world_center_xy(obj)
             if current_center is None:
@@ -610,17 +658,26 @@ def _repair_targets(scene: RoomScene, payload: dict[str, Any]) -> list[_RepairTa
             teacher_id = str(teacher.get("surface_id") or "")
             teacher_center = _xy(teacher.get("target_surface_center_xy_m"))
             teacher_yaw = _float_or_none(teacher.get("target_surface_yaw_deg"))
-            if teacher_id and teacher_center is not None and teacher_yaw is not None:
+            if (
+                not teacher.get("managed_by_contract")
+                and teacher_id
+                and teacher_center is not None
+                and teacher_yaw is not None
+            ):
                 poses.append(_RepairPose(teacher_id, teacher_center, teacher_yaw))
             unique_poses = tuple({pose.object_id: pose for pose in poses}.values())
-            if len(unique_poses) >= 3 and teacher_id:
+            anchor_pose = next(
+                (pose for pose in unique_poses if pose.object_id == teacher_id),
+                unique_poses[0] if unique_poses else None,
+            )
+            if len(unique_poses) >= 3 and anchor_pose is not None:
                 targets.append(
                     _RepairTarget(
-                        teacher_id,
+                        anchor_pose.object_id,
                         relation,
                         check_id,
-                        teacher_center,
-                        teacher_yaw,
+                        anchor_pose.target_center_xy,
+                        anchor_pose.target_yaw_deg,
                         member_poses=unique_poses,
                     )
                 )
@@ -727,6 +784,26 @@ def _repair_targets(scene: RoomScene, payload: dict[str, Any]) -> list[_RepairTa
             if object_id and center is not None:
                 targets.append(
                     _RepairTarget(object_id, relation, check_id, center, None)
+                )
+        elif relation in {
+            "operation_zone_at_wall",
+            "instructional_surface_alignment",
+        }:
+            object_id = str(result.get("primary_object") or "")
+            center = _xy(diagnostics.get("target_center_xy_m"))
+            yaw = _float_or_none(diagnostics.get("target_yaw_deg"))
+            if object_id and center is not None and yaw is not None:
+                targets.append(
+                    _RepairTarget(
+                        object_id,
+                        relation,
+                        check_id,
+                        center,
+                        yaw,
+                        target_wall_id=(
+                            str(diagnostics.get("presenter_wall_id") or "") or None
+                        ),
+                    )
                 )
         elif relation == "object_on_support":
             if not media_on_support:
@@ -1901,8 +1978,18 @@ def _apply_repair_target(
 
     object_ids = target.group_object_ids or (target.object_id,)
     anchor = scene.objects.get(UniqueID(target.object_id))
-    if anchor is None or anchor.object_type != ObjectType.FURNITURE:
+    if anchor is None or not _repair_target_type_allowed(anchor, target.relation_type):
         return False
+    if target.relation_type == "instructional_surface_alignment":
+        if anchor.object_type == ObjectType.WALL_MOUNTED:
+            return _move_wall_mounted_instructional_surface(
+                scene,
+                anchor,
+                target_wall_id=target.target_wall_id,
+                target_transform=anchor_transform,
+            )
+        _move_object_with_surfaces(scene, anchor.object_id, anchor_transform)
+        return True
     delta = anchor_transform @ anchor.transform.inverse()
     transforms: dict[UniqueID, RigidTransform] = {}
     for object_id in object_ids:
@@ -1920,6 +2007,99 @@ def _apply_repair_target(
     for object_id, transform in transforms.items():
         _move_object_with_surfaces(scene, object_id, transform)
     return True
+
+
+def _repair_target_type_allowed(obj: SceneObject, relation_type: str) -> bool:
+    if obj.object_type == ObjectType.FURNITURE:
+        return True
+    return (
+        relation_type == "instructional_surface_alignment"
+        and obj.object_type == ObjectType.WALL_MOUNTED
+    )
+
+
+def _move_wall_mounted_instructional_surface(
+    scene: RoomScene,
+    obj: SceneObject,
+    *,
+    target_wall_id: str | None,
+    target_transform: RigidTransform,
+) -> bool:
+    """Move a focal surface through the canonical wall-local placement model."""
+    surface = _target_wall_surface(scene, target_wall_id)
+    if surface is None:
+        return False
+
+    local_translation = surface.transform.inverse().multiply(
+        target_transform.translation()
+    )
+    position_x = float(local_translation[0])
+    position_z = float(local_translation[2])
+    rotation_2d = _wall_rotation_2d(surface, target_transform)
+    world_transform = surface.to_world_pose(
+        position_x=position_x,
+        position_z=position_z,
+        rotation_deg=math.degrees(rotation_2d),
+    )
+    _move_object_with_surfaces(scene, obj.object_id, world_transform)
+    obj.placement_info = PlacementInfo(
+        parent_surface_id=surface.surface_id,
+        position_2d=np.array([position_x, position_z], dtype=float),
+        rotation_2d=rotation_2d,
+        placement_method="wall_placement",
+    )
+    return True
+
+
+def _target_wall_surface(
+    scene: RoomScene, target_wall_id: str | None
+) -> WallSurface | None:
+    if not target_wall_id or scene.room_geometry is None:
+        return None
+    # Import lazily: wall_agents package initialization loads the stateful base
+    # agent, which itself imports this repair module.
+    from scenesmith.wall_agents.tools.wall_surface import (
+        extract_wall_surfaces_from_room_geometry,
+    )
+
+    surfaces = extract_wall_surfaces_from_room_geometry(
+        scene.room_geometry,
+        room_id=scene.room_id,
+    )
+    normalized_target = str(target_wall_id).strip().lower()
+    exact = next(
+        (
+            surface
+            for surface in surfaces
+            if normalized_target
+            in {
+                str(surface.surface_id).lower(),
+                str(surface.wall_id).lower(),
+            }
+        ),
+        None,
+    )
+    if exact is not None:
+        return exact
+    return next(
+        (
+            surface
+            for surface in surfaces
+            if re.search(
+                rf"(^|_){re.escape(surface.wall_direction.value)}(?:_wall)?$",
+                normalized_target,
+            )
+        ),
+        None,
+    )
+
+
+def _wall_rotation_2d(surface: WallSurface, world_transform: RigidTransform) -> float:
+    local_rotation = (
+        surface.transform.rotation().inverse().multiply(world_transform.rotation())
+    )
+    placement_rotation = local_rotation.multiply(RotationMatrix.MakeZRotation(-math.pi))
+    return -float(RollPitchYaw(placement_rotation).pitch_angle())
 
 
 def _within_floor_bounds(

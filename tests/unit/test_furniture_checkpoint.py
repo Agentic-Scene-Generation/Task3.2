@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from scenesmith.experiments.indoor_scene_generation import (
     _apply_and_rescore_final_furniture_state,
+    _apply_final_wall_functional_guards,
     _copy_checkpoint_for_stage,
     _fix_paths_in_json_file,
     _raise_for_unresolved_furniture_relations,
@@ -79,6 +80,59 @@ class TestFinalFurnitureRescore(unittest.TestCase):
         )
         agent._request_critique_impl.assert_awaited_once_with(update_checkpoint=False)
         agent._finalize_scene_and_scores.assert_awaited_once_with()
+
+    def test_post_wall_contract_guard_is_noop_for_legacy_and_shadow(self):
+        module = "scenesmith.experiments.indoor_scene_generation"
+        for mode in ("legacy", "shadow"):
+            with self.subTest(mode=mode):
+                with (
+                    patch(
+                        f"{module}.critic_config_from_any",
+                        return_value=SimpleNamespace(
+                            enabled=True,
+                            constraint_mode=mode,
+                        ),
+                    ),
+                    patch(f"{module}.improve_furniture_relations") as improve,
+                    patch(
+                        f"{module}._raise_for_unresolved_furniture_relations"
+                    ) as validate,
+                ):
+                    _apply_final_wall_functional_guards(scene=object(), cfg_dict={})
+
+                improve.assert_not_called()
+                validate.assert_not_called()
+
+    def test_post_wall_contract_guard_repairs_only_delayed_alignment(self):
+        module = "scenesmith.experiments.indoor_scene_generation"
+        scene = object()
+        cfg_dict = {"experiment": "config"}
+        fix = SimpleNamespace(
+            object_id="chalkboard_0",
+            relation_type="instructional_surface_alignment",
+        )
+        with (
+            patch(
+                f"{module}.critic_config_from_any",
+                return_value=SimpleNamespace(
+                    enabled=True,
+                    constraint_mode="contract",
+                ),
+            ),
+            patch(
+                f"{module}.improve_furniture_relations",
+                return_value=[fix],
+            ) as improve,
+            patch(f"{module}._raise_for_unresolved_furniture_relations") as validate,
+        ):
+            _apply_final_wall_functional_guards(scene=scene, cfg_dict=cfg_dict)
+
+        improve.assert_called_once_with(
+            scene,
+            config=cfg_dict,
+            allowed_relation_types={"instructional_surface_alignment"},
+        )
+        validate.assert_called_once_with(scene=scene, cfg_dict=cfg_dict)
 
     def test_rescore_observes_state_after_all_final_guards(self):
         events: list[tuple[str, str]] = []
