@@ -1,0 +1,19 @@
+{
+  "schema_version": "1.0",
+  "assets": [
+    {
+      "mesh_id": "16100ba2844b8f89c2ba6e30677d13ffe45d82a7",
+      "status": "blocked",
+      "families": ["bed"],
+      "reason": "Compound HSSD scene fragment: the bed includes an oversized wall or backdrop panel that dominates placement bounds.",
+      "evidence": "Confirmed in the 2026-07-30 ACP run and the source HSSD mesh metadata."
+    },
+    {
+      "mesh_id": "cdcbb79d18ce406593cc699cb35a2adc9fddc99e",
+      "status": "blocked",
+      "families": ["sofa"],
+      "reason": "Compound HSSD scene fragment: the sofa includes an oversized backing or staging panel that is not intrinsic furniture geometry.",
+      "evidence": "Confirmed in the 2026-07-30 ACP run and the source HSSD mesh metadata."
+    }
+  ]
+}

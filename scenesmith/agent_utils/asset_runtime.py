@@ -7,6 +7,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from scenesmith.agent_utils.asset_quarantine import hssd_asset_quarantine_reason
 
 _FAMILY_ALIASES: dict[str, tuple[str, ...]] = {
     # Match specific functional roles before broader furniture aliases. For
@@ -124,7 +125,7 @@ _FLOOR_LAYOUT_FAMILIES = frozenset({"plant", "rug", "floor_lamp"})
 
 # Bump whenever semantic admission meaning changes.  Persistent HSSD decisions
 # must never outlive the prompt/placement contract that produced them.
-ASSET_SEMANTIC_CONTRACT_VERSION = "6.0"
+ASSET_SEMANTIC_CONTRACT_VERSION = "7.0"
 
 
 def placement_role_contract(role: str) -> str:
@@ -207,9 +208,11 @@ class AssetRuntimeGate:
         """Return whether an asset may participate in runtime reuse."""
 
         metadata = getattr(asset, "metadata", {}) or {}
+        mesh_id = str(metadata.get("hssd_mesh_id", "") or "")
         return not bool(
             metadata.get("repair_placeholder", False)
             or metadata.get("asset_admission_failed", False)
+            or hssd_asset_quarantine_reason(mesh_id)
         )
 
     def configure(

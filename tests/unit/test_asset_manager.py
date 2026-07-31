@@ -23,9 +23,7 @@ from scenesmith.agent_utils.asset_router.dataclasses import ValidationResult
 from scenesmith.agent_utils.geometry_generation_server.dataclasses import (
     GeometryGenerationServerResponse,
 )
-from scenesmith.agent_utils.hssd_retrieval_server.dataclasses import (
-    HssdRetrievalResult,
-)
+from scenesmith.agent_utils.hssd_retrieval_server.dataclasses import HssdRetrievalResult
 from scenesmith.agent_utils.image_generation import (
     AssetOperationType,
     OpenAIImageGenerator,
@@ -329,6 +327,91 @@ class TestAssetManager(unittest.TestCase):
             manager._thin_covering_router.validate_asset.call_count,
             2,
         )
+
+    def test_hssd_quarantine_precedes_cache_and_vlm_admission(self):
+        manager = object.__new__(AssetManager)
+        manager.cfg = OmegaConf.create(
+            {
+                "asset_manager": {
+                    "hssd": {
+                        "semantic_validation": {
+                            "enabled": True,
+                            "families": ["bed"],
+                            "critical_families": ["bed"],
+                            "max_candidates": 4,
+                        }
+                    }
+                }
+            }
+        )
+        manager.debug_dir = self.temp_dir / "debug"
+        manager._thin_covering_router = MagicMock()
+        manager._thin_covering_router.validate_asset.return_value = ValidationResult(
+            True,
+            "Standalone bed",
+            contains_architectural_context=False,
+            requested_object_is_dominant=True,
+        )
+        quarantined = HssdRetrievalResult(
+            mesh_path=str(self.temp_dir / "compound_bed.glb"),
+            hssd_id="16100ba2844b8f89c2ba6e30677d13ffe45d82a7",
+            object_name="bed with wall panel",
+            similarity_score=0.99,
+            size=(2.8, 2.1, 2.4),
+            category="large_objects",
+        )
+        standalone = HssdRetrievalResult(
+            mesh_path=str(self.temp_dir / "standalone_bed.glb"),
+            hssd_id="standalone_bed",
+            object_name="bed",
+            similarity_score=0.90,
+            size=(1.6, 2.0, 0.8),
+            category="large_objects",
+        )
+        manager._direct_hssd_semantic_cache = {
+            "16100ba2844b8f89c2ba6e30677d13ffe45d82a7|bed": ValidationResult(
+                True,
+                "stale positive cache",
+                contains_architectural_context=False,
+                requested_object_is_dominant=True,
+            )
+        }
+
+        selected = manager._select_direct_hssd_candidate(
+            candidates=[quarantined, standalone],
+            description="double bed",
+            short_name="bed",
+        )
+
+        self.assertEqual("standalone_bed", selected.hssd_id)
+        self.assertEqual(
+            "quarantined",
+            manager._direct_hssd_admission_states[quarantined.hssd_id],
+        )
+        validated_path = manager._thin_covering_router.validate_asset.call_args.kwargs[
+            "mesh_path"
+        ]
+        self.assertEqual("standalone_bed.glb", validated_path.name)
+
+    def test_hssd_retrieval_reserves_replace_quarantined_top_candidates(self):
+        manager = object.__new__(AssetManager)
+        manager.cfg = OmegaConf.create(
+            {
+                "asset_manager": {
+                    "hssd": {
+                        "semantic_validation": {
+                            "enabled": True,
+                            "families": ["bed"],
+                            "critical_families": ["bed"],
+                            "max_candidates": 4,
+                        }
+                    }
+                }
+            }
+        )
+
+        self.assertEqual(4, manager._direct_hssd_candidate_count("bed", "bed"))
+        self.assertEqual(6, manager._hssd_retrieval_candidate_count("bed", "bed"))
 
     def test_critical_hssd_candidate_must_pass_shared_size_contract(self):
         manager = object.__new__(AssetManager)

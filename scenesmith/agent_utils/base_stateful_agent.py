@@ -910,10 +910,20 @@ class BaseStatefulAgent(ABC):
             256,
             int(self._stage_budget_value("critic_max_output_tokens", 1536) or 1536),
         )
+        retry_tokens = max(
+            configured_tokens,
+            int(
+                self._stage_budget_value(
+                    "critic_retry_max_output_tokens",
+                    max(3072, configured_tokens),
+                )
+                or max(3072, configured_tokens)
+            ),
+        )
         profile = StructuredLLMProfile(
             thinking_mode="none",
-            max_tokens=min(1024, configured_tokens),
-            retry_max_tokens=configured_tokens,
+            max_tokens=configured_tokens,
+            retry_max_tokens=retry_tokens,
             timeout_seconds=attempt_seconds,
             temperature=0.1,
             max_attempts=max_attempts,

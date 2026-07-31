@@ -21,6 +21,10 @@ from pydrake.all import RigidTransform
 from scenesmith.agent_utils.articulated_retrieval_server import (
     ArticulatedRetrievalClient,
 )
+from scenesmith.agent_utils.asset_quarantine import (
+    hssd_asset_quarantine_reason,
+    quarantined_hssd_asset_ids,
+)
 from scenesmith.agent_utils.asset_registry import AssetRegistry
 from scenesmith.agent_utils.asset_router import AssetRouter
 from scenesmith.agent_utils.asset_router.dataclasses import (
@@ -1024,6 +1028,14 @@ class AssetManager:
         family: str,
         use_lenient: bool,
     ) -> ValidationResult | None:
+        quarantine_reason = hssd_asset_quarantine_reason(candidate_id)
+        if quarantine_reason:
+            console_logger.warning(
+                "Ignoring semantic cache for quarantined HSSD asset %s: %s",
+                candidate_id,
+                quarantine_reason,
+            )
+            return None
         cache_path = self._hssd_validation_cache_path(
             candidate_id=candidate_id,
             family=family,
@@ -1210,11 +1222,24 @@ class AssetManager:
         excluded = set(excluded_candidate_ids or set())
         if not hasattr(self, "_direct_hssd_admission_states"):
             self._direct_hssd_admission_states = {}
-        candidates = [
-            candidate for candidate in candidates if candidate.hssd_id not in excluded
-        ]
+        eligible_candidates: list[HssdRetrievalResult] = []
+        for candidate in candidates:
+            quarantine_reason = hssd_asset_quarantine_reason(candidate.hssd_id)
+            if quarantine_reason:
+                self._direct_hssd_admission_states[candidate.hssd_id] = "quarantined"
+                console_logger.warning(
+                    "Rejected quarantined HSSD candidate %s for '%s' before "
+                    "cache/VLM admission: %s",
+                    candidate.hssd_id,
+                    description,
+                    quarantine_reason,
+                )
+                continue
+            if candidate.hssd_id not in excluded:
+                eligible_candidates.append(candidate)
+        candidates = eligible_candidates
         if not candidates:
-            raise ValueError("No results returned from HSSD server")
+            raise ValueError("No non-quarantined results remained from the HSSD server")
 
         family = semantic_asset_family(description, short_name)
         critical_family = self._is_critical_hssd_family(family)
@@ -1369,6 +1394,12 @@ class AssetManager:
                     use_lenient=use_lenient,
                 )
                 if validation is not None:
+                    console_logger.info(
+                        "Reused HSSD semantic validation cache for candidate %s "
+                        "and family '%s'",
+                        candidate.hssd_id,
+                        family,
+                    )
                     validation_cache[validation_cache_key] = validation
             mesh_path = Path(candidate.mesh_path)
             validation_dir = (
@@ -1552,6 +1583,17 @@ class AssetManager:
                 4,
                 max(1, int(getattr(hssd_cfg, "dimension_candidates", 3) or 3)),
             )
+
+    def _hssd_retrieval_candidate_count(
+        self,
+        description: str,
+        short_name: str,
+    ) -> int:
+        """Retrieve reserve candidates without increasing bounded VLM work."""
+
+        admission_count = self._direct_hssd_candidate_count(description, short_name)
+        reserve_count = min(4, len(quarantined_hssd_asset_ids()))
+        return min(8, admission_count + reserve_count)
 
     def _uniform_dimension_fit_bounds(
         self,
@@ -2017,7 +2059,7 @@ class AssetManager:
                 ),
                 output_dir=str(asset_path_configs[index].sdf_dir),
                 scene_id=request.scene_id,
-                num_candidates=self._direct_hssd_candidate_count(
+                num_candidates=self._hssd_retrieval_candidate_count(
                     request.object_descriptions[index],
                     request.short_names[index],
                 ),
@@ -2049,12 +2091,25 @@ class AssetManager:
                     f"{index+1}/{len(request.object_descriptions)}: '{desc}'"
                 )
 
+                eligible_results = [
+                    result
+                    for result in response.results
+                    if hssd_asset_quarantine_reason(result.hssd_id) is None
+                ]
+                quarantined_count = len(response.results) - len(eligible_results)
+                if quarantined_count:
+                    console_logger.warning(
+                        "Filtered %d quarantined HSSD candidate(s) for '%s'; "
+                        "using retrieval reserves without increasing VLM attempts",
+                        quarantined_count,
+                        desc,
+                    )
                 max_candidates = min(
                     4,
                     self._direct_hssd_candidate_count(desc, short_name),
-                    len(response.results),
+                    len(eligible_results),
                 )
-                candidates = list(response.results[:max_candidates])
+                candidates = list(eligible_results[:max_candidates])
                 desired_dimensions = _optional_hssd_dimension_contract(
                     request.desired_dimensions[index]
                 )
@@ -2080,6 +2135,10 @@ class AssetManager:
                 validation_deadline = time.monotonic() + transaction_seconds
 
                 scene_obj: SceneObject | None = None
+                if not candidates:
+                    candidate_errors.append(
+                        "selection: no non-quarantined HSSD candidates were returned"
+                    )
                 for candidate_attempt in range(1, max_candidates + 1):
                     try:
                         result = self._select_direct_hssd_candidate(

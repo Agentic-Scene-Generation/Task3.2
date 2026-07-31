@@ -1,9 +1,8 @@
-import unittest
-
 import json
 import os
 import sys
 import types
+import unittest
 
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -11,8 +10,14 @@ from unittest.mock import patch
 
 import numpy as np
 
-from scripts.build_memory_index import build_memory_indexes
-from scripts.clean_memory_stage_attribution import clean_failure_bank
+from scenesmith.agent_utils.scoring import (
+    CategoryScore,
+    FloorPlanCritiqueWithScores,
+    FurnitureCritiqueWithScores,
+    scores_to_dict,
+)
+from scenesmith.agent_utils.stage_working_memory import StageWorkingMemory
+from scenesmith.scene_expert.context_bundle import build_stage_context_bundle
 from scenesmith.scene_expert.memory.embedding import (
     SceneMemoryEmbedder,
     resolve_memory_embedding_model_dir,
@@ -29,7 +34,7 @@ from scenesmith.scene_expert.memory.schemas import (
 from scenesmith.scene_expert.memory.store import FastMemoryStore
 from scenesmith.scene_expert.memory.text_builder import build_embedding_text
 from scenesmith.scene_expert.memory.writer import MemoryWriter
-from scenesmith.scene_expert.context_bundle import build_stage_context_bundle
+from scenesmith.scene_expert.prompt_context import strip_sceneexpert_injected_blocks
 from scenesmith.scene_expert.repair_taxonomy import (
     FailureCategory,
     classify_hard_reasons,
@@ -39,24 +44,19 @@ from scenesmith.scene_expert.schemas import (
     SceneTaskSpec,
     StageVerifyReport,
 )
-from scenesmith.agent_utils.scoring import (
-    CategoryScore,
-    FloorPlanCritiqueWithScores,
-    FurnitureCritiqueWithScores,
-    scores_to_dict,
-)
-from scenesmith.agent_utils.stage_working_memory import StageWorkingMemory
 from scenesmith.scene_expert.task_compiler import (
     _fallback_spec_from_prompt,
     _ground_compiled_spec,
 )
-from scenesmith.scene_expert.prompt_context import strip_sceneexpert_injected_blocks
 from scenesmith.scene_expert.verifier import (
     FullVerifier,
     StageVerifier,
     _check_required_objects,
     _map_scenesmith_scores,
 )
+from scripts.build_memory_index import build_memory_indexes
+from scripts.clean_memory_stage_attribution import clean_failure_bank
+from scripts.clean_quarantined_asset_memory import clean_quarantined_asset_memory
 
 
 class SceneExpertMemoryTest(unittest.TestCase):
@@ -293,6 +293,124 @@ class SceneExpertMemoryTest(unittest.TestCase):
             self.assertTrue(applied["index_rebuild_required"])
             self.assertTrue(Path(str(applied["backup_path"])).is_file())
             self.assertTrue(Path(str(applied["report_path"])).is_file())
+
+    def test_quarantined_asset_memory_is_not_written_or_retrieved(self) -> None:
+        bad_asset_id = "16100ba2844b8f89c2ba6e30677d13ffe45d82a7"
+        with TemporaryDirectory() as tmp:
+            store = FastMemoryStore(tmp)
+            contaminated = SuccessCase(
+                case_id="contaminated_success",
+                room_type="bedroom",
+                stage="furniture",
+                task_signature=["bed"],
+                required_objects=["bed"],
+                successful_pattern=["Reuse the historical bed."],
+                placement_reference=[f"bed_0 mesh_id={bad_asset_id} x=0 y=0"],
+            )
+            store.add_success_case(contaminated)
+            self.assertEqual([], store.success_cases)
+
+            # Simulate a legacy on-disk record written before quarantine existed.
+            success_path = Path(tmp) / "success_cases.jsonl"
+            success_path.write_text(
+                contaminated.model_dump_json() + "\n",
+                encoding="utf-8",
+            )
+            legacy_store = FastMemoryStore(tmp)
+            pack = MemoryRetriever(store=legacy_store).retrieve(
+                SceneTaskSpec(
+                    room_type="bedroom",
+                    style="modern",
+                    required_large_objects=["bed"],
+                ),
+                "furniture",
+            )
+
+        self.assertEqual([], pack.success_case_ids)
+        self.assertEqual("", pack.placement_reference)
+
+    def test_memory_update_cannot_introduce_quarantined_asset_reference(self) -> None:
+        bad_asset_id = "cdcbb79d18ce406593cc699cb35a2adc9fddc99e"
+        with TemporaryDirectory() as tmp:
+            store = FastMemoryStore(tmp)
+            store.add_skill(
+                Skill(
+                    skill_name="sofa_layout",
+                    stage="furniture",
+                    procedure=["Place the sofa toward the conversation area."],
+                )
+            )
+
+            store.update_skill(
+                "sofa_layout",
+                {"procedure": [f"Reuse asset {bad_asset_id}."]},
+            )
+
+        self.assertEqual(
+            ["Place the sofa toward the conversation area."],
+            store.skills[0].procedure,
+        )
+
+    def test_quarantined_asset_cleanup_covers_all_memory_banks(self) -> None:
+        bad_asset_id = "cdcbb79d18ce406593cc699cb35a2adc9fddc99e"
+        with TemporaryDirectory() as tmp:
+            memory_root = Path(tmp)
+            payloads = {
+                "success_cases.jsonl": [
+                    SuccessCase(
+                        case_id="bad_success",
+                        room_type="living_room",
+                        stage="furniture",
+                        placement_reference=[f"sofa mesh={bad_asset_id}"],
+                    ).model_dump_json(),
+                    SuccessCase(
+                        case_id="good_success",
+                        room_type="living_room",
+                        stage="furniture",
+                    ).model_dump_json(),
+                ],
+                "failure_cases.jsonl": [
+                    FailureCase(
+                        failure_id="bad_failure",
+                        room_type="living_room",
+                        stage="furniture",
+                        bad_pattern=f"asset {bad_asset_id} has a backdrop",
+                    ).model_dump_json(),
+                ],
+                "skills.jsonl": [
+                    Skill(
+                        skill_name="bad_skill",
+                        stage="furniture",
+                        procedure=[f"reuse {bad_asset_id}"],
+                    ).model_dump_json(),
+                ],
+            }
+            for bank_name, lines in payloads.items():
+                (memory_root / bank_name).write_text(
+                    "\n".join(lines) + "\n",
+                    encoding="utf-8",
+                )
+
+            dry_run = clean_quarantined_asset_memory(memory_dir=memory_root)
+            self.assertEqual("DRY_RUN", dry_run["status"])
+            self.assertEqual(3, dry_run["removed_count"])
+
+            applied = clean_quarantined_asset_memory(
+                memory_dir=memory_root,
+                apply=True,
+            )
+            remaining_success = [
+                json.loads(line)["case_id"]
+                for line in (memory_root / "success_cases.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+                if line.strip()
+            ]
+            self.assertTrue(Path(str(applied["report_path"])).is_file())
+
+        self.assertEqual("APPLIED", applied["status"])
+        self.assertEqual(["good_success"], remaining_success)
+        self.assertTrue(applied["index_rebuild_required"])
 
     def test_task_compiler_fallback_preserves_required_bedroom_objects(self) -> None:
         spec = _fallback_spec_from_prompt(

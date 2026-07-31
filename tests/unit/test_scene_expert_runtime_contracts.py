@@ -6,8 +6,10 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
+from scenesmith.agent_utils.asset_runtime import AssetRuntimeGate
+from scenesmith.agent_utils.scoring import FurnitureCritiqueWithScores
 from scenesmith.scene_expert.critic_feedback import (
     critic_feedback_contract,
     direct_critic_scoring_instructions,
@@ -34,6 +36,18 @@ else:
 
 
 class SceneExpertRuntimeContractTest(unittest.TestCase):
+    def test_runtime_asset_reuse_rejects_quarantined_hssd_mesh(self) -> None:
+        asset = SimpleNamespace(
+            metadata={"hssd_mesh_id": "16100ba2844b8f89c2ba6e30677d13ffe45d82a7"}
+        )
+
+        self.assertFalse(AssetRuntimeGate.is_asset_admitted(asset))
+        self.assertTrue(
+            AssetRuntimeGate.is_asset_admitted(
+                SimpleNamespace(metadata={"hssd_mesh_id": "standalone_bed"})
+            )
+        )
+
     def test_compact_critic_feedback_preserves_action_and_acceptance(self) -> None:
         feedback = parse_critic_feedback(
             """
@@ -63,11 +77,12 @@ END_FINDING
         self.assertIn("Preserve:", designer_text)
         self.assertIn("Accept when:", designer_text)
 
-    def test_contract_does_not_limit_blocking_findings(self) -> None:
+    def test_contract_caps_findings_without_dropping_blocking_evidence(self) -> None:
         contract = critic_feedback_contract()
 
-        self.assertIn("Include EVERY blocking issue", contract)
-        self.assertIn("have no count limit", contract)
+        self.assertIn("at most five FINDING blocks", contract)
+        self.assertIn("every distinct blocking issue", contract)
+        self.assertIn("merging related evidence", contract)
         self.assertIn("at most three major/refinement", contract)
 
     def test_direct_scoring_contract_overrides_impossible_tool_workflow(self) -> None:
@@ -164,7 +179,8 @@ END_FINDING
                     critic_active_max_seconds=300,
                     planner_max_output_tokens=768,
                     designer_max_output_tokens=1536,
-                    critic_max_output_tokens=1536,
+                    critic_max_output_tokens=2048,
+                    critic_retry_max_output_tokens=3072,
                     critic_max_attempts=2,
                 ),
                 wall_mounted=SimpleNamespace(
@@ -179,7 +195,8 @@ END_FINDING
         self.assertEqual(240, budget.designer_active_max_seconds)
         self.assertEqual(300, budget.critic_active_max_seconds)
         self.assertEqual(768, budget.planner_max_output_tokens)
-        self.assertEqual(1536, budget.critic_max_output_tokens)
+        self.assertEqual(2048, budget.critic_max_output_tokens)
+        self.assertEqual(3072, budget.critic_retry_max_output_tokens)
         self.assertEqual(2, budget.critic_max_attempts)
 
     def test_retryable_pause_persists_candidate_without_success_marker(self) -> None:
@@ -236,6 +253,54 @@ END_FINDING
 
 
 class NestedPlannerBudgetTest(unittest.IsolatedAsyncioTestCase):
+    @unittest.skipIf(
+        BaseStatefulAgent is None,
+        f"requires OpenAI Agents SDK: {_BASE_AGENT_IMPORT_ERROR}",
+    )
+    async def test_direct_critic_uses_full_initial_and_expanded_retry_tokens(
+        self,
+    ) -> None:
+        budget = {
+            "critic_max_attempts": 2,
+            "critic_evaluation_max_seconds": 360,
+            "critic_max_output_tokens": 2048,
+            "critic_retry_max_output_tokens": 3072,
+        }
+        structured_client = MagicMock()
+        structured_client.complete.return_value = SimpleNamespace(
+            success=False,
+            status_dict=lambda: {
+                "attempt_count": 2,
+                "final_error_kind": "length",
+                "final_error": "truncated",
+            },
+        )
+        agent = SimpleNamespace(
+            _stage_budget_value=lambda name, default: budget.get(name, default),
+            agent_type=SimpleNamespace(value="furniture"),
+            _stage_role_active_consumed={},
+            _direct_critic_system_instructions=lambda response_type: "score",
+            _sceneexpert_critic_llm_client=lambda: structured_client,
+            _pause_parent_execution_lease=lambda role: None,
+            _resume_parent_execution_lease=lambda lease: None,
+            _record_llm_call_debug=lambda **kwargs: None,
+            _chat_completion_image_parts=lambda parts: parts,
+        )
+
+        result = await BaseStatefulAgent._run_sceneexpert_direct_critic_score(
+            agent,
+            evidence_text="compact evidence",
+            image_parts=[],
+            response_type=FurnitureCritiqueWithScores,
+            event="test_critic",
+        )
+
+        self.assertIsNone(result)
+        profile = structured_client.complete.call_args.kwargs["profile"]
+        self.assertEqual(2048, profile.max_tokens)
+        self.assertEqual(3072, profile.retry_max_tokens)
+        self.assertEqual(2, profile.max_attempts)
+
     @unittest.skipIf(
         BaseStatefulAgent is None,
         f"requires OpenAI Agents SDK: {_BASE_AGENT_IMPORT_ERROR}",

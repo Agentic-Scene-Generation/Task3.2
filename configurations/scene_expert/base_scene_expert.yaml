@@ -117,7 +117,10 @@ stage_budget:
     # preserve their original runtime behavior.
     planner_max_output_tokens: 768
     designer_max_output_tokens: 1536
-    critic_max_output_tokens: 1536
+    critic_max_output_tokens: 2048
+    # Only a truncation/schema recovery attempt receives the larger cap. This
+    # avoids repeatedly spending a knowingly insufficient 1024/1536-token window.
+    critic_retry_max_output_tokens: 3072
     # Two explicit direct requests share the transaction budget. The second is
     # used only for transport, truncation, empty-content, JSON, or schema recovery.
     critic_max_attempts: 2

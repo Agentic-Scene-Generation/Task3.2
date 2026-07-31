@@ -133,10 +133,11 @@ PRESERVE: correct relationships that must not be damaged, separated by semicolon
 ACCEPTANCE_CHECK: observable condition proving the repair succeeded
 END_FINDING
 
-Repeat FINDING blocks as needed. Include EVERY blocking issue; blocking issues
-have no count limit. While any blocking issue exists, omit optional refinements.
-If there are no blocking issues, include at most three major/refinement findings.
-Never invent object IDs or coordinates. A PASS may contain zero findings.
+Return at most five FINDING blocks. Include every distinct blocking issue by
+merging related evidence and objects into the same finding when necessary.
+While any blocking issue exists, omit optional refinements. If there are no
+blocking issues, include at most three major/refinement findings. Never invent
+object IDs or coordinates. A PASS may contain zero findings.
 """
 
 
