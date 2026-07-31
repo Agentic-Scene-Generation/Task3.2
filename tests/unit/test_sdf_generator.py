@@ -218,6 +218,42 @@ class TestGenerateDrakeSDF(unittest.TestCase):
         self.assertTrue(collision_0_path.exists())
         self.assertTrue(collision_1_path.exists())
 
+    def test_open_mesh_uses_bounded_inertial_fallback(self):
+        """Non-watertight visual meshes must not emit an out-of-bounds COM."""
+        visual_mesh = trimesh.creation.box(extents=[1.0, 2.0, 3.0])
+        visual_mesh.apply_translation([0.0, 1.0, 0.0])
+        visual_mesh.update_faces(np.arange(len(visual_mesh.faces)) != 0)
+        self.assertFalse(visual_mesh.is_watertight)
+        visual_path = self.temp_path / "open_mesh.gltf"
+        visual_mesh.export(visual_path)
+
+        physics = MeshPhysicsAnalysis(
+            up_axis="+Y",
+            front_axis="+Z",
+            material="ceramic",
+            mass_kg=12.0,
+            mass_range_kg=(8.0, 16.0),
+        )
+        output_path = self.temp_path / "open_mesh.sdf"
+        generate_drake_sdf(
+            visual_mesh_path=visual_path,
+            collision_pieces=[visual_mesh.convex_hull],
+            physics_analysis=physics,
+            output_path=output_path,
+            asset_name="open_mesh",
+        )
+
+        pose = [
+            float(value)
+            for value in ET.parse(output_path).findtext(".//inertial/pose").split()[:3]
+        ]
+        np.testing.assert_allclose(pose, [0.0, 0.0, 1.0], atol=1e-6)
+        inertia = ET.parse(output_path).find(".//inertia")
+        self.assertIsNotNone(inertia)
+        self.assertGreater(float(inertia.findtext("ixx")), 0.0)
+        self.assertGreater(float(inertia.findtext("iyy")), 0.0)
+        self.assertGreater(float(inertia.findtext("izz")), 0.0)
+
     def test_generate_drake_sdf_converts_y_up_collision_axes(self):
         """Collision OBJ output uses SceneSmith's Z-up frame."""
         # Encode a 1.6m wide, 2.05m deep, 0.8m tall object in glTF Y-up:

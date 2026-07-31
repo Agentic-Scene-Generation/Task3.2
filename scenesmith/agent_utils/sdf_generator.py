@@ -103,45 +103,11 @@ def generate_drake_sdf(
     if mass <= 0:
         raise ValueError(f"Mass must be positive, got {mass}")
 
-    # Get volume and validate.
-    volume = visual_mesh.volume
-    if volume <= 0:
-        # Try fixing normals - some assets have inverted normals causing negative volume.
-        console_logger.warning(
-            f"Mesh '{asset_name}' has negative volume ({volume:.6f}), "
-            f"attempting to fix normals..."
-        )
-        visual_mesh.fix_normals()
-        volume = visual_mesh.volume
-        if volume <= 0:
-            # Still negative - use absolute value. Mass from VLM is correct,
-            # we just need the magnitude for density calculation.
-            console_logger.warning(
-                f"Mesh '{asset_name}' still has negative volume ({volume:.6f}) "
-                f"after normal fix. Using absolute value."
-            )
-            volume = abs(volume)
-
-    density = mass / volume
-
-    # Get inertia tensor from trimesh (assumes uniform density).
-    # trimesh returns moment of inertia; we need to scale by density.
-    inertia_tensor = visual_mesh.moment_inertia * density
-
-    # Validate inertia tensor has positive eigenvalues.
-    # If invalid (e.g., from inverted mesh normals), set to None to omit from SDF.
-    eigenvalues = np.linalg.eigvals(inertia_tensor)
-    if np.any(eigenvalues < 0):
-        console_logger.warning(
-            f"Computed inertia tensor for '{asset_name}' has negative eigenvalues "
-            f"[{eigenvalues[0]:.3f}, {eigenvalues[1]:.3f}, {eigenvalues[2]:.3f}]. "
-            f"This indicates inverted mesh geometry. "
-            f"Using mass={mass:.3f}kg but omitting inertia tensor."
-        )
-        inertia_tensor = None  # Signal to omit tensor in SDF.
-
-    # Get center of mass.
-    center_of_mass = visual_mesh.center_mass
+    center_of_mass, inertia_tensor = _safe_inertial_properties(
+        visual_mesh=visual_mesh,
+        mass=mass,
+        asset_name=asset_name,
+    )
 
     # Get friction coefficient for material.
     friction = physics_analysis.friction_coefficient
@@ -168,17 +134,13 @@ def generate_drake_sdf(
         f"{center_of_mass[2]:.6f} 0 0 0"
     )
 
-    # Inertia tensor (only include if valid).
-    if inertia_tensor is not None:
-        inertia = ET.SubElement(inertial, "inertia")
-        ET.SubElement(inertia, "ixx").text = f"{inertia_tensor[0, 0]:.6e}"
-        ET.SubElement(inertia, "iyy").text = f"{inertia_tensor[1, 1]:.6e}"
-        ET.SubElement(inertia, "izz").text = f"{inertia_tensor[2, 2]:.6e}"
-        ET.SubElement(inertia, "ixy").text = f"{inertia_tensor[0, 1]:.6e}"
-        ET.SubElement(inertia, "ixz").text = f"{inertia_tensor[0, 2]:.6e}"
-        ET.SubElement(inertia, "iyz").text = f"{inertia_tensor[1, 2]:.6e}"
-    # If inertia_tensor is None, omit the <inertia> tag entirely.
-    # Drake will use default values (I_xx=I_yy=I_zz=1.0, products=0.0).
+    inertia = ET.SubElement(inertial, "inertia")
+    ET.SubElement(inertia, "ixx").text = f"{inertia_tensor[0, 0]:.6e}"
+    ET.SubElement(inertia, "iyy").text = f"{inertia_tensor[1, 1]:.6e}"
+    ET.SubElement(inertia, "izz").text = f"{inertia_tensor[2, 2]:.6e}"
+    ET.SubElement(inertia, "ixy").text = f"{inertia_tensor[0, 1]:.6e}"
+    ET.SubElement(inertia, "ixz").text = f"{inertia_tensor[0, 2]:.6e}"
+    ET.SubElement(inertia, "iyz").text = f"{inertia_tensor[1, 2]:.6e}"
 
     # Visual geometry (external mesh reference).
     visual = ET.SubElement(link, "visual", name="visual")
@@ -243,6 +205,83 @@ def generate_drake_sdf(
     console_logger.info(f"Generated Drake SDF: {output_path}")
 
     return output_path
+
+
+def _safe_inertial_properties(
+    visual_mesh: trimesh.Trimesh,
+    mass: float,
+    asset_name: str,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return validated mesh mass properties or a bounded box approximation."""
+    bounds = np.asarray(visual_mesh.bounds, dtype=float)
+    if bounds.shape != (2, 3) or not np.all(np.isfinite(bounds)):
+        raise ValueError(f"Visual mesh bounds are invalid for '{asset_name}'")
+
+    extents = bounds[1] - bounds[0]
+    if not np.all(np.isfinite(extents)) or np.any(extents <= 0.0):
+        raise ValueError(f"Visual mesh extents are invalid for '{asset_name}'")
+
+    fallback_center = bounds.mean(axis=0)
+    fallback_inertia = _box_inertia_tensor(mass, extents)
+
+    # 2026-07-31: trimesh volume moments are not reliable for open HSSD meshes;
+    # keep their mass inside the rendered bounds instead of emitting a distant COM.
+    if not visual_mesh.is_watertight:
+        console_logger.warning(
+            "Mesh '%s' is not watertight; using bounding-box inertial fallback",
+            asset_name,
+        )
+        return fallback_center, fallback_inertia
+
+    volume = float(visual_mesh.volume)
+    if not np.isfinite(volume) or volume <= 0.0:
+        visual_mesh.fix_normals()
+        volume = float(visual_mesh.volume)
+    if not np.isfinite(volume) or volume <= 0.0:
+        console_logger.warning(
+            "Mesh '%s' has invalid volume; using bounding-box inertial fallback",
+            asset_name,
+        )
+        return fallback_center, fallback_inertia
+
+    center_of_mass = np.asarray(visual_mesh.center_mass, dtype=float)
+    inertia_tensor = np.asarray(
+        visual_mesh.moment_inertia * (mass / volume), dtype=float
+    )
+    com_tolerance = np.maximum(0.01, extents * 0.02)
+    com_is_in_bounds = np.all(center_of_mass >= bounds[0] - com_tolerance) and np.all(
+        center_of_mass <= bounds[1] + com_tolerance
+    )
+    symmetric_inertia = (inertia_tensor + inertia_tensor.T) / 2.0
+    eigenvalues = np.linalg.eigvalsh(symmetric_inertia)
+    inertia_is_valid = (
+        inertia_tensor.shape == (3, 3)
+        and np.all(np.isfinite(inertia_tensor))
+        and np.all(eigenvalues > 0.0)
+    )
+    if com_is_in_bounds and inertia_is_valid:
+        return center_of_mass, symmetric_inertia
+
+    console_logger.warning(
+        "Mesh '%s' has invalid mass properties (com=%s, bounds=%s); "
+        "using bounding-box inertial fallback",
+        asset_name,
+        center_of_mass.tolist(),
+        bounds.tolist(),
+    )
+    return fallback_center, fallback_inertia
+
+
+def _box_inertia_tensor(mass: float, extents: np.ndarray) -> np.ndarray:
+    """Return the centroidal inertia tensor of a solid axis-aligned box."""
+    x, y, z = np.asarray(extents, dtype=float)
+    return np.diag(
+        [
+            mass * (y**2 + z**2) / 12.0,
+            mass * (x**2 + z**2) / 12.0,
+            mass * (x**2 + y**2) / 12.0,
+        ]
+    )
 
 
 def _validate_collision_geometry(

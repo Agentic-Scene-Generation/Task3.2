@@ -167,13 +167,13 @@ def _restore_collectively_unstable_instances(
     for obj in scene.objects.values():
         if obj.object_type != ObjectType.FURNITURE:
             continue
-        asset_path = obj.sdf_path or obj.geometry_path
-        if asset_path is None or obj.object_id not in pre_simulation_transforms:
+        asset_group_key = _furniture_asset_group_key(obj)
+        if asset_group_key is None or obj.object_id not in pre_simulation_transforms:
             continue
-        groups.setdefault(str(asset_path), []).append(obj.object_id)
+        groups.setdefault(asset_group_key, []).append(obj.object_id)
 
     restored: list[UniqueID] = []
-    for asset_path, object_ids in groups.items():
+    for asset_group_key, object_ids in groups.items():
         if len(object_ids) < 2 or not all(
             obj_id in fallen_set for obj_id in object_ids
         ):
@@ -193,9 +193,24 @@ def _restore_collectively_unstable_instances(
             "Restored %d collectively unstable furniture instance(s) for shared "
             "collision proxy %s",
             len(object_ids),
-            asset_path,
+            asset_group_key,
         )
     return restored
+
+
+def _furniture_asset_group_key(obj: SceneObject) -> str | None:
+    """Return a stable provenance key for grouping repeated furniture assets."""
+    metadata = obj.metadata or {}
+    asset_source = str(metadata.get("asset_source") or "unknown")
+    for field_name in ("hssd_mesh_id", "objaverse_mesh_id", "articulated_id"):
+        asset_id = metadata.get(field_name)
+        if asset_id not in (None, ""):
+            # 2026-07-31: each placement has a fresh SDF directory, so source IDs
+            # are required to detect a shared bad collision proxy across copies.
+            return f"{asset_source}:{field_name}:{asset_id}"
+
+    asset_path = obj.sdf_path or obj.geometry_path
+    return str(asset_path) if asset_path is not None else None
 
 
 def _create_drake_plant_for_ik(

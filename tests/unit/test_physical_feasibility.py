@@ -870,6 +870,49 @@ class TestFallenFurnitureRemoval(PhysicalFeasibilityTestCase):
                     places=5,
                 )
 
+    def test_repeated_hssd_asset_is_restored_across_generated_sdf_paths(self) -> None:
+        """Copies of one HSSD mesh must group despite per-placement SDF paths."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            scene = RoomScene(
+                room_geometry=self.room_geometry,
+                scene_dir=Path(tmp_dir),
+                text_description="Repeated HSSD furniture group",
+            )
+            object_ids = [UniqueID("plant_0"), UniqueID("plant_1")]
+            upright = {
+                object_ids[0]: RigidTransform(p=[-1.0, 0.0, 0.5]),
+                object_ids[1]: RigidTransform(p=[1.0, 0.0, 0.5]),
+            }
+            for index, object_id in enumerate(object_ids):
+                scene.add_object(
+                    SceneObject(
+                        object_id=object_id,
+                        object_type=ObjectType.FURNITURE,
+                        name="plant",
+                        description="Repeated HSSD plant",
+                        transform=RigidTransform(
+                            R=RotationMatrix(RollPitchYaw(np.pi / 2.0, 0.0, 0.0)),
+                            p=upright[object_id].translation(),
+                        ),
+                        sdf_path=Path(tmp_dir) / f"placement_{index}" / "plant.sdf",
+                        metadata={
+                            "asset_source": "hssd",
+                            "hssd_mesh_id": "shared-plant-mesh",
+                        },
+                    )
+                )
+
+            restored = _restore_collectively_unstable_instances(
+                scene, upright, object_ids, tilt_threshold_degrees=45.0
+            )
+
+            self.assertEqual(restored, object_ids)
+            for object_id, transform in upright.items():
+                np.testing.assert_allclose(
+                    scene.get_object(object_id).transform.GetAsMatrix4(),
+                    transform.GetAsMatrix4(),
+                )
+
     def test_catastrophic_translation_is_unstable_below_tilt_threshold(self) -> None:
         obj = SceneObject(
             object_id=UniqueID("plant_0"),
