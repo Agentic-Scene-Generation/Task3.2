@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from scenesmith.scenebenchmark_critic.metrics.interaction_clearance.evaluator import (
     build_clearance_checks,
+    build_door_clearance_checks,
 )
 
 
@@ -74,3 +75,77 @@ def test_low_ceiling_fixture_still_blocks_horizontal_clearance() -> None:
     )
 
     assert _clearance_label(_monitor(), fixture) == "fail"
+
+
+def test_door_sweep_uses_door_width_beyond_legacy_clearance_box() -> None:
+    geometry = {
+        "scene_shell": {
+            "doors": [
+                {
+                    "id": "door_0",
+                    "opening_type": "door",
+                    "center": (-2.5, 0.0, 1.05),
+                    "width": 0.9,
+                    "height": 2.1,
+                    "sill_height": 0.0,
+                    "wall_direction": "west",
+                    # Deliberately shallower than the physical door leaf.  The
+                    # interaction rule must derive the sweep from door width.
+                    "bbox": {
+                        "min": (-2.5, -0.45, 0.0),
+                        "max": (-2.2, 0.45, 2.1),
+                    },
+                }
+            ]
+        }
+    }
+    sofa = _object(
+        "sofa_0",
+        category="sofa",
+        object_type="furniture",
+        bbox_min=(-1.75, -0.10, 0.0),
+        bbox_max=(-1.65, 0.10, 0.8),
+    )
+
+    checks = build_door_clearance_checks(geometry, {"sofa_0": sofa})
+
+    assert len(checks) == 1
+    assert checks[0]["clearance_result"]["label"] == "fail"
+    assert checks[0]["clearance_result"]["blocking_objects"] == ["sofa_0"]
+    assert checks[0]["clearance_result"]["door_width_m"] == 0.9
+
+
+def test_door_sweep_ignores_floor_coverings_and_clear_furniture() -> None:
+    geometry = {
+        "scene_shell": {
+            "doors": [
+                {
+                    "id": "door_0",
+                    "opening_type": "door",
+                    "center": (0.0, -2.0, 1.05),
+                    "width": 0.9,
+                    "height": 2.1,
+                    "wall_direction": "south",
+                }
+            ]
+        }
+    }
+    rug = _object(
+        "rug_0",
+        category="rug",
+        object_type="thin_covering",
+        bbox_min=(-0.4, -1.9, 0.0),
+        bbox_max=(0.4, -1.2, 0.02),
+    )
+    sofa = _object(
+        "sofa_0",
+        category="sofa",
+        object_type="furniture",
+        bbox_min=(1.0, 0.5, 0.0),
+        bbox_max=(2.0, 1.2, 0.8),
+    )
+
+    check = build_door_clearance_checks(geometry, {"rug_0": rug, "sofa_0": sofa})[0]
+
+    assert check["clearance_result"]["label"] == "pass"
+    assert check["clearance_result"]["blocking_objects"] == []

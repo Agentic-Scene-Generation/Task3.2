@@ -257,6 +257,15 @@ def build_checks(
                 continue
             checks.append(check)
             seen_check_ids.add(check["check_id"])
+        # 2026-07-31: Treat a door leaf's 90-degree swept volume as structural
+        # interaction clearance.  This remains active while relation repair
+        # scores candidate furniture poses, so an alignment improvement cannot
+        # silently move a sofa back into a doorway after physics repaired it.
+        for check in clearance_source.build_door_clearance_checks(geometry, objects):
+            if check["check_id"] in seen_check_ids:
+                continue
+            checks.append(check)
+            seen_check_ids.add(check["check_id"])
     return checks
 
 

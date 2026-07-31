@@ -640,7 +640,7 @@ def _parent_surface_id(obj: dict[str, Any]) -> str:
 
 
 def _support_surface_owner_families(
-    objects: dict[str, dict[str, Any]]
+    objects: dict[str, dict[str, Any]],
 ) -> dict[str, str]:
     owners: dict[str, str] = {}
     for obj in objects.values():
@@ -656,9 +656,7 @@ def _support_surface_owner_families(
     return owners
 
 
-def _support_surface_owner_ids(
-    objects: dict[str, dict[str, Any]]
-) -> dict[str, str]:
+def _support_surface_owner_ids(objects: dict[str, dict[str, Any]]) -> dict[str, str]:
     owners: dict[str, str] = {}
     for object_id, obj in objects.items():
         for region in obj.get("support_regions") or []:
@@ -679,8 +677,7 @@ def _is_support_owner_intrusion(
         return False
     surface_id = _parent_surface_id(subject)
     return bool(
-        surface_id
-        and surface_owner_ids.get(surface_id) == str(blocker.get("id") or "")
+        surface_id and surface_owner_ids.get(surface_id) == str(blocker.get("id") or "")
     )
 
 
@@ -759,9 +756,7 @@ def build_clearance_checks(objects: dict[str, dict[str, Any]]) -> list[dict[str,
                 "family": _category_family_for_object(obj),
                 "scene_object_type": str(obj.get("object_type") or "").lower(),
                 "parent_surface_id": parent_surface_id,
-                "parent_surface_family": surface_owner_families.get(
-                    parent_surface_id
-                ),
+                "parent_surface_family": surface_owner_families.get(parent_surface_id),
             }
         )
     world_box_by_id = {str(box.get("id")): box for box in world_boxes}
@@ -875,7 +870,9 @@ def build_window_clearance_checks(
             if not isinstance(obbox, dict):
                 continue
             omin, omax = obbox.get("min"), obbox.get("max")
-            if not isinstance(omin, (list, tuple)) or not isinstance(omax, (list, tuple)):
+            if not isinstance(omin, (list, tuple)) or not isinstance(
+                omax, (list, tuple)
+            ):
                 continue
             # 2026-07-14 修改原因：低于窗台的家具不遮挡窗洞，避免误报床底、
             # 地毯等低矮物体；只报告高度超过 sill 且 XY 投影相交的对象。
@@ -938,6 +935,193 @@ def build_window_clearance_checks(
     return checks
 
 
+def _door_sweep_geometry(
+    door: dict[str, Any],
+) -> tuple[dict[str, list[float]], int, int, float, float, int] | None:
+    """Return the 90-degree door sweep envelope and its local 2D frame.
+
+    The opening annotation does not encode which jamb owns the hinge.  The
+    evaluator therefore checks the union of the two possible quarter-circle
+    sweeps.  The returned AABB is only evidence for prompts and reports; the
+    actual blocker test below uses the quarter-circle geometry.
+    """
+    center = door.get("center") or door.get("position")
+    if not isinstance(center, (list, tuple)) or len(center) < 3:
+        return None
+    try:
+        width = float(door.get("width") or 0.0)
+        height = float(door.get("height") or 0.0)
+        center_xyz = [float(value) for value in center[:3]]
+    except (TypeError, ValueError):
+        return None
+    if width <= 0.0 or height <= 0.0:
+        return None
+
+    direction = str(door.get("wall_direction") or "").strip().lower()
+    frames = {
+        "west": (0, 1, 1),
+        "east": (0, 1, -1),
+        "south": (1, 0, 1),
+        "north": (1, 0, -1),
+    }
+    frame = frames.get(direction)
+    if frame is None:
+        return None
+    normal_axis, tangent_axis, inward_sign = frame
+    wall_coord = center_xyz[normal_axis]
+    tangent_center = center_xyz[tangent_axis]
+    normal_end = wall_coord + inward_sign * width
+
+    lower = center_xyz.copy()
+    upper = center_xyz.copy()
+    lower[normal_axis] = min(wall_coord, normal_end)
+    upper[normal_axis] = max(wall_coord, normal_end)
+    lower[tangent_axis] = tangent_center - width / 2.0
+    upper[tangent_axis] = tangent_center + width / 2.0
+    lower[2] = float(door.get("sill_height") or 0.0)
+    upper[2] = lower[2] + height
+    return (
+        {"min": lower, "max": upper, "side": "door_swing_90deg"},
+        normal_axis,
+        tangent_axis,
+        wall_coord,
+        tangent_center,
+        inward_sign,
+    )
+
+
+def _aabb_intersects_door_sweep(
+    bbox: dict[str, Any],
+    *,
+    sweep: dict[str, list[float]],
+    normal_axis: int,
+    tangent_axis: int,
+    wall_coord: float,
+    tangent_center: float,
+    inward_sign: int,
+    width: float,
+) -> bool:
+    """Check an object AABB against either possible quarter-circle door sweep."""
+    lower, upper = bbox.get("min"), bbox.get("max")
+    if not isinstance(lower, (list, tuple)) or not isinstance(upper, (list, tuple)):
+        return False
+    if len(lower) < 3 or len(upper) < 3:
+        return False
+    try:
+        obj_min = [float(value) for value in lower[:3]]
+        obj_max = [float(value) for value in upper[:3]]
+    except (TypeError, ValueError):
+        return False
+    if obj_min[2] >= sweep["max"][2] or obj_max[2] <= sweep["min"][2]:
+        return False
+
+    normal_values = (
+        inward_sign * (obj_min[normal_axis] - wall_coord),
+        inward_sign * (obj_max[normal_axis] - wall_coord),
+    )
+    normal_min, normal_max = min(normal_values), max(normal_values)
+    if normal_max <= 0.0 or normal_min >= width:
+        return False
+
+    tangent_min = obj_min[tangent_axis]
+    tangent_max = obj_max[tangent_axis]
+    hinge_positions = (tangent_center - width / 2.0, tangent_center + width / 2.0)
+    for hinge_index, hinge_position in enumerate(hinge_positions):
+        hinge_sign = 1 if hinge_index == 0 else -1
+        tangent_values = (
+            hinge_sign * (tangent_min - hinge_position),
+            hinge_sign * (tangent_max - hinge_position),
+        )
+        local_tangent_min = min(tangent_values)
+        local_tangent_max = max(tangent_values)
+        if local_tangent_max <= 0.0 or local_tangent_min >= width:
+            continue
+        nearest_normal = max(0.0, normal_min)
+        nearest_tangent = max(0.0, local_tangent_min)
+        if nearest_normal**2 + nearest_tangent**2 < width**2:
+            return True
+    return False
+
+
+def build_door_clearance_checks(
+    geometry: dict[str, Any], objects: dict[str, dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Build hard checks for furniture inside a door's opening sweep."""
+    shell = geometry.get("scene_shell") or {}
+    checks: list[dict[str, Any]] = []
+    for door in shell.get("doors") or []:
+        if not isinstance(door, dict):
+            continue
+        opening_type = str(door.get("opening_type") or "door").lower()
+        if opening_type != "door":
+            continue
+        door_id = str(door.get("id") or door.get("opening_id") or "")
+        sweep_geometry = _door_sweep_geometry(door)
+        if not door_id or sweep_geometry is None:
+            continue
+        (
+            sweep,
+            normal_axis,
+            tangent_axis,
+            wall_coord,
+            tangent_center,
+            inward_sign,
+        ) = sweep_geometry
+        width = float(door.get("width") or 0.0)
+        blockers: list[str] = []
+        intruding: list[dict[str, Any]] = []
+        for object_id, obj in objects.items():
+            if not _is_clearance_blocker_candidate(obj):
+                continue
+            bbox = obj.get("bbox_world")
+            if not isinstance(bbox, dict):
+                continue
+            if not _aabb_intersects_door_sweep(
+                bbox,
+                sweep=sweep,
+                normal_axis=normal_axis,
+                tangent_axis=tangent_axis,
+                wall_coord=wall_coord,
+                tangent_center=tangent_center,
+                inward_sign=inward_sign,
+                width=width,
+            ):
+                continue
+            blockers.append(str(object_id))
+            intruding.append(
+                {
+                    "object_id": str(object_id),
+                    "side": "either_hinge_90deg_sweep",
+                }
+            )
+        blockers = sorted(set(blockers))
+        checks.append(
+            {
+                "check_id": f"door_clearance__{door_id}",
+                "metric": "interaction_clearance",
+                "subject_id": door_id,
+                "target_ids": blockers,
+                "priority_weight": 1.0,
+                "scoring_tier": "core",
+                "question": f"Can door {door_id} open through 90 degrees?",
+                "evidence_refs": ["scene_geometry", "door_sweep_clearance"],
+                "clearance_result": {
+                    "label": "fail" if blockers else "pass",
+                    "blocking_objects": blockers,
+                    "keep_clear": [sweep],
+                    "intrusions": intruding,
+                    "confidence": 1.0,
+                    "clearance_type": "door_swing",
+                    "direction": door.get("wall_direction"),
+                    "door_width_m": width,
+                    "hinge_assumption": "either_jamb",
+                    "sweep_angle_deg": 90.0,
+                },
+            }
+        )
+    return checks
+
+
 def _wall_mounted_overlaps_window(
     obj: dict[str, Any], window: dict[str, Any], window_bbox: dict[str, Any]
 ) -> bool:
@@ -973,9 +1157,7 @@ def _wall_mounted_overlaps_window(
     else:
         # 2026-07-14 修改原因：部分导出的 shell 没有 wall_direction；用窗口
         # bbox 的薄轴推断墙面方向，避免规则只适用于带完整标注的房间。
-        horizontal_sizes = [
-            float(wmax[index]) - float(wmin[index]) for index in (0, 1)
-        ]
+        horizontal_sizes = [float(wmax[index]) - float(wmin[index]) for index in (0, 1)]
         wall_axis = 0 if horizontal_sizes[0] <= horizontal_sizes[1] else 1
         along_axis = 1 - wall_axis
 
@@ -991,9 +1173,7 @@ def _wall_mounted_overlaps_window(
         return False
 
     wall_coord = float(
-        wmax[wall_axis]
-        if direction in {"north", "east"}
-        else wmin[wall_axis]
+        wmax[wall_axis] if direction in {"north", "east"} else wmin[wall_axis]
     )
     distance_to_wall = max(
         float(omin[wall_axis]) - wall_coord,
@@ -1009,15 +1189,22 @@ def evaluate_clearance(check: dict[str, Any]) -> dict[str, Any]:
     cr = check.get("clearance_result") or {}
     label = str(cr.get("label") or "unknown")
     blockers = list(cr.get("blocking_objects") or [])
+    check_id = str(check.get("check_id") or "")
     if label == "pass":
         reason = "Functional clearance zone is unobstructed."
     elif blockers:
-        reason = (
-            f"{len(blockers)} object(s) intrude into the "
-            f"{cr.get('clearance_type') or 'clearance'} zone: "
-            f"{', '.join(str(b) for b in blockers)}."
-        )
-        if str(check.get("check_id") or "").startswith("window_clearance__"):
+        if check_id.startswith("door_clearance__"):
+            reason = (
+                f"Door opening sweep is blocked by: "
+                f"{', '.join(str(b) for b in blockers)}."
+            )
+        else:
+            reason = (
+                f"{len(blockers)} object(s) intrude into the "
+                f"{cr.get('clearance_type') or 'clearance'} zone: "
+                f"{', '.join(str(b) for b in blockers)}."
+            )
+        if check_id.startswith("window_clearance__"):
             reason += " Prefer removing the window or moving it to a clear wall position before moving suitable furniture."
     else:
         reason = "Clearance could not be determined."
@@ -1039,6 +1226,9 @@ def evaluate_clearance(check: dict[str, Any]) -> dict[str, Any]:
             "direction": cr.get("direction"),
             "keep_clear": cr.get("keep_clear"),
             "intrusions": cr.get("intrusions"),
+            "door_width_m": cr.get("door_width_m"),
+            "hinge_assumption": cr.get("hinge_assumption"),
+            "sweep_angle_deg": cr.get("sweep_angle_deg"),
         },
         "scoring_tier": check.get("scoring_tier", "core"),
     }

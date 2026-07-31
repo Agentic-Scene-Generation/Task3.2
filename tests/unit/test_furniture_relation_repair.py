@@ -1980,6 +1980,103 @@ def test_repairs_explicit_front_alignment_without_moving_centered_rug(
     assert results["back_against_wall"]["label"] == "pass"
 
 
+def test_front_alignment_does_not_reintroduce_door_sweep_blockage(
+    tmp_path: Path,
+) -> None:
+    sofa = _object(
+        "sofa_0",
+        "sofa",
+        (-1.945, -1.3, 0.38),
+        (1.2, 0.95, 0.76),
+        yaw_deg=-90.0,
+    )
+    rug = _object("rug_0", "rug", (0.0, -0.2, 0.015), (1.8, 1.8, 0.03))
+    scene = _scene(
+        tmp_path,
+        sofa,
+        rug,
+        text=(
+            "A living room with a two-seater sofa against the wall, a square rug "
+            "in the middle in front of the sofa."
+        ),
+    )
+    scene.room_type = "living_room"
+    scene.room_geometry.openings = [
+        ClearanceOpeningData(
+            opening_id="door_0",
+            opening_type="door",
+            wall_direction="west",
+            center_world=[-2.5, -0.2, 1.05],
+            width=0.9,
+            sill_height=0.0,
+            height=2.1,
+            clearance_bbox_min=[-2.5, -0.65, 0.0],
+            clearance_bbox_max=[-1.7, 0.25, 2.1],
+            wall_start=[-2.5, -2.0],
+            wall_end=[-2.5, 2.0],
+            position_along_wall=1.35,
+        )
+    ]
+    scene.scenebenchmark_intent_contract = {
+        "schema_version": SCHEMA_VERSION,
+        "prompt_sha256": hashlib.sha256(
+            " ".join(scene.text_description.split()).encode("utf-8")
+        ).hexdigest(),
+        "constraints": [
+            {
+                "constraint_id": "sofa_wall",
+                "relation": "against_wall",
+                "subjects": {"category": "sofa", "count": 1},
+                "targets": {"category": "wall"},
+                "source": "explicit_prompt",
+                "strength": "hard",
+            },
+            {
+                "constraint_id": "rug_center",
+                "relation": "centered_in_room",
+                "subjects": {"category": "rug", "count": 1},
+                "targets": {"category": "room"},
+                "source": "explicit_prompt",
+                "strength": "hard",
+            },
+            {
+                "constraint_id": "rug_front",
+                "relation": "in_front_of",
+                "subjects": {"category": "rug", "count": 1},
+                "targets": {"category": "sofa", "count": 1},
+                "source": "explicit_prompt",
+                "strength": "hard",
+            },
+        ],
+    }
+    config = CriticConfig(
+        enabled=True,
+        metrics=("functional_dependency", "interaction_clearance"),
+        constraint_mode="contract",
+    )
+
+    before = evaluate_room_scene(scene, config=config, stage="door_safe_before")
+    before_by_id = {result["check_id"]: result for result in before["results"]}
+    assert before_by_id["door_clearance__door_0"]["label"] == "pass"
+    assert (
+        next(
+            result
+            for result in before["results"]
+            if result.get("relation_type") == "front_axis_alignment"
+        )["label"]
+        == "fail"
+    )
+    original_transform = sofa.transform.GetAsMatrix4().copy()
+
+    fixes = improve_furniture_relations(scene, config=config)
+
+    assert fixes == []
+    np.testing.assert_allclose(sofa.transform.GetAsMatrix4(), original_transform)
+    after = evaluate_room_scene(scene, config=config, stage="door_safe_after")
+    after_by_id = {result["check_id"]: result for result in after["results"]}
+    assert after_by_id["door_clearance__door_0"]["label"] == "pass"
+
+
 def test_repairs_two_anchor_living_room_group(tmp_path: Path) -> None:
     sofa = _object("sofa_0", "sofa", (0.0, -1.5, 0.4), (2.2, 0.8, 0.8))
     tv_stand = _object("tv_stand_0", "tv_stand", (0.0, 1.7, 0.3), (1.4, 0.5, 0.6))
