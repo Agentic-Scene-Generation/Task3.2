@@ -496,6 +496,25 @@ class TestAssetManager(unittest.TestCase):
             (bbox_max - bbox_min)[:2], [2.0, 2.0], rtol=1e-5, atol=1e-5
         )
 
+    def test_empty_dimensions_preserve_canonical_asset_scale(self):
+        canonical_path = self.temp_dir / "clock_canonical.gltf"
+        final_path = self.temp_dir / "clock.gltf"
+        trimesh.creation.box(extents=[0.3, 0.2, 0.4]).export(canonical_path)
+
+        _, bbox_min, bbox_max, applied_scale = (
+            self.asset_manager._scale_and_measure_canonical_mesh(
+                canonical_path=canonical_path,
+                final_path=final_path,
+                desired_dimensions=[],
+            )
+        )
+
+        self.assertEqual(applied_scale, 1.0)
+        self.assertTrue(final_path.exists())
+        np.testing.assert_allclose(
+            bbox_max - bbox_min, [0.3, 0.4, 0.2], rtol=1e-5, atol=1e-5
+        )
+
     def test_plant_uniform_fit_relaxation_is_targeted(self):
         """Plant envelopes may use 0.45; other assets retain the 0.50 floor."""
         actual = np.array([0.6, 0.754861, 0.556976])

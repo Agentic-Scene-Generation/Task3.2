@@ -32,7 +32,11 @@ from scenesmith.scene_expert.context_bundle import (
     build_llm_call_debug_record,
     build_stage_context_bundle,
 )
-from scenesmith.scene_expert.global_planner import GlobalPlanner, _SYSTEM_PROMPT
+from scenesmith.scene_expert.global_planner import (
+    GlobalPlanner,
+    _SYSTEM_PROMPT,
+    _reconcile_stage_brief,
+)
 from scenesmith.scene_expert.repair_taxonomy import (
     FailureCategory,
     classify_hard_reasons,
@@ -77,6 +81,71 @@ class SceneExpertMemoryTest(unittest.TestCase):
         self.assertIn("takes priority over", message)
         self.assertIn("explicit object, position, or facing", brief.to_injection_text())
         self.assertIn("Immutable User Task", _SYSTEM_PROMPT)
+        self.assertIn("minimum, not an exhaustive list", _SYSTEM_PROMPT)
+
+    def test_stage_brief_removes_planner_invented_inventory_exclusivity(self) -> None:
+        brief = StageBrief(
+            stage="furniture",
+            stage_objective="Place only the bed required by the task",
+            constraints_for_designer=[
+                "Place the bed in the sleeping zone.",
+                "Do not place any other furniture; only the bed is required.",
+                "Only place furniture objects during the furniture stage.",
+            ],
+            checks_for_critic=["Verify only the bed is required."],
+            failure_patterns_to_avoid=["Avoid adding any additional furniture."],
+        )
+
+        reconciled = _reconcile_stage_brief(
+            brief,
+            original_task="A bedroom with rustic farmhouse decor.",
+            room_type="bedroom",
+            required_objects=["bed"],
+        )
+        text = reconciled.to_injection_text()
+
+        self.assertNotIn("only the bed", text.lower())
+        self.assertNotIn("additional furniture", text.lower())
+        self.assertIn("Only place furniture objects", text)
+        self.assertIn("additional objects owned by this stage are allowed", text)
+
+    def test_stage_brief_preserves_user_requested_sparse_inventory(self) -> None:
+        constraint = "Do not place any other furniture; only the bed is required."
+        brief = StageBrief(
+            stage="furniture",
+            stage_objective="Place only the bed required by the task",
+            constraints_for_designer=[constraint],
+        )
+
+        reconciled = _reconcile_stage_brief(
+            brief,
+            original_task="A bedroom with only a bed and no other furniture.",
+            room_type="bedroom",
+            required_objects=["bed"],
+        )
+
+        self.assertEqual([constraint], reconciled.constraints_for_designer)
+        self.assertEqual(brief.stage_objective, reconciled.stage_objective)
+
+    def test_stage_brief_does_not_treat_only_aesthetic_as_closed_inventory(
+        self,
+    ) -> None:
+        brief = StageBrief(
+            stage="furniture",
+            stage_objective="Place only the bed required by the task",
+            constraints_for_designer=[
+                "Do not place any other furniture; only the bed is required."
+            ],
+        )
+
+        reconciled = _reconcile_stage_brief(
+            brief,
+            original_task="A bedroom with only warm colors and rustic decor.",
+            room_type="bedroom",
+            required_objects=["bed"],
+        )
+
+        self.assertNotIn("only the bed", reconciled.to_injection_text().lower())
 
     def test_empty_stage_inventory_uses_noop_brief(self) -> None:
         context = HarnessContext(

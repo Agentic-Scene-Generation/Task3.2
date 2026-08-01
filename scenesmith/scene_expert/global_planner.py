@@ -75,10 +75,14 @@ Guidelines:
   facing relations are authoritative. Memory and current-scene observations may
   refine only non-conflicting details. Omit a suggestion instead of replacing an
   explicit user relation with a design convention.
-- The Task Specification owns objects by stage. Its "Required objects for this
-  stage" inventory is closed: never create, move, or reinterpret an object
-  assigned to another stage. When that inventory is empty, emit an observation-
-  only brief with no object-placement instruction.
+- The Task Specification owns objects by stage. Never create, move, or
+  reinterpret an object assigned to another stage. A non-empty "Required objects
+  for this stage" inventory is a minimum, not an exhaustive list: same-stage
+  supporting objects may be suggested when they improve function or completeness,
+  unless the Immutable User Task explicitly forbids them. When that inventory is
+  empty, emit an observation-only brief with no object-placement instruction.
+- Never turn a non-empty required inventory into an "only these objects" rule
+  unless that exclusivity appears explicitly in the Immutable User Task.
 - Keep constraints_for_designer to 3-6 items max. More is not better.
 - The designer will read this brief directly — write for it, not for humans.
 - Output ONLY the JSON object, no other text.
@@ -91,6 +95,156 @@ _STAGE_DESCRIPTIONS = {
     "ceiling_mounted": "Place ceiling-mounted objects (lights, fans) on the ceiling.",
     "manipuland": "Place small manipulable objects (books, cups, plants) on furniture surfaces.",
 }
+
+_INVENTORY_CLOSING_PATTERNS = (
+    re.compile(
+        r"\b(?:do not|don't|must not|never)\s+"
+        r"(?:add|create|include|place|generate)\s+"
+        r"(?:any\s+)?(?:other|additional|extra)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bavoid\s+(?:adding|creating|including|placing|generating)\s+"
+        r"(?:any\s+)?(?:other|additional|extra)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:no|without)\s+(?:other|additional|extra)\s+"
+        r"(?:furniture|objects?|items?|fixtures?|decor(?:ation)?s?)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bonly\s+(?:the\s+)?"
+        r"(?!(?:furniture|objects?|items?|fixtures?|decorations?)\b)"
+        r"[a-z0-9][a-z0-9 _-]{0,48}\s+(?:is|are)\s+"
+        r"(?:required|needed)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:add|create|include|place|generate)\s+only\s+(?:the\s+)?"
+        r"(?!(?:furniture|objects?|items?|fixtures?|decorations?)\b)"
+        r"[a-z0-9][a-z0-9 _-]{0,48}",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:limit|restrict)\s+(?:this\s+stage|the\s+stage|placements?|inventory)"
+        r"\s+to\s+(?:the\s+)?required\b",
+        re.IGNORECASE,
+    ),
+)
+
+_EXPLICITLY_CLOSED_TASK_PATTERNS = (
+    re.compile(
+        r"\b(?:no|without)\s+(?:other|additional|extra)\s+"
+        r"(?:furniture|objects?|items?|fixtures?|decor(?:ation)?s?)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\bnothing\s+else\b", re.IGNORECASE),
+)
+
+_ONLY_INVENTORY_CLAUSE_PATTERNS = (
+    re.compile(
+        r"\b(?:with|containing|contains|including|includes|featuring|features)"
+        r"\s+only\b(?P<inventory>[^.\n]{0,100})",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:furnished|decorated|equipped)\s+(?:only|solely|exclusively)\s+with\b"
+        r"(?P<inventory>[^.\n]{0,100})",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:consists?|consisting)\s+(?:only|solely|exclusively)\s+of\b"
+        r"(?P<inventory>[^.\n]{0,100})",
+        re.IGNORECASE,
+    ),
+)
+
+
+def _text_closes_stage_inventory(text: str) -> bool:
+    """Return whether planner text makes a stage's required inventory exclusive."""
+    normalized = " ".join(str(text or "").split())
+    return any(pattern.search(normalized) for pattern in _INVENTORY_CLOSING_PATTERNS)
+
+
+def _task_explicitly_closes_inventory(
+    original_task: str,
+    required_objects: list[str],
+) -> bool:
+    """Recognize user-authored requests for an intentionally sparse inventory."""
+    normalized = " ".join(str(original_task or "").split())
+    if any(pattern.search(normalized) for pattern in _EXPLICITLY_CLOSED_TASK_PATTERNS):
+        return True
+
+    required_terms = {
+        " ".join(re.sub(r"[^a-z0-9]+", " ", value.lower()).split())
+        for value in required_objects
+        if str(value).strip()
+    }
+    for pattern in _ONLY_INVENTORY_CLAUSE_PATTERNS:
+        match = pattern.search(normalized)
+        if not match:
+            continue
+        inventory = " ".join(
+            re.sub(r"[^a-z0-9]+", " ", match.group("inventory").lower()).split()
+        )
+        if any(
+            re.search(rf"\b{re.escape(term)}\b", inventory) for term in required_terms
+        ):
+            return True
+    return False
+
+
+def _reconcile_stage_brief(
+    brief: StageBrief,
+    *,
+    original_task: str,
+    room_type: str,
+    required_objects: list[str],
+) -> StageBrief:
+    """Remove planner-invented exclusivity that can deadlock designer and critic."""
+    if _task_explicitly_closes_inventory(original_task, required_objects):
+        return brief
+
+    fields = (
+        "constraints_for_designer",
+        "checks_for_critic",
+        "failure_patterns_to_avoid",
+    )
+    updates: dict[str, object] = {}
+    removed = 0
+    for field in fields:
+        values = list(getattr(brief, field))
+        kept = [value for value in values if not _text_closes_stage_inventory(value)]
+        removed += len(values) - len(kept)
+        if len(kept) != len(values):
+            updates[field] = kept
+
+    if _text_closes_stage_inventory(brief.stage_objective):
+        updates["stage_objective"] = (
+            f"Complete the {brief.stage} stage for a {room_type}"
+        )
+        removed += 1
+
+    if not removed:
+        return brief
+
+    constraints = list(
+        updates.get("constraints_for_designer", brief.constraints_for_designer)
+    )
+    constraints = constraints[:5]
+    constraints.append(
+        "Treat required objects as a minimum; additional objects owned by this "
+        "stage are allowed when they improve room function or completeness."
+    )
+    updates["constraints_for_designer"] = constraints
+    console_logger.warning(
+        "GlobalPlanner removed %d invented inventory-closing instruction(s) from "
+        "the %s brief",
+        removed,
+        brief.stage,
+    )
+    return brief.model_copy(update=updates)
 
 
 def _format_memory_for_prompt(memory_pack: MemoryPack) -> str:
@@ -131,7 +285,10 @@ def _format_task_spec(task_spec: SceneTaskSpec, stage: str) -> str:
 
     required = _stage_required_objects(task_spec, stage)
     if required:
-        lines.append(f"Required objects for this stage: {', '.join(required)}")
+        lines.append(
+            "Required objects for this stage (minimum, not exhaustive): "
+            f"{', '.join(required)}"
+        )
     else:
         lines.extend(
             (
@@ -254,6 +411,12 @@ class GlobalPlanner:
             # Ensure stage field is set correctly
             data["stage"] = stage
             brief = StageBrief.model_validate(data)
+            brief = _reconcile_stage_brief(
+                brief,
+                original_task=original_task,
+                room_type=context.task_spec.room_type,
+                required_objects=_stage_required_objects(context.task_spec, stage),
+            )
             console_logger.info(
                 f"GlobalPlanner: brief for {stage}: {len(brief.constraints_for_designer)} constraints, "
                 f"{len(brief.failure_patterns_to_avoid)} failure patterns"

@@ -557,6 +557,12 @@ class AssetManager:
         exact_fit_axes: tuple[int, ...] = (),
     ) -> tuple[Path, np.ndarray, np.ndarray, float]:
         """Scale canonical Y-up glTF and expose SceneSmith-frame bounds."""
+        if desired_dimensions is not None and len(desired_dimensions) == 0:
+            console_logger.warning(
+                "Empty desired dimensions; preserving the canonical asset scale"
+            )
+            desired_dimensions = None
+
         applied_scale = 1.0
         if desired_dimensions is not None:
             scene_to_gltf_axis = {0: 0, 1: 2, 2: 1}
