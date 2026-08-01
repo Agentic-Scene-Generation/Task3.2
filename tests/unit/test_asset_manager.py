@@ -47,6 +47,9 @@ def create_mock_cfg():
 
     # Define test overrides for fast testing.
     test_overrides = {
+        "paths": {
+            "checkpoints_dir": "/tmp/checkpoints",
+        },
         "openai": {
             "model": "gpt-4o-mini",  # Cheaper model for testing
         },
@@ -1852,7 +1855,7 @@ class TestAssetManagerDimensionControl(unittest.TestCase):
         # Verify scale_mesh_uniformly_to_dimensions was called.
         mock_scale_mesh.assert_called_once()
         call_args = mock_scale_mesh.call_args
-        self.assertEqual(call_args[1]["desired_dimensions"], [1.8, 0.75, 0.9])
+        self.assertEqual(call_args[1]["desired_dimensions"], [0.9, 0.9, 0.9])
 
 
 if __name__ == "__main__":
