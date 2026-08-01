@@ -10,6 +10,7 @@ import pytest
 
 from pydantic import ValidationError
 
+from scenesmith.agent_utils.room import ObjectType
 from scenesmith.scenebenchmark_critic import adapter
 from scenesmith.scene_expert.schemas import SceneTaskSpec
 from scenesmith.scene_expert.task_compiler import TaskCompiler, _SYSTEM_PROMPT
@@ -556,6 +557,52 @@ def test_adapter_canonicalizes_styled_semantic_asset_category() -> None:
     )
 
     assert adapter._category_for_object(asset) == "bed"
+
+
+@pytest.mark.parametrize(
+    ("semantic_name", "description", "object_type", "expected_category"),
+    [
+        (
+            "bed_artwork",
+            "Botanical canvas painting above a bed",
+            ObjectType.WALL_MOUNTED,
+            "painting",
+        ),
+        (
+            "dresser_mirror",
+            "Oval framed mirror above a dresser",
+            ObjectType.WALL_MOUNTED,
+            "mirror",
+        ),
+        (
+            "dining_table_chandelier",
+            "Glass chandelier above a dining table",
+            ObjectType.CEILING_MOUNTED,
+            "chandelier",
+        ),
+        (
+            "wall_television",
+            "Wall-mounted television",
+            ObjectType.WALL_MOUNTED,
+            "television",
+        ),
+    ],
+)
+def test_adapter_mounted_category_ignores_companion_furniture_tokens(
+    semantic_name: str,
+    description: str,
+    object_type: ObjectType,
+    expected_category: str,
+) -> None:
+    asset = SimpleNamespace(
+        metadata={"semantic_name": semantic_name},
+        object_id=f"{semantic_name}_0",
+        object_type=object_type,
+        name=semantic_name,
+        description=description,
+    )
+
+    assert adapter._category_for_object(asset) == expected_category
 
 
 def test_failed_upstream_relation_blocks_downstream_until_final() -> None:
