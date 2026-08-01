@@ -139,6 +139,31 @@ def _cfg_get(cfg: Any, key: str, default: Any) -> Any:
     return getattr(cfg, key, default)
 
 
+def _agent_candidate_content_hash(agent: Any) -> str:
+    """Hash either a placement scene or a floor-plan layout.
+
+    ``BaseStatefulAgent`` is shared by placement agents (``scene``) and the
+    floor-plan agent (``layout``).  Cache lifecycle operations must therefore
+    use the common candidate-state contract instead of assuming ``scene`` is
+    present.
+    """
+
+    for attribute in ("scene", "layout"):
+        candidate = getattr(agent, attribute, None)
+        if candidate is None:
+            continue
+        content_hash = getattr(candidate, "content_hash", None)
+        if callable(content_hash):
+            try:
+                return str(content_hash())
+            except (AttributeError, TypeError, ValueError):
+                pass
+        fallback = candidate_state_hash(candidate)
+        if fallback:
+            return fallback
+    return ""
+
+
 def log_agent_usage(result: RunResult, agent_name: str) -> None:
     """Log token usage from an agent run.
 
@@ -2000,13 +2025,13 @@ class BaseStatefulAgent(ABC):
 
     def _reset_critic_candidate_cache(self) -> None:
         self._critic_candidate_cache = {
-            "scene_hash": self.scene.content_hash(),
+            "scene_hash": _agent_candidate_content_hash(self),
         }
 
     def _cache_valid_for_current_scene(self) -> bool:
-        return (
-            self._critic_candidate_cache.get("scene_hash") == self.scene.content_hash()
-        )
+        return self._critic_candidate_cache.get(
+            "scene_hash"
+        ) == _agent_candidate_content_hash(self)
 
     def _get_cached_physics_context(self) -> str:
         if (

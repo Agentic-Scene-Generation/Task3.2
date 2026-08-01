@@ -39,6 +39,11 @@ from scenesmith.agent_utils.asset_runtime import (
     AssetRuntimeGate,
     semantic_asset_family,
 )
+from scenesmith.agent_utils.asset_structure import (
+    ASSET_STRUCTURE_CONTRACT_VERSION,
+    AssetStructureCheck,
+    inspect_hssd_candidate_structure,
+)
 from scenesmith.agent_utils.convex_decomposition_server import ConvexDecompositionClient
 from scenesmith.agent_utils.geometry_generation_server.client import (
     GeometryGenerationClient,
@@ -1027,6 +1032,7 @@ class AssetManager:
         candidate_id: str,
         family: str,
         use_lenient: bool,
+        structural_check: AssetStructureCheck,
     ) -> ValidationResult | None:
         quarantine_reason = hssd_asset_quarantine_reason(candidate_id)
         if quarantine_reason:
@@ -1045,6 +1051,25 @@ class AssetManager:
             return None
         try:
             payload = json.loads(cache_path.read_text(encoding="utf-8"))
+            if str(payload.get("schema_version", "")) != str(
+                ASSET_SEMANTIC_CONTRACT_VERSION
+            ):
+                return None
+            cached_structure = payload.get("structural_check", {}) or {}
+            if (
+                not structural_check.cacheable
+                or str(cached_structure.get("contract_version", ""))
+                != ASSET_STRUCTURE_CONTRACT_VERSION
+                or str(cached_structure.get("status", "")) != "pass"
+                or str(cached_structure.get("geometry_fingerprint", ""))
+                != structural_check.geometry_fingerprint
+            ):
+                console_logger.info(
+                    "Ignoring HSSD semantic cache %s because its structural "
+                    "contract or geometry fingerprint is stale",
+                    cache_path,
+                )
+                return None
             return ValidationResult(
                 is_acceptable=bool(payload["is_acceptable"]),
                 reason=str(payload.get("reason", "cached validation")),
@@ -1073,7 +1098,12 @@ class AssetManager:
         family: str,
         use_lenient: bool,
         validation: ValidationResult,
+        structural_check: AssetStructureCheck,
     ) -> None:
+        # A positive semantic decision must never become cross-scene authority
+        # when the source geometry could not be inspected deterministically.
+        if not structural_check.cacheable:
+            return
         cache_path = self._hssd_validation_cache_path(
             candidate_id=candidate_id,
             family=family,
@@ -1095,6 +1125,7 @@ class AssetManager:
                 validation.contains_architectural_context
             ),
             "requested_object_is_dominant": validation.requested_object_is_dominant,
+            "structural_check": structural_check.to_cache_payload(),
         }
         temporary = cache_path.with_name(
             f".{cache_path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
@@ -1201,6 +1232,34 @@ class AssetManager:
         )
         return fallback_front, "family_geometry_fallback", 0.25
 
+    def _inspect_direct_hssd_structure(
+        self,
+        *,
+        candidate: HssdRetrievalResult,
+        family: str,
+    ) -> AssetStructureCheck:
+        """Return one memoized source-geometry admission result per candidate."""
+
+        cache = getattr(self, "_direct_hssd_structure_cache", None)
+        if cache is None:
+            cache = {}
+            self._direct_hssd_structure_cache = cache
+        try:
+            source_stat = Path(candidate.mesh_path).stat()
+            source_revision = f"{source_stat.st_size}:{source_stat.st_mtime_ns}"
+        except OSError:
+            source_revision = "missing"
+        cache_key = f"{candidate.hssd_id}|{family}|{source_revision}"
+        check = cache.get(cache_key)
+        if check is None:
+            check = inspect_hssd_candidate_structure(
+                mesh_path=candidate.mesh_path,
+                family=family,
+                up_axis=getattr(candidate, "up_axis", None) or "+Z",
+            )
+            cache[cache_key] = check
+        return check
+
     def _select_direct_hssd_candidate(
         self,
         *,
@@ -1268,6 +1327,43 @@ class AssetManager:
                 for candidate in candidates
             )
 
+        structurally_eligible: list[HssdRetrievalResult] = []
+        structurally_inconclusive: list[HssdRetrievalResult] = []
+        structural_reasons: list[str] = []
+        for candidate in candidates:
+            structural_check = self._inspect_direct_hssd_structure(
+                candidate=candidate,
+                family=family,
+            )
+            if structural_check.rejected:
+                self._direct_hssd_admission_states[candidate.hssd_id] = (
+                    "structural_rejected"
+                )
+                structural_reasons.append(
+                    f"{candidate.hssd_id}: {structural_check.reason}"
+                )
+                console_logger.warning(
+                    "Rejected HSSD candidate %s for '%s' before semantic "
+                    "cache/VLM admission: %s",
+                    candidate.hssd_id,
+                    description,
+                    structural_check.reason,
+                )
+                continue
+            if structural_check.cacheable:
+                structurally_eligible.append(candidate)
+            else:
+                structurally_inconclusive.append(candidate)
+        # Prefer candidates backed by deterministic geometry evidence. A parser
+        # failure remains eligible for live VLM validation, but must not outrank
+        # a structurally verified candidate or enter the persistent cache.
+        candidates = structurally_eligible + structurally_inconclusive
+        if not candidates:
+            raise ValueError(
+                "All bounded HSSD candidates failed deterministic structural "
+                f"admission for '{description}': {' | '.join(structural_reasons)}"
+            )
+
         (
             enabled,
             max_candidates,
@@ -1312,6 +1408,7 @@ class AssetManager:
         infrastructure_failures = 0
         attempted_candidates = 0
         transient_candidate: HssdRetrievalResult | None = None
+        transient_structure: AssetStructureCheck | None = None
         considered = candidates[: min(4, max_candidates)]
         validation_started = time.monotonic()
         configured_total_seconds = timeout_seconds
@@ -1381,17 +1478,47 @@ class AssetManager:
                 max(0.0, validation_deadline - validation_started),
             )
         for candidate_index, candidate in enumerate(considered):
+            structural_check = self._inspect_direct_hssd_structure(
+                candidate=candidate,
+                family=family,
+            )
+            if structural_check.rejected:
+                attempted_candidates += 1
+                self._direct_hssd_admission_states[candidate.hssd_id] = (
+                    "structural_rejected"
+                )
+                console_logger.warning(
+                    "Rejected HSSD candidate %s for '%s' before semantic "
+                    "cache/VLM admission: %s",
+                    candidate.hssd_id,
+                    description,
+                    structural_check.reason,
+                )
+                continue
+            if structural_check.status == "inconclusive":
+                console_logger.warning(
+                    "HSSD structural inspection was inconclusive for %s; "
+                    "requiring live semantic validation and disabling persistent "
+                    "positive-cache reuse: %s",
+                    candidate.hssd_id,
+                    structural_check.reason,
+                )
             validation_cache = getattr(self, "_direct_hssd_semantic_cache", None)
             if validation_cache is None:
                 validation_cache = {}
                 self._direct_hssd_semantic_cache = validation_cache
-            validation_cache_key = f"{candidate.hssd_id}|{family}"
+            validation_cache_key = (
+                f"{candidate.hssd_id}|{family}|"
+                f"structure={ASSET_STRUCTURE_CONTRACT_VERSION}:"
+                f"{structural_check.geometry_fingerprint or 'inconclusive'}"
+            )
             validation = validation_cache.get(validation_cache_key)
             if validation is None:
                 validation = self._load_persistent_hssd_validation(
                     candidate_id=candidate.hssd_id,
                     family=family,
                     use_lenient=use_lenient,
+                    structural_check=structural_check,
                 )
                 if validation is not None:
                     console_logger.info(
@@ -1443,6 +1570,7 @@ class AssetManager:
                         family=family,
                         use_lenient=use_lenient,
                         validation=validation,
+                        structural_check=structural_check,
                     )
             contracted_validation = _enforce_critical_hssd_validation_contract(
                 validation,
@@ -1456,6 +1584,7 @@ class AssetManager:
                     family=family,
                     use_lenient=use_lenient,
                     validation=validation,
+                    structural_check=structural_check,
                 )
             if validation.is_acceptable:
                 orientation_results = getattr(
@@ -1465,7 +1594,11 @@ class AssetManager:
                     orientation_results = {}
                     self._direct_hssd_validation_results = orientation_results
                 orientation_results[candidate.hssd_id] = validation
-                self._direct_hssd_admission_states[candidate.hssd_id] = "vlm_verified"
+                self._direct_hssd_admission_states[candidate.hssd_id] = (
+                    "vlm_verified"
+                    if structural_check.cacheable
+                    else "vlm_verified_structural_inconclusive"
+                )
                 console_logger.info(
                     "Direct HSSD semantic validation selected candidate %s for '%s'",
                     candidate.hssd_id,
@@ -1479,6 +1612,7 @@ class AssetManager:
                 infrastructure_failures += 1
                 if transient_candidate is None:
                     transient_candidate = candidate
+                    transient_structure = structural_check
             console_logger.warning(
                 "Rejected HSSD candidate %s for '%s': %s",
                 candidate.hssd_id,
@@ -1519,18 +1653,32 @@ class AssetManager:
                     ] = retry_validation
                     self._direct_hssd_admission_states[transient_candidate.hssd_id] = (
                         "vlm_verified_after_family_retry"
+                        if transient_structure is not None
+                        and transient_structure.cacheable
+                        else "vlm_verified_after_family_retry_structural_inconclusive"
                     )
                     return transient_candidate
                 if not _asset_validation_is_retryable(retry_validation):
                     family_retry_semantic_rejected = True
-                    retry_cache_key = f"{transient_candidate.hssd_id}|{family}"
-                    self._direct_hssd_semantic_cache[retry_cache_key] = retry_validation
-                    self._save_persistent_hssd_validation(
-                        candidate_id=transient_candidate.hssd_id,
-                        family=family,
-                        use_lenient=use_lenient,
-                        validation=retry_validation,
+                    retry_fingerprint = (
+                        transient_structure.geometry_fingerprint
+                        if transient_structure is not None
+                        else ""
                     )
+                    retry_cache_key = (
+                        f"{transient_candidate.hssd_id}|{family}|"
+                        f"structure={ASSET_STRUCTURE_CONTRACT_VERSION}:"
+                        f"{retry_fingerprint or 'inconclusive'}"
+                    )
+                    self._direct_hssd_semantic_cache[retry_cache_key] = retry_validation
+                    if transient_structure is not None:
+                        self._save_persistent_hssd_validation(
+                            candidate_id=transient_candidate.hssd_id,
+                            family=family,
+                            use_lenient=use_lenient,
+                            validation=retry_validation,
+                            structural_check=transient_structure,
+                        )
 
         if (
             attempted_candidates > 0
@@ -1821,6 +1969,16 @@ class AssetManager:
         )
         server_mesh_path = Path(result.mesh_path)
         mesh_id = result.hssd_id
+        family = semantic_asset_family(description, short_name)
+        structural_check = self._inspect_direct_hssd_structure(
+            candidate=result,
+            family=family,
+        )
+        if structural_check.rejected:
+            raise ValueError(
+                "HSSD candidate failed deterministic structural admission after "
+                f"selection: {structural_check.reason}"
+            )
 
         if server_mesh_path.suffix.lower() == ".glb":
             gltf_path = server_mesh_path.with_suffix(".gltf")
@@ -1946,6 +2104,10 @@ class AssetManager:
                     mesh_id,
                     "deterministic",
                 ),
+                "asset_structure_contract_version": structural_check.contract_version,
+                "asset_structure_status": structural_check.status,
+                "asset_structure_fingerprint": structural_check.geometry_fingerprint,
+                "asset_structure_reason": structural_check.reason,
             },
             # The final glTF and SDF already contain applied_scale.
             # SceneObject.scale_factor is reserved for later mutations.
@@ -2190,6 +2352,8 @@ class AssetManager:
                         )
                     ):
                         failure_kind = "validation_unavailable"
+                    elif "structural admission" in failure_detail.lower():
+                        failure_kind = "structural_mismatch"
                     elif "visual semantic validation" in failure_detail.lower():
                         failure_kind = "semantic_mismatch"
                     elif not candidates:

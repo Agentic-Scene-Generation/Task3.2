@@ -47,6 +47,33 @@ class SceneExpertRuntimeContractTest(unittest.TestCase):
                 SimpleNamespace(metadata={"hssd_mesh_id": "standalone_bed"})
             )
         )
+        self.assertFalse(
+            AssetRuntimeGate.is_asset_admitted(
+                SimpleNamespace(
+                    metadata={
+                        "hssd_mesh_id": "new_candidate",
+                        "asset_structure_status": "reject",
+                    }
+                )
+            )
+        )
+
+    @unittest.skipIf(
+        BaseStatefulAgent is None,
+        f"requires OpenAI Agents SDK: {_BASE_AGENT_IMPORT_ERROR}",
+    )
+    def test_floor_plan_cache_reset_uses_layout_contract(self) -> None:
+        state = {"hash": "layout-a"}
+        agent = SimpleNamespace(
+            layout=SimpleNamespace(content_hash=lambda: state["hash"]),
+            _critic_candidate_cache={},
+        )
+
+        BaseStatefulAgent._reset_critic_candidate_cache(agent)
+
+        self.assertTrue(BaseStatefulAgent._cache_valid_for_current_scene(agent))
+        state["hash"] = "layout-b"
+        self.assertFalse(BaseStatefulAgent._cache_valid_for_current_scene(agent))
 
     def test_compact_critic_feedback_preserves_action_and_acceptance(self) -> None:
         feedback = parse_critic_feedback(
@@ -80,10 +107,10 @@ END_FINDING
     def test_contract_caps_findings_without_dropping_blocking_evidence(self) -> None:
         contract = critic_feedback_contract()
 
-        self.assertIn("at most five FINDING blocks", contract)
-        self.assertIn("every distinct blocking issue", contract)
-        self.assertIn("merging related evidence", contract)
-        self.assertIn("at most three major/refinement", contract)
+        self.assertIn("at most three FINDING blocks", contract)
+        self.assertIn("all blocking issue classes", contract)
+        self.assertIn("Merge related evidence", contract)
+        self.assertIn("do not emit", contract)
 
     def test_direct_scoring_contract_overrides_impossible_tool_workflow(self) -> None:
         instructions = direct_critic_scoring_instructions(

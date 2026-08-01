@@ -126,18 +126,16 @@ FINDING 1
 SEVERITY: BLOCKING | MAJOR | REFINEMENT
 CATEGORY: short issue type
 OBJECTS: exact object IDs, comma-separated, or scene/stage
-OBSERVATION: concrete evidence from the render/state
-REASON: why this is functionally or visually wrong
-REQUIRED_CHANGE: one actionable designer instruction
-PRESERVE: correct relationships that must not be damaged, separated by semicolons
-ACCEPTANCE_CHECK: observable condition proving the repair succeeded
+OBSERVATION: one short concrete fact from the render/state
+REQUIRED_CHANGE: one short actionable designer instruction
+ACCEPTANCE_CHECK: one observable condition proving the repair succeeded
 END_FINDING
 
-Return at most five FINDING blocks. Include every distinct blocking issue by
-merging related evidence and objects into the same finding when necessary.
-While any blocking issue exists, omit optional refinements. If there are no
-blocking issues, include at most three major/refinement findings. Never invent
-object IDs or coordinates. A PASS may contain zero findings.
+Return at most three FINDING blocks. Merge related evidence and objects so
+all blocking issue classes are still represented. While any blocking issue exists,
+omit optional refinements. Never invent object IDs or coordinates. A PASS may
+contain zero findings. The parser still accepts legacy REASON and PRESERVE
+fields, but do not emit them in this compact scoring transaction.
 """
 
 
@@ -333,8 +331,8 @@ def direct_critic_scoring_instructions(
         "Evaluate only objects and relationships owned by the current stage.",
     )
     context = str(scene_context or "").strip()
-    if len(context) > 8000:
-        context = context[:8000].rstrip() + "\n...[scene context truncated]..."
+    if len(context) > 4000:
+        context = context[:4000].rstrip() + "\n...[scene context truncated]..."
     return f"""\
 /no_think
 You are the final visual quality critic for the `{stage}` stage.

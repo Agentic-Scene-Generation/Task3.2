@@ -396,6 +396,79 @@ class TestAssetManager(unittest.TestCase):
         ]
         self.assertEqual("standalone_bed.glb", validated_path.name)
 
+    def test_structural_admission_rejects_unlisted_compound_bed_before_vlm(self):
+        manager = object.__new__(AssetManager)
+        manager.cfg = OmegaConf.create(
+            {
+                "asset_manager": {
+                    "hssd": {
+                        "semantic_validation": {
+                            "enabled": True,
+                            "families": ["bed"],
+                            "critical_families": ["bed"],
+                            "max_candidates": 4,
+                        }
+                    }
+                }
+            }
+        )
+        manager.debug_dir = self.temp_dir / "debug"
+        manager._thin_covering_router = MagicMock()
+        manager._thin_covering_router.validate_asset.return_value = ValidationResult(
+            True,
+            "Standalone bed",
+            contains_architectural_context=False,
+            requested_object_is_dominant=True,
+        )
+        compound_path = self.temp_dir / "unlisted_compound_bed.glb"
+        compound_scene = trimesh.Scene()
+        compound_scene.add_geometry(
+            trimesh.creation.box(extents=(1.6, 2.05, 0.7)),
+            node_name="bed",
+            geom_name="bed",
+        )
+        compound_scene.add_geometry(
+            trimesh.creation.box(extents=(1.747, 0.151, 2.105)),
+            node_name="backdrop",
+            geom_name="backdrop",
+        )
+        compound_path.write_bytes(compound_scene.export(file_type="glb"))
+        standalone_path = self.temp_dir / "standalone_bed.glb"
+        standalone_path.write_bytes(
+            trimesh.creation.box(extents=(1.6, 2.05, 0.8)).export(file_type="glb")
+        )
+        candidates = [
+            HssdRetrievalResult(
+                mesh_path=str(compound_path),
+                hssd_id="previously_unseen_compound_bed",
+                object_name="platform bed",
+                similarity_score=0.99,
+                size=(1.75, 2.1, 2.1),
+                category="large_objects",
+            ),
+            HssdRetrievalResult(
+                mesh_path=str(standalone_path),
+                hssd_id="standalone_bed",
+                object_name="platform bed",
+                similarity_score=0.90,
+                size=(1.6, 2.05, 0.8),
+                category="large_objects",
+            ),
+        ]
+
+        selected = manager._select_direct_hssd_candidate(
+            candidates=candidates,
+            description="platform bed",
+            short_name="bed",
+        )
+
+        self.assertEqual("standalone_bed", selected.hssd_id)
+        self.assertEqual(
+            "structural_rejected",
+            manager._direct_hssd_admission_states["previously_unseen_compound_bed"],
+        )
+        manager._thin_covering_router.validate_asset.assert_called_once()
+
     def test_hssd_retrieval_reserves_replace_quarantined_top_candidates(self):
         manager = object.__new__(AssetManager)
         manager.cfg = OmegaConf.create(
@@ -414,7 +487,7 @@ class TestAssetManager(unittest.TestCase):
         )
 
         self.assertEqual(4, manager._direct_hssd_candidate_count("bed", "bed"))
-        self.assertEqual(6, manager._hssd_retrieval_candidate_count("bed", "bed"))
+        self.assertEqual(7, manager._hssd_retrieval_candidate_count("bed", "bed"))
 
     def test_critical_hssd_candidate_must_pass_shared_size_contract(self):
         manager = object.__new__(AssetManager)
@@ -877,8 +950,12 @@ class TestAssetManager(unittest.TestCase):
                 }
             }
         )
+        cached_bed_path = self.temp_dir / "cached_bed.glb"
+        cached_bed_path.write_bytes(
+            trimesh.creation.box(extents=(1.6, 2.05, 0.8)).export(file_type="glb")
+        )
         candidate = HssdRetrievalResult(
-            mesh_path=str(self.temp_dir / "cached_bed.glb"),
+            mesh_path=str(cached_bed_path),
             hssd_id="cached_bed",
             object_name="bed",
             similarity_score=0.9,

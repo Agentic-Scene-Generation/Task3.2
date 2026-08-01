@@ -125,7 +125,7 @@ _FLOOR_LAYOUT_FAMILIES = frozenset({"plant", "rug", "floor_lamp"})
 
 # Bump whenever semantic admission meaning changes.  Persistent HSSD decisions
 # must never outlive the prompt/placement contract that produced them.
-ASSET_SEMANTIC_CONTRACT_VERSION = "7.0"
+ASSET_SEMANTIC_CONTRACT_VERSION = "8.0"
 
 
 def placement_role_contract(role: str) -> str:
@@ -212,6 +212,7 @@ class AssetRuntimeGate:
         return not bool(
             metadata.get("repair_placeholder", False)
             or metadata.get("asset_admission_failed", False)
+            or metadata.get("asset_structure_status") == "reject"
             or hssd_asset_quarantine_reason(mesh_id)
         )
 
