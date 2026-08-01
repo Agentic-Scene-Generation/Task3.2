@@ -6,14 +6,78 @@ type safety and easy JSON serialization across the pipeline.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from scenesmith.scenebenchmark_critic.relation_registry import relation_spec
 
 
 # ---------------------------------------------------------------------------
 # TaskCompiler output
 # ---------------------------------------------------------------------------
+
+
+class ObjectSelectorSpec(BaseModel):
+    """Semantic endpoint selector; generated object ids are bound later."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    category: str = Field(min_length=1)
+    count: int | None = Field(default=None, ge=1)
+    quantifier: Literal["all", "exactly", "at_least", "minimum"] = "all"
+    role: str = ""
+    secondary_category: str = ""
+    secondary_count: int | None = Field(default=None, ge=1)
+    secondary_role: str = ""
+
+    @field_validator("category", "secondary_category", mode="before")
+    @classmethod
+    def _normalize_category(cls, value: Any) -> str:
+        return "_".join(str(value or "").strip().lower().split())
+
+    @field_validator("role", "secondary_role", mode="before")
+    @classmethod
+    def _normalize_role(cls, value: Any) -> str:
+        return str(value or "").strip().lower()
+
+
+class IntentConstraintSpec(BaseModel):
+    """One atomic, executable relation produced by TaskCompiler."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    relation: str
+    subjects: ObjectSelectorSpec
+    targets: ObjectSelectorSpec | None = None
+    source: Literal["explicit_prompt", "model_inferred"]
+    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+    evidence_span: str = ""
+    inference_reason: str = ""
+
+    @field_validator("relation", mode="before")
+    @classmethod
+    def _normalize_relation(cls, value: Any) -> str:
+        relation = str(value or "").strip().lower()
+        relation_spec(relation)
+        return relation
+
+    @model_validator(mode="after")
+    def _validate_arity_and_provenance(self) -> "IntentConstraintSpec":
+        spec = relation_spec(self.relation)
+        target_arity = 0
+        if self.targets is not None:
+            target_arity = 2 if self.targets.secondary_category else 1
+        if target_arity != spec.target_arity:
+            raise ValueError(
+                f"Relation {self.relation!r} requires {spec.target_arity} target(s), "
+                f"got {target_arity}"
+            )
+        if self.source == "explicit_prompt" and not self.evidence_span.strip():
+            raise ValueError("explicit_prompt constraints require evidence_span")
+        if self.source == "model_inferred" and not self.inference_reason.strip():
+            raise ValueError("model_inferred constraints require inference_reason")
+        return self
 
 
 class SceneTaskSpec(BaseModel):
@@ -53,17 +117,16 @@ class SceneTaskSpec(BaseModel):
         default_factory=list,
         description="Visual / style constraints: material palette, density, symmetry, etc.",
     )
-    # Constraint rows are deliberately permissive at this boundary because the
-    # model compiler is best-effort.  The critic normalizes them into its
-    # versioned, finite intent-contract schema and refuses malformed/inferred
-    # hard constraints there.
-    intent_constraints: list[dict[str, Any]] = Field(
+    intent_constraints: list[IntentConstraintSpec] = Field(
         default_factory=list,
         description=(
-            "Prompt-originated spatial relations with relation, subjects, targets, "
-            "source, confidence, and evidence_span."
+            "Atomic explicit and common-sense functional relations. All validated "
+            "rows are hard contract constraints."
         ),
     )
+    compiler_status: Literal["ok", "degraded"] = "ok"
+    compiler_failure_reason: str = ""
+    compiler_spec_version: str = "scenesmith.task_compiler.v2"
 
 
 # ---------------------------------------------------------------------------

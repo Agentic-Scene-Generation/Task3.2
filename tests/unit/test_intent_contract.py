@@ -30,7 +30,6 @@ from scenesmith.scenebenchmark_critic.intent_contract import (
     contract_seating_targets,
     is_hard_constraint,
     original_prompt_for_scene,
-    set_contract_mode,
 )
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.intent_contract import (
     evaluate_intent_contract_extensions,
@@ -46,6 +45,7 @@ from scenesmith.scenebenchmark_critic.reports import (
     build_evaluation_payload,
     format_prompt_context,
 )
+from scenesmith.scene_expert.task_compiler import _fallback_spec_from_prompt
 
 
 def _relations(contract: dict) -> set[tuple[str, str, str]]:
@@ -72,11 +72,9 @@ def _explicit_constraint(
     }
 
 
-@pytest.mark.parametrize("mode", ("contract", "shadow"))
-def test_room_adapter_sets_controlled_mode_before_building_checks(
-    monkeypatch: pytest.MonkeyPatch, mode: str
+def test_room_adapter_builds_v2_case_pack_without_mode_fields(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    observed: list[str] = []
     scene = SimpleNamespace(
         room_id="training",
         room_type="classroom",
@@ -96,72 +94,51 @@ def test_room_adapter_sets_controlled_mode_before_building_checks(
     )
 
     def capture(case_pack: dict, metrics: object = None) -> list[dict]:
-        observed.append(str(case_pack.get("intent_contract_mode")))
-        assert case_pack["intent_contract"]["mode"] == mode
+        assert "intent_contract_mode" not in case_pack
+        assert "mode" not in case_pack["intent_contract"]
         return []
 
     monkeypatch.setattr(adapter, "build_all_checks", capture)
 
-    case_pack = adapter.room_scene_to_case_pack(scene, intent_contract_mode=mode)
+    case_pack = adapter.room_scene_to_case_pack(scene)
 
-    assert observed == [mode]
-    assert case_pack["intent_contract_mode"] == mode
-    assert case_pack["_checks_built_intent_contract_mode"] == mode
+    assert case_pack["schema_version"] == "scenesmith.scenebenchmark_critic.v2"
+    assert "_checks_built_intent_contract_mode" not in case_pack
 
 
-def test_house_adapter_sets_shadow_mode_before_building_checks(
+def test_house_adapter_builds_v2_case_pack_without_mode_fields(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    observed: list[str] = []
     house = SimpleNamespace(
         rooms={},
         layout=SimpleNamespace(house_prompt="A shared instructional building."),
     )
 
     def capture(case_pack: dict, metrics: object = None) -> list[dict]:
-        observed.append(str(case_pack.get("intent_contract_mode")))
+        assert "intent_contract_mode" not in case_pack
         return []
 
     monkeypatch.setattr(adapter, "build_all_checks", capture)
 
-    case_pack = adapter.house_scene_to_case_pack(house, intent_contract_mode="shadow")
+    case_pack = adapter.house_scene_to_case_pack(house)
 
-    assert observed == ["shadow"]
-    assert case_pack["intent_contract_mode"] == "shadow"
-    assert case_pack["_checks_built_intent_contract_mode"] == "shadow"
+    assert case_pack["schema_version"] == "scenesmith.scenebenchmark_critic.v2"
+    assert "_checks_built_intent_contract_mode" not in case_pack
 
 
-def test_prepare_rebuilds_adapter_checks_when_contract_mode_changes(
+@pytest.mark.parametrize("removed_field", ("constraint_mode", "intent_contract_mode"))
+def test_old_constraint_mode_config_fails_fast(removed_field: str) -> None:
+    with pytest.raises(ValueError, match=f"{removed_field} was removed"):
+        evaluator._coerce_config({"scenebenchmark_critic": {removed_field: "shadow"}})
+
+
+def test_old_constraint_mode_environment_fails_fast(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    case_pack = {
-        "intent_contract": {"constraints": []},
-        "intent_contract_mode": "legacy",
-        "_checks_built_intent_contract_mode": "legacy",
-        "scene_geometry": {"rooms": [], "objects": [], "relations": []},
-        "checks": [{"check_id": "legacy_check"}],
-    }
-    observed_modes: list[str] = []
+    monkeypatch.setenv("CRITIC_CONSTRAINT_MODE", "shadow")
 
-    def rebuild(case_pack: dict, metrics: object = None) -> list[dict]:
-        observed_modes.append(str(case_pack.get("intent_contract_mode")))
-        return [{"check_id": "contract_check"}]
-
-    monkeypatch.setattr(evaluator, "build_all_checks", rebuild)
-    monkeypatch.setattr(evaluator, "get_metric_plugins", lambda _metrics: ())
-
-    evaluator.prepare_case_pack(
-        case_pack,
-        CriticConfig(
-            enabled=True,
-            metrics=("functional_dependency",),
-            constraint_mode="contract",
-        ),
-    )
-
-    assert observed_modes == ["contract"]
-    assert case_pack["checks"] == [{"check_id": "contract_check"}]
-    assert case_pack["_checks_built_intent_contract_mode"] == "contract"
+    with pytest.raises(ValueError, match="CRITIC_CONSTRAINT_MODE was removed"):
+        evaluator._coerce_config({"scenebenchmark_critic": {"enabled": True}})
 
 
 @pytest.mark.parametrize(
@@ -307,7 +284,14 @@ def test_checkpoint_prompt_fallback_excludes_injected_layout_language() -> None:
             + "\n\n=== SceneExpert Stage Brief: furniture ===\n"
             + "Designer constraints:\n"
             + "  - Arrange the student desks in organized rows.\n"
-            + "=== End Stage Brief ==="
+            + "=== End Stage Brief ===",
+            # Resumed scenes can retain this transient attribute. It must be
+            # stripped with the same rule as text_description.
+            "scene_expert_original_description": original_prompt
+            + "\n\n=== SceneExpert Stage Brief: furniture ===\n"
+            + "Designer constraints:\n"
+            + "  - Arrange the student desks in organized rows.\n"
+            + "=== End Stage Brief ===",
         },
     )()
 
@@ -322,11 +306,24 @@ def test_checkpoint_prompt_fallback_excludes_injected_layout_language() -> None:
     )
 
 
+def test_rocking_chair_is_not_duplicated_as_a_generic_chair_relation() -> None:
+    contract = build_intent_contract(
+        "A nursery with a rocking chair near a small side table."
+    )
+
+    assert ("near", "rocking_chair", "side_table") in _relations(contract)
+    assert ("near", "chair", "side_table") not in _relations(contract)
+
+
 def test_classroom_each_with_builds_one_to_one_pair_checks_without_grid_gate() -> None:
     prompt = (
         "A classroom with six student desks, each with a chair. A teacher's desk "
         "sits at the front near the chalkboard."
     )
+    task_spec = _fallback_spec_from_prompt(prompt)
+    assert task_spec.required_large_objects.count("student_desk") == 6
+    assert task_spec.required_large_objects.count("student_chair") == 6
+    assert "chair" not in task_spec.required_large_objects
     desk_positions = [
         (-2.5, 2.0),
         (0.0, 2.0),
@@ -338,8 +335,11 @@ def test_classroom_each_with_builds_one_to_one_pair_checks_without_grid_gate() -
     case_pack = {
         "task_instruction": prompt,
         "room_type": "classroom",
-        "intent_contract": build_intent_contract(prompt, room_type="classroom"),
-        "intent_contract_mode": "contract",
+        "intent_contract": build_intent_contract(
+            prompt,
+            room_type="classroom",
+            task_spec=task_spec,
+        ),
         "scene_geometry": {
             "rooms": [
                 {
@@ -398,6 +398,7 @@ def test_classroom_each_with_builds_one_to_one_pair_checks_without_grid_gate() -
     ]
     assert len(seat_checks) == 6
     assert len(surface_checks) == 6
+    assert len({check["subject_id"] for check in seat_checks}) == 6
     assert len({check["target_ids"][0] for check in seat_checks}) == 6
     assert {
         (check["subject_id"], check["target_ids"][0]) for check in surface_checks
@@ -409,18 +410,11 @@ def test_classroom_each_with_builds_one_to_one_pair_checks_without_grid_gate() -
         config=CriticConfig(
             enabled=True,
             metrics=("functional_dependency",),
-            constraint_mode="contract",
         ),
     )
-    classroom_result = next(
-        result
+    assert not any(
+        result.get("relation_type") == "classroom_workstation_distribution"
         for result in results
-        if result.get("relation_type") == "classroom_workstation_distribution"
-    )
-    assert classroom_result["label"] == "fail"
-    assert (
-        classroom_result["diagnostics"]["teacher_slot"]["surface_id"]
-        == "teacher_desk_0"
     )
     pair_results = [
         result
@@ -456,7 +450,6 @@ def test_teacher_desk_at_front_does_not_infer_wall_constraint() -> None:
         "task_instruction": prompt,
         "room_type": "classroom",
         "intent_contract": contract,
-        "intent_contract_mode": "contract",
         "scene_geometry": {
             "objects": [
                 _record(
@@ -570,7 +563,6 @@ def test_hard_operation_contract_overrides_conflicting_asset_facing_prior() -> N
         "task_instruction": prompt,
         "room_type": "classroom",
         "intent_contract": build_intent_contract(prompt, room_type="classroom"),
-        "intent_contract_mode": "contract",
         "scene_geometry": {
             "objects": [
                 teacher,
@@ -590,14 +582,6 @@ def test_hard_operation_contract_overrides_conflicting_asset_facing_prior() -> N
         check.get("subject_id") == "teacher_desk_0"
         and check.get("check_source") == "asset_orientation_dependency"
         for check in contract_checks
-    )
-
-    case_pack["intent_contract_mode"] = "shadow"
-    shadow_checks = build_checks(case_pack, metrics=("functional_dependency",))
-    assert any(
-        check.get("subject_id") == "teacher_desk_0"
-        and check.get("check_source") == "asset_orientation_dependency"
-        for check in shadow_checks
     )
 
 
@@ -629,7 +613,6 @@ def test_ambiguous_teacher_desks_keep_asset_facing_priors() -> None:
         "task_instruction": prompt,
         "room_type": "classroom",
         "intent_contract": build_intent_contract(prompt, room_type="classroom"),
-        "intent_contract_mode": "contract",
         "scene_geometry": {
             "objects": [
                 *teachers,
@@ -699,7 +682,6 @@ def test_explicit_count_extension_rejects_broader_role_substitution() -> None:
     )
     case_pack = {
         "intent_contract": build_intent_contract(prompt),
-        "intent_contract_mode": "contract",
         "scene_geometry": {
             "objects": [
                 *[
@@ -761,7 +743,7 @@ def _record(
     }
 
 
-def test_shadow_contract_checks_are_recorded_but_ignored() -> None:
+def test_contract_checks_are_core_without_shadow_metadata() -> None:
     case_pack = {
         "intent_contract": build_intent_contract("A sofa faces a TV stand."),
         "scene_geometry": {
@@ -772,8 +754,6 @@ def test_shadow_contract_checks_are_recorded_but_ignored() -> None:
         },
         "checks": [],
     }
-    set_contract_mode(case_pack, "shadow")
-
     assert augment_contract_checks(case_pack)
     checks = [
         check
@@ -781,13 +761,11 @@ def test_shadow_contract_checks_are_recorded_but_ignored() -> None:
         if check.get("check_source") == "intent_contract"
     ]
     assert checks
-    assert {check["scoring_tier"] for check in checks} == {"ignored"}
-    assert case_pack["intent_contract"]["shadow_check_ids"] == [
-        check["check_id"] for check in checks
-    ]
+    assert {check["scoring_tier"] for check in checks} == {"core"}
+    assert "shadow_check_ids" not in case_pack["intent_contract"]
 
 
-def test_contract_mode_keeps_model_and_vlm_evidence_auxiliary() -> None:
+def test_model_inferred_relations_are_hard_and_unknown_sources_are_rejected() -> None:
     case_pack = {
         "intent_contract": build_intent_contract(
             "An office chair faces a desk.",
@@ -828,8 +806,6 @@ def test_contract_mode_keeps_model_and_vlm_evidence_auxiliary() -> None:
         },
         "checks": [],
     }
-    set_contract_mode(case_pack, "contract")
-
     assert augment_contract_checks(case_pack)
     tiers_by_source = {
         check["evidence"]["intent_constraint"]["source"]: check["scoring_tier"]
@@ -837,19 +813,24 @@ def test_contract_mode_keeps_model_and_vlm_evidence_auxiliary() -> None:
         if check.get("check_source") == "intent_contract"
     }
     assert tiers_by_source["explicit_prompt"] == "core"
-    assert tiers_by_source["model_inferred"] == "auxiliary"
-    assert tiers_by_source["vlm_observation"] == "auxiliary"
-    untrusted_claim = next(
+    assert tiers_by_source["model_inferred"] == "core"
+    explicit_claim = next(
         row
         for row in case_pack["intent_contract"]["constraints"]
         if row["relation"] == "against_wall"
         and row["subjects"].get("category") == "bookshelf"
     )
-    assert untrusted_claim["source"] == "model_inferred"
-    assert not is_hard_constraint(untrusted_claim)
-    # Model/VLM relations are visible in diagnostics but cannot authorize the
-    # direct seating guard to rotate an unmentioned seat toward a target.
-    assert contract_seating_targets(case_pack) == {"office_chair_0": {"desk_0"}}
+    assert explicit_claim["source"] == "explicit_prompt"
+    assert is_hard_constraint(explicit_claim)
+    assert not any(
+        row["source"] == "vlm_observation"
+        for row in case_pack["intent_contract"]["constraints"]
+    )
+    assert contract_seating_targets(case_pack) == {
+        "armchair_0": {"television_0"},
+        "bookshelf_0": {"wall_0"},
+        "office_chair_0": {"desk_0"},
+    }
 
 
 def test_contract_seating_targets_do_not_guess_unmentioned_chair_roles() -> None:
@@ -892,13 +873,11 @@ def test_single_prompt_selector_does_not_bind_multiple_candidate_assets() -> Non
         },
         "checks": [],
     }
-    set_contract_mode(case_pack, "contract")
-
     assert not augment_contract_checks(case_pack)
     assert contract_seating_targets(case_pack) == {}
 
 
-def test_auxiliary_model_relation_cannot_enable_a_legacy_topology_rule() -> None:
+def test_model_inferred_relation_enables_hard_topology_rule() -> None:
     case_pack = {
         "intent_contract": build_intent_contract(
             "A dining room with a dining table and four dining chairs.",
@@ -915,10 +894,43 @@ def test_auxiliary_model_relation_cannot_enable_a_legacy_topology_rule() -> None
         )
     }
 
-    assert not contract_relation_requested(case_pack, "one_per_side")
+    assert contract_relation_requested(case_pack, "one_per_side")
 
 
-def test_auxiliary_model_relation_cannot_enter_gate_or_critic_context() -> None:
+def test_one_per_side_accepts_a_pair_on_opposite_bed_sides() -> None:
+    case_pack = {
+        "intent_contract": {
+            "constraints": [
+                {
+                    **_explicit_constraint(
+                        "bedside_pair", "one_per_side", "nightstand", "bed"
+                    ),
+                    "subjects": {"category": "nightstand", "count": 2},
+                }
+            ]
+        },
+        "scene_geometry": {
+            "objects": [
+                _record(
+                    "bed_0", "bed", (0.0, 0.9, 0.4), (1.6, 2.05, 0.8), yaw_deg=180.0
+                ),
+                _record("nightstand_0", "nightstand", (1.07, 1.62, 0.3)),
+                _record("nightstand_1", "nightstand", (-1.07, 1.62, 0.3)),
+            ]
+        },
+    }
+
+    result = next(
+        item
+        for item in evaluate_intent_contract_extensions(case_pack)
+        if item["relation_type"] == "one_per_side"
+    )
+
+    assert result["label"] == "pass"
+    assert result["diagnostics"]["occupied_sides"] == [[0, -1], [0, 1]]
+
+
+def test_model_inferred_relation_enters_gate_and_critic_context() -> None:
     case_pack = {
         "intent_contract": build_intent_contract(
             "A room.",
@@ -945,13 +957,12 @@ def test_auxiliary_model_relation_cannot_enter_gate_or_critic_context() -> None:
         enabled=True,
         hard_gate=True,
         metrics=("functional_dependency",),
-        constraint_mode="contract",
     )
 
     results = run_case_pack_checks(case_pack, config=config)
     assert len(results) == 1
     assert results[0]["label"] == "fail"
-    assert results[0]["scoring_tier"] == "auxiliary"
+    assert results[0]["scoring_tier"] == "core"
 
     payload = build_evaluation_payload(
         case_pack=case_pack,
@@ -961,10 +972,10 @@ def test_auxiliary_model_relation_cannot_enter_gate_or_critic_context() -> None:
         config=config,
     )
     scene_summary = payload["summary"]["scene_summary"]
-    assert scene_summary["fail"] == 0
-    assert scene_summary["excluded_auxiliary"] == 1
-    assert not payload["gate"]["blocked"]
-    assert "no degraded or failed checks" in format_prompt_context(payload)
+    assert scene_summary["fail"] == 1
+    assert scene_summary["excluded_auxiliary"] == 0
+    assert payload["gate"]["blocked"]
+    assert "object_on_support" in format_prompt_context(payload)
     assert "no degraded or failed checks" in format_agent_prompt_context(
         payload,
         agent_type="furniture",
@@ -976,7 +987,6 @@ def test_generic_centered_on_wall_extension_uses_room_relative_geometry() -> Non
         "intent_contract": build_intent_contract(
             "A study with a desk centered against the back wall."
         ),
-        "intent_contract_mode": "contract",
         "scene_geometry": {
             "rooms": [
                 {
@@ -1004,6 +1014,28 @@ def test_generic_centered_on_wall_extension_uses_room_relative_geometry() -> Non
     assert result["diagnostics"]["target_center_xy_m"] == [0.0, 1.62]
 
 
+def test_room_relative_wall_target_binds_to_physical_walls() -> None:
+    case_pack = {
+        "stage": "furniture",
+        "intent_contract": {
+            "constraints": [
+                _explicit_constraint("sofa_back", "against_wall", "sofa", "back_wall")
+            ]
+        },
+        "scene_geometry": {
+            "objects": [
+                _record("sofa_0", "sofa", (0.0, -1.5, 0.4), (2.2, 0.8, 0.8)),
+                _record("south_wall", "wall", (0.0, -2.0, 1.35), (5.0, 0.1, 2.7)),
+                _record("north_wall", "wall", (0.0, 2.0, 1.35), (5.0, 0.1, 2.7)),
+            ]
+        },
+    }
+
+    results = evaluate_intent_contract_extensions(case_pack)
+
+    assert results == []
+
+
 def test_contract_study_does_not_invent_tangential_wall_slots() -> None:
     """Wall wording must not manufacture a bookshelf/chair coordinate profile."""
     prompt = (
@@ -1014,7 +1046,6 @@ def test_contract_study_does_not_invent_tangential_wall_slots() -> None:
     case_pack = {
         "task_instruction": prompt,
         "intent_contract": build_intent_contract(prompt, room_type="study"),
-        "intent_contract_mode": "contract",
         "scene_geometry": {
             "rooms": [
                 {
@@ -1070,15 +1101,6 @@ def test_contract_study_does_not_invent_tangential_wall_slots() -> None:
     # by the prompt.  Contract mode must evaluate the four explicit relations,
     # not fail a legacy all-in-one wall-layout profile.
     assert evaluate_study_furniture_layout(case_pack) == []
-    # Shadow mode preserves the historical diagnostic for comparison, but it
-    # must not make an invented opposite-wall arrangement an authoritative
-    # hard constraint.
-    case_pack["intent_contract_mode"] = "shadow"
-    shadow_result = evaluate_study_furniture_layout(case_pack)
-    assert len(shadow_result) == 1
-    assert shadow_result[0]["label"] == "fail"
-    assert shadow_result[0]["scoring_tier"] == "auxiliary"
-    case_pack["intent_contract_mode"] = "contract"
     assert augment_contract_checks(case_pack)
     relation_types = {
         check["relation_type"]
@@ -1170,7 +1192,6 @@ def test_generic_centered_on_wall_repair_is_accepted_only_after_improvement(
     config = CriticConfig(
         enabled=True,
         metrics=("functional_dependency",),
-        constraint_mode="contract",
     )
 
     before = evaluate_room_scene(scene, config=config, stage="before")
@@ -1207,7 +1228,6 @@ def test_in_front_of_reports_lateral_alignment_and_preserves_center_anchor() -> 
                 _explicit_constraint("rug_front", "in_front_of", "rug", "sofa"),
             ]
         },
-        "intent_contract_mode": "contract",
         "scene_geometry": {
             "rooms": [
                 {
@@ -1268,7 +1288,7 @@ def test_living_room_prompt_extracts_two_anchor_relations() -> None:
     assert all(is_hard_constraint(row) for row in constraints.values())
 
 
-def test_media_furniture_ontology_keeps_freestanding_television_auxiliary() -> None:
+def test_media_furniture_ontology_hardens_inferred_television_support() -> None:
     prompt = (
         "A living room with a sofa facing a TV stand and television on the "
         "opposite wall."
@@ -1292,7 +1312,7 @@ def test_media_furniture_ontology_keeps_freestanding_television_auxiliary() -> N
         "quantifier": "all",
     }
     assert support["source"] == "model_inferred"
-    assert not is_hard_constraint(support)
+    assert is_hard_constraint(support)
 
     objects = [
         _record("television_0", "television", (0.0, 0.0, 0.8)),
@@ -1312,6 +1332,52 @@ def test_media_furniture_ontology_does_not_ground_wall_mounted_television() -> N
         row["relation"] == "on_top_of" and row["source"] == "room_ontology"
         for row in contract["constraints"]
     )
+
+
+def test_model_inferred_shared_target_uses_inventory_cardinality() -> None:
+    task_spec = {
+        "required_large_objects": ["bed", "nightstand", "nightstand"],
+        "intent_constraints": [
+            {
+                "relation": "next_to",
+                "subjects": {"category": "nightstand", "count": 1},
+                "targets": {"category": "bed"},
+                "source": "model_inferred",
+                "inference_reason": "Nightstands are placed next to beds.",
+            }
+        ],
+    }
+
+    contract = build_intent_contract(
+        "A bedroom with a bed and two nightstands.",
+        room_type="bedroom",
+        task_spec=task_spec,
+    )
+    relation = next(
+        row
+        for row in contract["constraints"]
+        if row["relation"] == "next_to" and row["source"] == "model_inferred"
+    )
+
+    assert relation["subjects"] == {
+        "category": "nightstand",
+        "count": 2,
+        "quantifier": "all",
+    }
+    assert relation["targets"] == {
+        "category": "bed",
+        "count": 1,
+        "quantifier": "all",
+    }
+    objects = [
+        _record("bed_0", "bed", (0.0, 0.0, 0.4)),
+        _record("nightstand_0", "nightstand", (-1.0, 0.0, 0.3)),
+        _record("nightstand_1", "nightstand", (1.0, 0.0, 0.3)),
+    ]
+    assert bound_ids(relation["subjects"], objects) == [
+        "nightstand_0",
+        "nightstand_1",
+    ]
 
 
 def test_between_and_flanking_evaluate_full_two_dimensional_alignment() -> None:
@@ -1348,7 +1414,6 @@ def test_between_and_flanking_evaluate_full_two_dimensional_alignment() -> None:
                 },
             ]
         },
-        "intent_contract_mode": "contract",
         "scene_geometry": {
             "rooms": [
                 {
@@ -1394,7 +1459,6 @@ def test_in_front_of_does_not_move_two_independently_centered_objects() -> None:
                 _explicit_constraint("rug_front", "in_front_of", "rug", "sofa"),
             ]
         },
-        "intent_contract_mode": "contract",
         "scene_geometry": {
             "rooms": [
                 {

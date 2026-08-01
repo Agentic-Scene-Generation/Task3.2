@@ -27,9 +27,7 @@ SUPPORT_CATEGORIES = {
 
 def evaluate_media_support_alignment(case_pack: dict[str, Any]) -> list[dict[str, Any]]:
     """Report wall-mounted media that is not centered over a matching console."""
-    if str(
-        case_pack.get("intent_contract_mode") or "legacy"
-    ) == "contract" and not contract_relation_requested(case_pack, "on_top_of"):
+    if not contract_relation_requested(case_pack, "on_top_of"):
         return []
     geometry = case_pack.get("scene_geometry") or {}
     objects = [obj for obj in geometry.get("objects") or [] if isinstance(obj, dict)]

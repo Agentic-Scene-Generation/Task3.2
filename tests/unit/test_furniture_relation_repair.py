@@ -6,6 +6,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from pydrake.math import RigidTransform, RollPitchYaw
 
@@ -31,10 +32,6 @@ from scenesmith.scenebenchmark_critic.furniture_relation_repair import (
     unresolved_furniture_relation_failures,
 )
 from scenesmith.scenebenchmark_critic.intent_contract import SCHEMA_VERSION
-from scenesmith.scenebenchmark_critic.metrics.functional_dependency.orientation_contracts import (
-    CONTRACT_ATTR,
-)
-from scenesmith.scenebenchmark_critic.prompt_context import format_agent_prompt_context
 from scenesmith.utils.geometry_utils import compute_optimal_facing_yaw
 from scenesmith.wall_agents.tools.wall_surface import (
     extract_wall_surfaces_from_room_geometry,
@@ -155,7 +152,16 @@ def test_repairs_rotated_dining_slots_without_moving_unrelated_furniture(
         "decorative_console", "console_table", (1.8, 1.2, 0.4), (0.8, 0.4, 0.8)
     )
     old_unrelated = unrelated.transform.GetAsMatrix4().copy()
-    scene = _scene(tmp_path, table, *seats, unrelated)
+    scene = _scene(
+        tmp_path,
+        table,
+        *seats,
+        unrelated,
+        text=(
+            "A dining room with a dining table and four dining chairs arranged "
+            "around it with one on each side."
+        ),
+    )
     config = CriticConfig(enabled=True, metrics=("functional_dependency",))
 
     unresolved_before = unresolved_furniture_relation_failures(scene, config=config)
@@ -165,7 +171,9 @@ def test_repairs_rotated_dining_slots_without_moving_unrelated_furniture(
 
     fixes = improve_furniture_relations(scene, config=config)
 
-    assert {fix.object_id for fix in fixes} == {"seat_variant_0", "seat_variant_1"}
+    assert {fix.object_id for fix in fixes} == {
+        f"seat_variant_{index}" for index in range(4)
+    }
     np.testing.assert_allclose(unrelated.transform.GetAsMatrix4(), old_unrelated)
     payload = evaluate_room_scene(scene, config=config, stage="test")
     result = next(
@@ -259,111 +267,18 @@ def test_sideboard_wall_phrase_does_not_bind_dining_chairs_to_wall(
     )
     config = CriticConfig(enabled=True, metrics=("functional_dependency",))
 
-    evaluate_room_scene(scene, config=config, stage="dining_sideboard_prompt")
+    payload = evaluate_room_scene(scene, config=config, stage="dining_sideboard_prompt")
 
-    contracts = getattr(scene, CONTRACT_ATTR)
-    assert {contracts[seat.object_id]["relation_type"] for seat in seats} == {
-        "seating_to_work_surface"
-    }
-    assert {contracts[seat.object_id]["target_ids"][0] for seat in seats} == {
-        "dining_table_0"
-    }
-
-
-def test_repairs_generic_classroom_as_atomic_student_grid(tmp_path: Path) -> None:
-    desk_positions = (
-        (-3.04, -3.8),
-        (-3.04, -2.0),
-        (-3.04, 0.0),
-        (-3.04, 2.0),
-        (-1.6, -3.8),
-        (-1.6, -2.0),
-        (-1.6, 0.0),
+    constraints = payload["case_pack"]["intent_contract"]["constraints"]
+    assert any(
+        row["relation"] == "against_wall" and row["subjects"]["category"] == "sideboard"
+        for row in constraints
     )
-    chair_positions = (
-        (-1.6, 2.0),
-        (-1.6, 3.8),
-        (0.0, -3.8),
-        (0.0, -2.0),
-        (0.0, 0.0),
-        (0.0, 2.0),
+    assert not any(
+        row["relation"] == "against_wall"
+        and row["subjects"]["category"] == "dining_chair"
+        for row in constraints
     )
-    desks = [
-        _object(f"desk_{index}", "desk", (*xy, 0.3), (1.13, 0.6, 0.6))
-        for index, xy in enumerate(desk_positions)
-    ]
-    chairs = [
-        _object(f"chair_{index}", "chair", (*xy, 0.4), (0.51, 0.5, 0.8))
-        for index, xy in enumerate(chair_positions)
-    ]
-    text = (
-        "A classroom with six student desks, each with a chair. A teacher's "
-        "desk sits at the front near the chalkboard. Arrange student desks in "
-        "rows across the classroom with all workstations facing the front."
-    )
-    scene = _scene(tmp_path, *desks, *chairs, text=text)
-    scene.room_geometry.length = 8.0
-    scene.room_geometry.width = 10.0
-    scene.room_geometry.walls = [
-        _object(
-            "west_wall",
-            "wall",
-            (-4.0, 0.0, 1.35),
-            (0.1, 10.0, 2.7),
-            object_type=ObjectType.WALL,
-        ),
-        _object(
-            "east_wall",
-            "wall",
-            (4.0, 0.0, 1.35),
-            (0.1, 10.0, 2.7),
-            object_type=ObjectType.WALL,
-        ),
-        _object(
-            "south_wall",
-            "wall",
-            (0.0, -5.0, 1.35),
-            (8.0, 0.1, 2.7),
-            object_type=ObjectType.WALL,
-        ),
-        _object(
-            "north_wall",
-            "wall",
-            (0.0, 5.0, 1.35),
-            (8.0, 0.1, 2.7),
-            object_type=ObjectType.WALL,
-        ),
-    ]
-    config = CriticConfig(enabled=True, metrics=("functional_dependency",))
-
-    before = evaluate_room_scene(scene, config=config, stage="classroom_before")
-    result = next(
-        item
-        for item in before["results"]
-        if item.get("relation_type") == "classroom_workstation_distribution"
-    )
-    assert result["label"] == "fail"
-
-    fixes = improve_furniture_relations(scene, config=config)
-
-    moved_ids = {fix.object_id for fix in fixes}
-    assert {f"chair_{index}" for index in range(6)} <= moved_ids
-    # A member already occupying its assigned slot legitimately has no
-    # FurnitureRelationFix record even though the coordinated candidate owns
-    # and validates the whole group.
-    assert len({f"desk_{index}" for index in range(7)} & moved_ids) >= 6
-    after = evaluate_room_scene(scene, config=config, stage="classroom_after")
-    result = next(
-        item
-        for item in after["results"]
-        if item.get("relation_type") == "classroom_workstation_distribution"
-    )
-    assert result["label"] == "pass"
-    slots = result["diagnostics"]["workstation_slots"]
-    lateral_centers = {
-        round(slot["target_surface_center_xy_m"][1], 3) for slot in slots
-    }
-    assert len(lateral_centers) == 3
 
 
 def test_instructional_contract_repairs_furniture_then_wall_surface(
@@ -390,7 +305,6 @@ def test_instructional_contract_repairs_furniture_then_wall_surface(
     config = CriticConfig(
         enabled=True,
         metrics=("functional_dependency",),
-        constraint_mode="contract",
     )
 
     before = evaluate_room_scene(scene, config=config, stage="furniture_before")
@@ -419,10 +333,12 @@ def test_instructional_contract_repairs_furniture_then_wall_surface(
     )
     assert operation["label"] == "pass"
     assert operation["diagnostics"]["operation_clearance_m"] >= 0.65
-    assert not any(
-        item.get("relation_type") == "instructional_surface_alignment"
+    pending_alignment = next(
+        item
         for item in furniture_after["results"]
+        if item.get("relation_type") == "instructional_surface_alignment"
     )
+    assert pending_alignment["contract_state"] == "pending"
 
     wall_surfaces = {
         surface.wall_direction.value: surface
@@ -570,7 +486,6 @@ def test_paired_work_surfaces_rotate_toward_their_assigned_seats(
     config = CriticConfig(
         enabled=True,
         metrics=("functional_dependency",),
-        constraint_mode="contract",
     )
 
     before = evaluate_room_scene(scene, config=config, stage="paired_surface_before")
@@ -614,10 +529,97 @@ def test_paired_work_surfaces_rotate_toward_their_assigned_seats(
     ]
     assert len(pair_results) == 12
     assert {result["label"] for result in pair_results} == {"pass"}
-    assert unresolved_furniture_relation_failures(scene, config=config) == []
+    assert not any(
+        result.get("relation_type")
+        in {"seating_to_work_surface", "furniture_faces_furniture"}
+        for result in unresolved_furniture_relation_failures(scene, config=config)
+    )
 
 
-def test_repairs_generic_storage_to_wall(tmp_path: Path) -> None:
+def test_repairs_generic_near_contract_for_unrelated_categories(
+    tmp_path: Path,
+) -> None:
+    armchair = _object("armchair_0", "armchair", (-1.6, 0.0, 0.45), (0.7, 0.7, 0.9))
+    plant = _object("plant_0", "plant", (1.4, 0.0, 0.45), (0.6, 0.6, 0.9))
+    scene = _scene(tmp_path, armchair, plant)
+    scene.scene_expert_task_spec = {
+        "compiler_status": "ok",
+        "intent_constraints": [
+            {
+                "relation": "near",
+                "subjects": {"category": "armchair", "count": 1},
+                "targets": {"category": "plant", "count": 1},
+                "source": "explicit_prompt",
+                "evidence_span": "an armchair near a plant",
+            }
+        ],
+    }
+    config = CriticConfig(enabled=True, metrics=("functional_dependency",))
+
+    before = evaluate_room_scene(scene, config=config, stage="generic_near_before")
+    near_before = next(
+        result
+        for result in before["results"]
+        if result.get("relation_type") == "generic_near_relation"
+    )
+    assert near_before["label"] == "fail"
+
+    fixes = improve_furniture_relations(scene, config=config)
+
+    assert [(fix.object_id, fix.relation_type) for fix in fixes] == [
+        ("armchair_0", "generic_near_relation")
+    ]
+    after = evaluate_room_scene(scene, config=config, stage="generic_near_after")
+    near_after = next(
+        result
+        for result in after["results"]
+        if result.get("relation_type") == "generic_near_relation"
+    )
+    assert near_after["label"] == "pass"
+    assert near_after["contract_state"] == "passed"
+
+
+def test_repairs_corner_of_room_contract(tmp_path: Path) -> None:
+    wardrobe = _object("wardrobe_0", "wardrobe", (-1.6, 1.1, 0.9), (0.8, 0.6, 1.8))
+    scene = _scene(tmp_path, wardrobe)
+    scene.scene_expert_task_spec = {
+        "compiler_status": "ok",
+        "intent_constraints": [
+            {
+                "relation": "corner_of_room",
+                "subjects": {"category": "wardrobe", "count": 1},
+                "targets": {"category": "room"},
+                "source": "explicit_prompt",
+                "evidence_span": "wardrobe in the corner of the room",
+            }
+        ],
+    }
+    config = CriticConfig(enabled=True, metrics=("functional_dependency",))
+
+    before = evaluate_room_scene(scene, config=config, stage="corner_before")
+    corner_before = next(
+        result
+        for result in before["results"]
+        if result.get("relation_type") == "corner_of_room"
+    )
+    assert corner_before["label"] == "fail"
+
+    fixes = improve_furniture_relations(scene, config=config)
+
+    assert [(fix.object_id, fix.relation_type) for fix in fixes] == [
+        ("wardrobe_0", "corner_of_room")
+    ]
+    after = evaluate_room_scene(scene, config=config, stage="corner_after")
+    corner_after = next(
+        result
+        for result in after["results"]
+        if result.get("relation_type") == "corner_of_room"
+    )
+    assert corner_after["label"] == "pass"
+    assert corner_after["contract_state"] == "passed"
+
+
+def test_does_not_infer_generic_storage_to_wall(tmp_path: Path) -> None:
     storage = _object(
         "storage_piece_alpha",
         "shelving_unit",
@@ -632,12 +634,8 @@ def test_repairs_generic_storage_to_wall(tmp_path: Path) -> None:
         config=CriticConfig(enabled=True, metrics=("functional_dependency",)),
     )
 
-    assert [(fix.object_id, fix.relation_type) for fix in fixes] == [
-        ("storage_piece_alpha", "wall_backed_storage_alignment")
-    ]
-    assert storage.transform.translation()[0] < -1.8
-    front = storage.transform.rotation().matrix() @ np.array([0.0, 1.0, 0.0])
-    np.testing.assert_allclose(front[:2], [1.0, 0.0], atol=1e-7)
+    assert fixes == []
+    np.testing.assert_allclose(storage.transform.translation()[:2], [-1.0, 0.0])
 
 
 def test_repairs_window_blocking_wall_backed_bookshelf(tmp_path: Path) -> None:
@@ -686,7 +684,7 @@ def test_repairs_window_blocking_wall_backed_bookshelf(tmp_path: Path) -> None:
     after = evaluate_room_scene(scene, config=config, stage="window_after")
     result_by_id = {result["check_id"]: result for result in after["results"]}
     assert result_by_id["window_clearance__window_0"]["label"] == "pass"
-    assert result_by_id["wall_backed_storage__bookshelf_0"]["label"] == "pass"
+    assert "wall_backed_storage__bookshelf_0" not in result_by_id
 
 
 def test_repairs_multiple_wall_backed_stools_with_wall_normal_orientation(
@@ -714,6 +712,17 @@ def test_repairs_multiple_wall_backed_stools_with_wall_normal_orientation(
         west_wall,
         text="A study with two stools placed against the side wall.",
     )
+    scene.scene_expert_task_spec = {
+        "intent_constraints": [
+            {
+                "relation": "against_wall",
+                "subjects": {"category": "stool", "count": 2},
+                "targets": {"category": "wall"},
+                "source": "explicit_prompt",
+                "evidence_span": "two stools placed against the side wall",
+            }
+        ]
+    }
 
     fixes = improve_furniture_relations(
         scene,
@@ -730,6 +739,36 @@ def test_repairs_multiple_wall_backed_stools_with_wall_normal_orientation(
         stool_bounds = stool.compute_world_bounds()
         assert stool_bounds is not None
         assert abs(stool_bounds[0][0] - wall_bounds[1][0] - 0.03) < 1e-7
+
+
+def test_wall_backed_targets_offer_small_move_from_just_outside_tolerance(
+    tmp_path: Path,
+) -> None:
+    chair = _object(
+        "guest_chair_0",
+        "guest_chair",
+        (-1.85, 0.0, 0.45),
+        (0.60, 0.65, 0.90),
+        yaw_deg=-90.0,
+    )
+    scene = _scene(
+        tmp_path,
+        chair,
+        text="A study with a guest chair against the side wall.",
+    )
+
+    targets = furniture_relation_repair._wall_backed_targets(
+        scene,
+        "guest_chair_0",
+        "west_wall",
+    )
+
+    assert targets
+    target_center, target_yaw = targets[0]
+    assert target_yaw == pytest.approx(-90.0)
+    # The current AABB gap is 0.275m, only 0.025m over the 0.25m contract
+    # threshold. Prefer the 0.23m in-tolerance pose over a 0.03m flush pose.
+    assert target_center[0] == pytest.approx(-1.895)
 
 
 def test_wall_backed_repair_uses_door_safe_lateral_pose(tmp_path: Path) -> None:
@@ -758,7 +797,6 @@ def test_wall_backed_repair_uses_door_safe_lateral_pose(tmp_path: Path) -> None:
     config = CriticConfig(
         enabled=True,
         metrics=("functional_dependency",),
-        constraint_mode="contract",
     )
 
     fixes = improve_furniture_relations(scene, config=config)
@@ -821,7 +859,6 @@ def test_wall_backed_repair_keeps_nearby_required_relation(tmp_path: Path) -> No
     config = CriticConfig(
         enabled=True,
         metrics=("functional_dependency",),
-        constraint_mode="contract",
     )
 
     fixes = improve_furniture_relations(scene, config=config)
@@ -857,7 +894,6 @@ def test_freestanding_television_repair_restores_media_support(tmp_path: Path) -
     config = CriticConfig(
         enabled=True,
         metrics=("functional_dependency",),
-        constraint_mode="contract",
     )
 
     before = next(
@@ -944,10 +980,9 @@ def test_implicit_media_support_failure_is_not_repaired_or_hard_gated(
     config = CriticConfig(
         enabled=True,
         metrics=("functional_dependency",),
-        constraint_mode="contract",
     )
     payload = {
-        "case_pack": {"intent_contract_mode": "contract", "checks": []},
+        "case_pack": {"checks": []},
         "results": [
             {
                 "check_id": "fd_television_0_tv_stand_0_object_on_support",
@@ -966,397 +1001,33 @@ def test_implicit_media_support_failure_is_not_repaired_or_hard_gated(
     assert improve_furniture_relations(scene, config=config) == []
 
 
-def test_prompt_facing_guest_chairs_override_cached_orientation_contracts(
-    tmp_path: Path,
+def test_hard_furniture_inventory_contract_is_stage_gated(
+    tmp_path: Path, monkeypatch
 ) -> None:
-    desk = _object(
-        "study_desk_0",
-        "study_desk",
-        (0.0, 1.79, 0.4),
-        (1.46, 0.8, 0.8),
-        yaw_deg=180.0,
-    )
-    chair_positions = ((2.05, 0.5), (2.05, -0.5))
-    chairs = [
-        _object(
-            f"guest_chair_{index}",
-            "guest_chair",
-            (position[0], position[1], 0.45),
-            (0.55, 0.66, 0.9),
-            yaw_deg=_facing_yaw(position, (0.0, 1.79)),
-        )
-        for index, position in enumerate(chair_positions)
-    ]
-    scene = _scene(
-        tmp_path,
-        desk,
-        *chairs,
-        text="A study with a desk and two guest chairs.",
-    )
+    scene = _scene(tmp_path, text="An office with two office chairs.")
     config = CriticConfig(enabled=True, metrics=("functional_dependency",))
-
-    initial_payload = evaluate_room_scene(
-        scene, config=config, stage="before_prompt_face"
-    )
-    initial_contracts = {
-        check.get("subject_id"): check
-        for check in initial_payload["case_pack"]["checks"]
-        if check.get("check_source") == "scenesmith_orientation_contract"
+    failure = {
+        "check_id": "intent_required_office_chair",
+        "label": "fail",
+        "contract_state": "failed",
+        "scoring_tier": "core",
+        "relation_type": "required_count",
+        "primary_object": "office_chair",
+        "evidence": {
+            "intent_constraint": {
+                "relation": "required_count",
+                "stage": "furniture",
+                "strength": "hard",
+            }
+        },
     }
-    assert (
-        initial_contracts["guest_chair_0"]["relation_type"] == "seating_to_work_surface"
+    monkeypatch.setattr(
+        furniture_relation_repair,
+        "_evaluate",
+        lambda *_args, **_kwargs: {"case_pack": {}, "results": [failure]},
     )
 
-    scene.text_description = (
-        "A study with a desk centered against the back wall and two guest chairs "
-        "against the side wall facing the desk."
-    )
-    payload = evaluate_room_scene(scene, config=config, stage="after_prompt_face")
-    contracts = {
-        check.get("subject_id"): check
-        for check in payload["case_pack"]["checks"]
-        if check.get("check_source") == "scenesmith_orientation_contract"
-    }
-    expected_ids = {str(chair.object_id) for chair in chairs}
-    assert expected_ids <= contracts.keys()
-    for chair_id in expected_ids:
-        assert contracts[chair_id]["relation_type"] == "furniture_faces_furniture"
-        assert contracts[chair_id]["target_ids"] == ["study_desk_0"]
-
-    result_by_check = {result["check_id"]: result for result in payload["results"]}
-    contract_results = [
-        result_by_check[contracts[chair_id]["check_id"]] for chair_id in expected_ids
-    ]
-    assert {result["label"] for result in contract_results} == {"pass"}
-    assert all("angle 0deg" in result["reason"] for result in contract_results)
-
-    context = format_agent_prompt_context(payload, agent_type=AgentType.FURNITURE)
-    assert context.count("result=pass") >= 2
-    assert "A deterministic `result=pass` is authoritative" in context
-    assert "`guest_chair_0`: `furniture_faces_furniture` -> `study_desk_0`" in context
-
-
-def test_prompt_wall_backed_guest_chairs_stay_free_of_study_desk(
-    tmp_path: Path,
-) -> None:
-    desk = _object(
-        "study_desk_0",
-        "study_desk",
-        (0.0, 1.79, 0.4),
-        (1.46, 0.8, 0.8),
-        yaw_deg=180.0,
-    )
-    office_chair = _object(
-        "office_chair_0",
-        "office_chair",
-        (0.0, 0.915, 0.45),
-        (0.6, 0.6, 0.9),
-        yaw_deg=0.0,
-    )
-    guest_positions = ((1.35, 0.55), (1.35, -0.55))
-    guests = [
-        _object(
-            f"guest_chair_{index}",
-            "guest_chair",
-            (position[0], position[1], 0.45),
-            (0.55, 0.66, 0.9),
-            yaw_deg=_facing_yaw(position, (0.0, 1.79)),
-        )
-        for index, position in enumerate(guest_positions)
-    ]
-    scene = _scene(
-        tmp_path,
-        desk,
-        office_chair,
-        *guests,
-        text=(
-            "A study with a desk centered against the back wall, an office chair "
-            "tucked under the desk, and two guest chairs against the side wall "
-            "with their usable fronts perpendicular to the wall and facing into "
-            "the room."
-        ),
-    )
-    config = CriticConfig(enabled=True, metrics=("functional_dependency",))
-
-    payload = evaluate_room_scene(scene, config=config, stage="prompt_wall_backed")
-    contracts = {
-        check.get("subject_id"): check
-        for check in payload["case_pack"]["checks"]
-        if check.get("check_source") == "scenesmith_orientation_contract"
-    }
-    guest_ids = {str(guest.object_id) for guest in guests}
-
-    assert contracts["office_chair_0"]["relation_type"] == "seating_to_work_surface"
-    assert contracts["office_chair_0"]["target_ids"] == ["study_desk_0"]
-    for guest_id in guest_ids:
-        contract = contracts[guest_id]
-        assert contract["relation_type"] == "back_against_wall"
-        assert contract["target_ids"] == ["east_wall"]
-        assert contract["evidence"]["prompt_explicit_wall"] is True
-    assert not any(
-        check.get("subject_id") in guest_ids
-        and check.get("relation_type")
-        in {"seating_to_work_surface", "furniture_faces_furniture"}
-        and "study_desk_0" in {str(item) for item in check.get("target_ids") or []}
-        for check in payload["case_pack"]["checks"]
-    )
-
-    fixes = improve_furniture_relations(scene, config=config)
-    assert guest_ids <= {fix.object_id for fix in fixes}
-    assert {fix.relation_type for fix in fixes if fix.object_id in guest_ids} == {
-        "back_against_wall"
-    }
-
-    east_wall = next(
-        wall for wall in scene.room_geometry.walls if str(wall.object_id) == "east_wall"
-    )
-    east_bounds = east_wall.compute_world_bounds()
-    assert east_bounds is not None
-    for guest in guests:
-        front = guest.transform.rotation().matrix() @ np.array([0.0, 1.0, 0.0])
-        np.testing.assert_allclose(front[:2], [-1.0, 0.0], atol=1e-7)
-        guest_bounds = guest.compute_world_bounds()
-        assert guest_bounds is not None
-        assert abs(east_bounds[0][0] - guest_bounds[1][0] - 0.03) < 1e-7
-
-    repaired_payload = evaluate_room_scene(
-        scene, config=config, stage="prompt_wall_backed_repaired"
-    )
-    result_by_check = {
-        result["check_id"]: result for result in repaired_payload["results"]
-    }
-    repaired_contracts = {
-        check.get("subject_id"): check
-        for check in repaired_payload["case_pack"]["checks"]
-        if check.get("check_source") == "scenesmith_orientation_contract"
-    }
-    assert {
-        result_by_check[repaired_contracts[guest_id]["check_id"]]["label"]
-        for guest_id in guest_ids
-    } == {"pass"}
-    assert repaired_contracts["office_chair_0"]["target_ids"] == ["study_desk_0"]
-
-
-def test_back_wall_sofa_uses_adjacent_wall_not_coffee_table_wall(
-    tmp_path: Path,
-) -> None:
-    sofa = _object("sofa_0", "sofa", (0.0, -1.5, 0.4), (2.2, 0.9, 0.8), yaw_deg=0.0)
-    tv_stand = _object(
-        "tv_stand_0", "tv_stand", (0.0, 1.65, 0.5), (1.7, 0.45, 1.0), yaw_deg=180.0
-    )
-    coffee_table = _object(
-        "coffee_table_0", "coffee_table", (0.0, 0.1, 0.25), (1.2, 0.7, 0.5)
-    )
-    scene = _scene(
-        tmp_path,
-        sofa,
-        tv_stand,
-        coffee_table,
-        text=(
-            "A living room with a sofa against the back wall facing a TV stand "
-            "on the opposite wall, and a coffee table between them."
-        ),
-    )
-    config = CriticConfig(enabled=True, metrics=("functional_dependency",))
-
-    payload = evaluate_room_scene(scene, config=config, stage="back_wall_sofa")
-    contract = next(
-        check
-        for check in payload["case_pack"]["checks"]
-        if check.get("check_source") == "scenesmith_orientation_contract"
-        and check.get("subject_id") == "sofa_0"
-    )
-    results_by_id = {result["check_id"]: result for result in payload["results"]}
-
-    assert contract["relation_type"] == "back_against_wall"
-    assert contract["target_ids"] == ["south_wall"]
-    assert results_by_id[contract["check_id"]]["label"] == "pass"
-
-
-def test_later_stage_brief_overrides_earlier_guest_desk_facing(tmp_path: Path) -> None:
-    desk = _object(
-        "study_desk_0",
-        "study_desk",
-        (0.0, 1.79, 0.4),
-        (1.46, 0.8, 0.8),
-        yaw_deg=180.0,
-    )
-    guests = [
-        _object(
-            f"guest_chair_{index}",
-            "guest_chair",
-            (1.9, y, 0.45),
-            (0.55, 0.66, 0.9),
-            yaw_deg=_facing_yaw((1.9, y), (0.0, 1.79)),
-        )
-        for index, y in enumerate((0.5, -0.5))
-    ]
-    scene = _scene(
-        tmp_path,
-        desk,
-        *guests,
-        text=(
-            "A study with two guest chairs against the side wall facing the desk.\n\n"
-            "=== SceneExpert Stage Brief: furniture ===\n"
-            "Place the two guest chairs against a side wall, oriented with their "
-            "fronts facing into the room. Verify both guest chairs are against a "
-            "side wall and facing inward."
-        ),
-    )
-    config = CriticConfig(enabled=True, metrics=("functional_dependency",))
-
-    payload = evaluate_room_scene(scene, config=config, stage="later_inward_brief")
-    contracts = {
-        check.get("subject_id"): check
-        for check in payload["case_pack"]["checks"]
-        if check.get("check_source") == "scenesmith_orientation_contract"
-    }
-    for guest in guests:
-        contract = contracts[str(guest.object_id)]
-        assert contract["relation_type"] == "back_against_wall"
-        assert contract["target_ids"] == ["east_wall"]
-
-    fixes = improve_furniture_relations(scene, config=config)
-
-    assert {fix.object_id for fix in fixes} == {
-        "guest_chair_0",
-        "guest_chair_1",
-    }
-    for guest in guests:
-        front = guest.transform.rotation().matrix() @ np.array([0.0, 1.0, 0.0])
-        np.testing.assert_allclose(front[:2], [-1.0, 0.0], atol=1e-7)
-
-
-def test_repairs_study_as_coordinated_opposite_wall_layout(tmp_path: Path) -> None:
-    desk = _object("desk_0", "desk", (-1.0, -1.45, 0.4), (1.4, 0.8, 0.8), yaw_deg=90.0)
-    office_chair = _object(
-        "office_chair_0",
-        "office_chair",
-        (-1.9, -1.7, 0.45),
-        (0.6, 0.62, 0.9),
-        yaw_deg=-78.0,
-    )
-    guests = [
-        _object(
-            f"guest_chair_{index}",
-            "guest_chair",
-            (-2.0, -0.9 + 0.9 * index, 0.4),
-            (0.55, 0.72, 0.8),
-            yaw_deg=yaw,
-        )
-        for index, yaw in enumerate((-90.0, -145.0))
-    ]
-    bookshelf = _object(
-        "bookshelf_0",
-        "bookshelf",
-        (-2.15, 0.0, 1.0),
-        (1.0, 0.5, 2.0),
-        yaw_deg=-90.0,
-    )
-    scene = _scene(
-        tmp_path,
-        desk,
-        office_chair,
-        *guests,
-        bookshelf,
-        text=(
-            "A study with a desk centered against the back wall, an office chair "
-            "tucked under the desk, two guest chairs against the side wall with "
-            "their usable fronts perpendicular to the wall and facing into the "
-            "room, and a bookshelf on the adjacent wall."
-        ),
-    )
-    config = CriticConfig(
-        enabled=True,
-        metrics=("functional_dependency",),
-        # This test preserves the historical coordinated-wall repair. Contract
-        # mode intentionally suppresses this scene-specific legacy extension.
-        constraint_mode="legacy",
-    )
-
-    before = evaluate_room_scene(scene, config=config, stage="study_before")
-    before_result = next(
-        result
-        for result in before["results"]
-        if result.get("relation_type") == "study_furniture_layout"
-    )
-    assert before_result["label"] == "fail"
-
-    fixes = improve_furniture_relations(scene, config=config)
-
-    group_ids = {
-        "desk_0",
-        "office_chair_0",
-        "guest_chair_0",
-        "guest_chair_1",
-        "bookshelf_0",
-    }
-    assert group_ids <= {fix.object_id for fix in fixes}
-    assert desk.transform.translation()[1] > 1.0
-    assert abs(desk.transform.translation()[0]) < 1e-7
-    assert bookshelf.transform.translation()[0] < -1.5
-    for guest in guests:
-        assert guest.transform.translation()[0] > 1.5
-        front = guest.transform.rotation().matrix() @ np.array([0.0, 1.0, 0.0])
-        np.testing.assert_allclose(front[:2], [-1.0, 0.0], atol=1e-7)
-
-    after = evaluate_room_scene(scene, config=config, stage="study_after")
-    after_result = next(
-        result
-        for result in after["results"]
-        if result.get("relation_type") == "study_furniture_layout"
-    )
-    assert after_result["label"] == "pass"
-
-
-def test_prompt_guest_facing_does_not_apply_to_earlier_office_chair(
-    tmp_path: Path,
-) -> None:
-    desk = _object("study_desk_0", "study_desk", (0.0, 1.79, 0.4), (1.46, 0.8, 0.8))
-    office_chair = _object(
-        "office_chair_0",
-        "office_chair",
-        (0.0, 1.15, 0.45),
-        (0.6, 0.6, 0.9),
-        yaw_deg=_facing_yaw((0.0, 1.15), (0.0, 1.79)),
-    )
-    guests = [
-        _object(
-            f"guest_chair_{index}",
-            "guest_chair",
-            (1.95, y, 0.45),
-            (0.55, 0.66, 0.9),
-            yaw_deg=_facing_yaw((1.95, y), (0.0, 1.79)),
-        )
-        for index, y in enumerate((0.5, -0.5))
-    ]
-    scene = _scene(
-        tmp_path,
-        desk,
-        office_chair,
-        *guests,
-        text=(
-            "A study with a desk centered against the back wall, an office chair "
-            "tucked under the desk, a computer monitor on the desk, two guest "
-            "chairs against the side wall facing the desk."
-        ),
-    )
-
-    payload = evaluate_room_scene(
-        scene,
-        config=CriticConfig(enabled=True, metrics=("functional_dependency",)),
-        stage="role_scoped_prompt_face",
-    )
-    contracts = {
-        check.get("subject_id"): check
-        for check in payload["case_pack"]["checks"]
-        if check.get("check_source") == "scenesmith_orientation_contract"
-    }
-
-    assert contracts["office_chair_0"]["relation_type"] == "seating_to_work_surface"
-    assert {contracts[str(guest.object_id)]["relation_type"] for guest in guests} == {
-        "furniture_faces_furniture"
-    }
+    assert unresolved_furniture_relation_failures(scene, config=config) == [failure]
 
 
 def test_repairs_work_seat_to_in_room_side_when_other_side_is_outside(
@@ -2113,7 +1784,6 @@ def test_repairs_explicit_front_alignment_without_moving_centered_rug(
     config = CriticConfig(
         enabled=True,
         metrics=("functional_dependency",),
-        constraint_mode="contract",
     )
 
     before = evaluate_room_scene(scene, config=config, stage="front_alignment_before")
@@ -2140,6 +1810,103 @@ def test_repairs_explicit_front_alignment_without_moving_centered_rug(
     }
     assert results["front_axis_alignment"]["label"] == "pass"
     assert results["back_against_wall"]["label"] == "pass"
+
+
+def test_front_alignment_moves_explicit_near_dependents_with_sofa(
+    tmp_path: Path,
+) -> None:
+    sofa = _object(
+        "sofa_0",
+        "sofa",
+        (-1.57, -1.445, 0.38),
+        (1.7, 0.95, 0.76),
+        yaw_deg=0.0,
+    )
+    rug = _object("rug_0", "rug", (0.0, 0.0, 0.015), (1.8, 1.8, 0.03))
+    plants = [
+        _object("plant_0", "plant", (-1.9, 0.8, 0.45), (0.6, 0.6, 0.9)),
+        _object("plant_1", "plant", (-2.14, 1.52, 0.45), (0.6, 0.6, 0.9)),
+    ]
+    scene = _scene(
+        tmp_path,
+        sofa,
+        rug,
+        *plants,
+        text=(
+            "A living room with a two-seater sofa against the wall, a square rug "
+            "in the middle in front of the sofa, and two large plants near the sofa."
+        ),
+    )
+    scene.room_type = "living_room"
+    scene.scenebenchmark_intent_contract = {
+        "schema_version": SCHEMA_VERSION,
+        "prompt_sha256": hashlib.sha256(
+            " ".join(scene.text_description.split()).encode("utf-8")
+        ).hexdigest(),
+        "constraints": [
+            {
+                "constraint_id": "sofa_wall",
+                "relation": "against_wall",
+                "subjects": {"category": "sofa", "count": 1},
+                "targets": {"category": "wall"},
+                "source": "explicit_prompt",
+                "strength": "hard",
+            },
+            {
+                "constraint_id": "rug_center",
+                "relation": "centered_in_room",
+                "subjects": {"category": "rug", "count": 1},
+                "targets": {"category": "room"},
+                "source": "explicit_prompt",
+                "strength": "hard",
+            },
+            {
+                "constraint_id": "rug_front",
+                "relation": "in_front_of",
+                "subjects": {"category": "rug", "count": 1},
+                "targets": {"category": "sofa", "count": 1},
+                "source": "explicit_prompt",
+                "strength": "hard",
+            },
+            {
+                "constraint_id": "plants_near_sofa",
+                "relation": "near",
+                "subjects": {"category": "plant", "count": 2},
+                "targets": {"category": "sofa", "count": 1},
+                "source": "explicit_prompt",
+                "strength": "hard",
+            },
+        ],
+    }
+    config = CriticConfig(enabled=True, metrics=("functional_dependency",))
+
+    before = evaluate_room_scene(scene, config=config, stage="near_group_before")
+    assert any(
+        item.get("relation_type") == "front_axis_alignment"
+        and item.get("label") == "fail"
+        for item in before["results"]
+    )
+
+    fixes = improve_furniture_relations(scene, config=config)
+
+    assert {fix.object_id for fix in fixes} == {"sofa_0", "plant_0", "plant_1"}
+    assert {fix.relation_type for fix in fixes} == {"front_axis_alignment"}
+    np.testing.assert_allclose(sofa.transform.translation()[:2], [0.0, -1.445])
+    np.testing.assert_allclose(rug.transform.translation()[:2], [0.0, 0.0])
+
+    after = evaluate_room_scene(scene, config=config, stage="near_group_after")
+    hard_results = [
+        item
+        for item in after["results"]
+        if item.get("relation_type")
+        in {"back_against_wall", "front_axis_alignment", "generic_near_relation"}
+        or (
+            (item.get("evidence") or {}).get("intent_constraint", {}).get("relation")
+            == "centered_in_room"
+        )
+    ]
+    assert hard_results
+    assert {item["label"] for item in hard_results} == {"pass"}
 
 
 def test_front_alignment_does_not_reintroduce_door_sweep_blockage(
@@ -2214,7 +1981,6 @@ def test_front_alignment_does_not_reintroduce_door_sweep_blockage(
     config = CriticConfig(
         enabled=True,
         metrics=("functional_dependency", "interaction_clearance"),
-        constraint_mode="contract",
     )
 
     before = evaluate_room_scene(scene, config=config, stage="door_safe_before")
@@ -2265,7 +2031,6 @@ def test_repairs_two_anchor_living_room_group(tmp_path: Path) -> None:
     config = CriticConfig(
         enabled=True,
         metrics=("functional_dependency",),
-        constraint_mode="contract",
     )
 
     before = evaluate_room_scene(scene, config=config, stage="living_group_before")
@@ -2342,7 +2107,6 @@ def test_centered_anchor_repair_preserves_passing_flanking_clearance(
     config = CriticConfig(
         enabled=True,
         metrics=("functional_dependency",),
-        constraint_mode="contract",
     )
 
     before = evaluate_room_scene(scene, config=config, stage="group_clearance_before")
@@ -2378,3 +2142,131 @@ def test_centered_anchor_repair_preserves_passing_flanking_clearance(
         for item in after["results"]
         if item.get("relation_type") in {"centered_between_alignment", "flanking"}
     } == {"centered_between_alignment": "pass", "flanking": "pass"}
+
+
+def test_repairs_paired_workstation_aisle_without_moving_other_furniture(
+    tmp_path: Path,
+) -> None:
+    first = _object("desk_0", "desk", (0.0, -0.65, 0.4), (1.2, 0.6, 0.8))
+    second = _object("desk_1", "desk", (0.0, 0.65, 0.4), (1.2, 0.6, 0.8))
+    scene = _scene(
+        tmp_path,
+        first,
+        second,
+        text="An office has two desks with a clear walking path between the workstations.",
+    )
+    scene.room_type = "office"
+    scene.scene_expert_original_description = scene.text_description
+    scene.scene_expert_task_spec = {
+        "compiler_status": "ok",
+        "required_large_objects": ["desk", "desk"],
+        "intent_constraints": [
+            {
+                "relation": "clear_access",
+                "subjects": {"category": "desk", "count": 2},
+                "targets": {"category": "desk", "count": 2},
+                "source": "explicit_prompt",
+                "evidence_span": "clear walking path between the workstations",
+            }
+        ],
+    }
+    config = CriticConfig(enabled=True, metrics=("functional_dependency",))
+
+    before = evaluate_room_scene(
+        scene, config=config, stage="furniture_relation_repair"
+    )
+    before_clear_access = next(
+        item
+        for item in before["results"]
+        if item.get("relation_type") == "clear_access"
+        and item.get("diagnostics", {}).get("evaluation_mode") == "between_workstations"
+    )
+    assert before_clear_access["label"] == "fail"
+    assert before_clear_access["diagnostics"]["free_depth_m"] == pytest.approx(0.7)
+
+    fixes = improve_furniture_relations(scene, config=config)
+
+    assert {fix.object_id for fix in fixes} == {"desk_0", "desk_1"}
+    assert {fix.relation_type for fix in fixes} == {"clear_access"}
+    after = evaluate_room_scene(scene, config=config, stage="furniture_relation_repair")
+    after_clear_access = next(
+        item
+        for item in after["results"]
+        if item.get("relation_type") == "clear_access"
+        and item.get("diagnostics", {}).get("evaluation_mode") == "between_workstations"
+    )
+    assert after_clear_access["label"] == "pass"
+    assert after_clear_access["diagnostics"]["free_depth_m"] >= 0.8
+
+
+def test_repairs_work_seats_blocking_a_paired_workstation_aisle(
+    tmp_path: Path,
+) -> None:
+    first = _object("desk_0", "desk", (0.0, -1.0, 0.4), (1.2, 0.6, 0.8))
+    second = _object("desk_1", "desk", (0.0, 1.0, 0.4), (1.2, 0.6, 0.8))
+    first_chair = _object(
+        "office_chair_0", "office_chair", (0.0, -0.45, 0.45), (0.6, 0.6, 0.9)
+    )
+    second_chair = _object(
+        "office_chair_1", "office_chair", (0.0, 0.45, 0.45), (0.6, 0.6, 0.9)
+    )
+    scene = _scene(
+        tmp_path,
+        first,
+        second,
+        first_chair,
+        second_chair,
+        text="An office has two desks with a clear walking path between the workstations.",
+    )
+    scene.room_type = "office"
+    scene.scene_expert_original_description = scene.text_description
+    scene.scene_expert_task_spec = {
+        "compiler_status": "ok",
+        "required_large_objects": ["desk", "desk"],
+        "intent_constraints": [
+            {
+                "relation": "clear_access",
+                "subjects": {"category": "desk", "count": 2},
+                "targets": {"category": "desk", "count": 2},
+                "source": "explicit_prompt",
+                "evidence_span": "clear walking path between the workstations",
+            }
+        ],
+    }
+    config = CriticConfig(enabled=True, metrics=("functional_dependency",))
+
+    before = evaluate_room_scene(
+        scene, config=config, stage="furniture_relation_repair"
+    )
+    before_clear_access = next(
+        item
+        for item in before["results"]
+        if item.get("relation_type") == "clear_access"
+        and item.get("diagnostics", {}).get("evaluation_mode") == "between_workstations"
+    )
+    assert before_clear_access["diagnostics"]["blocking_ids"] == [
+        "office_chair_0",
+        "office_chair_1",
+    ]
+
+    fixes = improve_furniture_relations(scene, config=config)
+
+    assert {fix.object_id for fix in fixes} == {
+        "desk_0",
+        "desk_1",
+        "office_chair_0",
+        "office_chair_1",
+    }
+    assert float(first.transform.translation()[1]) > -1.0
+    assert float(second.transform.translation()[1]) < 1.0
+    assert float(first_chair.transform.translation()[1]) < -1.0
+    assert float(second_chair.transform.translation()[1]) > 1.0
+    after = evaluate_room_scene(scene, config=config, stage="furniture_relation_repair")
+    after_clear_access = next(
+        item
+        for item in after["results"]
+        if item.get("relation_type") == "clear_access"
+        and item.get("diagnostics", {}).get("evaluation_mode") == "between_workstations"
+    )
+    assert after_clear_access["label"] == "pass"
+    assert after_clear_access["diagnostics"]["blocking_ids"] == []

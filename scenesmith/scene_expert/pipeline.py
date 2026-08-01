@@ -261,6 +261,7 @@ class SceneExpertPipeline:
             from scenesmith.scene_expert.schemas import SceneTaskSpec
 
             task_spec = SceneTaskSpec(room_type="room", style="standard")
+        trace_logger.record_task_compiler(task_spec)
 
         # Determine stage range from config
         pipeline_cfg = cfg_dict.get("experiment", {}).get("pipeline", {})

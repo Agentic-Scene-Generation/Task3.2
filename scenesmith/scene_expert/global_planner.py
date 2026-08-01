@@ -75,6 +75,10 @@ Guidelines:
   facing relations are authoritative. Memory and current-scene observations may
   refine only non-conflicting details. Omit a suggestion instead of replacing an
   explicit user relation with a design convention.
+- The Task Specification owns objects by stage. Its "Required objects for this
+  stage" inventory is closed: never create, move, or reinterpret an object
+  assigned to another stage. When that inventory is empty, emit an observation-
+  only brief with no object-placement instruction.
 - Keep constraints_for_designer to 3-6 items max. More is not better.
 - The designer will read this brief directly — write for it, not for humans.
 - Output ONLY the JSON object, no other text.
@@ -105,6 +109,19 @@ def _format_memory_for_prompt(memory_pack: MemoryPack) -> str:
     return "\n".join(parts) if parts else "No relevant memory retrieved for this stage."
 
 
+def _stage_required_objects(task_spec: SceneTaskSpec, stage: str) -> list[str]:
+    """Return the TaskCompiler-owned inventory for one pipeline stage."""
+    return list(
+        {
+            "floor_plan": task_spec.required_large_objects,
+            "furniture": task_spec.required_large_objects,
+            "wall_mounted": task_spec.required_wall_objects,
+            "ceiling_mounted": task_spec.required_ceiling_objects,
+            "manipuland": task_spec.required_small_objects,
+        }.get(stage, [])
+    )
+
+
 def _format_task_spec(task_spec: SceneTaskSpec, stage: str) -> str:
     """Format task spec focusing on stage-relevant requirements."""
     lines = [
@@ -112,16 +129,17 @@ def _format_task_spec(task_spec: SceneTaskSpec, stage: str) -> str:
         f"Style: {task_spec.style}",
     ]
 
-    stage_objects = {
-        "floor_plan": task_spec.required_large_objects,
-        "furniture": task_spec.required_large_objects,
-        "wall_mounted": task_spec.required_wall_objects,
-        "ceiling_mounted": task_spec.required_ceiling_objects,
-        "manipuland": task_spec.required_small_objects,
-    }
-    required = stage_objects.get(stage, [])
+    required = _stage_required_objects(task_spec, stage)
     if required:
         lines.append(f"Required objects for this stage: {', '.join(required)}")
+    else:
+        lines.extend(
+            (
+                "Required objects for this stage: none.",
+                "Stage ownership: do not create, move, or reinterpret objects "
+                "assigned to another stage.",
+            )
+        )
 
     if task_spec.functional_zones:
         lines.append(f"Functional zones: {', '.join(task_spec.functional_zones)}")
@@ -189,6 +207,16 @@ class GlobalPlanner:
         """
         stage = context.stage
         console_logger.info(f"GlobalPlanner: generating StageBrief for stage '{stage}'")
+
+        # Empty inventories must be a true no-op.  Letting an LLM read the
+        # original prompt here can otherwise recreate a manipuland or furniture
+        # object in the wall stage, contradicting the compiled contract.
+        if not _stage_required_objects(context.task_spec, stage):
+            console_logger.info(
+                "GlobalPlanner: %s has no TaskCompiler-owned objects; using no-op brief",
+                stage,
+            )
+            return self._fallback_brief(context)
 
         user_message = self._build_user_message(
             context,
@@ -300,30 +328,37 @@ class GlobalPlanner:
     def _fallback_brief(self, context: HarnessContext) -> StageBrief:
         """Minimal safe StageBrief used when the model call fails."""
         stage = context.stage
-        required = {
-            "floor_plan": context.task_spec.required_large_objects,
-            "furniture": context.task_spec.required_large_objects,
-            "wall_mounted": context.task_spec.required_wall_objects,
-            "ceiling_mounted": context.task_spec.required_ceiling_objects,
-            "manipuland": context.task_spec.required_small_objects,
-        }.get(stage, [])
+        required = _stage_required_objects(context.task_spec, stage)
 
         constraints = []
         if required:
             constraints.append(
                 f"Ensure these objects are present: {', '.join(required)}"
             )
-        constraints.append(f"Follow {context.task_spec.style} aesthetic style")
-        constraints.append("Maintain clear walking paths and avoid overcrowding")
+            constraints.append(f"Follow {context.task_spec.style} aesthetic style")
+            constraints.append("Maintain clear walking paths and avoid overcrowding")
+        else:
+            constraints.append(
+                "No objects are allocated to this stage; do not create, move, or "
+                "reinterpret objects owned by another stage."
+            )
 
         return StageBrief(
             stage=stage,
-            stage_objective=f"Complete the {stage} stage for a {context.task_spec.room_type}",
+            stage_objective=(
+                f"Complete the {stage} stage for a {context.task_spec.room_type}"
+                if required
+                else f"Preserve the existing scene during the empty {stage} stage"
+            ),
             recommended_skills=[],
             constraints_for_designer=constraints,
             checks_for_critic=[
-                "Verify all required objects are present",
-                "Check for collisions",
+                (
+                    "Verify all required objects are present"
+                    if required
+                    else "Verify no cross-stage object was created or moved"
+                ),
+                "Check for collisions" if required else "Preserve existing geometry",
             ],
             failure_patterns_to_avoid=[],
         )

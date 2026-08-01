@@ -78,7 +78,6 @@ from scenesmith.scenebenchmark_critic.config import critic_config_from_any
 from scenesmith.scenebenchmark_critic.furniture_relation_repair import (
     improve_furniture_relations,
 )
-from scenesmith.scenebenchmark_critic.intent_contract import constraint_mode
 from scenesmith.utils.logging import BaseLogger
 
 console_logger = logging.getLogger(__name__)
@@ -391,6 +390,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             scene.text_description,
         )
         self._configure_furniture_safety_for_scene(safety_description)
+        self._synchronize_task_required_counts()
         self._placement_order_reference = build_furniture_placement_order_reference(
             cfg=self.cfg,
             scene_prompt=safety_description,
@@ -585,9 +585,8 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         The planner auto-scores the result immediately after this method returns.
         Performing an eligible deterministic repair here therefore prevents the
         first critic render from observing a known-bad, but otherwise complete,
-        LLM layout.  This remains deliberately inactive for legacy/shadow
-        rollout: only hard constraints compiled from the immutable prompt may
-        move furniture before that first critique.
+        LLM layout. Only hard constraints compiled from the immutable prompt
+        may move furniture before that first critique.
         """
         result = await super()._request_initial_design_impl()
         self._repair_initial_contract_layout()
@@ -599,13 +598,11 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         Both repair mechanisms are geometry-only and retain their own
         whole-scene acceptance/rollback checks.  In particular, this does not
         ask an LLM or VLM to infer a pose, and it never activates from a
-        StageBrief, current layout, or legacy prompt heuristic.
+        StageBrief or the current layout.
         """
         critic_config = critic_config_from_any(self.cfg)
-        if (
-            not critic_config.enabled
-            or not critic_config.metric_enabled("functional_dependency")
-            or constraint_mode(critic_config) != "contract"
+        if not critic_config.enabled or not critic_config.metric_enabled(
+            "functional_dependency"
         ):
             return []
 
@@ -720,11 +717,13 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         console_logger.info("Deterministic furniture %s", repair_plan.to_log_text())
 
         required_counts = self._repair_required_counts()
+        inventory_changed = False
         for category in required_counts:
             if not self._category_matches_missing_reason(category, reasons):
                 continue
             added = self._ensure_required_furniture_asset(category)
             if added:
+                inventory_changed = True
                 actions.append(
                     f"added {added} missing {category} asset(s) from local/HSSD bank"
                 )
@@ -732,6 +731,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         if "geometry construction failed" in reasons:
             replaced = self._replace_geometry_failed_furniture_assets(reasons)
             if replaced:
+                inventory_changed = True
                 actions.append(
                     f"replaced {replaced} geometry-failed furniture asset(s)"
                 )
@@ -753,6 +753,8 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 actions.append(
                     f"removed {removed_excess} duplicate prompt-required furniture asset(s)"
                 )
+            if inventory_changed:
+                actions.extend(self._repair_relations_after_inventory_change())
             return bool(actions), actions
 
         if self._anchor_existing_bed():
@@ -784,8 +786,39 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             actions.append(
                 f"removed {removed_excess} duplicate prompt-required furniture asset(s)"
             )
+        if inventory_changed:
+            actions.extend(self._repair_relations_after_inventory_change())
 
         return bool(actions), actions
+
+    def _repair_relations_after_inventory_change(self) -> list[str]:
+        """Bind newly added furniture into the prompt's hard relations."""
+        critic_config = critic_config_from_any(self.cfg)
+        if not critic_config.enabled or not critic_config.metric_enabled(
+            "functional_dependency"
+        ):
+            return []
+
+        relation_fixes = improve_furniture_relations(
+            self.scene,
+            config=critic_config,
+        )
+        seating_fixes = align_seating_to_nearest_surface(
+            self.scene,
+            allowed_targets_by_seat=seating_orientation_targets(
+                self.scene,
+                config=critic_config,
+            ),
+        )
+        actions = [
+            f"bound {fix.object_id} via {fix.relation_type} after inventory repair"
+            for fix in relation_fixes
+        ]
+        actions.extend(
+            f"aligned {fix.subject_id} toward {fix.target_id} after inventory repair"
+            for fix in seating_fixes
+        )
+        return actions
 
     def _remove_excess_required_furniture(self, required_counts: dict[str, int]) -> int:
         """Converge prompt-counted inventory after repair/fallback asset creation."""
@@ -1362,6 +1395,24 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             if specialized and counts.get(generic, 0) <= specialized:
                 counts.pop(generic, None)
         return counts
+
+    def _synchronize_task_required_counts(self) -> None:
+        """Make tool guards and deterministic repair share TaskCompiler counts."""
+        controller = getattr(self, "furniture_safety_controller", None)
+        if controller is None or not getattr(controller, "enabled", False):
+            return
+        counts = self._repair_required_counts()
+        if not counts:
+            return
+        controller.required_counts = counts
+        controller.required_terms.update(counts)
+        try:
+            self.stage_working_memory.set_required_counts(counts)
+        except Exception as exc:
+            console_logger.warning(
+                "Failed to synchronize TaskCompiler furniture requirements: %s",
+                exc,
+            )
 
     @staticmethod
     def _repair_category_for_task_label(value: Any) -> str:

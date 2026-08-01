@@ -107,6 +107,31 @@ class TestReachability(unittest.TestCase):
         self.assertAlmostEqual(result.reachability_ratio, 1.0)
         self.assertEqual(result.blocking_furniture_ids, [])
 
+    def test_explicit_centered_floor_defines_world_reachability_bounds(self):
+        """Reachability must use the floor pose instead of a positive-quadrant box."""
+        floor = SceneObject(
+            object_id=UniqueID("floor"),
+            object_type=ObjectType.FLOOR,
+            name="floor",
+            description="Centered floor",
+            transform=RigidTransform(),
+            bbox_min=np.array([-3.0, -2.0, -0.1]),
+            bbox_max=np.array([3.0, 2.0, 0.0]),
+        )
+        self.room_geometry.floor = floor
+        divider = self._create_furniture_object(
+            name="divider",
+            position=np.array([0.0, 0.0, 1.0]),
+            size=np.array([0.2, 4.0, 2.0]),
+        )
+        self.scene.add_object(divider)
+
+        result = compute_reachability(self.scene, self.robot_width)
+
+        self.assertFalse(result.is_fully_reachable)
+        self.assertEqual(result.num_disconnected_regions, 2)
+        self.assertEqual(result.blocking_furniture_ids, ["divider"])
+
     def test_furniture_along_walls_reachable(self):
         """Furniture along walls should leave room fully reachable."""
         # Add furniture along the walls (not blocking passages).

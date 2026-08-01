@@ -52,7 +52,16 @@ def fill_container_tool_impl(
     top_surface_overlap_tolerance: float,
     is_top_surface_fn: Callable[[str], bool],
     validate_footprint_fn: Callable[
-        [SupportSurface, Path | None, np.ndarray, float, float, float],
+        [
+            SupportSurface,
+            Path | None,
+            np.ndarray,
+            float,
+            float,
+            float,
+            np.ndarray | None,
+            np.ndarray | None,
+        ],
         tuple[bool, str | None],
     ],
 ) -> str:
@@ -378,6 +387,8 @@ def fill_container_tool_impl(
         rotation_degrees=rotation_degrees,
         allow_overlap_ratio=overlap_ratio,
         scale_factor=container_asset.scale_factor,
+        bounding_box_min=container_asset.bbox_min,
+        bounding_box_max=container_asset.bbox_max,
     )
     if not is_valid:
         console_logger.warning(

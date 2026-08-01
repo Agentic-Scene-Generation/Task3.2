@@ -51,7 +51,10 @@ from scenesmith.manipuland_agents.stateful_manipuland_agent import (
     StatefulManipulandAgent,
 )
 from scenesmith.scenebenchmark_critic.config import critic_config_from_any
-from scenesmith.scenebenchmark_critic.api import seating_orientation_targets
+from scenesmith.scenebenchmark_critic.api import (
+    seating_orientation_targets,
+    write_room_stage_report,
+)
 from scenesmith.scenebenchmark_critic.furniture_relation_repair import (
     improve_furniture_relations,
     unresolved_furniture_relation_failures,
@@ -91,6 +94,28 @@ STAGE_ASSET_DIRS = {
 
 _SCENE_STATUS_FILENAME = "scene_status.json"
 _SCENE_SUCCESS_MARKER = "_SUCCESS"
+
+
+def _write_final_critic_report(
+    scene: RoomScene, room_dir: Path, cfg_dict: dict
+) -> dict | None:
+    """Evaluate the immutable hard contract after final physics processing.
+
+    Intermediate critic calls drive the furniture, wall, and manipuland agents,
+    but they do not establish the final contract state after manipuland
+    projection/simulation.  Keep that final evaluation in the core generation
+    path so a completed replay always has an auditable final-state report.
+    """
+    critic_config = critic_config_from_any(cfg_dict)
+    if not critic_config.enabled or not critic_config.room_stage_enabled("final_scene"):
+        return None
+    return write_room_stage_report(
+        scene,
+        room_dir / "scenebenchmark_critic" / "final_scene",
+        config=critic_config,
+        stage="final_scene",
+        raw_config=cfg_dict,
+    )
 
 
 def _write_scene_status(
@@ -599,10 +624,7 @@ def _apply_final_furniture_guards(*, scene: RoomScene, cfg_dict: dict) -> None:
 def _apply_final_wall_functional_guards(*, scene: RoomScene, cfg_dict: dict) -> None:
     """Resolve contracts whose wall-mounted endpoint appears after furniture."""
     critic_config = critic_config_from_any(cfg_dict)
-    if (
-        not critic_config.enabled
-        or str(critic_config.constraint_mode).strip().lower() != "contract"
-    ):
+    if not critic_config.enabled:
         return
     fixes = improve_furniture_relations(
         scene,
@@ -1413,6 +1435,7 @@ def _generate_room(
     _export_scene_blend_file(
         scene=scene, scene_dir=room_dir, cfg_dict=cfg_dict, name="final_scene"
     )
+    _write_final_critic_report(scene, room_dir, cfg_dict)
     if scene_expert_hooks:
         scene_expert_hooks.post_stage("manipuland", scene, room_dir)
 

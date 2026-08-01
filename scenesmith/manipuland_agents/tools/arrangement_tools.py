@@ -142,7 +142,16 @@ def create_arrangement_impl(
     support_surfaces: dict[str, SupportSurface],
     generate_unique_id: Callable[[str], UniqueID],
     validate_footprint_fn: Callable[
-        [SupportSurface, Path | None, np.ndarray, float, float, float],
+        [
+            SupportSurface,
+            Path | None,
+            np.ndarray,
+            float,
+            float,
+            float,
+            np.ndarray | None,
+            np.ndarray | None,
+        ],
         tuple[bool, str | None],
     ],
     top_surface_overlap_tolerance: float,
@@ -381,6 +390,8 @@ def create_arrangement_impl(
         rotation_degrees,
         overlap_ratio,
         container_asset.scale_factor,
+        container_asset.bbox_min,
+        container_asset.bbox_max,
     )
     if not is_valid:
         console_logger.warning(

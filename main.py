@@ -19,8 +19,12 @@ from omegaconf.omegaconf import open_dict
 # avoid native symbol-order issues. multiprocessing spawn re-executes this file
 # as ``__mp_main__``; importing bpy there fails in the cluster environment
 # because the child bootstrap cannot resolve Blender's private ``_bpy`` module.
-# Scene workers use the external BlenderServer and do not need bpy in-process.
-if __name__ != "__mp_main__":
+# Parallel probes use the external BlenderServer, so they can explicitly skip
+# this import. On CCI it alone starts hundreds of native worker threads.
+skip_main_bpy_import = os.environ.get(
+    "SCENEEXPERT_SKIP_MAIN_BPY_IMPORT", ""
+).strip().lower() in {"1", "true", "yes", "on"}
+if __name__ != "__mp_main__" and not skip_main_bpy_import:
     import bpy  # noqa: F401
 
 # isort: on

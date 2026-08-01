@@ -16,9 +16,8 @@ def test_evaluate_room_scene_writes_timing_record(tmp_path, monkeypatch) -> None
     monkeypatch.setattr(
         api,
         "room_scene_to_case_pack",
-        lambda _scene, *, stage, metrics, intent_contract_mode: case_pack,
+        lambda _scene, *, stage, metrics: case_pack,
     )
-    monkeypatch.setattr(api, "constraint_mode", lambda _config: "contract")
 
     def _run_checks(_case_pack, *, config, timing):
         timing["run_case_pack_checks_sec"] = 0.001

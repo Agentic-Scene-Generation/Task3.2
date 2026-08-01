@@ -81,27 +81,20 @@ class TestFinalFurnitureRescore(unittest.TestCase):
         agent._request_critique_impl.assert_awaited_once_with(update_checkpoint=False)
         agent._finalize_scene_and_scores.assert_awaited_once_with()
 
-    def test_post_wall_contract_guard_is_noop_for_legacy_and_shadow(self):
+    def test_post_wall_contract_guard_is_noop_when_critic_disabled(self):
         module = "scenesmith.experiments.indoor_scene_generation"
-        for mode in ("legacy", "shadow"):
-            with self.subTest(mode=mode):
-                with (
-                    patch(
-                        f"{module}.critic_config_from_any",
-                        return_value=SimpleNamespace(
-                            enabled=True,
-                            constraint_mode=mode,
-                        ),
-                    ),
-                    patch(f"{module}.improve_furniture_relations") as improve,
-                    patch(
-                        f"{module}._raise_for_unresolved_furniture_relations"
-                    ) as validate,
-                ):
-                    _apply_final_wall_functional_guards(scene=object(), cfg_dict={})
+        with (
+            patch(
+                f"{module}.critic_config_from_any",
+                return_value=SimpleNamespace(enabled=False),
+            ),
+            patch(f"{module}.improve_furniture_relations") as improve,
+            patch(f"{module}._raise_for_unresolved_furniture_relations") as validate,
+        ):
+            _apply_final_wall_functional_guards(scene=object(), cfg_dict={})
 
-                improve.assert_not_called()
-                validate.assert_not_called()
+        improve.assert_not_called()
+        validate.assert_not_called()
 
     def test_post_wall_contract_guard_repairs_only_delayed_alignment(self):
         module = "scenesmith.experiments.indoor_scene_generation"
@@ -114,10 +107,7 @@ class TestFinalFurnitureRescore(unittest.TestCase):
         with (
             patch(
                 f"{module}.critic_config_from_any",
-                return_value=SimpleNamespace(
-                    enabled=True,
-                    constraint_mode="contract",
-                ),
+                return_value=SimpleNamespace(enabled=True),
             ),
             patch(
                 f"{module}.improve_furniture_relations",
@@ -172,6 +162,10 @@ class TestFinalFurnitureRescore(unittest.TestCase):
             patch(
                 f"{module}.critic_config_from_any",
                 return_value=SimpleNamespace(enabled=True),
+            ),
+            patch(
+                f"{module}.seating_orientation_targets",
+                return_value=None,
             ),
             patch(f"{module}._rescore_furniture_after_postprocessing", rescore),
         ):

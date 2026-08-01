@@ -23,7 +23,11 @@ from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.m
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.seat_surface_assignment import (
     is_dining_context,
 )
-from scenesmith.scenebenchmark_critic.intent_contract import contract_relation_requested
+from scenesmith.scenebenchmark_critic.intent_contract import (
+    bound_ids,
+    contract_constraints,
+    contract_relation_requested,
+)
 
 RELATION_TYPE = "dining_seat_distribution"
 _ONE_PER_EDGE_TABLE_GAP_M = 0.05
@@ -39,10 +43,7 @@ def evaluate_dining_seat_distribution(
         if isinstance(obj, dict) and obj.get("id")
     ]
     objects_by_id = {str(obj["id"]): obj for obj in objects}
-    contract_mode = str(case_pack.get("intent_contract_mode") or "legacy")
-    if contract_mode == "contract" and not contract_relation_requested(
-        case_pack, "one_per_side"
-    ):
+    if not contract_relation_requested(case_pack, "one_per_side"):
         # Dining chairs are not universally required to occupy every table
         # edge; only an explicit one-per-side request gives that topology a
         # hard semantic meaning.
@@ -51,12 +52,7 @@ def evaluate_dining_seat_distribution(
         task_instruction=str(case_pack.get("task_instruction") or ""),
         room_type=str(case_pack.get("room_type") or ""),
     )
-    one_per_edge = (
-        contract_relation_requested(case_pack, "one_per_side")
-        if contract_mode == "contract"
-        else dining_context
-        and _requests_one_seat_per_edge(str(case_pack.get("task_instruction") or ""))
-    )
+    one_per_edge = contract_relation_requested(case_pack, "one_per_side")
     tables = [
         obj
         for obj in objects
@@ -66,6 +62,11 @@ def evaluate_dining_seat_distribution(
     seats_by_table = _positionally_associated_seats(
         tables, objects_by_id, include_unassociated=one_per_edge
     )
+    constraints = contract_constraints(
+        case_pack,
+        relations=("one_per_side",),
+        include_auxiliary=False,
+    )
     results: list[dict[str, Any]] = []
     for table in tables:
         result = _evaluate_table(
@@ -74,6 +75,17 @@ def evaluate_dining_seat_distribution(
             enforce_one_per_edge=one_per_edge,
         )
         if result is not None:
+            table_id = str(table["id"])
+            constraint = next(
+                (
+                    row
+                    for row in constraints
+                    if table_id in bound_ids(row.get("targets"), objects)
+                ),
+                None,
+            )
+            if constraint is not None:
+                result["evidence"]["intent_constraint"] = constraint
             results.append(result)
     return results
 

@@ -20,10 +20,6 @@ from scenesmith.scenebenchmark_critic.adapter import (
     room_scene_to_case_pack,
 )
 from scenesmith.scenebenchmark_critic.config import CriticConfig, critic_config_from_any
-from scenesmith.scenebenchmark_critic.metrics.functional_dependency.orientation_contracts import (
-    stabilize_orientation_contracts,
-)
-from scenesmith.scenebenchmark_critic.intent_contract import constraint_mode
 from scenesmith.scenebenchmark_critic.intent_contract import (
     contract_seating_targets,
 )
@@ -132,19 +128,11 @@ def evaluate_room_scene(
             scene,
             stage=stage,
             metrics=list(critic_config.metrics),
-            intent_contract_mode=constraint_mode(critic_config),
         )
         timing_steps["case_pack_build_sec"] = round(time.perf_counter() - step_start, 6)
         step_start = time.perf_counter()
-        # The historical orientation contract remains available while
-        # shadowing legacy behavior, but contract mode only uses prompt targets.
-        if constraint_mode(critic_config) != "contract":
-            stabilize_orientation_contracts(
-                case_pack,
-                scene,
-                critic_config,
-                stage=stage,
-            )
+        # Prompt contracts own orientation. The stabilizer only fills asset
+        # metadata and cannot create an additional layout requirement.
         timing_steps["orientation_contract_sec"] = round(
             time.perf_counter() - step_start, 6
         )
@@ -216,7 +204,6 @@ def evaluate_house_scene(
             stage=stage,
             metrics=list(critic_config.metrics),
             include_object_types=include_object_types,
-            intent_contract_mode=constraint_mode(critic_config),
         )
         timing_steps["case_pack_build_sec"] = round(time.perf_counter() - step_start, 6)
         check_timing: dict[str, Any] = {}
@@ -339,12 +326,9 @@ def seating_orientation_targets(
     prompt contract as later geometry evaluation.
     """
     critic_config = _coerce_config(config)
-    if constraint_mode(critic_config) != "contract":
-        return None
     case_pack = room_scene_to_case_pack(
         scene,
         metrics=("functional_dependency",),
-        intent_contract_mode="contract",
     )
     return contract_seating_targets(case_pack)
 

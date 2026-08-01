@@ -78,6 +78,30 @@ class SceneExpertMemoryTest(unittest.TestCase):
         self.assertIn("explicit object, position, or facing", brief.to_injection_text())
         self.assertIn("Immutable User Task", _SYSTEM_PROMPT)
 
+    def test_empty_stage_inventory_uses_noop_brief(self) -> None:
+        context = HarnessContext(
+            stage="wall_mounted",
+            task_spec=SceneTaskSpec(
+                room_type="living room",
+                style="standard",
+                required_large_objects=["tv_stand"],
+                required_small_objects=["television"],
+            ),
+            memory_pack=MemoryPack(),
+        )
+        planner = object.__new__(GlobalPlanner)
+
+        brief = planner.generate_stage_brief(
+            context,
+            original_task=(
+                "A sofa faces a TV stand and television on the opposite wall."
+            ),
+        )
+
+        self.assertIn("empty wall_mounted stage", brief.stage_objective)
+        self.assertIn("No objects are allocated", brief.constraints_for_designer[0])
+        self.assertNotIn("television", "\n".join(brief.constraints_for_designer))
+
     def test_llm_debug_record_marks_scenebenchmark_prompt_context(self) -> None:
         record = build_llm_call_debug_record(
             stage="furniture",

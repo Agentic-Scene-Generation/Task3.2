@@ -29,9 +29,6 @@ from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.i
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.manipuland_completeness import (
     evaluate_manipuland_completeness,
 )
-from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.media_support import (
-    evaluate_media_support_alignment,
-)
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.room_center import (
     evaluate_room_center_alignment,
 )
@@ -90,7 +87,6 @@ METRIC_REGISTRY: dict[str, MetricPlugin] = {
         rule_evaluator=evaluate_functional_dependency,
         check_augmenter=augment_functional_dependency_checks,
         extension_evaluators=(
-            evaluate_media_support_alignment,
             evaluate_intent_contract_extensions,
             evaluate_bedside_group_alignment,
             evaluate_classroom_workstation_distribution,

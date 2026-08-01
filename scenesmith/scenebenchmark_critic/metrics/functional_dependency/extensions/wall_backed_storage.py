@@ -37,16 +37,13 @@ def evaluate_wall_backed_storage_alignment(
 ) -> list[dict[str, Any]]:
     geometry = case_pack.get("scene_geometry") or {}
     objects = [obj for obj in geometry.get("objects") or [] if isinstance(obj, dict)]
-    contract_mode = str(case_pack.get("intent_contract_mode") or "legacy")
-    contracted_ids: set[str] | None = None
-    if contract_mode == "contract":
-        contracted_ids = set()
-        for constraint in contract_constraints(
-            case_pack,
-            relations=("against_wall", "centered_on_wall"),
-            include_auxiliary=False,
-        ):
-            contracted_ids.update(selected_ids(constraint.get("subjects"), objects))
+    contracted_ids: set[str] = set()
+    for constraint in contract_constraints(
+        case_pack,
+        relations=("against_wall", "centered_on_wall"),
+        include_auxiliary=False,
+    ):
+        contracted_ids.update(selected_ids(constraint.get("subjects"), objects))
     walls = [obj for obj in objects if object_category(obj) == "wall"]
     room_center = _room_center(geometry)
     if not walls or room_center is None:
@@ -56,10 +53,7 @@ def evaluate_wall_backed_storage_alignment(
     for obj in objects:
         if not _is_wall_backed_storage(obj):
             continue
-        if (
-            contracted_ids is not None
-            and str(obj.get("id") or "") not in contracted_ids
-        ):
+        if str(obj.get("id") or "") not in contracted_ids:
             # A storage category alone is not semantic evidence that it belongs
             # against a wall (it may be an island, divider, or display piece).
             continue

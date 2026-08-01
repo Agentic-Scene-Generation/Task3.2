@@ -146,6 +146,34 @@ class TestSceneTools(BaseAgentToolsTest):
         self.assertIsInstance(result, str)
         # The result should contain furniture information.
         self.assertIn("furniture", result.lower())
+        objects_by_id = {
+            item["object_id"]: item for item in json.loads(result)["objects"]
+        }
+        table_state = objects_by_id[str(table_mock.object_id)]
+        self.assertAlmostEqual(table_state["rotation_degrees"], 90.0)
+        self.assertAlmostEqual(table_state["front_direction_x"], -1.0)
+        self.assertAlmostEqual(table_state["front_direction_y"], 0.0, places=7)
+        self.assertEqual(table_state["front_direction_cardinal"], "west (-X)")
+
+    def test_critic_prompts_require_geometry_backed_facing_verdicts(self):
+        prompt_dir = (
+            Path(__file__).parent.parent.parent
+            / "scenesmith"
+            / "prompts"
+            / "data"
+            / "furniture_agent"
+        )
+        critic = (prompt_dir / "stateful_critic_agent.yaml").read_text()
+        runner = (prompt_dir / "stateful_critic_runner_instruction.yaml").read_text()
+        designer = (
+            prompt_dir / "designer_critique_instruction_stateful.yaml"
+        ).read_text()
+
+        assert "yaw +90 degrees faces world -X" in critic
+        assert 'direction="away"' in critic
+        assert "is_facing=True" in critic
+        assert "yaw +90 degrees faces world -X" in runner
+        assert "do not rotate the chair" in designer
 
     def test_scene_state_result_serialization(self):
         """SceneStateResult DTOs serialize to valid JSON."""

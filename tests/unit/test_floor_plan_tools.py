@@ -5,8 +5,42 @@ import random
 import unittest
 
 from scenesmith.agent_utils.house import HouseLayout, OpeningType, WallDirection
+from scenesmith.experiments.base_experiment import BaseExperiment
 from scenesmith.floor_plan_agents.tools.floor_plan_tools import FloorPlanTools
 from scenesmith.floor_plan_agents.tools.room_placement import get_shared_edge
+
+
+class _CapturingFloorPlanAgent:
+    def __init__(self, cfg, logger, render_gpu_id=None):
+        self.cfg = cfg
+        self.logger = logger
+        self.render_gpu_id = render_gpu_id
+
+
+def test_floor_plan_agent_receives_experiment_materials_endpoint():
+    agent = BaseExperiment.build_floor_plan_agent(
+        {
+            "floor_plan_agent": {
+                "_name": "capturing",
+                "materials": {
+                    "use_retrieval_server": True,
+                    "default_wall_material": "Plaster001_1K-JPG",
+                    "default_floor_material": "Wood094_1K-JPG",
+                },
+            },
+            "experiment": {
+                "materials_retrieval_server": {
+                    "host": "127.0.0.1",
+                    "port": 63308,
+                }
+            },
+        },
+        {"capturing": _CapturingFloorPlanAgent},
+        logger=None,
+    )
+
+    assert agent.cfg.materials.retrieval_server_host == "127.0.0.1"
+    assert agent.cfg.materials.retrieval_server_port == 63308
 
 
 class TestOpeningPreservation(unittest.TestCase):

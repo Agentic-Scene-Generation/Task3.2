@@ -149,6 +149,76 @@ def _furniture_simulation_instability_reason(
     return None
 
 
+def _world_bbox_bottom_z(obj: SceneObject, transform: RigidTransform) -> float | None:
+    """Return the bottom of an object's rendered AABB at a given transform."""
+    if obj.bbox_min is None or obj.bbox_max is None:
+        return None
+    try:
+        bbox_min = np.asarray(obj.bbox_min, dtype=float)
+        bbox_max = np.asarray(obj.bbox_max, dtype=float)
+    except (TypeError, ValueError):
+        return None
+    if (
+        bbox_min.shape != (3,)
+        or bbox_max.shape != (3,)
+        or not np.all(np.isfinite(bbox_min))
+        or not np.all(np.isfinite(bbox_max))
+    ):
+        return None
+
+    corners = np.asarray(
+        [
+            transform @ np.asarray([x, y, z], dtype=float)
+            for x in (bbox_min[0], bbox_max[0])
+            for y in (bbox_min[1], bbox_max[1])
+            for z in (bbox_min[2], bbox_max[2])
+        ]
+    )
+    bottom_z = float(np.min(corners[:, 2]))
+    return bottom_z if np.isfinite(bottom_z) else None
+
+
+def _restore_furniture_that_fell_through_floor(
+    scene: RoomScene,
+    pre_simulation_transforms: dict[UniqueID, RigidTransform],
+    floor_z: float = 0.0,
+    tolerance_m: float = 0.05,
+) -> list[UniqueID]:
+    """Restore furniture when simulation moves a valid rendered bbox below floor.
+
+    This targets invalid collision-proxy outcomes rather than ordinary settling:
+    an object is restored only when its rendered bounds started above the floor
+    tolerance and ended below it. Objects that already penetrated the floor are
+    left unchanged so this safeguard cannot hide an invalid input layout.
+    """
+    restored: list[UniqueID] = []
+    floor_limit = floor_z - tolerance_m
+    for obj_id, pre_transform in pre_simulation_transforms.items():
+        obj = scene.get_object(obj_id)
+        if obj is None or obj.object_type != ObjectType.FURNITURE:
+            continue
+        pre_bottom_z = _world_bbox_bottom_z(obj, pre_transform)
+        post_bottom_z = _world_bbox_bottom_z(obj, obj.transform)
+        if (
+            pre_bottom_z is None
+            or post_bottom_z is None
+            or pre_bottom_z < floor_limit
+            or post_bottom_z >= floor_limit
+        ):
+            continue
+        obj.transform = pre_transform
+        restored.append(obj_id)
+        console_logger.warning(
+            "Restored furniture %s after simulation moved its rendered bounds "
+            "through the floor (bottom_z %.3fm -> %.3fm, limit %.3fm)",
+            obj_id,
+            pre_bottom_z,
+            post_bottom_z,
+            floor_limit,
+        )
+    return restored
+
+
 def _restore_collectively_unstable_instances(
     scene: RoomScene,
     pre_simulation_transforms: dict[UniqueID, RigidTransform],
@@ -158,9 +228,12 @@ def _restore_collectively_unstable_instances(
     """Keep an intact set when one shared collision proxy topples every copy.
 
     A bad SDF/collision proxy can make every instance of one asset fall during a
-    single simulation pass.  Restoring that set is safer than deleting an
-    otherwise valid repeated furniture group.  Genuine isolated falls retain
-    the existing removal behaviour.
+    single simulation pass.  The final timestep can leave one copy just below
+    the removal threshold while the others have crossed it, so treat a group as
+    collectively unstable when every copy has toppled or is nearly toppled.
+    Restoring that set is safer than deleting an otherwise valid repeated
+    furniture group. Genuine isolated falls retain the existing removal
+    behaviour.
     """
     fallen_set = set(fallen_ids)
     groups: dict[str, list[UniqueID]] = {}
@@ -173,14 +246,25 @@ def _restore_collectively_unstable_instances(
         groups.setdefault(asset_group_key, []).append(obj.object_id)
 
     restored: list[UniqueID] = []
+    near_topple_threshold_degrees = 0.9 * tilt_threshold_degrees
     for asset_group_key, object_ids in groups.items():
-        if len(object_ids) < 2 or not all(
+        if len(object_ids) < 2 or not any(
             obj_id in fallen_set for obj_id in object_ids
         ):
             continue
         if any(
             compute_tilt_angle_degrees(pre_simulation_transforms[obj_id])
             > tilt_threshold_degrees
+            for obj_id in object_ids
+        ):
+            continue
+        if not all(
+            obj_id in fallen_set
+            or (
+                (obj := scene.get_object(obj_id)) is not None
+                and compute_tilt_angle_degrees(obj.transform)
+                >= near_topple_threshold_degrees
+            )
             for obj_id in object_ids
         ):
             continue
@@ -191,9 +275,10 @@ def _restore_collectively_unstable_instances(
                 restored.append(obj_id)
         console_logger.warning(
             "Restored %d collectively unstable furniture instance(s) for shared "
-            "collision proxy %s",
+            "collision proxy %s (near-topple threshold=%.1fdeg)",
             len(object_ids),
             asset_group_key,
+            near_topple_threshold_degrees,
         )
     return restored
 
@@ -987,6 +1072,31 @@ def apply_non_penetration_projection(
         return scene, False
 
 
+def _is_plausible_floor_fallback_penetration(
+    obj: SceneObject, penetration_m: float
+) -> bool:
+    """Return whether a reported floor penetration fits the object's scale.
+
+    Drake collision proxies occasionally report a floor penetration larger than
+    the rendered furniture itself. Lifting by that value puts an otherwise
+    correct object in mid-air, where the simulation then topples and removes
+    it. Keep the fallback conservative when a rendered bounding box is
+    available; objects without bounds retain the historical fallback behavior.
+    """
+    try:
+        world_bounds = obj.compute_world_bounds()
+    except (TypeError, ValueError):
+        world_bounds = None
+    if world_bounds is None:
+        return True
+
+    world_min, world_max = world_bounds
+    vertical_extent_m = float(world_max[2] - world_min[2])
+    if not np.isfinite(vertical_extent_m) or vertical_extent_m <= 0.0:
+        return True
+    return penetration_m <= vertical_extent_m
+
+
 def _apply_floor_penetration_fallback(
     scene: RoomScene, margin_m: float = 0.001
 ) -> tuple[RoomScene, int]:
@@ -1067,6 +1177,19 @@ def _apply_floor_penetration_fallback(
             lift_amount = penetration + margin_m
             obj = scene.get_object(furn_id)
             if obj is None:
+                continue
+            if not _is_plausible_floor_fallback_penetration(obj, penetration):
+                world_bounds = obj.compute_world_bounds()
+                vertical_extent_m = float(world_bounds[1][2] - world_bounds[0][2])
+                console_logger.warning(
+                    "Skipping floor fallback for %s (%s): reported floor "
+                    "penetration %.3fm exceeds object vertical extent %.3fm; "
+                    "collision proxy is not credible",
+                    obj.name,
+                    obj.object_id,
+                    penetration,
+                    vertical_extent_m,
+                )
                 continue
 
             # Create new transform with lifted Z.
@@ -1566,6 +1689,11 @@ def apply_forward_simulation(
             object_indices=object_indices,
             composite_info=composite_info,
             operation_name="Simulation",
+        )
+
+        _restore_furniture_that_fell_through_floor(
+            scene,
+            pre_simulation_transforms,
         )
 
         # Detect and remove physically unstable furniture if enabled.

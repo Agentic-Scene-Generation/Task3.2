@@ -14,6 +14,7 @@ from agents import function_tool
 from omegaconf import DictConfig
 from pydrake.all import RigidTransform, RollPitchYaw
 from scipy.spatial import ConvexHull, QhullError
+from shapely.geometry import Polygon
 from typing_extensions import TypedDict
 
 from scenesmith.agent_utils.action_logger import log_scene_action
@@ -72,6 +73,8 @@ from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.d
 )
 
 console_logger = logging.getLogger(__name__)
+
+_MANIPULAND_WALL_CLEARANCE_M = 0.01
 
 
 class FillAssetItem(TypedDict):
@@ -593,6 +596,8 @@ class ManipulandTools:
         rotation_degrees: float,
         allow_overlap_ratio: float = 0.0,
         scale_factor: float = 1.0,
+        bounding_box_min: np.ndarray | None = None,
+        bounding_box_max: np.ndarray | None = None,
     ) -> tuple[bool, str | None]:
         """Validate that object's convex hull fits within surface with optional overlap.
 
@@ -612,17 +617,42 @@ class ManipulandTools:
             rotation_degrees: Placement rotation in degrees.
             allow_overlap_ratio: Ratio by which to shrink the convex hull
                 (0.0 = no shrinking/strict containment, 0.15 = shrink by 15%).
-            scale_factor: Scale factor to apply to mesh vertices (default 1.0).
+            scale_factor: Scale factor used only when no placement-frame bounding box
+                is available.
+            bounding_box_min: Optional object-frame AABB minimum. Asset bounding boxes
+                share the SDF collision frame and already include runtime scaling.
+            bounding_box_max: Optional object-frame AABB maximum.
 
         Returns:
             Tuple of (is_valid, error_message):
             - is_valid: True if shrunk hull vertices are within surface boundary.
             - error_message: Descriptive error if validation fails, None otherwise.
         """
-        # Get object convex hull vertices.
-        hull_vertices = self._get_object_convex_hull_2d(
-            geometry_path=geometry_path, scale_factor=scale_factor
+        has_bounding_box = (
+            bounding_box_min is not None
+            and bounding_box_max is not None
+            and len(bounding_box_min) >= 3
+            and len(bounding_box_max) >= 3
         )
+        if has_bounding_box:
+            bbox_min = np.asarray(bounding_box_min, dtype=float)
+            bbox_max = np.asarray(bounding_box_max, dtype=float)
+            hull_vertices = np.array(
+                [
+                    [bbox_min[0], bbox_min[1]],
+                    [bbox_max[0], bbox_min[1]],
+                    [bbox_max[0], bbox_max[1]],
+                    [bbox_min[0], bbox_max[1]],
+                ],
+                dtype=float,
+            )
+        else:
+            # Render meshes are only a fallback. Some generated assets use a
+            # different axis convention for the visual GLTF and SDF collision
+            # geometry, while the placement-frame AABB above is authoritative.
+            hull_vertices = self._get_object_convex_hull_2d(
+                geometry_path=geometry_path, scale_factor=scale_factor
+            )
 
         # Compute hull centroid and center the hull at origin.
         # This ensures shrinking works correctly even if mesh is not perfectly
@@ -643,7 +673,6 @@ class ManipulandTools:
         sin_theta = np.sin(rotation_radians)
         rotation_matrix = np.array([[cos_theta, -sin_theta], [sin_theta, cos_theta]])
 
-        # Check each shrunk hull vertex.
         for i, vertex in enumerate(shrunk_hull_vertices):
             # Apply rotation.
             rotated_vertex = rotation_matrix @ vertex
@@ -667,7 +696,94 @@ class ManipulandTools:
                     f"- Placing on a different surface",
                 )
 
+        if has_bounding_box:
+            wall_error = self._wall_clearance_error(
+                target_surface=target_surface,
+                position_2d=position_2d,
+                rotation_degrees=rotation_degrees,
+                footprint_vertices=hull_vertices_centered,
+                bounding_box_min=bbox_min,
+                bounding_box_max=bbox_max,
+            )
+            if wall_error is not None:
+                return False, wall_error
+
         return (True, None)
+
+    def _wall_clearance_error(
+        self,
+        target_surface: SupportSurface,
+        position_2d: np.ndarray,
+        rotation_degrees: float,
+        footprint_vertices: np.ndarray,
+        bounding_box_min: np.ndarray,
+        bounding_box_max: np.ndarray,
+    ) -> str | None:
+        """Reject placements whose collision-frame footprint enters a room wall."""
+        rotation_radians = math.radians(rotation_degrees)
+        cos_theta = math.cos(rotation_radians)
+        sin_theta = math.sin(rotation_radians)
+        rotation_matrix = np.array(
+            [[cos_theta, -sin_theta], [sin_theta, cos_theta]], dtype=float
+        )
+        local_vertices = [
+            rotation_matrix @ vertex + position_2d for vertex in footprint_vertices
+        ]
+        world_vertices = [
+            (target_surface.transform @ np.array([vertex[0], vertex[1], 0.0]))[:2]
+            for vertex in local_vertices
+        ]
+        object_polygon = Polygon(world_vertices).convex_hull
+        if object_polygon.is_empty or object_polygon.area <= 1e-9:
+            return None
+
+        object_pose = target_surface.to_world_pose(
+            position_2d=position_2d,
+            rotation_2d=rotation_radians,
+        )
+        object_z_values = [
+            float((object_pose @ np.array([x, y, z], dtype=float))[2])
+            for x in (float(bounding_box_min[0]), float(bounding_box_max[0]))
+            for y in (float(bounding_box_min[1]), float(bounding_box_max[1]))
+            for z in (float(bounding_box_min[2]), float(bounding_box_max[2]))
+        ]
+        object_z_min = min(object_z_values)
+        object_z_max = max(object_z_values)
+
+        for wall in getattr(self.scene, "objects", {}).values():
+            if getattr(wall, "object_type", None) != ObjectType.WALL:
+                continue
+            if wall.bbox_min is None or wall.bbox_max is None:
+                continue
+
+            wall_corners = [
+                wall.transform @ np.array([x, y, z], dtype=float)
+                for x in (float(wall.bbox_min[0]), float(wall.bbox_max[0]))
+                for y in (float(wall.bbox_min[1]), float(wall.bbox_max[1]))
+                for z in (float(wall.bbox_min[2]), float(wall.bbox_max[2]))
+            ]
+            wall_z_min = min(float(corner[2]) for corner in wall_corners)
+            wall_z_max = max(float(corner[2]) for corner in wall_corners)
+            if object_z_max < wall_z_min or object_z_min > wall_z_max:
+                continue
+
+            wall_polygon = Polygon(
+                [(float(corner[0]), float(corner[1])) for corner in wall_corners]
+            ).convex_hull
+            blocked_region = wall_polygon.buffer(
+                _MANIPULAND_WALL_CLEARANCE_M, join_style=2
+            )
+            if not blocked_region.intersects(object_polygon):
+                continue
+            return (
+                f"Object collision footprint is too close to structural wall "
+                f"{wall.object_id}; manipulands must remain at least "
+                f"{_MANIPULAND_WALL_CLEARANCE_M:.3f}m from room walls.\n\n"
+                f"Try moving the object toward the room-facing side or center of "
+                f"surface {target_surface.surface_id}."
+            )
+
+        return None
 
     def _create_tool_closures(self) -> dict[str, Any]:
         """Create tool closures that capture current furniture/surface context."""
@@ -1357,6 +1473,8 @@ class ManipulandTools:
                 rotation_degrees=rotation_degrees,
                 allow_overlap_ratio=overlap_ratio,
                 scale_factor=original_asset.scale_factor,
+                bounding_box_min=original_asset.bbox_min,
+                bounding_box_max=original_asset.bbox_max,
             )
             if not is_valid:
                 return self._create_placement_failure_result(
@@ -1614,6 +1732,8 @@ class ManipulandTools:
                 rotation_degrees=rotation_degrees,
                 allow_overlap_ratio=overlap_ratio,
                 scale_factor=scene_obj.scale_factor,
+                bounding_box_min=scene_obj.bbox_min,
+                bounding_box_max=scene_obj.bbox_max,
             )
             if not is_valid:
                 return self._create_placement_failure_result(
@@ -2098,6 +2218,8 @@ class ManipulandTools:
             rotation_degrees=rotation_degrees,
             allow_overlap_ratio=overlap_ratio,
             scale_factor=scene_object.scale_factor,
+            bounding_box_min=scene_object.bbox_min,
+            bounding_box_max=scene_object.bbox_max,
         )
         return bool(valid)
 

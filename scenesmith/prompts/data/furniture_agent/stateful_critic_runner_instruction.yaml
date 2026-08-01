@@ -100,5 +100,11 @@ prompt: |
   oriented but have not validated it with check_facing_tool, your assessment is
   INVALID. Always trust tool validation over visual interpretation.
 
+  Never infer facing from the numeric yaw alone. `get_current_scene_state`
+  exposes the canonical world front vector; yaw +90 degrees faces world -X.
+  For furniture along a wall, validate with
+  `check_facing_tool(object_id, wall_id, direction="away")`. A relevant
+  `is_facing=True` result forbids reporting that object as facing the wrong way.
+
   Major facing issues (furniture unusable due to orientation) must result in
   functionality scores ≤3/10.

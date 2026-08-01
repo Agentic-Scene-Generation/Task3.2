@@ -78,7 +78,6 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
             "scenebenchmark_critic": {
                 "enabled": True,
                 "metrics": ["functional_dependency"],
-                "constraint_mode": "contract",
             }
         }
         agent.furniture_safety_controller = SimpleNamespace(
@@ -325,11 +324,10 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         agent._reset_critic_candidate_cache = MagicMock()
         critic_config = SimpleNamespace(
             enabled=True,
-            constraint_mode="contract",
             metric_enabled=lambda metric: metric == "functional_dependency",
         )
         relation_fix = SimpleNamespace(
-            object_id="desk_0", relation_type="study_furniture_layout"
+            object_id="desk_0", relation_type="room_center_alignment"
         )
         seating_fix = SimpleNamespace(subject_id="office_chair_0", target_id="desk_0")
         module = "scenesmith.furniture_agents.stateful_furniture_agent"
@@ -360,7 +358,7 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         self.assertEqual(
             actions,
             [
-                "desk_0:study_furniture_layout",
+                "desk_0:room_center_alignment",
                 "office_chair_0->desk_0:seating_orientation",
             ],
         )
@@ -369,7 +367,7 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         StatefulFurnitureAgent is None,
         f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
     )
-    def test_initial_contract_repair_does_not_change_shadow_or_legacy_rollout(
+    def test_initial_contract_repair_is_noop_when_critic_disabled(
         self,
     ) -> None:
         agent = object.__new__(StatefulFurnitureAgent)
@@ -378,8 +376,7 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         agent.rendering_manager = SimpleNamespace(clear_cache=MagicMock())
         agent._reset_critic_candidate_cache = MagicMock()
         critic_config = SimpleNamespace(
-            enabled=True,
-            constraint_mode="shadow",
+            enabled=False,
             metric_enabled=lambda _metric: True,
         )
         module = "scenesmith.furniture_agents.stateful_furniture_agent"
@@ -397,6 +394,60 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         align.assert_not_called()
         agent.rendering_manager.clear_cache.assert_not_called()
         agent._reset_critic_candidate_cache.assert_not_called()
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
+    def test_inventory_repair_binds_new_furniture_to_contract_relations(self) -> None:
+        agent = object.__new__(StatefulFurnitureAgent)
+        agent.cfg = object()
+        agent.scene = object()
+        critic_config = SimpleNamespace(
+            enabled=True,
+            metric_enabled=lambda metric: metric == "functional_dependency",
+        )
+        relation_fix = SimpleNamespace(
+            object_id="student_chair_0",
+            relation_type="seating_to_work_surface",
+        )
+        seating_fix = SimpleNamespace(
+            subject_id="student_chair_0",
+            target_id="student_desk_0",
+        )
+        module = "scenesmith.furniture_agents.stateful_furniture_agent"
+        targets = {"student_chair_0": {"student_desk_0"}}
+
+        with (
+            patch(f"{module}.critic_config_from_any", return_value=critic_config),
+            patch(
+                f"{module}.improve_furniture_relations",
+                return_value=[relation_fix],
+            ) as improve,
+            patch(
+                f"{module}.seating_orientation_targets",
+                return_value=targets,
+            ) as seating_targets,
+            patch(
+                f"{module}.align_seating_to_nearest_surface",
+                return_value=[seating_fix],
+            ) as align,
+        ):
+            actions = agent._repair_relations_after_inventory_change()
+
+        improve.assert_called_once_with(agent.scene, config=critic_config)
+        seating_targets.assert_called_once_with(agent.scene, config=critic_config)
+        align.assert_called_once_with(
+            agent.scene,
+            allowed_targets_by_seat=targets,
+        )
+        self.assertEqual(
+            actions,
+            [
+                "bound student_chair_0 via seating_to_work_surface after inventory repair",
+                "aligned student_chair_0 toward student_desk_0 after inventory repair",
+            ],
+        )
 
     @unittest.skipIf(
         StatefulFurnitureAgent is None,
@@ -473,6 +524,11 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
             repaired_categories.append(category) or 1
         )
         agent._repair_forbidden_zone_conflicts = lambda include_windows=False: False
+        relation_repairs: list[bool] = []
+        agent._repair_relations_after_inventory_change = lambda: (
+            relation_repairs.append(True)
+            or ["bound sofa_0 via back_against_wall after inventory repair"]
+        )
 
         repaired, actions = agent._attempt_deterministic_repair(
             SimpleNamespace(
@@ -483,7 +539,9 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
 
         self.assertTrue(repaired)
         self.assertEqual(repaired_categories, ["sofa"])
+        self.assertEqual(relation_repairs, [True])
         self.assertTrue(any("missing sofa" in action for action in actions))
+        self.assertTrue(any("bound sofa_0" in action for action in actions))
 
     @unittest.skipIf(
         StatefulFurnitureAgent is None,
@@ -513,6 +571,7 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
             repaired_categories.append(category) or 1
         )
         agent._repair_forbidden_zone_conflicts = lambda include_windows=False: False
+        agent._repair_relations_after_inventory_change = lambda: []
 
         repaired, _ = agent._attempt_deterministic_repair(
             SimpleNamespace(
@@ -544,6 +603,41 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         self.assertEqual(
             agent._repair_required_counts(),
             {"student_desk": 6, "teacher_desk": 1, "student_chair": 6},
+        )
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
+    def test_task_counts_override_prompt_safety_counts(self) -> None:
+        agent = object.__new__(StatefulFurnitureAgent)
+        agent.scene = SimpleNamespace(
+            objects={},
+            scene_expert_task_spec={
+                "required_large_objects": [
+                    "desk",
+                    "desk",
+                    "office_chair",
+                    "office_chair",
+                ],
+                "intent_constraints": [],
+            },
+        )
+        agent.furniture_safety_controller = SimpleNamespace(
+            enabled=True,
+            required_counts={"desk": 2, "office_chair": 1},
+            required_terms={"desk", "office_chair"},
+        )
+        agent.stage_working_memory = MagicMock()
+
+        agent._synchronize_task_required_counts()
+
+        self.assertEqual(
+            agent.furniture_safety_controller.required_counts,
+            {"desk": 2, "office_chair": 2},
+        )
+        agent.stage_working_memory.set_required_counts.assert_called_once_with(
+            {"desk": 2, "office_chair": 2}
         )
 
     @unittest.skipIf(

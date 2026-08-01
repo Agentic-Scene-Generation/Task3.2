@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import os
 from typing import Any
 
 # 2026-07-16 修改原因：critic 迁移到统一 registry 后，四个一级指标必须
@@ -29,11 +30,6 @@ class CriticConfig:
     fail_gate_threshold: int = 1
     degraded_gate_threshold: int = 999999
     asset_annotation: dict[str, Any] = field(default_factory=dict)
-    # Rollout control for prompt-originated intent contracts.  ``legacy`` keeps
-    # historical geometry heuristics unchanged, ``shadow`` records contract
-    # checks with the ignored tier, and ``contract`` makes only contracted
-    # relations eligible for hard critic/repair handling.
-    constraint_mode: str = "legacy"
     intent_compiler: dict[str, Any] = field(default_factory=dict)
     visual_grounding: dict[str, Any] = field(default_factory=dict)
     vlm_hard_gate: bool = False
@@ -51,6 +47,12 @@ class CriticConfig:
 
 def critic_config_from_any(cfg: Any) -> CriticConfig:
     """Extract critic config from a full experiment config or an agent config."""
+    if os.environ.get("CRITIC_CONSTRAINT_MODE") is not None:
+        raise ValueError(
+            "SceneBenchmark critic CRITIC_CONSTRAINT_MODE was removed; delete the "
+            "old legacy/shadow/contract environment override. Intent contracts are "
+            "always hard."
+        )
     raw = _get(cfg, "scenebenchmark_critic", None)
     if raw is None:
         experiment = _get(cfg, "experiment", None)
@@ -72,11 +74,22 @@ def critic_config_from_any(cfg: Any) -> CriticConfig:
         "fail_gate_threshold",
         "degraded_gate_threshold",
         "asset_annotation",
-        "constraint_mode",
         "intent_compiler",
         "visual_grounding",
         "vlm_hard_gate",
     }
+    removed_mode_fields = {
+        "constraint_mode",
+        "intent_contract_mode",
+        "CRITIC_CONSTRAINT_MODE",
+    }
+    supplied_removed_modes = sorted(removed_mode_fields & set(data))
+    if supplied_removed_modes:
+        raise ValueError(
+            "SceneBenchmark critic "
+            f"{', '.join(supplied_removed_modes)} was removed; delete the old "
+            "legacy/shadow/contract override. Intent contracts are always hard."
+        )
     extra = {key: value for key, value in data.items() if key not in known}
     metrics = _as_tuple(data.get("metrics", DEFAULT_METRICS), DEFAULT_METRICS)
     # 2026-07-16 修改原因：旧调度器会静默跳过未知 metric，迁移后应在配置
@@ -104,7 +117,6 @@ def critic_config_from_any(cfg: Any) -> CriticConfig:
         fail_gate_threshold=int(data.get("fail_gate_threshold", 1)),
         degraded_gate_threshold=int(data.get("degraded_gate_threshold", 999999)),
         asset_annotation=_as_dict(data.get("asset_annotation")),
-        constraint_mode=str(data.get("constraint_mode", "legacy") or "legacy"),
         intent_compiler=_as_dict(data.get("intent_compiler")),
         visual_grounding=_as_dict(data.get("visual_grounding")),
         # VLM output is evidence-only in v1.  Retaining this parsed field makes

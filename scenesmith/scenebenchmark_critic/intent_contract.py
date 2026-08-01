@@ -8,13 +8,14 @@ replay.  This module keeps the requirement source explicit and serializable:
 ``original prompt -> semantic selector -> object-id binding -> geometry check``.
 
 No function in this module returns a pose.  LLM/VLM observations may enrich a
-contract's evidence, but only explicit prompt clauses and the small room
-ontology below are allowed to be hard constraints.
+contract's evidence, while schema-validated explicit and model-inferred
+relations are evaluated by the same hard contract path.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import re
 
@@ -24,33 +25,29 @@ from scenesmith.scenebenchmark_critic.core.geometry import (
     bbox_center_xy,
     object_category,
 )
+from scenesmith.scenebenchmark_critic.relation_registry import (
+    CEILING_MOUNTED_CATEGORIES,
+    MANIPULAND_CATEGORIES,
+    PUBLIC_RELATIONS,
+    STAGE_ORDER,
+    WALL_MOUNTED_CATEGORIES,
+    relation_spec,
+)
 
 
-SCHEMA_VERSION = "scenesmith.intent_contract.v1"
-VALID_MODES = frozenset({"legacy", "shadow", "contract"})
-VALID_RELATIONS = frozenset(
+SCHEMA_VERSION = "scenesmith.intent_contract.v2"
+VALID_RELATIONS = PUBLIC_RELATIONS
+HARD_SOURCES = frozenset(
+    {"explicit_prompt", "model_inferred", "room_ontology", "deterministic_fallback"}
+)
+_DIRECT_FD_EVALUATORS = frozenset(
     {
-        "required_count",
-        "against_wall",
-        "centered_on_wall",
-        "centered_in_room",
-        "centered_between",
-        "between",
-        "in_front_of",
-        "flanking",
-        "faces",
-        "on_top_of",
-        "near",
-        "aligned_with",
-        "paired_with",
-        "distributed_evenly",
-        "one_per_side",
-        "clear_access",
-        "operation_zone_at_wall",
-        "instructional_surface_alignment",
+        "back_against_wall",
+        "generic_near_relation",
+        "mounted_to_wall",
+        "object_on_support",
     }
 )
-HARD_SOURCES = frozenset({"explicit_prompt", "room_ontology"})
 
 _CATEGORY_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
@@ -66,18 +63,27 @@ _CATEGORY_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ),
     ("student_desk", ("student desk",)),
     ("teacher_desk", ("teacher desk", "instructor desk")),
+    ("reception_desk", ("reception desk", "reception counter")),
     ("office_chair", ("office chair", "desk chair", "task chair")),
     (
         "guest_chair",
         ("guest chair", "visitor chair", "guest armchair", "visitor armchair"),
     ),
     ("dining_chair", ("dining chair",)),
+    ("rocking_chair", ("rocking chair",)),
     ("armchair", ("armchair", "arm chair")),
     ("dining_table", ("dining table",)),
     ("coffee_table", ("coffee table",)),
+    ("side_table", ("side table", "end table", "accent table")),
+    ("filing_cabinet", ("filing cabinet", "file cabinet")),
     ("tv_stand", ("tv stand", "television stand", "media console")),
     ("television", ("television", "tv")),
-    ("monitor", ("computer monitor", "monitor", "display", "screen")),
+    (
+        "monitor",
+        ("computer monitor", "computer display", "monitor", "display", "screen"),
+    ),
+    ("brochure_holder", ("brochure holder", "leaflet holder", "brochure stand")),
+    ("printer", ("printer",)),
     ("nightstand", ("nightstand", "bedside table")),
     ("bookshelf", ("bookshelf", "bookcase", "shelving unit")),
     ("sideboard", ("sideboard", "buffet")),
@@ -86,6 +92,7 @@ _CATEGORY_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("floor_lamp", ("floor lamp",)),
     ("table_lamp", ("table lamp", "desk lamp")),
     ("rug", ("rug", "carpet", "area rug")),
+    ("floor", ("floor",)),
     ("plant", ("plant",)),
     ("bed", ("bed",)),
     ("sofa", ("sofa", "couch", "settee")),
@@ -137,32 +144,22 @@ _MEDIA_GROUP_ON_WALL_PATTERN = re.compile(
 )
 
 
-def constraint_mode(config: Any | None) -> str:
-    """Return the configured rollout mode without accepting unknown values."""
-    if config is not None and hasattr(config, "constraint_mode"):
-        value = getattr(config, "constraint_mode")
-    else:
-        extra = getattr(config, "extra", None)
-        if isinstance(extra, dict):
-            value = extra.get("constraint_mode", "legacy")
-        elif isinstance(config, dict):
-            value = config.get("constraint_mode", "legacy")
-        else:
-            value = "legacy"
-    mode = str(value or "legacy").strip().lower()
-    return mode if mode in VALID_MODES else "legacy"
-
-
 def original_prompt_for_scene(scene: Any) -> str:
     """Read the immutable prompt before SceneExpert/memory prompt injection."""
     original = getattr(scene, "scene_expert_original_description", "")
     if original:
-        return str(original).strip()
+        return _strip_scene_expert_injection(str(original))
 
     # RoomScene checkpoints serialize text_description but not SceneExpert's
     # dynamic provenance attributes.  Only remove blocks with explicit system
     # markers so ordinary prompt wording cannot be mistaken for injected text.
-    text = str(getattr(scene, "text_description", "") or "")
+    return _strip_scene_expert_injection(
+        str(getattr(scene, "text_description", "") or "")
+    )
+
+
+def _strip_scene_expert_injection(text: str) -> str:
+    """Remove StageBrief/memory suffixes from both live and resumed scenes."""
     marker_offsets = [
         match.start()
         for marker in _SCENE_EXPERT_INJECTION_MARKERS
@@ -202,11 +199,21 @@ def build_intent_contract(
         _room_ontology_constraints(normalized_room, lowered, task_spec=task_spec)
     )
     constraints = _deduplicate_constraints(constraints)
+    constraints = _apply_task_spec_contract_metadata(constraints, task_spec)
+    constraints = _deduplicate_constraints(constraints)
+    task_spec_payload = _task_spec_payload(task_spec)
     return {
         "schema_version": SCHEMA_VERSION,
         "prompt": normalized_prompt,
         "prompt_sha256": hashlib.sha256(normalized_prompt.encode("utf-8")).hexdigest(),
         "room_type": normalized_room,
+        "task_compiler_spec_sha256": hashlib.sha256(
+            _stable_json(task_spec_payload).encode("utf-8")
+        ).hexdigest(),
+        "compiler_status": str(task_spec_payload.get("compiler_status") or "degraded"),
+        "compiler_failure_reason": str(
+            task_spec_payload.get("compiler_failure_reason") or ""
+        ),
         "constraints": constraints,
     }
 
@@ -219,27 +226,21 @@ def attach_intent_contract_to_case_pack(
     task_spec = getattr(scene, "scene_expert_task_spec", None)
     room_type = str(getattr(scene, "room_type", "") or case_pack.get("room_type") or "")
     prompt_hash = hashlib.sha256(" ".join(prompt.split()).encode("utf-8")).hexdigest()
+    task_spec_hash = hashlib.sha256(
+        _stable_json(_task_spec_payload(task_spec)).encode("utf-8")
+    ).hexdigest()
     cached = getattr(scene, "scenebenchmark_intent_contract", None)
     if not (
         isinstance(cached, dict)
         and cached.get("schema_version") == SCHEMA_VERSION
         and cached.get("prompt_sha256") == prompt_hash
+        and cached.get("task_compiler_spec_sha256") == task_spec_hash
     ):
         cached = build_intent_contract(prompt, room_type=room_type, task_spec=task_spec)
         setattr(scene, "scenebenchmark_intent_contract", cached)
     case_pack["original_task_instruction"] = prompt
     case_pack["intent_contract"] = _copy_contract(cached)
     return case_pack["intent_contract"]
-
-
-def set_contract_mode(case_pack: dict[str, Any], mode: str) -> None:
-    resolved_mode = str(mode or "legacy").strip().lower()
-    case_pack["intent_contract_mode"] = (
-        resolved_mode if resolved_mode in VALID_MODES else "legacy"
-    )
-    contract = case_pack.get("intent_contract")
-    if isinstance(contract, dict):
-        contract["mode"] = case_pack["intent_contract_mode"]
 
 
 def contract_constraints(
@@ -265,17 +266,14 @@ def contract_constraints(
 
 
 def is_hard_constraint(constraint: dict[str, Any]) -> bool:
-    return (
-        str(constraint.get("strength") or "auxiliary").lower() == "hard"
-        and str(constraint.get("source") or "").lower() in HARD_SOURCES
-    )
+    return str(constraint.get("source") or "").lower() in HARD_SOURCES
 
 
 def contract_relation_requested(case_pack: dict[str, Any], *relations: str) -> bool:
     """Whether a relation is authorized to enable a contract-mode hard rule.
 
-    Auxiliary model/VLM observations can be evaluated and reported, but must
-    not activate a legacy layout rule or grant a repair target.
+    Only schema-validated compiled relations may activate a hard rule or grant
+    a repair target.
     """
     return bool(
         contract_constraints(
@@ -310,6 +308,58 @@ def selected_ids(
     return sorted(dict.fromkeys(ids))
 
 
+def selector_match_count(
+    selector: dict[str, Any] | None,
+    objects: Iterable[dict[str, Any]],
+) -> int:
+    """Count semantic matches, including members represented by stack containers.
+
+    Stacked manipulands are serialized as one physical scene object so they can
+    be simulated and supported as a unit. Their ``member_assets`` still record
+    the individual prompt objects, which must count toward a selector such as
+    "three magazines". Relation binding continues to use the physical stack
+    object returned by :func:`selected_ids`.
+    """
+    if not isinstance(selector, dict):
+        return 0
+    category = _normalize_selector_category(selector.get("category"))
+    role = str(selector.get("role") or "").lower()
+    return sum(
+        _selector_match_multiplicity(category, role, obj)
+        for obj in objects
+        if isinstance(obj, dict) and obj.get("id")
+    )
+
+
+def _selector_match_multiplicity(category: str, role: str, obj: dict[str, Any]) -> int:
+    metadata = obj.get("metadata") if isinstance(obj.get("metadata"), dict) else {}
+    members = metadata.get("member_assets")
+    if metadata.get("composite_type") == "stack" and isinstance(members, list):
+        matched_members = sum(
+            _selector_matches_object(
+                category,
+                role,
+                {
+                    "id": f"{obj['id']}::member::{index}",
+                    "name": member.get("name") or member.get("asset_id") or "",
+                    "description": member.get("description") or "",
+                    "category": member.get("category") or "",
+                    "category_norm": member.get("category_norm") or "",
+                    "metadata": (
+                        member.get("metadata")
+                        if isinstance(member.get("metadata"), dict)
+                        else {}
+                    ),
+                },
+            )
+            for index, member in enumerate(members)
+            if isinstance(member, dict)
+        )
+        if matched_members:
+            return matched_members
+    return int(_selector_matches_object(category, role, obj))
+
+
 def bound_ids(
     selector: dict[str, Any] | None,
     objects: Iterable[dict[str, Any]],
@@ -321,7 +371,8 @@ def bound_ids(
     relation binding deliberately degrades to no hard check when the semantic
     selector cannot be matched at the requested cardinality.
     """
-    ids = selected_ids(selector, objects)
+    object_rows = list(objects)
+    ids = selected_ids(selector, object_rows)
     if not isinstance(selector, dict):
         return ids
     try:
@@ -329,7 +380,11 @@ def bound_ids(
     except (TypeError, ValueError):
         count = 0
     quantifier = str(selector.get("quantifier") or "all").lower()
-    if count > 0 and quantifier not in {"at_least", "minimum"} and len(ids) != count:
+    if (
+        count > 0
+        and quantifier not in {"at_least", "minimum"}
+        and selector_match_count(selector, object_rows) != count
+    ):
         return []
     return ids
 
@@ -385,14 +440,7 @@ def selector_for_phrase(
 
 
 def augment_contract_checks(case_pack: dict[str, Any]) -> bool:
-    """Add contract-grounded FD checks in shadow/contract modes.
-
-    Shadow checks use the ignored tier.  They remain in the JSON report for
-    comparison but cannot alter an agent prompt, gate, or repair acceptance.
-    """
-    mode = str(case_pack.get("intent_contract_mode") or "legacy")
-    if mode == "legacy":
-        return False
+    """Add pairwise contract checks to the hard functional-dependency core."""
     geometry = case_pack.get("scene_geometry") or {}
     objects = [
         item
@@ -408,14 +456,12 @@ def augment_contract_checks(case_pack: dict[str, Any]) -> bool:
     }
     added = False
     checks = list(case_pack.get("checks") or [])
-    shadow_ids: list[str] = []
     for constraint in contract_constraints(case_pack):
         if str(constraint.get("relation") or "") == "paired_with":
             paired_checks = _paired_seating_checks(
                 constraint,
                 case_pack=case_pack,
                 objects=objects,
-                mode=mode,
             )
             for check in paired_checks:
                 check_id = str(check["check_id"])
@@ -424,10 +470,8 @@ def augment_contract_checks(case_pack: dict[str, Any]) -> bool:
                 checks.append(check)
                 existing.add(check_id)
                 added = True
-                if mode == "shadow":
-                    shadow_ids.append(check_id)
             continue
-        relation_type = _fd_relation_for_constraint(constraint, objects)
+        relation_type = _fd_relation_for_constraint(constraint)
         if relation_type is None:
             continue
         subject_ids = bound_ids(constraint.get("subjects"), objects)
@@ -450,41 +494,53 @@ def augment_contract_checks(case_pack: dict[str, Any]) -> bool:
             ]
             if not compatible_targets:
                 continue
-            # A relation can legitimately point to one work surface/media item.
-            # Keep the semantic binding stable instead of choosing by current pose.
+            target_selector = constraint.get("targets") or {}
+            existential_target = str(target_selector.get("quantifier") or "") in {
+                "at_least",
+                "minimum",
+            }
+            try:
+                subject_count = int((constraint.get("subjects") or {}).get("count"))
+                target_count = int(target_selector.get("count"))
+            except (TypeError, ValueError):
+                subject_count = target_count = 0
+            group_targets = (
+                subject_count > 1
+                and subject_count == target_count
+                and len(subject_ids) == len(target_ids)
+            )
             target_id = compatible_targets[0]
+            check_target_ids = (
+                compatible_targets
+                if existential_target or group_targets
+                else [target_id]
+            )
             check_id = (
                 f"intent_contract__{constraint['constraint_id']}__"
                 f"{subject_id}__{target_id}"
             )
             if check_id in existing:
                 continue
-            tier = _constraint_tier(constraint, mode)
             checks.append(
                 {
                     "check_id": check_id,
                     "metric": "functional_dependency",
                     "subject_id": subject_id,
-                    "target_ids": [target_id],
+                    "target_ids": check_target_ids,
                     "relation_type": relation_type,
                     "expected_use": _expected_use(constraint, relation_type),
                     "check_source": "intent_contract",
-                    "scoring_tier": tier,
+                    "scoring_tier": "core",
                     "evidence": {
                         "intent_constraint": constraint,
-                        "constraint_mode": mode,
+                        "dependency": _relation_threshold_dependency(constraint),
                     },
                 }
             )
             existing.add(check_id)
             added = True
-            if mode == "shadow":
-                shadow_ids.append(check_id)
     if added:
         case_pack["checks"] = checks
-    contract = case_pack.get("intent_contract")
-    if isinstance(contract, dict):
-        contract["shadow_check_ids"] = shadow_ids
     return added
 
 
@@ -514,7 +570,6 @@ def contract_seating_targets(case_pack: dict[str, Any]) -> dict[str, set[str]]:
                 constraint,
                 case_pack=case_pack,
                 objects=objects,
-                mode="contract",
             ):
                 if check.get("relation_type") != "seating_to_work_surface":
                     continue
@@ -535,9 +590,299 @@ def contract_seating_targets(case_pack: dict[str, Any]) -> dict[str, set[str]]:
     return allowed
 
 
+def apply_contract_execution_states(
+    case_pack: dict[str, Any], results: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Apply dependency ordering and persist one audit row per constraint."""
+    constraints = contract_constraints(case_pack)
+    if not constraints:
+        return results
+    stage = _execution_stage(str(case_pack.get("stage") or "adhoc"))
+    final_stage = stage == "final"
+    by_constraint: dict[str, list[dict[str, Any]]] = {}
+    for result in results:
+        constraint = (result.get("evidence") or {}).get("intent_constraint") or {}
+        constraint_id = str(constraint.get("constraint_id") or "")
+        if constraint_id:
+            by_constraint.setdefault(constraint_id, []).append(result)
+
+    constraint_by_id = {str(row.get("constraint_id") or ""): row for row in constraints}
+    status: dict[str, str] = {}
+    for constraint_id, constraint in constraint_by_id.items():
+        rows = by_constraint.get(constraint_id, [])
+        expected = str(
+            constraint.get("stage")
+            or relation_spec(str(constraint.get("relation") or "")).earliest_stage
+        )
+        before_expected = STAGE_ORDER.index(stage) < STAGE_ORDER.index(expected)
+        if not rows:
+            status[constraint_id] = "pending" if before_expected else "failed"
+        elif before_expected and not all(
+            str(row.get("label") or "") == "pass" for row in rows
+        ):
+            status[constraint_id] = "pending"
+        elif any(str(row.get("contract_state") or "") == "pending" for row in rows):
+            status[constraint_id] = "pending"
+        elif any(str(row.get("label") or "") == "fail" for row in rows):
+            status[constraint_id] = "failed"
+        elif rows and all(str(row.get("label") or "") == "pass" for row in rows):
+            status[constraint_id] = "passed"
+        else:
+            status[constraint_id] = "failed"
+
+    dependency_ids: dict[str, list[str]] = {}
+    for constraint_id, constraint in constraint_by_id.items():
+        relation = relation_spec(str(constraint.get("relation") or ""))
+        dependency_relations = set(relation.dependencies)
+        dependencies = [
+            candidate_id
+            for candidate_id, candidate in constraint_by_id.items()
+            if candidate_id != constraint_id
+            and str(candidate.get("relation") or "") in dependency_relations
+            and _dependency_selectors_overlap(
+                constraint,
+                candidate,
+                relation.dependency_binding,
+            )
+        ]
+        dependency_ids[constraint_id] = dependencies
+        if dependencies and any(status.get(item) == "failed" for item in dependencies):
+            status[constraint_id] = "blocked"
+
+    if final_stage:
+        for constraint_id, value in list(status.items()):
+            if value in {"pending", "blocked"}:
+                status[constraint_id] = "failed"
+
+    execution: list[dict[str, Any]] = []
+    for constraint_id, constraint in constraint_by_id.items():
+        state = status[constraint_id]
+        rows = by_constraint.get(constraint_id, [])
+        if not rows:
+            synthetic = {
+                "check_id": f"intent_execution__{constraint_id}",
+                "metric": "functional_dependency",
+                "label": "fail" if state == "failed" else "unknown",
+                "confidence": 1.0,
+                "primary_object": str(
+                    (constraint.get("subjects") or {}).get("category") or "unbound"
+                ),
+                "related_objects": [],
+                "selected_related_objects": [],
+                "blocking_objects": [],
+                "relation_type": str(constraint.get("relation") or ""),
+                "reason": (
+                    "No executable geometry result was produced for this hard "
+                    f"constraint at stage `{stage}`."
+                ),
+                "diagnostics": {"contract_state": state, "stage": stage},
+                "evidence": {"intent_constraint": constraint},
+                "evaluation_source": "scenesmith_intent_contract",
+                "scoring_tier": "core" if state == "failed" else "auxiliary",
+                "contract_state": state,
+            }
+            results.append(synthetic)
+            rows = [synthetic]
+            by_constraint[constraint_id] = rows
+        for row in rows:
+            row["contract_state"] = state
+            diagnostics = row.setdefault("diagnostics", {})
+            diagnostics["contract_state"] = state
+            diagnostics["dependency_constraint_ids"] = dependency_ids[constraint_id]
+            if state == "pending" and not final_stage:
+                row["label"] = "unknown"
+                row["scoring_tier"] = "auxiliary"
+                row["reason"] = (
+                    f"Constraint is pending until its `{constraint.get('stage')}` stage."
+                )
+            elif state == "blocked" and not final_stage:
+                row["label"] = "unknown"
+                row["scoring_tier"] = "auxiliary"
+                row["reason"] = (
+                    "Blocked by failed upstream contract constraint(s): "
+                    + ", ".join(dependency_ids[constraint_id])
+                )
+        if state == "failed" and not any(
+            str(row.get("label") or "") == "fail" for row in rows
+        ):
+            rows[0]["label"] = "fail"
+            rows[0]["scoring_tier"] = "core"
+        execution.append(
+            {
+                "constraint_id": constraint_id,
+                "relation": str(constraint.get("relation") or ""),
+                "source": str(constraint.get("source") or ""),
+                "evidence_span": str(constraint.get("evidence_span") or ""),
+                "inference_reason": str(constraint.get("inference_reason") or ""),
+                "state": state,
+                "subject_ids": sorted(
+                    {
+                        str(row.get("primary_object") or "")
+                        for row in rows
+                        if row.get("primary_object")
+                    }
+                ),
+                "target_ids": sorted(
+                    {
+                        str(object_id)
+                        for row in rows
+                        for object_id in row.get("related_objects") or []
+                    }
+                ),
+                "dependency_constraint_ids": dependency_ids[constraint_id],
+                "repair_strategy": relation_spec(
+                    str(constraint.get("relation") or "")
+                ).repair_strategy,
+            }
+        )
+    contract = case_pack.get("intent_contract")
+    if isinstance(contract, dict):
+        contract["execution"] = execution
+        contract["resolution_rate"] = round(
+            sum(row["state"] == "passed" for row in execution) / len(execution), 6
+        )
+    return results
+
+
+def _dependency_selectors_overlap(
+    constraint: dict[str, Any],
+    candidate: dict[str, Any],
+    binding: str,
+) -> bool:
+    """Return whether a declared relation dependency concerns the same objects.
+
+    Dependency relation names alone are too broad: a failed ``near`` check for
+    a plant and sofa must not block a chair that faces a desk.  The registry
+    declares whether the prerequisite applies to the same subject, to the full
+    endpoint pair, or to any shared inventory endpoint.
+    """
+    subject = _constraint_endpoint_selectors(constraint, include_subject=True)
+    candidate_subject = _constraint_endpoint_selectors(
+        candidate, include_subject=True, include_targets=False
+    )
+    candidate_endpoints = _constraint_endpoint_selectors(candidate)
+    if binding == "subject":
+        return _selector_groups_overlap(subject, candidate_subject)
+    if binding == "any_endpoint":
+        return _selector_groups_overlap(subject, candidate_endpoints)
+
+    targets = _constraint_endpoint_selectors(
+        constraint, include_subject=False, include_targets=True
+    )
+    candidate_targets = _constraint_endpoint_selectors(
+        candidate, include_subject=False, include_targets=True
+    )
+    return (
+        _selector_groups_overlap(subject, candidate_subject)
+        and _selector_groups_overlap(targets, candidate_targets)
+    ) or (
+        _selector_groups_overlap(subject, candidate_targets)
+        and _selector_groups_overlap(targets, candidate_subject)
+    )
+
+
+def _constraint_endpoint_selectors(
+    constraint: dict[str, Any],
+    *,
+    include_subject: bool = True,
+    include_targets: bool = True,
+) -> list[dict[str, Any]]:
+    selectors: list[dict[str, Any]] = []
+    if include_subject and isinstance(constraint.get("subjects"), dict):
+        selectors.append(constraint["subjects"])
+    targets = constraint.get("targets")
+    if include_targets and isinstance(targets, dict):
+        if targets.get("category"):
+            selectors.append(targets)
+        if targets.get("secondary_category"):
+            selectors.append(
+                {
+                    "category": targets["secondary_category"],
+                    "role": targets.get("secondary_role", ""),
+                }
+            )
+    return selectors
+
+
+def _selector_groups_overlap(
+    first: Iterable[dict[str, Any]], second: Iterable[dict[str, Any]]
+) -> bool:
+    return any(
+        _selectors_can_overlap(left, right) for left in first for right in second
+    )
+
+
+def _selectors_can_overlap(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    left_category = _normalize_selector_category(left.get("category"))
+    right_category = _normalize_selector_category(right.get("category"))
+    if not left_category or not right_category:
+        return False
+    left_role = str(left.get("role") or "").strip().lower()
+    right_role = str(right.get("role") or "").strip().lower()
+    if left_role and right_role and left_role != right_role:
+        return False
+    return bool(
+        _selector_category_family(left_category)
+        & _selector_category_family(right_category)
+    )
+
+
+def _selector_category_family(category: str) -> set[str]:
+    """Return semantic families which an endpoint selector may bind."""
+    category = _normalize_selector_category(category)
+    families = {
+        "chair": {
+            "chair",
+            "office_chair",
+            "dining_chair",
+            "student_chair",
+            "guest_chair",
+            "teacher_chair",
+            "armchair",
+            "stool",
+            "bench",
+        },
+        "table": {"table", "dining_table", "coffee_table", "desk"},
+        "desk": {"desk", "teacher_desk", "student_desk", "reception_desk"},
+    }
+    if category in families:
+        return families[category]
+    for broad, members in families.items():
+        if category in members:
+            return {category, broad}
+    return {category}
+
+
+def _execution_stage(stage: str) -> str:
+    normalized = str(stage or "").strip().lower()
+    aliases = {
+        "scene_after_furniture": "furniture",
+        "furniture_relation_repair": "furniture",
+        "scene_after_wall_objects": "wall_mounted",
+        "wall_visual_clearance_repair": "wall_mounted",
+        "scene_after_ceiling_objects": "ceiling_mounted",
+        "scene_after_manipulands": "manipuland",
+        "final_scene": "final",
+    }
+    if normalized in aliases:
+        return aliases[normalized]
+    if normalized in STAGE_ORDER:
+        return normalized
+    for token, resolved in (
+        ("manipuland", "manipuland"),
+        ("ceiling", "ceiling_mounted"),
+        ("wall", "wall_mounted"),
+        ("furniture", "furniture"),
+    ):
+        if token in normalized:
+            return resolved
+    return "final"
+
+
 def _explicit_prompt_constraints(prompt: str, lowered: str) -> list[dict[str, Any]]:
     constraints: list[dict[str, Any]] = []
     clauses = _clauses(prompt)
+    previous_selector: dict[str, Any] | None = None
     for clause in clauses:
         normalized = clause.lower()
         # Keep the subject phrase short.  This accepts paraphrases while
@@ -553,11 +898,14 @@ def _explicit_prompt_constraints(prompt: str, lowered: str) -> list[dict[str, An
             if subject is None:
                 continue
             relation = "centered_on_wall" if match.group("centered") else "against_wall"
+            wall_role = (match.group("wall") or "").strip()
+            if wall_role in {"a", "an", "one", "the"}:
+                wall_role = ""
             constraints.append(
                 _constraint(
                     relation,
                     subject,
-                    {"category": "wall", "role": (match.group("wall") or "").strip()},
+                    {"category": "wall", "role": wall_role},
                     source="explicit_prompt",
                     evidence_span=clause,
                 )
@@ -575,6 +923,24 @@ def _explicit_prompt_constraints(prompt: str, lowered: str) -> list[dict[str, An
                 constraints.append(
                     _constraint(
                         "centered_in_room",
+                        subject,
+                        {"category": "room"},
+                        source="explicit_prompt",
+                        evidence_span=clause,
+                    )
+                )
+
+        for match in re.finditer(
+            r"(?P<subject>[a-z0-9_\- ,']{1,70}?)\s+"
+            r"(?:is |sits |stands |placed |positioned )?"
+            r"(?:in|at)\s+(?:a|the|one)\s+(?:room\s+)?corner\b",
+            normalized,
+        ):
+            subject = selector_for_phrase(match.group("subject"))
+            if subject is not None:
+                constraints.append(
+                    _constraint(
+                        "corner_of_room",
                         subject,
                         {"category": "room"},
                         source="explicit_prompt",
@@ -637,7 +1003,10 @@ def _explicit_prompt_constraints(prompt: str, lowered: str) -> list[dict[str, An
             r"(?P<target>[a-z0-9_\- ,']{1,70}?)(?:[,.;]|$)",
             normalized,
         ):
-            subject = selector_for_phrase(match.group("subject"))
+            subject_phrase = re.sub(
+                r"\s+on\s+(?:the\s+)?floor\b.*$", "", match.group("subject")
+            )
+            subject = selector_for_phrase(subject_phrase)
             target = selector_for_phrase(match.group("target"))
             if subject is not None and target is not None:
                 constraints.append(
@@ -652,8 +1021,94 @@ def _explicit_prompt_constraints(prompt: str, lowered: str) -> list[dict[str, An
 
         for match in re.finditer(
             r"(?P<subject>[a-z0-9_\- ,']{1,70}?)\s+"
+            r"(?:is |sits |stands |placed |positioned )?(?:directly\s+)?"
+            r"behind\s+(?:the\s+|a\s+|an\s+)?"
+            r"(?P<target>it|[a-z0-9_\- ,']{1,70}?)(?:[,.;]|$)",
+            normalized,
+        ):
+            subject = selector_for_phrase(match.group("subject"))
+            target = (
+                previous_selector
+                if match.group("target") == "it"
+                else selector_for_phrase(match.group("target"))
+            )
+            if subject is not None and target is not None:
+                constraints.append(
+                    _constraint(
+                        "behind",
+                        subject,
+                        dict(target),
+                        source="explicit_prompt",
+                        evidence_span=clause,
+                    )
+                )
+
+        for match in re.finditer(
+            r"(?P<subject>[a-z0-9_\- ,']{1,70}?)\s+"
+            r"(?:is |sits |lies |placed |positioned )?"
+            r"(?P<centered>centered|centred)?\s*between\s+"
+            r"(?:the\s+)?(?P<anchors>[a-z0-9_\- ']{1,50}?)(?:[,.;]|$)",
+            normalized,
+        ):
+            subject = selector_for_phrase(match.group("subject"))
+            anchors = selector_for_phrase(match.group("anchors"), count=2)
+            if (
+                subject is None
+                or anchors is None
+                or not _phrase_mentions_plural(
+                    match.group("anchors"), str(anchors.get("category") or "")
+                )
+            ):
+                continue
+            targets = dict(anchors)
+            targets["count"] = 2
+            targets["quantifier"] = "all"
+            targets["secondary_category"] = anchors["category"]
+            targets["secondary_count"] = 2
+            if anchors.get("role"):
+                targets["secondary_role"] = anchors["role"]
+            constraints.append(
+                _constraint(
+                    "centered_between" if match.group("centered") else "between",
+                    subject,
+                    targets,
+                    source="explicit_prompt",
+                    evidence_span=clause,
+                )
+            )
+
+        for match in re.finditer(
+            r"(?P<anchors>(?:two|2)\s+[a-z0-9_\- ']{1,50}?)\b.*?"
+            r"(?:with|and)\s+(?:a\s+|an\s+|the\s+)?"
+            r"(?P<subject>[a-z0-9_\- ']{1,50}?)\s+"
+            r"(?P<centered>centered\s+)?between\s+them\b",
+            normalized,
+        ):
+            anchors = selector_for_phrase(match.group("anchors"), count=2)
+            subject = selector_for_phrase(match.group("subject"))
+            if anchors is None or subject is None:
+                continue
+            targets = dict(anchors)
+            targets["count"] = 2
+            targets["quantifier"] = "all"
+            targets["secondary_category"] = anchors["category"]
+            targets["secondary_count"] = 2
+            if anchors.get("role"):
+                targets["secondary_role"] = anchors["role"]
+            constraints.append(
+                _constraint(
+                    "centered_between" if match.group("centered") else "between",
+                    subject,
+                    targets,
+                    source="explicit_prompt",
+                    evidence_span=clause,
+                )
+            )
+
+        for match in re.finditer(
+            r"(?P<subject>[a-z0-9_\- ,']{1,70}?)\s+"
             r"(?:facing|faces|face)\s+(?:the\s+|a\s+|an\s+)?"
-            r"(?P<target>[a-z0-9_\- ,']{1,70}?)(?:[,.;]|$)",
+            r"(?P<target>[a-z0-9_\- ,']{1,70}?)(?=\s+with\b|[,.;]|$)",
             normalized,
         ):
             subject = selector_for_phrase(match.group("subject"))
@@ -700,7 +1155,10 @@ def _explicit_prompt_constraints(prompt: str, lowered: str) -> list[dict[str, An
             r"(?P<target>[a-z0-9_\- ,']{1,70}?)(?:[,.;]|$)",
             normalized,
         ):
-            subject = selector_for_phrase(match.group("subject"))
+            subject_phrase = re.sub(
+                r"\s+on\s+(?:the\s+)?floor\b.*$", "", match.group("subject")
+            )
+            subject = selector_for_phrase(subject_phrase)
             target = selector_for_phrase(match.group("target"))
             if subject is not None and target is not None:
                 constraints.append(
@@ -724,7 +1182,8 @@ def _explicit_prompt_constraints(prompt: str, lowered: str) -> list[dict[str, An
             # into the nonsensical `nightstand on_top_of bed` contract.
             if re.search(r"\bon\s+(?:each|either|both)\s+side", match.group(0)):
                 continue
-            subject = selector_for_phrase(match.group("subject"))
+            subject_phrase = re.split(r"\band\b", match.group("subject"))[-1]
+            subject = selector_for_phrase(subject_phrase)
             target = selector_for_phrase(match.group("target"))
             if subject is not None and target is not None:
                 constraints.append(
@@ -778,6 +1237,95 @@ def _explicit_prompt_constraints(prompt: str, lowered: str) -> list[dict[str, An
                         evidence_span=clause,
                     )
                 )
+
+        clause_selector = selector_for_phrase(clause)
+        if clause_selector is not None:
+            previous_selector = clause_selector
+
+    number_pattern = r"\d+|" + "|".join(
+        re.escape(value) for value in _NUMBER_WORDS if value not in {"a", "an"}
+    )
+    for match in re.finditer(
+        rf"(?P<subject>(?:{number_pattern})\s+[a-z0-9_\- ]{{1,60}}?)\s+"
+        r"(?:are\s+)?(?:facing|face)\s+each\s+other\b",
+        lowered,
+    ):
+        subject = selector_for_phrase(match.group("subject"))
+        if subject is None or int(subject.get("count") or 0) < 2:
+            continue
+        constraints.append(
+            _constraint(
+                "across_from",
+                subject,
+                dict(subject),
+                source="explicit_prompt",
+                evidence_span=_first_sentence_with(lowered, "each other"),
+            )
+        )
+
+    required_counts = {
+        str((row.get("subjects") or {}).get("category") or ""): int(
+            (row.get("subjects") or {}).get("count") or 1
+        )
+        for row in _explicit_required_count_constraints(prompt)
+    }
+    route_pattern = re.compile(
+        r"(?P<evidence>(?:keep|maintain|leave)?\s*(?:an?\s+|the\s+)?"
+        r"(?:open|clear|unobstructed)\s+(?:walking\s+)?(?:route|path|access)\s+"
+        r"from\s+(?:the\s+)?(?:entrance|entry|door)\s+to\s+"
+        r"(?P<targets>[a-z0-9_\- ',]+?))(?=[.;]|$)",
+        re.IGNORECASE,
+    )
+    for route in route_pattern.finditer(lowered):
+        for phrase in re.split(r"\s+and\s+|\s*,\s*", route.group("targets")):
+            target = selector_for_phrase(phrase)
+            if target is None:
+                continue
+            category = str(target.get("category") or "")
+            if _phrase_mentions_plural(phrase, category):
+                specific = [
+                    candidate
+                    for candidate, count in required_counts.items()
+                    if count > 1
+                    and category in _selector_category_family(candidate)
+                ]
+                if len(specific) == 1:
+                    category = specific[0]
+                    target["category"] = category
+                    target["count"] = required_counts[category]
+                    target["quantifier"] = "all"
+            constraints.append(
+                _constraint(
+                    "clear_access",
+                    {"category": "entrance", "count": 1, "quantifier": "all"},
+                    target,
+                    source="explicit_prompt",
+                    evidence_span=route.group("evidence"),
+                )
+            )
+    for match in re.finditer(
+        r"(?P<items>[^,.;]{1,100}?)\s+at\s+each\s+"
+        r"(?P<target>[a-z][a-z0-9' -]{0,40}?)(?=[,.;]|$)",
+        lowered,
+    ):
+        target = selector_for_phrase(match.group("target"))
+        target_count = required_counts.get(str((target or {}).get("category") or ""), 0)
+        if target is None or target_count <= 1:
+            continue
+        target["count"] = target_count
+        for item_phrase in re.split(r"\s+and\s+", match.group("items")):
+            subject = selector_for_phrase(item_phrase, count=target_count)
+            if subject is None:
+                continue
+            constraints.append(
+                _constraint(
+                    "near",
+                    subject,
+                    dict(target),
+                    source="explicit_prompt",
+                    evidence_span=match.group(0),
+                )
+            )
 
     # Group constraints often span a full sentence and are easier to recognise
     # independently from individual relation clauses.
@@ -918,6 +1466,48 @@ def _explicit_required_count_constraints(prompt: str) -> list[dict[str, Any]]:
                 evidence_span=match.group(0),
             )
         )
+
+    explicit_counts = {
+        str((row.get("subjects") or {}).get("category") or ""): int(
+            (row.get("subjects") or {}).get("count") or 1
+        )
+        for row in constraints
+        if row.get("relation") == "required_count"
+    }
+    distributed_pattern = re.compile(
+        r"(?P<items>[^,.;]{1,100}?)\s+(?:at|on)\s+each\s+"
+        r"(?P<target>[a-z][a-z0-9' -]{0,40}?)(?=[,.;]|$)",
+        re.IGNORECASE,
+    )
+    for match in distributed_pattern.finditer(prompt):
+        target = selector_for_phrase(match.group("target"))
+        if target is None:
+            continue
+        count = explicit_counts.get(str(target.get("category") or ""), 0)
+        if count <= 1:
+            continue
+        for item_phrase in re.split(r"\s+and\s+", match.group("items")):
+            item = selector_for_phrase(item_phrase)
+            if item is None:
+                continue
+            category = str(item.get("category") or "")
+            if not category or explicit_counts.get(category, 0) >= count:
+                continue
+            constraints.append(
+                _constraint(
+                    "required_count",
+                    {
+                        "category": category,
+                        "count": count,
+                        "quantifier": "at_least",
+                        **({"role": item["role"]} if item.get("role") else {}),
+                    },
+                    None,
+                    source="explicit_prompt",
+                    evidence_span=match.group(0),
+                )
+            )
+            explicit_counts[category] = count
     return constraints
 
 
@@ -1070,7 +1660,169 @@ def _task_spec_constraints(task_spec: Any | None) -> list[dict[str, Any]]:
         values = task_spec.get("intent_constraints") or []
     else:
         values = getattr(task_spec, "intent_constraints", []) or []
-    return [item for item in values if isinstance(item, dict)]
+    return [
+        item.model_dump(exclude_none=True) if hasattr(item, "model_dump") else item
+        for item in values
+        if isinstance(item, dict) or hasattr(item, "model_dump")
+    ]
+
+
+def _task_spec_payload(task_spec: Any | None) -> dict[str, Any]:
+    if task_spec is None:
+        return {}
+    if isinstance(task_spec, dict):
+        return dict(task_spec)
+    if hasattr(task_spec, "model_dump"):
+        return task_spec.model_dump(mode="json", exclude_none=True)
+    return {}
+
+
+def _apply_task_spec_contract_metadata(
+    constraints: list[dict[str, Any]], task_spec: Any | None
+) -> list[dict[str, Any]]:
+    """Derive endpoint stage and existential selectors from typed inventory."""
+
+    payload = _task_spec_payload(task_spec)
+    category_stages: dict[str, str] = {}
+    category_counts: dict[str, int] = {}
+    for field, stage in (
+        ("required_large_objects", "furniture"),
+        ("required_wall_objects", "wall_mounted"),
+        ("required_ceiling_objects", "ceiling_mounted"),
+        ("required_small_objects", "manipuland"),
+    ):
+        for value in payload.get(field) or []:
+            category = _normalize_selector_category(value)
+            if not category:
+                continue
+            category_stages[category] = stage
+            category_counts[category] = category_counts.get(category, 0) + 1
+
+    result: list[dict[str, Any]] = []
+    for original in constraints:
+        constraint = dict(original)
+        subjects = dict(constraint.get("subjects") or {})
+        subject_category = _normalize_selector_category(subjects.get("category"))
+        if subject_category in category_stages:
+            constraint["stage"] = category_stages[subject_category]
+        if category_counts.get(subject_category) == 1 and not subjects.get("count"):
+            subjects["count"] = 1
+            constraint["subjects"] = subjects
+        evidence = str(constraint.get("evidence_span") or "").lower()
+        if subjects.get("count") == 1 and (
+            re.search(r"\b(?:few|several|multiple)\b", evidence)
+            or _phrase_mentions_plural(evidence, subject_category)
+        ):
+            subjects["quantifier"] = "minimum"
+            constraint["subjects"] = subjects
+
+        targets = dict(constraint.get("targets") or {})
+        target_category = _normalize_selector_category(targets.get("category"))
+        if category_counts.get(target_category) == 1 and not targets.get("count"):
+            targets["count"] = 1
+            constraint["targets"] = targets
+        endpoint_stages = [
+            category_stages[category]
+            for category in (
+                subject_category,
+                target_category,
+                _normalize_selector_category(targets.get("secondary_category")),
+            )
+            if category in category_stages
+        ]
+        if endpoint_stages:
+            current_stage = str(
+                constraint.get("stage")
+                or relation_spec(str(constraint.get("relation") or "")).earliest_stage
+            )
+            constraint["stage"] = max(
+                [current_stage, *endpoint_stages], key=STAGE_ORDER.index
+            )
+        subject_count = category_counts.get(subject_category, 0)
+        target_count = category_counts.get(target_category, 0)
+        evidence_has_each = re.search(r"\b(?:each|every)\b", evidence) is not None
+        try:
+            requested_subject_count = int(subjects.get("count") or 0)
+        except (TypeError, ValueError):
+            requested_subject_count = 0
+        inferred_shared_target = (
+            constraint.get("source") == "model_inferred"
+            and relation_spec(str(constraint.get("relation") or "")).target_arity == 1
+            and subject_count > 1
+            and target_count == 1
+            and requested_subject_count <= 1
+        )
+        if inferred_shared_target:
+            # A compiler often represents a shared target as one singular
+            # endpoint (for example, nightstands next to one bed).  The typed
+            # inventory determines the subject group cardinality, preventing
+            # an otherwise valid relation from becoming an ambiguous binding.
+            subjects["count"] = subject_count
+            subjects["quantifier"] = "all"
+            targets["count"] = 1
+            targets["quantifier"] = "all"
+            constraint["subjects"] = subjects
+            constraint["targets"] = targets
+        inferred_group = (
+            constraint.get("source") == "model_inferred"
+            and subject_count > 1
+            and subject_count == target_count
+        )
+        if (
+            relation_spec(str(constraint.get("relation") or "")).target_arity == 1
+            and subject_count > 1
+            and subject_count == target_count
+            and (evidence_has_each or inferred_group)
+        ):
+            subjects["count"] = subject_count
+            subjects["quantifier"] = "all"
+            targets["count"] = target_count
+            targets["quantifier"] = "all"
+            constraint["subjects"] = subjects
+            constraint["targets"] = targets
+
+        if (
+            constraint.get("relation") in {"across_from", "clear_access"}
+            and subject_category == target_category
+            and subject_count == 2
+        ):
+            subjects["count"] = 2
+            subjects["quantifier"] = "all"
+            targets["count"] = 2
+            targets["quantifier"] = "all"
+            constraint["subjects"] = subjects
+            constraint["targets"] = targets
+
+        if (
+            constraint.get("relation") == "centered_in_room"
+            and subject_count > 1
+            and not re.search(r"\b(?:each|every)\b", evidence)
+            and not re.search(
+                rf"\b(?:a|an|one|single)\s+(?:[a-z0-9_-]+\s+){{0,2}}"
+                rf"{re.escape(subject_category.replace('_', ' '))}\b",
+                evidence,
+            )
+        ):
+            continue
+        if category_counts.get(target_category, 0) > 1:
+            phrase = re.escape(target_category.replace("_", " "))
+            explicitly_one = (
+                targets.get("count") == 1
+                or re.search(
+                    rf"\b(?:one|any|other|another)\s+(?:[a-z0-9_-]+\s+){{0,2}}{phrase}s?\b",
+                    evidence,
+                )
+                # A relation may elide the repeated noun entirely: "the
+                # other" resolves to one member of its already typed target
+                # group, rather than every matching object in the room.
+                or re.search(r"\b(?:the\s+)?(?:another|(?<!each\s)other)\b", evidence)
+            )
+            if explicitly_one:
+                targets["count"] = 1
+                targets["quantifier"] = "minimum"
+                constraint["targets"] = targets
+        result.append(constraint)
+    return result
 
 
 def _normalize_external_constraint(raw: dict[str, Any]) -> dict[str, Any] | None:
@@ -1082,23 +1834,18 @@ def _normalize_external_constraint(raw: dict[str, Any]) -> dict[str, Any] | None
     if subjects is None:
         return None
     supplied_source = str(raw.get("source") or "model_inferred").strip().lower()
-    # A model can quote a real span yet still hallucinate its relation.  It is
-    # therefore never allowed to self-authorize an ``explicit_prompt`` or
-    # ``room_ontology`` hard constraint.  The deterministic prompt parser and
-    # this module's controlled ontology are the only hard-constraint authors;
-    # model/VLM output remains useful as labelled auxiliary evidence.
-    source = (
-        supplied_source
-        if supplied_source in {"model_inferred", "vlm_observation"}
-        else "model_inferred"
-    )
+    if supplied_source not in {"explicit_prompt", "model_inferred"}:
+        return None
+    source = supplied_source
     evidence = str(raw.get("evidence_span") or raw.get("evidence") or "").strip()
+    inference_reason = str(raw.get("inference_reason") or "").strip()
     return _constraint(
         relation,
         subjects,
         targets,
         source=source,
         evidence_span=evidence,
+        inference_reason=inference_reason,
         confidence=_bounded_float(raw.get("confidence"), default=0.7),
     )
 
@@ -1108,7 +1855,7 @@ def _normalize_selector(value: Any) -> dict[str, Any] | None:
         return selector_for_phrase(value)
     if not isinstance(value, dict):
         return None
-    category = str(value.get("category") or "").strip().lower().replace(" ", "_")
+    category = _normalize_selector_category(value.get("category"))
     if not category:
         return None
     normalized: dict[str, Any] = {
@@ -1142,22 +1889,34 @@ def _constraint(
     *,
     source: str,
     evidence_span: str,
+    inference_reason: str = "",
     confidence: float = 1.0,
 ) -> dict[str, Any]:
     normalized_evidence = " ".join(str(evidence_span or "").split())
+    normalized_inference_reason = " ".join(str(inference_reason or "").split())
     digest = hashlib.sha1(
-        repr((relation, subjects, targets, source, normalized_evidence)).encode("utf-8")
+        _stable_json(
+            [
+                relation,
+                subjects,
+                targets,
+                source,
+                normalized_evidence,
+                normalized_inference_reason,
+            ]
+        ).encode("utf-8")
     ).hexdigest()[:12]
     return {
         "constraint_id": f"intent_{digest}",
         "relation": relation,
         "subjects": subjects,
         "targets": targets or {},
-        "strength": "hard" if source in HARD_SOURCES else "auxiliary",
+        "strength": "hard",
         "source": source,
         "confidence": _bounded_float(confidence, default=1.0),
         "evidence_span": normalized_evidence,
-        "stage": "furniture",
+        "inference_reason": normalized_inference_reason,
+        "stage": relation_spec(relation).earliest_stage,
     }
 
 
@@ -1170,12 +1929,12 @@ def _deduplicate_constraints(constraints: list[dict[str, Any]]) -> list[dict[str
     }
     keyed: dict[tuple[str, str, str], dict[str, Any]] = {}
     for constraint in constraints:
-        subjects = constraint.get("subjects") or {}
-        targets = constraint.get("targets") or {}
+        subjects = _normalize_selector(constraint.get("subjects")) or {}
+        targets = _normalize_selector(constraint.get("targets")) or {}
         key = (
             str(constraint.get("relation") or ""),
-            repr(subjects),
-            repr(targets),
+            _stable_json(subjects),
+            _stable_json(targets),
         )
         previous = keyed.get(key)
         if previous is None or priority.get(
@@ -1276,6 +2035,7 @@ def _role_matches_object(role: str, obj: dict[str, Any]) -> bool:
         "south",
         "east",
         "west",
+        "adjacent",
     }:
         return (
             str(obj.get("category_norm") or obj.get("category") or "").lower() == "wall"
@@ -1293,6 +2053,8 @@ def _selector_matches_object(category: str, role: str, obj: dict[str, Any]) -> b
     base_category = _normalize_selector_category(
         obj.get("category_norm") or obj.get("category")
     )
+    if object_cat == category or base_category == category:
+        return _role_matches_object(role, obj)
     identity = " ".join(
         str(obj.get(key) or "").lower().replace("_", " ")
         for key in ("id", "name", "description")
@@ -1323,6 +2085,9 @@ def _selector_matches_object(category: str, role: str, obj: dict[str, Any]) -> b
         ),
         "guest_chair": base_category in {"chair", "armchair", "office_chair"}
         and ("guest" in identity or "visitor" in identity),
+        "rocking_chair": base_category == "rocking_chair"
+        or semantic_name == "rocking_chair"
+        or semantic_name.endswith("_rocking_chair"),
         "student_chair": base_category in {"chair", "office_chair", "dining_chair"}
         and "student" in identity,
         "dining_chair": base_category in {"dining_chair", "chair"}
@@ -1336,7 +2101,8 @@ def _selector_matches_object(category: str, role: str, obj: dict[str, Any]) -> b
         or "tv stand" in identity,
         "television": base_category in {"television", "tv", "screen", "display"}
         or (
-            not _MEDIA_SUPPORT_PATTERN.search(identity)
+            base_category in {"", "unknown", "object"}
+            and not _MEDIA_SUPPORT_PATTERN.search(identity)
             and ("television" in identity or re.search(r"\btv\b", identity) is not None)
         ),
         "office_chair": base_category in {"office_chair", "chair"}
@@ -1345,6 +2111,25 @@ def _selector_matches_object(category: str, role: str, obj: dict[str, Any]) -> b
             or "desk chair" in identity
             or base_category == "office_chair"
         ),
+        # Retrieval preserves useful asset specificity in semantic names (for
+        # example ``two_seater_sofa``). Prompt contracts use the family noun,
+        # so bind that stable token without relying on free-form descriptions.
+        "sofa": base_category == "sofa"
+        or semantic_name == "sofa"
+        or semantic_name.endswith("_sofa"),
+        "desk": base_category == "desk"
+        or base_category.endswith("_desk")
+        or semantic_name.endswith("_desk"),
+        "table_lamp": base_category.startswith("table_lamp")
+        or base_category.startswith("desk_lamp")
+        or semantic_name.startswith("table_lamp")
+        or semantic_name.startswith("desk_lamp"),
+        "plant": base_category == "plant"
+        or base_category.endswith("_plant")
+        or semantic_name.endswith("_plant"),
+        "rug": base_category == "rug"
+        or base_category.endswith("_rug")
+        or semantic_name.endswith("_rug"),
         "table": base_category in {"table", "dining_table", "coffee_table", "desk"},
         "chair": base_category
         in {
@@ -1365,7 +2150,10 @@ def _selector_matches_object(category: str, role: str, obj: dict[str, Any]) -> b
         category_matches = (
             object_cat == category
             or base_category == category
-            or _contains_phrase(identity, normalized_category)
+            or (
+                base_category in {"", "unknown", "object"}
+                and _contains_phrase(identity, normalized_category)
+            )
         )
     if not category_matches:
         return False
@@ -1386,18 +2174,31 @@ def _normalize_selector_category(value: Any) -> str:
         "instructor_desk",
     }:
         return "teacher_desk"
+    if normalized in {"computer_monitor", "computer_display", "display_monitor"}:
+        return "monitor"
+    if normalized in {
+        "chalkboard",
+        "blackboard",
+        "whiteboard",
+        "projection_screen",
+        "projector_screen",
+        "teaching_screen",
+    }:
+        return "instructional_surface"
     return normalized
 
 
-def _fd_relation_for_constraint(
-    constraint: dict[str, Any], objects: list[dict[str, Any]]
-) -> str | None:
+def _fd_relation_for_constraint(constraint: dict[str, Any]) -> str | None:
     relation = str(constraint.get("relation") or "")
-    if relation == "against_wall":
-        return "back_against_wall"
-    if relation == "paired_with":
+    evaluator = relation_spec(relation).evaluator
+    if (
+        evaluator == "object_on_support"
+        and str((constraint.get("targets") or {}).get("category") or "") == "floor"
+    ):
+        return "object_on_floor"
+    if evaluator == "paired_with":
         return "seating_to_work_surface"
-    if relation in {"faces", "aligned_with"}:
+    if evaluator in {"faces", "aligned_with"}:
         subject_category = str((constraint.get("subjects") or {}).get("category") or "")
         target_category = str((constraint.get("targets") or {}).get("category") or "")
         if subject_category in {
@@ -1421,11 +2222,17 @@ def _fd_relation_for_constraint(
             if target_category in {"television", "monitor", "tv_stand"}:
                 return "seating_to_media"
         return "furniture_faces_furniture"
-    if relation == "on_top_of":
-        return "object_on_support"
-    if relation == "near":
-        return "generic_near_relation"
-    return None
+    return evaluator if evaluator in _DIRECT_FD_EVALUATORS else None
+
+
+def _relation_threshold_dependency(
+    constraint: dict[str, Any],
+) -> dict[str, float]:
+    thresholds = relation_spec(str(constraint.get("relation") or "")).thresholds
+    max_gap = thresholds.get("max_gap_m")
+    if max_gap is None:
+        return {}
+    return {"max_distance_m": float(max_gap)}
 
 
 def _paired_seating_checks(
@@ -1433,7 +2240,6 @@ def _paired_seating_checks(
     *,
     case_pack: dict[str, Any],
     objects: list[dict[str, Any]],
-    mode: str,
 ) -> list[dict[str, Any]]:
     """Materialize prompt-authorized one-to-one seat/surface checks.
 
@@ -1463,7 +2269,6 @@ def _paired_seating_checks(
     ]
     if len(selected) != len(subject_ids):
         return []
-    tier = _constraint_tier(constraint, mode)
     checks: list[dict[str, Any]] = []
     for assignment in selected:
         seat_check_id = (
@@ -1472,7 +2277,6 @@ def _paired_seating_checks(
         )
         common_evidence = {
             "intent_constraint": constraint,
-            "constraint_mode": mode,
             **assignment.evidence(),
         }
         checks.append(
@@ -1484,7 +2288,7 @@ def _paired_seating_checks(
                 "relation_type": "seating_to_work_surface",
                 "expected_use": _expected_use(constraint, "seating_to_work_surface"),
                 "check_source": "intent_contract",
-                "scoring_tier": tier,
+                "scoring_tier": "core",
                 "evidence": common_evidence,
             }
         )
@@ -1499,7 +2303,7 @@ def _paired_seating_checks(
                     "the paired work surface's usable front faces its assigned seat"
                 ),
                 "check_source": "intent_contract",
-                "scoring_tier": tier,
+                "scoring_tier": "core",
                 "evidence": {
                     **common_evidence,
                     "paired_surface_facing": True,
@@ -1542,12 +2346,6 @@ def _center_distance_sq(
     return (first[0] - second[0]) ** 2 + (first[1] - second[1]) ** 2
 
 
-def _constraint_tier(constraint: dict[str, Any], mode: str) -> str:
-    if mode == "shadow":
-        return "ignored"
-    return "core" if is_hard_constraint(constraint) else "auxiliary"
-
-
 def _expected_use(constraint: dict[str, Any], relation_type: str) -> str:
     evidence = str(constraint.get("evidence_span") or "")
     return {
@@ -1582,3 +2380,13 @@ def _copy_contract(contract: dict[str, Any]) -> dict[str, Any]:
             if isinstance(constraint, dict)
         ],
     }
+
+
+def _stable_json(value: Any) -> str:
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        default=str,
+    )

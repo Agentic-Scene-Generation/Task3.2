@@ -33,6 +33,7 @@ from scenesmith.prompts.registry import WallAgentPrompts
 from scenesmith.scenebenchmark_critic import evaluate_room_scene, format_prompt_context
 from scenesmith.scenebenchmark_critic.config import critic_config_from_any
 from scenesmith.scenebenchmark_critic.prompt_context import format_agent_prompt_context
+from scenesmith.scenebenchmark_critic.intent_contract import original_prompt_for_scene
 from scenesmith.scenebenchmark_critic.visual_clearance_repair import (
     improve_wall_visual_clearance,
 )
@@ -424,8 +425,10 @@ class StatefulWallAgent(BaseStatefulAgent, BaseWallAgent):
         Args:
             room_description: Human-readable room description.
         """
+        immutable_prompt = original_prompt_for_scene(self.scene) or room_description
         self.required_wall_object_constraints = build_required_wall_object_constraints(
-            room_description
+            immutable_prompt,
+            task_spec=getattr(self.scene, "scene_expert_task_spec", None),
         )
         # Create designer tools first.
         designer_tools = self._create_designer_tools(

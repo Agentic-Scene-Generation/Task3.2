@@ -30,7 +30,7 @@ def test_task_compiler_records_full_input_and_output(tmp_path, monkeypatch) -> N
     compiler = object.__new__(TaskCompiler)
     compiler._model = "test-model"
     compiler._max_tokens = 512
-    compiler._temperature = 0.1
+    compiler._temperature = 0.0
     compiler._client = SimpleNamespace(
         chat=SimpleNamespace(completions=SimpleNamespace(create=create))
     )

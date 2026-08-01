@@ -855,8 +855,6 @@ def _hard_contract_orientation_subjects(
     case_pack: dict[str, Any], objects: dict[str, dict[str, Any]]
 ) -> set[str]:
     """Return subjects whose usable front is owned by a hard intent contract."""
-    if str(case_pack.get("intent_contract_mode") or "legacy") != "contract":
-        return set()
     subject_ids: set[str] = set()
     for constraint in contract_constraints(
         case_pack,

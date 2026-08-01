@@ -28,6 +28,22 @@ _MEDIA_GROUP_ON_WALL_PATTERN = re.compile(
     r"(?:is\s+)?(?:on|against)\s+(?:the\s+)?(?:opposite\s+)?wall\b",
     re.IGNORECASE,
 )
+_NO_EXPLICIT_WALL_REQUIREMENTS = (
+    "- No explicit wall-object obligations were extracted from the prompt. "
+    "Do not create, move, remove, or duplicate wall-mounted objects that the "
+    "TaskCompiler allocated to another stage."
+)
+
+
+def _task_spec_values(task_spec: Any, field: str) -> list[str]:
+    if task_spec is None:
+        return []
+    values = (
+        task_spec.get(field, [])
+        if isinstance(task_spec, dict)
+        else getattr(task_spec, field, [])
+    )
+    return [str(value) for value in values or []]
 
 
 def _media_display_category(obj: Any) -> str | None:
@@ -115,11 +131,21 @@ def converge_cross_stage_media_inventory(
     return removed
 
 
-def build_required_wall_object_constraints(room_description: str) -> str:
+def build_required_wall_object_constraints(
+    room_description: str, *, task_spec: Any | None = None
+) -> str:
     """Extract explicit wall-object obligations from the room prompt."""
     normalized = " ".join(room_description.split())
     lower_text = normalized.lower()
     requirements: list[str] = []
+
+    # When SceneExpert has compiled the prompt, that inventory is the sole
+    # authority for stage ownership.  ``room_description`` may already include
+    # a model-authored StageBrief, so re-parsing it can promote an object from a
+    # later stage to a wall obligation.
+    required_wall_objects = _task_spec_values(task_spec, "required_wall_objects")
+    if task_spec is not None and not required_wall_objects:
+        return _NO_EXPLICIT_WALL_REQUIREMENTS
 
     has_media_furniture = bool(_MEDIA_FURNITURE_PATTERN.search(normalized))
     has_explicit_mount_verb = bool(_EXPLICIT_MOUNT_VERB_PATTERN.search(normalized))
@@ -154,9 +180,12 @@ def build_required_wall_object_constraints(room_description: str) -> str:
         )
 
     if not requirements:
-        return (
-            "- No explicit wall-object obligations were extracted from the prompt. "
-            "Decorate walls contextually."
-        )
+        if required_wall_objects:
+            return (
+                "- REQUIRED wall objects from the TaskCompiler inventory: "
+                f"{', '.join(required_wall_objects)}. Create only these objects "
+                "and preserve objects allocated to other stages."
+            )
+        return _NO_EXPLICIT_WALL_REQUIREMENTS
 
     return "\n".join(requirements)

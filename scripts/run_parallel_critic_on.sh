@@ -9,6 +9,9 @@
 # generates OUTPUT_ROOT/shared_base and branches the critic run from it.
 # To reuse a previous base, set BRANCH_FROM_SHARED_BASE=true and point
 # SHARED_BASE_ROOT at that directory.
+# Output defaults to ``outputs/critic_probe/<run-id>``. Override it with
+# OUTPUT_ROOT, ``--output-root <directory>``, or ``--output-dir <directory>``
+# for disposable probes.
 
 set -euo pipefail
 
@@ -21,6 +24,22 @@ PYTHON_BIN="${PYTHON_BIN:-python}"
 MODEL_NAME="${MODEL_NAME:-${SCENEEXPERT_MODEL_ID:-Qwen3.6-27B-Q8_0}}"
 RUN_ID="${RUN_ID:-critic_on_$(date +%Y-%m-%d_%H-%M-%S)}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-$PROJECT_ROOT/outputs/critic_probe/$RUN_ID}"
+
+if [ "${1:-}" = "--output-root" ] || [ "${1:-}" = "--output-dir" ]; then
+    if [ "$#" -lt 2 ] || [ -z "${2:-}" ]; then
+        echo "ERROR: $1 requires a directory" >&2
+        exit 2
+    fi
+    OUTPUT_ROOT="$2"
+    shift 2
+elif [[ "${1:-}" == --output-root=* || "${1:-}" == --output-dir=* ]]; then
+    OUTPUT_ROOT="${1#*=}"
+    if [ -z "$OUTPUT_ROOT" ]; then
+        echo "ERROR: --output-root/--output-dir requires a directory" >&2
+        exit 2
+    fi
+    shift
+fi
 
 SCENE_BATCH_SIZE="${SCENE_BATCH_SIZE:-1}"
 SCENE_WORKERS_PER_PROCESS="${SCENE_WORKERS_PER_PROCESS:-1}"
@@ -49,22 +68,27 @@ SHARED_BASE_ROOT="${SHARED_BASE_ROOT:-}"
 GENERATE_SHARED_BASE="${GENERATE_SHARED_BASE:-false}"
 MAX_CASES="${MAX_CASES:-0}"
 CASE_FILTER="${CASE_FILTER:-}"
+INCLUDE_HOLDOUT_CASES="${INCLUDE_HOLDOUT_CASES:-false}"
 DRY_RUN="${DRY_RUN:-false}"
 CRITIC_PROBE_RENDER_FINAL_VIEWS="${CRITIC_PROBE_RENDER_FINAL_VIEWS:-false}"
 CRITIC_PROBE_FINAL_VIEW_PARALLELISM="${CRITIC_PROBE_FINAL_VIEW_PARALLELISM:-1}"
-# First run the prompt-originated system in shadow mode. Set to ``contract``
-# only after reviewing the comparison report and holdout replay.
-CRITIC_CONSTRAINT_MODE="${CRITIC_CONSTRAINT_MODE:-shadow}"
 FINAL_VIEW_PYTHON_BIN="${FINAL_VIEW_PYTHON_BIN:-$PYTHON_BIN}"
 DISABLE_ARTICULATED="${SCENEEXPERT_DISABLE_ARTICULATED:-false}"
 DISABLE_MATERIALS="${SCENEEXPERT_DISABLE_MATERIALS:-false}"
 DISABLE_BWRAP="${SCENEEXPERT_DISABLE_BWRAP:-false}"
+# The probe uses only external BlenderServer instances. Avoid importing bpy in
+# the controller process, which otherwise allocates hundreds of idle threads.
+SKIP_MAIN_BPY_IMPORT="${SCENEEXPERT_SKIP_MAIN_BPY_IMPORT:-true}"
 HSSD_RETRIEVAL_BACKEND="${HSSD_RETRIEVAL_BACKEND:-clip}"
 HSSD_RENDERED_ASSET_CHOICE="${HSSD_RENDERED_ASSET_CHOICE:-false}"
 # os.cpu_count() sees the host's 192 logical CPUs in the CCI container.  A
 # critic replay should never inherit the 32-thread YAML default implicitly:
 # each isolated decomposition server gets a small explicit cap.
 CONVEX_MAX_OMP_THREADS="${SCENEEXPERT_CONVEX_MAX_OMP_THREADS:-2}"
+# Native BLAS/OpenMP libraries otherwise see all host CPUs. Six simultaneous
+# BGE initializations can then create more than one thousand threads before
+# scene generation even starts.
+SCENEEXPERT_OMP_NUM_THREADS="${SCENEEXPERT_OMP_NUM_THREADS:-2}"
 
 INTERNAL_RUN_BATCH="false"
 if [ "${1:-}" = "--internal-run-batch" ]; then
@@ -97,6 +121,10 @@ export SCENEEXPERT_MEMORY_EMBEDDING_DEVICE="cpu"
 export SCENEEXPERT_MEMORY_EMBEDDING_INDEX_DEVICE="cpu"
 export SCENEEXPERT_MEMORY_INDEX_AUTO_BUILD_MISSING="1"
 export SCENEEXPERT_MP_START_METHOD="forkserver"
+export OMP_NUM_THREADS="$SCENEEXPERT_OMP_NUM_THREADS"
+export MKL_NUM_THREADS="$SCENEEXPERT_OMP_NUM_THREADS"
+export OPENBLAS_NUM_THREADS="$SCENEEXPERT_OMP_NUM_THREADS"
+export NUMEXPR_NUM_THREADS="$SCENEEXPERT_OMP_NUM_THREADS"
 
 normalize_bool() {
     case "${1,,}" in
@@ -153,6 +181,7 @@ require_positive_integer CRITIC_PROBE_FINAL_VIEW_PARALLELISM "$CRITIC_PROBE_FINA
 if [ -n "$CONVEX_MAX_OMP_THREADS" ]; then
     require_positive_integer SCENEEXPERT_CONVEX_MAX_OMP_THREADS "$CONVEX_MAX_OMP_THREADS"
 fi
+require_positive_integer SCENEEXPERT_OMP_NUM_THREADS "$SCENEEXPERT_OMP_NUM_THREADS"
 
 if ! CRITIC_PROBE_ALLOW_UNSAFE_PARALLELISM="$(normalize_bool "$CRITIC_PROBE_ALLOW_UNSAFE_PARALLELISM")"; then
     echo "ERROR: CRITIC_PROBE_ALLOW_UNSAFE_PARALLELISM must be true or false" >&2
@@ -179,6 +208,10 @@ if ! DRY_RUN="$(normalize_bool "$DRY_RUN")"; then
     echo "ERROR: DRY_RUN must be true or false" >&2
     exit 1
 fi
+if ! INCLUDE_HOLDOUT_CASES="$(normalize_bool "$INCLUDE_HOLDOUT_CASES")"; then
+    echo "ERROR: INCLUDE_HOLDOUT_CASES must be true or false" >&2
+    exit 1
+fi
 if ! CRITIC_PROBE_CONTINUE_ON_BATCH_FAILURE="$(normalize_bool "$CRITIC_PROBE_CONTINUE_ON_BATCH_FAILURE")"; then
     echo "ERROR: CRITIC_PROBE_CONTINUE_ON_BATCH_FAILURE must be true or false" >&2
     exit 1
@@ -193,6 +226,10 @@ if ! DISABLE_MATERIALS="$(normalize_bool "$DISABLE_MATERIALS")"; then
 fi
 if ! DISABLE_BWRAP="$(normalize_bool "$DISABLE_BWRAP")"; then
     echo "ERROR: SCENEEXPERT_DISABLE_BWRAP must be true or false" >&2
+    exit 1
+fi
+if ! SKIP_MAIN_BPY_IMPORT="$(normalize_bool "$SKIP_MAIN_BPY_IMPORT")"; then
+    echo "ERROR: SCENEEXPERT_SKIP_MAIN_BPY_IMPORT must be true or false" >&2
     exit 1
 fi
 if [[ "$HSSD_RETRIEVAL_BACKEND" != "clip" && "$HSSD_RETRIEVAL_BACKEND" != "embedding" ]]; then
@@ -287,15 +324,16 @@ export CRITIC_PROBE_CONTINUE_ON_BATCH_FAILURE
 export CRITIC_PROBE_RENDER_FINAL_VIEWS
 export CRITIC_PROBE_FINAL_VIEW_PARALLELISM
 export FINAL_VIEW_PYTHON_BIN
-export CRITIC_CONSTRAINT_MODE
 export PIPELINE_STOP_STAGE BRANCH_FROM_SHARED_BASE SHARED_BASE_STOP_STAGE
-export SHARED_BASE_ROOT GENERATE_SHARED_BASE MAX_CASES CASE_FILTER DRY_RUN
+export SHARED_BASE_ROOT GENERATE_SHARED_BASE MAX_CASES CASE_FILTER
+export INCLUDE_HOLDOUT_CASES DRY_RUN
 export SCENEEXPERT_DISABLE_ARTICULATED="$DISABLE_ARTICULATED"
 export SCENEEXPERT_DISABLE_MATERIALS="$DISABLE_MATERIALS"
 export SCENEEXPERT_DISABLE_BWRAP="$DISABLE_BWRAP"
+export SCENEEXPERT_SKIP_MAIN_BPY_IMPORT="$SKIP_MAIN_BPY_IMPORT"
 export FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS
 export HSSD_RETRIEVAL_BACKEND HSSD_RENDERED_ASSET_CHOICE
-export CONVEX_MAX_OMP_THREADS
+export CONVEX_MAX_OMP_THREADS SCENEEXPERT_OMP_NUM_THREADS
 export FLOOR_PLAN_DESIGNER_THINKING FLOOR_PLAN_CRITIC_THINKING
 export FURNITURE_DESIGNER_THINKING FURNITURE_CRITIC_THINKING
 export WALL_DESIGNER_THINKING WALL_CRITIC_THINKING
@@ -377,9 +415,11 @@ echo "continue after batch failure: $CRITIC_PROBE_CONTINUE_ON_BATCH_FAILURE"
 echo "final-view parallelism: $CRITIC_PROBE_FINAL_VIEW_PARALLELISM"
 echo "fail unresolved furniture hard constraints: $FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS"
 echo "HSSD retrieval: backend=$HSSD_RETRIEVAL_BACKEND rendered_asset_choice=$HSSD_RENDERED_ASSET_CHOICE"
+echo "skip controller bpy import: $SKIP_MAIN_BPY_IMPORT"
 if [ -n "$CONVEX_MAX_OMP_THREADS" ]; then
     echo "convex decomposition max OMP threads: $CONVEX_MAX_OMP_THREADS"
 fi
+echo "native OMP/BLAS threads per scene: $SCENEEXPERT_OMP_NUM_THREADS"
 if [ "$INTERNAL_RUN_BATCH" = "false" ] \
     && memory_limit_bytes=$(read_cgroup_memory_value) \
     && memory_current_bytes=$(read_cgroup_memory_current); then
@@ -387,6 +427,7 @@ if [ "$INTERNAL_RUN_BATCH" = "false" ] \
 fi
 echo "thinking profile: floor_plan=${FLOOR_PLAN_DESIGNER_THINKING}/${FLOOR_PLAN_CRITIC_THINKING}, furniture=${FURNITURE_DESIGNER_THINKING}/${FURNITURE_CRITIC_THINKING}, wall=${WALL_DESIGNER_THINKING}/${WALL_CRITIC_THINKING}, ceiling=${CEILING_DESIGNER_THINKING}/${CEILING_CRITIC_THINKING}, manipuland=${MANIPULAND_DESIGNER_THINKING}/${MANIPULAND_CRITIC_THINKING}"
 echo "shared base: $BRANCH_FROM_SHARED_BASE (generate=$GENERATE_SHARED_BASE)"
+echo "holdout cases: $INCLUDE_HOLDOUT_CASES"
 echo "==============================================="
 
 # case_id|critic goal|prompt. Override only selection/count with CASE_FILTER
@@ -402,6 +443,15 @@ CASES=(
     "dining_room_service_squeeze|dining table-chair-place-setting relation and dining/sideboard accessibility|A dining room with a dining table in the center, four dining chairs arranged around it with one on each side, a sideboard against the wall behind the chairs on one side, and table settings for four including plates, cutlery, and glasses. A centerpiece vase with flowers sits in the middle of the table, and a set of coasters sits on the sideboard."
 )
 
+if [ "$INCLUDE_HOLDOUT_CASES" = "true" ]; then
+    CASES+=(
+        "holdout_office|office workstation pairing and shared central circulation|A collaborative office with two desks facing each other across the center, an office chair and computer monitor at each desk, a filing cabinet against one wall, and a clear walking path between the workstations. A keyboard and desk lamp sit on each desk."
+        "holdout_reception|reception workflow, guest seating, and brochure access|A reception room with a reception desk against the back wall, an office chair behind it, two guest chairs facing the desk, a side table between the guest chairs, a filing cabinet in a corner, and a brochure holder on top of the reception desk. Keep an open route from the entrance to the desk and chairs."
+        "holdout_workshop|workbench tool access and safe circulation|A workshop with a workbench against the back wall, two stools paired with the workbench, a tool cabinet against a side wall, a freestanding assembly table in the center, and storage shelves on the opposite wall. A toolbox and task lamp sit on the workbench, with a clear path around the assembly table."
+        "holdout_nursery|crib access, paired bedside storage, and reading corner|A nursery with a crib centered against the back wall, a changing table against a side wall, a dresser on the opposite wall, and a rocking chair near a small side table in one corner. A table lamp and two books sit on the side table, while the route to the crib remains clear."
+    )
+fi
+
 COMMON_ARGS=(
     "experiment.num_workers=${SCENE_WORKERS_PER_PROCESS}"
     "experiment.scene_retry_attempts=1"
@@ -412,7 +462,6 @@ COMMON_ARGS=(
     "experiment.scenebenchmark_critic.inject_into_llm_critic=true"
     "experiment.scenebenchmark_critic.fd_relation_proposer_mode=template"
     "experiment.scenebenchmark_critic.max_fd_relation_proposals=8"
-    "experiment.scenebenchmark_critic.constraint_mode=${CRITIC_CONSTRAINT_MODE}"
     "floor_plan_agent.openai.reasoning_effort.designer=${FLOOR_PLAN_DESIGNER_THINKING}"
     "floor_plan_agent.openai.reasoning_effort.critic=${FLOOR_PLAN_CRITIC_THINKING}"
     "furniture_agent.openai.reasoning_effort.designer=${FURNITURE_DESIGNER_THINKING}"
@@ -606,7 +655,6 @@ run_batches() {
     local run_kind="$1"
     local active_pids=()
     local active_labels=()
-    local failed_group_pids=()
     local batch_index=0
     local source_batch_index=0
     local selected=0
@@ -621,9 +669,34 @@ run_batches() {
             '$1 == pgid && $2 !~ /^Z/ { found = 1 } END { exit !found }'
     }
 
+    terminate_failed_batch_group() {
+        local pid="$1" deadline any_alive
+
+        # The session leader has already been reaped by wait_one, but a
+        # crashed Python process can leave its forkserver, Blender, or
+        # retrieval-server descendants alive. Clean only this batch's process
+        # group before starting a replacement batch.
+        if ! process_group_alive "$pid"; then
+            return 0
+        fi
+        echo "WARNING: terminating failed batch process group $pid" >&2
+        kill -TERM -- "-$pid" 2>/dev/null || true
+        deadline=$((SECONDS + CRITIC_PROBE_SHUTDOWN_GRACE_SECONDS))
+        while [ "$SECONDS" -lt "$deadline" ]; do
+            if ! process_group_alive "$pid"; then
+                return 0
+            fi
+            sleep 1
+        done
+        if process_group_alive "$pid"; then
+            echo "WARNING: force-killing failed batch process group $pid" >&2
+            kill -KILL -- "-$pid" 2>/dev/null || true
+        fi
+    }
+
     cleanup_active_batches() {
         local pid deadline any_alive
-        local cleanup_pids=("${active_pids[@]}" "${failed_group_pids[@]}")
+        local cleanup_pids=("${active_pids[@]}")
         if [ "$cleanup_started" = "true" ]; then
             return 0
         fi
@@ -660,7 +733,6 @@ run_batches() {
         done
         active_pids=()
         active_labels=()
-        failed_group_pids=()
     }
 
     on_batch_signal() {
@@ -712,10 +784,7 @@ run_batches() {
             echo "ERROR: $run_kind/$label failed with exit code $rc" >&2
             batch_failure="$rc"
             if [ "$CRITIC_PROBE_CONTINUE_ON_BATCH_FAILURE" = "true" ]; then
-                # The batch leader may have exited while native descendants
-                # remain in its process group. Keep that group for cleanup
-                # after all other batches have finished.
-                failed_group_pids+=("$finished_pid")
+                terminate_failed_batch_group "$finished_pid"
                 echo "WARNING: continuing remaining $run_kind batches after $run_kind/$label failure; final exit will report failure" >&2
                 return 0
             fi
@@ -781,11 +850,6 @@ run_batches() {
     done
     if [ "${#batch_entries[@]}" -gt 0 ]; then launch; fi
     while [ "${#active_pids[@]}" -gt 0 ]; do wait_one; done
-    # A failed parallel batch can leave native descendants behind even though
-    # its shell leader has exited. Reap those groups after other batches finish.
-    if [ "${#failed_group_pids[@]}" -gt 0 ]; then
-        cleanup_active_batches
-    fi
     trap - EXIT INT TERM HUP
     if [ "$batch_failure" -ne 0 ]; then
         return "$batch_failure"

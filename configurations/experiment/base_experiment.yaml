@@ -105,10 +105,6 @@ scenebenchmark_critic:
   fd_relation_proposer_mode: "template"
   max_fd_relation_proposals: 8
   stable_orientation_contracts: true
-  # Roll out prompt-originated constraints in observation mode first.  The
-  # contract evaluator writes ignored diagnostics until ACP replay confirms it
-  # is at least as safe as the legacy heuristic path.
-  constraint_mode: "shadow"
   intent_compiler:
     enabled: true
   visual_grounding:

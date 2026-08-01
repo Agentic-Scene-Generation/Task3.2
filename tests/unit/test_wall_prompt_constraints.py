@@ -32,6 +32,26 @@ def test_desktop_monitor_does_not_become_wall_requirement() -> None:
     assert "No explicit wall-object obligations" in constraints
 
 
+def test_task_spec_blocks_stagebrief_from_promoting_later_stage_tv() -> None:
+    constraints = build_required_wall_object_constraints(
+        """A sofa faces a TV stand and television on the opposite wall.
+
+=== SceneExpert Stage Brief: wall_mounted ===
+Designer constraints:
+  - Place the television on the wall opposite the sofa.
+=== End Stage Brief ===""",
+        task_spec={
+            "required_large_objects": ["tv_stand"],
+            "required_wall_objects": [],
+            "required_small_objects": ["television"],
+        },
+    )
+
+    assert "No explicit wall-object obligations" in constraints
+    assert "Do not create" in constraints
+    assert "REQUIRED media display" not in constraints
+
+
 class _Scene:
     def __init__(self, *, requested: list[str]) -> None:
         self.scene_expert_task_spec = {

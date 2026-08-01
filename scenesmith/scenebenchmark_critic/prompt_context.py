@@ -51,7 +51,6 @@ FURNITURE_RELATIONS = {
     # 2026-07-10 修改原因：bedside_pair 的 FD 结果包含床头柜 front 轴平行性，
     # 需要传给 furniture critic 执行位置/朝向修复。
     "bedside_pair",
-    "classroom_workstation_distribution",
     "dining_seat_distribution",
     "furniture_faces_furniture",
     "seat_faces_surface",
@@ -107,39 +106,21 @@ def format_agent_prompt_context(
         )
     else:
         context = format_full_prompt_context(
-            {"results": filtered}, max_issues=max_issues
+            {
+                "results": filtered,
+                "case_pack": {
+                    "intent_contract": (
+                        (payload.get("case_pack") or {}).get("intent_contract") or {}
+                    )
+                },
+            },
+            max_issues=max_issues,
         )
-
-    # 2026-07-11 修改原因：仅注入 failed/degraded 结果时，已经通过的稳定朝向
-    # contract 对 LLM 不可见，critic 会重新解释原始 prompt，把靠墙 guest chair
-    # 再次绑定到远处书桌。把当前 contract 明示为权威方向拓扑，避免局部循环。
-    contract_context = _format_orientation_contract_context(payload, agent_type)
-    if contract_context:
-        context = f"{context}\n\n{contract_context}"
-    # 2026-07-12 修改原因：仅显示失败项会让视觉 critic 看不到已通过的成组
-    # manipuland 库存，并可能把已存在物品误报为全部缺失。显式提供当前支撑家具的
-    # 权威 completeness 结果，避免基于单张视图推翻确定性场景数据。
-    completeness_context = _format_manipuland_completeness_context(
-        payload, agent_type, current_furniture_id
-    )
-    if completeness_context:
-        context = f"{context}\n\n{completeness_context}"
-    orientation_context = _format_manipuland_orientation_context(
-        payload, agent_type, current_furniture_id
-    )
-    if orientation_context:
-        context = f"{context}\n\n{orientation_context}"
     wall_media_context = _format_wall_media_window_context(
         payload, filtered, agent_type
     )
     if wall_media_context:
         context = f"{context}\n\n{wall_media_context}"
-    room_center_context = _format_room_center_contract_context(payload, agent_type)
-    if room_center_context:
-        context = f"{context}\n\n{room_center_context}"
-    bedside_context = _format_bedside_group_contract_context(payload, agent_type)
-    if bedside_context:
-        context = f"{context}\n\n{bedside_context}"
     return context
 
 
@@ -789,9 +770,19 @@ def _objects_by_id(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
 
 def _is_prompt_issue(result: dict[str, Any]) -> bool:
-    return result.get(
-        "label"
-    ) in ISSUE_LABELS and not _is_non_authoritative_scoring_tier(result)
+    constraint = (result.get("evidence") or {}).get("intent_constraint") or {}
+    return (
+        str(result.get("contract_state") or "") == "failed"
+        and result.get("label") in ISSUE_LABELS
+        and str(constraint.get("source") or "")
+        in {
+            "explicit_prompt",
+            "model_inferred",
+            "room_ontology",
+            "deterministic_fallback",
+        }
+        and not _is_non_authoritative_scoring_tier(result)
+    )
 
 
 def _is_non_authoritative_scoring_tier(result: dict[str, Any]) -> bool:

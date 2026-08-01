@@ -72,7 +72,6 @@ from scenesmith.scenebenchmark_critic.config import critic_config_from_any
 from scenesmith.scenebenchmark_critic.furniture_relation_repair import (
     unresolved_furniture_relation_failures,
 )
-from scenesmith.scenebenchmark_critic.intent_contract import constraint_mode
 from scenesmith.scenebenchmark_critic.prompt_context import format_agent_prompt_context
 from scenesmith.utils.logging import BaseLogger
 from scenesmith.utils.openai import (
@@ -569,10 +568,8 @@ class BaseStatefulAgent(ABC):
         if cfg is None:
             return hard_state
         critic_config = critic_config_from_any(cfg)
-        if (
-            not critic_config.enabled
-            or not critic_config.metric_enabled("functional_dependency")
-            or constraint_mode(critic_config) != "contract"
+        if not critic_config.enabled or not critic_config.metric_enabled(
+            "functional_dependency"
         ):
             return hard_state
         try:
@@ -1217,9 +1214,10 @@ class BaseStatefulAgent(ABC):
                     f"after {call_kind} designer call."
                 )
 
+            reason_state = checkpoint_hard or hard_eval
             reasons = (
-                "; ".join(hard_eval.hard_reasons)
-                if hard_eval and hard_eval.hard_reasons
+                "; ".join(reason_state.hard_reasons)
+                if reason_state and reason_state.hard_reasons
                 else "unknown deterministic hard-check failure"
             )
             rollback_state = controller.best_scene_state

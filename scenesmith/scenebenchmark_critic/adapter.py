@@ -24,7 +24,6 @@ from scenesmith.scenebenchmark_critic.asset_library_annotations import (
 from scenesmith.scenebenchmark_critic.evaluator import build_all_checks
 from scenesmith.scenebenchmark_critic.intent_contract import (
     attach_intent_contract_to_case_pack,
-    set_contract_mode,
 )
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.constants import (
     BEDS,
@@ -321,12 +320,12 @@ def room_scene_to_case_pack(
     *,
     stage: str = "adhoc",
     metrics: tuple[str, ...] | list[str] | None = None,
-    intent_contract_mode: str = "legacy",
 ) -> dict[str, Any]:
     scene_geometry = _room_scene_geometry(scene)
     case_pack = {
-        "schema_version": "scenesmith.scenebenchmark_critic.v1",
+        "schema_version": "scenesmith.scenebenchmark_critic.v2",
         "scene_id": f"{scene.room_id}:{stage}",
+        "stage": stage,
         "source_method": "scenesmith_online",
         "task_instruction": scene.text_description,
         "room_type": scene.room_type,
@@ -337,9 +336,7 @@ def room_scene_to_case_pack(
     # SceneExpert may append memory and a StageBrief to ``text_description``;
     # those instructions must never become critic hard constraints.
     attach_intent_contract_to_case_pack(scene, case_pack)
-    set_contract_mode(case_pack, intent_contract_mode)
     case_pack["checks"] = build_all_checks(case_pack, metrics=metrics)
-    case_pack["_checks_built_intent_contract_mode"] = case_pack["intent_contract_mode"]
     return case_pack
 
 
@@ -349,7 +346,6 @@ def house_scene_to_case_pack(
     stage: str = "adhoc",
     metrics: tuple[str, ...] | list[str] | None = None,
     include_object_types: list[ObjectType] | tuple[ObjectType, ...] | None = None,
-    intent_contract_mode: str = "legacy",
 ) -> dict[str, Any]:
     objects: list[dict[str, Any]] = []
     rooms: list[dict[str, Any]] = []
@@ -366,8 +362,9 @@ def house_scene_to_case_pack(
         relations.extend(room_geom["relations"])
 
     case_pack = {
-        "schema_version": "scenesmith.scenebenchmark_critic.v1",
+        "schema_version": "scenesmith.scenebenchmark_critic.v2",
         "scene_id": f"house:{stage}",
+        "stage": stage,
         "source_method": "scenesmith_online",
         "task_instruction": (
             getattr(house.layout, "house_prompt", "")
@@ -383,9 +380,7 @@ def house_scene_to_case_pack(
         },
         "checks": [],
     }
-    set_contract_mode(case_pack, intent_contract_mode)
     case_pack["checks"] = build_all_checks(case_pack, metrics=metrics)
-    case_pack["_checks_built_intent_contract_mode"] = case_pack["intent_contract_mode"]
     return case_pack
 
 
@@ -924,7 +919,11 @@ def _offset_xy_polygon(raw: Any, offset: np.ndarray) -> Any:
 def _category_for_object(obj: SceneObject) -> str:
     semantic_name = obj.metadata.get("semantic_name")
     if semantic_name:
-        return str(semantic_name).strip().lower().replace(" ", "_")
+        # Retrieval names often preserve style or capacity (for example,
+        # ``farmhouse_bed``). Contracts bind the functional noun, while the
+        # original semantic name remains available in metadata for visual and
+        # orientation checks.
+        return _canonical_category(str(semantic_name))
     for key in ("category_norm", "category", "asset_category"):
         raw = obj.metadata.get(key)
         if raw:

@@ -22,7 +22,7 @@ def build_evaluation_payload(
     summary = aggregate_results(results, case_pack=case_pack)
     gate = _gate_status(summary, config)
     return {
-        "schema_version": "scenesmith.scenebenchmark_critic.report.v1",
+        "schema_version": "scenesmith.scenebenchmark_critic.report.v2",
         "scope": scope,
         "stage": stage,
         "case_pack": case_pack,
@@ -60,9 +60,32 @@ def format_markdown_report(payload: dict[str, Any]) -> str:
         f"{scene_summary.get('unknown', 0)}",
         f"- Score: {_fmt(scene_summary.get('score'))}",
         "",
-        "## Issues",
+        "## Intent Contract",
         "",
     ]
+    execution = ((payload.get("case_pack") or {}).get("intent_contract") or {}).get(
+        "execution"
+    ) or []
+    execution_by_constraint = {
+        str(row.get("constraint_id") or ""): row for row in execution
+    }
+    if not execution:
+        lines.append("No compiled intent constraints.")
+    for row in execution:
+        dependencies = _format_dependency_states(row, execution_by_constraint)
+        subjects = ", ".join(row.get("subject_ids") or []) or "unbound"
+        targets = ", ".join(row.get("target_ids") or []) or "none"
+        provenance = str(
+            row.get("inference_reason") or row.get("evidence_span") or ""
+        ).strip()
+        provenance_text = f"; rationale={provenance}" if provenance else ""
+        lines.append(
+            f"- `{row.get('constraint_id')}` [{row.get('source')}] "
+            f"`{row.get('relation')}`: **{row.get('state')}**; "
+            f"subjects={subjects}; targets={targets}; dependencies={dependencies}; "
+            f"repair={row.get('repair_strategy') or 'none'}{provenance_text}"
+        )
+    lines.extend(["", "## Issues", ""])
     issue_rows = [
         result for result in payload.get("results") or [] if _is_prompt_issue(result)
     ]
@@ -86,6 +109,16 @@ def format_markdown_report(payload: dict[str, Any]) -> str:
 
 def format_prompt_context(payload: dict[str, Any], *, max_issues: int = 8) -> str:
     results = payload.get("results") or []
+    execution_by_constraint = {
+        str(row.get("constraint_id") or ""): row
+        for row in (
+            ((payload.get("case_pack") or {}).get("intent_contract") or {}).get(
+                "execution"
+            )
+            or []
+        )
+        if isinstance(row, dict) and row.get("constraint_id")
+    }
     counted_results = [
         result for result in results if not _is_non_authoritative_scoring_tier(result)
     ]
@@ -115,15 +148,66 @@ def format_prompt_context(payload: dict[str, Any], *, max_issues: int = 8) -> st
                 "  Repair priority: shrink the window first, then move it, then "
                 "remove it; only move otherwise appropriate furniture afterward."
             )
+        constraint = (result.get("evidence") or {}).get("intent_constraint") or {}
+        if constraint:
+            execution = execution_by_constraint.get(
+                str(constraint.get("constraint_id") or ""), {}
+            )
+            dependency_ids = _format_dependency_states(
+                execution, execution_by_constraint
+            )
+            binding = execution.get("subject_ids") or [result.get("primary_object")]
+            binding_text = ", ".join(str(item) for item in binding if item) or "unbound"
+            lines.append(
+                "  Contract: "
+                f"{constraint.get('constraint_id')} source={constraint.get('source')} "
+                f"relation={constraint.get('relation')} "
+                f"state={execution.get('state') or result.get('contract_state') or 'failed'} "
+                f"bound_subjects={binding_text} dependencies={dependency_ids}"
+            )
+            rationale = str(
+                constraint.get("inference_reason")
+                or constraint.get("evidence_span")
+                or ""
+            ).strip()
+            if rationale:
+                lines.append(f"  Contract rationale: {rationale}")
     return "\n".join(lines)
 
 
+def _format_dependency_states(
+    row: dict[str, Any], execution_by_constraint: dict[str, dict[str, Any]]
+) -> str:
+    dependency_ids = [
+        str(value) for value in row.get("dependency_constraint_ids") or [] if value
+    ]
+    if not dependency_ids:
+        return "none"
+    return ", ".join(
+        f"{constraint_id}:{execution_by_constraint.get(constraint_id, {}).get('state') or 'unknown'}"
+        for constraint_id in dependency_ids
+    )
+
+
 def _is_prompt_issue(result: dict[str, Any]) -> bool:
-    return result.get("label") in {
-        "fail",
-        "degraded",
-        "unknown",
-    } and not _is_non_authoritative_scoring_tier(result)
+    constraint = (result.get("evidence") or {}).get("intent_constraint") or {}
+    return (
+        str(result.get("contract_state") or "") == "failed"
+        and result.get("label")
+        in {
+            "fail",
+            "degraded",
+            "unknown",
+        }
+        and str(constraint.get("source") or "")
+        in {
+            "explicit_prompt",
+            "model_inferred",
+            "room_ontology",
+            "deterministic_fallback",
+        }
+        and not _is_non_authoritative_scoring_tier(result)
+    )
 
 
 def _is_non_authoritative_scoring_tier(result: dict[str, Any]) -> bool:

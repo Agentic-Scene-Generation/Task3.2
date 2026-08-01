@@ -217,14 +217,12 @@ def _eval_relation_over_targets(
         eval_target = target
         direction_note = ""
         if relation_type == "generic_near_relation":
-            inferred = _infer_relation_type(subject, target)
-            if inferred and _relation_target_is_valid(subject, target, inferred):
-                target_relation = inferred
-            elif _relation_target_is_valid(target, subject, "object_on_support"):
-                target_relation = "object_on_support"
-                eval_subject = target
-                eval_target = subject
-                direction_note = f"interpreted reversed support direction: `{target.get('id')}` is supported by `{subject.get('id')}`; "
+            # An explicit ``near`` / ``next_to`` relation is planar adjacency,
+            # not an implicit request to place a small object on its neighbor.
+            # Semantic inference remains useful for unconstrained template
+            # proposals, but applying it here made floor objects near a desk or
+            # dresser fail a support-surface check despite satisfying the prompt.
+            target_relation = "generic_near_relation"
         elif not _relation_target_is_valid(subject, target, relation_type):
             inferred = _infer_relation_type(subject, target)
             if inferred and _relation_target_is_valid(subject, target, inferred):
@@ -293,6 +291,15 @@ def _eval_relation_over_targets(
                     label, confidence, reason = _eval_seating_to_surface(
                         subject, target, target_relation
                     )
+            elif evaluator is _eval_generic_near_relation:
+                dependency = _dependency_payload(check)
+                max_gap = dependency.get("max_distance_m")
+                label, confidence, reason = _eval_generic_near_relation(
+                    subject,
+                    target,
+                    target_relation,
+                    max_gap=(float(max_gap) if max_gap is not None else None),
+                )
             else:
                 label, confidence, reason = evaluator(subject, target, target_relation)
             scored.append(
@@ -1458,18 +1465,24 @@ def _dependency_float(dependency: dict[str, Any], key: str, default: float) -> f
 
 
 def _eval_generic_near_relation(
-    subject: dict[str, Any], target: dict[str, Any], relation_type: str
+    subject: dict[str, Any],
+    target: dict[str, Any],
+    relation_type: str,
+    *,
+    max_gap: float | None = None,
 ) -> tuple[str, float, str]:
     gap = bbox_gap_xy(subject, target)
     if gap is None:
         return "unknown", 0.0, "missing distance geometry."
-    if gap <= 0.6:
+    pass_gap = 0.6 if max_gap is None else max(0.0, max_gap)
+    degraded_gap = 1.2 if max_gap is None else pass_gap * 1.5
+    if gap <= pass_gap:
         return (
             "pass",
             0.75,
             f"generic `{relation_type}` target is nearby with {gap:.2f}m gap.",
         )
-    if gap <= 1.2:
+    if gap <= degraded_gap:
         return (
             "degraded",
             0.65,

@@ -21,6 +21,7 @@ from scenesmith.scene_expert.schemas import (
     StageCost,
     StageTraceEntry,
     StageVerifyReport,
+    SceneTaskSpec,
 )
 
 console_logger = logging.getLogger(__name__)
@@ -32,7 +33,7 @@ class TraceLogger:
     One TraceLogger instance per scene generation run.
     """
 
-    SCHEMA_VERSION = "1.1"
+    SCHEMA_VERSION = "1.2"
 
     def __init__(
         self,
@@ -68,6 +69,28 @@ class TraceLogger:
         self._start_time = time.time()
         self._full_report: FullVerifyReport | None = None
         self._exports: dict = {}
+        self._task_compiler: dict = {}
+
+    def record_task_compiler(self, task_spec: SceneTaskSpec) -> Path:
+        """Persist compiler status and deterministic fallback contract."""
+        self._task_compiler = {
+            "compiler_status": task_spec.compiler_status,
+            "failure_reason": task_spec.compiler_failure_reason,
+            "compiler_spec_version": task_spec.compiler_spec_version,
+            "fallback_contract": (
+                [
+                    row.model_dump(mode="json", exclude_none=True)
+                    for row in task_spec.intent_constraints
+                ]
+                if task_spec.compiler_status == "degraded"
+                else []
+            ),
+            "task_spec": task_spec.model_dump(mode="json", exclude_none=True),
+        }
+        path = self._trace_debug_dir / "task_compiler.json"
+        self._write_json(path, self._task_compiler)
+        self.save_partial(status="running")
+        return path
 
     def log_stage(
         self,
@@ -193,6 +216,7 @@ class TraceLogger:
             "experiment_name": self._experiment_name,
             "config_hash": self._config_hash,
             "prompt": self._prompt,
+            "task_compiler": self._task_compiler,
             "model": model,
             "total_time_sec": round(time.time() - self._start_time, 1),
             "stages": [entry.model_dump() for entry in self._stage_entries],
@@ -212,6 +236,7 @@ class TraceLogger:
             "experiment_name": self._experiment_name,
             "config_hash": self._config_hash,
             "prompt": self._prompt,
+            "task_compiler": self._task_compiler,
             "total_time_sec": round(time.time() - self._start_time, 1),
             "stages": [entry.model_dump() for entry in self._stage_entries],
         }
@@ -231,6 +256,7 @@ class TraceLogger:
                 "experiment_name": self._experiment_name,
                 "config_hash": self._config_hash,
                 "prompt": self._prompt,
+                "task_compiler": self._task_compiler,
                 "stages": [entry.model_dump() for entry in self._stage_entries],
             }
 

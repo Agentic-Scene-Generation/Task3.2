@@ -336,6 +336,7 @@ class SceneExpertHookRunner:
             experiment_name=experiment_name,
             config_hash=config_hash,
         )
+        self._trace_logger.record_task_compiler(task_spec)
         self._stage_reports: list[StageVerifyReport] = []
         self._completed_stages: list[str] = list(self._stage_order_baseline)
         self._qwen_calls = 0
