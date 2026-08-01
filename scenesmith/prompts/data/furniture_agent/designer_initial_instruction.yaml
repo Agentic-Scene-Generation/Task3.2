@@ -1,5 +1,5 @@
 name: "designer_initial_instruction"
-version: "1.0"
+version: "1.1"
 description: "Instructions for initial furniture design phase"
 template_variables:
   - "scene_description"
@@ -11,22 +11,30 @@ prompt: |
   Create the initial furniture layout for this room.
 
   {% if has_reference_image %}
-  A reference image showing a possible design arrangement has been provided above
-  for inspiration. This shows one way a room with similar dimensions could be furnished.
-  Use the concepts and ideas from this reference to inform your design, but adapt them
-  creatively to the actual room.
+  IMPORTANT: The reference image above is an AI-edited concept image, NOT a render
+  of the current 3D scene. Furniture visible in that image does not exist in the
+  scene. The concept image may also change the camera perspective or distort room
+  geometry, so never infer exact coordinates, dimensions, doors, windows, walls, or
+  current scene contents from it.
 
-  Call observe_scene to see the ACTUAL empty room you're designing, then use ideas
-  from the reference to create an appropriate furniture layout.
+  Use the concept image only for high-level layout and style inspiration. Call
+  observe_scene to inspect the ACTUAL empty room, and treat observe_scene plus the
+  structured scene state as the only authoritative sources of scene contents and
+  geometry.
+
+  You MUST generate and place every required furniture item with the provided tools,
+  even when it is already visible in the concept image. Do not claim that an item
+  was placed unless its tool call succeeded. Never call finish_stage based on the
+  concept image alone.
   {% else %}
   Call observe_scene to see the empty room, then design and place appropriate furniture.
   {% endif %}
 
   ## Initial Design Workflow:
-  {% if has_reference_image %}1. Review the reference image above to extract design ideas and concepts
-  2. Call observe_scene to see the ACTUAL empty room you're designing
-  3. Synthesize: Think about how to apply reference ideas to the actual room layout
-  4. Create TODO list based on room requirements, informed by reference concepts
+  {% if has_reference_image %}1. Call observe_scene to inspect the ACTUAL empty room and its authoritative geometry
+  2. Review the AI-edited concept image only for high-level design ideas
+  3. Synthesize: adapt useful concepts to the actual observed room without copying image coordinates
+  4. Create a TODO list for every required item and complete it through successful tool calls
   {% else %}1. Call observe_scene to see the empty room and understand the space
   2. Create TODO list based on room requirements
   {% endif %}

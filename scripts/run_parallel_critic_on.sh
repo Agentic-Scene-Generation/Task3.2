@@ -49,6 +49,7 @@ SHARED_BASE_ROOT="${SHARED_BASE_ROOT:-}"
 GENERATE_SHARED_BASE="${GENERATE_SHARED_BASE:-false}"
 MAX_CASES="${MAX_CASES:-0}"
 CASE_FILTER="${CASE_FILTER:-}"
+CRITIC_PROBE_CASES_FILE="${CRITIC_PROBE_CASES_FILE:-}"
 DRY_RUN="${DRY_RUN:-false}"
 CRITIC_PROBE_RENDER_FINAL_VIEWS="${CRITIC_PROBE_RENDER_FINAL_VIEWS:-false}"
 CRITIC_PROBE_FINAL_VIEW_PARALLELISM="${CRITIC_PROBE_FINAL_VIEW_PARALLELISM:-1}"
@@ -61,6 +62,14 @@ DISABLE_MATERIALS="${SCENEEXPERT_DISABLE_MATERIALS:-false}"
 DISABLE_BWRAP="${SCENEEXPERT_DISABLE_BWRAP:-false}"
 HSSD_RETRIEVAL_BACKEND="${HSSD_RETRIEVAL_BACKEND:-clip}"
 HSSD_RENDERED_ASSET_CHOICE="${HSSD_RENDERED_ASSET_CHOICE:-false}"
+HSSD_DATA_PATH="${HSSD_DATA_PATH:-}"
+HSSD_PREPROCESSED_PATH="${HSSD_PREPROCESSED_PATH:-}"
+HSSD_RENDERED_ASSETS_DIR="${HSSD_RENDERED_ASSETS_DIR:-}"
+HSSD_RENDERED_ASSET_CHOICE_TOP_N="${HSSD_RENDERED_ASSET_CHOICE_TOP_N:-}"
+HSSD_ZVEC_COLLECTION_PATH="${HSSD_ZVEC_COLLECTION_PATH:-}"
+HSSD_EMBEDDING_BASE_URL="${HSSD_EMBEDDING_BASE_URL:-}"
+FURNITURE_CONTEXT_IMAGE_GENERATION_ENABLED="${FURNITURE_CONTEXT_IMAGE_GENERATION_ENABLED:-}"
+FURNITURE_CONTEXT_IMAGE_GENERATION_BACKEND="${FURNITURE_CONTEXT_IMAGE_GENERATION_BACKEND:-}"
 # os.cpu_count() sees the host's 192 logical CPUs in the CCI container.  A
 # critic replay should never inherit the 32-thread YAML default implicitly:
 # each isolated decomposition server gets a small explicit cap.
@@ -199,6 +208,9 @@ if [[ "$HSSD_RETRIEVAL_BACKEND" != "clip" && "$HSSD_RETRIEVAL_BACKEND" != "embed
     echo "ERROR: HSSD_RETRIEVAL_BACKEND must be clip or embedding" >&2
     exit 1
 fi
+if [ -n "$HSSD_RENDERED_ASSET_CHOICE_TOP_N" ]; then
+    require_positive_integer HSSD_RENDERED_ASSET_CHOICE_TOP_N "$HSSD_RENDERED_ASSET_CHOICE_TOP_N"
+fi
 if ! HSSD_RENDERED_ASSET_CHOICE="$(normalize_bool "$HSSD_RENDERED_ASSET_CHOICE")"; then
     echo "ERROR: HSSD_RENDERED_ASSET_CHOICE must be true or false" >&2
     exit 1
@@ -210,6 +222,23 @@ fi
 if ! CRITIC_PROBE_RENDER_FINAL_VIEWS="$(normalize_bool "$CRITIC_PROBE_RENDER_FINAL_VIEWS")"; then
     echo "ERROR: CRITIC_PROBE_RENDER_FINAL_VIEWS must be true or false" >&2
     exit 1
+fi
+if [ -n "$FURNITURE_CONTEXT_IMAGE_GENERATION_ENABLED" ]; then
+    if ! FURNITURE_CONTEXT_IMAGE_GENERATION_ENABLED="$(
+        normalize_bool "$FURNITURE_CONTEXT_IMAGE_GENERATION_ENABLED"
+    )"; then
+        echo "ERROR: FURNITURE_CONTEXT_IMAGE_GENERATION_ENABLED must be true or false" >&2
+        exit 1
+    fi
+fi
+if [ -n "$FURNITURE_CONTEXT_IMAGE_GENERATION_BACKEND" ]; then
+    case "$FURNITURE_CONTEXT_IMAGE_GENERATION_BACKEND" in
+        inherit|qwen_local) ;;
+        *)
+            echo "ERROR: FURNITURE_CONTEXT_IMAGE_GENERATION_BACKEND must be inherit or qwen_local" >&2
+            exit 1
+            ;;
+    esac
 fi
 if [ "$CRITIC_PROBE_RENDER_FINAL_VIEWS" = "true" ] && [ "$SCENE_BATCH_SIZE" -ne 1 ]; then
     echo "ERROR: immediate per-scene final rendering requires SCENE_BATCH_SIZE=1 (got $SCENE_BATCH_SIZE)" >&2
@@ -289,12 +318,18 @@ export CRITIC_PROBE_FINAL_VIEW_PARALLELISM
 export FINAL_VIEW_PYTHON_BIN
 export CRITIC_CONSTRAINT_MODE
 export PIPELINE_STOP_STAGE BRANCH_FROM_SHARED_BASE SHARED_BASE_STOP_STAGE
-export SHARED_BASE_ROOT GENERATE_SHARED_BASE MAX_CASES CASE_FILTER DRY_RUN
+export SHARED_BASE_ROOT GENERATE_SHARED_BASE MAX_CASES CASE_FILTER
+export CRITIC_PROBE_CASES_FILE DRY_RUN
 export SCENEEXPERT_DISABLE_ARTICULATED="$DISABLE_ARTICULATED"
 export SCENEEXPERT_DISABLE_MATERIALS="$DISABLE_MATERIALS"
 export SCENEEXPERT_DISABLE_BWRAP="$DISABLE_BWRAP"
+export FURNITURE_CONTEXT_IMAGE_GENERATION_ENABLED
+export FURNITURE_CONTEXT_IMAGE_GENERATION_BACKEND
 export FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS
 export HSSD_RETRIEVAL_BACKEND HSSD_RENDERED_ASSET_CHOICE
+export HSSD_DATA_PATH HSSD_PREPROCESSED_PATH
+export HSSD_RENDERED_ASSETS_DIR HSSD_RENDERED_ASSET_CHOICE_TOP_N
+export HSSD_ZVEC_COLLECTION_PATH HSSD_EMBEDDING_BASE_URL
 export CONVEX_MAX_OMP_THREADS
 export FLOOR_PLAN_DESIGNER_THINKING FLOOR_PLAN_CRITIC_THINKING
 export FURNITURE_DESIGNER_THINKING FURNITURE_CRITIC_THINKING
@@ -389,9 +424,11 @@ echo "thinking profile: floor_plan=${FLOOR_PLAN_DESIGNER_THINKING}/${FLOOR_PLAN_
 echo "shared base: $BRANCH_FROM_SHARED_BASE (generate=$GENERATE_SHARED_BASE)"
 echo "==============================================="
 
-# case_id|critic goal|prompt. Override only selection/count with CASE_FILTER
-# and MAX_CASES; this keeps batch indices stable for reusable shared bases.
-CASES=(
+# case_id|critic goal|prompt. By default, selection/count is controlled with
+# CASE_FILTER and MAX_CASES. A caller may provide a UTF-8 tab-separated file
+# through CRITIC_PROBE_CASES_FILE; each non-comment line must contain exactly
+# three logical fields: case_id, critic goal, and a single-line prompt.
+DEFAULT_CASES=(
     "default_bedroom|ACP default scene 0|A bedroom with a bed, two nightstands, and a wardrobe in the corner of the room."
     "default_living_room|ACP default scene 1|A living room with a two-seater sofa against the wall, a square rug in the middle in front of the sofa, and two large plants on the floor near the sofa."
     "default_classroom|ACP default scene 2|A classroom with six student desks, each with a chair. A teacher's desk sits at the front near the chalkboard, which hangs on the wall."
@@ -401,6 +438,34 @@ CASES=(
     "bedroom_bedside_blockage|bed-nightstand-lamp functional relation and bed-side/wardrobe accessibility|A bedroom with a bed centered on the main wall, a nightstand with a table lamp on each side of the bed, a dresser against the opposite wall directly facing the bed, and a wardrobe placed next to the dresser. An alarm clock sits on one nightstand, a book on the other, and a small wastebasket near the dresser."
     "dining_room_service_squeeze|dining table-chair-place-setting relation and dining/sideboard accessibility|A dining room with a dining table in the center, four dining chairs arranged around it with one on each side, a sideboard against the wall behind the chairs on one side, and table settings for four including plates, cutlery, and glasses. A centerpiece vase with flowers sits in the middle of the table, and a set of coasters sits on the sideboard."
 )
+
+CASES=("${DEFAULT_CASES[@]}")
+if [ -n "$CRITIC_PROBE_CASES_FILE" ]; then
+    if [ ! -f "$CRITIC_PROBE_CASES_FILE" ]; then
+        echo "ERROR: CRITIC_PROBE_CASES_FILE not found: $CRITIC_PROBE_CASES_FILE" >&2
+        exit 1
+    fi
+    CASES=()
+    while IFS=$'\t' read -r case_id critic_goal prompt extra || \
+        [ -n "${case_id:-}${critic_goal:-}${prompt:-}${extra:-}" ]; do
+        if [ -z "${case_id:-}" ] || [[ "$case_id" == \#* ]]; then
+            continue
+        fi
+        if [ -z "${critic_goal:-}" ] || [ -z "${prompt:-}" ] || [ -n "${extra:-}" ]; then
+            echo "ERROR: invalid cases-file row for '$case_id'; expected 3 tab-separated fields" >&2
+            exit 1
+        fi
+        if [[ "$case_id$critic_goal$prompt" == *"|"* ]]; then
+            echo "ERROR: cases-file fields may not contain '|': $case_id" >&2
+            exit 1
+        fi
+        CASES+=("$case_id|$critic_goal|$prompt")
+    done < "$CRITIC_PROBE_CASES_FILE"
+    if [ "${#CASES[@]}" -eq 0 ]; then
+        echo "ERROR: cases file contains no runnable cases: $CRITIC_PROBE_CASES_FILE" >&2
+        exit 1
+    fi
+fi
 
 COMMON_ARGS=(
     "experiment.num_workers=${SCENE_WORKERS_PER_PROCESS}"
@@ -432,6 +497,50 @@ COMMON_ARGS=(
     "ceiling_agent.asset_manager.hssd.rendered_asset_choice.enabled=${HSSD_RENDERED_ASSET_CHOICE}"
     "manipuland_agent.asset_manager.hssd.rendered_asset_choice.enabled=${HSSD_RENDERED_ASSET_CHOICE}"
 )
+
+if [ -n "$FURNITURE_CONTEXT_IMAGE_GENERATION_ENABLED" ]; then
+    COMMON_ARGS+=(
+        "furniture_agent.context_image_generation.enabled=${FURNITURE_CONTEXT_IMAGE_GENERATION_ENABLED}"
+    )
+fi
+if [ -n "$FURNITURE_CONTEXT_IMAGE_GENERATION_BACKEND" ]; then
+    COMMON_ARGS+=(
+        "furniture_agent.context_image_generation.backend=${FURNITURE_CONTEXT_IMAGE_GENERATION_BACKEND}"
+    )
+fi
+
+for agent_prefix in furniture_agent wall_agent ceiling_agent manipuland_agent; do
+    if [ -n "$HSSD_DATA_PATH" ]; then
+        COMMON_ARGS+=(
+            "${agent_prefix}.asset_manager.hssd.data_path=${HSSD_DATA_PATH}"
+        )
+    fi
+    if [ -n "$HSSD_PREPROCESSED_PATH" ]; then
+        COMMON_ARGS+=(
+            "${agent_prefix}.asset_manager.hssd.preprocessed_path=${HSSD_PREPROCESSED_PATH}"
+        )
+    fi
+    if [ -n "$HSSD_RENDERED_ASSETS_DIR" ]; then
+        COMMON_ARGS+=(
+            "${agent_prefix}.asset_manager.hssd.rendered_asset_choice.rendered_assets_dir=${HSSD_RENDERED_ASSETS_DIR}"
+        )
+    fi
+    if [ -n "$HSSD_RENDERED_ASSET_CHOICE_TOP_N" ]; then
+        COMMON_ARGS+=(
+            "${agent_prefix}.asset_manager.hssd.rendered_asset_choice.top_n=${HSSD_RENDERED_ASSET_CHOICE_TOP_N}"
+        )
+    fi
+    if [ -n "$HSSD_ZVEC_COLLECTION_PATH" ]; then
+        COMMON_ARGS+=(
+            "${agent_prefix}.asset_manager.hssd.zvec.collection_path=${HSSD_ZVEC_COLLECTION_PATH}"
+        )
+    fi
+    if [ -n "$HSSD_EMBEDDING_BASE_URL" ]; then
+        COMMON_ARGS+=(
+            "${agent_prefix}.asset_manager.hssd.zvec.base_url=${HSSD_EMBEDDING_BASE_URL}"
+        )
+    fi
+done
 
 if [ -n "$CONVEX_MAX_OMP_THREADS" ]; then
     COMMON_ARGS+=(

@@ -1,0 +1,9 @@
+torch==2.5.1
+transformers==4.55.4
+accelerate==1.13.0
+safetensors==0.7.0
+Pillow==12.2.0
+fastapi==0.135.3
+uvicorn==0.43.0
+python-multipart>=0.0.9,<1
+diffusers @ git+https://github.com/huggingface/diffusers@fbe8a75ad59fe5c0eec7f3691d2eb0ed890a0c90
