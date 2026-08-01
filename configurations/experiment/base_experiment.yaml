@@ -19,7 +19,8 @@ prompts: [
   "A classroom with six student desks, each with a chair. A teacher's desk sits at the front near the chalkboard, which hangs on the wall.",
 
   #kunming
-  "A bedroom featuring rustic farmhouse decor with exposed wooden beams.",
+  # "A bedroom featuring rustic farmhouse decor with exposed wooden beams.",
+  "A bedroom featuring rustic farmhouse decor, furnished with a solid wood bed, rattan nightstands, a vintage wooden dresser and linen-upholstered seating.",
   "A bedroom where a chunky knit throw blanket is casually draped over the foot of the bed.",
   "A livingroom flooded with natural light from floor-to-ceiling windows.",
 
