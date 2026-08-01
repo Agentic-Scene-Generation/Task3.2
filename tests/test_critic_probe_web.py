@@ -423,11 +423,34 @@ def test_exposes_benchmark_evaluation_and_repairs(tmp_path: Path) -> None:
                 "details": {"result_count": 1},
                 "steps": {"check_execution_wall_sec": 0.1},
                 "evaluation": {
+                    "schema_version": "scenesmith.scenebenchmark_critic.report.v2",
+                    "case_pack": {
+                        "schema_version": "scenesmith.scenebenchmark_critic.v2",
+                        "stage": "furniture",
+                        "intent_contract": {
+                            "resolution_rate": 0.0,
+                            "execution": [
+                                {
+                                    "constraint_id": "intent_0001",
+                                    "relation": "window_clearance",
+                                    "source": "explicit_prompt",
+                                    "evidence_span": "wardrobe away from the window",
+                                    "state": "failed",
+                                    "subject_ids": ["wardrobe_0"],
+                                    "target_ids": ["window_0"],
+                                    "dependency_constraint_ids": [],
+                                    "repair_strategy": "window_clearance",
+                                }
+                            ],
+                        },
+                    },
                     "results": [
                         {
                             "check_id": "window_clearance__wardrobe_0",
                             "metric": "functional_dependency",
                             "label": "fail",
+                            "scoring_tier": "core",
+                            "contract_state": "failed",
                             "reason": "wardrobe blocks the window",
                             "repair_advice": "move wardrobe away from the opening",
                         }
@@ -475,6 +498,10 @@ def test_exposes_benchmark_evaluation_and_repairs(tmp_path: Path) -> None:
 
     assert benchmark["evaluation"]["results"][0]["reason"] == (
         "wardrobe blocks the window"
+    )
+    assert (
+        benchmark["evaluation"]["case_pack"]["intent_contract"]["execution"][0]["state"]
+        == "failed"
     )
     assert len(repairs) == 2
     assert repairs[0]["id"].startswith("legacy-repair:")
@@ -529,6 +556,65 @@ def test_exposes_full_task_compiler_input_and_output(tmp_path: Path) -> None:
     assert detail["output"] == '{"room_type":"bedroom"}'
     assert detail["has_full_input"] is True
     assert detail["has_full_output"] is True
+
+
+def test_exposes_typed_task_compiler_contract(tmp_path: Path) -> None:
+    room = tmp_path / "run_a" / "batch_001" / "scene_000" / "room_bedroom"
+    write(room / "timing_stats.jsonl", "")
+    write(
+        room.parent / "scene_expert" / "trace" / "task_compiler.json",
+        json.dumps(
+            {
+                "compiler_status": "degraded",
+                "failure_reason": "ValidationError: invalid relation",
+                "compiler_spec_version": "scenesmith.task_compiler.v2",
+                "fallback_contract": [
+                    {
+                        "relation": "faces",
+                        "subjects": {"category": "chair", "quantifier": "all"},
+                        "targets": {"category": "desk", "quantifier": "all"},
+                        "source": "model_inferred",
+                        "confidence": 1.0,
+                        "inference_reason": "deterministic room ontology",
+                    }
+                ],
+                "task_spec": {
+                    "room_type": "office",
+                    "style": "modern",
+                    "required_large_objects": ["desk", "chair"],
+                    "intent_constraints": [
+                        {
+                            "relation": "faces",
+                            "subjects": {"category": "chair", "quantifier": "all"},
+                            "targets": {"category": "desk", "quantifier": "all"},
+                            "source": "model_inferred",
+                            "confidence": 1.0,
+                            "inference_reason": "deterministic room ontology",
+                        }
+                    ],
+                },
+            }
+        ),
+    )
+
+    payload = (
+        create_app(tmp_path)
+        .test_client()
+        .get("/api/scene", query_string={"path": str(room.relative_to(tmp_path))})
+        .get_json()
+    )
+    event = next(
+        item
+        for item in payload["audit_events"]
+        if item["id"] == "contract:task-compiler"
+    )
+
+    assert event["kind"] == "contract"
+    assert event["audit_status"] == "degraded"
+    assert event["has_error"] is True
+    assert event["contract"]["spec_version"] == "scenesmith.task_compiler.v2"
+    assert event["contract"]["constraints"][0]["relation"] == "faces"
+    assert event["detail"]["constraint_count"] == 1
 
 
 def test_exposes_planner_orchestration_and_full_session_trace(tmp_path: Path) -> None:

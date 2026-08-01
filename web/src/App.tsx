@@ -25,11 +25,12 @@ import {
 } from "lucide-react";
 import { AuditEventDrawer } from "./components/AuditEventDrawer";
 import { StageTimeline, type TimelineGroup } from "./components/StageTimeline";
+import { eventNeedsAttention } from "./audit";
 import type { Action, AuditEvent, Diff, Render, Run, Scene, SceneDetail, TimedEvent } from "./types";
 
 const API_REFRESH_MS = 5000;
 type SortOrder = "asc" | "desc";
-const EVENT_FILTER_OPTIONS = ["all", "attention", "llm", "benchmark", "tool", "repair", "orchestration", "system"] as const;
+const EVENT_FILTER_OPTIONS = ["all", "attention", "contract", "llm", "benchmark", "tool", "repair", "orchestration", "system"] as const;
 type EventFilter = (typeof EVENT_FILTER_OPTIONS)[number];
 
 function queryValue(name: string): string {
@@ -167,14 +168,6 @@ function legacyAuditEvents(detail: SceneDetail | null): AuditEvent[] {
   return [...systemEvents, ...llmEvents];
 }
 
-function eventNeedsAttention(event: AuditEvent): boolean {
-  const benchmarkFailed = event.evaluation?.results?.some((result) => {
-    const label = result.label?.toLowerCase();
-    return label === "fail" || label === "degraded";
-  });
-  return Boolean(event.has_error || benchmarkFailed || event.kind === "repair");
-}
-
 function eventSearchText(event: AuditEvent): string {
   return [
     event.title,
@@ -187,6 +180,7 @@ function eventSearchText(event: AuditEvent): string {
     event.metrics ? JSON.stringify(event.metrics) : "",
     event.evaluation ? JSON.stringify(event.evaluation) : "",
     event.repair ? JSON.stringify(event.repair) : "",
+    event.contract ? JSON.stringify(event.contract) : "",
   ].join(" ").toLowerCase();
 }
 

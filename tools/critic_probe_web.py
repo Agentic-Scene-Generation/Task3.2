@@ -387,6 +387,19 @@ def _repair_records(room_dir: Path) -> list[dict[str, Any]]:
     return sorted(records, key=lambda row: str(row.get("created_at", "")))
 
 
+def _task_compiler_record(room_dir: Path) -> tuple[dict[str, Any], str] | None:
+    """Read the typed TaskCompiler contract written by TraceLogger v1.2."""
+    paths = (
+        room_dir.parent / "scene_expert" / "trace" / "task_compiler.json",
+        room_dir / "scene_expert" / "trace" / "task_compiler.json",
+    )
+    for path in paths:
+        payload = _read_json(path, {})
+        if isinstance(payload, dict) and payload:
+            return payload, _iso_mtime(path)
+    return None
+
+
 def _parse_time(value: str | None) -> datetime | None:
     if not value:
         return None
@@ -582,6 +595,46 @@ def _audit_events(room_dir: Path) -> list[dict[str, Any]]:
         row.get("strategy") == "deterministic_hard_state" for row in repair_records
     )
     events: list[dict[str, Any]] = []
+    compiler_record = _task_compiler_record(room_dir)
+    if compiler_record is not None:
+        compiler, created_at = compiler_record
+        task_spec = (
+            compiler.get("task_spec", {})
+            if isinstance(compiler.get("task_spec"), dict)
+            else {}
+        )
+        constraints = task_spec.get("intent_constraints", [])
+        if not isinstance(constraints, list):
+            constraints = []
+        compiler_status = str(compiler.get("compiler_status") or "unknown")
+        contract = {
+            "status": compiler_status,
+            "spec_version": compiler.get("compiler_spec_version"),
+            "failure_reason": compiler.get("failure_reason"),
+            "constraints": constraints,
+            "fallback_contract": compiler.get("fallback_contract", []),
+            "task_spec": task_spec,
+        }
+        events.append(
+            {
+                "id": "contract:task-compiler",
+                "kind": "contract",
+                "source": "scene_expert_trace",
+                "created_at": created_at,
+                "stage": "task_compiler",
+                "actor": "task_compiler",
+                "function": "compile_contract",
+                "title": "Compiled scene contract",
+                "audit_status": compiler_status,
+                "has_error": compiler_status == "degraded",
+                "detail": {
+                    "compiler_spec_version": compiler.get("compiler_spec_version"),
+                    "constraint_count": len(constraints),
+                    "failure_reason": compiler.get("failure_reason"),
+                },
+                "contract": contract,
+            }
+        )
     for index, row in enumerate(timings):
         if row.get("module") == "deterministic_repair":
             if has_structured_hard_repairs:

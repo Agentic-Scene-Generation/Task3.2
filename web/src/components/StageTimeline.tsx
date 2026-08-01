@@ -1,4 +1,5 @@
-import { Activity, AlertTriangle, ArrowRight, Bot, CircleDot, Image as ImageIcon, Search, Workflow, Wrench, X } from "lucide-react";
+import { Activity, AlertTriangle, ArrowRight, Bot, CircleDot, FileCheck2, Image as ImageIcon, Search, Workflow, Wrench, X } from "lucide-react";
+import { eventNeedsAttention } from "../audit";
 import type { AuditEvent, Render } from "../types";
 
 export type TimelineGroup = {
@@ -57,14 +58,6 @@ function formatEventFilter(value: EventFilter): string {
   return value.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
-function eventNeedsAttention(event: AuditEvent): boolean {
-  const benchmarkFailed = event.evaluation?.results?.some((result) => {
-    const label = result.label?.toLowerCase();
-    return label === "fail" || label === "degraded";
-  });
-  return Boolean(event.has_error || benchmarkFailed || event.kind === "repair");
-}
-
 function classifyAgent(event: AuditEvent): AgentRole {
   const actor = event.actor.toLowerCase();
   const stage = event.stage.toLowerCase();
@@ -79,6 +72,7 @@ function classifyAgent(event: AuditEvent): AgentRole {
 
 function eventIcon(event: AuditEvent) {
   const name = event.function;
+  if (event.kind === "contract") return <FileCheck2 size={15} />;
   if (event.kind === "orchestration") return <Workflow size={15} />;
   if (event.kind === "repair") return <Wrench size={15} />;
   if (event.kind === "tool" || name.includes("add_") || name.includes("move_") || name.includes("snap_")) return <Wrench size={15} />;
@@ -171,7 +165,7 @@ export function StageTimeline({ groups, selectedRender, stages, stageFilter, set
     </div>
     <div className="timeline-audit-toolbar">
       <label className="event-search"><Search size={15} /><span className="sr-only">Search execution trace</span><input id="event-search" type="search" value={eventSearch} onChange={(event) => setEventSearch(event.target.value)} placeholder="Search trace" /></label>
-      <label className="event-kind-select"><span>Event type</span><select value={eventFilter} onChange={(event) => setEventFilter(event.target.value as EventFilter)}>{(["all", "attention", "llm", "benchmark", "tool", "repair", "orchestration", "system"] as EventFilter[]).map((filter) => <option key={filter} value={filter}>{formatEventFilter(filter)}</option>)}</select></label>
+      <label className="event-kind-select"><span>Event type</span><select value={eventFilter} onChange={(event) => setEventFilter(event.target.value as EventFilter)}>{(["all", "attention", "contract", "llm", "benchmark", "tool", "repair", "orchestration", "system"] as EventFilter[]).map((filter) => <option key={filter} value={filter}>{formatEventFilter(filter)}</option>)}</select></label>
       <button className={`attention-filter${eventFilter === "attention" ? " active" : ""}`} type="button" onClick={() => setEventFilter((eventFilter === "attention" ? "all" : "attention") as EventFilter)} aria-pressed={eventFilter === "attention"}><AlertTriangle size={14} />Needs review <span>{attentionCount}</span></button>
       <span className="event-count" aria-live="polite">{visibleEventCount} of {totalEventCount}</span>
       {filtersActive && <button className="icon-button clear-audit-filters" type="button" onClick={clearFilters} title="Clear audit filters" aria-label="Clear audit filters"><X size={16} /></button>}

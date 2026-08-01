@@ -47,7 +47,7 @@ export type TimedEvent = {
 
 export type AuditEvent = {
   id: string;
-  kind: "llm" | "system" | "benchmark" | "tool" | "orchestration" | "repair";
+  kind: "llm" | "system" | "benchmark" | "tool" | "orchestration" | "repair" | "contract";
   source: string;
   created_at?: string;
   started_at?: string;
@@ -62,6 +62,7 @@ export type AuditEvent = {
   metrics?: Record<string, unknown>;
   evaluation?: BenchmarkEvaluation;
   repair?: RepairAudit;
+  contract?: TaskCompilerAudit;
   prompt_chars?: number;
   output_chars?: number;
   has_error?: boolean;
@@ -82,13 +83,78 @@ export type BenchmarkResult = {
   reason?: string;
   repair_advice?: string;
   evidence?: unknown;
+  scoring_tier?: "core" | "auxiliary" | "ignored" | string;
+  contract_state?: ContractState;
+  evaluation_source?: string;
+  relation_type?: string;
+  [key: string]: unknown;
+};
+
+export type ContractState = "passed" | "pending" | "blocked" | "failed" | string;
+
+export type IntentContractExecution = {
+  constraint_id: string;
+  relation: string;
+  source: string;
+  evidence_span?: string;
+  inference_reason?: string;
+  state: ContractState;
+  subject_ids?: string[];
+  target_ids?: string[];
+  dependency_constraint_ids?: string[];
+  repair_strategy?: string;
+};
+
+export type IntentContractAudit = {
+  schema_version?: string;
+  resolution_rate?: number;
+  execution?: IntentContractExecution[];
+  constraints?: IntentConstraint[];
   [key: string]: unknown;
 };
 
 export type BenchmarkEvaluation = {
+  schema_version?: string;
+  scope?: string;
+  stage?: string;
   results?: BenchmarkResult[];
   summary?: Record<string, unknown>;
   gate?: Record<string, unknown>;
+  case_pack?: {
+    schema_version?: string;
+    stage?: string;
+    intent_contract?: IntentContractAudit;
+    [key: string]: unknown;
+  };
+};
+
+export type ObjectSelector = {
+  category: string;
+  count?: number | null;
+  quantifier?: string;
+  role?: string;
+  secondary_category?: string;
+  secondary_count?: number | null;
+  secondary_role?: string;
+};
+
+export type IntentConstraint = {
+  relation: string;
+  subjects: ObjectSelector;
+  targets?: ObjectSelector | null;
+  source: string;
+  confidence?: number;
+  evidence_span?: string;
+  inference_reason?: string;
+};
+
+export type TaskCompilerAudit = {
+  status: string;
+  spec_version?: string;
+  failure_reason?: string;
+  constraints?: IntentConstraint[];
+  fallback_contract?: IntentConstraint[];
+  task_spec?: Record<string, unknown>;
 };
 
 export type RepairAudit = {
