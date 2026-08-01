@@ -219,6 +219,72 @@ def _restore_furniture_that_fell_through_floor(
     return restored
 
 
+def _restore_anomalous_furniture_projection(
+    scene: RoomScene,
+    pre_projection_transforms: dict[UniqueID, RigidTransform],
+) -> list[UniqueID]:
+    """Rollback malformed projection poses and scale-inconsistent room exits."""
+    restored: list[UniqueID] = []
+    for obj_id, pre_transform in pre_projection_transforms.items():
+        obj = scene.get_object(obj_id)
+        if obj is None or obj.object_type != ObjectType.FURNITURE:
+            continue
+        reason = _furniture_simulation_instability_reason(
+            obj,
+            pre_transform,
+            tilt_threshold_degrees=45.0,
+        )
+        if reason is None:
+            continue
+        if reason.startswith("displacement=") and not _projection_exits_room(
+            scene, obj
+        ):
+            # A large solve can be legitimate for a severely overlapped input.
+            # Treat displacement as anomalous only when it also leaves the
+            # room's plausible horizontal/vertical extent.
+            continue
+        obj.transform = pre_transform
+        restored.append(obj_id)
+        console_logger.warning(
+            "Restored furniture %s after anomalous non-penetration projection: %s",
+            obj_id,
+            reason,
+        )
+    return restored
+
+
+def _projection_exits_room(scene: RoomScene, obj: SceneObject) -> bool:
+    """Return whether projected rendered bounds lie outside the room envelope."""
+    room_geometry = scene.room_geometry
+    if room_geometry is None:
+        return False
+    try:
+        bounds = obj.compute_world_bounds()
+    except (TypeError, ValueError):
+        bounds = None
+    if bounds is None:
+        point = np.asarray(obj.transform.translation(), dtype=float)
+        world_min = world_max = point
+    else:
+        world_min = np.asarray(bounds[0], dtype=float)
+        world_max = np.asarray(bounds[1], dtype=float)
+    if not np.all(np.isfinite(world_min)) or not np.all(np.isfinite(world_max)):
+        return True
+
+    half_length = max(0.0, float(room_geometry.length)) / 2.0
+    half_width = max(0.0, float(room_geometry.width)) / 2.0
+    wall_height = max(0.0, float(room_geometry.wall_height))
+    margin_m = max(0.05, float(room_geometry.wall_thickness))
+    return bool(
+        (half_length > 0.0 and world_min[0] < -half_length - margin_m)
+        or (half_length > 0.0 and world_max[0] > half_length + margin_m)
+        or (half_width > 0.0 and world_min[1] < -half_width - margin_m)
+        or (half_width > 0.0 and world_max[1] > half_width + margin_m)
+        or world_min[2] < -margin_m
+        or (wall_height > 0.0 and world_max[2] > wall_height + margin_m)
+    )
+
+
 def _restore_collectively_unstable_instances(
     scene: RoomScene,
     pre_simulation_transforms: dict[UniqueID, RigidTransform],
@@ -1872,6 +1938,14 @@ def apply_physical_feasibility_postprocessing(
     Returns:
         Tuple of (processed_scene, projection_success, removed_ids).
     """
+    pre_projection_transforms = {
+        obj.object_id: RigidTransform(
+            R=obj.transform.rotation(), p=obj.transform.translation()
+        )
+        for obj in scene.objects.values()
+        if obj.object_type == ObjectType.FURNITURE
+    }
+
     # Stage 1: Projection.
     if projection_enabled:
         scene, projection_success = apply_non_penetration_projection(
@@ -1909,6 +1983,11 @@ def apply_physical_feasibility_postprocessing(
         elif not projection_success:
             console_logger.warning(
                 "Projection failed (furniture welded, skipping floor fallback)"
+            )
+        elif not weld_furniture:
+            _restore_anomalous_furniture_projection(
+                scene,
+                pre_projection_transforms,
             )
 
     # Stage 2: Simulation (runs regardless of projection result).

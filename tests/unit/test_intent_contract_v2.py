@@ -1444,13 +1444,280 @@ def test_behind_uses_target_rear_axis_and_is_repairable() -> None:
     results = run_case_pack_checks(
         case_pack, CriticConfig(enabled=True, metrics=("functional_dependency",))
     )
-    result = next(row for row in results if row["relation_type"] == "rear_axis_alignment")
+    result = next(
+        row for row in results if row["relation_type"] == "rear_axis_alignment"
+    )
 
     assert result["label"] == "pass"
     assert result["diagnostics"]["target_relation_axis_xy"] == [-0.0, -1.0]
     assert "rear_axis_alignment" in repair_relation_types(
         strategies=_FURNITURE_REPAIR_STRATEGIES
     )
+
+
+def test_middle_of_support_rejects_malformed_wall_constraint() -> None:
+    contract = build_intent_contract(
+        "A centerpiece vase with flowers sits in the middle of the dining table.",
+        task_spec={
+            "compiler_status": "ok",
+            "required_large_objects": ["dining_table"],
+            "required_small_objects": ["vase", "flowers"],
+            "intent_constraints": [
+                {
+                    "relation": "centered_on_wall",
+                    "subjects": {"category": "vase", "count": 1},
+                    "targets": {"category": "dining_table", "count": 1},
+                    "source": "explicit_prompt",
+                    "evidence_span": "vase sits in the middle of the dining table",
+                }
+            ],
+        },
+    )
+
+    assert not any(
+        row["relation"] in {"centered_on_wall", "centered_in_room"}
+        for row in contract["constraints"]
+    )
+    support = next(
+        row
+        for row in contract["constraints"]
+        if row["relation"] == "on_top_of" and row["subjects"]["category"] == "vase"
+    )
+    assert support["targets"]["category"] == "dining_table"
+
+
+def test_place_setting_component_count_is_minimum_and_checks_every_component() -> None:
+    contract = build_intent_contract(
+        "Set table settings for four including cutlery.",
+        task_spec={
+            "compiler_status": "ok",
+            "required_large_objects": ["dining_table"],
+            "required_small_objects": ["cutlery"] * 4,
+            "intent_constraints": [
+                {
+                    "relation": "on_top_of",
+                    "subjects": {"category": "cutlery", "count": 4},
+                    "targets": {"category": "dining_table", "count": 1},
+                    "source": "explicit_prompt",
+                    "evidence_span": "table settings for four including cutlery",
+                }
+            ],
+        },
+    )
+    support = next(
+        row
+        for row in contract["constraints"]
+        if row["relation"] == "on_top_of" and row["subjects"]["category"] == "cutlery"
+    )
+    objects = [_record("dining_table_0", "dining_table", (0.0, 0.0, 0.4))] + [
+        _record(f"cutlery_{index}", "cutlery", (0.0, 0.0, 0.9)) for index in range(8)
+    ]
+    case_pack = {
+        "intent_contract": contract,
+        "scene_geometry": {"objects": objects},
+        "checks": [],
+    }
+
+    assert support["subjects"]["quantifier"] == "minimum"
+    assert bound_ids(support["subjects"], objects) == [
+        f"cutlery_{index}" for index in range(8)
+    ]
+    assert augment_contract_checks(case_pack)
+    assert (
+        len(
+            [
+                row
+                for row in case_pack["checks"]
+                if row["relation_type"] == "object_on_support"
+            ]
+        )
+        == 8
+    )
+
+
+def test_model_inferred_compound_component_direction_is_dropped() -> None:
+    contract = build_intent_contract(
+        "A vase with flowers.",
+        task_spec={
+            "compiler_status": "ok",
+            "required_small_objects": ["vase", "flowers"],
+            "intent_constraints": [
+                {
+                    "relation": "in_front_of",
+                    "subjects": {"category": "flowers", "count": 1},
+                    "targets": {"category": "vase", "count": 1},
+                    "source": "model_inferred",
+                    "inference_reason": "Flowers emerge from a vase.",
+                }
+            ],
+        },
+    )
+    assert not any(row["relation"] == "in_front_of" for row in contract["constraints"])
+
+
+def test_behind_one_side_selects_a_satisfying_target_from_group() -> None:
+    prompt = "A sideboard sits behind the chairs on one side."
+    contract = build_intent_contract(
+        prompt,
+        task_spec={
+            "compiler_status": "ok",
+            "required_large_objects": [
+                "sideboard",
+                "dining_chair",
+                "dining_chair",
+                "dining_chair",
+                "dining_chair",
+            ],
+            "intent_constraints": [
+                {
+                    "relation": "behind",
+                    "subjects": {"category": "sideboard", "count": 1},
+                    # Compilers may retain a typed endpoint even when the
+                    # evidence uses the broad noun "chairs".
+                    "targets": {
+                        "category": "dining_chair",
+                        "count": 4,
+                        "quantifier": "all",
+                    },
+                    "source": "explicit_prompt",
+                    "evidence_span": "behind the chairs on one side",
+                }
+            ],
+        },
+    )
+    behind = next(row for row in contract["constraints"] if row["relation"] == "behind")
+    assert behind["targets"]["count"] == 1
+    assert behind["targets"]["quantifier"] == "minimum"
+
+    case_pack = {
+        "stage": "furniture",
+        "intent_contract": contract,
+        "scene_geometry": {
+            "rooms": [
+                {"id": "dining", "bbox": {"min": [-3, -3, 0], "max": [3, 3, 2.7]}}
+            ],
+            "objects": [
+                _record("sideboard_0", "sideboard", (0.0, 1.8, 0.4)),
+                _record("chair_0", "dining_chair", (0.0, 0.7, 0.45), yaw_deg=180.0),
+                _record("chair_1", "dining_chair", (0.0, -0.7, 0.45), yaw_deg=0.0),
+                _record("chair_2", "dining_chair", (0.9, 0.0, 0.45), yaw_deg=90.0),
+                _record("chair_3", "dining_chair", (-0.9, 0.0, 0.45), yaw_deg=-90.0),
+            ],
+        },
+        "checks": [],
+    }
+
+    results = run_case_pack_checks(
+        case_pack, CriticConfig(enabled=True, metrics=("functional_dependency",))
+    )
+    result = next(
+        row for row in results if row["relation_type"] == "rear_axis_alignment"
+    )
+    assert result["label"] == "pass"
+    assert result["related_objects"] == ["chair_0"]
+    assert result["diagnostics"]["existential_target_selection"] is True
+
+
+def test_unrelated_one_side_clause_does_not_weaken_plural_target() -> None:
+    contract = build_intent_contract(
+        "A sideboard sits behind the dining chairs; place a lamp on one side.",
+        task_spec={
+            "compiler_status": "ok",
+            "required_large_objects": [
+                "sideboard",
+                "dining_chair",
+                "dining_chair",
+                "lamp",
+            ],
+            "intent_constraints": [
+                {
+                    "relation": "behind",
+                    "subjects": {"category": "sideboard", "count": 1},
+                    "targets": {"category": "dining_chair"},
+                    "source": "explicit_prompt",
+                    "evidence_span": (
+                        "behind the dining chairs; place a lamp on one side"
+                    ),
+                }
+            ],
+        },
+    )
+
+    behind = next(row for row in contract["constraints"] if row["relation"] == "behind")
+    assert behind["targets"].get("quantifier") != "minimum"
+
+
+def test_unique_typed_inventory_deduplicates_broad_relation_endpoint() -> None:
+    prompt = "A sideboard sits behind the dining chairs on one side."
+    contract = build_intent_contract(
+        prompt,
+        task_spec={
+            "compiler_status": "ok",
+            "required_large_objects": [
+                "sideboard",
+                "dining_chair",
+                "dining_chair",
+                "dining_chair",
+                "dining_chair",
+            ],
+            "intent_constraints": [
+                {
+                    "relation": "behind",
+                    "subjects": {"category": "sideboard", "count": 1},
+                    "targets": {"category": "chair"},
+                    "source": "explicit_prompt",
+                    "evidence_span": "behind the dining chairs on one side",
+                }
+            ],
+        },
+    )
+
+    behind = [row for row in contract["constraints"] if row["relation"] == "behind"]
+
+    assert len(behind) == 1
+    assert behind[0]["targets"] == {
+        "category": "dining_chair",
+        "count": 1,
+        "quantifier": "minimum",
+    }
+
+
+def test_mixed_typed_inventory_keeps_broad_relation_endpoint() -> None:
+    contract = build_intent_contract(
+        "A sideboard sits behind a chair.",
+        task_spec={
+            "compiler_status": "ok",
+            "required_large_objects": [
+                "sideboard",
+                "dining_chair",
+                "office_chair",
+            ],
+            "intent_constraints": [
+                {
+                    "relation": "behind",
+                    "subjects": {"category": "sideboard", "count": 1},
+                    "targets": {"category": "chair", "count": 1},
+                    "source": "explicit_prompt",
+                    "evidence_span": "sideboard sits behind a chair",
+                }
+            ],
+        },
+    )
+
+    behind = [row for row in contract["constraints"] if row["relation"] == "behind"]
+
+    assert len(behind) == 1
+    assert behind[0]["targets"]["category"] == "chair"
+
+
+def test_wall_decor_identity_does_not_bind_as_furniture() -> None:
+    bed = _record("bed_0", "bed", (0.0, 0.0, 0.4))
+    decor = _record("bedroom_art_bed_0", "unknown", (0.0, 2.0, 1.5))
+    decor["name"] = "bedroom art above bed"
+    decor["object_type"] = "wall_mounted"
+    decor["functional_hints"] = {"scene_object_type": "wall_mounted"}
+
+    assert selected_ids({"category": "bed"}, [bed, decor]) == ["bed_0"]
 
 
 def test_between_binds_two_instances_of_the_same_anchor_category() -> None:
@@ -1501,7 +1768,9 @@ def test_between_binds_two_instances_of_the_same_anchor_category() -> None:
 
 
 @pytest.mark.parametrize("blocked", [False, True])
-def test_clear_access_from_entrance_uses_connected_walkable_space(blocked: bool) -> None:
+def test_clear_access_from_entrance_uses_connected_walkable_space(
+    blocked: bool,
+) -> None:
     contract = build_intent_contract(
         "Keep an open route from the entrance to the desk.",
         task_spec={
@@ -1520,7 +1789,9 @@ def test_clear_access_from_entrance_uses_connected_walkable_space(blocked: bool)
     )
     objects = [_record("desk_0", "reception_desk", (0.0, 2.0, 0.4))]
     if blocked:
-        objects.append(_record("barrier_0", "cabinet", (0.0, 0.0, 0.5), (5.2, 0.3, 1.0)))
+        objects.append(
+            _record("barrier_0", "cabinet", (0.0, 0.0, 0.5), (5.2, 0.3, 1.0))
+        )
     case_pack = {
         "stage": "furniture",
         "intent_contract": contract,

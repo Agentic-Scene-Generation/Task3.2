@@ -27,6 +27,7 @@ from scenesmith.agent_utils.base_stateful_agent import (
     HardStateEvaluation,
     log_agent_usage,
 )
+from scenesmith.agent_utils.clearance_zones import WALL_HEIGHT_TOLERANCE_M
 from scenesmith.agent_utils.furniture_layout_planning import (
     build_bedroom_anchor_plan,
     format_bedroom_anchor_guidance,
@@ -735,6 +736,12 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 actions.append(
                     f"replaced {replaced} geometry-failed furniture asset(s)"
                 )
+        if "wall height exceeded" in reasons:
+            grounded = self._ground_elevated_floor_furniture()
+            if grounded:
+                actions.append(
+                    f"grounded {grounded} elevated floor furniture object(s)"
+                )
         if (
             FailureCategory.DOOR_OR_OPENING_CLEARANCE in repair_plan.categories
             and self._repair_forbidden_zone_conflicts(include_windows=False)
@@ -755,6 +762,12 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 )
             if inventory_changed:
                 actions.extend(self._repair_relations_after_inventory_change())
+            elif "unresolved prompt-core furniture relation" in reasons:
+                # A later design change can break a hard prompt relation even
+                # when the inventory is already complete.  Re-run the same
+                # geometry-only repair path so the safety controller has a
+                # deterministic recovery before rejecting the stage.
+                actions.extend(self._repair_unresolved_prompt_contract_relations())
             return bool(actions), actions
 
         if self._anchor_existing_bed():
@@ -788,11 +801,59 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             )
         if inventory_changed:
             actions.extend(self._repair_relations_after_inventory_change())
+        elif "unresolved prompt-core furniture relation" in reasons:
+            actions.extend(self._repair_unresolved_prompt_contract_relations())
 
         return bool(actions), actions
 
+    def _ground_elevated_floor_furniture(
+        self, tolerance_m: float = WALL_HEIGHT_TOLERANCE_M
+    ) -> int:
+        """Lower accidentally elevated furniture whose top exceeds wall height."""
+        if self.scene is None or self.scene.room_geometry is None:
+            return 0
+        wall_height = float(
+            getattr(self.scene.room_geometry, "wall_height", 0.0) or 0.0
+        )
+        if wall_height <= 0.0:
+            return 0
+
+        grounded = 0
+        for obj in self.scene.objects.values():
+            if obj.object_type != ObjectType.FURNITURE:
+                continue
+            try:
+                bounds = obj.compute_world_bounds()
+            except Exception:
+                continue
+            if bounds is None:
+                continue
+            bottom_z = float(bounds[0][2])
+            top_z = float(bounds[1][2])
+            if (
+                not np.isfinite(bottom_z)
+                or not np.isfinite(top_z)
+                or bottom_z <= tolerance_m
+                or top_z <= wall_height + tolerance_m
+            ):
+                continue
+            translation = np.asarray(obj.transform.translation(), dtype=float).copy()
+            translation[2] -= bottom_z
+            transform = RigidTransform(R=obj.transform.rotation(), p=translation)
+            self.scene.move_object(obj.object_id, transform)
+            grounded += 1
+        return grounded
+
     def _repair_relations_after_inventory_change(self) -> list[str]:
         """Bind newly added furniture into the prompt's hard relations."""
+        return self._repair_prompt_contract_relations("after inventory repair")
+
+    def _repair_unresolved_prompt_contract_relations(self) -> list[str]:
+        """Repair hard prompt relations after a design change without inventory churn."""
+        return self._repair_prompt_contract_relations("after hard constraint failure")
+
+    def _repair_prompt_contract_relations(self, action_context: str) -> list[str]:
+        """Apply prompt-authorized geometry repairs and report their trigger context."""
         critic_config = critic_config_from_any(self.cfg)
         if not critic_config.enabled or not critic_config.metric_enabled(
             "functional_dependency"
@@ -811,11 +872,11 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             ),
         )
         actions = [
-            f"bound {fix.object_id} via {fix.relation_type} after inventory repair"
+            f"bound {fix.object_id} via {fix.relation_type} {action_context}"
             for fix in relation_fixes
         ]
         actions.extend(
-            f"aligned {fix.subject_id} toward {fix.target_id} after inventory repair"
+            f"aligned {fix.subject_id} toward {fix.target_id} {action_context}"
             for fix in seating_fixes
         )
         return actions

@@ -62,6 +62,14 @@ def snap_mesh_to_aabb(
     Raises:
         ValueError: If collision geometry cannot be loaded or no bbox.
     """
+    # Floor furniture touching a wall must stay on its support plane.  A wall's
+    # AABB center sits at mid-height, so using its full 3D center here can pull
+    # a grounded object upward on every closest-point snap.
+    horizontal_wall_snap = (
+        obj.object_type == ObjectType.FURNITURE
+        and target.object_type == ObjectType.WALL
+    )
+
     # Load collision geometry with automatic fallback to visual geometry.
     obj_collision_meshes = load_object_collision_geometry(obj)
 
@@ -108,6 +116,8 @@ def snap_mesh_to_aabb(
         obj_center = obj.transform.translation()
         target_center = (bbox_min + bbox_max) / 2
         pushout_direction = obj_center - target_center
+        if horizontal_wall_snap:
+            pushout_direction[2] = 0.0
         pushout_norm = np.linalg.norm(pushout_direction)
 
         if pushout_norm < DEGENERATE_VOLUME_THRESHOLD:
@@ -138,6 +148,8 @@ def snap_mesh_to_aabb(
     # Compute snap distance using collision detection.
     # Binary search to find exact distance where objects touch.
     snap_direction = box_center - (obj.transform.translation() + total_movement)
+    if horizontal_wall_snap:
+        snap_direction[2] = 0.0
     snap_norm = np.linalg.norm(snap_direction)
 
     if snap_norm < ZERO_DISTANCE_THRESHOLD:

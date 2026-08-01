@@ -72,7 +72,22 @@ def evaluate_wall_backed_storage_alignment(
             for item in candidates
             if float(item.get("dining_table_wall_error_deg", 0.0)) <= 20.0
         ]
-        nearest = min(preferred or candidates, key=lambda item: item["translation_m"])
+        # Table-axis alignment is a useful *repair* preference, but it must not
+        # override a storage piece that is already correctly backed by another
+        # wall.  For example, a sideboard can sit behind the north dining chair
+        # while the table's long axis would otherwise prefer an east/west wall.
+        # Evaluate an actually valid wall pose first; use the table preference
+        # only to select the best diagnosis when no wall is currently valid.
+        valid = [
+            item
+            for item in candidates
+            if float(item.get("wall_gap_m", float("inf"))) <= 0.1
+            and float(item.get("front_error_deg", float("inf"))) <= 20.0
+        ]
+        nearest = min(
+            valid or preferred or candidates,
+            key=lambda item: item["translation_m"],
+        )
         gap = float(nearest["wall_gap_m"])
         front_error = float(nearest["front_error_deg"])
         if gap <= 0.1 and front_error <= 20.0:

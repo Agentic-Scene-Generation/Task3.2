@@ -626,6 +626,68 @@ class TestApplyPhysicalFeasibilityPostprocessing(PhysicalFeasibilityTestCase):
                 np.allclose(box1_after.transform.translation(), initial_pos)
             )
 
+    def test_anomalous_projection_jump_is_restored_before_simulation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            scene = self._create_non_overlapping_boxes_scene(Path(tmp_dir))
+            box = scene.get_object(UniqueID("box_1"))
+            initial_transform = box.transform
+
+            def project(**kwargs):
+                projected_scene = kwargs["scene"]
+                projected_scene.get_object(UniqueID("box_1")).transform = (
+                    RigidTransform(p=[10.0, 0.0, 0.25])
+                )
+                return projected_scene, True
+
+            with patch(
+                "scenesmith.agent_utils.physical_feasibility.apply_non_penetration_projection",
+                side_effect=project,
+            ):
+                processed_scene, success, _ = apply_physical_feasibility_postprocessing(
+                    scene=scene,
+                    weld_furniture=False,
+                    projection_enabled=True,
+                    simulation_enabled=False,
+                )
+
+            self.assertTrue(success)
+            self.assertTrue(
+                np.allclose(
+                    processed_scene.get_object(
+                        UniqueID("box_1")
+                    ).transform.translation(),
+                    initial_transform.translation(),
+                )
+            )
+
+    def test_large_projection_inside_room_is_preserved(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            scene = self._create_non_overlapping_boxes_scene(Path(tmp_dir))
+
+            def project(**kwargs):
+                projected_scene = kwargs["scene"]
+                projected_scene.get_object(UniqueID("box_1")).transform = (
+                    RigidTransform(p=[-2.0, 0.0, 0.25])
+                )
+                return projected_scene, True
+
+            with patch(
+                "scenesmith.agent_utils.physical_feasibility.apply_non_penetration_projection",
+                side_effect=project,
+            ):
+                processed_scene, success, _ = apply_physical_feasibility_postprocessing(
+                    scene=scene,
+                    weld_furniture=False,
+                    projection_enabled=True,
+                    simulation_enabled=False,
+                )
+
+            self.assertTrue(success)
+            np.testing.assert_allclose(
+                processed_scene.get_object(UniqueID("box_1")).transform.translation(),
+                [-2.0, 0.0, 0.25],
+            )
+
     def test_disabled_simulation(self) -> None:
         """Test that disabled simulation skips simulation stage."""
         with tempfile.TemporaryDirectory() as tmp_dir:

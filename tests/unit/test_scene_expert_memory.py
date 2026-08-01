@@ -399,6 +399,21 @@ class SceneExpertMemoryTest(unittest.TestCase):
             ["table lamp"], [issue.object_name for issue in missing_one_lamp]
         )
 
+    def test_manipuland_verifier_allows_compound_asset_components(self) -> None:
+        report = StageVerifier(pass_threshold=0.6).verify(
+            stage="manipuland",
+            stage_output_dir="/path/that/does/not/exist",
+            task_spec=SceneTaskSpec(
+                room_type="dining room",
+                style="standard",
+                required_small_objects=["vase", "flowers"],
+            ),
+            scene_state_info={"object_names": ["vase_flowers_0"]},
+        )
+
+        self.assertTrue(report.pass_stage)
+        self.assertEqual([], report.issues)
+
     def test_wall_verifier_matches_tv_display_to_television(self) -> None:
         report = StageVerifier(pass_threshold=0.6).verify(
             stage="wall_mounted",

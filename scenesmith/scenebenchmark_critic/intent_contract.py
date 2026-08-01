@@ -29,17 +29,20 @@ from scenesmith.scenebenchmark_critic.relation_registry import (
     CEILING_MOUNTED_CATEGORIES,
     MANIPULAND_CATEGORIES,
     PUBLIC_RELATIONS,
+    ROOM_RELATIVE_WALL_CATEGORIES,
     STAGE_ORDER,
     WALL_MOUNTED_CATEGORIES,
     relation_spec,
 )
 
 
-SCHEMA_VERSION = "scenesmith.intent_contract.v2"
+SCHEMA_VERSION = "scenesmith.intent_contract.v3"
 VALID_RELATIONS = PUBLIC_RELATIONS
 HARD_SOURCES = frozenset(
     {"explicit_prompt", "model_inferred", "room_ontology", "deterministic_fallback"}
 )
+_WALL_TARGET_RELATIONS = frozenset({"against_wall", "centered_on_wall"})
+_WALL_TARGET_CATEGORIES = frozenset({"wall", *ROOM_RELATIVE_WALL_CATEGORIES})
 _DIRECT_FD_EVALUATORS = frozenset(
     {
         "back_against_wall",
@@ -91,6 +94,20 @@ _CATEGORY_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("dresser", ("dresser", "chest of drawers", "bureau")),
     ("floor_lamp", ("floor lamp",)),
     ("table_lamp", ("table lamp", "desk lamp")),
+    ("vase", ("vase",)),
+    ("flowers", ("flower", "flowers")),
+    ("plate", ("plate",)),
+    ("cutlery", ("cutlery", "fork", "knife", "spoon")),
+    ("glass", ("glass", "drinking glass", "wine glass")),
+    ("coaster", ("coaster",)),
+    ("book", ("book",)),
+    ("bottle", ("bottle",)),
+    ("bowl", ("bowl",)),
+    ("cup", ("cup",)),
+    ("mug", ("mug",)),
+    ("keyboard", ("keyboard",)),
+    ("laptop", ("laptop",)),
+    ("remote", ("remote", "remote control")),
     ("rug", ("rug", "carpet", "area rug")),
     ("floor", ("floor",)),
     ("plant", ("plant",)),
@@ -911,11 +928,37 @@ def _explicit_prompt_constraints(prompt: str, lowered: str) -> list[dict[str, An
                 )
             )
 
+        # A center/middle phrase with a concrete object target is local to that
+        # support, not a room-center or wall-center instruction.  Keep this
+        # parser before the room-center variants so their shorter matches do
+        # not consume the prefix of "middle of the table".
+        for match in re.finditer(
+            r"(?P<subject>[a-z0-9_\- ,']{1,70}?)\s+"
+            r"(?:is |sits |rests |stands |placed |positioned )?"
+            r"(?:in|at)\s+(?:the\s+)?(?:center|centre|middle)\s+of\s+"
+            r"(?:the\s+|a\s+|an\s+)?"
+            r"(?P<target>[a-z0-9_\- ,']{1,70}?)(?:[,.;]|$)",
+            normalized,
+        ):
+            subject = selector_for_phrase(match.group("subject"))
+            target = selector_for_phrase(match.group("target"))
+            if subject is not None and target is not None:
+                constraints.append(
+                    _constraint(
+                        "on_top_of",
+                        subject,
+                        target,
+                        source="explicit_prompt",
+                        evidence_span=clause,
+                    )
+                )
+
         for match in re.finditer(
             r"(?P<subject>[a-z0-9_\- ,']{1,70}?)\s+"
             r"(?:is |sits |placed |positioned |)?(?:centered|centred|central|centrally positioned)"
             r"(?:\s+in|\s+at|\s+of)?\s+(?:the\s+)?(?:center|centre|middle)"
-            r"(?:\s+of\s+(?:the\s+)?)?(?:room)?\b",
+            r"(?:\s+of\s+(?:the\s+)?room)?\b"
+            r"(?!\s+of\s+(?:the\s+)?(?!room\b)[a-z])",
             normalized,
         ):
             subject = selector_for_phrase(match.group("subject"))
@@ -981,7 +1024,8 @@ def _explicit_prompt_constraints(prompt: str, lowered: str) -> list[dict[str, An
         for match in re.finditer(
             r"(?P<subject>[a-z0-9_\- ,']{1,70}?)\s+"
             r"(?:is |sits |placed |positioned )?in\s+(?:the\s+)?(?:center|centre|middle)\b"
-            r"(?:\s+of\s+(?:the\s+)?room)?",
+            r"(?:\s+of\s+(?:the\s+)?room)?"
+            r"(?!\s+of\s+(?:the\s+)?(?!room\b)[a-z])",
             normalized,
         ):
             subject = selector_for_phrase(match.group("subject"))
@@ -1286,8 +1330,7 @@ def _explicit_prompt_constraints(prompt: str, lowered: str) -> list[dict[str, An
                 specific = [
                     candidate
                     for candidate, count in required_counts.items()
-                    if count > 1
-                    and category in _selector_category_family(candidate)
+                    if count > 1 and category in _selector_category_family(candidate)
                 ]
                 if len(specific) == 1:
                     category = specific[0]
@@ -1701,11 +1744,16 @@ def _apply_task_spec_contract_metadata(
     result: list[dict[str, Any]] = []
     for original in constraints:
         constraint = dict(original)
-        subjects = dict(constraint.get("subjects") or {})
+        subjects = _canonicalize_selector_to_typed_inventory(
+            constraint.get("subjects"), category_counts
+        )
+        constraint["subjects"] = subjects
         subject_category = _normalize_selector_category(subjects.get("category"))
-        if subject_category in category_stages:
-            constraint["stage"] = category_stages[subject_category]
-        if category_counts.get(subject_category) == 1 and not subjects.get("count"):
+        subject_stage = _typed_inventory_stage(subject_category, category_stages)
+        subject_count = _typed_inventory_count(subject_category, category_counts)
+        if subject_stage:
+            constraint["stage"] = subject_stage
+        if subject_count == 1 and not subjects.get("count"):
             subjects["count"] = 1
             constraint["subjects"] = subjects
         evidence = str(constraint.get("evidence_span") or "").lower()
@@ -1716,19 +1764,34 @@ def _apply_task_spec_contract_metadata(
             subjects["quantifier"] = "minimum"
             constraint["subjects"] = subjects
 
-        targets = dict(constraint.get("targets") or {})
+        # "Table/place settings for N" specifies at least N usable setting
+        # components.  A setting may legitimately contain both a fork and a
+        # knife, so treating N as the exact number of generated ``cutlery``
+        # assets makes the relation unbindable.  Minimum binding still emits a
+        # support check for every matching asset present in the scene.
+        if _is_place_setting_support_constraint(constraint, evidence):
+            if not subjects.get("count") and subject_count > 0:
+                subjects["count"] = subject_count
+            subjects["quantifier"] = "minimum"
+            constraint["subjects"] = subjects
+
+        targets = _canonicalize_selector_to_typed_inventory(
+            constraint.get("targets"), category_counts
+        )
+        constraint["targets"] = targets
         target_category = _normalize_selector_category(targets.get("category"))
-        if category_counts.get(target_category) == 1 and not targets.get("count"):
+        target_count = _typed_inventory_count(target_category, category_counts)
+        if target_count == 1 and not targets.get("count"):
             targets["count"] = 1
             constraint["targets"] = targets
         endpoint_stages = [
-            category_stages[category]
+            endpoint_stage
             for category in (
                 subject_category,
                 target_category,
                 _normalize_selector_category(targets.get("secondary_category")),
             )
-            if category in category_stages
+            if (endpoint_stage := _typed_inventory_stage(category, category_stages))
         ]
         if endpoint_stages:
             current_stage = str(
@@ -1738,8 +1801,6 @@ def _apply_task_spec_contract_metadata(
             constraint["stage"] = max(
                 [current_stage, *endpoint_stages], key=STAGE_ORDER.index
             )
-        subject_count = category_counts.get(subject_category, 0)
-        target_count = category_counts.get(target_category, 0)
         evidence_has_each = re.search(r"\b(?:each|every)\b", evidence) is not None
         try:
             requested_subject_count = int(subjects.get("count") or 0)
@@ -1804,8 +1865,9 @@ def _apply_task_spec_contract_metadata(
             )
         ):
             continue
-        if category_counts.get(target_category, 0) > 1:
+        if target_count > 1:
             phrase = re.escape(target_category.replace("_", " "))
+            target_nouns = _selector_evidence_noun_pattern(target_category)
             explicitly_one = (
                 targets.get("count") == 1
                 or re.search(
@@ -1816,6 +1878,17 @@ def _apply_task_spec_contract_metadata(
                 # other" resolves to one member of its already typed target
                 # group, rather than every matching object in the room.
                 or re.search(r"\b(?:the\s+)?(?:another|(?<!each\s)other)\b", evidence)
+                # Scope "on one side" to this relation's target noun.  An
+                # unrelated clause in a wider evidence span must not weaken a
+                # plural target into an existential one.  The compiler can
+                # retain a typed selector (``dining_chair``) while its exact
+                # prompt evidence uses a broad noun (``chairs``), so accept
+                # the selector's safe family aliases here.
+                or re.search(
+                    rf"\b(?:{target_nouns})(?:s|es)?\s+on\s+"
+                    r"(?:the\s+)?one\s+side\b",
+                    evidence,
+                )
             )
             if explicitly_one:
                 targets["count"] = 1
@@ -1823,6 +1896,105 @@ def _apply_task_spec_contract_metadata(
                 constraint["targets"] = targets
         result.append(constraint)
     return result
+
+
+def _canonicalize_selector_to_typed_inventory(
+    selector: Any, category_counts: dict[str, int]
+) -> dict[str, Any]:
+    """Replace an unambiguous broad selector with its typed inventory category.
+
+    Task compilers can emit a family noun (for example ``chair``) while the
+    required inventory and the deterministic prompt parser retain a concrete
+    category (for example ``dining_chair``).  Canonicalizing only a unique
+    compatible category lets the ordinary contract de-duplication remove that
+    duplicate relation without losing ambiguity when multiple chair types are
+    requested.
+    """
+    normalized = dict(selector or {}) if isinstance(selector, dict) else {}
+    category = _normalize_selector_category(normalized.get("category"))
+    typed_categories = _typed_inventory_categories(category, category_counts)
+    if len(typed_categories) == 1 and typed_categories[0] != category:
+        normalized["category"] = typed_categories[0]
+
+    secondary_category = _normalize_selector_category(
+        normalized.get("secondary_category")
+    )
+    secondary_typed_categories = _typed_inventory_categories(
+        secondary_category, category_counts
+    )
+    if (
+        len(secondary_typed_categories) == 1
+        and secondary_typed_categories[0] != secondary_category
+    ):
+        normalized["secondary_category"] = secondary_typed_categories[0]
+    return normalized
+
+
+def _typed_inventory_categories(
+    selector_category: str, category_values: dict[str, Any]
+) -> list[str]:
+    """Resolve broad selectors against compatible typed inventory categories."""
+    category = _normalize_selector_category(selector_category)
+    family = _selector_category_family(category)
+    if len(family) <= 2:
+        return [category] if category in category_values else []
+    return [candidate for candidate in category_values if candidate in family]
+
+
+def _typed_inventory_count(
+    selector_category: str, category_counts: dict[str, int]
+) -> int:
+    return sum(
+        category_counts[category]
+        for category in _typed_inventory_categories(selector_category, category_counts)
+    )
+
+
+def _typed_inventory_stage(
+    selector_category: str, category_stages: dict[str, str]
+) -> str:
+    stages = [
+        category_stages[category]
+        for category in _typed_inventory_categories(selector_category, category_stages)
+    ]
+    return max(stages, key=STAGE_ORDER.index) if stages else ""
+
+
+def _selector_evidence_noun_pattern(selector_category: str) -> str:
+    """Return prompt nouns that safely refer to a typed selector family."""
+    categories = _selector_category_family(selector_category)
+    nouns = {category.replace("_", " ") for category in categories if category}
+    for category, aliases in _CATEGORY_PATTERNS:
+        if category in categories:
+            nouns.update(alias for alias in aliases if alias)
+    return "|".join(re.escape(noun) for noun in sorted(nouns, key=len, reverse=True))
+
+
+def _is_place_setting_support_constraint(
+    constraint: dict[str, Any], evidence: str
+) -> bool:
+    """Whether a support relation describes a minimum number of place settings."""
+    if str(constraint.get("relation") or "") != "on_top_of":
+        return False
+    subject_category = _normalize_selector_category(
+        (constraint.get("subjects") or {}).get("category")
+    )
+    if subject_category not in {"cutlery", "flatware", "silverware"}:
+        return False
+    target_category = _normalize_selector_category(
+        (constraint.get("targets") or {}).get("category")
+    )
+    if target_category not in _selector_category_family("table"):
+        return False
+    return (
+        re.search(r"\b(?:cutlery|flatware|silverware)\b", evidence) is not None
+        and re.search(
+            r"\b(?:place|table)\s+settings?\s+(?:for\s+)?"
+            r"(?:\d+|one|two|three|four|five|six|seven|eight)\b",
+            evidence,
+        )
+        is not None
+    )
 
 
 def _normalize_external_constraint(raw: dict[str, Any]) -> dict[str, Any] | None:
@@ -1833,12 +2005,25 @@ def _normalize_external_constraint(raw: dict[str, Any]) -> dict[str, Any] | None
     targets = _normalize_selector(raw.get("targets") or raw.get("target"))
     if subjects is None:
         return None
+    if (
+        relation in _WALL_TARGET_RELATIONS
+        and _normalize_selector_category((targets or {}).get("category"))
+        not in _WALL_TARGET_CATEGORIES
+    ):
+        # Wall-local evaluators intentionally select a physical wall.  A
+        # malformed compiler target such as a table would otherwise move or
+        # score the subject against an unrelated nearest wall.
+        return None
     supplied_source = str(raw.get("source") or "model_inferred").strip().lower()
     if supplied_source not in {"explicit_prompt", "model_inferred"}:
         return None
     source = supplied_source
     evidence = str(raw.get("evidence_span") or raw.get("evidence") or "").strip()
     inference_reason = str(raw.get("inference_reason") or "").strip()
+    if _is_unsupported_composite_direction_inference(
+        relation, source, evidence, inference_reason
+    ):
+        return None
     return _constraint(
         relation,
         subjects,
@@ -1880,6 +2065,44 @@ def _normalize_selector(value: Any) -> dict[str, Any] | None:
         if isinstance(secondary_count, (int, float)) and int(secondary_count) > 0:
             normalized["secondary_count"] = int(secondary_count)
     return normalized
+
+
+def _is_unsupported_composite_direction_inference(
+    relation: str, source: str, evidence: str, inference_reason: str
+) -> bool:
+    """Reject directional guesses that describe an asset's internal components.
+
+    A retrieved ``vase_flowers``-style asset is one physical object.  Without
+    prompt evidence its flower component cannot truthfully be evaluated as in
+    front of, behind, or facing its vase component.  Explicit directions remain
+    valid, as do model inferences whose rationale describes a real spatial use.
+    """
+    if (
+        source != "model_inferred"
+        or evidence
+        or relation
+        not in {
+            "in_front_of",
+            "behind",
+            "faces",
+            "aligned_with",
+        }
+    ):
+        return False
+    normalized_reason = " ".join(inference_reason.lower().split())
+    return any(
+        phrase in normalized_reason
+        for phrase in (
+            "inside",
+            "within",
+            "emerge from",
+            "emerging from",
+            "part of",
+            "component of",
+            "contained in",
+            "integrated in",
+        )
+    )
 
 
 def _constraint(
@@ -2045,6 +2268,7 @@ def _role_matches_object(role: str, obj: dict[str, Any]) -> bool:
 
 def _selector_matches_object(category: str, role: str, obj: dict[str, Any]) -> bool:
     category = _normalize_selector_category(category)
+    normalized_category = category.replace("_", " ")
     object_cat = _normalize_selector_category(object_category(obj))
     metadata = obj.get("metadata") if isinstance(obj.get("metadata"), dict) else {}
     semantic_name = _normalize_selector_category(metadata.get("semantic_name"))
@@ -2055,6 +2279,25 @@ def _selector_matches_object(category: str, role: str, obj: dict[str, Any]) -> b
     )
     if object_cat == category or base_category == category:
         return _role_matches_object(role, obj)
+
+    # Generated wall/ceiling decor often includes the furniture it accompanies
+    # in its free-form identity (for example ``mirror_dresser`` or ``art_bed``).
+    # Exact semantic categories above remain authoritative, but identity-token
+    # fallback must not let later-stage decoration become a furniture endpoint.
+    hints = obj.get("functional_hints") or {}
+    scene_object_type = (
+        str(obj.get("object_type") or hints.get("scene_object_type") or "")
+        .strip()
+        .lower()
+        .replace("-", "_")
+    )
+    if scene_object_type == "wall_mounted" and category not in WALL_MOUNTED_CATEGORIES:
+        return False
+    if (
+        scene_object_type == "ceiling_mounted"
+        and category not in CEILING_MOUNTED_CATEGORIES
+    ):
+        return False
     identity = " ".join(
         str(obj.get(key) or "").lower().replace("_", " ")
         for key in ("id", "name", "description")
@@ -2064,7 +2307,6 @@ def _selector_matches_object(category: str, role: str, obj: dict[str, Any]) -> b
         for value in (semantic_name.replace("_", " "), base_category, identity)
         if value
     )
-    normalized_category = category.replace("_", " ")
     category_matches = {
         "instructional_surface": any(
             token in identity

@@ -284,20 +284,27 @@ def _check_required_objects(
         return issues
 
     present_objects = scene_state_info.get("object_names", [])
-    unmatched_present = [str(name) for name in present_objects]
+    present_labels = [str(name) for name in present_objects]
+    consumed_by_required_label: dict[str, set[int]] = {}
 
     for required in stage_required:
+        required_label = _normalize_object_label(required)
+        consumed_indices = consumed_by_required_label.setdefault(required_label, set())
         match_index = next(
             (
                 index
-                for index, present in enumerate(unmatched_present)
-                if _object_labels_match(required, present)
+                for index, present in enumerate(present_labels)
+                if index not in consumed_indices
+                and _object_labels_match(required, present)
             ),
             None,
         )
         if match_index is not None:
-            # Consume one scene instance so repeated requirements enforce cardinality.
-            unmatched_present.pop(match_index)
+            # Repeated requirements of the same semantic label consume distinct
+            # instances. A compound asset may still satisfy distinct component
+            # labels (for example one ``vase_flowers`` satisfies both ``vase``
+            # and ``flowers``).
+            consumed_indices.add(match_index)
         else:
             issues.append(
                 VerifyIssue(

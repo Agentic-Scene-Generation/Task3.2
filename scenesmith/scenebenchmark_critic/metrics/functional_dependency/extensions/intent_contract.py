@@ -85,10 +85,10 @@ def _evaluate_between(
     if targets.get("secondary_count"):
         secondary_selector["count"] = targets["secondary_count"]
     second_ids = bound_ids(secondary_selector, objects)
-    same_category_pair = (
-        str(targets.get("category") or "") == secondary_category
-        and str(targets.get("role") or "")
-        == str(targets.get("secondary_role") or "")
+    same_category_pair = str(
+        targets.get("category") or ""
+    ) == secondary_category and str(targets.get("role") or "") == str(
+        targets.get("secondary_role") or ""
     )
     if same_category_pair and first_ids == second_ids and len(first_ids) == 2:
         first_ids, second_ids = [first_ids[0]], [first_ids[1]]
@@ -539,26 +539,19 @@ def _evaluate_axial_relation(
     """
     subject_ids = bound_ids(constraint.get("subjects"), objects)
     target_ids = bound_ids(constraint.get("targets"), objects)
-    # Multiple target instances are ambiguous without an explicit pairing.
-    # Declining that case is safer than binding by scene order or proximity.
-    if not subject_ids or len(target_ids) != 1:
+    target_is_existential = str(
+        (constraint.get("targets") or {}).get("quantifier") or ""
+    ) in {"at_least", "minimum"}
+    # Multiple universal targets remain ambiguous without explicit pairing.
+    # For an existential target, geometry can select the best satisfying
+    # candidate without inventing a semantic identity.
+    if (
+        not subject_ids
+        or not target_ids
+        or (len(target_ids) != 1 and not target_is_existential)
+    ):
         return []
     by_id = {str(obj["id"]): obj for obj in objects}
-    target_id = target_ids[0]
-    target = by_id.get(target_id)
-    target_center = bbox_center_xy(target)
-    if target is None or target_center is None:
-        return []
-
-    front = front_vector(target)
-    front_norm = math.hypot(*front)
-    if front_norm <= 1e-6:
-        return []
-    front = (front[0] / front_norm, front[1] / front_norm)
-    if behind:
-        front = (-front[0], -front[1])
-    side = (-front[1], front[0])
-    min_forward = max(0.15, _projected_half_extent(target, front) * 0.70)
     centered_anchor_ids = _centered_anchor_ids(case_pack, objects)
 
     results: list[dict[str, Any]] = []
@@ -567,31 +560,41 @@ def _evaluate_axial_relation(
         subject_center = bbox_center_xy(subject)
         if subject is None or subject_center is None:
             continue
-        delta = (
-            subject_center[0] - target_center[0],
-            subject_center[1] - target_center[1],
-        )
-        forward_distance = delta[0] * front[0] + delta[1] * front[1]
-        lateral_signed = delta[0] * side[0] + delta[1] * side[1]
-        lateral_error = abs(lateral_signed)
-        lateral_tolerance = max(
-            0.18,
-            min(
-                0.40,
-                0.15
-                * (
-                    _projected_half_extent(subject, side)
-                    + _projected_half_extent(target, side)
-                ),
+        candidates = [
+            candidate
+            for target_id in target_ids
+            if (
+                candidate := _axial_candidate(
+                    subject,
+                    subject_center,
+                    by_id.get(target_id),
+                    target_id,
+                    behind=behind,
+                )
+            )
+            is not None
+        ]
+        if not candidates:
+            continue
+        candidate = min(
+            candidates,
+            key=lambda item: (
+                {"pass": 0, "degraded": 1, "fail": 2}[item["label"]],
+                item["forward_error"],
+                item["lateral_error"],
+                item["target_id"],
             ),
         )
-        forward_error = max(0.0, min_forward - forward_distance)
-        if forward_error <= 1e-6 and lateral_error <= lateral_tolerance:
-            label = "pass"
-        elif forward_distance >= 0.0 and lateral_error <= lateral_tolerance * 2.0:
-            label = "degraded"
-        else:
-            label = "fail"
+        target_id = candidate["target_id"]
+        target_center = candidate["target_center"]
+        front = candidate["front"]
+        side = candidate["side"]
+        min_forward = candidate["min_forward"]
+        forward_distance = candidate["forward_distance"]
+        lateral_signed = candidate["lateral_signed"]
+        lateral_error = candidate["lateral_error"]
+        lateral_tolerance = candidate["lateral_tolerance"]
+        label = candidate["label"]
 
         repair_object_id, repair_center = _front_alignment_repair_pose(
             subject_id=subject_id,
@@ -616,6 +619,9 @@ def _evaluate_axial_relation(
             "lateral_offset_m": round(lateral_error, 6),
             "lateral_tolerance_m": round(lateral_tolerance, 6),
         }
+        if len(target_ids) > 1:
+            diagnostics["candidate_target_ids"] = list(target_ids)
+            diagnostics["existential_target_selection"] = True
         if repair_object_id is not None and repair_center is not None:
             diagnostics["repair_object_id"] = repair_object_id
             diagnostics["repair_target_center_xy_m"] = [
@@ -644,6 +650,66 @@ def _evaluate_axial_relation(
             )
         )
     return results
+
+
+def _axial_candidate(
+    subject: dict[str, Any],
+    subject_center: tuple[float, float],
+    target: dict[str, Any] | None,
+    target_id: str,
+    *,
+    behind: bool,
+) -> dict[str, Any] | None:
+    target_center = bbox_center_xy(target)
+    if target is None or target_center is None:
+        return None
+    front = front_vector(target)
+    front_norm = math.hypot(*front)
+    if front_norm <= 1e-6:
+        return None
+    front = (front[0] / front_norm, front[1] / front_norm)
+    if behind:
+        front = (-front[0], -front[1])
+    side = (-front[1], front[0])
+    min_forward = max(0.15, _projected_half_extent(target, front) * 0.70)
+    delta = (
+        subject_center[0] - target_center[0],
+        subject_center[1] - target_center[1],
+    )
+    forward_distance = delta[0] * front[0] + delta[1] * front[1]
+    lateral_signed = delta[0] * side[0] + delta[1] * side[1]
+    lateral_error = abs(lateral_signed)
+    lateral_tolerance = max(
+        0.18,
+        min(
+            0.40,
+            0.15
+            * (
+                _projected_half_extent(subject, side)
+                + _projected_half_extent(target, side)
+            ),
+        ),
+    )
+    forward_error = max(0.0, min_forward - forward_distance)
+    if forward_error <= 1e-6 and lateral_error <= lateral_tolerance:
+        label = "pass"
+    elif forward_distance >= 0.0 and lateral_error <= lateral_tolerance * 2.0:
+        label = "degraded"
+    else:
+        label = "fail"
+    return {
+        "target_id": target_id,
+        "target_center": target_center,
+        "front": front,
+        "side": side,
+        "min_forward": min_forward,
+        "forward_distance": forward_distance,
+        "lateral_signed": lateral_signed,
+        "lateral_error": lateral_error,
+        "lateral_tolerance": lateral_tolerance,
+        "forward_error": forward_error,
+        "label": label,
+    }
 
 
 def _centered_anchor_ids(
@@ -1354,7 +1420,7 @@ def _evaluate_entrance_routes(
 ) -> list[dict[str, Any]]:
     """Check connected walkable space from any entrance to each destination."""
     bounds = _room_bounds(geometry)
-    doors = ((geometry.get("scene_shell") or {}).get("doors") or [])
+    doors = (geometry.get("scene_shell") or {}).get("doors") or []
     target_ids = bound_ids(constraint.get("targets"), objects)
     if bounds is None or not doors or not target_ids:
         return []
@@ -1382,7 +1448,7 @@ def _evaluate_entrance_routes(
                 "wall",
             }:
                 continue
-            lower = ((obj.get("bbox_world") or {}).get("min") or [])
+            lower = (obj.get("bbox_world") or {}).get("min") or []
             if len(lower) >= 3 and float(lower[2]) > 0.25:
                 continue
             footprint = object_footprint_polygon(obj)
@@ -1391,10 +1457,10 @@ def _evaluate_entrance_routes(
             polygon = Polygon(footprint)
             if polygon.is_empty or polygon.area <= 1e-9:
                 continue
-            obstacles.append(
-                (object_id, polygon.buffer(radius, join_style="mitre"))
-            )
-        blocked = unary_union([polygon for _, polygon in obstacles]) if obstacles else None
+            obstacles.append((object_id, polygon.buffer(radius, join_style="mitre")))
+        blocked = (
+            unary_union([polygon for _, polygon in obstacles]) if obstacles else None
+        )
         walkable = floor.difference(blocked) if blocked is not None else floor
         components = (
             list(walkable.geoms)
@@ -1410,13 +1476,14 @@ def _evaluate_entrance_routes(
             center = door.get("center") or door.get("position") or []
             if len(center) < 2 or walkable.is_empty:
                 continue
-            start, _ = nearest_points(walkable, Point(float(center[0]), float(center[1])))
+            start, _ = nearest_points(
+                walkable, Point(float(center[0]), float(center[1]))
+            )
             end, _ = nearest_points(walkable, Point(*target_center))
             selected_door = str(door.get("id") or door.get("opening_id") or "entrance")
             selected_start, selected_end = start, end
             if any(
-                component.distance(start) <= 1e-7
-                and component.distance(end) <= 1e-7
+                component.distance(start) <= 1e-7 and component.distance(end) <= 1e-7
                 for component in components
                 if not component.is_empty
             ):

@@ -22,6 +22,11 @@ from scenesmith.agent_utils.room import ObjectType, RoomScene
 
 console_logger = logging.getLogger(__name__)
 
+# Mesh export and rigid-transform arithmetic can place a ceiling-attached AABB
+# a few nanometers above its intended contact plane. Keep the tolerance far
+# below meaningful room-geometry violations.
+WALL_HEIGHT_TOLERANCE_M = 1e-6
+
 
 @dataclass
 class DoorClearanceViolation:
@@ -722,7 +727,7 @@ def compute_wall_height_violations(
         # Object top height.
         obj_top = obj_max[2]
 
-        if obj_top > wall_height:
+        if obj_top > wall_height + WALL_HEIGHT_TOLERANCE_M:
             violations.append(
                 WallHeightExceededViolation(
                     object_id=str(obj.object_id),
