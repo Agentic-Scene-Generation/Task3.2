@@ -35,6 +35,12 @@ ENABLE_AUTO_TOOL_CHOICE="${SCENEEXPERT_ENABLE_AUTO_TOOL_CHOICE:-1}"
 TOOL_CALL_PARSER="${SCENEEXPERT_TOOL_CALL_PARSER:-qwen3_xml}"
 REASONING_PARSER="${SCENEEXPERT_REASONING_PARSER:-qwen3}"
 PIP_INDEX_URL="${SCENEEXPERT_PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
+VLLM_VERSION="${SCENEEXPERT_VLLM_VERSION:-0.22.1}"
+VLLM_TORCH_BACKEND="${SCENEEXPERT_VLLM_TORCH_BACKEND:-cu129}"
+VLLM_VENV_PATH="${SCENEEXPERT_VLLM_VENV_PATH:-$PROJECT_DIR/.venv-vllm-${VLLM_VERSION}-${VLLM_TORCH_BACKEND}}"
+if [[ "$VLLM_VENV_PATH" != /* ]]; then
+    VLLM_VENV_PATH="$PROJECT_DIR/$VLLM_VENV_PATH"
+fi
 
 echo "=========================================="
 echo " Qwen vLLM 部署脚本"
@@ -47,22 +53,39 @@ echo ""
 # --------------------------------------------------------------------------
 # 步骤 1：安装依赖
 # --------------------------------------------------------------------------
-echo "[1/4] 安装依赖 (modelscope, vllm)..."
-if python -m pip show modelscope vllm >/dev/null 2>&1; then
-    echo "  ✓ modelscope/vllm 已安装"
-elif [ "${SCENEEXPERT_INSTALL_RUNTIME_DEPS:-0}" = "1" ]; then
-    python -m pip install modelscope vllm -i "$PIP_INDEX_URL"
+echo "[1/4] 安装依赖 (modelscope + isolated vLLM runtime)..."
+INSTALL_RUNTIME_DEPS="${SCENEEXPERT_INSTALL_RUNTIME_DEPS:-0}"
+if python -m pip show modelscope >/dev/null 2>&1; then
+    echo "  ✓ modelscope 已安装"
+elif [ "$INSTALL_RUNTIME_DEPS" = "1" ]; then
+    python -m pip install modelscope -i "$PIP_INDEX_URL"
 else
-    echo "  错误：缺少 modelscope 或 vllm"
+    echo "  错误：SceneSmith 环境缺少 modelscope"
     echo "  在线/内网镜像安装：SCENEEXPERT_INSTALL_RUNTIME_DEPS=1 bash scripts/deploy_qwen.sh"
-    echo "  离线安装：python -m pip install --no-index --find-links /path/to/wheels modelscope vllm"
+    echo "  离线安装：python -m pip install --no-index --find-links /path/to/wheels modelscope"
     exit 1
+fi
+export SCENEEXPERT_VLLM_VERSION="$VLLM_VERSION"
+export SCENEEXPERT_VLLM_TORCH_BACKEND="$VLLM_TORCH_BACKEND"
+export SCENEEXPERT_VLLM_VENV_PATH="$VLLM_VENV_PATH"
+if [ "$INSTALL_RUNTIME_DEPS" = "1" ]; then
+    bash "$PROJECT_DIR/scripts/bootstrap_vllm_runtime.sh"
+elif [ ! -x "$VLLM_VENV_PATH/bin/python" ]; then
+    echo "  错误：缺少隔离的 vLLM 运行环境: $VLLM_VENV_PATH"
+    echo "  执行：SCENEEXPERT_INSTALL_RUNTIME_DEPS=1 bash scripts/deploy_qwen.sh"
+    exit 1
+else
+    "$VLLM_VENV_PATH/bin/python" \
+        "$PROJECT_DIR/scripts/check_runtime_compatibility.py" \
+        --scope server \
+        --expected-vllm-version "$VLLM_VERSION" \
+        --expected-torch-backend "$VLLM_TORCH_BACKEND"
 fi
 echo "  ✓ 依赖安装完成"
 
 if [ "${SCENEEXPERT_SKIP_PYTHON_PREFLIGHT:-0}" != "1" ]; then
-    echo "  检查 vLLM / OpenAI / Agents SDK 兼容性..."
-    PYTHONDONTWRITEBYTECODE=1 python "$PROJECT_DIR/scripts/check_runtime_compatibility.py"
+    echo "  检查 OpenAI / Agents SDK 客户端兼容性..."
+    PYTHONDONTWRITEBYTECODE=1 python "$PROJECT_DIR/scripts/check_runtime_compatibility.py" --scope client
 fi
 
 # --------------------------------------------------------------------------
@@ -91,6 +114,15 @@ export SCENEEXPERT_MODEL_ID="$MODEL_ID"
 export SCENEEXPERT_MODELS_DIR="$MODELS_DIR"
 export SCENEEXPERT_MODEL_DIR="$MODEL_DIR"
 export SCENEEXPERT_VLLM_PORT="$VLLM_PORT"
+export SCENEEXPERT_VLLM_VERSION="$VLLM_VERSION"
+export SCENEEXPERT_VLLM_TORCH_BACKEND="$VLLM_TORCH_BACKEND"
+export SCENEEXPERT_VLLM_VENV_PATH="$VLLM_VENV_PATH"
+export SCENEEXPERT_VLLM_AUTO_BOOTSTRAP=0
+export SCENEEXPERT_VLLM_EXECUTABLE="$VLLM_VENV_PATH/bin/vllm"
+export SCENEEXPERT_VLLM_PYTHON="$VLLM_VENV_PATH/bin/python"
+export SCENEEXPERT_TENSOR_PARALLEL_SIZE="$TENSOR_PARALLEL_SIZE"
+export SCENEEXPERT_MAX_MODEL_LEN="$MAX_MODEL_LEN"
+export SCENEEXPERT_GPU_MEMORY_UTILIZATION="$GPU_MEMORY_UTILIZATION"
 export SCENEEXPERT_ENABLE_AUTO_TOOL_CHOICE="$ENABLE_AUTO_TOOL_CHOICE"
 export SCENEEXPERT_TOOL_CALL_PARSER="$TOOL_CALL_PARSER"
 export SCENEEXPERT_REASONING_PARSER="$REASONING_PARSER"
@@ -111,24 +143,5 @@ echo ""
 echo "  服务启动后按 Ctrl+C 停止"
 echo "=========================================="
 
-# 激活环境变量
-source_env_file "$ENV_FILE"
-
-VLLM_ARGS=(
-    vllm serve "$MODEL_DIR"
-    --served-model-name "$MODEL_ID"
-    --tensor-parallel-size "$TENSOR_PARALLEL_SIZE"
-    --port "$VLLM_PORT"
-    --max-model-len "$MAX_MODEL_LEN"
-    --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION"
-)
-if [ "$ENABLE_AUTO_TOOL_CHOICE" = "1" ]; then
-    VLLM_ARGS+=(--enable-auto-tool-choice)
-    if [ -n "$TOOL_CALL_PARSER" ]; then
-        VLLM_ARGS+=(--tool-call-parser "$TOOL_CALL_PARSER")
-    fi
-fi
-if [ -n "$REASONING_PARSER" ]; then
-    VLLM_ARGS+=(--reasoning-parser "$REASONING_PARSER")
-fi
-"${VLLM_ARGS[@]}"
+# Use the same runtime resolver, native ABI check, and launch contract as ACP.
+exec bash "$PROJECT_DIR/scripts/start_vllm.sh"

@@ -52,7 +52,7 @@ class RuntimeCompatibilityTest(unittest.TestCase):
 
         self.assertFalse(report.ok)
         self.assertIn("NamespaceTool is missing", report.errors[0])
-        self.assertEqual(report.versions["vllm"], "missing")
+        self.assertNotIn("vllm", report.versions)
 
     def test_agents_usage_schema_error_is_reported(self):
         class BrokenUsage:
@@ -73,6 +73,55 @@ class RuntimeCompatibilityTest(unittest.TestCase):
 
         self.assertFalse(report.ok)
         self.assertIn("cache_write_tokens field required", report.errors[0])
+
+    def test_server_contract_imports_native_cuda_boundary(self):
+        modules = {
+            "vllm": SimpleNamespace(),
+            "vllm.platforms.cuda": SimpleNamespace(),
+            "torch": SimpleNamespace(version=SimpleNamespace(cuda="12.9")),
+        }
+
+        report = check_runtime_compatibility(
+            importer=modules.__getitem__,
+            version_reader=_version_reader({"vllm": "0.22.1", "torch": "2.10.0"}),
+            check_client=False,
+            check_vllm_native=True,
+            expected_vllm_version="0.22.1",
+            expected_torch_backend="cu129",
+        )
+
+        self.assertTrue(report.ok)
+
+    def test_server_contract_rejects_wrong_vllm_and_missing_cuda_abi(self):
+        def importer(module):
+            if module == "vllm":
+                return SimpleNamespace()
+            if module == "vllm.platforms.cuda":
+                raise ImportError("libcudart.so.13: cannot open shared object file")
+            if module == "torch":
+                return SimpleNamespace(version=SimpleNamespace(cuda="12.4"))
+            raise KeyError(module)
+
+        report = check_runtime_compatibility(
+            importer=importer,
+            version_reader=_version_reader({"vllm": "0.25.1", "torch": "2.5.1"}),
+            check_client=False,
+            check_vllm_native=True,
+            expected_vllm_version="0.22.1",
+            expected_torch_backend="cu129",
+        )
+
+        self.assertFalse(report.ok)
+        self.assertTrue(
+            any("version contract mismatch" in error for error in report.errors)
+        )
+        self.assertTrue(any("libcudart.so.13" in error for error in report.errors))
+        self.assertTrue(
+            any(
+                "Torch CUDA backend contract mismatch" in error
+                for error in report.errors
+            )
+        )
 
 
 if __name__ == "__main__":

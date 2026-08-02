@@ -17,6 +17,8 @@ shift || true
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 ENV_FILE="${SCENEEXPERT_ENV_FILE:-$PROJECT_DIR/.env}"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/vllm_runtime.sh"
 
 source_env_file() {
     local env_path="$1"
@@ -95,7 +97,7 @@ if [ "${SCENEEXPERT_SKIP_PYTHON_PREFLIGHT:-0}" != "1" ]; then
     echo "  Running Python syntax preflight..."
     python -m compileall -q main.py scenesmith
     echo "  Running runtime dependency compatibility preflight..."
-    PYTHONDONTWRITEBYTECODE=1 python scripts/check_runtime_compatibility.py
+    PYTHONDONTWRITEBYTECODE=1 python scripts/check_runtime_compatibility.py --scope client
 fi
 
 NUMPY_VERSION="$(python -c 'import numpy as np; print(np.__version__)' 2>/dev/null || echo missing)"
@@ -195,24 +197,10 @@ if [ "$DISABLE_MATERIALS" = "1" ]; then
 fi
 
 if [ "$START_VLLM" = "1" ]; then
-    VLLM_LAUNCH_MODE=""
-    if ! command -v vllm >/dev/null 2>&1; then
-        if python -c "import importlib.util; raise SystemExit(0 if importlib.util.find_spec('vllm.entrypoints.openai.api_server') else 1)" >/dev/null 2>&1; then
-            VLLM_LAUNCH_MODE="python-module"
-            echo "  未找到 vllm 命令，改用当前 Python 的 vLLM 模块入口启动。"
-        else
-            echo "错误：找不到 vLLM 命令，当前 Python 也无法导入 vLLM。"
-            echo "  当前 Python: $(python -c 'import sys; print(sys.executable)')"
-            echo "  安装示例：python -m pip install vllm -i https://pypi.tuna.tsinghua.edu.cn/simple"
-            echo "  离线安装：python -m pip install --no-index --find-links /path/to/wheelhouse vllm"
-            echo "  如果已有其他 OpenAI-compatible 本地服务，请设置："
-            echo "    export SCENEEXPERT_START_VLLM=0"
-            echo "    export OPENAI_BASE_URL=http://host:port/v1"
-            exit 1
-        fi
-    else
-        VLLM_LAUNCH_MODE="cli"
-    fi
+    sceneexpert_resolve_vllm_runtime "$PROJECT_DIR"
+    VLLM_LAUNCH_MODE="$SCENEEXPERT_RESOLVED_VLLM_LAUNCH_MODE"
+    VLLM_EXECUTABLE="$SCENEEXPERT_RESOLVED_VLLM_EXECUTABLE"
+    VLLM_PYTHON="$SCENEEXPERT_RESOLVED_VLLM_PYTHON"
     if [ ! -d "$MODEL_DIR" ]; then
         echo "错误：模型目录不存在: $MODEL_DIR"
         echo "请确认 .env 中的 SCENEEXPERT_MODEL_DIR 指向已下载好的本地模型目录。"
@@ -328,9 +316,10 @@ if [ "$START_VLLM" = "1" ]; then
     echo "  DeepGEMM: use=${USE_DEEP_GEMM}, moe_use=${MOE_USE_DEEP_GEMM}, warmup=${DEEP_GEMM_WARMUP}"
     echo "  enforce eager: ${ENFORCE_EAGER}"
     echo "  启动方式: $VLLM_LAUNCH_MODE"
+    echo "  vLLM Python: $VLLM_PYTHON"
     if [ "$VLLM_LAUNCH_MODE" = "cli" ]; then
         VLLM_ARGS=(
-            vllm serve "$MODEL_DIR"
+            "$VLLM_EXECUTABLE" serve "$MODEL_DIR"
             --served-model-name "$MODEL_ID"
             --tensor-parallel-size "$TENSOR_PARALLEL_SIZE"
             --port "$VLLM_PORT"
@@ -341,7 +330,7 @@ if [ "$START_VLLM" = "1" ]; then
         )
     else
         VLLM_ARGS=(
-            python -m vllm.entrypoints.openai.api_server
+            "$VLLM_PYTHON" -m vllm.entrypoints.openai.api_server
             --model "$MODEL_DIR"
             --served-model-name "$MODEL_ID"
             --tensor-parallel-size "$TENSOR_PARALLEL_SIZE"

@@ -244,22 +244,29 @@ python -m pip --version
 python -m pip install -U pip
 python -m pip install uv -i https://pypi.tuna.tsinghua.edu.cn/simple
 uv sync --frozen --no-dev
-python -m pip install modelscope vllm -i https://pypi.tuna.tsinghua.edu.cn/simple
+python -m pip install modelscope -i https://pypi.tuna.tsinghua.edu.cn/simple
 python -m pip install "numpy>=1.26,<2.0" -i https://pypi.tuna.tsinghua.edu.cn/simple
-python scripts/check_runtime_compatibility.py
+python scripts/check_runtime_compatibility.py --scope client
+bash scripts/bootstrap_vllm_runtime.sh
 ```
 
-注意：`vllm` 和 `modelscope` 是运行脚本需要的依赖，不在 `pyproject.toml` 主依赖里，需要单独装。`vllm` 安装过程可能把 NumPy 升级到 2.x，但 `bpy==4.5.4` / Blender 扩展通常按 NumPy 1.x ABI 编译；如果日志出现 `A module that was compiled using NumPy 1.x cannot be run in NumPy 2.x`，必须重新执行上面的 NumPy pin 命令。`scripts/run_experiment.sh` 已加入预检查，发现 NumPy 2.x 会在启动 vLLM 前直接停止，避免浪费 30 分钟模型启动时间。
+注意：`modelscope` 安装在项目 `.venv` 中；`vllm` 不再安装到该环境。SceneSmith/Blender 锁定的 Torch/NumPy ABI 与快速演进的 vLLM CUDA ABI 并不相同，共用环境会在升级后出现 `libcudart.so.*` 缺失或破坏 `bpy` 的 NumPy ABI。`bootstrap_vllm_runtime.sh` 会建立版本化的 `.venv-vllm-0.22.1-cu129`，固定 vLLM 0.22.1 + CUDA 12.9，并在完成真实 native CUDA import 后才判定可用。ACP 入口默认首次自动创建、以后复用该环境。
 
 当前 ACP 运行环境必须保持 `openai==2.44.0` 与 `openai-agents==0.6.4`。`openai` 太旧（例如 `2.11.0`）缺少 vLLM 0.22.x 导入的 `NamespaceTool`；直接升级到 `2.45.0` 又会让 Agents SDK 在构造 `Usage()` 时因 `cache_write_tokens` 必填而失败。`pyproject.toml` 和 `uv.lock` 已固定这组兼容版本。若已有环境被 `pip install vllm` 改写，可修复后立即自检：
 
 ```bash
 python -m pip install --upgrade "openai==2.44.0" "openai-agents==0.6.4" \
   -i https://pypi.tuna.tsinghua.edu.cn/simple
-python scripts/check_runtime_compatibility.py
+python scripts/check_runtime_compatibility.py --scope client
 ```
 
-ACP 入口也会在加载 Qwen 权重前自动运行同一检查；检查失败时会直接退出并打印修复命令。
+ACP 入口在加载 Qwen 权重前分别检查客户端契约与 vLLM native CUDA 契约。若服务器环境损坏，可独立重建而不触碰 SceneSmith 环境：
+
+```bash
+SCENEEXPERT_VLLM_FORCE_REBUILD=1 bash scripts/bootstrap_vllm_runtime.sh
+.venv-vllm-0.22.1-cu129/bin/python scripts/check_runtime_compatibility.py \
+  --scope server --expected-vllm-version 0.22.1 --expected-torch-backend cu129
+```
 
 如果要运行向量 / hybrid memory 版本，还需要安装可选 memory 依赖。`requirements-memory.txt` 不是可执行脚本，而是 pip 的依赖清单；在项目根目录执行：
 
@@ -275,7 +282,10 @@ python -m pip install -r requirements-memory.txt -i https://pypi.tuna.tsinghua.e
 # 联网或可访问内网镜像的构建节点
 python -m pip install uv
 uv sync --frozen --no-dev
-python -m pip download modelscope vllm -d wheelhouse -i https://pypi.tuna.tsinghua.edu.cn/simple
+python -m pip download modelscope -d wheelhouse -i https://pypi.tuna.tsinghua.edu.cn/simple
+python -m pip download "vllm==0.22.1" -d wheelhouse_vllm \
+  -i https://pypi.tuna.tsinghua.edu.cn/simple \
+  --extra-index-url https://download.pytorch.org/whl/cu129
 python -m pip download -r requirements-memory.txt -d wheelhouse_memory -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 # 打包 uv cache、wheelhouse、代码仓库后传到集群共享盘
@@ -287,9 +297,11 @@ python -m pip download -r requirements-memory.txt -d wheelhouse_memory -i https:
 source .venv/bin/activate
 export UV_CACHE_DIR=/share/cache/uv_sceneexpert
 uv sync --frozen --no-dev --offline
-python -m pip install --no-index --find-links /share/wheelhouse modelscope vllm
+python -m pip install --no-index --find-links /share/wheelhouse modelscope
 python -m pip install --no-index --find-links /share/wheelhouse "numpy>=1.26,<2.0"
 python -m pip install --no-index --find-links /share/wheelhouse_memory -r requirements-memory.txt
+SCENEEXPERT_VLLM_WHEELHOUSE=/share/wheelhouse_vllm \
+  bash scripts/bootstrap_vllm_runtime.sh
 ```
 
 如果 `bpy==4.5.4` 无法离线解析，需要把 Blender PyPI 的对应 wheel 也预先放进 cache 或 wheelhouse。
@@ -725,15 +737,13 @@ export SCENEEXPERT_VLLM_HEALTH_URL="http://localhost:8000/health"
 export SCENEEXPERT_VLLM_HEALTH_URL="http://localhost:8000/v1/models"
 ```
 
-如果报 `vllm: command not found`，说明当前虚拟环境没有安装 vLLM，或者 `vllm` 命令不在 `PATH` 中。先检查：
+如果报 `vllm: command not found`，不要把 vLLM 安装回项目 `.venv`。先检查隔离的服务器环境：
 
 ```bash
-which vllm
-which python
-python -c "import sys; print(sys.executable)"
-python -m pip show vllm
-python -c "import vllm; print(vllm.__version__); print(vllm.__file__)"
-python -c "import sysconfig; print(sysconfig.get_path('scripts'))"
+ls -l .venv-vllm-0.22.1-cu129/bin/vllm
+.venv-vllm-0.22.1-cu129/bin/python -m pip show vllm
+.venv-vllm-0.22.1-cu129/bin/python scripts/check_runtime_compatibility.py \
+  --scope server --expected-vllm-version 0.22.1 --expected-torch-backend cu129
 ```
 
 如果你用的是 Conda 环境，并不想让脚本切换到项目 `.venv`，在 `.env` 中设置：
@@ -742,35 +752,35 @@ python -c "import sysconfig; print(sysconfig.get_path('scripts'))"
 export SCENEEXPERT_ACTIVATE_VENV=0
 ```
 
-能访问内网 PyPI 镜像时安装：
+能访问内网 PyPI 镜像时重建：
 
 ```bash
-python -m pip install vllm -i https://pypi.tuna.tsinghua.edu.cn/simple
+SCENEEXPERT_VLLM_FORCE_REBUILD=1 bash scripts/bootstrap_vllm_runtime.sh
 ```
 
 完全离线时，从 wheelhouse 安装：
 
 ```bash
-python -m pip install --no-index --find-links /share/wheelhouse vllm
+SCENEEXPERT_VLLM_WHEELHOUSE=/share/wheelhouse_vllm \
+SCENEEXPERT_VLLM_FORCE_REBUILD=1 \
+  bash scripts/bootstrap_vllm_runtime.sh
 ```
 
-如果 `python -m pip show vllm` 能看到包，但 `which vllm` 仍然为空，通常是 console script 没写入当前 venv 的 `bin/`，或 shell 没刷新 `PATH`。先尝试：
+如果包存在但入口缺失，不要手工改 `PATH`；强制重建版本化环境：
 
 ```bash
-hash -r
-python -m pip install --force-reinstall --no-cache-dir vllm -i https://pypi.tuna.tsinghua.edu.cn/simple
+SCENEEXPERT_VLLM_FORCE_REBUILD=1 bash scripts/bootstrap_vllm_runtime.sh
 ```
 
-如果集群不能重装，但 `python -c "import vllm"` 成功，项目脚本现在会自动退回到模块入口：
+如果使用自备的兼容服务器环境，可显式指定 Python 与入口：
 
 ```bash
-python -m vllm.entrypoints.openai.api_server \
-  --model "$SCENEEXPERT_MODEL_DIR" \
-  --served-model-name "$SCENEEXPERT_MODEL_ID" \
-  --port "$SCENEEXPERT_VLLM_PORT"
+export SCENEEXPERT_VLLM_PYTHON=/path/to/vllm-env/bin/python
+export SCENEEXPERT_VLLM_EXECUTABLE=/path/to/vllm-env/bin/vllm
+bash scripts/start_vllm.sh
 ```
 
-也就是说，`which vllm` 为空不一定致命；关键是当前 `python` 能否导入 `vllm.entrypoints.openai.api_server`。
+启动器会对指定环境执行 native CUDA ABI 预检；只有版本、Torch CUDA 后端和动态库都通过后才会启动模型。
 
 如果当前节点只有 1 张可见 GPU，而 `.env` 中写了 `SCENEEXPERT_TENSOR_PARALLEL_SIZE=2`，vLLM 也会启动失败。要么申请 2 张 GPU，要么改成：
 
