@@ -1,7 +1,9 @@
+import asyncio
 import math
 
+from contextlib import nullcontext
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, call, patch
 
 import numpy as np
 
@@ -142,6 +144,111 @@ def test_final_dining_alignment_leaves_passing_contract_unchanged() -> None:
 
     assert not repaired
     agent.manipuland_tools._align_dining_place_settings_impl.assert_not_called()
+
+
+def test_per_furniture_postprocessing_runs_before_final_critique() -> None:
+    furniture_id = UniqueID("sofa_0")
+    agent = object.__new__(StatefulManipulandAgent)
+    agent.cfg = SimpleNamespace(
+        agents=SimpleNamespace(planner_agent=SimpleNamespace(max_turns=3))
+    )
+    agent.prompt_registry = Mock()
+    agent._run_planner_workflow = AsyncMock(
+        return_value=SimpleNamespace(final_output=None)
+    )
+    agent._enforce_monitor_work_seat_orientation = Mock()
+    agent._enforce_dining_place_setting_alignment = Mock()
+    agent.scene = Mock()
+    agent.scene.content_hash.return_value = "settled-scene"
+    agent._can_skip_final_critique = Mock(return_value=False)
+
+    ordered = Mock()
+    agent._apply_per_furniture_postprocessing = Mock()
+    agent._request_critique_impl = AsyncMock()
+    agent._finalize_scene_and_scores = AsyncMock()
+    ordered.attach_mock(agent._apply_per_furniture_postprocessing, "postprocess")
+    ordered.attach_mock(agent._request_critique_impl, "critique")
+    ordered.attach_mock(agent._finalize_scene_and_scores, "finalize")
+
+    with patch(
+        "scenesmith.manipuland_agents.stateful_manipuland_agent.log_agent_usage"
+    ):
+        asyncio.run(agent._run_furniture_workflow(furniture_id))
+
+    assert ordered.mock_calls == [
+        call.postprocess(furniture_id),
+        call.critique(update_checkpoint=False),
+        call.finalize(),
+    ]
+
+
+def test_failed_furniture_workflow_restores_pre_target_scene() -> None:
+    furniture_id = UniqueID("sofa_0")
+    furniture = _object(str(furniture_id), "sofa")
+    selection = FurnitureSelection(
+        furniture_id=furniture_id,
+        suggested_items="throw blanket",
+        prompt_constraints="",
+        style_notes="",
+    )
+    snapshot = {
+        "room_geometry": None,
+        "objects": {"sofa_0": {"name": "sofa"}},
+        "text_description": "living room",
+    }
+    scene = Mock()
+    scene.get_object.return_value = furniture
+    scene.to_state_dict.return_value = snapshot
+    scene.content_hash.return_value = "restored-scene"
+    scene.text_description = "living room"
+
+    agent = object.__new__(StatefulManipulandAgent)
+    agent.cfg = SimpleNamespace(
+        context_furniture=SimpleNamespace(enabled=False),
+        support_surface_extraction={},
+        openai=SimpleNamespace(model="test-model"),
+    )
+    agent.rendering_manager = Mock()
+    agent.vlm_service = Mock()
+    agent._analyze_furniture_for_placement = AsyncMock(return_value=[selection])
+    agent._recover_prompt_required_manipuland_targets = Mock(return_value=[selection])
+    agent._route_explicit_floor_selections = Mock(return_value=[selection])
+    agent._skip_realized_floor_covering_targets = Mock(return_value=[selection])
+    agent._get_max_target_furniture = Mock(return_value=0)
+    agent._setup_furniture_context = Mock()
+    agent._generate_manipuland_context_image = Mock(return_value=None)
+    agent._initialize_checkpoint_state = Mock()
+    agent._setup_furniture_agents = Mock()
+    agent._run_furniture_workflow = AsyncMock(
+        side_effect=RuntimeError("unresolved hard constraints")
+    )
+
+    with (
+        patch(
+            "scenesmith.manipuland_agents.stateful_manipuland_agent.custom_span",
+            return_value=nullcontext(),
+        ),
+        patch(
+            "scenesmith.manipuland_agents.stateful_manipuland_agent."
+            "SupportSurfaceExtractionConfig.from_config",
+            return_value=Mock(),
+        ),
+        patch(
+            "scenesmith.manipuland_agents.stateful_manipuland_agent."
+            "extract_and_propagate_support_surfaces",
+            return_value=[Mock(surface_id=UniqueID("sofa_surface"))],
+        ),
+        patch(
+            "scenesmith.manipuland_agents.stateful_manipuland_agent."
+            "build_manipuland_placement_order_reference",
+            return_value="",
+        ),
+    ):
+        asyncio.run(agent.add_manipulands(scene))
+
+    scene.restore_from_state_dict.assert_called_once_with(snapshot)
+    assert agent.rendering_manager.clear_cache.call_count == 2
+    assert agent._critic_candidate_cache == {"scene_hash": "restored-scene"}
 
 
 def test_bilateral_bedside_prompt_recovers_both_nightstands() -> None:

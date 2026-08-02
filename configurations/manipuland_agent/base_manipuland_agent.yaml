@@ -352,6 +352,10 @@ max_critique_rounds: 1
 # per-furniture loop could spend hours on every bed/wardrobe/nightstand.
 max_target_furniture: 2
 
+# Reject and roll back an individual furniture target if deterministic physics
+# hard failures remain after its projection/simulation post-processing.
+fail_stage_on_unresolved_hard_constraints: true
+
 # Critic fast path: deterministic hard checks run before expensive VLM scoring.
 # Hard physics failures get a synthetic low score and repair hint, so the
 # planner can fix them without wasting a full VLM score_scene call.

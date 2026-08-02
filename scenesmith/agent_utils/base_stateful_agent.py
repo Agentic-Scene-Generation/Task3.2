@@ -633,6 +633,19 @@ class BaseStatefulAgent(ABC):
         repair_cfg = _cfg_get(controller_cfg, "deterministic_repair", {})
         return max(1, int(_cfg_get(repair_cfg, "max_attempts", 2)))
 
+    def _final_hard_validation_enabled(self) -> bool:
+        """Return whether unresolved deterministic hard failures abort this stage."""
+        controller = getattr(self, "furniture_safety_controller", None)
+        return bool(
+            controller
+            and getattr(controller, "enabled", False)
+            and _cfg_get(
+                self.cfg,
+                "fail_stage_on_unresolved_hard_constraints",
+                True,
+            )
+        )
+
     def _attempt_deterministic_repair(
         self, hard_state: HardStateEvaluation
     ) -> tuple[bool, list[str]]:
@@ -1793,14 +1806,7 @@ class BaseStatefulAgent(ABC):
                 # Update final_render_dir to point to restored checkpoint's render.
                 self.final_render_dir = self.checkpoint_render_dir
 
-        fail_on_hard_constraints = bool(
-            _cfg_get(self.cfg, "fail_stage_on_unresolved_hard_constraints", True)
-        )
-        if (
-            controller
-            and getattr(controller, "enabled", False)
-            and fail_on_hard_constraints
-        ):
+        if self._final_hard_validation_enabled():
             final_hard_state = self._evaluate_current_hard_state()
             final_hard_state, _, final_repair_actions = (
                 self._try_deterministic_repair_for_hard_state(
@@ -1835,13 +1841,14 @@ class BaseStatefulAgent(ABC):
                     reasons = "; ".join(final_hard_state.hard_reasons)
             if final_hard_state is not None and not final_hard_state.hard_valid:
                 reasons = "; ".join(final_hard_state.hard_reasons)
+                stage_name = self.agent_type.value.replace("_", " ").capitalize()
                 console_logger.error(
-                    "Furniture stage failed with unresolved deterministic hard "
-                    "constraints: %s",
+                    "%s stage failed with unresolved deterministic hard constraints: %s",
+                    stage_name,
                     reasons,
                 )
                 raise RuntimeError(
-                    "Furniture stage failed with unresolved hard constraints: "
+                    f"{stage_name} stage failed with unresolved hard constraints: "
                     f"{reasons}"
                 )
 

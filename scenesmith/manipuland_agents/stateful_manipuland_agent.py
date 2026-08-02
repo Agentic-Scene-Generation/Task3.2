@@ -5,6 +5,7 @@ This module implements manipuland placement using persistent agents that work
 per-furniture, with fresh contexts for each furniture surface to bound token usage.
 """
 
+import copy
 import logging
 import math
 import re
@@ -652,7 +653,50 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
         self.previous_scores = None
         self.previous_checkpoint_render_dir = None
         self.checkpoint_render_dir = None
+        self.final_render_dir = None
+        self.checkpoint_scene_hash = None
+        self._last_scored_scene_hash = None
         # Keep placement_style as-is (it persists across furniture iterations).
+
+    def _final_hard_validation_enabled(self) -> bool:
+        """Require manipuland targets to finish without hard physics violations."""
+        try:
+            configured = OmegaConf.select(
+                self.cfg,
+                "fail_stage_on_unresolved_hard_constraints",
+                default=False,
+            )
+        except Exception:
+            configured = getattr(
+                self.cfg,
+                "fail_stage_on_unresolved_hard_constraints",
+                False,
+            )
+        return bool(configured)
+
+    def _apply_per_furniture_postprocessing(self, furniture_id: UniqueID) -> None:
+        """Settle one target's manipulands before its final scored critique."""
+        postprocessing_cfg = self.cfg.per_furniture_postprocessing
+        if not postprocessing_cfg.enabled:
+            return
+
+        simulation_cfg = postprocessing_cfg.simulation
+        simulation_html_path = None
+        if simulation_cfg.save_html:
+            simulation_html_path = (
+                self.scene.scene_dir
+                / "simulation"
+                / "per_furniture"
+                / f"{furniture_id}_simulation.html"
+            )
+        self.scene = apply_per_furniture_postprocessing(
+            full_scene=self.scene,
+            furniture_id=furniture_id,
+            config=postprocessing_cfg,
+            simulation_html_path=simulation_html_path,
+        )
+        self.rendering_manager.clear_cache()
+        self._reset_critic_candidate_cache()
 
     def _setup_furniture_agents(
         self, furniture_id: UniqueID, furniture_description: str
@@ -724,6 +768,11 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
         # same deterministic contract before the final scored critique.
         self._enforce_monitor_work_seat_orientation(furniture_id)
         self._enforce_dining_place_setting_alignment(furniture_id)
+
+        # Projection and simulation must settle the candidate before the final
+        # critic observes it. Otherwise pre-repair collisions can be scored and
+        # persisted as a completed furniture target.
+        self._apply_per_furniture_postprocessing(furniture_id)
 
         # Compute final critique and scores for completed furniture.
         # Check if scene changed since last checkpoint to avoid redundant critique.
@@ -1081,6 +1130,7 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
                     )
                     continue
 
+                target_scene_snapshot = copy.deepcopy(self.scene.to_state_dict())
                 try:
                     # Set up per-furniture context.
                     self._setup_furniture_context(furniture_selection)
@@ -1130,27 +1180,15 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
                     # Run multi-agent workflow.
                     await self._run_furniture_workflow(furniture_id)
 
-                    # Per-furniture post-processing (after manipulands placed).
-                    if self.cfg.per_furniture_postprocessing.enabled:
-                        sim_cfg = self.cfg.per_furniture_postprocessing.simulation
-                        sim_html_path = None
-                        if sim_cfg.save_html:
-                            sim_html_path = (
-                                self.scene.scene_dir
-                                / "simulation"
-                                / "per_furniture"
-                                / f"{furniture_id}_simulation.html"
-                            )
-                        self.scene = apply_per_furniture_postprocessing(
-                            full_scene=self.scene,
-                            furniture_id=furniture_id,
-                            config=self.cfg.per_furniture_postprocessing,
-                            simulation_html_path=sim_html_path,
-                        )
-
                 except Exception as e:
+                    self.scene.restore_from_state_dict(target_scene_snapshot)
+                    self.rendering_manager.clear_cache()
+                    self._reset_critic_candidate_cache()
                     console_logger.error(
-                        f"Error populating furniture {furniture_id}: {e}", exc_info=True
+                        "Error populating furniture %s; restored pre-target scene: %s",
+                        furniture_id,
+                        e,
+                        exc_info=True,
                     )
                     # Continue to next furniture piece.
                     continue

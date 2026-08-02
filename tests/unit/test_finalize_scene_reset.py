@@ -79,7 +79,10 @@ class TestFinalizeSceneReset(unittest.TestCase):
         shutil.rmtree(self.temp_dir)
 
     def _create_testable_agent(
-        self, mock_scene: MagicMock, mock_rendering_manager: MagicMock
+        self,
+        mock_scene: MagicMock,
+        mock_rendering_manager: MagicMock,
+        agent_type: AgentType = AgentType.FURNITURE,
     ):
         """Create a concrete testable subclass of BaseStatefulPlacementAgent."""
         final_scores_dir = self.final_scores_dir
@@ -102,7 +105,7 @@ class TestFinalizeSceneReset(unittest.TestCase):
 
             @property
             def agent_type(self) -> AgentType:
-                return AgentType.FURNITURE
+                return agent_type
 
             def _get_final_scores_directory(self) -> Path:
                 return final_scores_dir
@@ -286,6 +289,50 @@ class TestFinalizeSceneReset(unittest.TestCase):
         asyncio.run(agent._finalize_scene_and_scores())
 
         # No reset should occur since there's nothing to compare against.
+        mock_scene.restore_from_state_dict.assert_not_called()
+
+    def test_non_controller_stage_keeps_legacy_non_strict_default(self):
+        mock_scene = MagicMock()
+        mock_rendering_manager = MagicMock()
+        agent = self._create_testable_agent(mock_scene, mock_rendering_manager)
+        agent._evaluate_current_hard_state = MagicMock()
+        agent.previous_scores = None
+        agent.checkpoint_scores = None
+        agent.checkpoint_render_dir = None
+        agent.final_render_dir = None
+
+        asyncio.run(agent._finalize_scene_and_scores())
+
+        agent._evaluate_current_hard_state.assert_not_called()
+
+    def test_explicit_non_controller_hard_validation_rejects_invalid_scene(self):
+        mock_scene = MagicMock()
+        mock_rendering_manager = MagicMock()
+        agent = self._create_testable_agent(
+            mock_scene,
+            mock_rendering_manager,
+            agent_type=AgentType.MANIPULAND,
+        )
+        hard_state = HardStateEvaluation(
+            hard_valid=False,
+            hard_reasons=["physics hard violation: collisions"],
+        )
+        agent._final_hard_validation_enabled = MagicMock(return_value=True)
+        agent._evaluate_current_hard_state = MagicMock(return_value=hard_state)
+        agent._try_deterministic_repair_for_hard_state = MagicMock(
+            return_value=(hard_state, None, [])
+        )
+        agent.previous_scores = None
+        agent.checkpoint_scores = None
+        agent.checkpoint_render_dir = None
+        agent.final_render_dir = None
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "Manipuland stage failed with unresolved hard constraints",
+        ):
+            asyncio.run(agent._finalize_scene_and_scores())
+
         mock_scene.restore_from_state_dict.assert_not_called()
 
     def test_finalize_keeps_hard_valid_scene_over_unscored_snapshot(self):
