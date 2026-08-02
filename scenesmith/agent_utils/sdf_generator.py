@@ -47,6 +47,7 @@ def generate_drake_sdf(
     physics_analysis: MeshPhysicsAnalysis,
     output_path: Path,
     asset_name: str | None = None,
+    physics_proxy_policy: str | None = None,
 ) -> Path:
     """Generate Drake SDF file for a simulation asset with visual geometry, collision
     geometry, and physics properties.
@@ -59,6 +60,10 @@ def generate_drake_sdf(
         physics_analysis: Physics properties from VLM analysis (mass, material).
         output_path: Path where SDF file will be saved.
         asset_name: Optional name for the asset (defaults to visual mesh stem).
+        physics_proxy_policy: Optional asset annotation policy. ``bbox_inertia``
+            skips mesh volume moments, ``weld_or_static`` emits a static model,
+            and ``reject`` refuses SDF generation. Numerical validation remains
+            active for ``mesh_mass_properties`` and unannotated assets.
 
     Returns:
         Path to the generated SDF file.
@@ -72,6 +77,18 @@ def generate_drake_sdf(
 
     if not collision_pieces:
         raise ValueError("collision_pieces cannot be empty")
+
+    allowed_policies = {
+        None,
+        "mesh_mass_properties",
+        "bbox_inertia",
+        "weld_or_static",
+        "reject",
+    }
+    if physics_proxy_policy not in allowed_policies:
+        raise ValueError(f"Unsupported physics proxy policy: {physics_proxy_policy}")
+    if physics_proxy_policy == "reject":
+        raise ValueError("Asset physics proxy policy is reject")
 
     asset_name = asset_name or visual_mesh_path.stem
 
@@ -107,6 +124,7 @@ def generate_drake_sdf(
         visual_mesh=visual_mesh,
         mass=mass,
         asset_name=asset_name,
+        force_bbox=physics_proxy_policy == "bbox_inertia",
     )
 
     # Get friction coefficient for material.
@@ -117,6 +135,8 @@ def generate_drake_sdf(
     # Create SDF XML structure.
     sdf = ET.Element("sdf", version="1.7")
     model = ET.SubElement(sdf, "model", name=asset_name)
+    if physics_proxy_policy == "weld_or_static":
+        ET.SubElement(model, "static").text = "true"
 
     # Add single link (simple rigid body).
     link = ET.SubElement(model, "link", name="base_link")
@@ -211,6 +231,7 @@ def _safe_inertial_properties(
     visual_mesh: trimesh.Trimesh,
     mass: float,
     asset_name: str,
+    force_bbox: bool = False,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Return validated mesh mass properties or a bounded box approximation."""
     bounds = np.asarray(visual_mesh.bounds, dtype=float)
@@ -223,6 +244,12 @@ def _safe_inertial_properties(
 
     fallback_center = bounds.mean(axis=0)
     fallback_inertia = _box_inertia_tensor(mass, extents)
+
+    if force_bbox:
+        console_logger.info(
+            "Mesh '%s' uses annotation-requested bounding-box inertia", asset_name
+        )
+        return fallback_center, fallback_inertia
 
     # 2026-07-31: trimesh volume moments are not reliable for open HSSD meshes;
     # keep their mass inside the rendered bounds instead of emitting a distant COM.

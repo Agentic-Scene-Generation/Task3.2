@@ -254,6 +254,52 @@ class TestGenerateDrakeSDF(unittest.TestCase):
         self.assertGreater(float(inertia.findtext("iyy")), 0.0)
         self.assertGreater(float(inertia.findtext("izz")), 0.0)
 
+    def test_annotation_can_force_bbox_inertia_for_closed_mesh(self):
+        visual_mesh = trimesh.creation.box(extents=[1.0, 2.0, 3.0])
+        visual_mesh.apply_translation([4.0, 1.0, 0.0])
+        visual_path = self.temp_path / "forced_bbox.gltf"
+        visual_mesh.export(visual_path)
+        physics = MeshPhysicsAnalysis(
+            up_axis="+Y", front_axis="+Z", material="wood", mass_kg=6.0,
+            mass_range_kg=(4.0, 8.0),
+        )
+        output_path = self.temp_path / "forced_bbox.sdf"
+        generate_drake_sdf(
+            visual_path, [visual_mesh], physics, output_path,
+            physics_proxy_policy="bbox_inertia",
+        )
+        pose = [float(v) for v in ET.parse(output_path).findtext(".//inertial/pose").split()[:3]]
+        np.testing.assert_allclose(pose, [4.0, 0.0, 1.0], atol=1e-6)
+
+    def test_annotation_weld_or_static_emits_static_model(self):
+        visual_mesh = trimesh.creation.box(extents=[1.0, 1.0, 1.0])
+        visual_path = self.temp_path / "mounted.gltf"
+        visual_mesh.export(visual_path)
+        physics = MeshPhysicsAnalysis(
+            up_axis="+Y", front_axis="+Z", material="metal", mass_kg=1.0,
+            mass_range_kg=(0.5, 2.0),
+        )
+        output_path = self.temp_path / "mounted.sdf"
+        generate_drake_sdf(
+            visual_path, [visual_mesh], physics, output_path,
+            physics_proxy_policy="weld_or_static",
+        )
+        self.assertEqual(ET.parse(output_path).findtext(".//model/static"), "true")
+
+    def test_annotation_reject_stops_sdf_generation(self):
+        visual_mesh = trimesh.creation.box()
+        visual_path = self.temp_path / "rejected.gltf"
+        visual_mesh.export(visual_path)
+        physics = MeshPhysicsAnalysis(
+            up_axis="+Y", front_axis="+Z", material="wood", mass_kg=1.0,
+            mass_range_kg=(0.5, 2.0),
+        )
+        with self.assertRaisesRegex(ValueError, "policy is reject"):
+            generate_drake_sdf(
+                visual_path, [visual_mesh], physics, self.temp_path / "rejected.sdf",
+                physics_proxy_policy="reject",
+            )
+
     def test_generate_drake_sdf_converts_y_up_collision_axes(self):
         """Collision OBJ output uses SceneSmith's Z-up frame."""
         # Encode a 1.6m wide, 2.05m deep, 0.8m tall object in glTF Y-up:

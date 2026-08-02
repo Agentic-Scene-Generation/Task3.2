@@ -9,6 +9,7 @@ REPO = Path(__file__).resolve().parents[2]
 DATA = REPO / "scenesmith" / "scenebenchmark_critic" / "asset_annotation_data"
 LOOKUP = DATA / "hssd_annotation_lookup.json.gz"
 AUDIT = DATA / "HSSD_OPEN_MESH_PHYSICS_AUDIT.json"
+FULL_SUMMARY = DATA / "HSSD_MESH_PHYSICS_FULL_SUMMARY.json"
 PLANT_ID = "cb9b5a9ee8e0eb6cacd1eb98cfe65cced77ad54f"
 HIGH_RISK_IDS = {
     PLANT_ID,
@@ -40,7 +41,9 @@ def test_high_risk_open_mesh_assets_are_merged_into_lookup():
     assert len(lookup) == 10963
     for asset_id in HIGH_RISK_IDS:
         quality = lookup[asset_id]["asset_quality"]
-        assert quality["mesh_topology"]["watertight"] is False
+        assert quality["mesh_topology"]["measured"] is True
+        assert quality["mesh_topology"]["runtime_watertight_observation"] is False
+        assert quality["mesh_topology"]["topology_detail_status"] == "resolved_glb_scan_complete"
         assert quality["physics_proxy"]["policy"] in {
             "bbox_inertia",
             "weld_or_static",
@@ -59,8 +62,8 @@ def test_falling_plant_uses_bbox_inertia_without_rejection():
 
     assert topology["is_open_by_design"] is True
     assert topology["open_mesh_reason"] == "thin_leaf_surfaces"
-    assert topology["boundary_edge_count"] is None
-    assert topology["topology_detail_status"] == "pending_resolved_glb_scan"
+    assert topology["boundary_edge_count"] == 16796
+    assert topology["topology_detail_status"] == "resolved_glb_scan_complete"
     assert proxy["policy"] == "bbox_inertia"
     assert proxy["collision_proxy_policy"] == "convex_decomposition"
     assert proxy["is_usable_in_physics"] is True
@@ -87,3 +90,24 @@ def test_audit_is_explicit_about_unavailable_measurements():
         assert topology["measurement_method"] == "trimesh.is_watertight"
         assert topology["boundary_edge_count"] is None
         assert topology["non_manifold_edge_count"] is None
+
+
+def test_full_library_mesh_physics_audit_is_complete():
+    summary = json.loads(FULL_SUMMARY.read_text(encoding="utf-8"))
+    assert summary["asset_count"] == 10963
+    assert summary["scan_status_counts"] == {"complete": 10962, "error": 1}
+    assert summary["watertight_counts"] == {"False": 10256, "True": 706}
+    assert summary["physics_proxy_policy_counts"] == {
+        "bbox_inertia": 7889,
+        "mesh_mass_properties": 691,
+        "weld_or_static": 2383,
+    }
+
+
+def test_zero_thickness_wall_art_is_attached_instead_of_rejected():
+    store = AssetLibraryAnnotationStore(lookup_path=LOOKUP)
+    policy = store.get_physics_proxy_policy(
+        "775a3ca949c41b0f143a1c919efa402817172e1f"
+    )
+    assert policy["policy"] == "weld_or_static"
+    assert policy["is_usable_in_physics"] is True

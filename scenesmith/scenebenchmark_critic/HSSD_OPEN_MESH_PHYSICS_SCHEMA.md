@@ -70,6 +70,15 @@ SceneSmith may read the policy through
 must retain its numerical fallback when annotations are missing. Annotation
 data does not silently alter collision geometry or scene behavior.
 
+The complete-library consumer passes `physics_proxy.policy` to
+`generate_drake_sdf(..., physics_proxy_policy=...)`. `bbox_inertia` forces
+bounded per-instance COM/inertia, `weld_or_static` emits a static model, and
+`reject` stops generation. Runtime numerical checks remain active even when a
+record says `mesh_mass_properties`.
+
+Official-GLB and runtime-resolved watertight observations are separate fields.
+When they conflict, the more conservative reviewed runtime policy wins.
+
 ## Reproduction
 
 Apply replay-backed evidence without a local geometry mount:

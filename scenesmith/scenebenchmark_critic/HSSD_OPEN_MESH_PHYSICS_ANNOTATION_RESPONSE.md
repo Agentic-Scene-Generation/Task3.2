@@ -1,5 +1,8 @@
 # HSSD Open-Mesh Physics Annotation Response
 
+> Full-library follow-up: see `HSSD_FULL_MESH_PHYSICS_AUDIT_RESPONSE.md` for
+> the 10,963-asset resolved-GLB audit and runtime policy execution.
+
 Date: 2026-08-02
 
 Base: `dev_hrk_week31@687800bb909a50afcdf95b89f629fc79bd76b4d8`
