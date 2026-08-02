@@ -51,9 +51,21 @@ echo "  Torch backend: $TORCH_BACKEND"
 
 if command -v uv >/dev/null 2>&1; then
     UV_REINSTALL_ARGS=()
-    UV_TORCH_ARGS=()
+    UV_INDEX_ARGS=(--index-url "$PIP_INDEX_URL")
     if uv pip install --help 2>&1 | grep -q -- "--torch-backend"; then
-        UV_TORCH_ARGS+=(--torch-backend "$TORCH_BACKEND")
+        # uv routes only packages in the PyTorch ecosystem to this backend and
+        # keeps general dependencies (for example packaging) on the main
+        # index. Do not also add the PyTorch index as an extra index: it would
+        # take priority for every package and can make resolution unsatisfiable.
+        UV_INDEX_ARGS+=(--torch-backend "$TORCH_BACKEND")
+    else
+        # Older uv releases lack package-scoped Torch routing. Match pip's
+        # cross-index resolution so a stale packaging wheel on the PyTorch
+        # index cannot hide a compatible version from the main mirror.
+        UV_INDEX_ARGS+=(
+            --extra-index-url "$TORCH_INDEX_URL"
+            --index-strategy unsafe-best-match
+        )
     fi
     if [ ! -x "$VLLM_PYTHON" ]; then
         uv venv --python "$PYTHON_VERSION" "$VLLM_VENV_PATH"
@@ -75,9 +87,7 @@ if command -v uv >/dev/null 2>&1; then
             --python "$VLLM_PYTHON" \
             --upgrade \
             "${UV_REINSTALL_ARGS[@]}" \
-            --index-url "$PIP_INDEX_URL" \
-            --extra-index-url "$TORCH_INDEX_URL" \
-            "${UV_TORCH_ARGS[@]}" \
+            "${UV_INDEX_ARGS[@]}" \
             "vllm==$VLLM_VERSION"
     fi
 else
