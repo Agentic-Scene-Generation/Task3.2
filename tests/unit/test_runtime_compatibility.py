@@ -1,6 +1,7 @@
 import importlib.metadata
 import unittest
 
+from pathlib import Path
 from types import SimpleNamespace
 
 from scripts.check_runtime_compatibility import check_runtime_compatibility
@@ -21,6 +22,18 @@ def _version_reader(versions):
 
 
 class RuntimeCompatibilityTest(unittest.TestCase):
+    def test_bootstrap_uses_resumable_official_vllm_wheel_cache(self):
+        project_root = Path(__file__).resolve().parents[2]
+        bootstrap = (project_root / "scripts" / "bootstrap_vllm_runtime.sh").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("https://wheels.vllm.ai/", bootstrap)
+        self.assertIn("--continue-at -", bootstrap)
+        self.assertIn("verify_wheel_sha256", bootstrap)
+        self.assertIn("SCENEEXPERT_VLLM_WHEEL_CACHE", bootstrap)
+        self.assertNotIn("github.com/vllm-project/vllm/releases/download", bootstrap)
+
     def test_compatible_contract_passes(self):
         modules = {
             "openai.types.responses": SimpleNamespace(NamespaceTool=object),

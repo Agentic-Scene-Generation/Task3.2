@@ -18,6 +18,9 @@ TORCH_INDEX_URL="${SCENEEXPERT_VLLM_TORCH_INDEX_URL:-https://download.pytorch.or
 VLLM_WHEELHOUSE="${SCENEEXPERT_VLLM_WHEELHOUSE:-}"
 VLLM_WHEEL_URL="${SCENEEXPERT_VLLM_WHEEL_URL:-}"
 VLLM_WHEEL_SHA256="${SCENEEXPERT_VLLM_WHEEL_SHA256:-}"
+VLLM_WHEEL_CACHE="${SCENEEXPERT_VLLM_WHEEL_CACHE:-$PROJECT_DIR/.cache/vllm-wheels}"
+VLLM_HTTP_TIMEOUT_SECONDS="${SCENEEXPERT_VLLM_HTTP_TIMEOUT_SECONDS:-600}"
+VLLM_HTTP_RETRIES="${SCENEEXPERT_VLLM_HTTP_RETRIES:-8}"
 FORCE_REBUILD="${SCENEEXPERT_VLLM_FORCE_REBUILD:-0}"
 VLLM_PYTHON="$VLLM_VENV_PATH/bin/python"
 
@@ -44,11 +47,11 @@ resolve_vllm_install_target() {
     case "$VLLM_VERSION:$TORCH_BACKEND:$machine_arch" in
         0.22.1:cu129:x86_64)
             printf '%s\n' \
-                "https://github.com/vllm-project/vllm/releases/download/v0.22.1/vllm-0.22.1%2Bcu129-cp38-abi3-manylinux_2_28_x86_64.whl#sha256=365ee929afd73bb5d146235b65053fa948788ec2ee00a2c3e957d3f43bf2b0cd"
+                "https://wheels.vllm.ai/0decac0d96c42b49572498019f0a0e3600f50398/vllm-0.22.1%2Bcu129-cp38-abi3-manylinux_2_28_x86_64.whl#sha256=365ee929afd73bb5d146235b65053fa948788ec2ee00a2c3e957d3f43bf2b0cd"
             ;;
         0.22.1:cu129:aarch64|0.22.1:cu129:arm64)
             printf '%s\n' \
-                "https://github.com/vllm-project/vllm/releases/download/v0.22.1/vllm-0.22.1%2Bcu129-cp38-abi3-manylinux_2_28_aarch64.whl#sha256=b4cef4bf6264372d61382ebeb36e2be7183e3e736769f1d53fa4c897a0be8ce7"
+                "https://wheels.vllm.ai/0decac0d96c42b49572498019f0a0e3600f50398/vllm-0.22.1%2Bcu129-cp38-abi3-manylinux_2_28_aarch64.whl#sha256=b4cef4bf6264372d61382ebeb36e2be7183e3e736769f1d53fa4c897a0be8ce7"
             ;;
         *)
             echo "ERROR: no verified vLLM binary is registered for version=$VLLM_VERSION, backend=$TORCH_BACKEND, arch=$machine_arch." >&2
@@ -56,6 +59,86 @@ resolve_vllm_install_target() {
             return 1
             ;;
     esac
+}
+
+verify_wheel_sha256() {
+    local wheel_path="$1"
+    local expected_sha256="$2"
+    [ -n "$expected_sha256" ] || return 0
+    command -v sha256sum >/dev/null 2>&1 || {
+        echo "ERROR: sha256sum is required to verify the vLLM release wheel." >&2
+        return 1
+    }
+    printf '%s  %s\n' "$expected_sha256" "$wheel_path" | sha256sum --check --status
+}
+
+materialize_remote_wheel() {
+    local install_target="$1"
+    case "$install_target" in
+        http://*|https://*) ;;
+        *)
+            printf '%s\n' "$install_target"
+            return
+            ;;
+    esac
+
+    # curl can resume a partially downloaded 400+ MB wheel. uv retries HTTP
+    # requests, but a failed direct-URL fetch may otherwise restart from zero
+    # on restricted CCI/ACP egress links.
+    command -v curl >/dev/null 2>&1 || {
+        printf '%s\n' "$install_target"
+        return
+    }
+
+    local wheel_url="${install_target%%#sha256=*}"
+    local expected_sha256=""
+    if [[ "$install_target" == *"#sha256="* ]]; then
+        expected_sha256="${install_target##*#sha256=}"
+    fi
+    local wheel_name="${wheel_url##*/}"
+    wheel_name="${wheel_name//%2B/+}"
+    wheel_name="${wheel_name//%2b/+}"
+    local wheel_path="$VLLM_WHEEL_CACHE/$wheel_name"
+    local partial_path="${wheel_path}.partial"
+
+    mkdir -p "$VLLM_WHEEL_CACHE"
+    if [ -f "$wheel_path" ] && verify_wheel_sha256 "$wheel_path" "$expected_sha256"; then
+        echo "Reusing verified vLLM wheel: $wheel_path" >&2
+        printf '%s\n' "$wheel_path"
+        return
+    fi
+    rm -f "$wheel_path"
+    if [ -f "$partial_path" ] && verify_wheel_sha256 "$partial_path" "$expected_sha256"; then
+        mv -f "$partial_path" "$wheel_path"
+        echo "Recovered a complete verified vLLM wheel from the partial cache: $wheel_path" >&2
+        printf '%s\n' "$wheel_path"
+        return
+    fi
+
+    local curl_retry_args=(--retry "$VLLM_HTTP_RETRIES")
+    if curl --help all 2>/dev/null | grep -q -- "--retry-all-errors"; then
+        curl_retry_args+=(--retry-all-errors)
+    fi
+    echo "Downloading the ABI-matched vLLM wheel with resume support:" >&2
+    echo "  source: $wheel_url" >&2
+    echo "  cache:  $wheel_path" >&2
+    curl \
+        --fail \
+        --location \
+        --continue-at - \
+        --connect-timeout 30 \
+        --speed-limit 1024 \
+        --speed-time 120 \
+        "${curl_retry_args[@]}" \
+        --output "$partial_path" \
+        "$wheel_url"
+    if ! verify_wheel_sha256 "$partial_path" "$expected_sha256"; then
+        rm -f "$partial_path"
+        echo "ERROR: downloaded vLLM wheel failed SHA-256 verification." >&2
+        return 1
+    fi
+    mv -f "$partial_path" "$wheel_path"
+    printf '%s\n' "$wheel_path"
 }
 
 check_runtime() {
@@ -89,8 +172,19 @@ echo "  vLLM: $VLLM_VERSION"
 echo "  Torch backend: $TORCH_BACKEND"
 VLLM_INSTALL_TARGET="$(resolve_vllm_install_target)"
 echo "  vLLM wheel: $VLLM_INSTALL_TARGET"
+VLLM_INSTALL_TARGET="$(materialize_remote_wheel "$VLLM_INSTALL_TARGET")"
 
 if command -v uv >/dev/null 2>&1; then
+    export UV_HTTP_TIMEOUT="${UV_HTTP_TIMEOUT:-$VLLM_HTTP_TIMEOUT_SECONDS}"
+    export UV_HTTP_RETRIES="${UV_HTTP_RETRIES:-$VLLM_HTTP_RETRIES}"
+    case "${UV_LINK_MODE:-}" in
+        "") export UV_LINK_MODE="copy" ;;
+        clone|copy|hardlink|symlink) ;;
+        *)
+            echo "WARNING: invalid UV_LINK_MODE='${UV_LINK_MODE}'; using copy for the AFS runtime." >&2
+            export UV_LINK_MODE="copy"
+            ;;
+    esac
     UV_INDEX_ARGS=(--index-url "$PIP_INDEX_URL")
     if uv pip install --help 2>&1 | grep -q -- "--torch-backend"; then
         # uv routes only packages in the PyTorch ecosystem to this backend and
@@ -131,6 +225,7 @@ if command -v uv >/dev/null 2>&1; then
     fi
 else
     BOOTSTRAP_PYTHON="${SCENEEXPERT_VLLM_BOOTSTRAP_PYTHON:-python3}"
+    export PIP_DEFAULT_TIMEOUT="${PIP_DEFAULT_TIMEOUT:-$VLLM_HTTP_TIMEOUT_SECONDS}"
     VENV_CLEAR_ARGS=()
     if [ -d "$VLLM_VENV_PATH" ]; then
         VENV_CLEAR_ARGS+=(--clear)
