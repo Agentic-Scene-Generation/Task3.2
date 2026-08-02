@@ -20,6 +20,7 @@ from scenesmith.agent_utils.stage_working_memory import StageWorkingMemory
 from scenesmith.scene_expert.context_bundle import build_stage_context_bundle
 from scenesmith.scene_expert.memory.embedding import (
     SceneMemoryEmbedder,
+    _flag_embedding_transformers_compatibility,
     resolve_memory_embedding_model_dir,
 )
 from scenesmith.scene_expert.memory.hybrid_retriever import HybridMemoryRetriever
@@ -1243,6 +1244,7 @@ Summary: |-
 
         fake_module = types.SimpleNamespace(BGEM3FlagModel=DummyBGEM3FlagModel)
         with TemporaryDirectory() as tmp:
+            Path(tmp, "model.safetensors").touch()
             with patch.dict(sys.modules, {"FlagEmbedding": fake_module}):
                 embedder = SceneMemoryEmbedder(model_dir=tmp, device="cpu")
                 matrix = embedder.encode(["bedroom furniture"])
@@ -1252,6 +1254,25 @@ Summary: |-
         self.assertIsInstance(kwargs, dict)
         self.assertEqual(["cpu"], kwargs["devices"])
         self.assertEqual((1, 2), matrix.shape)
+
+    def test_flag_embedding_dtype_is_translated_for_transformers(self) -> None:
+        from transformers import AutoModel
+
+        calls: list[dict[str, object]] = []
+        original = AutoModel.from_pretrained
+
+        def fake_loader(*args: object, **kwargs: object) -> object:
+            calls.append(dict(kwargs))
+            return object()
+
+        AutoModel.from_pretrained = fake_loader  # type: ignore[method-assign]
+        try:
+            with _flag_embedding_transformers_compatibility():
+                AutoModel.from_pretrained("local-model", dtype="float32")
+        finally:
+            AutoModel.from_pretrained = original  # type: ignore[method-assign]
+
+        self.assertEqual([{"torch_dtype": "float32"}], calls)
 
     def test_numpy_memory_index_searches_normalized_vectors(self) -> None:
         with TemporaryDirectory() as tmp:
