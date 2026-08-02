@@ -682,6 +682,13 @@ def build_scenebenchmark_annotation(record: dict[str, Any]) -> dict[str, Any]:
         hints["semantic_directions"] = canonical_front.get("semantic_directions", [])
         hints["functional_directions"] = record.get("functional_directions", [])
 
+    asset_quality = record.get("asset_quality") or {}
+    if isinstance(asset_quality, dict):
+        for field in ("mesh_topology", "physics_proxy", "support_stability"):
+            value = asset_quality.get(field)
+            if isinstance(value, dict):
+                hints[field] = value
+
     return {
         "schema_version": "scenebenchmark_hssd_fd_sa@0.1",
         "functional_hints": hints,
@@ -1037,6 +1044,15 @@ class AssetLibraryAnnotationStore:
             raise KeyError(f"HSSD id not found in annotation lookup: {normalized}")
         return record
 
+    def get_physics_proxy_policy(self, hssd_id: str) -> dict[str, Any] | None:
+        """Return the reviewed open-mesh physics policy for an HSSD asset."""
+        record = self.get(hssd_id)
+        if record is None:
+            return None
+        quality = record.get("asset_quality") or {}
+        policy = quality.get("physics_proxy") if isinstance(quality, dict) else None
+        return dict(policy) if isinstance(policy, dict) else None
+
     def search_category(self, query: str, limit: int = 20) -> list[dict[str, Any]]:
         q = str(query or "").strip().lower().replace("_", " ")
         if not q:
@@ -1066,3 +1082,11 @@ def get_hssd_asset_annotations(hssd_id: str) -> dict[str, Any] | None:
     if _DEFAULT_STORE is None:
         _DEFAULT_STORE = AssetLibraryAnnotationStore()
     return _DEFAULT_STORE.get(hssd_id)
+
+
+def get_hssd_physics_proxy_policy(hssd_id: str) -> dict[str, Any] | None:
+    """Return a machine-readable proxy policy without requiring full expansion."""
+    global _DEFAULT_STORE
+    if _DEFAULT_STORE is None:
+        _DEFAULT_STORE = AssetLibraryAnnotationStore()
+    return _DEFAULT_STORE.get_physics_proxy_policy(hssd_id)

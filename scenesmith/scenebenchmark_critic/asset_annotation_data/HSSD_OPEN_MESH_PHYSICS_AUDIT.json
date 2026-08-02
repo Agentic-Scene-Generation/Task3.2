@@ -1,0 +1,259 @@
+{
+  "schema_version": "hssd_open_mesh_physics_audit@1.0",
+  "method_version": "week31-runtime-replay-plus-render-review-20260802",
+  "source_branch": "dev_hrk_week31",
+  "source_commit": "687800bb909a50afcdf95b89f629fc79bd76b4d8",
+  "scope": {
+    "asset_count": 6,
+    "runtime_watertight_observation_count": 6,
+    "full_topology_scan_count": 0,
+    "note": "Runtime trimesh.is_watertight observations are direct mesh evidence. Detailed edge/component counts remain null until the resolved GLB is bound and scanned."
+  },
+  "assets": {
+    "cb9b5a9ee8e0eb6cacd1eb98cfe65cced77ad54f": {
+      "category": "potted plant",
+      "render_evidence": {
+        "bundle_ref": "hssd_rendered_assets/cb9b5a9ee8e0eb6cacd1eb98cfe65cced77ad54f",
+        "reviewed_views": ["front", "back", "left", "right", "top", "iso"],
+        "conclusion": "Thin leaf surfaces are normal plant construction; the pot provides the intended floor support."
+      },
+      "mesh_topology": {
+        "measured": true,
+        "watertight": false,
+        "is_open_by_design": true,
+        "open_mesh_reason": "thin_leaf_surfaces",
+        "connected_component_count": null,
+        "boundary_edge_count": null,
+        "non_manifold_edge_count": null,
+        "degenerate_face_count": null,
+        "self_intersection_status": "unknown",
+        "topology_detail_status": "pending_resolved_glb_scan",
+        "measurement_source": "week31_resolved_visual_mesh_runtime",
+        "measurement_method": "trimesh.is_watertight",
+        "measurement_version": "hssd-open-mesh-v1"
+      },
+      "physics_proxy": {
+        "policy": "bbox_inertia",
+        "mesh_mass_properties_trustworthy": false,
+        "center_of_mass_in_bounds": null,
+        "inertia_positive_definite": null,
+        "bbox_inertia_positive_definite": true,
+        "collision_proxy_policy": "convex_decomposition",
+        "is_usable_in_physics": true,
+        "warning_tags": ["open_mesh", "do_not_use_mesh_volume", "thin_leaf_surfaces"],
+        "reason": "Leaf cards make volume moments unreliable; keep convex collision pieces and use bounded visual-bbox COM/inertia."
+      },
+      "support_stability": {
+        "support_axis": "+Y_hssd",
+        "support_footprint_area_m2": null,
+        "support_contact_component_count": null,
+        "static_simulation_seconds": null,
+        "max_translation_m": null,
+        "max_tilt_deg": null,
+        "stable_with_recommended_proxy": true,
+        "validation_status": "week31_scene_replay_verified",
+        "evidence": "Two repeated instances remained upright and on-floor after bbox-inertia fallback; exact 5-second trajectory metrics were not exported."
+      }
+    },
+    "d160e323f1d5a92394de74865aef8938f986d344": {
+      "category": "monitor",
+      "mesh_topology": {
+        "measured": true,
+        "watertight": false,
+        "is_open_by_design": null,
+        "open_mesh_reason": "thin_shell_or_export_gap_pending_review",
+        "connected_component_count": null,
+        "boundary_edge_count": null,
+        "non_manifold_edge_count": null,
+        "degenerate_face_count": null,
+        "self_intersection_status": "unknown",
+        "topology_detail_status": "pending_resolved_glb_scan",
+        "measurement_source": "week31_resolved_visual_mesh_runtime",
+        "measurement_method": "trimesh.is_watertight",
+        "measurement_version": "hssd-open-mesh-v1"
+      },
+      "physics_proxy": {
+        "policy": "bbox_inertia",
+        "mesh_mass_properties_trustworthy": false,
+        "center_of_mass_in_bounds": null,
+        "inertia_positive_definite": null,
+        "bbox_inertia_positive_definite": true,
+        "collision_proxy_policy": "convex_decomposition",
+        "is_usable_in_physics": true,
+        "warning_tags": ["open_mesh", "do_not_use_mesh_volume", "support_stability_pending"],
+        "reason": "Use bounded inertia until the thin screen and stand topology are scanned."
+      },
+      "support_stability": {
+        "support_axis": "+Y_hssd",
+        "support_footprint_area_m2": null,
+        "support_contact_component_count": null,
+        "static_simulation_seconds": null,
+        "max_translation_m": null,
+        "max_tilt_deg": null,
+        "stable_with_recommended_proxy": null,
+        "validation_status": "pending_static_simulation",
+        "evidence": "Runtime open-mesh fallback observed; stand-specific stability metrics were not exported."
+      }
+    },
+    "19c7d98ce8c620cd916b4fe978c565b065edcea1": {
+      "category": "pendant lamp",
+      "mesh_topology": {
+        "measured": true,
+        "watertight": false,
+        "is_open_by_design": true,
+        "open_mesh_reason": "lamp_shade_opening_and_thin_shell",
+        "connected_component_count": null,
+        "boundary_edge_count": null,
+        "non_manifold_edge_count": null,
+        "degenerate_face_count": null,
+        "self_intersection_status": "unknown",
+        "topology_detail_status": "pending_resolved_glb_scan",
+        "measurement_source": "week31_resolved_visual_mesh_runtime",
+        "measurement_method": "trimesh.is_watertight",
+        "measurement_version": "hssd-open-mesh-v1"
+      },
+      "physics_proxy": {
+        "policy": "weld_or_static",
+        "mesh_mass_properties_trustworthy": false,
+        "center_of_mass_in_bounds": null,
+        "inertia_positive_definite": null,
+        "bbox_inertia_positive_definite": true,
+        "collision_proxy_policy": "convex_decomposition",
+        "is_usable_in_physics": true,
+        "warning_tags": ["open_mesh", "mounted_asset", "do_not_free_simulate"],
+        "reason": "Normal shade openings are acceptable, but a ceiling-mounted lamp should be welded/static rather than treated as a free rigid body."
+      },
+      "support_stability": {
+        "support_axis": "+Y_hssd",
+        "support_footprint_area_m2": null,
+        "support_contact_component_count": null,
+        "static_simulation_seconds": null,
+        "max_translation_m": null,
+        "max_tilt_deg": null,
+        "stable_with_recommended_proxy": true,
+        "validation_status": "policy_stable_when_welded",
+        "evidence": "Attachment policy, not free-body resting stability, governs this ceiling asset."
+      }
+    },
+    "3b63f000011404011c4aeb3f19bb04a112535634": {
+      "category": "spoon",
+      "mesh_topology": {
+        "measured": true,
+        "watertight": false,
+        "is_open_by_design": null,
+        "open_mesh_reason": "thin_utensil_surface_or_export_gap_pending_review",
+        "connected_component_count": null,
+        "boundary_edge_count": null,
+        "non_manifold_edge_count": null,
+        "degenerate_face_count": null,
+        "self_intersection_status": "unknown",
+        "topology_detail_status": "pending_resolved_glb_scan",
+        "measurement_source": "week31_resolved_visual_mesh_runtime",
+        "measurement_method": "trimesh.is_watertight",
+        "measurement_version": "hssd-open-mesh-v1"
+      },
+      "physics_proxy": {
+        "policy": "bbox_inertia",
+        "mesh_mass_properties_trustworthy": false,
+        "center_of_mass_in_bounds": null,
+        "inertia_positive_definite": null,
+        "bbox_inertia_positive_definite": true,
+        "collision_proxy_policy": "convex_decomposition",
+        "is_usable_in_physics": true,
+        "warning_tags": ["open_mesh", "thin_object", "do_not_use_mesh_volume"],
+        "reason": "Thin utensil volume moments are unreliable; retain convex collision pieces and bounded inertia."
+      },
+      "support_stability": {
+        "support_axis": "+Y_hssd",
+        "support_footprint_area_m2": null,
+        "support_contact_component_count": null,
+        "static_simulation_seconds": null,
+        "max_translation_m": null,
+        "max_tilt_deg": null,
+        "stable_with_recommended_proxy": null,
+        "validation_status": "pending_static_simulation",
+        "evidence": "Runtime open-mesh fallback observed; static trajectory metrics were not exported."
+      }
+    },
+    "xxxx82261fccxf2d8x4aacxbf4axb3a0a222dbad": {
+      "category": "glass",
+      "mesh_topology": {
+        "measured": true,
+        "watertight": false,
+        "is_open_by_design": true,
+        "open_mesh_reason": "vessel_opening_and_thin_glass_shell",
+        "connected_component_count": null,
+        "boundary_edge_count": null,
+        "non_manifold_edge_count": null,
+        "degenerate_face_count": null,
+        "self_intersection_status": "unknown",
+        "topology_detail_status": "pending_resolved_glb_scan",
+        "measurement_source": "week31_resolved_visual_mesh_runtime",
+        "measurement_method": "trimesh.is_watertight",
+        "measurement_version": "hssd-open-mesh-v1"
+      },
+      "physics_proxy": {
+        "policy": "bbox_inertia",
+        "mesh_mass_properties_trustworthy": false,
+        "center_of_mass_in_bounds": null,
+        "inertia_positive_definite": null,
+        "bbox_inertia_positive_definite": true,
+        "collision_proxy_policy": "convex_decomposition",
+        "is_usable_in_physics": true,
+        "warning_tags": ["open_mesh", "thin_shell", "do_not_use_mesh_volume"],
+        "reason": "The vessel opening is normal design; bounded inertia avoids unstable thin-shell volume integration."
+      },
+      "support_stability": {
+        "support_axis": "+Y_hssd",
+        "support_footprint_area_m2": null,
+        "support_contact_component_count": null,
+        "static_simulation_seconds": null,
+        "max_translation_m": null,
+        "max_tilt_deg": null,
+        "stable_with_recommended_proxy": null,
+        "validation_status": "pending_static_simulation",
+        "evidence": "Runtime open-mesh fallback observed; base-contact metrics were not exported."
+      }
+    },
+    "c717fbe8f10ad354c83f9cfc7ce154ae2fcdf96c": {
+      "category": "plate",
+      "mesh_topology": {
+        "measured": true,
+        "watertight": false,
+        "is_open_by_design": true,
+        "open_mesh_reason": "thin_dish_shell",
+        "connected_component_count": null,
+        "boundary_edge_count": null,
+        "non_manifold_edge_count": null,
+        "degenerate_face_count": null,
+        "self_intersection_status": "unknown",
+        "topology_detail_status": "pending_resolved_glb_scan",
+        "measurement_source": "week31_resolved_visual_mesh_runtime",
+        "measurement_method": "trimesh.is_watertight",
+        "measurement_version": "hssd-open-mesh-v1"
+      },
+      "physics_proxy": {
+        "policy": "bbox_inertia",
+        "mesh_mass_properties_trustworthy": false,
+        "center_of_mass_in_bounds": null,
+        "inertia_positive_definite": null,
+        "bbox_inertia_positive_definite": true,
+        "collision_proxy_policy": "convex_decomposition",
+        "is_usable_in_physics": true,
+        "warning_tags": ["open_mesh", "thin_shell", "do_not_use_mesh_volume"],
+        "reason": "Thin dish-shell volume moments are unreliable; use bounded inertia while preserving convex collision pieces."
+      },
+      "support_stability": {
+        "support_axis": "+Y_hssd",
+        "support_footprint_area_m2": null,
+        "support_contact_component_count": null,
+        "static_simulation_seconds": null,
+        "max_translation_m": null,
+        "max_tilt_deg": null,
+        "stable_with_recommended_proxy": null,
+        "validation_status": "pending_static_simulation",
+        "evidence": "Runtime open-mesh fallback observed; base-contact metrics were not exported."
+      }
+    }
+  }
+}
