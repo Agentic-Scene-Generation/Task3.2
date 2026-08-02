@@ -16,8 +16,47 @@ PYTHON_VERSION="${SCENEEXPERT_VLLM_PYTHON_VERSION:-3.11}"
 PIP_INDEX_URL="${SCENEEXPERT_PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
 TORCH_INDEX_URL="${SCENEEXPERT_VLLM_TORCH_INDEX_URL:-https://download.pytorch.org/whl/${TORCH_BACKEND}}"
 VLLM_WHEELHOUSE="${SCENEEXPERT_VLLM_WHEELHOUSE:-}"
+VLLM_WHEEL_URL="${SCENEEXPERT_VLLM_WHEEL_URL:-}"
+VLLM_WHEEL_SHA256="${SCENEEXPERT_VLLM_WHEEL_SHA256:-}"
 FORCE_REBUILD="${SCENEEXPERT_VLLM_FORCE_REBUILD:-0}"
 VLLM_PYTHON="$VLLM_VENV_PATH/bin/python"
+
+resolve_vllm_install_target() {
+    if [ -n "$VLLM_WHEELHOUSE" ]; then
+        # CUDA variants use a PEP 440 local version. Requiring it explicitly
+        # prevents an offline wheelhouse from silently selecting the default
+        # CUDA 13 wheel for a CUDA 12.9 Torch runtime.
+        printf 'vllm==%s+%s\n' "$VLLM_VERSION" "$TORCH_BACKEND"
+        return
+    fi
+
+    if [ -n "$VLLM_WHEEL_URL" ]; then
+        if [ -n "$VLLM_WHEEL_SHA256" ]; then
+            printf '%s#sha256=%s\n' "$VLLM_WHEEL_URL" "$VLLM_WHEEL_SHA256"
+        else
+            printf '%s\n' "$VLLM_WHEEL_URL"
+        fi
+        return
+    fi
+
+    local machine_arch
+    machine_arch="$(uname -m)"
+    case "$VLLM_VERSION:$TORCH_BACKEND:$machine_arch" in
+        0.22.1:cu129:x86_64)
+            printf '%s\n' \
+                "https://github.com/vllm-project/vllm/releases/download/v0.22.1/vllm-0.22.1%2Bcu129-cp38-abi3-manylinux_2_28_x86_64.whl#sha256=365ee929afd73bb5d146235b65053fa948788ec2ee00a2c3e957d3f43bf2b0cd"
+            ;;
+        0.22.1:cu129:aarch64|0.22.1:cu129:arm64)
+            printf '%s\n' \
+                "https://github.com/vllm-project/vllm/releases/download/v0.22.1/vllm-0.22.1%2Bcu129-cp38-abi3-manylinux_2_28_aarch64.whl#sha256=b4cef4bf6264372d61382ebeb36e2be7183e3e736769f1d53fa4c897a0be8ce7"
+            ;;
+        *)
+            echo "ERROR: no verified vLLM binary is registered for version=$VLLM_VERSION, backend=$TORCH_BACKEND, arch=$machine_arch." >&2
+            echo "Set SCENEEXPERT_VLLM_WHEEL_URL to an ABI-matched release wheel and optionally set SCENEEXPERT_VLLM_WHEEL_SHA256." >&2
+            return 1
+            ;;
+    esac
+}
 
 check_runtime() {
     [ -x "$VLLM_PYTHON" ] || return 1
@@ -48,9 +87,10 @@ echo "Preparing isolated vLLM runtime:"
 echo "  path: $VLLM_VENV_PATH"
 echo "  vLLM: $VLLM_VERSION"
 echo "  Torch backend: $TORCH_BACKEND"
+VLLM_INSTALL_TARGET="$(resolve_vllm_install_target)"
+echo "  vLLM wheel: $VLLM_INSTALL_TARGET"
 
 if command -v uv >/dev/null 2>&1; then
-    UV_REINSTALL_ARGS=()
     UV_INDEX_ARGS=(--index-url "$PIP_INDEX_URL")
     if uv pip install --help 2>&1 | grep -q -- "--torch-backend"; then
         # uv routes only packages in the PyTorch ecosystem to this backend and
@@ -67,51 +107,47 @@ if command -v uv >/dev/null 2>&1; then
             --index-strategy unsafe-best-match
         )
     fi
-    if [ ! -x "$VLLM_PYTHON" ]; then
-        uv venv --python "$PYTHON_VERSION" "$VLLM_VENV_PATH"
-    else
-        # The environment exists but failed its native ABI check (or an
-        # explicit rebuild was requested), so replace every resolved wheel.
-        UV_REINSTALL_ARGS+=(--reinstall)
+    # Reaching this branch means the environment is absent, failed its native
+    # ABI preflight, or was explicitly rebuilt. Clear it transactionally so
+    # CUDA 13 packages from a previous wheel can never leak into CUDA 12.9.
+    UV_VENV_ARGS=(--python "$PYTHON_VERSION")
+    if [ -d "$VLLM_VENV_PATH" ]; then
+        UV_VENV_ARGS+=(--clear)
     fi
+    uv venv "${UV_VENV_ARGS[@]}" "$VLLM_VENV_PATH"
     if [ -n "$VLLM_WHEELHOUSE" ]; then
         uv pip install \
             --python "$VLLM_PYTHON" \
             --upgrade \
-            "${UV_REINSTALL_ARGS[@]}" \
             --no-index \
             --find-links "$VLLM_WHEELHOUSE" \
-            "vllm==$VLLM_VERSION"
+            "$VLLM_INSTALL_TARGET"
     else
         uv pip install \
             --python "$VLLM_PYTHON" \
             --upgrade \
-            "${UV_REINSTALL_ARGS[@]}" \
             "${UV_INDEX_ARGS[@]}" \
-            "vllm==$VLLM_VERSION"
+            "$VLLM_INSTALL_TARGET"
     fi
 else
     BOOTSTRAP_PYTHON="${SCENEEXPERT_VLLM_BOOTSTRAP_PYTHON:-python3}"
-    PIP_REINSTALL_ARGS=()
-    if [ ! -x "$VLLM_PYTHON" ]; then
-        "$BOOTSTRAP_PYTHON" -m venv "$VLLM_VENV_PATH"
-    else
-        PIP_REINSTALL_ARGS+=(--force-reinstall)
+    VENV_CLEAR_ARGS=()
+    if [ -d "$VLLM_VENV_PATH" ]; then
+        VENV_CLEAR_ARGS+=(--clear)
     fi
+    "$BOOTSTRAP_PYTHON" -m venv "${VENV_CLEAR_ARGS[@]}" "$VLLM_VENV_PATH"
     if [ -n "$VLLM_WHEELHOUSE" ]; then
         "$VLLM_PYTHON" -m pip install \
             --upgrade \
-            "${PIP_REINSTALL_ARGS[@]}" \
             --no-index \
             --find-links "$VLLM_WHEELHOUSE" \
-            "vllm==$VLLM_VERSION"
+            "$VLLM_INSTALL_TARGET"
     else
         "$VLLM_PYTHON" -m pip install \
             --upgrade \
-            "${PIP_REINSTALL_ARGS[@]}" \
             --index-url "$PIP_INDEX_URL" \
             --extra-index-url "$TORCH_INDEX_URL" \
-            "vllm==$VLLM_VERSION"
+            "$VLLM_INSTALL_TARGET"
     fi
 fi
 

@@ -252,7 +252,7 @@ bash scripts/bootstrap_vllm_runtime.sh
 
 注意：`modelscope` 安装在项目 `.venv` 中；`vllm` 不再安装到该环境。SceneSmith/Blender 锁定的 Torch/NumPy ABI 与快速演进的 vLLM CUDA ABI 并不相同，共用环境会在升级后出现 `libcudart.so.*` 缺失或破坏 `bpy` 的 NumPy ABI。`bootstrap_vllm_runtime.sh` 会建立版本化的 `.venv-vllm-0.22.1-cu129`，固定 vLLM 0.22.1 + CUDA 12.9，并在完成真实 native CUDA import 后才判定可用。ACP 入口默认首次自动创建、以后复用该环境。
 
-引导脚本使用新版 `uv --torch-backend=cu129` 对 PyTorch 生态包进行定向选源，普通依赖只从 `SCENEEXPERT_PIP_INDEX_URL` 解析；不会再把 PyTorch 仓库作为全局 `extra-index`。旧版 uv 才启用跨索引 best-match 兼容模式。这可以避免 PyTorch 仓库中的旧版 `packaging` 遮蔽主镜像版本并造成伪依赖冲突。
+引导脚本使用新版 `uv --torch-backend=cu129` 对 PyTorch 生态包进行定向选源，普通依赖只从 `SCENEEXPERT_PIP_INDEX_URL` 解析；不会再把 PyTorch 仓库作为全局 `extra-index`。旧版 uv 才启用跨索引 best-match 兼容模式。这可以避免 PyTorch 仓库中的旧版 `packaging` 遮蔽主镜像版本并造成伪依赖冲突。vLLM 0.22.1 的 PyPI 默认 wheel 使用 CUDA 13；脚本会按 CPU 架构显式安装官方 Release 中带 `+cu129` 后缀的 CUDA 12.9 wheel 并校验 SHA-256，不能用无后缀 wheel 与 `torch==*+cu129` 混装。强制重建或 native ABI 自检失败时会清空版本化 vLLM 环境，防止旧 CUDA 13 包残留。
 
 当前 ACP 运行环境必须保持 `openai==2.44.0` 与 `openai-agents==0.6.4`。`openai` 太旧（例如 `2.11.0`）缺少 vLLM 0.22.x 导入的 `NamespaceTool`；直接升级到 `2.45.0` 又会让 Agents SDK 在构造 `Usage()` 时因 `cache_write_tokens` 必填而失败。`pyproject.toml` 和 `uv.lock` 已固定这组兼容版本。若已有环境被 `pip install vllm` 改写，可修复后立即自检：
 
@@ -285,7 +285,9 @@ python -m pip install -r requirements-memory.txt -i https://pypi.tuna.tsinghua.e
 python -m pip install uv
 uv sync --frozen --no-dev
 python -m pip download modelscope -d wheelhouse -i https://pypi.tuna.tsinghua.edu.cn/simple
-python -m pip download "vllm==0.22.1" -d wheelhouse_vllm \
+python -m pip download \
+  "https://github.com/vllm-project/vllm/releases/download/v0.22.1/vllm-0.22.1%2Bcu129-cp38-abi3-manylinux_2_28_x86_64.whl" \
+  -d wheelhouse_vllm \
   -i https://pypi.tuna.tsinghua.edu.cn/simple \
   --extra-index-url https://download.pytorch.org/whl/cu129
 python -m pip download -r requirements-memory.txt -d wheelhouse_memory -i https://pypi.tuna.tsinghua.edu.cn/simple

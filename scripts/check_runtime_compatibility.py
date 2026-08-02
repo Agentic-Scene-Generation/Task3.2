@@ -31,6 +31,21 @@ SERVER_REPAIR_COMMAND = (
 )
 
 
+def _expected_vllm_distribution_version(
+    version: str,
+    torch_backend: str | None,
+) -> str:
+    """Return the binary distribution version required by an ABI contract."""
+
+    if "+" in version or not torch_backend:
+        return version
+    # vLLM 0.22.1 publishes its non-default CUDA 12.9 binary as a PEP 440
+    # local-version wheel. The unqualified 0.22.1 distribution is CUDA 13.
+    if version == "0.22.1" and torch_backend == "cu129":
+        return f"{version}+{torch_backend}"
+    return version
+
+
 @dataclass(frozen=True)
 class CompatibilityReport:
     """Result of checking the runtime packages used by ACP."""
@@ -107,14 +122,18 @@ def check_runtime_compatibility(
 
     if check_vllm_native:
         installed_vllm = versions["vllm"]
+        required_vllm = _expected_vllm_distribution_version(
+            expected_vllm_version or "",
+            expected_torch_backend,
+        )
         if installed_vllm == "missing":
             errors.append("vLLM is not installed in the selected server runtime.")
-        elif expected_vllm_version and installed_vllm != expected_vllm_version:
+        elif required_vllm and installed_vllm != required_vllm:
             errors.append(
                 "vLLM version contract mismatch: "
-                f"installed={installed_vllm}, expected={expected_vllm_version}. "
+                f"installed={installed_vllm}, expected={required_vllm}. "
                 "Do not share the SceneSmith application environment with the "
-                "vLLM server environment."
+                "vLLM server environment or mix CUDA wheel variants."
             )
 
         if installed_vllm != "missing":

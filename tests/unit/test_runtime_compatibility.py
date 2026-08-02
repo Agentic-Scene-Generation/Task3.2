@@ -83,7 +83,9 @@ class RuntimeCompatibilityTest(unittest.TestCase):
 
         report = check_runtime_compatibility(
             importer=modules.__getitem__,
-            version_reader=_version_reader({"vllm": "0.22.1", "torch": "2.10.0"}),
+            version_reader=_version_reader(
+                {"vllm": "0.22.1+cu129", "torch": "2.10.0"}
+            ),
             check_client=False,
             check_vllm_native=True,
             expected_vllm_version="0.22.1",
@@ -91,6 +93,29 @@ class RuntimeCompatibilityTest(unittest.TestCase):
         )
 
         self.assertTrue(report.ok)
+
+    def test_server_contract_rejects_default_cuda_wheel_for_cu129(self):
+        modules = {
+            "vllm": SimpleNamespace(),
+            "vllm.platforms.cuda": SimpleNamespace(),
+            "torch": SimpleNamespace(version=SimpleNamespace(cuda="12.9")),
+        }
+
+        report = check_runtime_compatibility(
+            importer=modules.__getitem__,
+            version_reader=_version_reader(
+                {"vllm": "0.22.1", "torch": "2.11.0+cu129"}
+            ),
+            check_client=False,
+            check_vllm_native=True,
+            expected_vllm_version="0.22.1",
+            expected_torch_backend="cu129",
+        )
+
+        self.assertFalse(report.ok)
+        self.assertTrue(
+            any("expected=0.22.1+cu129" in error for error in report.errors)
+        )
 
     def test_server_contract_rejects_wrong_vllm_and_missing_cuda_abi(self):
         def importer(module):
