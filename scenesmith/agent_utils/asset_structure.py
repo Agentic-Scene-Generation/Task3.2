@@ -19,7 +19,7 @@ import numpy as np
 import trimesh
 
 
-ASSET_STRUCTURE_CONTRACT_VERSION = "1.0"
+ASSET_STRUCTURE_CONTRACT_VERSION = "2.0"
 
 # Wardrobes/cabinets legitimately contain tall thin panels.  Keep the hard
 # structural rule limited to families for which a near-wall-height backdrop is
@@ -107,6 +107,7 @@ def evaluate_component_extents(
     horizontal_indices = [index for index in range(3) if index != up_index]
     minimum_vertical = 1.75 if normalized_family == "bed" else 1.55
 
+    ambiguous_panels: list[dict[str, Any]] = []
     for component in component_list:
         dimensions = np.asarray(component.dimensions, dtype=float)
         if dimensions.shape != (3,) or not np.all(np.isfinite(dimensions)):
@@ -133,6 +134,36 @@ def evaluate_component_extents(
                 geometry_fingerprint=geometry_fingerprint,
                 evidence=base_evidence,
             )
+
+        # A broad, shallow panel below wall height is not sufficient evidence
+        # for a deterministic reject: it may be a real headboard or sofa
+        # backrest.  It is still material structural evidence, however, and
+        # must prevent unqualified positive-cache reuse.  The live multi-view
+        # validator can close this ambiguity explicitly, after which its result
+        # is safe to cache against this exact geometry fingerprint.
+        ambiguous_vertical = (normalized_family == "bed" and vertical > 1.20) or (
+            normalized_family == "sofa" and vertical >= 0.70
+        )
+        if (
+            len(component_list) > 1
+            and ambiguous_vertical
+            and span >= 1.20
+            and thickness <= 0.40
+            and thickness / max(1e-6, span) <= 0.25
+        ):
+            ambiguous_panels.append(asdict(component))
+
+    if ambiguous_panels:
+        base_evidence["ambiguous_panel_components"] = ambiguous_panels
+        return AssetStructureCheck(
+            status="inconclusive",
+            reason=(
+                f"{normalized_family} contains broad shallow source submesh(es) "
+                "that require live standalone-object validation"
+            ),
+            geometry_fingerprint=geometry_fingerprint,
+            evidence=base_evidence,
+        )
 
     return AssetStructureCheck(
         status="pass",

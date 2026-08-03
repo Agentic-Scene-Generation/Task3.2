@@ -45,6 +45,7 @@ from scenesmith.manipuland_agents.tools.manipuland_tools import ManipulandTools
 from scenesmith.manipuland_agents.tools.vision_tools import ManipulandVisionTools
 from scenesmith.prompts.registry import ManipulandAgentPrompts
 from scenesmith.scene_expert.exceptions import StageValidationError
+from scenesmith.scene_expert.runtime_state import candidate_state_hash
 from scenesmith.utils.logging import BaseLogger
 
 console_logger = logging.getLogger(__name__)
@@ -649,7 +650,7 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
 
         # Compute final critique and scores for completed furniture.
         # Check if scene changed since last checkpoint to avoid redundant critique.
-        current_scene_hash = self.scene.content_hash()
+        current_scene_hash = candidate_state_hash(self.scene)
 
         if self._can_skip_final_critique(current_scene_hash):
             console_logger.info(
@@ -971,7 +972,7 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
                 )
             current_scene_scored = (
                 self._stage_trusted_score_available
-                and self._last_scored_scene_hash == self.scene.content_hash()
+                and self._last_scored_scene_hash == candidate_state_hash(self.scene)
             )
             if not current_scene_scored:
                 required_minimum, target_minimum, current_count = (
@@ -1047,7 +1048,7 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
         if hard_state is not None and not hard_state.hard_valid:
             return False
 
-        current_hash = self.scene.content_hash()
+        current_hash = candidate_state_hash(self.scene)
         if self._last_scored_scene_hash != current_hash:
             console_logger.info(
                 "Per-furniture post-processing changed the manipuland candidate; "
@@ -1063,7 +1064,7 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
             self._stage_visual_scores.append(refreshed_score)
 
         return (
-            self._last_scored_scene_hash == self.scene.content_hash()
+            self._last_scored_scene_hash == candidate_state_hash(self.scene)
             and bool(self._stage_visual_scores)
             and self._stage_visual_scores[-1] >= threshold
         )

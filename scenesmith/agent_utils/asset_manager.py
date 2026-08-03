@@ -1056,11 +1056,15 @@ class AssetManager:
             ):
                 return None
             cached_structure = payload.get("structural_check", {}) or {}
+            structural_cache_eligible = bool(
+                structural_check.geometry_fingerprint
+                and structural_check.status in {"pass", "inconclusive"}
+            )
             if (
-                not structural_check.cacheable
+                not structural_cache_eligible
                 or str(cached_structure.get("contract_version", ""))
                 != ASSET_STRUCTURE_CONTRACT_VERSION
-                or str(cached_structure.get("status", "")) != "pass"
+                or str(cached_structure.get("status", "")) != structural_check.status
                 or str(cached_structure.get("geometry_fingerprint", ""))
                 != structural_check.geometry_fingerprint
             ):
@@ -1069,6 +1073,14 @@ class AssetManager:
                     "contract or geometry fingerprint is stale",
                     cache_path,
                 )
+                return None
+            if structural_check.status == "inconclusive" and not (
+                payload.get("contains_architectural_context") is False
+                and payload.get("requested_object_is_dominant") is True
+            ):
+                # A topology warning can only be closed by an explicit live
+                # standalone-object decision.  Older/underspecified positive
+                # cache records are not sufficient evidence.
                 return None
             return ValidationResult(
                 is_acceptable=bool(payload["is_acceptable"]),
@@ -1100,9 +1112,20 @@ class AssetManager:
         validation: ValidationResult,
         structural_check: AssetStructureCheck,
     ) -> None:
-        # A positive semantic decision must never become cross-scene authority
-        # when the source geometry could not be inspected deterministically.
-        if not structural_check.cacheable:
+        # Parser failures have no source fingerprint and must never become
+        # cross-scene authority.  A fingerprinted ambiguous panel may be cached
+        # only after the critical VLM explicitly proves that the asset is a
+        # standalone dominant object without architectural context.
+        structural_cache_eligible = bool(
+            structural_check.geometry_fingerprint
+            and structural_check.status in {"pass", "inconclusive"}
+        )
+        if not structural_cache_eligible:
+            return
+        if structural_check.status == "inconclusive" and not (
+            validation.contains_architectural_context is False
+            and validation.requested_object_is_dominant is True
+        ):
             return
         cache_path = self._hssd_validation_cache_path(
             candidate_id=candidate_id,
@@ -1244,8 +1267,11 @@ class AssetManager:
         if cache is None:
             cache = {}
             self._direct_hssd_structure_cache = cache
+        structure_mesh_path = (
+            getattr(candidate, "structure_mesh_path", None) or candidate.mesh_path
+        )
         try:
-            source_stat = Path(candidate.mesh_path).stat()
+            source_stat = Path(structure_mesh_path).stat()
             source_revision = f"{source_stat.st_size}:{source_stat.st_mtime_ns}"
         except OSError:
             source_revision = "missing"
@@ -1253,7 +1279,7 @@ class AssetManager:
         check = cache.get(cache_key)
         if check is None:
             check = inspect_hssd_candidate_structure(
-                mesh_path=candidate.mesh_path,
+                mesh_path=structure_mesh_path,
                 family=family,
                 up_axis=getattr(candidate, "up_axis", None) or "+Z",
             )
@@ -1498,8 +1524,8 @@ class AssetManager:
             if structural_check.status == "inconclusive":
                 console_logger.warning(
                     "HSSD structural inspection was inconclusive for %s; "
-                    "requiring live semantic validation and disabling persistent "
-                    "positive-cache reuse: %s",
+                    "requiring explicit standalone-object validation before "
+                    "candidate-bound cache reuse: %s",
                     candidate.hssd_id,
                     structural_check.reason,
                 )
@@ -1740,7 +1766,8 @@ class AssetManager:
         """Retrieve reserve candidates without increasing bounded VLM work."""
 
         admission_count = self._direct_hssd_candidate_count(description, short_name)
-        reserve_count = min(4, len(quarantined_hssd_asset_ids()))
+        family = semantic_asset_family(description, short_name)
+        reserve_count = min(4, len(quarantined_hssd_asset_ids(family)))
         return min(8, admission_count + reserve_count)
 
     def _uniform_dimension_fit_bounds(

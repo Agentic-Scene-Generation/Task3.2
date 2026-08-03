@@ -109,6 +109,40 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         StatefulFurnitureAgent is None,
         f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
     )
+    def test_functional_relation_dominance_prefers_inward_facing_candidate(
+        self,
+    ) -> None:
+        agent_layout = {
+            "layout_family": "living_room",
+            "score": 0.64,
+            "issue_count": 2,
+            "issues": ["sofa faces wall", "rug is behind sofa"],
+        }
+        deterministic_layout = {
+            "layout_family": "living_room",
+            "score": 1.0,
+            "issue_count": 0,
+            "issues": [],
+        }
+
+        self.assertTrue(
+            StatefulFurnitureAgent.functional_layout_dominates(
+                agent_layout,
+                deterministic_layout,
+            )
+        )
+        deterministic_layout["issue_count"] = 2
+        self.assertFalse(
+            StatefulFurnitureAgent.functional_layout_dominates(
+                agent_layout,
+                deterministic_layout,
+            )
+        )
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
     def test_quality_regeneration_requires_scene_expert_and_trusted_score(self) -> None:
         agent = object.__new__(StatefulFurnitureAgent)
         agent.scene = SimpleNamespace(scene_expert_stage_budget={"enabled": True})

@@ -48,7 +48,10 @@ from scenesmith.scene_expert.repair_taxonomy import (
     FailureCategory,
     build_repair_plan,
 )
-from scenesmith.scene_expert.runtime_state import mark_degraded_stage_recovered
+from scenesmith.scene_expert.runtime_state import (
+    candidate_state_hash,
+    mark_degraded_stage_recovered,
+)
 from scenesmith.agent_utils.room import (
     AgentType,
     ObjectType,
@@ -401,7 +404,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
 
         # Compute final critique and scores for completed scene.
         # Check if scene changed since last checkpoint to avoid redundant critique.
-        current_scene_hash = self.scene.content_hash()
+        current_scene_hash = candidate_state_hash(self.scene)
 
         if self._critic_failed:
             console_logger.warning(
@@ -736,8 +739,10 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             and not hard_state.hard_valid
             and self.scene is not None
         ):
+            state = copy.deepcopy(self.scene.to_state_dict())
             return {
-                "scene_state": copy.deepcopy(self.scene.to_state_dict()),
+                "scene_state": state,
+                "candidate_hash": candidate_state_hash(state),
                 "scores": None,
                 "render_dir": self.final_render_dir,
                 "weighted_score": None,
@@ -750,8 +755,10 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         if controller is None or controller.best_scene_state is None:
             if hard_state is None or not hard_state.hard_valid or self.scene is None:
                 return None
+            state = copy.deepcopy(self.scene.to_state_dict())
             return {
-                "scene_state": copy.deepcopy(self.scene.to_state_dict()),
+                "scene_state": state,
+                "candidate_hash": candidate_state_hash(state),
                 "scores": None,
                 "render_dir": None,
                 "weighted_score": None,
@@ -759,8 +766,10 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 "hard_valid": True,
                 "hard_reasons": [],
             }
+        state = copy.deepcopy(controller.best_scene_state)
         return {
-            "scene_state": copy.deepcopy(controller.best_scene_state),
+            "scene_state": state,
+            "candidate_hash": candidate_state_hash(state),
             "scores": (
                 copy.deepcopy(controller.best_scores)
                 if getattr(controller, "best_score_source", "unavailable")
@@ -842,6 +851,21 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             controller.best_reasons = ["best pure-agent candidate across regenerations"]
         self.previous_scores = copy.deepcopy(candidate.get("scores"))
         self.final_render_dir = candidate.get("render_dir")
+        if (
+            candidate.get("score_source") == "vlm_critic"
+            and candidate.get("scores") is not None
+        ):
+            self._last_trusted_critic_candidate = {
+                "scene_state": copy.deepcopy(candidate["scene_state"]),
+                "scores": copy.deepcopy(candidate["scores"]),
+                "render_dir": candidate.get("render_dir"),
+                "weighted_score": candidate.get("weighted_score"),
+                "score_source": "vlm_critic",
+                "candidate_hash": candidate.get("candidate_hash")
+                or candidate_state_hash(candidate["scene_state"]),
+            }
+        else:
+            self._last_trusted_critic_candidate = None
         self.rendering_manager.clear_cache()
 
     def persist_agent_best_candidate(self, candidate: dict[str, Any]) -> Path:
@@ -981,6 +1005,59 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             "missing_total": sum(missing_counts.values()),
         }
 
+    def functional_layout_summary(self) -> dict[str, Any]:
+        """Return candidate-bound geometry evidence for functional relations."""
+
+        safety_cfg = getattr(self.cfg, "furniture_safety_controller", None)
+        functional_cfg = getattr(safety_cfg, "functional_layout", None)
+        report = evaluate_functional_layout(
+            self.scene,
+            category_resolver=self.furniture_safety_controller.infer_object_category,
+            cfg=functional_cfg,
+        )
+        if report is None:
+            return {
+                "layout_family": "unsupported",
+                "score": None,
+                "issue_count": 0,
+                "issues": [],
+            }
+        return {
+            "layout_family": report.layout_family,
+            "score": float(report.score),
+            "issue_count": len(report.issues),
+            "issues": list(report.issues),
+            "metrics": dict(report.metrics),
+        }
+
+    @staticmethod
+    def functional_layout_dominates(
+        incumbent: dict[str, Any],
+        challenger: dict[str, Any],
+    ) -> bool:
+        """Prefer a hard-valid fallback that strictly resolves relation defects."""
+
+        if (
+            not incumbent
+            or not challenger
+            or incumbent.get("layout_family") in {None, "unsupported"}
+            or challenger.get("layout_family") != incumbent.get("layout_family")
+        ):
+            return False
+        incumbent_count = int(incumbent.get("issue_count", 0) or 0)
+        challenger_count = int(challenger.get("issue_count", 0) or 0)
+        incumbent_score = incumbent.get("score")
+        challenger_score = challenger.get("score")
+        return bool(
+            incumbent_count > 0
+            and challenger_count < incumbent_count
+            and challenger_score is not None
+            and (
+                incumbent_score is None
+                or float(challenger_score) >= float(incumbent_score)
+            )
+        )
+
     @staticmethod
     def requirement_fulfillment_dominates(
         incumbent: dict[str, Any],
@@ -1064,6 +1141,32 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             ),
         }
 
+    def _commit_deterministic_fallback_candidate(
+        self,
+        *,
+        scene_state: dict[str, Any],
+        candidate: dict[str, Any] | None,
+        render_dir: Path,
+        reason: str,
+    ) -> None:
+        """Atomically bind fallback geometry, score provenance, and controller."""
+
+        self.scene.restore_from_state_dict(scene_state)
+        self.rendering_manager.clear_cache()
+        scores = candidate.get("scores") if candidate is not None else None
+        weighted_score = (
+            candidate.get("weighted_score") if candidate is not None else None
+        )
+        controller = self.furniture_safety_controller
+        controller.best_scene_state = copy.deepcopy(scene_state)
+        controller.best_scores = copy.deepcopy(scores)
+        controller.best_score_source = (
+            "vlm_critic" if scores is not None else "unscored_hard_valid"
+        )
+        controller.best_render_dir = render_dir
+        controller.best_weighted_score = float(weighted_score or 0.0)
+        controller.best_reasons = [reason]
+
     async def compare_deterministic_fallback(
         self,
         *,
@@ -1074,13 +1177,14 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         """Render and score one deterministic fallback without making it authoritative.
 
         The controller keeps the pure-agent candidate as incumbent. The fallback
-        wins when it resolves a hard-invalid incumbent, or when deterministic hard
-        checks pass and a real VLM critic score improves a hard-valid incumbent.
+        wins when it resolves hard/required deficits, strictly reduces supported
+        functional-relation defects, or materially improves a trusted VLM score.
         """
         self.restore_agent_candidate(agent_candidate)
-        agent_hash = self.scene.content_hash()
+        agent_hash = candidate_state_hash(self.scene)
         agent_hard_state = self._evaluate_current_hard_state()
         agent_requirement_fulfillment = self.requirement_fulfillment_summary()
+        agent_functional_layout = self.functional_layout_summary()
         agent_render_dir = self.persist_agent_best_candidate(agent_candidate)
 
         comparison: dict[str, Any] = {
@@ -1100,6 +1204,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 [] if agent_hard_state is None else agent_hard_state.hard_reasons
             ),
             "agent_requirement_fulfillment": agent_requirement_fulfillment,
+            "agent_functional_layout": agent_functional_layout,
             "deterministic_actions": [],
             "deterministic_candidate": {
                 "score_source": "not_generated",
@@ -1292,6 +1397,15 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 deterministic_requirement_fulfillment,
             )
         )
+        deterministic_functional_layout = self.functional_layout_summary()
+        comparison["deterministic_functional_layout"] = deterministic_functional_layout
+        comparison["deterministic_functional_dominates"] = bool(
+            comparison["deterministic_hard_valid"]
+            and self.functional_layout_dominates(
+                agent_functional_layout,
+                deterministic_functional_layout,
+            )
+        )
         self.logger.log_scene(
             scene=self.scene,
             name="furniture_deterministic_candidate",
@@ -1304,7 +1418,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             render_name="deterministic_candidate",
         )
 
-        deterministic_hash = self.scene.content_hash()
+        deterministic_hash = candidate_state_hash(self.scene)
         comparison["deterministic_render_dir"] = str(deterministic_render_dir)
         comparison["deterministic_scene_changed"] = deterministic_hash != agent_hash
         # The deterministic render is a required diagnostic artifact, even if
@@ -1350,8 +1464,6 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 if comparison["deterministic_requirement_dominates"]:
                     # L1 evidence (hard checks + prompt-required object counts)
                     # outranks an unavailable or subjective L3 visual score.
-                    self.scene.restore_from_state_dict(deterministic_state)
-                    self.rendering_manager.clear_cache()
                     comparison["selection"] = "deterministic_candidate"
                     comparison["selection_evidence_level"] = (
                         "L1_required_object_dominance"
@@ -1361,38 +1473,19 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                         "prompt-required object deficits without regressing any "
                         "required category"
                     )
-                    controller = self.furniture_safety_controller
-                    deterministic_scores = (
-                        deterministic_candidate.get("scores")
-                        if deterministic_candidate is not None
-                        else None
+                    self._commit_deterministic_fallback_candidate(
+                        scene_state=deterministic_state,
+                        candidate=deterministic_candidate,
+                        render_dir=deterministic_render_dir,
+                        reason=(
+                            "deterministic fallback improved required object coverage"
+                        ),
                     )
-                    deterministic_weighted_score = (
-                        deterministic_candidate.get("weighted_score")
-                        if deterministic_candidate is not None
-                        else None
-                    )
-                    controller.best_scene_state = copy.deepcopy(deterministic_state)
-                    controller.best_scores = copy.deepcopy(deterministic_scores)
-                    controller.best_score_source = (
-                        "vlm_critic"
-                        if deterministic_candidate is not None
-                        else "unscored_hard_valid"
-                    )
-                    controller.best_render_dir = deterministic_render_dir
-                    controller.best_weighted_score = float(
-                        deterministic_weighted_score or 0.0
-                    )
-                    controller.best_reasons = [
-                        "deterministic fallback improved required object coverage"
-                    ]
                 elif not comparison["agent_hard_valid"]:
                     # Physical validity dominates visual score availability.
                     # Preserve the repaired candidate even when the VLM transport
                     # times out; reverting to a known colliding scene is never a
                     # valid comparison outcome.
-                    self.scene.restore_from_state_dict(deterministic_state)
-                    self.rendering_manager.clear_cache()
                     comparison["selection"] = "deterministic_candidate"
                     comparison["selection_evidence_level"] = (
                         "L1_hard_constraint_recovery"
@@ -1400,31 +1493,36 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                     comparison["selection_reason"] = (
                         "deterministic candidate resolved agent hard violations"
                     )
-                    controller = self.furniture_safety_controller
-                    deterministic_scores = (
-                        deterministic_candidate.get("scores")
-                        if deterministic_candidate is not None
-                        else None
+                    self._commit_deterministic_fallback_candidate(
+                        scene_state=deterministic_state,
+                        candidate=deterministic_candidate,
+                        render_dir=deterministic_render_dir,
+                        reason=(
+                            "deterministic fallback resolved agent hard violations"
+                        ),
                     )
-                    deterministic_weighted_score = (
-                        deterministic_candidate.get("weighted_score")
-                        if deterministic_candidate is not None
-                        else None
+                elif comparison["deterministic_functional_dominates"]:
+                    # Functional relation evidence is candidate-bound geometry:
+                    # unlike a subjective score delta it directly proves that
+                    # sofa facing, rug-front, plant-flank, or classroom pairing
+                    # defects were reduced.  It is authoritative only in this
+                    # final fallback comparison after the agent loop exhausted.
+                    comparison["selection"] = "deterministic_candidate"
+                    comparison["selection_evidence_level"] = (
+                        "L2_functional_relation_dominance"
                     )
-                    controller.best_scene_state = copy.deepcopy(deterministic_state)
-                    controller.best_scores = copy.deepcopy(deterministic_scores)
-                    controller.best_score_source = (
-                        "vlm_critic"
-                        if deterministic_candidate is not None
-                        else "unscored_hard_valid"
+                    comparison["selection_reason"] = (
+                        "hard-valid deterministic candidate strictly reduced "
+                        "candidate-bound functional layout defects"
                     )
-                    controller.best_render_dir = deterministic_render_dir
-                    controller.best_weighted_score = float(
-                        deterministic_weighted_score or 0.0
+                    self._commit_deterministic_fallback_candidate(
+                        scene_state=deterministic_state,
+                        candidate=deterministic_candidate,
+                        render_dir=deterministic_render_dir,
+                        reason=(
+                            "deterministic fallback improved functional relations"
+                        ),
                     )
-                    controller.best_reasons = [
-                        "deterministic fallback resolved agent hard violations"
-                    ]
                 elif deterministic_candidate is None:
                     self.restore_agent_candidate(agent_candidate)
                     comparison["deterministic_candidate"] = {
@@ -1447,13 +1545,10 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                             0.05,
                         )
                     )
-                    if (
-                        self.deterministic_candidate_improves(
-                            agent_candidate,
-                            deterministic_candidate,
-                            minimum_delta=minimum_delta,
-                        )
-                        and self.scene.content_hash() == deterministic_hash
+                    if self.deterministic_candidate_improves(
+                        agent_candidate,
+                        deterministic_candidate,
+                        minimum_delta=minimum_delta,
                     ):
                         comparison["selection"] = "deterministic_candidate"
                         comparison["selection_evidence_level"] = (
@@ -1465,17 +1560,14 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                             f"{float(deterministic_score) - float(agent_score):.3f} "
                             f"(required {minimum_delta:.3f})"
                         )
-                        controller = self.furniture_safety_controller
-                        controller.best_scene_state = copy.deepcopy(deterministic_state)
-                        controller.best_scores = copy.deepcopy(
-                            deterministic_candidate["scores"]
+                        self._commit_deterministic_fallback_candidate(
+                            scene_state=deterministic_state,
+                            candidate=deterministic_candidate,
+                            render_dir=deterministic_render_dir,
+                            reason=(
+                                "deterministic fallback improved trusted critic score"
+                            ),
                         )
-                        controller.best_score_source = "vlm_critic"
-                        controller.best_render_dir = deterministic_render_dir
-                        controller.best_weighted_score = float(deterministic_score)
-                        controller.best_reasons = [
-                            "deterministic fallback improved trusted critic score"
-                        ]
                     else:
                         self.restore_agent_candidate(agent_candidate)
                         comparison["selection_reason"] = (
@@ -1483,7 +1575,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                             "required trusted-score improvement"
                         )
         except Exception as exc:
-            preserve_hard_recovery = (
+            preserve_deterministic_evidence = (
                 deterministic_state is not None
                 and comparison.get("deterministic_hard_valid", False)
                 and (
@@ -1492,31 +1584,32 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                         "deterministic_requirement_dominates",
                         False,
                     )
+                    or comparison.get(
+                        "deterministic_functional_dominates",
+                        False,
+                    )
                 )
             )
-            if preserve_hard_recovery:
+            if preserve_deterministic_evidence:
                 console_logger.exception(
-                    "Deterministic fallback critic failed after hard recovery; "
-                    "preserving the hard-valid deterministic candidate"
+                    "Deterministic fallback critic failed after candidate-bound "
+                    "recovery; preserving the hard-valid deterministic candidate"
                 )
-                self.scene.restore_from_state_dict(deterministic_state)
-                self.rendering_manager.clear_cache()
-                controller = self.furniture_safety_controller
-                controller.best_scene_state = copy.deepcopy(deterministic_state)
-                controller.best_scores = None
-                controller.best_score_source = "unscored_hard_valid"
-                controller.best_render_dir = deterministic_render_dir
-                controller.best_weighted_score = 0.0
-                controller.best_reasons = [
-                    (
-                        "deterministic fallback improved required object coverage"
-                        if comparison.get(
-                            "deterministic_requirement_dominates",
-                            False,
-                        )
+                recovery_reason = (
+                    "deterministic fallback improved required object coverage"
+                    if comparison.get("deterministic_requirement_dominates", False)
+                    else (
+                        "deterministic fallback improved functional relations"
+                        if comparison.get("deterministic_functional_dominates", False)
                         else "deterministic fallback resolved agent hard violations"
                     )
-                ]
+                )
+                self._commit_deterministic_fallback_candidate(
+                    scene_state=deterministic_state,
+                    candidate=None,
+                    render_dir=deterministic_render_dir,
+                    reason=recovery_reason,
+                )
                 comparison["selection"] = "deterministic_candidate"
                 comparison["selection_evidence_level"] = (
                     "L1_required_object_dominance"
@@ -1524,11 +1617,18 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                         "deterministic_requirement_dominates",
                         False,
                     )
-                    else "L1_hard_constraint_recovery"
+                    else (
+                        "L2_functional_relation_dominance"
+                        if comparison.get(
+                            "deterministic_functional_dominates",
+                            False,
+                        )
+                        else "L1_hard_constraint_recovery"
+                    )
                 )
                 comparison["selection_reason"] = (
-                    "deterministic candidate preserved on L1 evidence after "
-                    "the visual critic failed"
+                    "deterministic candidate preserved on candidate-bound "
+                    "evidence after the visual critic failed"
                 )
             else:
                 console_logger.exception(
@@ -1541,7 +1641,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 "weighted_score": None,
                 "error": f"{type(exc).__name__}: {exc}",
             }
-            if not preserve_hard_recovery:
+            if not preserve_deterministic_evidence:
                 comparison["selection_reason"] = (
                     "fallback critic failed; pure-agent candidate preserved"
                 )
@@ -1567,7 +1667,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
 
         # Preserve the diagnostic render path even when the controller restores
         # the incumbent after scoring.
-        comparison["selected_scene_hash"] = self.scene.content_hash()
+        comparison["selected_scene_hash"] = candidate_state_hash(self.scene)
         self._write_fallback_comparison(comparison)
         # Candidate comparison is the last layout-selection operation. Generic
         # finalization may still validate/copy artifacts, but it must not run a
@@ -1605,10 +1705,8 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                     "selection_evidence_level",
                     "",
                 ),
-                "deterministic_hard_valid": comparison.get(
-                    "deterministic_hard_valid"
-                ),
-                "selected_scene_hash": self.scene.content_hash(),
+                "deterministic_hard_valid": comparison.get("deterministic_hard_valid"),
+                "selected_scene_hash": candidate_state_hash(self.scene),
             },
         )
         self._degraded_stage_reasons = []

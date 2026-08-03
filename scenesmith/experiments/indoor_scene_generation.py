@@ -385,7 +385,7 @@ def _pause_unscored_scene_candidate(
         stage=stage,
         reason=reason,
         candidate_state=scene.to_state_dict(),
-        candidate_hash=scene.content_hash(),
+        candidate_hash=candidate_state_hash(scene),
         render_dir=render_dir,
         attempt_count=2,
         metadata={
@@ -446,7 +446,6 @@ def _mark_incomplete_placement_stage_degraded(
         "scene_root_dir",
         getattr(scene, "scene_dir", Path.cwd()),
     )
-    content_hash = getattr(scene, "content_hash", None)
     manifest_path = persist_degraded_incomplete(
         scene_root_dir=scene_root_dir,
         reasons=degraded_reasons,
@@ -455,7 +454,7 @@ def _mark_incomplete_placement_stage_degraded(
             "failure_code": failure_code,
             "responsible_role": role,
             "recommended_resume_action": resume_action,
-            "candidate_hash": content_hash() if callable(content_hash) else "",
+            "candidate_hash": candidate_state_hash(scene),
             "room_id": str(getattr(scene, "room_id", "")),
             "room_dir": str(getattr(scene, "scene_dir", "")),
             "available_admitted_asset_ids": asset_ids,
@@ -470,6 +469,69 @@ def _mark_incomplete_placement_stage_degraded(
         reason,
         manifest_path,
     )
+
+
+def _export_first_blocking_stage_candidate(
+    *,
+    stage: str,
+    scene: RoomScene,
+    room_dir: Path,
+    logger: Any,
+    cfg_dict: dict[str, Any],
+) -> bool:
+    """Close an incomplete room at its first blocking stage and export it.
+
+    A required upstream stage that exhausted its real repair/regeneration budget
+    cannot be improved by wall, ceiling, or manipuland generation.  Continuing
+    only multiplies timeouts and makes the eventual failure harder to resume.
+    The candidate is therefore exported as an explicitly degraded ``final_scene``
+    (never success memory), with the first blocking stage as the resume target.
+    """
+
+    if str(getattr(scene, "scene_expert_outcome_status", "")).upper() != (
+        "DEGRADED_INCOMPLETE"
+    ):
+        return False
+
+    existing_stage = str(getattr(scene, "scene_expert_first_blocking_stage", "") or "")
+    first_blocking_stage = existing_stage or stage
+    setattr(scene, "scene_expert_first_blocking_stage", first_blocking_stage)
+    runtime_events = list(
+        getattr(scene, "scene_expert_runtime_repair_events", []) or []
+    )
+    event = f"downstream_stages_skipped_after_{first_blocking_stage}"
+    if event not in runtime_events:
+        runtime_events.append(event)
+    setattr(scene, "scene_expert_runtime_repair_events", runtime_events)
+
+    reasons = list(getattr(scene, "scene_expert_degraded_stage_reasons", []) or [])
+    persist_degraded_incomplete(
+        scene_root_dir=room_dir.parent,
+        reasons=reasons,
+        metadata={
+            "first_blocking_stage": first_blocking_stage,
+            "last_stage": stage,
+            "recommended_resume_action": f"retry_stage_{first_blocking_stage}",
+            "candidate_hash": candidate_state_hash(scene),
+            "room_id": str(getattr(scene, "room_id", "")),
+            "room_dir": str(room_dir),
+            "downstream_stages_skipped": True,
+            "runtime_events": runtime_events,
+        },
+    )
+    logger.log_scene(scene=scene, name="final_scene")
+    _export_scene_blend_file(
+        scene=scene,
+        scene_dir=room_dir,
+        cfg_dict=cfg_dict,
+        name="final_scene",
+    )
+    console_logger.warning(
+        "Room stopped at first blocking stage %s; exported an auditable "
+        "DEGRADED_INCOMPLETE final_scene and skipped dependent stages",
+        first_blocking_stage,
+    )
+    return True
 
 
 def _raise_if_required_assets_unavailable(*, stage: str, agent: Any) -> None:
@@ -2239,6 +2301,14 @@ def _generate_room(
         console_logger.info("Saved furniture checkpoint (scene_after_furniture)")
         if scene_expert_hooks:
             scene_expert_hooks.post_stage("furniture", scene, room_dir)
+        if _export_first_blocking_stage_candidate(
+            stage="furniture",
+            scene=scene,
+            room_dir=room_dir,
+            logger=logger,
+            cfg_dict=cfg_dict,
+        ):
+            return scene
     elif start_idx == 1:
         # Starting from wall_objects - load scene from saved furniture state.
         console_logger.info("Loading scene from saved furniture state for wall_objects")
@@ -2325,6 +2395,14 @@ def _generate_room(
         console_logger.info("Saved wall_objects checkpoint (scene_after_wall_objects)")
         if scene_expert_hooks:
             scene_expert_hooks.post_stage("wall_mounted", scene, room_dir)
+        if _export_first_blocking_stage_candidate(
+            stage="wall_mounted",
+            scene=scene,
+            room_dir=room_dir,
+            logger=logger,
+            cfg_dict=cfg_dict,
+        ):
+            return scene
     elif start_idx == 2:
         # Starting from ceiling_mounted - load scene from saved wall_objects state.
         console_logger.info("Loading scene from saved wall_objects state for ceiling")
@@ -2395,6 +2473,14 @@ def _generate_room(
         )
         if scene_expert_hooks:
             scene_expert_hooks.post_stage("ceiling_mounted", scene, room_dir)
+        if _export_first_blocking_stage_candidate(
+            stage="ceiling_mounted",
+            scene=scene,
+            room_dir=room_dir,
+            logger=logger,
+            cfg_dict=cfg_dict,
+        ):
+            return scene
     else:
         # Starting from manipulands - load scene from saved ceiling_objects state.
         console_logger.info("Loading scene from saved ceiling_objects state")
@@ -2653,7 +2739,7 @@ def _generate_room(
                 and final_manipuland_count >= minimum_manipulands
                 and not postprocess_critic_attempted
                 and getattr(manipuland_agent, "_last_scored_scene_hash", None)
-                != scene.content_hash()
+                != candidate_state_hash(scene)
             ):
                 console_logger.info(
                     "Final physics post-processing changed the manipuland scene; "

@@ -38,6 +38,21 @@ class AssetStructureTest(unittest.TestCase):
 
         self.assertEqual("pass", result.status)
 
+    def test_broad_sub_wall_height_panel_requires_standalone_validation(self) -> None:
+        result = evaluate_component_extents(
+            family="sofa",
+            up_axis="+Z",
+            components=[
+                MeshComponentEvidence("sofa_body", (1.95, 0.88, 0.72)),
+                MeshComponentEvidence("attached_panel", (2.01, 0.03, 0.80)),
+            ],
+            geometry_fingerprint="source-topology",
+        )
+
+        self.assertEqual("inconclusive", result.status)
+        self.assertFalse(result.cacheable)
+        self.assertIn("live standalone-object validation", result.reason)
+
     def test_uses_declared_up_axis_instead_of_dimension_sorting(self) -> None:
         result = evaluate_component_extents(
             family="sofa",

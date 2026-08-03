@@ -3,6 +3,7 @@
 import logging
 
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 import trimesh
@@ -42,6 +43,9 @@ class RetrievalCandidate:
 
     bbox_score: float
     """Bounding box size difference score (L1 distance)."""
+
+    source_mesh_path: Path | None = None
+    """Original HSSD GLB before ``force='mesh'`` flattens its node topology."""
 
 
 class HssdRetriever:
@@ -247,6 +251,10 @@ class HssdRetriever:
                 metadata=metadata,
                 clip_score=clip_score,
                 bbox_score=bbox_score,
+                source_mesh_path=construct_hssd_mesh_path(
+                    self.config.data_path,
+                    mesh_id,
+                ),
             )
             candidates.append(candidate)
 

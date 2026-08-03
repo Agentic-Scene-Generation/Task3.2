@@ -29,6 +29,7 @@ from scenesmith.agent_utils.scoring import WallCritiqueWithScores, log_agent_res
 from scenesmith.agent_utils.workflow_tools import WorkflowTools
 from scenesmith.prompts.registry import WallAgentPrompts
 from scenesmith.scene_expert.exceptions import StageValidationError
+from scenesmith.scene_expert.runtime_state import candidate_state_hash
 from scenesmith.utils.logging import BaseLogger
 from scenesmith.wall_agents.base_wall_agent import BaseWallAgent
 from scenesmith.wall_agents.tools.vision_tools import WallVisionTools
@@ -384,7 +385,7 @@ class StatefulWallAgent(BaseStatefulAgent, BaseWallAgent):
 
         # Compute final critique and scores.
         # Check if scene changed since last checkpoint to avoid redundant critique.
-        current_scene_hash = self.scene.content_hash()
+        current_scene_hash = candidate_state_hash(self.scene)
 
         if self._can_skip_final_critique(current_scene_hash):
             console_logger.info(

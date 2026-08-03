@@ -152,6 +152,9 @@ def _agent_candidate_content_hash(agent: Any) -> str:
         candidate = getattr(agent, attribute, None)
         if candidate is None:
             continue
+        stable_hash = candidate_state_hash(candidate)
+        if stable_hash:
+            return stable_hash
         content_hash = getattr(candidate, "content_hash", None)
         if callable(content_hash):
             try:
@@ -1740,6 +1743,7 @@ class BaseStatefulAgent(ABC):
                     "render_dir": images_dir,
                     "weighted_score": weighted_score,
                     "score_source": "vlm_critic",
+                    "candidate_hash": provenance.get("candidate_hash", ""),
                 }
             self._save_critic_working_memory(
                 render_dir=images_dir,
@@ -3156,7 +3160,7 @@ class BaseStatefulAgent(ABC):
                 # render/score decision.  Never copy the stale hard-fail
                 # artifacts as if they described the repaired final state.
                 if final_hard_state is None or final_hard_state.hard_valid:
-                    repaired_hash = self.scene.content_hash()
+                    repaired_hash = candidate_state_hash(self.scene)
                     if self._last_scored_scene_hash != repaired_hash:
                         console_logger.info(
                             "Final deterministic repair produced a hard-valid "
@@ -3302,8 +3306,20 @@ class BaseStatefulAgent(ABC):
                 and self._last_score_provenance.get("candidate_hash")
                 == current_candidate_hash
             )
+            last_trusted_candidate = copy.deepcopy(
+                getattr(self, "_last_trusted_critic_candidate", None) or {}
+            )
+            retained_candidate_score_available = bool(
+                last_trusted_candidate.get("score_source") == "vlm_critic"
+                and last_trusted_candidate.get("scores") is not None
+                and bool(current_candidate_hash)
+                and last_trusted_candidate.get("candidate_hash")
+                == current_candidate_hash
+            )
             trusted_score_available = (
-                controller_score_available or direct_score_available
+                controller_score_available
+                or direct_score_available
+                or retained_candidate_score_available
             )
             if not trusted_score_available:
                 reason = (
@@ -3665,7 +3681,7 @@ class BaseStatefulAgent(ABC):
                 f"auto_score_after_{attempt_label.replace(' ', '_')}"
             )
 
-        current_hash = self.scene.content_hash()
+        current_hash = candidate_state_hash(self.scene)
         if (
             self.checkpoint_scene_hash is not None
             and current_hash == self.checkpoint_scene_hash
@@ -3770,7 +3786,7 @@ class BaseStatefulAgent(ABC):
             if (
                 self._auto_score_after_design_attempts_enabled()
                 and self.checkpoint_scene_hash is not None
-                and self.scene.content_hash() == self.checkpoint_scene_hash
+                and candidate_state_hash(self.scene) == self.checkpoint_scene_hash
             ):
                 return (
                     "Current scene already has a critique score from the latest "
@@ -4075,7 +4091,7 @@ class BaseStatefulAgent(ABC):
                 self.scene_checkpoint = copy.deepcopy(self.scene.to_state_dict())
                 self.checkpoint_scores = checkpoint_scores
                 self.checkpoint_render_dir = checkpoint_render_dir
-                self.checkpoint_scene_hash = self.scene.content_hash()
+                self.checkpoint_scene_hash = candidate_state_hash(self.scene)
             elif update_checkpoint:
                 console_logger.info(
                     "Skipping checkpoint update because deterministic hard-check "
@@ -4505,7 +4521,7 @@ class BaseStatefulAgent(ABC):
             self.checkpoint_render_dir = checkpoint_render_dir
 
             # Reuse render cache hash for checkpoint change detection.
-            self.checkpoint_scene_hash = self.scene.content_hash()
+            self.checkpoint_scene_hash = candidate_state_hash(self.scene)
         elif update_checkpoint:
             console_logger.info(
                 "Skipping checkpoint update because furniture safety rejected "
@@ -4523,7 +4539,7 @@ class BaseStatefulAgent(ABC):
         # still need to know the actual last render dir for copying to final output.
         self.final_render_dir = checkpoint_render_dir or images_dir
         if trusted_visual_score:
-            self._last_scored_scene_hash = self.scene.content_hash()
+            self._last_scored_scene_hash = candidate_state_hash(self.scene)
         self._last_critique_render_profile = render_profile
 
         # Return natural language critique with score deltas for planner.

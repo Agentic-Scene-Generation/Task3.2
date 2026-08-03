@@ -104,6 +104,9 @@ class HssdRetrievalResult:
     extent_frame: str = "unresolved"
     """Frame of ``size``. It is never a semantic width/depth/height contract."""
 
+    structure_mesh_path: str | None = None
+    """Original topology-preserving GLB used only for structural admission."""
+
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""
         return asdict(self)
@@ -130,6 +133,7 @@ class HssdRetrievalResult:
             up_axis=data.get("up_axis"),
             orientation_source=data.get("orientation_source"),
             extent_frame=str(data.get("extent_frame", "unresolved")),
+            structure_mesh_path=data.get("structure_mesh_path"),
         )
 
 

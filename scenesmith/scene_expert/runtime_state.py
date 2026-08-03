@@ -306,19 +306,29 @@ def mark_degraded_stage_recovered(
 
 
 def candidate_state_hash(scene: object) -> str:
-    """Hash candidate geometry and objects without mutable prompt text."""
+    """Hash serialized candidate geometry without mutable prompt/session state.
+
+    The same algorithm accepts a live scene or its checkpoint dictionary.  This
+    is important because designer prompts, SceneExpert hints, and agent session
+    state can change while the rendered geometry remains exactly the scored
+    candidate.  A score must also survive an atomic checkpoint restore.
+    """
 
     try:
-        room_geometry = getattr(scene, "room_geometry")
-        hash_objects = getattr(scene, "_hash_objects")
-        payload: Any = {
-            "room_geometry": room_geometry.content_hash(),
-            "objects": hash_objects(),
-        }
+        payload: Any = (
+            dict(scene)
+            if isinstance(scene, dict)
+            else dict(getattr(scene, "to_state_dict")())
+        )
+        payload.pop("text_description", None)
     except (AttributeError, TypeError, ValueError):
         try:
-            payload = dict(getattr(scene, "to_state_dict")())
-            payload.pop("text_description", None)
+            room_geometry = getattr(scene, "room_geometry")
+            hash_objects = getattr(scene, "_hash_objects")
+            payload = {
+                "room_geometry": room_geometry.content_hash(),
+                "objects": hash_objects(),
+            }
         except (AttributeError, TypeError, ValueError):
             return ""
     serialized = json.dumps(payload, sort_keys=True, default=str)

@@ -102,10 +102,18 @@ def hssd_asset_quarantine_reason(mesh_id: str) -> str | None:
     return entry.reason if entry is not None else None
 
 
-def quarantined_hssd_asset_ids() -> frozenset[str]:
-    """Return the exact mesh IDs denied by the current admission contract."""
+def quarantined_hssd_asset_ids(family: str | None = None) -> frozenset[str]:
+    """Return exact denied mesh IDs, optionally scoped to a semantic family."""
 
-    return frozenset(load_hssd_asset_quarantine())
+    entries = load_hssd_asset_quarantine()
+    normalized_family = str(family or "").strip().casefold()
+    if not normalized_family:
+        return frozenset(entries)
+    return frozenset(
+        mesh_id
+        for mesh_id, entry in entries.items()
+        if not entry.families or normalized_family in entry.families
+    )
 
 
 def value_references_quarantined_hssd_asset(value: Any) -> bool:

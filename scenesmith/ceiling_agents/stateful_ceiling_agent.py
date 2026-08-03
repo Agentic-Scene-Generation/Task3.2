@@ -31,6 +31,7 @@ from scenesmith.ceiling_agents.tools.ceiling_tools import CeilingTools
 from scenesmith.ceiling_agents.tools.vision_tools import CeilingVisionTools
 from scenesmith.prompts.registry import CeilingAgentPrompts
 from scenesmith.scene_expert.exceptions import StageValidationError
+from scenesmith.scene_expert.runtime_state import candidate_state_hash
 from scenesmith.utils.logging import BaseLogger
 
 console_logger = logging.getLogger(__name__)
@@ -384,7 +385,7 @@ class StatefulCeilingAgent(BaseStatefulAgent, BaseCeilingAgent):
 
         # Compute final critique and scores.
         # Check if scene changed since last checkpoint to avoid redundant critique.
-        current_scene_hash = self.scene.content_hash()
+        current_scene_hash = candidate_state_hash(self.scene)
 
         if self._can_skip_final_critique(current_scene_hash):
             console_logger.info(

@@ -4,8 +4,10 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from scenesmith.experiments.indoor_scene_generation import (
+    _export_first_blocking_stage_candidate,
     _is_repairable_stage_validation,
     _is_retryable_scene_failure,
     _raise_if_required_assets_unavailable,
@@ -43,6 +45,64 @@ class StageFailureRecoveryTest(unittest.TestCase):
         }
 
         self.assertEqual(injected_hash, candidate_state_hash(scene))
+
+    def test_candidate_hash_is_identical_for_live_and_checkpoint_state(self) -> None:
+        state = {
+            "text_description": "mutable prompt",
+            "room_geometry": {"length": 5.0, "width": 4.0},
+            "objects": {"sofa_0": {"translation": [0.0, 1.5, 0.0]}},
+        }
+        scene = SimpleNamespace(to_state_dict=lambda: dict(state))
+
+        self.assertEqual(candidate_state_hash(scene), candidate_state_hash(state))
+
+    def test_first_blocking_stage_exports_degraded_final_and_stops_downstream(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as tmp:
+            room_dir = Path(tmp) / "room_living_room"
+            room_dir.mkdir()
+            scene = SimpleNamespace(
+                room_id="living_room",
+                scene_expert_outcome_status="DEGRADED_INCOMPLETE",
+                scene_expert_degraded_stage_reasons=[
+                    "[furniture] missing required sofa"
+                ],
+                to_state_dict=lambda: {
+                    "text_description": "living room",
+                    "objects": {},
+                },
+            )
+            logged: list[str] = []
+            logger = SimpleNamespace(
+                log_scene=lambda *, scene, name: logged.append(name)
+            )
+
+            with patch(
+                "scenesmith.experiments.indoor_scene_generation."
+                "_export_scene_blend_file"
+            ) as export:
+                stopped = _export_first_blocking_stage_candidate(
+                    stage="furniture",
+                    scene=scene,
+                    room_dir=room_dir,
+                    logger=logger,
+                    cfg_dict={},
+                )
+
+            self.assertTrue(stopped)
+            self.assertEqual(["final_scene"], logged)
+            export.assert_called_once()
+            manifest = json.loads(
+                (
+                    Path(tmp) / "scene_expert" / "degraded" / "degraded_manifest.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                "furniture",
+                manifest["metadata"]["first_blocking_stage"],
+            )
+            self.assertTrue(manifest["metadata"]["downstream_stages_skipped"])
 
     def test_required_asset_unavailable_is_not_retried_as_layout_failure(self) -> None:
         error = StageValidationError(

@@ -488,6 +488,7 @@ class TestAssetManager(unittest.TestCase):
 
         self.assertEqual(4, manager._direct_hssd_candidate_count("bed", "bed"))
         self.assertEqual(7, manager._hssd_retrieval_candidate_count("bed", "bed"))
+        self.assertEqual(6, manager._hssd_retrieval_candidate_count("sofa", "sofa"))
 
     def test_critical_hssd_candidate_must_pass_shared_size_contract(self):
         manager = object.__new__(AssetManager)
@@ -593,6 +594,40 @@ class TestAssetManager(unittest.TestCase):
         )
 
         self.assertEqual("second", selected.hssd_id)
+
+    def test_direct_hssd_structure_prefers_topology_preserving_payload(self):
+        manager = object.__new__(AssetManager)
+        flattened_path = self.temp_dir / "flattened.glb"
+        structure_path = self.temp_dir / "original.structure.glb"
+        flattened_path.write_bytes(b"flattened")
+        structure_path.write_bytes(b"scene-graph")
+        candidate = HssdRetrievalResult(
+            mesh_path=str(flattened_path),
+            structure_mesh_path=str(structure_path),
+            hssd_id="compound_candidate",
+            object_name="sofa",
+            similarity_score=0.9,
+            size=(1.8, 0.9, 0.8),
+            category="large_objects",
+            up_axis="+Z",
+        )
+        expected = MagicMock()
+
+        with patch(
+            "scenesmith.agent_utils.asset_manager.inspect_hssd_candidate_structure",
+            return_value=expected,
+        ) as inspect_structure:
+            result = manager._inspect_direct_hssd_structure(
+                candidate=candidate,
+                family="sofa",
+            )
+
+        self.assertIs(expected, result)
+        inspect_structure.assert_called_once_with(
+            mesh_path=str(structure_path),
+            family="sofa",
+            up_axis="+Z",
+        )
 
     def test_direct_hssd_validation_reuses_front_calibration_and_deadline(self):
         manager = object.__new__(AssetManager)
@@ -989,6 +1024,79 @@ class TestAssetManager(unittest.TestCase):
         )
 
         self.assertEqual("cached_bed", selected.hssd_id)
+        second._thin_covering_router.validate_asset.assert_not_called()
+
+    def test_ambiguous_structure_cache_requires_explicit_standalone_evidence(self):
+        cache_dir = self.temp_dir / "semantic_cache_ambiguous"
+        cfg = OmegaConf.create(
+            {
+                "asset_manager": {
+                    "hssd": {
+                        "semantic_validation": {
+                            "enabled": True,
+                            "families": ["sofa"],
+                            "critical_families": ["sofa"],
+                            "cache_dir": str(cache_dir),
+                            "max_candidates": 1,
+                        }
+                    }
+                }
+            }
+        )
+        flattened_path = self.temp_dir / "ambiguous_sofa.glb"
+        flattened_path.write_bytes(
+            trimesh.creation.box(extents=(1.8, 0.9, 0.8)).export(file_type="glb")
+        )
+        structure_path = self.temp_dir / "ambiguous_sofa.structure.glb"
+        structure_scene = trimesh.Scene()
+        structure_scene.add_geometry(
+            trimesh.creation.box(extents=(1.8, 0.9, 0.8)),
+            node_name="sofa_body",
+            geom_name="sofa_body",
+        )
+        structure_scene.add_geometry(
+            trimesh.creation.box(extents=(2.01, 0.03, 0.8)),
+            node_name="broad_panel",
+            geom_name="broad_panel",
+        )
+        structure_path.write_bytes(structure_scene.export(file_type="glb"))
+        candidate = HssdRetrievalResult(
+            mesh_path=str(flattened_path),
+            structure_mesh_path=str(structure_path),
+            hssd_id="ambiguous_sofa",
+            object_name="sofa",
+            similarity_score=0.9,
+            size=(1.8, 0.9, 0.8),
+            category="large_objects",
+        )
+        first = object.__new__(AssetManager)
+        first.cfg = cfg
+        first.debug_dir = self.temp_dir / "debug_ambiguous_first"
+        first._thin_covering_router = MagicMock()
+        first._thin_covering_router.validate_asset.return_value = ValidationResult(
+            True,
+            "Standalone sofa with an intrinsic backrest",
+            contains_architectural_context=False,
+            requested_object_is_dominant=True,
+        )
+        second = object.__new__(AssetManager)
+        second.cfg = cfg
+        second.debug_dir = self.temp_dir / "debug_ambiguous_second"
+        second._thin_covering_router = MagicMock()
+
+        first._select_direct_hssd_candidate(
+            candidates=[candidate],
+            description="standalone sofa",
+            short_name="sofa",
+        )
+        selected = second._select_direct_hssd_candidate(
+            candidates=[candidate],
+            description="standalone sofa",
+            short_name="sofa",
+        )
+
+        self.assertEqual("ambiguous_sofa", selected.hssd_id)
+        first._thin_covering_router.validate_asset.assert_called_once()
         second._thin_covering_router.validate_asset.assert_not_called()
 
     def test_create_asset_paths_disambiguates_duplicate_short_names(self):
