@@ -615,7 +615,40 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         snapped = agent._snap_transform_to_wall(SimpleNamespace(), transform, "west")
 
         self.assertIsInstance(snapped, RigidTransform)
-        self.assertLess(snapped.translation()[0], 0.0)
+        translation_delta = snapped.translation()[0] - transform.translation()[0]
+        snapped_world_min_x = -2.7 + translation_delta
+        self.assertAlmostEqual(-2.5 + 0.08, snapped_world_min_x)
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
+    def test_snap_transform_targets_each_room_wall_edge(self) -> None:
+        agent = self._make_agent()
+        local_min = np.asarray([-0.5, -0.2, 0.0])
+        local_max = np.asarray([0.5, 0.2, 1.0])
+
+        def bounds_for_transform(_obj, transform):
+            translation = np.asarray(transform.translation(), dtype=float)
+            return local_min + translation, local_max + translation
+
+        agent._bounds_for_transform = bounds_for_transform
+        expected_edges = {
+            "west": (0, "min", -2.5 + 0.08),
+            "east": (0, "max", 2.5 - 0.08),
+            "south": (1, "min", -2.0 + 0.08),
+            "north": (1, "max", 2.0 - 0.08),
+        }
+        for wall, (axis, edge, expected) in expected_edges.items():
+            with self.subTest(wall=wall):
+                snapped = agent._snap_transform_to_wall(
+                    SimpleNamespace(),
+                    RigidTransform(),
+                    wall,
+                )
+                world_min, world_max = bounds_for_transform(None, snapped)
+                observed = world_min[axis] if edge == "min" else world_max[axis]
+                self.assertAlmostEqual(expected, observed)
 
     @unittest.skipIf(
         StatefulFurnitureAgent is None,

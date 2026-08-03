@@ -103,6 +103,31 @@ class StageFailureRecoveryTest(unittest.TestCase):
             )
             self.assertTrue(manifest["metadata"]["downstream_stages_skipped"])
 
+    def test_critic_only_degradation_does_not_skip_downstream_stages(self) -> None:
+        scene = SimpleNamespace(
+            room_id="living_room",
+            scene_expert_outcome_status="DEGRADED_INCOMPLETE",
+            scene_expert_degraded_stage_reasons=[
+                "[furniture] critic_unavailable: visual critic timed out"
+            ],
+        )
+        logger = SimpleNamespace(
+            log_scene=lambda **_kwargs: self.fail(
+                "critic-only degradation must remain nonblocking"
+            )
+        )
+
+        with TemporaryDirectory() as tmp:
+            stopped = _export_first_blocking_stage_candidate(
+                stage="furniture",
+                scene=scene,
+                room_dir=Path(tmp) / "room_living_room",
+                logger=logger,
+                cfg_dict={},
+            )
+
+        self.assertFalse(stopped)
+
     def test_required_asset_unavailable_is_not_retried_as_layout_failure(self) -> None:
         error = StageValidationError(
             stage="furniture",

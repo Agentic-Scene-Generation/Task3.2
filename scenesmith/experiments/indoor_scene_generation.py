@@ -51,6 +51,7 @@ from scenesmith.scene_expert.runtime_state import (
     mark_retryable_pause_resolved,
     persist_degraded_incomplete,
     persist_retryable_pause,
+    split_degraded_stage_reasons,
 )
 from scenesmith.utils.logging import ConsoleLogger, FileLoggingContext
 from scenesmith.utils.parallel import run_parallel_isolated
@@ -536,12 +537,35 @@ def _export_first_blocking_stage_candidate(
     ):
         return False
 
+    reasons = list(getattr(scene, "scene_expert_degraded_stage_reasons", []) or [])
     existing_stage = str(getattr(scene, "scene_expert_first_blocking_stage", "") or "")
     # Critic-only degradation is nonblocking: geometry is hard-valid, so later
     # stages and the normal final export remain meaningful. Structural/asset/
     # placement failures set this field at their origin and still stop here.
     if not existing_stage:
-        return False
+        _, current_stage_reasons, _ = split_degraded_stage_reasons(
+            reasons,
+            current_stage=stage,
+        )
+        critic_only_markers = (
+            "critic_unavailable",
+            "visual critic",
+            "stale_evidence",
+            "unscored",
+            "no trustworthy numeric quality score",
+        )
+        blocking_reasons = [
+            reason
+            for reason in current_stage_reasons
+            if not any(marker in reason.casefold() for marker in critic_only_markers)
+        ]
+        if not blocking_reasons:
+            return False
+        # Backward-compatible state migration: older degraded checkpoints did
+        # not persist first_blocking_stage atomically. A stage-scoped structural,
+        # asset, or placement reason is sufficient to recover that missing field;
+        # critic-only degradation deliberately remains nonblocking.
+        existing_stage = stage
     first_blocking_stage = existing_stage
     setattr(scene, "scene_expert_first_blocking_stage", first_blocking_stage)
     runtime_events = list(
@@ -552,7 +576,6 @@ def _export_first_blocking_stage_candidate(
         runtime_events.append(event)
     setattr(scene, "scene_expert_runtime_repair_events", runtime_events)
 
-    reasons = list(getattr(scene, "scene_expert_degraded_stage_reasons", []) or [])
     persist_degraded_incomplete(
         scene_root_dir=room_dir.parent,
         reasons=reasons,

@@ -6,6 +6,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+from scenesmith.scene_expert.runtime_state import candidate_state_hash
+
 
 def _load_completion_compatibility_agent() -> type:
     source_path = (
@@ -18,8 +20,7 @@ def _load_completion_compatibility_agent() -> type:
     stateful_class = next(
         node
         for node in tree.body
-        if isinstance(node, ast.ClassDef)
-        and node.name == "StatefulManipulandAgent"
+        if isinstance(node, ast.ClassDef) and node.name == "StatefulManipulandAgent"
     )
     method = next(
         node
@@ -39,6 +40,11 @@ def _load_completion_compatibility_agent() -> type:
             ast.ImportFrom(
                 module="__future__",
                 names=[ast.alias(name="annotations")],
+                level=0,
+            ),
+            ast.ImportFrom(
+                module="scenesmith.scene_expert.runtime_state",
+                names=[ast.alias(name="candidate_state_hash")],
                 level=0,
             ),
             compatibility_class,
@@ -61,6 +67,9 @@ class _HashScene:
     def content_hash(self) -> str:
         return self.scene_hash
 
+    def to_state_dict(self) -> dict:
+        return {"objects": {"candidate": {"state": self.scene_hash}}}
+
 
 class StatefulManipulandCompletionTest(unittest.IsolatedAsyncioTestCase):
     async def test_postprocessed_stage_is_rescored_before_target_search(self) -> None:
@@ -74,14 +83,12 @@ class StatefulManipulandCompletionTest(unittest.IsolatedAsyncioTestCase):
         agent._stage_budget_value = lambda key, default: (
             0.6 if key == "min_visual_score" else default
         )
-        agent._evaluate_current_hard_state = lambda: SimpleNamespace(
-            hard_valid=True
-        )
+        agent._evaluate_current_hard_state = lambda: SimpleNamespace(hard_valid=True)
         agent._normalized_visual_score = lambda _scores: 0.85
 
         async def rescore(*, update_checkpoint: bool) -> None:
             self.assertFalse(update_checkpoint)
-            agent._last_scored_scene_hash = agent.scene.content_hash()
+            agent._last_scored_scene_hash = candidate_state_hash(agent.scene)
 
         agent._request_critique_impl = AsyncMock(side_effect=rescore)
 
@@ -99,13 +106,11 @@ class StatefulManipulandCompletionTest(unittest.IsolatedAsyncioTestCase):
         agent.scene = _HashScene("scored")
         agent._stage_trusted_score_available = True
         agent._stage_visual_scores = [0.8]
-        agent._last_scored_scene_hash = "scored"
+        agent._last_scored_scene_hash = candidate_state_hash(agent.scene)
         agent._stage_budget_value = lambda key, default: (
             0.6 if key == "min_visual_score" else default
         )
-        agent._evaluate_current_hard_state = lambda: SimpleNamespace(
-            hard_valid=True
-        )
+        agent._evaluate_current_hard_state = lambda: SimpleNamespace(hard_valid=True)
         agent._request_critique_impl = AsyncMock()
 
         satisfied = await agent._manipuland_stage_contract_satisfied(

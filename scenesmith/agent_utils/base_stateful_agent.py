@@ -369,7 +369,12 @@ class BaseStatefulAgent(ABC):
 
     def _expand_critical_retry_budget(self) -> None:
         """Grant one quality-critical retry a larger, fresh role budget."""
-        if not self._stage_runtime_budget or self._critical_retry_budget_expanded:
+        runtime_budget = getattr(self, "_stage_runtime_budget", {}) or {}
+        if not runtime_budget or getattr(
+            self,
+            "_critical_retry_budget_expanded",
+            False,
+        ):
             return
         multiplier = max(
             1.0,
@@ -392,14 +397,14 @@ class BaseStatefulAgent(ABC):
             "max_asset_requests",
             "max_semantic_retries_per_family",
         ):
-            value = float(self._stage_runtime_budget.get(key, 0) or 0)
+            value = float(runtime_budget.get(key, 0) or 0)
             if value <= 0:
                 continue
             retry_key = f"critic_retry_{key}"
-            if self._stage_runtime_budget.get(retry_key) not in (None, 0, 0.0, ""):
+            if runtime_budget.get(retry_key) not in (None, 0, 0.0, ""):
                 continue
             expanded = value * multiplier
-            self._stage_runtime_budget[retry_key] = (
+            runtime_budget[retry_key] = (
                 int(round(expanded))
                 if key.startswith("max_") and not key.endswith("_seconds")
                 else expanded
@@ -530,7 +535,7 @@ class BaseStatefulAgent(ABC):
         """
 
         return bool(
-            self._stage_runtime_budget
+            getattr(self, "_stage_runtime_budget", {})
             and candidate_state_hash(self.scene) == scene_hash_before
             and self._admitted_stage_asset_ids() == admitted_assets_before
         )
@@ -727,7 +732,7 @@ class BaseStatefulAgent(ABC):
             )
 
     def _stage_budget_value(self, key: str, default: Any) -> Any:
-        return self._stage_runtime_budget.get(key, default)
+        return dict(getattr(self, "_stage_runtime_budget", {}) or {}).get(key, default)
 
     def _phase_budget_value(self, key: str, default: Any) -> Any:
         """Resolve an execution limit for the active recovery transaction.
@@ -749,7 +754,9 @@ class BaseStatefulAgent(ABC):
         }.get(phase)
         if phase_prefix:
             phase_key = f"{phase_prefix}_{key}"
-            phase_value = self._stage_runtime_budget.get(phase_key)
+            phase_value = dict(getattr(self, "_stage_runtime_budget", {}) or {}).get(
+                phase_key
+            )
             if phase_value not in (None, 0, 0.0, ""):
                 return phase_value
         return self._stage_budget_value(key, default)
@@ -818,7 +825,7 @@ class BaseStatefulAgent(ABC):
 
     def _planner_completion_contract(self) -> str:
         """Return a runtime planner directive for the preferred stage output."""
-        if not self._stage_runtime_budget:
+        if not getattr(self, "_stage_runtime_budget", {}):
             return ""
         required_minimum, target_minimum, _ = self._stage_output_count_contract()
         if target_minimum <= 0:
@@ -866,7 +873,7 @@ class BaseStatefulAgent(ABC):
 
     def _effective_critique_round_limit(self) -> int:
         configured = max(0, int(_cfg_get(self.cfg, "max_critique_rounds", 0)))
-        if not self._stage_runtime_budget:
+        if not getattr(self, "_stage_runtime_budget", {}):
             return configured
         stage_limit = max(
             0,
@@ -915,7 +922,7 @@ class BaseStatefulAgent(ABC):
 
         previous_phase = self._stage_runtime_phase
         previous_phase_started_at = self._stage_phase_started_at
-        if self._stage_runtime_budget:
+        if getattr(self, "_stage_runtime_budget", {}):
             self._activate_runtime_phase("repair", reset_role_consumption=True)
             self._stage_phase_started_at = time.monotonic()
             self._current_phase_role_consumption().pop("designer", None)
@@ -949,7 +956,7 @@ class BaseStatefulAgent(ABC):
         evaluation_limit = float(
             self._phase_budget_value("critic_evaluation_max_seconds", 0.0) or 0.0
         )
-        if self._stage_runtime_budget and evaluation_limit > 0:
+        if getattr(self, "_stage_runtime_budget", {}) and evaluation_limit > 0:
             return None
         return (
             float(provider_default_seconds)
@@ -1028,22 +1035,28 @@ class BaseStatefulAgent(ABC):
         instead of hiding them inside Agents SDK turns.
         """
 
+        phase_budget_value = getattr(self, "_phase_budget_value", None)
+        budget_value = (
+            phase_budget_value
+            if callable(phase_budget_value)
+            else self._stage_budget_value
+        )
         max_attempts = max(
             1,
-            int(self._phase_budget_value("critic_max_attempts", 2) or 2),
+            int(budget_value("critic_max_attempts", 2) or 2),
         )
         evaluation_seconds = float(
-            self._phase_budget_value("critic_evaluation_max_seconds", 240.0) or 240.0
+            budget_value("critic_evaluation_max_seconds", 240.0) or 240.0
         )
         attempt_seconds = max(30.0, evaluation_seconds / max_attempts)
         configured_tokens = max(
             256,
-            int(self._phase_budget_value("critic_max_output_tokens", 1536) or 1536),
+            int(budget_value("critic_max_output_tokens", 1536) or 1536),
         )
         retry_tokens = max(
             configured_tokens,
             int(
-                self._phase_budget_value(
+                budget_value(
                     "critic_retry_max_output_tokens",
                     max(3072, configured_tokens),
                 )
@@ -1084,7 +1097,16 @@ class BaseStatefulAgent(ABC):
             )
         finally:
             elapsed = time.monotonic() - started
-            consumption = self._current_phase_role_consumption()
+            current_consumption = getattr(
+                self,
+                "_current_phase_role_consumption",
+                None,
+            )
+            consumption = (
+                current_consumption()
+                if callable(current_consumption)
+                else self._stage_role_active_consumed
+            )
             consumption["critic"] = float(consumption.get("critic", 0.0)) + elapsed
             self._resume_parent_execution_lease(parent_lease)
 
@@ -1293,7 +1315,7 @@ class BaseStatefulAgent(ABC):
             "critic": "max_critic_turns",
         }.get(role, "")
         max_turns = configured_max_turns
-        if role_turn_key and self._stage_runtime_budget:
+        if role_turn_key and getattr(self, "_stage_runtime_budget", {}):
             stage_turns = int(self._stage_budget_value(role_turn_key, 0) or 0)
             if stage_turns > 0:
                 max_turns = (
@@ -1827,7 +1849,7 @@ class BaseStatefulAgent(ABC):
         *,
         response: CritiqueWithScores,
         images_dir: Path | None,
-        physics_context: str,
+        physics_context: str = "",
         event: str = "critique",
     ) -> None:
         """Persist score artifacts and stage working memory for a render."""
@@ -1946,7 +1968,7 @@ class BaseStatefulAgent(ABC):
         return bool(self._critic_fast_path_value(key, default))
 
     def _sceneexpert_critic_feedback_contract(self) -> str:
-        if not self._stage_runtime_budget:
+        if not getattr(self, "_stage_runtime_budget", {}):
             return ""
         return critic_feedback_contract(str(self.agent_type.value))
 
@@ -1995,7 +2017,7 @@ class BaseStatefulAgent(ABC):
                 1,
             )
         )
-        if not self._stage_runtime_budget:
+        if not getattr(self, "_stage_runtime_budget", {}):
             return configured_limit
         # SceneExpert's repair budget is the outer control contract.  A smaller
         # legacy fast-path value must not silently cancel a repair round that
@@ -2216,7 +2238,7 @@ class BaseStatefulAgent(ABC):
             )
 
         hard_reasons = self._parse_generic_physics_hard_reasons(physics_context)
-        if self.scene is not None and self._stage_runtime_budget:
+        if self.scene is not None and getattr(self, "_stage_runtime_budget", {}):
             object_type = self.agent_type.to_object_type()
             if object_type is not None:
                 stage_objects = self.scene.get_objects_by_type(object_type)
@@ -2895,7 +2917,7 @@ class BaseStatefulAgent(ABC):
         # occupy the floor-plan worker for tens of minutes.
         output_limits = getattr(self.cfg.openai, "max_output_tokens", None)
         runtime_limit = None
-        if settings_key and self._stage_runtime_budget:
+        if settings_key and getattr(self, "_stage_runtime_budget", {}):
             runtime_limit = self._stage_budget_value(
                 f"{settings_key}_max_output_tokens",
                 None,
@@ -3356,7 +3378,7 @@ class BaseStatefulAgent(ABC):
                     )
 
         enforce_sceneexpert_completion = bool(
-            self._stage_runtime_budget
+            getattr(self, "_stage_runtime_budget", {})
             and self.agent_type.is_placement_agent
             and not getattr(self, "_defer_stage_completion_contract", False)
             and not (controller and getattr(controller, "enabled", False))
@@ -3381,7 +3403,7 @@ class BaseStatefulAgent(ABC):
                     )
 
         if (
-            self._stage_runtime_budget
+            getattr(self, "_stage_runtime_budget", {})
             and self.agent_type.is_placement_agent
             and not getattr(self, "_defer_stage_completion_contract", False)
         ):
@@ -4315,7 +4337,7 @@ class BaseStatefulAgent(ABC):
         # observe_scene choice and creates an invalid tools + response_format
         # request for vLLM's Qwen tool parser.
         score_instructions = self.critic.instructions
-        if self._stage_runtime_budget:
+        if getattr(self, "_stage_runtime_budget", {}):
             score_instructions = self._direct_critic_system_instructions(
                 self._critic_output_type
             )
@@ -4490,7 +4512,7 @@ class BaseStatefulAgent(ABC):
                 response = self._make_transient_critic_fallback_scores(
                     error=RuntimeError("visual critic render produced no images")
                 )
-            elif self._stage_runtime_budget and direct_multimodal:
+            elif getattr(self, "_stage_runtime_budget", {}) and direct_multimodal:
                 response = await self._run_sceneexpert_direct_critic_score(
                     evidence_text=direct_text,
                     image_parts=direct_image_parts,
