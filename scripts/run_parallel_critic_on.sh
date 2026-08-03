@@ -70,6 +70,8 @@ HSSD_ZVEC_COLLECTION_PATH="${HSSD_ZVEC_COLLECTION_PATH:-}"
 HSSD_EMBEDDING_BASE_URL="${HSSD_EMBEDDING_BASE_URL:-}"
 FURNITURE_CONTEXT_IMAGE_GENERATION_ENABLED="${FURNITURE_CONTEXT_IMAGE_GENERATION_ENABLED:-}"
 FURNITURE_CONTEXT_IMAGE_GENERATION_BACKEND="${FURNITURE_CONTEXT_IMAGE_GENERATION_BACKEND:-}"
+FLOOR_PLAN_MODE="${FLOOR_PLAN_MODE:-room}"
+FURNITURE_PLACEMENT_ORDER_ENABLED="${FURNITURE_PLACEMENT_ORDER_ENABLED:-}"
 # os.cpu_count() sees the host's 192 logical CPUs in the CCI container.  A
 # critic replay should never inherit the 32-thread YAML default implicitly:
 # each isolated decomposition server gets a small explicit cap.
@@ -240,6 +242,21 @@ if [ -n "$FURNITURE_CONTEXT_IMAGE_GENERATION_BACKEND" ]; then
             ;;
     esac
 fi
+case "$FLOOR_PLAN_MODE" in
+    room|house|polygon) ;;
+    *)
+        echo "ERROR: FLOOR_PLAN_MODE must be room, house, or polygon" >&2
+        exit 1
+        ;;
+esac
+if [ -n "$FURNITURE_PLACEMENT_ORDER_ENABLED" ]; then
+    if ! FURNITURE_PLACEMENT_ORDER_ENABLED="$(
+        normalize_bool "$FURNITURE_PLACEMENT_ORDER_ENABLED"
+    )"; then
+        echo "ERROR: FURNITURE_PLACEMENT_ORDER_ENABLED must be true or false" >&2
+        exit 1
+    fi
+fi
 if [ "$CRITIC_PROBE_RENDER_FINAL_VIEWS" = "true" ] && [ "$SCENE_BATCH_SIZE" -ne 1 ]; then
     echo "ERROR: immediate per-scene final rendering requires SCENE_BATCH_SIZE=1 (got $SCENE_BATCH_SIZE)" >&2
     echo "       Set SCENE_BATCH_SIZE=1 so each completed batch maps to exactly one scene." >&2
@@ -325,6 +342,7 @@ export SCENEEXPERT_DISABLE_MATERIALS="$DISABLE_MATERIALS"
 export SCENEEXPERT_DISABLE_BWRAP="$DISABLE_BWRAP"
 export FURNITURE_CONTEXT_IMAGE_GENERATION_ENABLED
 export FURNITURE_CONTEXT_IMAGE_GENERATION_BACKEND
+export FLOOR_PLAN_MODE FURNITURE_PLACEMENT_ORDER_ENABLED
 export FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS
 export HSSD_RETRIEVAL_BACKEND HSSD_RENDERED_ASSET_CHOICE
 export HSSD_DATA_PATH HSSD_PREPROCESSED_PATH
@@ -468,6 +486,7 @@ if [ -n "$CRITIC_PROBE_CASES_FILE" ]; then
 fi
 
 COMMON_ARGS=(
+    "floor_plan_agent.mode=${FLOOR_PLAN_MODE}"
     "experiment.num_workers=${SCENE_WORKERS_PER_PROCESS}"
     "experiment.scene_retry_attempts=1"
     "furniture_agent.fail_stage_on_unresolved_hard_constraints=${FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS}"
@@ -506,6 +525,11 @@ fi
 if [ -n "$FURNITURE_CONTEXT_IMAGE_GENERATION_BACKEND" ]; then
     COMMON_ARGS+=(
         "furniture_agent.context_image_generation.backend=${FURNITURE_CONTEXT_IMAGE_GENERATION_BACKEND}"
+    )
+fi
+if [ -n "$FURNITURE_PLACEMENT_ORDER_ENABLED" ]; then
+    COMMON_ARGS+=(
+        "experiment.stage_placement_order.furniture.enabled=${FURNITURE_PLACEMENT_ORDER_ENABLED}"
     )
 fi
 

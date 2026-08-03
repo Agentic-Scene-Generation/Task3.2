@@ -1,5 +1,5 @@
 name: "designer_initial_instruction"
-version: "1.1"
+version: "1.2"
 description: "Instructions for initial furniture design phase"
 template_variables:
   - "scene_description"
@@ -17,10 +17,31 @@ prompt: |
   geometry, so never infer exact coordinates, dimensions, doors, windows, walls, or
   current scene contents from it.
 
-  Use the concept image only for high-level layout and style inspiration. Call
-  observe_scene to inspect the ACTUAL empty room, and treat observe_scene plus the
-  structured scene state as the only authoritative sources of scene contents and
-  geometry.
+  Use the concept image as the preferred reference for furniture selection and
+  placement. Reproduce its visible layout as closely as the actual room permits,
+  including furniture categories, functional zones, relative positions, facing
+  directions, groupings, spacing patterns, and ordering along walls. Preserve the
+  image's main anchor objects and layout topology instead of independently
+  redesigning the room.
+
+  Call observe_scene to inspect the ACTUAL empty room. Treat observe_scene plus the
+  structured scene state as authoritative for room geometry, coordinates, doors,
+  windows, and existing scene contents, while treating the concept image as the
+  preferred target for furniture arrangement.
+
+  Depart from the reference arrangement only when an appropriate asset cannot be
+  retrieved or generated, or when the referenced placement cannot be made valid
+  after reasonable attempts to resolve polygon containment, door/window clearance,
+  collisions, or required accessibility. When a departure is necessary, make the
+  smallest local change possible: first try the closest suitable asset substitute,
+  then adjust only the affected object's position, yaw, or spacing while preserving
+  its functional zone, neighbors, grouping, and facing relationship. Do not use one
+  local conflict as a reason to broadly redesign unaffected parts of the layout.
+
+  If the scene requirements contain furniture that is absent from the concept
+  image, add it in the least disruptive valid location without moving image-matched
+  anchors unnecessarily. The explicit scene requirements remain authoritative for
+  required inventory and constraints.
 
   You MUST generate and place every required furniture item with the provided tools,
   even when it is already visible in the concept image. Do not claim that an item
@@ -32,8 +53,8 @@ prompt: |
 
   ## Initial Design Workflow:
   {% if has_reference_image %}1. Call observe_scene to inspect the ACTUAL empty room and its authoritative geometry
-  2. Review the AI-edited concept image only for high-level design ideas
-  3. Synthesize: adapt useful concepts to the actual observed room without copying image coordinates
+  2. Extract the concept image's furniture groups, anchor objects, relative positions, facing directions, and zone assignments
+  3. Map that reference arrangement onto the authoritative room geometry and preserve it as closely as possible; use minimal local adjustments only for unavailable assets or unresolved validity conflicts
   4. Create a TODO list for every required item and complete it through successful tool calls
   {% else %}1. Call observe_scene to see the empty room and understand the space
   2. Create TODO list based on room requirements
@@ -77,7 +98,10 @@ prompt: |
   **CRITICAL - Collision-Free Completion:**
   Before finishing, you MUST call check_physics and verify zero collisions exist.
   You MUST NOT complete your work while ANY collisions remain. If collisions exist,
-  resolve them by repositioning or removing objects. Deletion is better than collision.
+  preserve the reference layout as much as possible and resolve them with the
+  smallest local position, yaw, or spacing change. Delete only optional,
+  non-required decoration when local repair is impossible; never omit explicitly
+  required furniture solely to resolve a collision.
 
   **CRITICAL - Layout Plausibility Completion:**
   Before finishing, call observe_scene and verify that the main furniture anchors

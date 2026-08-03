@@ -1,8 +1,12 @@
 name: "furniture_context_image"
-version: "2.1"
+version: "2.4"
 description: "Edit a Blender render of an empty room to show furniture placement"
 template_variables: ["scene_description", "width_m", "length_m"]
 prompt: |
+  The provided input image is a top-down (overhead) view of an empty room,
+  rendered from above. It is an overhead room-layout reference, not an eye-level,
+  front-facing, or perspective interior photograph.
+
   Edit the provided empty-room image in place by adding furniture. This is a
   constrained image-editing task, not a request to generate a new room image.
 
@@ -12,15 +16,13 @@ prompt: |
   - Preserve every wall, room boundary, floor outline, floor material, door,
     window, opening, and architectural feature at exactly the same image location,
     size, shape, and orientation.
-  - Preserve all existing labels, colored annotations, and overlays exactly as
-    shown. Do not rewrite, move, duplicate, corrupt, cover, or remove them.
   - Do not add, remove, move, resize, repaint, or reinterpret any room geometry.
     Do not invent new doors, windows, wall openings, alcoves, or partitions.
 
   Only add furniture inside the existing floor boundary. Keep all furniture clear
-  of walls, doors, windows, openings, labels, and annotations. Leave usable walking
-  paths and door-swing/access clearance. Arrange the requested furniture as a
-  coherent top-down layout with realistic scale, spacing, and orientation.
+  of walls, doors, windows, and openings. Leave usable walking paths and
+  door-swing/access clearance. Arrange the requested furniture as a coherent
+  top-down layout with realistic scale, spacing, and orientation.
 
   Match the requested furniture categories and quantities as closely as possible.
   Do not replace requested furniture with decorations, and do not add people,

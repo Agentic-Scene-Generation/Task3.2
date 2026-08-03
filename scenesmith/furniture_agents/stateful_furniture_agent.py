@@ -350,6 +350,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             render_name="empty_room_context",
             rendering_mode="furniture_selection",  # Disables grid/frame
             annotate_object_types=[],  # Disables all labels/bboxes
+            show_opening_labels=False,  # Qwen input must not contain text overlays
         )
 
     def _get_context_image_editor(self) -> Any:

@@ -832,6 +832,7 @@ def render_scene_for_agent_observation(
     side_view_start_azimuth_degrees: float | None = None,
     include_vertical_views: bool = True,
     override_side_view_count: int | None = None,
+    show_opening_labels: bool = True,
 ) -> list[Path]:
     """Render scene with config-driven layout for agent observation.
 
@@ -897,6 +898,8 @@ def render_scene_for_agent_observation(
             Defaults to True. Set to False for angled-only context image rendering.
         override_side_view_count: Optional override for number of side views. If
             provided, overrides cfg.side_view_count. Set to 1 for single angled view.
+        show_opening_labels: Whether to include door/window/opening metadata for
+            post-render text labels. Defaults to True for backward compatibility.
 
     Returns:
         List of Paths to rendered PNG files.
@@ -1038,7 +1041,7 @@ def render_scene_for_agent_observation(
             "current_furniture_id": current_furniture_id,
             "openings": (
                 [o.to_dict() for o in scene.room_geometry.openings]
-                if scene.room_geometry
+                if scene.room_geometry and show_opening_labels
                 else []
             ),
         }

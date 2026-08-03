@@ -156,6 +156,7 @@ class RenderingManager:
         side_view_start_azimuth_degrees: float | None = None,
         include_vertical_views: bool = True,
         override_side_view_count: int | None = None,
+        show_opening_labels: bool = True,
     ) -> Path:
         """Render scene with automatic content-based caching.
 
@@ -206,6 +207,8 @@ class RenderingManager:
                 Defaults to True. Set to False for angled-only context image rendering.
             override_side_view_count: Optional override for number of side views. If
                 provided, overrides cfg.side_view_count. Set to 1 for single angled view.
+            show_opening_labels: Whether to add door/window/opening text labels to
+                top views. Defaults to True to preserve all existing render behavior.
 
         Returns:
             Path to directory containing rendered images.
@@ -278,6 +281,8 @@ class RenderingManager:
             cache_key_parts.append("no_vert")
         if override_side_view_count is not None:
             cache_key_parts.append(f"sides_{override_side_view_count}")
+        if not show_opening_labels:
+            cache_key_parts.append("opening_labels_off")
 
         cache_key = "_".join(cache_key_parts)
 
@@ -323,6 +328,7 @@ class RenderingManager:
                     side_view_start_azimuth_degrees=side_view_start_azimuth_degrees,
                     include_vertical_views=include_vertical_views,
                     override_side_view_count=override_side_view_count,
+                    show_opening_labels=show_opening_labels,
                     taa_samples=int(getattr(effective_cfg, "taa_samples", 16)),
                 )
 
