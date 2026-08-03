@@ -91,6 +91,13 @@ def _cfg_get(cfg: Any, key: str, default: Any) -> Any:
     return getattr(cfg, key, default)
 
 
+def _append_session_input(
+    history: list[Any], new_input: list[Any]
+) -> list[Any]:
+    """Append multimodal input to session history using the SDK's default order."""
+    return history + new_input
+
+
 def log_agent_usage(result: RunResult, agent_name: str) -> None:
     """Log token usage from an agent run.
 
@@ -2802,6 +2809,13 @@ class BaseStatefulAgent(ABC):
 
         # Build input (may include context image if enabled).
         input_message = self._build_initial_design_input(instruction)
+        run_config = self._create_run_config()
+        if isinstance(input_message, list):
+            # The Agents SDK requires an explicit merge callback whenever list
+            # (multimodal) input is combined with session memory. This callback
+            # matches the SDK's normal string-input behavior: history first,
+            # followed by the new user message.
+            run_config.session_input_callback = _append_session_input
 
         # Designer runs with initial design instruction.
         designer_start = time.time()
@@ -2815,7 +2829,7 @@ class BaseStatefulAgent(ABC):
                     input=input_message,
                     session=self.designer_session,
                     max_turns=self.cfg.agents.designer_agent.max_turns,
-                    run_config=self._create_run_config(),
+                    run_config=run_config,
                 )
         except Exception as exc:
             self._record_llm_call_debug(

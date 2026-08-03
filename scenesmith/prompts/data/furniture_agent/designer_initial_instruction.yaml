@@ -1,5 +1,5 @@
 name: "designer_initial_instruction"
-version: "1.0"
+version: "1.2"
 description: "Instructions for initial furniture design phase"
 template_variables:
   - "scene_description"
@@ -11,22 +11,51 @@ prompt: |
   Create the initial furniture layout for this room.
 
   {% if has_reference_image %}
-  A reference image showing a possible design arrangement has been provided above
-  for inspiration. This shows one way a room with similar dimensions could be furnished.
-  Use the concepts and ideas from this reference to inform your design, but adapt them
-  creatively to the actual room.
+  IMPORTANT: The reference image above is an AI-edited concept image, NOT a render
+  of the current 3D scene. Furniture visible in that image does not exist in the
+  scene. The concept image may also change the camera perspective or distort room
+  geometry, so never infer exact coordinates, dimensions, doors, windows, walls, or
+  current scene contents from it.
 
-  Call observe_scene to see the ACTUAL empty room you're designing, then use ideas
-  from the reference to create an appropriate furniture layout.
+  Use the concept image as the preferred reference for furniture selection and
+  placement. Reproduce its visible layout as closely as the actual room permits,
+  including furniture categories, functional zones, relative positions, facing
+  directions, groupings, spacing patterns, and ordering along walls. Preserve the
+  image's main anchor objects and layout topology instead of independently
+  redesigning the room.
+
+  Call observe_scene to inspect the ACTUAL empty room. Treat observe_scene plus the
+  structured scene state as authoritative for room geometry, coordinates, doors,
+  windows, and existing scene contents, while treating the concept image as the
+  preferred target for furniture arrangement.
+
+  Depart from the reference arrangement only when an appropriate asset cannot be
+  retrieved or generated, or when the referenced placement cannot be made valid
+  after reasonable attempts to resolve polygon containment, door/window clearance,
+  collisions, or required accessibility. When a departure is necessary, make the
+  smallest local change possible: first try the closest suitable asset substitute,
+  then adjust only the affected object's position, yaw, or spacing while preserving
+  its functional zone, neighbors, grouping, and facing relationship. Do not use one
+  local conflict as a reason to broadly redesign unaffected parts of the layout.
+
+  If the scene requirements contain furniture that is absent from the concept
+  image, add it in the least disruptive valid location without moving image-matched
+  anchors unnecessarily. The explicit scene requirements remain authoritative for
+  required inventory and constraints.
+
+  You MUST generate and place every required furniture item with the provided tools,
+  even when it is already visible in the concept image. Do not claim that an item
+  was placed unless its tool call succeeded. Never call finish_stage based on the
+  concept image alone.
   {% else %}
   Call observe_scene to see the empty room, then design and place appropriate furniture.
   {% endif %}
 
   ## Initial Design Workflow:
-  {% if has_reference_image %}1. Review the reference image above to extract design ideas and concepts
-  2. Call observe_scene to see the ACTUAL empty room you're designing
-  3. Synthesize: Think about how to apply reference ideas to the actual room layout
-  4. Create TODO list based on room requirements, informed by reference concepts
+  {% if has_reference_image %}1. Call observe_scene to inspect the ACTUAL empty room and its authoritative geometry
+  2. Extract the concept image's furniture groups, anchor objects, relative positions, facing directions, and zone assignments
+  3. Map that reference arrangement onto the authoritative room geometry and preserve it as closely as possible; use minimal local adjustments only for unavailable assets or unresolved validity conflicts
+  4. Create a TODO list for every required item and complete it through successful tool calls
   {% else %}1. Call observe_scene to see the empty room and understand the space
   2. Create TODO list based on room requirements
   {% endif %}
@@ -69,7 +98,10 @@ prompt: |
   **CRITICAL - Collision-Free Completion:**
   Before finishing, you MUST call check_physics and verify zero collisions exist.
   You MUST NOT complete your work while ANY collisions remain. If collisions exist,
-  resolve them by repositioning or removing objects. Deletion is better than collision.
+  preserve the reference layout as much as possible and resolve them with the
+  smallest local position, yaw, or spacing change. Delete only optional,
+  non-required decoration when local repair is impossible; never omit explicitly
+  required furniture solely to resolve a collision.
 
   **CRITICAL - Layout Plausibility Completion:**
   Before finishing, call observe_scene and verify that the main furniture anchors

@@ -27,6 +27,9 @@ from scenesmith.agent_utils.base_stateful_agent import (
     HardStateEvaluation,
     log_agent_usage,
 )
+from scenesmith.agent_utils.context_image_generation import (
+    OpenAICompatibleContextImageEditor,
+)
 from scenesmith.agent_utils.furniture_layout_planning import (
     build_bedroom_anchor_plan,
     format_bedroom_anchor_guidance,
@@ -203,6 +206,10 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
 
         # Context image for designer initialization (furniture-specific).
         self.context_image_path: Path | None = None
+        # Lazily created only when context generation and qwen_local are enabled.
+        self._qwen_context_image_editor: (
+            OpenAICompatibleContextImageEditor | None
+        ) = None
         # Populated per scene only when the optional feature is enabled.
         self._placement_order_reference: str = ""
 
@@ -343,9 +350,37 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             render_name="empty_room_context",
             rendering_mode="furniture_selection",  # Disables grid/frame
             annotate_object_types=[],  # Disables all labels/bboxes
+            show_opening_labels=False,  # Qwen input must not contain text overlays
         )
 
-    def _generate_and_save_context_image(self, scene: RoomScene) -> Path:
+    def _get_context_image_editor(self) -> Any:
+        """Resolve the editor after the top-level context switch is enabled."""
+        context_cfg = self.cfg.context_image_generation
+        backend = str(context_cfg.get("backend", "inherit")).strip().lower()
+        if backend == "inherit":
+            return self.asset_manager.image_generator
+        if backend == "qwen_local":
+            if self._qwen_context_image_editor is None:
+                qwen_cfg = context_cfg.get("qwen_local")
+                if qwen_cfg is None:
+                    raise ValueError(
+                        "context_image_generation.qwen_local config is required "
+                        "when backend=qwen_local"
+                    )
+                self._qwen_context_image_editor = (
+                    OpenAICompatibleContextImageEditor(qwen_cfg)
+                )
+            return self._qwen_context_image_editor
+        raise ValueError(
+            "Unknown context_image_generation.backend="
+            f"{backend!r}; expected 'inherit' or 'qwen_local'"
+        )
+
+    def _generate_and_save_context_image(
+        self,
+        scene: RoomScene,
+        image_editor: Any,
+    ) -> Path:
         """Generate and save context image for design guidance.
 
         Renders an empty room showing doors/windows, then uses image editing
@@ -367,14 +402,12 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         # Generate context image using the render as reference.
         # Save alongside the input render for easy association.
         output_path = room_render_dir / "context_edited.png"
-        image_path = (
-            self.asset_manager.image_generator.generate_furniture_context_image(
-                reference_image_path=room_render,
-                scene_description=scene.text_description,
-                width_m=scene.room_geometry.width,
-                length_m=scene.room_geometry.length,
-                output_path=output_path,
-            )
+        image_path = image_editor.generate_furniture_context_image(
+            reference_image_path=room_render,
+            scene_description=scene.text_description,
+            width_m=scene.room_geometry.width,
+            length_m=scene.room_geometry.length,
+            output_path=output_path,
         )
 
         console_logger.info(f"Context image saved to: {image_path}")
@@ -408,8 +441,14 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
 
         # Generate context image if configured. If generation fails, continue without it.
         if self.cfg.context_image_generation.enabled:
+            # Resolve static backend configuration outside the runtime fail-open
+            # block. This branch is unreachable when the feature is disabled.
+            image_editor = self._get_context_image_editor()
             try:
-                self.context_image_path = self._generate_and_save_context_image(scene)
+                self.context_image_path = self._generate_and_save_context_image(
+                    scene,
+                    image_editor,
+                )
             except Exception as e:
                 console_logger.warning(
                     f"Context image generation failed, continuing without it: {e}"
