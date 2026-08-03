@@ -303,8 +303,8 @@ _RELATIONS = (
         "one subject on each side of target",
         dependencies=("required_count",),
         dependency_binding="any_endpoint",
-        repair_strategy="dining_seat_distribution",
-        repair_relation_types=("dining_seat_distribution",),
+        repair_strategy="table_seat_distribution",
+        repair_relation_types=("table_seat_distribution",),
     ),
     _relation(
         "corner_of_room",

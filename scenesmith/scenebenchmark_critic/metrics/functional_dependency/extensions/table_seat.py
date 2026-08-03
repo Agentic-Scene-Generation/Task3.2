@@ -1,4 +1,8 @@
-"""General dining-chair distribution checks for rectangular tables."""
+"""Prompt-authorized chair distribution checks for rectangular tables.
+
+The geometry rule applies to any rectangular table whenever the prompt
+explicitly requests a table-edge seating topology.
+"""
 
 from __future__ import annotations
 
@@ -29,11 +33,11 @@ from scenesmith.scenebenchmark_critic.intent_contract import (
     contract_relation_requested,
 )
 
-RELATION_TYPE = "dining_seat_distribution"
+RELATION_TYPE = "table_seat_distribution"
 _ONE_PER_EDGE_TABLE_GAP_M = 0.05
 
 
-def evaluate_dining_seat_distribution(
+def evaluate_table_seat_distribution(
     case_pack: dict[str, Any],
 ) -> list[dict[str, Any]]:
     """Check that chairs are centered or evenly spaced along each table edge."""
@@ -43,36 +47,68 @@ def evaluate_dining_seat_distribution(
         if isinstance(obj, dict) and obj.get("id")
     ]
     objects_by_id = {str(obj["id"]): obj for obj in objects}
-    if not contract_relation_requested(case_pack, "one_per_side"):
-        # Dining chairs are not universally required to occupy every table
-        # edge; only an explicit one-per-side request gives that topology a
-        # hard semantic meaning.
-        return []
+    task_instruction = str(case_pack.get("task_instruction") or "")
+    requested_one_per_edge = _requests_one_seat_per_edge(task_instruction)
     dining_context = is_dining_context(
-        task_instruction=str(case_pack.get("task_instruction") or ""),
+        task_instruction=task_instruction,
         room_type=str(case_pack.get("room_type") or ""),
     )
-    one_per_edge = contract_relation_requested(case_pack, "one_per_side")
+    if not (
+        contract_relation_requested(case_pack, "one_per_side")
+        or requested_one_per_edge
+        or dining_context
+    ):
+        # Outside an explicit dining context, only a prompt-authorized seating
+        # topology may enable this table-edge rule.
+        return []
+    long_side_distribution = _requests_long_side_distribution(case_pack)
+    single_long_side_distribution = _requests_single_long_side_distribution(case_pack)
+    single_short_side_seat_distribution = _requests_single_short_side_seat_distribution(
+        case_pack
+    )
+    # Legacy direct evaluator callers do not always carry a compiled contract.
+    # Keep their explicit four-edge dining prompt behavior, while the new
+    # long-side contract remains distinct from one-seat-per-edge positioning.
+    one_per_edge = requested_one_per_edge and not long_side_distribution
     tables = [
         obj
         for obj in objects
-        if (_is_dining_table(obj) or (dining_context and _is_generic_table(obj)))
+        if (
+            _is_dining_table(obj)
+            or (dining_context and _is_generic_table(obj))
+            or (long_side_distribution and _is_generic_table(obj))
+        )
         and not _is_round_table(obj)
     ]
     seats_by_table = _positionally_associated_seats(
-        tables, objects_by_id, include_unassociated=one_per_edge
+        tables,
+        objects_by_id,
+        include_unassociated=one_per_edge or long_side_distribution,
     )
     constraints = contract_constraints(
         case_pack,
         relations=("one_per_side",),
         include_auxiliary=False,
     )
+    if long_side_distribution:
+        bound_table_ids = {
+            table_id
+            for constraint in constraints
+            for table_id in bound_ids(constraint.get("targets"), objects)
+        }
+        if bound_table_ids:
+            tables = [obj for obj in tables if str(obj["id"]) in bound_table_ids]
     results: list[dict[str, Any]] = []
     for table in tables:
         result = _evaluate_table(
             table,
             seats_by_table.get(str(table["id"]), []),
             enforce_one_per_edge=one_per_edge,
+            enforce_long_side_distribution=long_side_distribution,
+            enforce_single_long_side_distribution=single_long_side_distribution,
+            enforce_single_short_side_seat_distribution=(
+                single_short_side_seat_distribution
+            ),
         )
         if result is not None:
             table_id = str(table["id"])
@@ -95,6 +131,9 @@ def _evaluate_table(
     seats: list[dict[str, Any]],
     *,
     enforce_one_per_edge: bool = False,
+    enforce_long_side_distribution: bool = False,
+    enforce_single_long_side_distribution: bool = False,
+    enforce_single_short_side_seat_distribution: bool = False,
 ) -> dict[str, Any] | None:
     center = bbox_center_xy(table)
     seats = [seat for seat in seats if "bench" not in _object_identity_text(seat)]
@@ -152,6 +191,48 @@ def _evaluate_table(
 
     diagnostics: list[dict[str, Any]] = []
     failures: list[str] = []
+    long_edges = {"front", "back"} if width >= depth else {"left", "right"}
+    topology_failures: list[str] = []
+    if enforce_long_side_distribution:
+        short_edges = sorted(set(grouped) - long_edges)
+        short_edge_seats = {
+            edge: sorted(str(seat["id"]) for seat, _position in grouped[edge])
+            for edge in short_edges
+        }
+        occupied_short_edges = [edge for edge in short_edges if grouped[edge]]
+        if enforce_single_short_side_seat_distribution:
+            if (
+                len(occupied_short_edges) != 1
+                or len(short_edge_seats[occupied_short_edges[0]]) != 1
+            ):
+                topology_failures.append(
+                    "chairs must occupy exactly one short table edge with one chair; "
+                    "keep the opposite short edge clear"
+                )
+        elif any(short_edge_seats.values()):
+            seat_ids = sorted(
+                seat_id for seats in short_edge_seats.values() for seat_id in seats
+            )
+            topology_failures.append(
+                "chairs must occupy only the two long table edges; move "
+                + ", ".join(f"`{seat_id}`" for seat_id in seat_ids)
+                + " to a long edge"
+            )
+        occupied_long_edges = [edge for edge in sorted(long_edges) if grouped[edge]]
+        long_edge_counts = [len(grouped[edge]) for edge in occupied_long_edges]
+        if enforce_single_long_side_distribution and len(occupied_long_edges) != 1:
+            topology_failures.append(
+                "chairs must occupy exactly one long table edge; keep the opposite long edge clear"
+            )
+        elif not enforce_single_long_side_distribution and (
+            len(long_edge_counts) != 2
+            or not all(long_edge_counts)
+            or long_edge_counts[0] != long_edge_counts[1]
+        ):
+            topology_failures.append(
+                "chairs must be split into equal nonzero groups on the two long table edges"
+            )
+    failures.extend(topology_failures)
     for edge, members in grouped.items():
         if not members:
             continue
@@ -285,21 +366,36 @@ def _evaluate_table(
                 )
     if not diagnostics:
         return None
+    topology_repair_slots = (
+        _topology_repair_slots(
+            seat_local_positions,
+            center=center,
+            width=width,
+            depth=depth,
+            tangent_x=tangent_x,
+            tangent_y=tangent_y,
+            long_edges=long_edges,
+            single_long_side=enforce_single_long_side_distribution,
+            single_short_side=enforce_single_short_side_seat_distribution,
+        )
+        if topology_failures
+        else []
+    )
     table_id = str(table["id"])
     related = sorted(str(seat["id"]) for seat in seats)
     failed = bool(failures)
     reason = (
-        "Dining chairs on each rectangular table edge must be centered when alone "
+        "Chairs on each rectangular table edge must be centered when alone "
         "and centered in equal edge segments when multiple chairs share the edge. "
         "For two chairs, this keeps the two end gaps equal and the middle gap "
         "approximately twice either end gap; apply the same equal-segment rule "
         "for any number of chairs. "
-        "For a dining chair, use an exact table-local slot and do not use generic "
+        "Use an exact table-local slot and do not use generic "
         "center snapping or shift the chair along the edge normal to resolve a "
         "door conflict; move the table or door-compatible layout instead. "
         + "; ".join(failures)
         if failed
-        else "Dining chairs are centered when alone and centered in equal segments along their respective table edges."
+        else "Chairs are centered when alone and centered in equal segments along their respective table edges."
     )
     return {
         "check_id": f"fd_{table_id}_{RELATION_TYPE}",
@@ -315,9 +411,16 @@ def _evaluate_table(
         "diagnostics": {
             "seat_slots": diagnostics,
             "coordinated_one_per_edge": enforce_one_per_edge,
+            "long_side_distribution": enforce_long_side_distribution,
+            "single_long_side_distribution": enforce_single_long_side_distribution,
+            "single_short_side_seat_distribution": (
+                enforce_single_short_side_seat_distribution
+            ),
+            "long_edges": sorted(long_edges),
+            "topology_repair_slots": topology_repair_slots,
         },
         "evidence": {"distribution": "table_local_equal_edge_segments"},
-        "evaluation_source": "scenesmith_dining_seat_distribution",
+        "evaluation_source": "scenesmith_table_seat_distribution",
         "scoring_tier": "core",
     }
 
@@ -341,6 +444,137 @@ def _equal_edge_segment_slots(edge_length: float, count: int) -> list[float]:
     return [
         -edge_length / 2.0 + (index + 0.5) * segment_length for index in range(count)
     ]
+
+
+def _topology_repair_slots(
+    seats: list[tuple[dict[str, Any], float, float]],
+    *,
+    center: tuple[float, float],
+    width: float,
+    depth: float,
+    tangent_x: tuple[float, float],
+    tangent_y: tuple[float, float],
+    long_edges: set[str],
+    single_long_side: bool,
+    single_short_side: bool,
+) -> list[dict[str, Any]]:
+    """Return the minimum-motion complete seating topology for deterministic repair."""
+    long_edges_ordered = sorted(long_edges)
+    if single_long_side:
+        long_edges_ordered = long_edges_ordered[:1]
+    short_edges = sorted({"left", "right", "front", "back"} - long_edges)
+    long_seat_count = len(seats) - int(single_short_side)
+    if (
+        not seats
+        or long_seat_count <= 0
+        or long_seat_count % len(long_edges_ordered) != 0
+    ):
+        return []
+    per_long_edge = long_seat_count // len(long_edges_ordered)
+    desired_edges = [
+        (edge, slot)
+        for edge in long_edges_ordered
+        for slot in _equal_edge_segment_slots(
+            depth if edge in {"left", "right"} else width, per_long_edge
+        )
+    ]
+    short_edge_options = short_edges if single_short_side else [None]
+    best: tuple[float, tuple[tuple[str, float], ...]] | None = None
+    for short_edge in short_edge_options:
+        edges = list(desired_edges)
+        if short_edge is not None:
+            edges.append((short_edge, 0.0))
+        for assignment in itertools.permutations(edges):
+            distance = 0.0
+            for (seat, local_x, local_y), (edge, slot) in zip(seats, assignment):
+                target_x, target_y = _one_per_edge_target_local(
+                    seat,
+                    edge,
+                    slot,
+                    width=width,
+                    depth=depth,
+                    tangent_x=tangent_x,
+                    tangent_y=tangent_y,
+                )
+                distance += (local_x - target_x) ** 2 + (local_y - target_y) ** 2
+            candidate = (distance, assignment)
+            if best is None or candidate < best:
+                best = candidate
+    if best is None:
+        return []
+    slots: list[dict[str, Any]] = []
+    for (seat, _local_x, _local_y), (edge, slot) in zip(seats, best[1]):
+        target_x, target_y = _one_per_edge_target_local(
+            seat,
+            edge,
+            slot,
+            width=width,
+            depth=depth,
+            tangent_x=tangent_x,
+            tangent_y=tangent_y,
+        )
+        target_xy = (
+            center[0] + target_x * tangent_x[0] + target_y * tangent_y[0],
+            center[1] + target_x * tangent_x[1] + target_y * tangent_y[1],
+        )
+        slots.append(
+            {
+                "seat_id": str(seat["id"]),
+                "edge": edge,
+                "target_center_xy_m": [round(value, 6) for value in target_xy],
+                "current_front_xy": [round(value, 6) for value in front_vector(seat)],
+                "facing_target_xy_m": [round(value, 6) for value in center],
+            }
+        )
+    return slots
+
+
+def _requests_long_side_distribution(case_pack: dict[str, Any]) -> bool:
+    """Return whether the compiled table-seat contract names long sides."""
+    return any(
+        re.search(r"\blong\s+(?:side|edge)s?\b", str(row.get("evidence_span") or ""))
+        for row in contract_constraints(
+            case_pack, relations=("one_per_side",), include_auxiliary=False
+        )
+    )
+
+
+def _requests_single_long_side_distribution(case_pack: dict[str, Any]) -> bool:
+    """Return whether the compiled contract requires one occupied long edge."""
+    instruction = _table_seat_contract_evidence(case_pack)
+    return _requests_long_side_distribution(case_pack) and bool(
+        re.search(r"\b(?:one|single)\s+long\s+(?:side|edge)\b", instruction)
+        and re.search(
+            r"\bopposite\s+long\s+(?:side|edge)\b[^.]{0,80}\b(?:free|clear)\b",
+            instruction,
+        )
+    )
+
+
+def _requests_single_short_side_seat_distribution(case_pack: dict[str, Any]) -> bool:
+    """Return whether the compiled contract requires one occupied short edge."""
+    instruction = _table_seat_contract_evidence(case_pack)
+    return _requests_long_side_distribution(case_pack) and bool(
+        re.search(
+            r"\b(?:one|single)(?:\s+[a-z]+){0,3}\s+(?:chair|seat)s?\b"
+            r"[^.]{0,100}\b(?:on|along|at)\s+(?:one\s+)?short\s+(?:side|edge)\b",
+            instruction,
+        )
+        and re.search(
+            r"\bopposite\s+short\s+(?:side|edge)\b[^.]{0,80}\b(?:free|clear)\b",
+            instruction,
+        )
+    )
+
+
+def _table_seat_contract_evidence(case_pack: dict[str, Any]) -> str:
+    """Join model-authored evidence for the table-seat topology contract."""
+    return " ".join(
+        str(row.get("evidence_span") or "").lower()
+        for row in contract_constraints(
+            case_pack, relations=("one_per_side",), include_auxiliary=False
+        )
+    )
 
 
 def _seat_tangent_span(seat: dict[str, Any], edge: str, table_yaw: float) -> float:

@@ -76,6 +76,10 @@ _CATEGORY_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("rocking_chair", ("rocking chair",)),
     ("armchair", ("armchair", "arm chair")),
     ("dining_table", ("dining table",)),
+    (
+        "conference_table",
+        ("conference table", "meeting table", "boardroom table"),
+    ),
     ("coffee_table", ("coffee table",)),
     ("side_table", ("side table", "end table", "accent table")),
     ("filing_cabinet", ("filing cabinet", "file cabinet")),
@@ -215,8 +219,10 @@ def build_intent_contract(
     constraints.extend(
         _room_ontology_constraints(normalized_room, lowered, task_spec=task_spec)
     )
+    constraints = _coalesce_table_edge_seating_constraints(constraints)
     constraints = _deduplicate_constraints(constraints)
     constraints = _apply_task_spec_contract_metadata(constraints, task_spec)
+    constraints = _coalesce_table_edge_seating_constraints(constraints)
     constraints = _deduplicate_constraints(constraints)
     task_spec_payload = _task_spec_payload(task_spec)
     return {
@@ -859,7 +865,14 @@ def _selector_category_family(category: str) -> set[str]:
             "stool",
             "bench",
         },
-        "table": {"table", "dining_table", "coffee_table", "desk"},
+        "table": {
+            "table",
+            "dining_table",
+            "conference_table",
+            "coffee_table",
+            "side_table",
+            "desk",
+        },
         "desk": {"desk", "teacher_desk", "student_desk", "reception_desk"},
     }
     if category in families:
@@ -1421,7 +1434,91 @@ def _explicit_prompt_constraints(prompt: str, lowered: str) -> list[dict[str, An
                 evidence_span=_first_sentence_with(lowered, "each"),
             )
         )
+    if re.search(
+        r"\b(?:chairs?|seats?)\b[^.]{0,100}\b(?:evenly\s+spaced|equal(?:ly)?\s+spaced|distributed\s+evenly)\b[^.]{0,100}\b(?:long\s+side|long\s+edge)s?\b",
+        lowered,
+    ) and re.search(r"\b(?:\w+\s+){0,2}table\b", lowered):
+        constraints.append(
+            _constraint(
+                # Keep the established relation name for contract compatibility:
+                # the evidence span distinguishes multi-seat long-edge layouts
+                # from the one-chair-per-edge dining topology.
+                "one_per_side",
+                {"category": "chair", "quantifier": "all"},
+                _long_side_layout_table_selector(lowered),
+                source="explicit_prompt",
+                evidence_span=_first_sentence_with(lowered, "long side"),
+            )
+        )
+        if re.search(
+            r"\bopposite\s+long\s+(?:side|edge)\b[^.]{0,100}\b(?:free|clear)\b",
+            lowered,
+        ):
+            constraints.append(
+                _constraint(
+                    "one_per_side",
+                    {"category": "chair", "quantifier": "all"},
+                    _long_side_layout_table_selector(lowered),
+                    source="explicit_prompt",
+                    evidence_span=_first_sentence_with(lowered, "opposite long"),
+                )
+            )
+    if re.search(
+        r"\b(?:chair|seat)s?\b[^.]{0,100}\bcentered\s+(?:along|on|at)\s+"
+        r"(?:one\s+)?short\s+(?:side|edge)\b",
+        lowered,
+    ) and re.search(
+        r"\bopposite\s+short\s+(?:side|edge)\b[^.]{0,100}\b(?:free|clear)\b",
+        lowered,
+    ):
+        constraints.append(
+            _constraint(
+                "one_per_side",
+                {"category": "chair", "quantifier": "all"},
+                _long_side_layout_table_selector(lowered),
+                source="explicit_prompt",
+                evidence_span=_first_sentence_with(lowered, "short side"),
+            )
+        )
+        constraints.append(
+            _constraint(
+                "one_per_side",
+                {"category": "chair", "quantifier": "all"},
+                _long_side_layout_table_selector(lowered),
+                source="explicit_prompt",
+                evidence_span=_first_sentence_with(lowered, "opposite short"),
+            )
+        )
     return constraints
+
+
+def _long_side_layout_table_selector(prompt: str) -> dict[str, Any]:
+    """Resolve the named table type without broadening to incidental tables.
+
+    A long-side seating instruction refers back to the table introduced in the
+    prompt.  Keep a typed noun such as ``conference table`` as a typed
+    selector, otherwise a generated side/auxiliary table can make the endpoint
+    binding ambiguous.  Bare ``table`` remains supported for prompts that do
+    not provide a more specific noun.
+    """
+    table_categories = {
+        "dining_table",
+        "conference_table",
+        "coffee_table",
+        "side_table",
+    }
+    matches: list[tuple[int, str]] = []
+    for category, aliases in _CATEGORY_PATTERNS:
+        if category not in table_categories:
+            continue
+        for alias in aliases:
+            match = re.search(r"\b" + re.escape(alias) + r"\b", prompt)
+            if match is not None:
+                matches.append((match.start(), category))
+    if matches:
+        _, category = min(matches)
+        return {"category": category, "quantifier": "all"}
+    return {"category": "table", "quantifier": "all"}
 
 
 def _explicit_required_count_constraints(prompt: str) -> list[dict[str, Any]]:
@@ -1694,6 +1791,105 @@ def _prompt_explicitly_wall_mounts_television(prompt: str) -> bool:
     ):
         return False
     return True
+
+
+def _coalesce_table_edge_seating_constraints(
+    constraints: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Give one geometry rule ownership of an LLM-proposed table seating layout.
+
+    The compiler may describe one topology as a long-side distribution, a
+    short-edge centered seat, and chair-facing rows.  Those are one coupled
+    placement requirement, not independent pairwise relations.  Preserve the
+    model's verbatim evidence while emitting the established `one_per_side`
+    contract relation, which is implemented by the rectangular table-seat
+    evaluator.
+    """
+    topology_groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for constraint in constraints:
+        if not _is_table_edge_topology_constraint(constraint):
+            continue
+        subjects = constraint.get("subjects") or {}
+        targets = constraint.get("targets") or {}
+        key = (
+            _normalize_selector_category(subjects.get("category")),
+            _normalize_selector_category(targets.get("category")),
+        )
+        topology_groups.setdefault(key, []).append(constraint)
+    if not topology_groups:
+        return constraints
+
+    result: list[dict[str, Any]] = []
+    emitted_groups: set[tuple[str, str]] = set()
+    for constraint in constraints:
+        group_key = _table_edge_topology_group_key(constraint)
+        if group_key is not None:
+            if group_key in emitted_groups:
+                continue
+            emitted_groups.add(group_key)
+            members = topology_groups[group_key]
+            primary = max(
+                members,
+                key=lambda item: int((item.get("subjects") or {}).get("count") or 0),
+            )
+            merged = dict(primary)
+            merged["relation"] = "one_per_side"
+            evidence_spans = [
+                str(item.get("evidence_span") or "").strip()
+                for item in members
+                if str(item.get("evidence_span") or "").strip()
+            ]
+            merged["evidence_span"] = " ".join(dict.fromkeys(evidence_spans))
+            result.append(merged)
+            continue
+        if _is_table_edge_seating_facing_constraint(constraint, topology_groups):
+            continue
+        result.append(constraint)
+    return result
+
+
+def _is_table_edge_topology_constraint(constraint: dict[str, Any]) -> bool:
+    relation = str(constraint.get("relation") or "")
+    if relation not in {"one_per_side", "distributed_evenly"}:
+        return False
+    subjects = constraint.get("subjects") or {}
+    targets = constraint.get("targets") or {}
+    subject = _normalize_selector_category(subjects.get("category"))
+    target = _normalize_selector_category(targets.get("category"))
+    evidence = str(constraint.get("evidence_span") or "").lower()
+    return bool(
+        ("chair" in subject or "seat" in subject)
+        and "table" in target
+        and re.search(r"\b(?:long|short)\s+(?:side|edge)s?\b", evidence)
+    )
+
+
+def _table_edge_topology_group_key(
+    constraint: dict[str, Any],
+) -> tuple[str, str] | None:
+    if not _is_table_edge_topology_constraint(constraint):
+        return None
+    subjects = constraint.get("subjects") or {}
+    targets = constraint.get("targets") or {}
+    return (
+        _normalize_selector_category(subjects.get("category")),
+        _normalize_selector_category(targets.get("category")),
+    )
+
+
+def _is_table_edge_seating_facing_constraint(
+    constraint: dict[str, Any],
+    topology_groups: dict[tuple[str, str], list[dict[str, Any]]],
+) -> bool:
+    if str(constraint.get("relation") or "") != "faces":
+        return False
+    subjects = constraint.get("subjects") or {}
+    targets = constraint.get("targets") or {}
+    key = (
+        _normalize_selector_category(subjects.get("category")),
+        _normalize_selector_category(targets.get("category")),
+    )
+    return key in topology_groups
 
 
 def _task_spec_constraints(task_spec: Any | None) -> list[dict[str, Any]]:
@@ -2003,6 +2199,11 @@ def _normalize_external_constraint(raw: dict[str, Any]) -> dict[str, Any] | None
         return None
     subjects = _normalize_selector(raw.get("subjects") or raw.get("subject"))
     targets = _normalize_selector(raw.get("targets") or raw.get("target"))
+    if targets is None and relation in _WALL_TARGET_RELATIONS:
+        raw_target = raw.get("targets") or raw.get("target")
+        target_text = " ".join(str(raw_target or "").lower().split())
+        if target_text in _WALL_TARGET_CATEGORIES:
+            targets = {"category": target_text, "quantifier": "all"}
     if subjects is None:
         return None
     if (
@@ -2336,6 +2537,11 @@ def _selector_matches_object(category: str, role: str, obj: dict[str, Any]) -> b
         and "dining" in identity,
         "dining_table": base_category in {"dining_table", "table"}
         and "dining" in identity,
+        "conference_table": base_category in {"conference_table", "table"}
+        and any(
+            token in identity
+            for token in ("conference table", "meeting table", "boardroom table")
+        ),
         "coffee_table": base_category in {"coffee_table", "table"}
         and "coffee" in identity,
         "tv_stand": base_category
@@ -2372,7 +2578,15 @@ def _selector_matches_object(category: str, role: str, obj: dict[str, Any]) -> b
         "rug": base_category == "rug"
         or base_category.endswith("_rug")
         or semantic_name.endswith("_rug"),
-        "table": base_category in {"table", "dining_table", "coffee_table", "desk"},
+        "table": base_category
+        in {
+            "table",
+            "dining_table",
+            "conference_table",
+            "coffee_table",
+            "side_table",
+            "desk",
+        },
         "chair": base_category
         in {
             "chair",

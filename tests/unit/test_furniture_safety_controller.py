@@ -855,7 +855,7 @@ class FurnitureSafetyControllerTest(unittest.TestCase):
         self.assertFalse(allowed)
         self.assertIn("already used 1", message)
 
-    def test_repeated_blocked_tools_end_designer_call(self) -> None:
+    def test_repeated_blocked_tools_leave_incomplete_scene_recoverable(self) -> None:
         controller = FurnitureSafetyController(
             {
                 "enabled": True,
@@ -870,8 +870,10 @@ class FurnitureSafetyControllerTest(unittest.TestCase):
         allowed, message = controller.record_move("bed_0")
 
         self.assertFalse(allowed)
-        self.assertTrue(controller.should_finish)
+        self.assertFalse(controller.should_finish)
         self.assertIn("STOP:", message)
+        self.assertIn("next critique-guided repair", message)
+        self.assertTrue(controller.record_move("nightstand_0")[0])
 
 
 if __name__ == "__main__":

@@ -594,7 +594,7 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         agent._repair_unresolved_prompt_contract_relations = lambda: (
             repair_calls.append(True)
             or [
-                "bound dining_chair_0 via dining_seat_distribution after hard constraint failure"
+                "bound dining_chair_0 via table_seat_distribution after hard constraint failure"
             ]
         )
 
@@ -603,7 +603,7 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
                 hard_valid=False,
                 hard_reasons=[
                     "unresolved prompt-core furniture relation: "
-                    "dining_seat_distribution:table_0"
+                    "table_seat_distribution:table_0"
                 ],
             )
         )
@@ -613,7 +613,7 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         self.assertEqual(
             actions,
             [
-                "bound dining_chair_0 via dining_seat_distribution "
+                "bound dining_chair_0 via table_seat_distribution "
                 "after hard constraint failure"
             ],
         )

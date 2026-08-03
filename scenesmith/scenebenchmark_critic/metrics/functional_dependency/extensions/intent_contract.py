@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 
 from typing import Any
 
@@ -53,6 +54,16 @@ def evaluate_intent_contract_extensions(
     results: list[dict[str, Any]] = []
     for constraint in contract_constraints(case_pack):
         relation = str(constraint.get("relation") or "")
+        if _is_long_side_table_seating_constraint(constraint):
+            # ``one_per_side`` is retained as the compiled relation name for
+            # checkpoint compatibility.  Its legacy group evaluator means one
+            # subject per cardinal edge, which conflicts with a prompt that
+            # explicitly puts several chairs on one table long edge.  The
+            # table-seat extension owns both endpoint binding and geometry.
+            # Check this before generic binding: a six-chair long-side clause
+            # is intentionally evaluated against a seven-chair mixed topology,
+            # so the generic count-based binder cannot identify a unique subset.
+            continue
         binding_result = _binding_state_result(case_pack, constraint, objects)
         if binding_result is not None:
             results.append(binding_result)
@@ -64,6 +75,15 @@ def evaluate_intent_contract_extensions(
         if result is not None:
             results.extend(result if isinstance(result, list) else [result])
     return results
+
+
+def _is_long_side_table_seating_constraint(constraint: dict[str, Any]) -> bool:
+    return str(constraint.get("relation") or "") == "one_per_side" and bool(
+        re.search(
+            r"\blong\s+(?:side|edge)s?\b",
+            str(constraint.get("evidence_span") or "").lower(),
+        )
+    )
 
 
 def _evaluate_between(

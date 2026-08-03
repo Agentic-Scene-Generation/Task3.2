@@ -41,12 +41,12 @@ console_logger = logging.getLogger(__name__)
 _ISSUE_LABELS = {"fail", "degraded"}
 _FURNITURE_REPAIR_STRATEGIES = (
     "furniture_relation",
-    "dining_seat_distribution",
+    "table_seat_distribution",
     "support_relation",
 )
 _FURNITURE_GATE_STRATEGIES = (
     "furniture_relation",
-    "dining_seat_distribution",
+    "table_seat_distribution",
 )
 _WINDOW_CLEARANCE_RELATION = "window_clearance"
 _WINDOW_CLEARANCE_MARGIN_M = 0.03
@@ -496,7 +496,7 @@ def _result_severity(result: dict[str, Any]) -> tuple[int, float]:
     diagnostics = result.get("diagnostics") or {}
     relation = str(result.get("relation_type") or "")
     magnitude = 0.0
-    if relation == "dining_seat_distribution":
+    if relation in {"table_seat_distribution", "dining_seat_distribution"}:
         for slot in diagnostics.get("seat_slots") or []:
             magnitude += max(
                 0.0,
@@ -660,7 +660,25 @@ def _clear_access_repair_targets(
     return [target] if target is not None else []
 
 
-def _dining_repair_targets(context: _RepairHandlerContext) -> list[_RepairTarget]:
+def _table_seat_repair_targets(context: _RepairHandlerContext) -> list[_RepairTarget]:
+    topology_slots = context.diagnostics.get("topology_repair_slots") or []
+    if topology_slots:
+        topology_targets = [
+            target
+            for slot in topology_slots
+            if (
+                target := _target_from_facing_diagnostics(
+                    context.scene,
+                    object_id=str(slot.get("seat_id") or ""),
+                    relation_type=context.relation,
+                    check_id=context.check_id,
+                    diagnostics=slot,
+                )
+            )
+            is not None
+        ]
+        if len(topology_targets) == len(topology_slots):
+            return _coordinated_dining_targets(topology_targets, topology_slots)
     dining_targets: list[_RepairTarget] = []
     dining_diagnostics: list[dict[str, Any]] = []
     for slot in context.diagnostics.get("seat_slots") or []:
@@ -919,7 +937,9 @@ _REPAIR_TARGET_HANDLERS = {
     "generic_near_relation": _generic_near_repair_targets,
     "corner_of_room": _corner_repair_targets,
     "clear_access": _clear_access_repair_targets,
-    "dining_seat_distribution": _dining_repair_targets,
+    "table_seat_distribution": _table_seat_repair_targets,
+    # Existing checkpoints can contain the pre-generalization relation name.
+    "dining_seat_distribution": _table_seat_repair_targets,
     "workstation_focal_alignment": _workstation_focal_repair_targets,
     "seating_to_work_surface": _seating_surface_repair_targets,
     "room_center_alignment": _room_center_repair_targets,

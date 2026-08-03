@@ -19,6 +19,7 @@ from scenesmith.scenebenchmark_critic.relation_registry import (
     PUBLIC_RELATIONS,
     ROOM_RELATIVE_WALL_CATEGORIES,
     WALL_MOUNTED_CATEGORIES,
+    relation_spec,
 )
 from scenesmith.agent_utils.thinking import chat_template_kwargs_from_effort
 from scenesmith.utils.llm_json import parse_llm_json_object
@@ -110,6 +111,16 @@ Rules:
   any member of a repeated category, set count to 1 and quantifier to "minimum".
 - Emit each relation atomically. Do not cap the number of constraints and do not
   combine independent relations into one row.
+- For a seating topology explicitly described relative to a rectangular table
+  (long or short table sides, equal chair groups, or a side that must remain
+  free), use `one_per_side` with the chairs as subjects and the table as the
+  target. Keep the exact topology wording in `evidence_span`; this relation is
+  interpreted by the table-seat geometry evaluator and does not mean one chair
+  on every edge when the evidence specifies another distribution. Do not emit
+  separate `distributed_evenly` or `faces` rows for the same table-seat
+  topology.
+- `required_count` has no target: omit its `targets` field entirely. Only emit
+  `targets` for relations whose wording names a target.
 - Copy evidence_span verbatim from the input prompt. Do not use StageBrief,
   retrieved memory, or current object positions as evidence.
 - Output ONLY the JSON object, no other text.
@@ -184,6 +195,18 @@ _OBJECT_ALIASES: dict[str, tuple[str, list[str], str]] = {
         "large",
         ["side table", "side tables", "end table", "end tables"],
         "side_table",
+    ),
+    "conference table": (
+        "large",
+        [
+            "conference table",
+            "conference tables",
+            "meeting table",
+            "meeting tables",
+            "boardroom table",
+            "boardroom tables",
+        ],
+        "conference_table",
     ),
     "filing cabinet": (
         "large",
@@ -262,6 +285,7 @@ _SPECIFIC_INVENTORY_FAMILIES = {
     "side_table": "table",
     "coffee_table": "table",
     "dining_table": "table",
+    "conference_table": "table",
     "office_chair": "chair",
     "guest_chair": "chair",
     "student_chair": "chair",
@@ -278,6 +302,14 @@ _INVENTORY_CATEGORY_ALIASES = {
     "projection_screen": "instructional_surface",
     "projector_screen": "instructional_surface",
     "teaching_screen": "instructional_surface",
+    "presentation_screen": "instructional_surface",
+}
+
+_RELATION_TARGET_CATEGORY_FAMILIES = {
+    "against_wall": {"wall", *ROOM_RELATIVE_WALL_CATEGORIES},
+    "centered_in_room": {"room"},
+    "centered_on_wall": {"wall", *ROOM_RELATIVE_WALL_CATEGORIES},
+    "on_wall": {"wall", *ROOM_RELATIVE_WALL_CATEGORIES},
 }
 
 _VIRTUAL_CATEGORIES = {
@@ -388,10 +420,24 @@ def _prompt_mentions_standalone_generic(
             " ",
             remainder,
         )
-    return any(
-        _extract_count_before_alias(remainder, alias) > 0
-        for alias in _aliases_for_canonical(generic)
-    )
+    for alias in _aliases_for_canonical(generic):
+        alias_pattern = re.escape(alias.lower()).replace(r"\ ", r"\s+")
+        for match in re.finditer(
+            rf"(?<![a-z0-9]){alias_pattern}(?:s|es)?(?![a-z0-9])", remainder
+        ):
+            # Later references such as ``the table`` and ``this chair`` name
+            # an already-introduced specific object. They must not preserve a
+            # second generic inventory entry beside ``conference_table`` or
+            # another typed family member.
+            before = remainder[: match.start()].rstrip()
+            if re.search(
+                r"\b(?:the|this|that|these|those|its|their)(?:\s+[a-z]+){0,2}$",
+                before,
+            ):
+                continue
+            if _extract_count_before_alias(remainder, alias) > 0:
+                return True
+    return False
 
 
 def _remove_spurious_generic_inventory_entries(
@@ -440,6 +486,99 @@ def _extract_json_from_text(text: str) -> dict:
     the authority on whether the recovered payload is usable.
     """
     return parse_llm_json_object(text)
+
+
+def _repair_zero_target_relation_payloads(data: dict) -> dict:
+    """Keep valid LLM semantics while isolating malformed atomic constraints.
+
+    Local models commonly emit the schema's illustrative ``targets`` object on
+    every relation.  For a relation such as ``required_count`` that target is
+    structurally forbidden but semantically redundant.  Remove only that field
+    before validation. A relation that requires a target but emits an empty
+    target object is dropped independently. The same applies when a relation
+    has a fixed endpoint family (for example, ``against_wall``) but the model
+    supplies an incompatible target. Retaining the LLM inventory is more useful
+    than discarding the entire compilation, and prompt-originated contract
+    compilation still supplies explicit spatial constraints.
+    """
+    constraints = data.get("intent_constraints")
+    if not isinstance(constraints, list):
+        return data
+
+    repaired_constraints: list[object] = []
+    changed = False
+    for constraint in constraints:
+        if not isinstance(constraint, dict):
+            repaired_constraints.append(constraint)
+            continue
+        relation = str(constraint.get("relation") or "").strip().lower()
+        try:
+            has_no_targets = relation_spec(relation).target_arity == 0
+        except ValueError:
+            has_no_targets = False
+        if has_no_targets and "targets" in constraint:
+            repaired = dict(constraint)
+            repaired.pop("targets", None)
+            repaired_constraints.append(repaired)
+            changed = True
+        elif (
+            not has_no_targets
+            and isinstance(constraint.get("targets"), dict)
+            and not str(constraint["targets"].get("category") or "").strip()
+        ):
+            changed = True
+        elif (
+            isinstance(constraint.get("targets"), dict)
+            and (
+                allowed_target_categories := _RELATION_TARGET_CATEGORY_FAMILIES.get(
+                    relation
+                )
+            )
+            is not None
+            and (
+                "_".join(
+                    str(constraint["targets"].get("category") or "")
+                    .strip()
+                    .lower()
+                    .split()
+                )
+                not in allowed_target_categories
+            )
+        ):
+            # A model can describe a chair centered on a table short edge as
+            # `centered_on_wall` because the schema has no table-edge relation.
+            # Preserve this explicit semantic proposal as the existing
+            # table-seat relation instead of discarding the short-edge evidence.
+            if _is_table_edge_seating_payload(constraint):
+                repaired = dict(constraint)
+                repaired["relation"] = "one_per_side"
+                repaired_constraints.append(repaired)
+                changed = True
+            else:
+                changed = True
+        else:
+            repaired_constraints.append(constraint)
+    if not changed:
+        return data
+    repaired_data = dict(data)
+    repaired_data["intent_constraints"] = repaired_constraints
+    return repaired_data
+
+
+def _is_table_edge_seating_payload(constraint: dict) -> bool:
+    """Whether an invalid wall relation is really chair seating at a table edge."""
+    relation = str(constraint.get("relation") or "").strip().lower()
+    subjects = constraint.get("subjects") or {}
+    targets = constraint.get("targets") or {}
+    subject = "_".join(str(subjects.get("category") or "").lower().split())
+    target = "_".join(str(targets.get("category") or "").lower().split())
+    evidence = str(constraint.get("evidence_span") or "").lower()
+    return bool(
+        relation == "centered_on_wall"
+        and ("chair" in subject or "seat" in subject)
+        and "table" in target
+        and re.search(r"\bshort\s+(?:side|edge)\b", evidence)
+    )
 
 
 def _normalize_stage_ownership(
@@ -560,9 +699,7 @@ def _normalize_stage_ownership(
         ):
             target.count = category_counts[target_category]
             target.quantifier = "all"
-        secondary_category = (
-            inventory_key(target.secondary_category) if target else ""
-        )
+        secondary_category = inventory_key(target.secondary_category) if target else ""
         if (
             target is not None
             and constraint.relation in {"between", "centered_between"}
@@ -909,7 +1046,7 @@ class TaskCompiler:
             }
 
         try:
-            data = _extract_json_from_text(raw)
+            data = _repair_zero_target_relation_payloads(_extract_json_from_text(raw))
             task_spec = _normalize_stage_ownership(
                 SceneTaskSpec.model_validate(data), prompt=prompt
             ).model_copy(

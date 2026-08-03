@@ -761,7 +761,14 @@ class FurnitureSafetyController:
         self.moves_by_object_this_call = {}
 
     def _record_tool_denial(self, message: str) -> str:
-        """Escalate repeated blocked tool calls into an explicit designer stop."""
+        """Escalate repeated blocked calls without stranding an invalid scene.
+
+        A tool-call model can ignore a textual stop instruction and continue
+        issuing calls in the same turn.  Ending the whole stage solely because
+        two calls were rejected makes that behavior unrecoverable when the
+        initial layout still lacks required objects.  A hard-valid checkpoint,
+        when available, is the only safe basis for ending the stage here.
+        """
         self.blocked_tool_calls_this_call += 1
         if (
             self.active_designer_call
@@ -769,11 +776,21 @@ class FurnitureSafetyController:
             and self.blocked_tool_calls_this_call
             >= self.max_blocked_tool_calls_per_designer_call
         ):
-            self.should_finish = True
+            if self.best_scene_state is not None:
+                self.should_finish = True
+                next_step = (
+                    "A hard-valid checkpoint is available, so finish the furniture "
+                    "stage without further changes."
+                )
+            else:
+                next_step = (
+                    "Do not repeat rejected operations. Return a concise summary so "
+                    "the next critique-guided repair call can continue completing the "
+                    "required layout."
+                )
             return (
                 f"{message} STOP: {self.blocked_tool_calls_this_call} tool calls "
-                "have been blocked in this designer call. Return your concise "
-                "designer summary now without calling another tool."
+                f"have been blocked in this designer call. {next_step}"
             )
         return message
 

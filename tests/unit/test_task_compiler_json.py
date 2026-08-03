@@ -6,7 +6,9 @@ from scenesmith.scene_expert.task_compiler import (
     _extract_json_from_text,
     _fallback_spec_from_prompt,
     _normalize_stage_ownership,
+    _repair_zero_target_relation_payloads,
 )
+from scenesmith.scenebenchmark_critic.intent_contract import build_intent_contract
 
 
 def test_task_compiler_repairs_a_truncated_optional_constraint() -> None:
@@ -271,7 +273,9 @@ def test_fallback_recovers_specific_reception_inventory_and_stage_ownership() ->
     )
 
 
-def test_model_reception_contract_normalizes_repeated_anchors_and_virtual_entrance() -> None:
+def test_model_reception_contract_normalizes_repeated_anchors_and_virtual_entrance() -> (
+    None
+):
     spec = SceneTaskSpec.model_validate(
         {
             "room_type": "reception room",
@@ -315,7 +319,9 @@ def test_model_reception_contract_normalizes_repeated_anchors_and_virtual_entran
     normalized = _normalize_stage_ownership(spec)
 
     assert "entrance" not in normalized.required_large_objects
-    between = next(row for row in normalized.intent_constraints if row.relation == "between")
+    between = next(
+        row for row in normalized.intent_constraints if row.relation == "between"
+    )
     assert between.targets is not None
     assert between.targets.count == 2
     assert between.targets.secondary_count == 2
@@ -383,3 +389,171 @@ def test_model_inventory_keeps_explicit_generic_chair_beside_rocking_chair() -> 
     )
 
     assert normalized.required_large_objects == ["rocking_chair", "chair"]
+
+
+def test_model_inventory_does_not_duplicate_conference_table_from_anaphora() -> None:
+    prompt = (
+        "A meeting room with one rectangular conference table and three office chairs. "
+        "Arrange all three chairs evenly spaced along one long side of the table."
+    )
+    spec = SceneTaskSpec.model_validate(
+        {
+            "room_type": "meeting room",
+            "style": "professional",
+            "required_large_objects": [
+                "conference table",
+                "office chair",
+                "office chair",
+                "office chair",
+                "table",
+            ],
+        }
+    )
+
+    normalized = _normalize_stage_ownership(spec, prompt=prompt)
+
+    assert normalized.required_large_objects.count("conference table") == 1
+    assert normalized.required_large_objects.count("office chair") == 3
+    assert "table" not in normalized.required_large_objects
+
+
+def test_task_compiler_keeps_llm_meeting_inventory_when_required_count_has_target() -> (
+    None
+):
+    """A redundant target must not discard an otherwise complete LLM response."""
+    data = {
+        "room_type": "meeting room",
+        "style": "professional",
+        "required_large_objects": [
+            "conference table",
+            *(["office chair"] * 7),
+            "credenza",
+        ],
+        "required_wall_objects": ["presentation screen"],
+        "intent_constraints": [
+            {
+                "relation": "required_count",
+                "subjects": {"category": "office chair", "count": 7},
+                "targets": {"category": "room"},
+                "source": "explicit_prompt",
+                "evidence_span": "seven office chairs",
+            },
+            {
+                "relation": "one_per_side",
+                "subjects": {"category": "office chair", "count": 6},
+                "targets": {"category": "conference table"},
+                "source": "explicit_prompt",
+                "evidence_span": "six office chairs evenly spaced along the table's two long sides",
+            },
+            {
+                "relation": "centered_in_room",
+                "subjects": {"category": "conference table", "count": 1},
+                "targets": {},
+                "source": "explicit_prompt",
+                "evidence_span": "conference table centered in the room",
+            },
+            {
+                "relation": "against_wall",
+                "subjects": {"category": "credenza", "count": 1},
+                "targets": {"category": "conference table"},
+                "source": "explicit_prompt",
+                "evidence_span": "credenza against the opposite wall",
+            },
+        ],
+    }
+
+    repaired = _repair_zero_target_relation_payloads(data)
+    spec = _normalize_stage_ownership(
+        SceneTaskSpec.model_validate(repaired),
+        prompt=(
+            "A meeting room with one rectangular conference table and seven office "
+            "chairs. Arrange six office chairs evenly spaced along the table's two "
+            "long sides."
+        ),
+    )
+
+    assert spec.required_large_objects.count("conference table") == 1
+    assert spec.required_large_objects.count("office chair") == 7
+    assert "credenza" in spec.required_large_objects
+    assert spec.required_wall_objects == ["presentation screen"]
+    assert spec.intent_constraints[0].targets is None
+    assert [constraint.relation for constraint in spec.intent_constraints] == [
+        "required_count",
+        "one_per_side",
+    ]
+
+
+def test_task_compiler_preserves_llm_table_edge_topology_as_one_relation() -> None:
+    prompt = (
+        "A meeting room with one rectangular conference table and seven office chairs. "
+        "Arrange six office chairs in two equal groups of three, evenly spaced along "
+        "the table's two long sides. Place one remaining office chair centered along "
+        "one short side, facing the table. Keep the opposite short side free of chairs."
+    )
+    data = {
+        "room_type": "meeting room",
+        "style": "professional",
+        "required_large_objects": ["conference table", *("office chair",) * 7],
+        "intent_constraints": [
+            {
+                "relation": "distributed_evenly",
+                "subjects": {"category": "office chair", "count": 6},
+                "targets": {"category": "conference table", "count": 1},
+                "source": "explicit_prompt",
+                "evidence_span": (
+                    "six office chairs in two equal groups of three, evenly spaced "
+                    "along the table's two long sides"
+                ),
+            },
+            {
+                "relation": "centered_on_wall",
+                "subjects": {"category": "office chair", "count": 1},
+                "targets": {"category": "conference table", "count": 1},
+                "source": "explicit_prompt",
+                "evidence_span": "one remaining office chair centered along one short side",
+            },
+            {
+                "relation": "faces",
+                "subjects": {"category": "office chair", "count": 7},
+                "targets": {"category": "conference table", "count": 1},
+                "source": "explicit_prompt",
+                "evidence_span": "all chairs facing the table",
+            },
+        ],
+    }
+
+    spec = _normalize_stage_ownership(
+        SceneTaskSpec.model_validate(_repair_zero_target_relation_payloads(data)),
+        prompt=prompt,
+    )
+    contract = build_intent_contract(prompt, task_spec=spec)
+    topology = [
+        constraint
+        for constraint in contract["constraints"]
+        if constraint["relation"] == "one_per_side"
+        and constraint["targets"]["category"] == "conference_table"
+    ]
+
+    assert len(topology) == 1
+    assert "two long sides" in topology[0]["evidence_span"]
+    assert "one short side" in topology[0]["evidence_span"]
+    assert not any(
+        constraint["relation"] in {"distributed_evenly", "faces"}
+        and constraint["targets"].get("category") == "conference_table"
+        for constraint in contract["constraints"]
+    )
+
+
+def test_task_compiler_moves_llm_presentation_screen_to_wall_stage() -> None:
+    spec = _normalize_stage_ownership(
+        SceneTaskSpec.model_validate(
+            {
+                "room_type": "meeting room",
+                "style": "professional",
+                "required_large_objects": ["presentation screen"],
+            }
+        )
+    )
+
+    assert spec.required_large_objects == []
+    assert spec.required_wall_objects == ["instructional_surface"]

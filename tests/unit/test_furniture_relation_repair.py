@@ -166,7 +166,7 @@ def test_repairs_rotated_dining_slots_without_moving_unrelated_furniture(
 
     unresolved_before = unresolved_furniture_relation_failures(scene, config=config)
     assert {result.get("relation_type") for result in unresolved_before} == {
-        "dining_seat_distribution"
+        "table_seat_distribution"
     }
 
     fixes = improve_furniture_relations(scene, config=config)
@@ -179,7 +179,7 @@ def test_repairs_rotated_dining_slots_without_moving_unrelated_furniture(
     result = next(
         item
         for item in payload["results"]
-        if item.get("relation_type") == "dining_seat_distribution"
+        if item.get("relation_type") == "table_seat_distribution"
     )
     assert result["label"] == "pass"
     assert unresolved_furniture_relation_failures(scene, config=config) == []
@@ -231,12 +231,107 @@ def test_one_per_edge_dining_repair_is_atomic_and_table_local(tmp_path: Path) ->
     result = next(
         item
         for item in payload["results"]
-        if item.get("relation_type") == "dining_seat_distribution"
+        if item.get("relation_type") == "table_seat_distribution"
     )
     assert result["label"] == "pass"
     for slot in result["diagnostics"]["seat_slots"]:
         assert slot["aligned"]
         assert slot["facing_aligned"]
+
+
+def test_repairs_reversed_mixed_table_edge_topology_atomically(tmp_path: Path) -> None:
+    table = _object(
+        "conference_table_0", "conference_table", (0.0, 0.0, 0.4), (3.3, 0.8, 0.8)
+    )
+    positions = [
+        *[(-1.95, y) for y in (-0.95, 0.0, 0.95)],
+        *[(1.95, y) for y in (-0.95, 0.0, 0.95)],
+        (0.0, 0.95),
+    ]
+    seats = [
+        _object(
+            f"office_chair_{index}",
+            "office_chair",
+            (*position, 0.45),
+            (0.5, 0.5, 0.9),
+            yaw_deg=_facing_yaw(position),
+        )
+        for index, position in enumerate(positions)
+    ]
+    scene = _scene(
+        tmp_path,
+        table,
+        *seats,
+        text=(
+            "A meeting room with one rectangular conference table and seven office "
+            "chairs. Arrange six office chairs in two equal groups of three, evenly "
+            "spaced along the table's two long sides. Place one remaining office chair "
+            "centered along one short side, facing the table. Keep the opposite short "
+            "side free of chairs."
+        ),
+    )
+    config = CriticConfig(enabled=True, metrics=("functional_dependency",))
+
+    fixes = improve_furniture_relations(scene, config=config)
+
+    assert {fix.object_id for fix in fixes} <= {seat.object_id for seat in seats}
+    assert len(fixes) >= 6
+    result = next(
+        item
+        for item in evaluate_room_scene(scene, config=config, stage="test")["results"]
+        if item.get("relation_type") == "table_seat_distribution"
+    )
+    assert result["label"] == "pass"
+    edges = [slot["edge"] for slot in result["diagnostics"]["seat_slots"]]
+    assert edges.count("front") == 3
+    assert edges.count("back") == 3
+    assert edges.count("left") + edges.count("right") == 1
+
+
+def test_repairs_reversed_mixed_topology_for_generic_fallback_table(
+    tmp_path: Path,
+) -> None:
+    """A fallback table must not prevent an independent seating repair."""
+    table = _object("table_0", "table", (0.0, 0.0, 0.34), (1.31, 0.8, 0.67))
+    positions = [
+        *[(-1.3, y) for y in (-1.0, 0.0, 1.0)],
+        *[(1.3, y) for y in (-1.0, 0.0, 1.0)],
+        (0.0, 2.2),
+    ]
+    seats = [
+        _object(
+            f"office_chair_{index}",
+            "office_chair",
+            (*position, 0.44),
+            (0.6, 0.61, 0.87),
+            yaw_deg=_facing_yaw(position),
+        )
+        for index, position in enumerate(positions)
+    ]
+    scene = _scene(
+        tmp_path,
+        table,
+        *seats,
+        text=(
+            "A meeting room with one rectangular conference table and seven office "
+            "chairs. Arrange six office chairs in two equal groups of three, evenly "
+            "spaced along the table's two long sides. Place one remaining office chair "
+            "centered along one short side, facing the table. Keep the opposite short "
+            "side free of chairs."
+        ),
+    )
+    scene.room_type = "meeting_room"
+    config = CriticConfig(enabled=True, metrics=("functional_dependency",))
+
+    fixes = improve_furniture_relations(scene, config=config)
+
+    assert len(fixes) >= 6
+    result = next(
+        item
+        for item in evaluate_room_scene(scene, config=config, stage="test")["results"]
+        if item.get("relation_type") == "table_seat_distribution"
+    )
+    assert result["label"] == "pass"
 
 
 def test_sideboard_wall_phrase_does_not_bind_dining_chairs_to_wall(
@@ -1088,7 +1183,7 @@ def test_candidate_score_allows_soft_degradation_when_hard_failures_drop() -> No
             {
                 "check_id": "dining_slots",
                 "label": "fail",
-                "relation_type": "dining_seat_distribution",
+                "relation_type": "table_seat_distribution",
             },
             {
                 "check_id": "chair_facing",
@@ -1107,7 +1202,7 @@ def test_candidate_score_allows_soft_degradation_when_hard_failures_drop() -> No
             {
                 "check_id": "dining_slots",
                 "label": "pass",
-                "relation_type": "dining_seat_distribution",
+                "relation_type": "table_seat_distribution",
             },
             {
                 "check_id": "chair_facing",
@@ -1136,7 +1231,7 @@ def test_candidate_score_rejects_soft_regression_without_hard_fail_reduction() -
             {
                 "check_id": "dining_slots",
                 "label": "fail",
-                "relation_type": "dining_seat_distribution",
+                "relation_type": "table_seat_distribution",
             },
             {
                 "check_id": "table_access",
@@ -1150,7 +1245,7 @@ def test_candidate_score_rejects_soft_regression_without_hard_fail_reduction() -
             {
                 "check_id": "dining_slots",
                 "label": "fail",
-                "relation_type": "dining_seat_distribution",
+                "relation_type": "table_seat_distribution",
             },
             {
                 "check_id": "table_access",
@@ -1378,7 +1473,7 @@ def test_dining_chair_repair_does_not_move_table_support_children(
                     {
                         "check_id": "dining_slots",
                         "label": "fail",
-                        "relation_type": "dining_seat_distribution",
+                        "relation_type": "table_seat_distribution",
                         "diagnostics": {
                             "seat_slots": [
                                 {
@@ -1396,7 +1491,7 @@ def test_dining_chair_repair_does_not_move_table_support_children(
                     {
                         "check_id": "dining_slots",
                         "label": "pass",
-                        "relation_type": "dining_seat_distribution",
+                        "relation_type": "table_seat_distribution",
                         "diagnostics": {"seat_slots": []},
                     }
                 ]
@@ -1440,7 +1535,7 @@ def test_dining_chair_repair_uses_outward_slot_when_exact_pose_blocks_access(
     failed_distribution = {
         "check_id": "dining_slots",
         "label": "fail",
-        "relation_type": "dining_seat_distribution",
+        "relation_type": "table_seat_distribution",
         "diagnostics": {
             "seat_slots": [
                 {
@@ -1458,7 +1553,7 @@ def test_dining_chair_repair_uses_outward_slot_when_exact_pose_blocks_access(
     passed_distribution = {
         "check_id": "dining_slots",
         "label": "pass",
-        "relation_type": "dining_seat_distribution",
+        "relation_type": "table_seat_distribution",
         "diagnostics": {"seat_slots": []},
     }
     evaluations = iter(
