@@ -304,6 +304,7 @@ class BaseStatefulAgent(ABC):
         self._critic_evaluation_started_at: float | None = None
         self._stage_runtime_exhausted = False
         self._stage_runtime_phase = "agent"
+        self._stage_phase_started_at: float | None = None
         self._allow_degraded_stage_completion = False
         self._degraded_stage_reasons: list[str] = []
         self._last_score_provenance: dict[str, Any] = {}
@@ -312,6 +313,9 @@ class BaseStatefulAgent(ABC):
         self._critical_retry_budget_expanded = False
         self._accept_optional_quality_diagnostic = False
         self._stage_role_active_consumed: dict[str, float] = {}
+        self._stage_role_active_consumed_by_phase: dict[str, dict[str, float]] = {
+            "agent": self._stage_role_active_consumed
+        }
         self._agent_execution_leases: list[_AgentExecutionLease] = []
         self._stage_external_paused_seconds = 0.0
         self._external_operation_depth = 0
@@ -391,8 +395,11 @@ class BaseStatefulAgent(ABC):
             value = float(self._stage_runtime_budget.get(key, 0) or 0)
             if value <= 0:
                 continue
+            retry_key = f"critic_retry_{key}"
+            if self._stage_runtime_budget.get(retry_key) not in (None, 0, 0.0, ""):
+                continue
             expanded = value * multiplier
-            self._stage_runtime_budget[key] = (
+            self._stage_runtime_budget[retry_key] = (
                 int(round(expanded))
                 if key.startswith("max_") and not key.endswith("_seconds")
                 else expanded
@@ -417,9 +424,13 @@ class BaseStatefulAgent(ABC):
         self._critical_retry_budget_expanded = False
         self._refresh_asset_runtime_budget()
         self._stage_runtime_phase = "agent"
+        self._stage_phase_started_at = self._stage_runtime_started_at
         self._last_score_provenance = {}
         self._last_trusted_critic_candidate = None
         self._stage_role_active_consumed = {}
+        self._stage_role_active_consumed_by_phase = {
+            "agent": self._stage_role_active_consumed
+        }
         self._agent_execution_leases = []
         self._stage_external_paused_seconds = 0.0
         self._external_operation_depth = 0
@@ -446,9 +457,10 @@ class BaseStatefulAgent(ABC):
         # exhausted timestamp made the replacement designer and critic no-ops,
         # even though the expensive assets are intentionally cached.
         self._stage_runtime_started_at = time.monotonic()
+        self._stage_phase_started_at = self._stage_runtime_started_at
         self._critic_evaluation_started_at = None
         self._stage_runtime_exhausted = False
-        self._stage_role_active_consumed = {}
+        self._activate_runtime_phase("regeneration", reset_role_consumption=True)
         self._agent_execution_leases = []
         self._stage_external_paused_seconds = 0.0
         self._external_operation_depth = 0
@@ -546,9 +558,10 @@ class BaseStatefulAgent(ABC):
         self._reset_planner_budget_tracking()
         self._reset_critic_candidate_cache()
         self._stage_runtime_started_at = time.monotonic()
+        self._stage_phase_started_at = self._stage_runtime_started_at
         self._critic_evaluation_started_at = None
         self._stage_runtime_exhausted = False
-        self._stage_role_active_consumed = {}
+        self._activate_runtime_phase("continuation", reset_role_consumption=True)
         self._agent_execution_leases = []
         self._stage_external_paused_seconds = 0.0
         self._external_operation_depth = 0
@@ -604,23 +617,40 @@ class BaseStatefulAgent(ABC):
 
     async def retry_final_critic_evaluation(self) -> None:
         """Retry only the final visual decision for an otherwise valid scene."""
+        previous_phase = self._stage_runtime_phase
+        previous_runtime_started_at = self._stage_runtime_started_at
+        previous_phase_started_at = self._stage_phase_started_at
+        previous_external_paused_seconds = self._stage_external_paused_seconds
+        previous_external_operation_depth = self._external_operation_depth
+        previous_external_operation_started_at = self._external_operation_started_at
+        previous_external_paused_lease = self._external_paused_lease
+        previous_critic_evaluation_started_at = self._critic_evaluation_started_at
+        previous_runtime_exhausted = self._stage_runtime_exhausted
         self._expand_critical_retry_budget()
-        self._stage_runtime_started_at = time.monotonic()
+        self._stage_phase_started_at = time.monotonic()
         self._stage_external_paused_seconds = 0.0
         self._external_operation_depth = 0
         self._external_operation_started_at = None
         self._external_paused_lease = None
         self._critic_evaluation_started_at = None
         self._stage_runtime_exhausted = False
-        self._stage_role_active_consumed.pop("critic", None)
-        self._stage_runtime_phase = "fallback"
+        self._activate_runtime_phase("critic_retry", reset_role_consumption=True)
+        self._current_phase_role_consumption().pop("critic", None)
         self._critical_retry_compact_context = True
         try:
             await self._request_critique_impl(update_checkpoint=False)
             await self._finalize_scene_and_scores()
         finally:
             self._critical_retry_compact_context = False
-            self._stage_runtime_phase = "agent"
+            self._activate_runtime_phase(previous_phase)
+            self._stage_runtime_started_at = previous_runtime_started_at
+            self._stage_phase_started_at = previous_phase_started_at
+            self._stage_external_paused_seconds = previous_external_paused_seconds
+            self._external_operation_depth = previous_external_operation_depth
+            self._external_operation_started_at = previous_external_operation_started_at
+            self._external_paused_lease = previous_external_paused_lease
+            self._critic_evaluation_started_at = previous_critic_evaluation_started_at
+            self._stage_runtime_exhausted = previous_runtime_exhausted
 
     async def finalize_retained_optional_candidate(
         self,
@@ -645,9 +675,11 @@ class BaseStatefulAgent(ABC):
         self._allow_degraded_stage_completion = True
         stage = str(self.agent_type.value)
         scoped_reasons = [
-            reason
-            if str(reason).lstrip().startswith(f"[{stage}]")
-            else f"[{stage}] {str(reason).strip()}"
+            (
+                reason
+                if str(reason).lstrip().startswith(f"[{stage}]")
+                else f"[{stage}] {str(reason).strip()}"
+            )
             for reason in reasons
             if str(reason).strip()
         ]
@@ -670,9 +702,11 @@ class BaseStatefulAgent(ABC):
             )
         await self._finalize_scene_and_scores()
         final_scoped_reasons = [
-            reason
-            if str(reason).lstrip().startswith(f"[{stage}]")
-            else f"[{stage}] {str(reason).strip()}"
+            (
+                reason
+                if str(reason).lstrip().startswith(f"[{stage}]")
+                else f"[{stage}] {str(reason).strip()}"
+            )
             for reason in self._degraded_stage_reasons
             if str(reason).strip()
         ]
@@ -694,6 +728,70 @@ class BaseStatefulAgent(ABC):
 
     def _stage_budget_value(self, key: str, default: Any) -> Any:
         return self._stage_runtime_budget.get(key, default)
+
+    def _phase_budget_value(self, key: str, default: Any) -> Any:
+        """Resolve an execution limit for the active recovery transaction.
+
+        Normal design, evidence-backed repair, full regeneration, placement-only
+        continuation, deterministic fallback, and isolated critic retry are
+        different transactions.  Falling back to the base key preserves all
+        existing configurations while allowing the control plane to account for
+        each recovery path independently.
+        """
+
+        phase = str(getattr(self, "_stage_runtime_phase", "agent") or "agent")
+        phase_prefix = {
+            "repair": "repair",
+            "regeneration": "regeneration",
+            "continuation": "continuation",
+            "fallback": "fallback",
+            "critic_retry": "critic_retry",
+        }.get(phase)
+        if phase_prefix:
+            phase_key = f"{phase_prefix}_{key}"
+            phase_value = self._stage_runtime_budget.get(phase_key)
+            if phase_value not in (None, 0, 0.0, ""):
+                return phase_value
+        return self._stage_budget_value(key, default)
+
+    def _activate_runtime_phase(
+        self,
+        phase: str,
+        *,
+        reset_role_consumption: bool = False,
+    ) -> None:
+        """Switch runtime transactions without sharing active role charges.
+
+        SceneSmith nests designer and critic calls inside the planner.  A recovery
+        transaction therefore needs both an independent limit *and* independent
+        accounting; merely changing the configured limit still lets the previous
+        transaction's consumed seconds cancel the new one.  Keep the legacy
+        ``_stage_role_active_consumed`` attribute as a view of the active bucket
+        for compatibility with existing agents and diagnostics.
+        """
+
+        phase_name = str(phase or "agent")
+        self._stage_runtime_phase = phase_name
+        buckets = getattr(self, "_stage_role_active_consumed_by_phase", None)
+        if not isinstance(buckets, dict):
+            if reset_role_consumption:
+                self._stage_role_active_consumed = {}
+            return
+        if reset_role_consumption:
+            buckets[phase_name] = {}
+        bucket = buckets.setdefault(phase_name, {})
+        self._stage_role_active_consumed = bucket
+
+    def _current_phase_role_consumption(self) -> dict[str, float]:
+        """Return the role accounting bucket for the active transaction."""
+
+        buckets = getattr(self, "_stage_role_active_consumed_by_phase", None)
+        if not isinstance(buckets, dict):
+            return self._stage_role_active_consumed
+        phase = str(getattr(self, "_stage_runtime_phase", "agent") or "agent")
+        bucket = buckets.setdefault(phase, {})
+        self._stage_role_active_consumed = bucket
+        return bucket
 
     def _stage_output_count_contract(self) -> tuple[int, int, int]:
         """Return (required minimum, preferred target, current stage count)."""
@@ -797,13 +895,15 @@ class BaseStatefulAgent(ABC):
         }.get(role)
         if not key:
             return None
-        limit = float(self._stage_budget_value(key, 0.0) or 0.0)
+        limit = float(self._phase_budget_value(key, 0.0) or 0.0)
         if limit <= 0:
             return None
-        consumed = float(self._stage_role_active_consumed.get(role, 0.0))
+        consumed = float(self._current_phase_role_consumption().get(role, 0.0))
         return limit - consumed
 
-    def _begin_mandatory_repair_transaction(self) -> str:
+    def _begin_mandatory_repair_transaction(
+        self,
+    ) -> tuple[str, float | None]:
         """Give one evidence-backed designer repair its own active-time lease.
 
         SceneSmith's initial design may legitimately spend most of the designer
@@ -814,10 +914,12 @@ class BaseStatefulAgent(ABC):
         """
 
         previous_phase = self._stage_runtime_phase
+        previous_phase_started_at = self._stage_phase_started_at
         if self._stage_runtime_budget:
-            self._stage_runtime_phase = "repair"
-            self._stage_role_active_consumed.pop("designer", None)
-        return previous_phase
+            self._activate_runtime_phase("repair", reset_role_consumption=True)
+            self._stage_phase_started_at = time.monotonic()
+            self._current_phase_role_consumption().pop("designer", None)
+        return previous_phase, previous_phase_started_at
 
     def _begin_critic_evaluation(self) -> None:
         """Start one isolated visual-scoring transaction for this candidate.
@@ -829,7 +931,7 @@ class BaseStatefulAgent(ABC):
         """
 
         self._critic_evaluation_started_at = time.monotonic()
-        self._stage_role_active_consumed.pop("critic", None)
+        self._current_phase_role_consumption().pop("critic", None)
 
     def _critic_score_call_timeout(
         self,
@@ -845,7 +947,7 @@ class BaseStatefulAgent(ABC):
         """
 
         evaluation_limit = float(
-            self._stage_budget_value("critic_evaluation_max_seconds", 0.0) or 0.0
+            self._phase_budget_value("critic_evaluation_max_seconds", 0.0) or 0.0
         )
         if self._stage_runtime_budget and evaluation_limit > 0:
             return None
@@ -928,20 +1030,20 @@ class BaseStatefulAgent(ABC):
 
         max_attempts = max(
             1,
-            int(self._stage_budget_value("critic_max_attempts", 2) or 2),
+            int(self._phase_budget_value("critic_max_attempts", 2) or 2),
         )
         evaluation_seconds = float(
-            self._stage_budget_value("critic_evaluation_max_seconds", 240.0) or 240.0
+            self._phase_budget_value("critic_evaluation_max_seconds", 240.0) or 240.0
         )
         attempt_seconds = max(30.0, evaluation_seconds / max_attempts)
         configured_tokens = max(
             256,
-            int(self._stage_budget_value("critic_max_output_tokens", 1536) or 1536),
+            int(self._phase_budget_value("critic_max_output_tokens", 1536) or 1536),
         )
         retry_tokens = max(
             configured_tokens,
             int(
-                self._stage_budget_value(
+                self._phase_budget_value(
                     "critic_retry_max_output_tokens",
                     max(3072, configured_tokens),
                 )
@@ -982,9 +1084,8 @@ class BaseStatefulAgent(ABC):
             )
         finally:
             elapsed = time.monotonic() - started
-            self._stage_role_active_consumed["critic"] = (
-                float(self._stage_role_active_consumed.get("critic", 0.0)) + elapsed
-            )
+            consumption = self._current_phase_role_consumption()
+            consumption["critic"] = float(consumption.get("critic", 0.0)) + elapsed
             self._resume_parent_execution_lease(parent_lease)
 
         if result.success and isinstance(result.value, CritiqueWithScores):
@@ -1090,21 +1191,25 @@ class BaseStatefulAgent(ABC):
         wall clock. The bounded planner loop still controls how many such
         candidate evaluations can occur.
         """
+        phase_budget_value = getattr(self, "_phase_budget_value", None)
+        budget_value = (
+            phase_budget_value
+            if callable(phase_budget_value)
+            else self._stage_budget_value
+        )
         critic_evaluation_started_at = getattr(
             self, "_critic_evaluation_started_at", None
         )
         if role == "critic" and critic_evaluation_started_at is not None:
             evaluation_limit = float(
-                self._stage_budget_value("critic_evaluation_max_seconds", 0.0) or 0.0
+                budget_value("critic_evaluation_max_seconds", 0.0) or 0.0
             )
             if evaluation_limit > 0:
                 return evaluation_limit - (
                     time.monotonic() - critic_evaluation_started_at
                 )
 
-        wall_clock_limit = float(
-            self._stage_budget_value("max_wall_clock_seconds", 0.0) or 0.0
-        )
+        wall_clock_limit = float(budget_value("max_wall_clock_seconds", 0.0) or 0.0)
         if wall_clock_limit <= 0 or self._stage_runtime_started_at is None:
             return None
         reserve_fraction = 0.0
@@ -1131,9 +1236,16 @@ class BaseStatefulAgent(ABC):
             if self._stage_runtime_phase != "fallback":
                 reserve_fraction += fallback_reserve
         reserve_fraction = max(0.0, min(0.9, reserve_fraction))
+        phase_started_at = (
+            getattr(self, "_stage_phase_started_at", None)
+            if self._stage_runtime_phase
+            in {"repair", "regeneration", "continuation", "fallback", "critic_retry"}
+            and getattr(self, "_stage_phase_started_at", None) is not None
+            else self._stage_runtime_started_at
+        )
         elapsed = (
             time.monotonic()
-            - self._stage_runtime_started_at
+            - phase_started_at
             - float(getattr(self, "_stage_external_paused_seconds", 0.0) or 0.0)
         )
         stage_remaining = wall_clock_limit * (1.0 - reserve_fraction) - elapsed
@@ -1244,9 +1356,9 @@ class BaseStatefulAgent(ABC):
                                 "SceneExpert nested execution lease stack became "
                                 "inconsistent; cleared it defensively"
                             )
-                    self._stage_role_active_consumed[role] = (
-                        float(self._stage_role_active_consumed.get(role, 0.0))
-                        + lease.active_elapsed_seconds
+                    consumption = self._current_phase_role_consumption()
+                    consumption[role] = (
+                        float(consumption.get(role, 0.0)) + lease.active_elapsed_seconds
                     )
         except Exception as exc:
             budget_error = isinstance(exc, TimeoutError) or self._is_agent_budget_error(
@@ -1309,12 +1421,18 @@ class BaseStatefulAgent(ABC):
     ) -> None:
         """Record elapsed time for per-stage optimization analysis."""
         elapsed = time.time() - start_time
+        timing_extra = {
+            "runtime_phase": str(
+                getattr(self, "_stage_runtime_phase", "agent") or "agent"
+            ),
+            **dict(extra or {}),
+        }
         try:
             self.stage_working_memory.record_timing(
                 module=module,
                 event=event,
                 elapsed_sec=elapsed,
-                extra=extra,
+                extra=timing_extra,
             )
         except Exception as e:
             console_logger.warning(
@@ -3872,12 +3990,17 @@ class BaseStatefulAgent(ABC):
             # correction is cancelled with only its tail budget remaining.
             evidence_backed_repair = counts_as_critique_cycle
             previous_phase = self._stage_runtime_phase
+            previous_phase_started_at = self._stage_phase_started_at
             if hard_repair_allowance or evidence_backed_repair:
-                previous_phase = self._begin_mandatory_repair_transaction()
+                (
+                    previous_phase,
+                    previous_phase_started_at,
+                ) = self._begin_mandatory_repair_transaction()
             try:
                 result = await self._request_design_change_impl(instruction)
             finally:
-                self._stage_runtime_phase = previous_phase
+                self._activate_runtime_phase(previous_phase)
+                self._stage_phase_started_at = previous_phase_started_at
             if hard_repair_allowance:
                 self._hard_repair_design_change_calls += 1
             result += await self._score_design_attempt_if_configured("design change")
@@ -4817,8 +4940,7 @@ class BaseStatefulAgent(ABC):
                 list(dict.fromkeys(runtime_events)),
             )
             retry_instruction = (
-                instruction
-                + "\n\n# Required Semantic No-Op Recovery\n"
+                instruction + "\n\n# Required Semantic No-Op Recovery\n"
                 "Your previous response did not change the scene or admit any "
                 "asset. Make one concrete attempt now: use the "
                 "available tools to retrieve or list an appropriate stage-native "
@@ -4865,15 +4987,11 @@ class BaseStatefulAgent(ABC):
                     event="request_initial_design_noop_retry",
                     prompt=retry_input,
                     output=(
-                        ""
-                        if retry_result is None
-                        else retry_result.final_output or ""
+                        "" if retry_result is None else retry_result.final_output or ""
                     ),
                     result=retry_result,
                     error=(
-                        "execution budget exhausted"
-                        if retry_result is None
-                        else ""
+                        "execution budget exhausted" if retry_result is None else ""
                     ),
                     elapsed_sec=time.time() - retry_started,
                 )

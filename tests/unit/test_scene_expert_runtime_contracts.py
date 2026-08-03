@@ -306,6 +306,7 @@ class NestedPlannerBudgetTest(unittest.IsolatedAsyncioTestCase):
             _stage_budget_value=lambda name, default: budget.get(name, default),
             agent_type=SimpleNamespace(value="furniture"),
             _stage_role_active_consumed={},
+            _current_phase_role_consumption=lambda: agent._stage_role_active_consumed,
             _direct_critic_system_instructions=lambda response_type: "score",
             _sceneexpert_critic_llm_client=lambda: structured_client,
             _pause_parent_execution_lease=lambda role: None,

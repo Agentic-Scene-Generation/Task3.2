@@ -359,47 +359,6 @@ def _stage_recovery_made_progress(
     )
 
 
-def _pause_unscored_scene_candidate(
-    *,
-    stage: str,
-    agent: Any,
-    scene: RoomScene,
-    reasons: list[str],
-    runtime_events: list[str],
-) -> None:
-    """Persist the current hard-valid candidate and pause only this scene."""
-
-    working_memory = getattr(agent, "stage_working_memory", None)
-    scene_root_dir = getattr(working_memory, "scene_root_dir", scene.scene_dir)
-    rendering_manager = getattr(agent, "rendering_manager", None)
-    render_dir = getattr(agent, "final_render_dir", None) or getattr(
-        rendering_manager,
-        "last_render_dir",
-        None,
-    )
-    runtime_events.append("paused_retryable_at_critic")
-    setattr(scene, "scene_expert_runtime_repair_events", runtime_events)
-    reason = "; ".join(str(item) for item in reasons if str(item).strip())
-    manifest_path = persist_retryable_pause(
-        scene_root_dir=scene_root_dir,
-        stage=stage,
-        reason=reason,
-        candidate_state=scene.to_state_dict(),
-        candidate_hash=candidate_state_hash(scene),
-        render_dir=render_dir,
-        attempt_count=2,
-        metadata={
-            "room_id": str(getattr(scene, "room_id", "")),
-            "room_dir": str(getattr(scene, "scene_dir", "")),
-            "score_provenance": dict(
-                getattr(agent, "_last_score_provenance", {}) or {}
-            ),
-            "runtime_events": list(runtime_events),
-        },
-    )
-    raise ScenePausedError(stage, reason, str(manifest_path))
-
-
 def _mark_incomplete_placement_stage_degraded(
     *,
     stage: str,
@@ -440,6 +399,8 @@ def _mark_incomplete_placement_stage_degraded(
     degraded_reasons = list(dict.fromkeys(degraded_reasons))
     setattr(scene, "scene_expert_degraded_stage_reasons", degraded_reasons)
     setattr(scene, "scene_expert_outcome_status", "DEGRADED_INCOMPLETE")
+    if not str(getattr(scene, "scene_expert_first_blocking_stage", "") or ""):
+        setattr(scene, "scene_expert_first_blocking_stage", stage)
     working_memory = getattr(agent, "stage_working_memory", None)
     scene_root_dir = getattr(
         working_memory,
@@ -471,6 +432,88 @@ def _mark_incomplete_placement_stage_degraded(
     )
 
 
+def _mark_unscored_stage_degraded(
+    *,
+    stage: str,
+    agent: Any,
+    scene: RoomScene,
+    reasons: list[str],
+    runtime_events: list[str],
+) -> None:
+    """Keep a hard-valid scene running when only visual scoring is unavailable.
+
+    The retry manifest remains a precise resume target for later re-scoring, but
+    a transient VLM transport failure is not a geometry failure and must not
+    terminate the worker.  The scene is explicitly degraded, excluded from
+    success memory, and allowed to finish all remaining stages/final export.
+    """
+
+    runtime_events.append(f"degraded_unscored_{stage}")
+    setattr(scene, "scene_expert_runtime_repair_events", runtime_events)
+    details = "; ".join(str(item) for item in reasons if str(item).strip())
+    scoped_reason = f"[{stage}] critic_unavailable: {details}"
+    degraded_reasons = list(
+        getattr(scene, "scene_expert_degraded_stage_reasons", []) or []
+    )
+    degraded_reasons.append(scoped_reason)
+    degraded_reasons = list(dict.fromkeys(degraded_reasons))
+    setattr(scene, "scene_expert_degraded_stage_reasons", degraded_reasons)
+    setattr(scene, "scene_expert_outcome_status", "DEGRADED_INCOMPLETE")
+
+    working_memory = getattr(agent, "stage_working_memory", None)
+    scene_root_dir = getattr(
+        working_memory,
+        "scene_root_dir",
+        getattr(scene, "scene_dir", Path.cwd()),
+    )
+    rendering_manager = getattr(agent, "rendering_manager", None)
+    render_dir = getattr(agent, "final_render_dir", None) or getattr(
+        rendering_manager,
+        "last_render_dir",
+        None,
+    )
+    manifest_path = persist_retryable_pause(
+        scene_root_dir=scene_root_dir,
+        stage=stage,
+        reason=details,
+        candidate_state=scene.to_state_dict(),
+        candidate_hash=candidate_state_hash(scene),
+        render_dir=render_dir,
+        attempt_count=2,
+        metadata={
+            "nonblocking_degraded_export": True,
+            "recommended_resume_action": "retry_stage_critic_only",
+            "room_id": str(getattr(scene, "room_id", "")),
+            "room_dir": str(getattr(scene, "scene_dir", "")),
+            "score_provenance": dict(
+                getattr(agent, "_last_score_provenance", {}) or {}
+            ),
+            "runtime_events": list(runtime_events),
+        },
+    )
+    persist_degraded_incomplete(
+        scene_root_dir=scene_root_dir,
+        reasons=degraded_reasons,
+        metadata={
+            "last_stage": stage,
+            "failure_code": "critic_unavailable",
+            "responsible_role": "critic",
+            "recommended_resume_action": "retry_stage_critic_only",
+            "candidate_hash": candidate_state_hash(scene),
+            "nonblocking_downstream": True,
+            "resume_manifest": str(manifest_path),
+            "runtime_events": list(runtime_events),
+        },
+    )
+    console_logger.warning(
+        "[DEGRADED_INCOMPLETE] %s visual critic remained unavailable after its "
+        "isolated retry budget; preserving the hard-valid candidate and "
+        "continuing toward final_scene (resume_manifest=%s)",
+        stage,
+        manifest_path,
+    )
+
+
 def _export_first_blocking_stage_candidate(
     *,
     stage: str,
@@ -494,7 +537,12 @@ def _export_first_blocking_stage_candidate(
         return False
 
     existing_stage = str(getattr(scene, "scene_expert_first_blocking_stage", "") or "")
-    first_blocking_stage = existing_stage or stage
+    # Critic-only degradation is nonblocking: geometry is hard-valid, so later
+    # stages and the normal final export remain meaningful. Structural/asset/
+    # placement failures set this field at their origin and still stop here.
+    if not existing_stage:
+        return False
+    first_blocking_stage = existing_stage
     setattr(scene, "scene_expert_first_blocking_stage", first_blocking_stage)
     runtime_events = list(
         getattr(scene, "scene_expert_runtime_repair_events", []) or []
@@ -561,7 +609,7 @@ def _score_postprocessed_candidate_or_pause(
     scene: RoomScene,
     runtime_events: list[str],
 ) -> None:
-    """Score an actual post-physics candidate, retrying only transport failure."""
+    """Score post-physics geometry, degrading without abort after bounded retries."""
 
     retry_critic = getattr(agent, "retry_final_critic_evaluation", None)
     if not callable(retry_critic):
@@ -588,7 +636,10 @@ def _score_postprocessed_candidate_or_pause(
                 f"{type(exc).__name__}: {exc}"
             ]
 
-    _pause_unscored_scene_candidate(
+    complete_degraded = getattr(agent, "complete_repair_exhausted_stage", None)
+    if callable(complete_degraded):
+        asyncio.run(complete_degraded(reasons))
+    _mark_unscored_stage_degraded(
         stage=stage,
         agent=agent,
         scene=scene,
@@ -717,9 +768,7 @@ def _capture_stage_candidate(
         hard_valid = False
         hard_reasons = ["hard-state evaluation failed while ranking candidate"]
 
-    provenance = copy.deepcopy(
-        getattr(agent, "_last_score_provenance", {}) or {}
-    )
+    provenance = copy.deepcopy(getattr(agent, "_last_score_provenance", {}) or {})
     scores = copy.deepcopy(getattr(agent, "previous_scores", None))
     candidate_hash = candidate_state_hash(scene)
     trusted_score = None
@@ -736,7 +785,9 @@ def _capture_stage_candidate(
         except Exception:
             trusted_score = None
 
-    capped_count = min(current_count, target_minimum) if target_minimum else current_count
+    capped_count = (
+        min(current_count, target_minimum) if target_minimum else current_count
+    )
     rank = (
         int(hard_valid),
         int(current_count >= required_minimum),
@@ -788,15 +839,11 @@ def _restore_stage_candidate(
 
     current_hash = candidate_state_hash(scene)
     saved_hash = str(candidate.get("candidate_hash", "") or "")
-    geometry_changed = (
-        not current_hash or not saved_hash or current_hash != saved_hash
-    )
+    geometry_changed = not current_hash or not saved_hash or current_hash != saved_hash
     if geometry_changed:
         scene.restore_from_state_dict(copy.deepcopy(candidate["scene_state"]))
     agent.previous_scores = copy.deepcopy(candidate.get("previous_scores"))
-    agent._last_score_provenance = copy.deepcopy(
-        candidate.get("score_provenance", {})
-    )
+    agent._last_score_provenance = copy.deepcopy(candidate.get("score_provenance", {}))
     agent.final_render_dir = candidate.get("final_render_dir")
     agent.checkpoint_render_dir = candidate.get("checkpoint_render_dir")
     agent._last_trusted_critic_candidate = copy.deepcopy(
@@ -1020,17 +1067,26 @@ def _run_sceneexpert_placement_stage(
                         failure_kind = "critic_unavailable"
 
             if failure_kind == "critic_unavailable" and critic_retry_attempted:
-                _pause_unscored_scene_candidate(
+                complete_degraded = getattr(
+                    agent,
+                    "complete_repair_exhausted_stage",
+                    None,
+                )
+                if callable(complete_degraded):
+                    asyncio.run(complete_degraded(list(exc.reasons)))
+                _mark_unscored_stage_degraded(
                     stage=stage,
                     agent=agent,
                     scene=scene,
                     reasons=list(exc.reasons),
                     runtime_events=runtime_events,
                 )
+                return regeneration_attempt
 
             # A structural surface absence cannot benefit from another layout
-            # proposal. Critic transport failure is handled as a resumable scene
-            # pause below; it must not trigger a redesign of a hard-valid scene.
+            # proposal. Critic transport failure is handled above as a resumable
+            # degraded score transaction; it must not trigger a redesign of a
+            # hard-valid scene.
             current_failure_snapshot = _stage_recovery_snapshot(
                 stage=stage,
                 agent=agent,
@@ -1974,20 +2030,20 @@ def _generate_room(
                             exc
                         )
                         if critic_only_retry_attempted and critic_still_unavailable:
-                            _pause_unscored_scene_candidate(
-                                stage="furniture",
-                                agent=furniture_agent,
-                                scene=scene,
-                                reasons=list(exc.reasons),
-                                runtime_events=list(
-                                    getattr(
-                                        scene,
-                                        "scene_expert_runtime_repair_events",
-                                        [],
-                                    )
-                                    or []
-                                ),
+                            # Keep the hard-valid candidate for the separately
+                            # rendered deterministic comparison.  Critic-only
+                            # failure is resolved as degraded/nonblocking after
+                            # final candidate selection, not as a redesign or a
+                            # process-level pause here.
+                            asyncio.run(
+                                furniture_agent.complete_repair_exhausted_stage(
+                                    list(exc.reasons)
+                                )
                             )
+                            furniture_runtime_events.append(
+                                "critic_unavailable_before_fallback_selection"
+                            )
+                            break
 
                         repairable = _is_repairable_stage_validation(exc)
                         missing_output = any(
@@ -2131,13 +2187,27 @@ def _generate_room(
                             None,
                         )
                         if callable(compare_deterministic_fallback):
-                            asyncio.run(
+                            comparison_result = asyncio.run(
                                 compare_deterministic_fallback(
                                     agent_candidate=comparison_candidate,
                                     trigger=fallback_reason,
                                     regeneration_attempts=regeneration_attempt,
                                 )
                             )
+                            if (
+                                comparison_result.get("selected_score_source")
+                                != "vlm_critic"
+                            ):
+                                _mark_unscored_stage_degraded(
+                                    stage="furniture",
+                                    agent=furniture_agent,
+                                    scene=scene,
+                                    reasons=[
+                                        "visual critic unavailable for the "
+                                        "selected hard-valid furniture candidate"
+                                    ],
+                                    runtime_events=furniture_runtime_events,
+                                )
                     else:
                         persist_agent_best = getattr(
                             furniture_agent,
@@ -2155,6 +2225,11 @@ def _generate_room(
                 selected_hard_state = (
                     evaluate_hard_state() if callable(evaluate_hard_state) else None
                 )
+                selected_candidate = (
+                    capture_agent_candidate()
+                    if callable(capture_agent_candidate)
+                    else None
+                )
                 if (
                     selected_hard_state is not None
                     and not selected_hard_state.hard_valid
@@ -2164,6 +2239,30 @@ def _generate_room(
                         agent=furniture_agent,
                         scene=scene,
                         reasons=list(selected_hard_state.hard_reasons),
+                        runtime_events=furniture_runtime_events,
+                    )
+                elif (
+                    selected_candidate is not None
+                    and selected_candidate.get("score_source") != "vlm_critic"
+                    and str(getattr(scene, "scene_expert_outcome_status", ""))
+                    != "DEGRADED_INCOMPLETE"
+                ):
+                    asyncio.run(
+                        furniture_agent.complete_repair_exhausted_stage(
+                            [
+                                "visual critic unavailable for the selected "
+                                "hard-valid furniture candidate"
+                            ]
+                        )
+                    )
+                    _mark_unscored_stage_degraded(
+                        stage="furniture",
+                        agent=furniture_agent,
+                        scene=scene,
+                        reasons=[
+                            "visual critic unavailable for the selected hard-valid "
+                            "furniture candidate"
+                        ],
                         runtime_events=furniture_runtime_events,
                     )
                 end_time = time.time()
@@ -2280,11 +2379,22 @@ def _generate_room(
                             )
                         )
                     except Exception as e:
-                        console_logger.error(
-                            "Failed to re-score post-processed furniture layout: %s",
-                            e,
-                            exc_info=True,
-                        )
+                        if isinstance(e, StageValidationError) and (
+                            _is_critic_unavailable_validation(e)
+                        ):
+                            console_logger.warning(
+                                "Post-processed furniture candidate is hard-valid "
+                                "but unscored; using the isolated critic recovery "
+                                "transaction"
+                            )
+                            _score_postprocessed_candidate_or_pause(
+                                stage="furniture",
+                                agent=furniture_agent,
+                                scene=scene,
+                                runtime_events=furniture_runtime_events,
+                            )
+                        else:
+                            raise
             finally:
                 # Always cleanup server subprocesses after all furniture-stage
                 # scoring/rendering that depends on the agent's Blender server.
@@ -3031,8 +3141,6 @@ def _generate_floor_plan_worker(
                         asyncio.run(
                             floor_plan_agent.prepare_stage_regeneration([repair_brief])
                         )
-                        if callable(configure_runtime_budget):
-                            configure_runtime_budget(floor_plan_budget)
                         active_prompt = (
                             f"{prompt}\n\n"
                             "# Mandatory Floor-Plan Regeneration\n"
@@ -3053,6 +3161,11 @@ def _generate_floor_plan_worker(
                     json.dump(serialized_layout, f, indent=2)
                 console_logger.info(f"Saved house layout to {house_layout_path}")
                 if pause_reason:
+                    floor_plan_failure_code = (
+                        "critic_unavailable"
+                        if "visual critic" in pause_reason.casefold()
+                        else "critic_repair_exhausted"
+                    )
                     manifest_path = persist_retryable_pause(
                         scene_root_dir=scene_path,
                         stage="floor_plan",
@@ -3076,10 +3189,27 @@ def _generate_floor_plan_worker(
                             )
                         },
                     )
-                    raise ScenePausedError(
-                        "floor_plan",
-                        pause_reason,
-                        str(manifest_path),
+                    persist_degraded_incomplete(
+                        scene_root_dir=scene_path,
+                        reasons=[
+                            f"[floor_plan] {floor_plan_failure_code}: {pause_reason}"
+                        ],
+                        metadata={
+                            "last_stage": "floor_plan",
+                            "failure_code": floor_plan_failure_code,
+                            "responsible_role": "critic",
+                            "recommended_resume_action": "retry_stage_critic_only",
+                            "candidate_hash": house_layout.content_hash(),
+                            "nonblocking_downstream": True,
+                            "resume_manifest": str(manifest_path),
+                        },
+                    )
+                    console_logger.warning(
+                        "Floor-plan critic recovery exhausted, but the "
+                        "deterministically usable layout was saved. Continuing "
+                        "downstream as DEGRADED_INCOMPLETE instead of terminating "
+                        "the scene (resume_manifest=%s)",
+                        manifest_path,
                     )
 
 
@@ -3883,7 +4013,8 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                             status=("degraded_incomplete" if degraded else "completed"),
                             attempt=attempt,
                         )
-                        mark_retryable_pause_resolved(scene_dir)
+                        if not degraded:
+                            mark_retryable_pause_resolved(scene_dir)
                         if not degraded:
                             (scene_dir / _SCENE_SUCCESS_MARKER).write_text(
                                 "completed\n", encoding="utf-8"
@@ -4023,7 +4154,8 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
             status="degraded_incomplete" if degraded else "completed",
             attempt=attempt,
         )
-        mark_retryable_pause_resolved(scene_dir)
+        if not degraded:
+            mark_retryable_pause_resolved(scene_dir)
         if not degraded:
             (scene_dir / _SCENE_SUCCESS_MARKER).write_text(
                 "completed\n", encoding="utf-8"

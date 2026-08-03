@@ -19,7 +19,6 @@ from scenesmith.experiments.indoor_scene_generation import (
 )
 from scenesmith.scene_expert.exceptions import StageValidationError
 from scenesmith.scene_expert.runtime_state import (
-    ScenePausedError,
     candidate_state_hash,
     mark_degraded_stage_recovered,
     persist_degraded_incomplete,
@@ -187,10 +186,7 @@ class StageFailureRecoveryTest(unittest.TestCase):
                 scene.scene_expert_outcome_status,
             )
             manifest_path = (
-                Path(tmp)
-                / "scene_expert"
-                / "degraded"
-                / "degraded_manifest.json"
+                Path(tmp) / "scene_expert" / "degraded" / "degraded_manifest.json"
             )
             payload = json.loads(manifest_path.read_text(encoding="utf-8"))
             self.assertEqual(["[wall_mounted] no wall decor"], payload["reasons"])
@@ -738,7 +734,7 @@ class StageFailureRecoveryTest(unittest.TestCase):
             self.assertIn('"unavailable_required_asset_families": [', manifest)
             self.assertIn('"bed"', manifest)
 
-    def test_second_critic_timeout_pauses_without_redesign_loop(self) -> None:
+    def test_second_critic_timeout_exports_degraded_without_redesign_loop(self) -> None:
         class FakeScene:
             text_description = "living room"
             scene_expert_stage_budget = {"max_stage_regenerations": 1}
@@ -753,7 +749,7 @@ class StageFailureRecoveryTest(unittest.TestCase):
             def content_hash(self) -> str:
                 return "candidate-hash"
 
-        calls = {"run": 0, "critic": 0}
+        calls = {"run": 0, "critic": 0, "complete": 0}
 
         async def run_once() -> None:
             calls["run"] += 1
@@ -775,21 +771,25 @@ class StageFailureRecoveryTest(unittest.TestCase):
                 ],
             )
 
+        async def complete(reasons: list[str]) -> None:
+            self.assertTrue(reasons)
+            calls["complete"] += 1
+
         with TemporaryDirectory() as tmp:
             scene = FakeScene(Path(tmp))
-            with self.assertRaises(ScenePausedError):
-                _run_sceneexpert_placement_stage(
-                    stage="wall_mounted",
-                    agent=SimpleNamespace(
-                        retry_final_critic_evaluation=retry_critic,
-                        stage_working_memory=SimpleNamespace(scene_root_dir=Path(tmp)),
-                        _last_score_provenance={"score_source": "unavailable"},
-                    ),
-                    scene=scene,
-                    run_once=run_once,
-                )
+            _run_sceneexpert_placement_stage(
+                stage="wall_mounted",
+                agent=SimpleNamespace(
+                    retry_final_critic_evaluation=retry_critic,
+                    complete_repair_exhausted_stage=complete,
+                    stage_working_memory=SimpleNamespace(scene_root_dir=Path(tmp)),
+                    _last_score_provenance={"score_source": "unavailable"},
+                ),
+                scene=scene,
+                run_once=run_once,
+            )
 
-            self.assertEqual({"run": 1, "critic": 1}, calls)
+            self.assertEqual({"run": 1, "critic": 1, "complete": 1}, calls)
             self.assertIn(
                 "expanded_compact_critic_retry",
                 scene.scene_expert_runtime_repair_events,
@@ -797,6 +797,12 @@ class StageFailureRecoveryTest(unittest.TestCase):
             self.assertTrue(
                 (Path(tmp) / "scene_expert" / "resume" / "pause_manifest.json").exists()
             )
+            self.assertTrue(
+                (
+                    Path(tmp) / "scene_expert" / "degraded" / "degraded_manifest.json"
+                ).exists()
+            )
+            self.assertEqual("DEGRADED_INCOMPLETE", scene.scene_expert_outcome_status)
 
     def test_postprocessed_candidate_gets_one_transport_retry(self) -> None:
         class FakeScene:

@@ -182,6 +182,10 @@ class FurnitureLayoutPlanningTest(unittest.TestCase):
         self.assertGreater(report.penalty, 0.0)
         self.assertLess(report.score, 1.0)
         self.assertTrue(any("expected east_wall" in issue for issue in report.issues))
+        self.assertTrue(
+            any("headboard slots" in issue for issue in report.issues),
+            report.issues,
+        )
 
 
 if __name__ == "__main__":

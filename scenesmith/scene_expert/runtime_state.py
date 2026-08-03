@@ -122,12 +122,26 @@ def persist_degraded_incomplete(
     scene_root = Path(scene_root_dir)
     degraded_dir = scene_root / "scene_expert" / "degraded"
     degraded_dir.mkdir(parents=True, exist_ok=True)
-    manifest = DegradedSceneManifest(
-        reasons=list(dict.fromkeys(str(reason) for reason in reasons if str(reason))),
-        created_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        metadata=dict(metadata or {}),
-    )
     manifest_path = degraded_dir / "degraded_manifest.json"
+    existing_reasons: list[str] = []
+    existing_metadata: dict[str, Any] = {}
+    if manifest_path.exists():
+        try:
+            existing = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if isinstance(existing, dict):
+                existing_reasons = list(existing.get("reasons", []) or [])
+                existing_metadata = dict(existing.get("metadata", {}) or {})
+        except (OSError, ValueError, TypeError):
+            pass
+    manifest = DegradedSceneManifest(
+        reasons=list(
+            dict.fromkeys(
+                str(reason) for reason in [*existing_reasons, *reasons] if str(reason)
+            )
+        ),
+        created_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        metadata={**existing_metadata, **dict(metadata or {})},
+    )
     _write_json_atomic(manifest_path, manifest.model_dump())
     return manifest_path
 
@@ -218,9 +232,7 @@ def mark_degraded_stage_recovered(
         getattr(scene, "scene_expert_degraded_stage_reasons", []) or []
     )
     removed_scene_reasons = [
-        str(reason)
-        for reason in scene_reasons
-        if belongs_to_recovered_stage(reason)
+        str(reason) for reason in scene_reasons if belongs_to_recovered_stage(reason)
     ]
     remaining_scene_reasons = [
         str(reason)
@@ -245,9 +257,7 @@ def mark_degraded_stage_recovered(
 
     manifest_reasons = list(manifest_payload.get("reasons", []) or [])
     removed_manifest_reasons = [
-        str(reason)
-        for reason in manifest_reasons
-        if belongs_to_recovered_stage(reason)
+        str(reason) for reason in manifest_reasons if belongs_to_recovered_stage(reason)
     ]
     remaining_manifest_reasons = [
         str(reason)
@@ -284,9 +294,7 @@ def mark_degraded_stage_recovered(
     setattr(
         scene,
         "scene_expert_outcome_status",
-        "DEGRADED_INCOMPLETE"
-        if recovery_record["remaining_reasons"]
-        else "COMPLETE",
+        "DEGRADED_INCOMPLETE" if recovery_record["remaining_reasons"] else "COMPLETE",
     )
     recovered_path = degraded_dir / f"last_recovered_{stage_name}.json"
     _write_json_atomic(recovered_path, recovery_record)

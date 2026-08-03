@@ -1290,6 +1290,7 @@ class SceneExpertHookRunner:
         degraded_manifest = (
             self._scene_debug_dir / "degraded" / "degraded_manifest.json"
         )
+        self._merge_persisted_degraded_reasons(degraded_manifest)
         if self._degraded_incomplete_reasons and not degraded_manifest.exists():
             persist_degraded_incomplete(
                 scene_root_dir=self._scene_debug_dir.parent,
@@ -1386,6 +1387,9 @@ class SceneExpertHookRunner:
         """
         console_logger.info(
             f"[SceneExpert/{self._mode}] finalizing scene {self._scene_id:03d}"
+        )
+        self._merge_persisted_degraded_reasons(
+            self._scene_debug_dir / "degraded" / "degraded_manifest.json"
         )
         finalize_start = time.time()
 
@@ -1511,6 +1515,33 @@ class SceneExpertHookRunner:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _merge_persisted_degraded_reasons(self, manifest_path: Path) -> None:
+        """Import worker-side degradation before verification or memory commit.
+
+        Floor-plan generation runs in a separate process and cannot mutate the
+        room object owned by this hook runner. Its durable manifest is therefore
+        the authoritative cross-process outcome contract; ignoring it could let
+        a degraded floor plan produce success memory after downstream export.
+        """
+
+        if not manifest_path.exists():
+            return
+        try:
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError) as exc:
+            console_logger.warning(
+                "Unable to read degraded outcome manifest %s: %s",
+                manifest_path,
+                exc,
+            )
+            return
+        if not isinstance(payload, dict):
+            return
+        for raw_reason in payload.get("reasons", []) or []:
+            reason = str(raw_reason or "").strip()
+            if reason and reason not in self._degraded_incomplete_reasons:
+                self._degraded_incomplete_reasons.append(reason)
 
     def _initial_completed_stages(self, start_stage: str) -> list[str]:
         """Return the stage-order prefix already satisfied by a resumed run."""

@@ -406,6 +406,11 @@ furniture_safety_controller:
     window_blocking_is_hard: true
     nightstand_bed_overlap_tolerance_m: 0.03
     nightstand_bed_max_gap_m: 0.55
+    nightstand_headboard_inset_m: 0.10
+    nightstand_head_alignment_tolerance_m: 0.30
+    nightstand_pair_symmetry_tolerance_m: 0.20
+    nightstand_bed_orientation_min_dot: 0.80
+    wardrobe_corner_max_gap_m: 0.45
     max_plausibility_penalty: 0.35
   functional_layout:
     enabled: true
@@ -417,6 +422,7 @@ furniture_safety_controller:
     living_room:
       sofa_wall_max_gap_m: 0.30
       sofa_inward_min_dot: 0.70
+      sofa_room_center_facing_min_dot: 0.70
       rug_min_front_distance_m: 0.35
       rug_max_center_distance_m: 2.20
       rug_max_lateral_offset_m: 0.75

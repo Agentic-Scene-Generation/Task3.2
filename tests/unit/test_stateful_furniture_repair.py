@@ -201,6 +201,37 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         StatefulFurnitureAgent is None,
         f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
     )
+    def test_trusted_score_does_not_hide_candidate_bound_functional_defect(
+        self,
+    ) -> None:
+        agent = object.__new__(StatefulFurnitureAgent)
+        agent.scene = SimpleNamespace(scene_expert_stage_budget={"enabled": True})
+        agent.furniture_safety_controller = SimpleNamespace(accept_score_threshold=0.75)
+        agent.functional_layout_summary = lambda: {
+            "layout_family": "living_room",
+            "issue_count": 1,
+            "issues": ["sofa is 0.9m from its nearest wall"],
+        }
+        trusted = {
+            "score_source": "vlm_critic",
+            "weighted_score": 0.9,
+            "hard_valid": True,
+        }
+
+        should_fallback, reason = agent.should_generate_deterministic_fallback(
+            trusted,
+            regeneration_attempts=0,
+            max_stage_regenerations=1,
+            repairable_hard_exhausted=False,
+        )
+
+        self.assertTrue(should_fallback)
+        self.assertIn("functional relations", reason)
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
     def test_capture_does_not_promote_fallback_score_to_trusted_critic(self) -> None:
         agent = object.__new__(StatefulFurnitureAgent)
         fallback_scores = SimpleNamespace(critique="critic timed out")
@@ -373,6 +404,33 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
 
         self.assertEqual(calls, ["bed", "nightstands", "wardrobe"])
         self.assertEqual(len(actions), 3)
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
+    def test_nightstand_relation_refits_bedside_group_before_tables(self) -> None:
+        agent = object.__new__(StatefulFurnitureAgent)
+        agent.scene = SimpleNamespace(objects={"bed_0": object()})
+        agent._bedroom_layout_cfg = lambda: SimpleNamespace()
+        calls: list[str] = []
+        agent._anchor_existing_bed = lambda: calls.append("bed") or True
+        agent._repair_bedside_nightstands = lambda: calls.append("nightstands") or True
+        agent._repair_wardrobe_wall_anchor = lambda: calls.append("wardrobe") or True
+
+        with patch(
+            "scenesmith.furniture_agents.stateful_furniture_agent."
+            "evaluate_bedroom_layout_plausibility",
+            return_value=SimpleNamespace(
+                issues=[
+                    "bedroom plausibility: nightstands are not aligned with the "
+                    "bed headboard slots"
+                ]
+            ),
+        ):
+            agent._repair_bedroom_layout()
+
+        self.assertEqual(calls, ["bed", "nightstands", "wardrobe"])
 
     @unittest.skipIf(
         StatefulFurnitureAgent is None,

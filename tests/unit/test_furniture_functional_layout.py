@@ -92,6 +92,22 @@ def _room(room_type: str, text: str, objects: dict, openings: list) -> SimpleNam
 
 
 class FurnitureFunctionalLayoutTest(unittest.TestCase):
+    def test_living_room_requires_sofa_back_to_reach_a_wall(self) -> None:
+        scene = _room(
+            "living_room",
+            "A living room with a sofa.",
+            {
+                "sofa_0": _Furniture("sofa", 0.0, -0.75, 0.0, 1.7, 0.9),
+            },
+            [],
+        )
+
+        report = evaluate_functional_layout(scene, _category)
+
+        self.assertIsNotNone(report)
+        self.assertTrue(any("sofa-back limit" in issue for issue in report.issues))
+        self.assertGreater(report.metrics["sofa_room_center_facing_dot"], 0.9)
+
     def test_living_room_rejects_disconnected_rug_and_same_side_plants(self) -> None:
         scene = _room(
             "living_room",
@@ -111,25 +127,23 @@ class FurnitureFunctionalLayoutTest(unittest.TestCase):
         report = evaluate_functional_layout(scene, _category)
 
         self.assertIsNotNone(report)
-        self.assertTrue(any("not centered in front" in issue for issue in report.issues))
-        self.assertTrue(any("not flanking opposite" in issue for issue in report.issues))
+        self.assertTrue(
+            any("not centered in front" in issue for issue in report.issues)
+        )
+        self.assertTrue(
+            any("not flanking opposite" in issue for issue in report.issues)
+        )
 
     def test_classroom_rejects_unpaired_rows_and_teacher_behind_students(self) -> None:
         scene = _room(
             "classroom",
             "A classroom with student desks and a teacher's desk.",
             {
-                "student_desk_0": _Furniture(
-                    "student_desk", -1.0, 0.5, 0.0, 0.7, 0.55
-                ),
-                "student_desk_1": _Furniture(
-                    "student_desk", 1.0, 0.5, 90.0, 0.7, 0.55
-                ),
+                "student_desk_0": _Furniture("student_desk", -1.0, 0.5, 0.0, 0.7, 0.55),
+                "student_desk_1": _Furniture("student_desk", 1.0, 0.5, 90.0, 0.7, 0.55),
                 "chair_0": _Furniture("chair", 2.5, -2.0, 0.0, 0.48, 0.5),
                 "chair_1": _Furniture("chair", -2.5, -2.0, 0.0, 0.48, 0.5),
-                "teacher_desk_0": _Furniture(
-                    "teacher_desk", 0.0, -1.5, 0.0, 1.4, 0.7
-                ),
+                "teacher_desk_0": _Furniture("teacher_desk", 0.0, -1.5, 0.0, 1.4, 0.7),
             },
             [
                 SimpleNamespace(opening_type="door", wall_direction="west"),
@@ -142,8 +156,12 @@ class FurnitureFunctionalLayoutTest(unittest.TestCase):
 
         self.assertIsNotNone(report)
         self.assertEqual(report.anchor_wall, "north")
-        self.assertTrue(any("inconsistent orientation" in issue for issue in report.issues))
-        self.assertTrue(any("correctly aligned chair" in issue for issue in report.issues))
+        self.assertTrue(
+            any("inconsistent orientation" in issue for issue in report.issues)
+        )
+        self.assertTrue(
+            any("correctly aligned chair" in issue for issue in report.issues)
+        )
         self.assertTrue(any("not ahead" in issue for issue in report.issues))
 
     def test_guidance_chooses_only_solid_classroom_front_wall(self) -> None:

@@ -200,10 +200,7 @@ def is_bedroom_scene(scene: Any) -> bool:
         "scene_expert_original_description",
         getattr(scene, "text_description", ""),
     )
-    text = (
-        f"{_text(getattr(scene, 'room_type', ''))} "
-        f"{_text(original_description)}"
-    )
+    text = f"{_text(getattr(scene, 'room_type', ''))} " f"{_text(original_description)}"
     return (
         "bedroom" in text
         or "nightstand" in text
@@ -472,6 +469,18 @@ def _bed_lateral_vector_xy(obj: Any) -> np.ndarray:
     return xy / norm
 
 
+def _object_forward_vector_xy(obj: Any) -> np.ndarray:
+    """Return the world functional-front direction for a canonical asset."""
+
+    rotation = _rotation_matrix(obj)
+    forward = rotation @ np.array([0.0, 1.0, 0.0])
+    xy = forward[:2]
+    norm = float(np.linalg.norm(xy))
+    if norm <= 1e-8:
+        return np.array([0.0, 1.0])
+    return xy / norm
+
+
 def _wall_for_vector(vector: np.ndarray) -> str:
     x, y = float(vector[0]), float(vector[1])
     if abs(x) >= abs(y):
@@ -633,15 +642,72 @@ def evaluate_bedroom_layout_plausibility(
         try:
             bed_center = _translation_xy(bed)
             lateral = _bed_lateral_vector_xy(bed)
-            lateral_positions = [
-                float(np.dot(_translation_xy(obj) - bed_center, lateral))
-                for _, obj in nightstands[:2]
-            ]
+            head = _bed_head_vector_xy(bed)
+            bed_forward = -head
+            selected_nightstands = nightstands[:2]
+            lateral_positions = []
+            head_positions = []
+            orientation_dots = []
+            expected_head_positions = []
+            for _, obj in selected_nightstands:
+                delta = _translation_xy(obj) - bed_center
+                lateral_positions.append(float(np.dot(delta, lateral)))
+                head_positions.append(float(np.dot(delta, head)))
+                orientation_dots.append(
+                    float(np.dot(_object_forward_vector_xy(obj), bed_forward))
+                )
+                nightstand_dims = _object_dimensions(obj)
+                if bed_dims is not None and nightstand_dims is not None:
+                    expected_head_positions.append(
+                        max(
+                            0.0,
+                            bed_dims[1] / 2.0
+                            - nightstand_dims[1] / 2.0
+                            - _cfg_float(cfg, "nightstand_headboard_inset_m", 0.10),
+                        )
+                    )
             if math.prod(lateral_positions) >= 0:
                 issues.append(
                     "bedroom plausibility: nightstands are not on opposite bed sides"
                 )
                 penalty += 0.08
+            max_head_error = _cfg_float(
+                cfg, "nightstand_head_alignment_tolerance_m", 0.30
+            )
+            if expected_head_positions and any(
+                abs(actual - expected) > max_head_error
+                for actual, expected in zip(
+                    head_positions,
+                    expected_head_positions,
+                )
+            ):
+                issues.append(
+                    "bedroom plausibility: nightstands are not aligned with the "
+                    "bed headboard slots"
+                )
+                penalty += 0.08
+            symmetry_tolerance = _cfg_float(
+                cfg, "nightstand_pair_symmetry_tolerance_m", 0.20
+            )
+            if (
+                abs(abs(lateral_positions[0]) - abs(lateral_positions[1]))
+                > (symmetry_tolerance)
+                or abs(head_positions[0] - head_positions[1]) > symmetry_tolerance
+            ):
+                issues.append(
+                    "bedroom plausibility: nightstand pair is not symmetric around "
+                    "the bed headboard"
+                )
+                penalty += 0.06
+            min_orientation_dot = _cfg_float(
+                cfg, "nightstand_bed_orientation_min_dot", 0.80
+            )
+            if any(dot < min_orientation_dot for dot in orientation_dots):
+                issues.append(
+                    "bedroom plausibility: nightstand fronts are not aligned with "
+                    "the bed functional front"
+                )
+                penalty += 0.06
         except Exception:
             pass
 
@@ -665,6 +731,21 @@ def evaluate_bedroom_layout_plausibility(
                     f"(nearest wall distance {nearest_wall_distance:.2f}m)"
                 )
                 penalty += 0.06
+            wall_distances = sorted(
+                (
+                    max(0.0, float(world_min[0]) - min_x),
+                    max(0.0, max_x - float(world_max[0])),
+                    max(0.0, float(world_min[1]) - min_y),
+                    max(0.0, max_y - float(world_max[1])),
+                )
+            )
+            corner_gap = wall_distances[1]
+            if corner_gap > _cfg_float(cfg, "wardrobe_corner_max_gap_m", 0.45):
+                issues.append(
+                    "bedroom plausibility: wardrobe is not anchored to a usable "
+                    f"corner (second-wall gap {corner_gap:.2f}m)"
+                )
+                penalty += 0.05
 
     penalty = min(penalty, _cfg_float(cfg, "max_plausibility_penalty", 0.35))
     score = max(0.0, 1.0 - penalty)

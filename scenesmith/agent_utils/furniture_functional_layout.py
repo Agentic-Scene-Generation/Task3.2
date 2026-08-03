@@ -72,11 +72,7 @@ def _original_scene_text(scene: Any) -> str:
         "scene_expert_original_description",
         getattr(scene, "text_description", ""),
     )
-    return (
-        f"{getattr(scene, 'room_type', '')} {original}"
-        .lower()
-        .replace("_", " ")
-    )
+    return f"{getattr(scene, 'room_type', '')} {original}".lower().replace("_", " ")
 
 
 def functional_layout_family(scene: Any) -> str | None:
@@ -90,8 +86,10 @@ def functional_layout_family(scene: Any) -> str | None:
 
 
 def _opening_value(opening: Any, key: str, default: str = "") -> str:
-    raw = opening.get(key, default) if isinstance(opening, dict) else getattr(
-        opening, key, default
+    raw = (
+        opening.get(key, default)
+        if isinstance(opening, dict)
+        else getattr(opening, key, default)
     )
     raw = getattr(raw, "value", raw)
     return str(raw or default).lower()
@@ -335,6 +333,25 @@ def _evaluate_living_room(
         return _report("living_room", anchor_wall, issues, metrics)
     lateral, forward = sofa_basis
 
+    room_bounds = _room_bounds(scene)
+    if room_bounds is not None:
+        min_x, min_y, max_x, max_y = room_bounds
+        room_center = np.asarray(
+            [(min_x + max_x) / 2.0, (min_y + max_y) / 2.0],
+            dtype=float,
+        )
+        center_vector = room_center - sofa_position
+        center_norm = float(np.linalg.norm(center_vector))
+        if center_norm > 1e-6:
+            center_facing_dot = float(np.dot(forward, center_vector / center_norm))
+            metrics["sofa_room_center_facing_dot"] = round(center_facing_dot, 3)
+            min_center_dot = _cfg_float(cfg, "sofa_room_center_facing_min_dot", 0.70)
+            if center_facing_dot < min_center_dot:
+                issues.append(
+                    f"functional layout: {sofa_id} does not face the room center "
+                    f"(alignment={center_facing_dot:.2f})"
+                )
+
     if rugs:
         rug_id, rug = rugs[0]
         rug_position = _position(rug)
@@ -446,8 +463,7 @@ def _evaluate_classroom(
             )
 
     unassigned = {
-        chair_id: (chair, _position(chair), _basis(chair))
-        for chair_id, chair in chairs
+        chair_id: (chair, _position(chair), _basis(chair)) for chair_id, chair in chairs
     }
     pair_distance = _cfg_float(cfg, "desk_chair_center_distance_m", 0.68)
     max_pair_error = _cfg_float(cfg, "desk_chair_pair_error_m", 0.48)
@@ -470,9 +486,10 @@ def _evaluate_classroom(
         if error > max_pair_error:
             unpaired.append(desk_id)
             continue
-        if chair_basis is not None and float(
-            np.dot(chair_basis[1], desk_forward)
-        ) < min_alignment:
+        if (
+            chair_basis is not None
+            and float(np.dot(chair_basis[1], desk_forward)) < min_alignment
+        ):
             unpaired.append(desk_id)
             continue
         unassigned.pop(chair_id, None)
@@ -490,8 +507,7 @@ def _evaluate_classroom(
         if teacher_position is not None:
             teacher_front = float(np.dot(teacher_position, mean_forward))
             student_front = max(
-                float(np.dot(position, mean_forward))
-                for _, _, position, _ in desk_data
+                float(np.dot(position, mean_forward)) for _, _, position, _ in desk_data
             )
             lead = teacher_front - student_front
             metrics["teacher_lead_distance_m"] = round(lead, 3)

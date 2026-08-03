@@ -136,6 +136,22 @@ stage_budget:
     # A single isolated retry expands the quality transaction when the only
     # failure is transport latency or structured-output recovery latency.
     critical_retry_budget_multiplier: 1.5
+    # Recovery transactions do not borrow the normal design clock.  Zero keeps
+    # backward-compatible inheritance; the quality profile assigns explicit
+    # limits so an earlier timeout cannot turn a later repair into an immediate
+    # no-op.
+    repair_max_wall_clock_seconds: 300
+    repair_designer_active_max_seconds: 240
+    regeneration_max_wall_clock_seconds: 600
+    regeneration_planner_active_max_seconds: 180
+    regeneration_designer_active_max_seconds: 360
+    regeneration_critic_active_max_seconds: 300
+    continuation_max_wall_clock_seconds: 360
+    continuation_planner_active_max_seconds: 120
+    continuation_designer_active_max_seconds: 240
+    continuation_critic_active_max_seconds: 240
+    fallback_critic_evaluation_max_seconds: 360
+    critic_retry_evaluation_max_seconds: 420
     max_asset_requests: 4
     # Blocking retrieval/canonicalization has its own service deadline and is
     # excluded from planner/designer active inference time.
@@ -184,6 +200,16 @@ stage_budget:
     # Furniture quality gates must not inherit a nearly exhausted designer
     # deadline. Each distinct rendered candidate gets one bounded VLM window.
     critic_evaluation_max_seconds: 360
+    repair_max_wall_clock_seconds: 420
+    repair_designer_active_max_seconds: 360
+    regeneration_max_wall_clock_seconds: 900
+    regeneration_planner_active_max_seconds: 240
+    regeneration_designer_active_max_seconds: 600
+    regeneration_critic_active_max_seconds: 360
+    continuation_max_wall_clock_seconds: 540
+    continuation_designer_active_max_seconds: 420
+    fallback_critic_evaluation_max_seconds: 480
+    critic_retry_evaluation_max_seconds: 540
     fallback_reserve_fraction: 0.15
     max_asset_requests: 4
     asset_acquisition_timeout_seconds: 360
@@ -242,6 +268,16 @@ stage_budget:
     planner_active_max_seconds: 240
     designer_active_max_seconds: 540
     critic_active_max_seconds: 300
+    repair_max_wall_clock_seconds: 360
+    repair_designer_active_max_seconds: 300
+    regeneration_max_wall_clock_seconds: 720
+    regeneration_planner_active_max_seconds: 210
+    regeneration_designer_active_max_seconds: 480
+    regeneration_critic_active_max_seconds: 300
+    continuation_max_wall_clock_seconds: 480
+    continuation_designer_active_max_seconds: 360
+    fallback_critic_evaluation_max_seconds: 360
+    critic_retry_evaluation_max_seconds: 480
     max_asset_requests: 4
     asset_acquisition_timeout_seconds: 300
     max_optional_object_families: 4

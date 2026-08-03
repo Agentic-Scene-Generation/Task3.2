@@ -948,18 +948,20 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 True,
                 "agent workflow completed without a trustworthy visual critic score",
             )
+        functional_layout = self.functional_layout_summary()
+        if int(functional_layout.get("issue_count", 0) or 0) > 0:
+            return (
+                True,
+                "agent workflow completed with unresolved candidate-bound "
+                "functional relations: "
+                + "; ".join(functional_layout.get("issues", [])[:4]),
+            )
         return False, reason
 
     def capture_postprocessing_guard(self) -> dict[str, Any]:
         """Capture selection invariants before projection/simulation."""
         hard_state = self._evaluate_current_hard_state()
-        safety_cfg = getattr(self.cfg, "furniture_safety_controller", None)
-        functional_cfg = getattr(safety_cfg, "functional_layout", None)
-        functional_report = evaluate_functional_layout(
-            self.scene,
-            category_resolver=self.furniture_safety_controller.infer_object_category,
-            cfg=functional_cfg,
-        )
+        functional_summary = self.functional_layout_summary()
         required_counts = getattr(
             self.furniture_safety_controller, "required_counts", {}
         )
@@ -969,9 +971,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         }
         return {
             "hard_valid": bool(hard_state is None or hard_state.hard_valid),
-            "functional_score": (
-                None if functional_report is None else functional_report.score
-            ),
+            "functional_score": functional_summary.get("score"),
             "required_counts": observed_counts,
         }
 
@@ -1009,6 +1009,18 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         """Return candidate-bound geometry evidence for functional relations."""
 
         safety_cfg = getattr(self.cfg, "furniture_safety_controller", None)
+        if is_bedroom_scene(self.scene):
+            bedroom_report = evaluate_bedroom_layout_plausibility(
+                self.scene,
+                cfg=getattr(safety_cfg, "bedroom_layout", None),
+            )
+            return {
+                "layout_family": "bedroom",
+                "score": float(bedroom_report.score),
+                "issue_count": len(bedroom_report.issues),
+                "issues": list(bedroom_report.issues),
+                "metrics": {},
+            }
         functional_cfg = getattr(safety_cfg, "functional_layout", None)
         report = evaluate_functional_layout(
             self.scene,
@@ -1110,17 +1122,14 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
 
         before_score = guard.get("functional_score")
         if before_score is not None:
-            safety_cfg = getattr(self.cfg, "furniture_safety_controller", None)
-            functional_cfg = getattr(safety_cfg, "functional_layout", None)
-            report = evaluate_functional_layout(
-                self.scene,
-                category_resolver=self.furniture_safety_controller.infer_object_category,
-                cfg=functional_cfg,
-            )
-            if report is not None and report.score + 0.05 < float(before_score):
+            summary = self.functional_layout_summary()
+            after_score = summary.get("score")
+            if after_score is not None and float(after_score) + 0.05 < float(
+                before_score
+            ):
                 return (
                     "post-processing degraded functional relations "
-                    f"({float(before_score):.3f} -> {report.score:.3f})"
+                    f"({float(before_score):.3f} -> {float(after_score):.3f})"
                 )
         return ""
 
@@ -1180,6 +1189,8 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         wins when it resolves hard/required deficits, strictly reduces supported
         functional-relation defects, or materially improves a trusted VLM score.
         """
+        parent_runtime_phase = self._stage_runtime_phase
+        parent_phase_started_at = self._stage_phase_started_at
         self.restore_agent_candidate(agent_candidate)
         agent_hash = candidate_state_hash(self.scene)
         agent_hard_state = self._evaluate_current_hard_state()
@@ -1212,6 +1223,9 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             },
             "selection": "agent_best_pre_deterministic",
             "selection_reason": "deterministic candidate was not generated",
+            "selected_score_source": str(
+                agent_candidate.get("score_source", "unavailable")
+            ),
             "agent_render_dir": str(agent_render_dir),
         }
         # Persist the trigger and pure-agent baseline before attempting any
@@ -1227,7 +1241,8 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             comparison["agent_hard_valid"]
             and agent_candidate.get("score_source") != "vlm_critic"
         ):
-            self._stage_runtime_phase = "fallback"
+            self._activate_runtime_phase("fallback", reset_role_consumption=True)
+            self._stage_phase_started_at = time.monotonic()
             try:
                 self._critic_failed = False
                 self._last_trusted_critic_candidate = None
@@ -1242,6 +1257,9 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                     agent_candidate = scored_agent_candidate
                     comparison["agent_candidate"] = self._candidate_score_summary(
                         agent_candidate
+                    )
+                    comparison["selected_score_source"] = str(
+                        agent_candidate.get("score_source", "unavailable")
                     )
                     self._write_score_artifacts(
                         response=agent_candidate["scores"],
@@ -1279,7 +1297,8 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 if self.scene.content_hash() != agent_hash:
                     self.scene.restore_from_state_dict(agent_candidate["scene_state"])
                     self.rendering_manager.clear_cache()
-                self._stage_runtime_phase = "agent"
+                self._activate_runtime_phase(parent_runtime_phase)
+                self._stage_phase_started_at = parent_phase_started_at
 
         controller_cfg = getattr(self.cfg, "furniture_safety_controller", None)
         bedroom_cfg = getattr(controller_cfg, "bedroom_layout", None)
@@ -1424,7 +1443,8 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         # The deterministic render is a required diagnostic artifact, even if
         # its later VLM comparison times out or the process is interrupted.
         self._write_fallback_comparison(comparison)
-        self._stage_runtime_phase = "fallback"
+        self._activate_runtime_phase("fallback", reset_role_consumption=True)
+        self._stage_phase_started_at = time.monotonic()
         deterministic_state = (
             copy.deepcopy(self.scene.to_state_dict())
             if comparison["deterministic_hard_valid"]
@@ -1519,9 +1539,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                         scene_state=deterministic_state,
                         candidate=deterministic_candidate,
                         render_dir=deterministic_render_dir,
-                        reason=(
-                            "deterministic fallback improved functional relations"
-                        ),
+                        reason=("deterministic fallback improved functional relations"),
                     )
                 elif deterministic_candidate is None:
                     self.restore_agent_candidate(agent_candidate)
@@ -1646,7 +1664,8 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                     "fallback critic failed; pure-agent candidate preserved"
                 )
         finally:
-            self._stage_runtime_phase = "agent"
+            self._activate_runtime_phase(parent_runtime_phase)
+            self._stage_phase_started_at = parent_phase_started_at
 
         if (
             comparison.get("selection") == "deterministic_candidate"
@@ -1668,12 +1687,40 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         # Preserve the diagnostic render path even when the controller restores
         # the incumbent after scoring.
         comparison["selected_scene_hash"] = candidate_state_hash(self.scene)
+        selected_key = (
+            "deterministic_candidate"
+            if comparison.get("selection") == "deterministic_candidate"
+            else "agent_candidate"
+        )
+        selected_score_source = str(
+            comparison.get(selected_key, {}).get("score_source", "unavailable")
+        )
+        comparison["selected_score_source"] = selected_score_source
         self._write_fallback_comparison(comparison)
         # Candidate comparison is the last layout-selection operation. Generic
         # finalization may still validate/copy artifacts, but it must not run a
         # new deterministic placement pass and create an unnamed third layout.
         self._freeze_selected_fallback_candidate = True
         try:
+            if selected_score_source != "vlm_critic" and bool(
+                comparison.get(
+                    (
+                        "deterministic_hard_valid"
+                        if selected_key == "deterministic_candidate"
+                        else "agent_hard_valid"
+                    ),
+                    False,
+                )
+            ):
+                # Selection is already complete and candidate-bound L1/L2
+                # evidence may be authoritative even when the optional VLM
+                # transport is unavailable.  Finalization must copy this exact
+                # candidate once, not re-open scoring and discard it.
+                self._allow_degraded_stage_completion = True
+                self._degraded_stage_reasons.append(
+                    "visual critic unavailable for the selected hard-valid "
+                    "furniture candidate"
+                )
             await self._finalize_scene_and_scores()
         finally:
             self._freeze_selected_fallback_candidate = False
@@ -1816,11 +1863,17 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 "bed headboard overlaps",
             )
         )
-        nightstand_relation_issue = "nightstands are not on opposite" in issue_text
-        wardrobe_relation_issue = "wardrobe is floating away" in issue_text
+        nightstand_relation_issue = "nightstand" in issue_text
+        wardrobe_relation_issue = "wardrobe" in issue_text
 
         actions: list[str] = []
-        bed_changed = bed_relation_issue and self._anchor_existing_bed()
+        # Nightstand slots are defined in the bed frame.  If the bed is too
+        # close to a lateral wall, independently clamping the two tables folds
+        # them into the same/incorrect slot.  Re-fit the complete bedside group
+        # before placing either dependent object.
+        bed_changed = (
+            bed_relation_issue or nightstand_relation_issue
+        ) and self._anchor_existing_bed()
         if bed_changed:
             actions.append("anchored bed headboard to the preferred solid wall")
 
@@ -2586,10 +2639,46 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         )
         transform = self._snap_transform_to_wall(bed, transform, wall)
         transform = self._fit_transform_inside_room(bed, transform)
+        transform = self._fit_bedside_group_inside_room(bed, transform, wall)
         if self._transform_close(bed.transform, transform):
             return False
         self.scene.move_object(bed.object_id, transform)
         return True
+
+    def _fit_bedside_group_inside_room(
+        self,
+        bed: SceneObject,
+        transform: RigidTransform,
+        wall: str,
+    ) -> RigidTransform:
+        """Clamp the bed anchor so both headboard-side tables remain feasible."""
+
+        room_bounds = self._room_bounds_xy()
+        if room_bounds is None:
+            return transform
+        bed_dims = self._local_size(bed, [1.60, 2.05, 0.80])
+        nightstands = self._furniture_by_category("nightstand")[:2]
+        nightstand_width = max(
+            [float(self._local_size(obj, [0.45, 0.42, 0.55])[0]) for obj in nightstands]
+            or [0.45]
+        )
+        group_half_span = (
+            float(bed_dims[0]) / 2.0
+            + nightstand_width
+            + float(self._repair_cfg_value("nightstand_gap_m", 0.08))
+            + 0.03
+        )
+        min_x, min_y, max_x, max_y = room_bounds
+        translation = np.asarray(transform.translation(), dtype=float).copy()
+        if wall in ("north", "south"):
+            low, high = min_x + group_half_span, max_x - group_half_span
+            if low <= high:
+                translation[0] = min(max(translation[0], low), high)
+        else:
+            low, high = min_y + group_half_span, max_y - group_half_span
+            if low <= high:
+                translation[1] = min(max(translation[1], low), high)
+        return RigidTransform(R=transform.rotation(), p=translation)
 
     def _repair_bedside_nightstands(self) -> bool:
         beds = self._furniture_by_category("bed")
@@ -2647,6 +2736,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         opening_zones = self._opening_forbidden_zones(include_windows=True)
         best_transform = None
         best_score = -1e9
+        original_center = np.asarray(wardrobe.transform.translation(), dtype=float)
         for transform, wall_opening_penalty in candidates:
             bounds = self._bounds_for_transform(wardrobe, transform)
             if bounds is None:
@@ -2658,6 +2748,8 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                     continue
                 overlap_x, overlap_y = self._xy_overlap_depths(bounds, obstacle_bounds)
                 overlap_penalty += overlap_x * overlap_y * 100.0
+            if overlap_penalty > 1e-4:
+                continue
             center = np.asarray(transform.translation(), dtype=float)
             bed_center = (
                 np.asarray(obstacles[0].transform.translation(), dtype=float)
@@ -2669,11 +2761,30 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 bounds,
                 opening_zones,
             )
+            if exact_opening_penalty > 1e-4:
+                continue
+            min_x, min_y, max_x, max_y = room_bounds
+            world_min, world_max = bounds
+            wall_gaps = sorted(
+                (
+                    max(0.0, float(world_min[0]) - min_x),
+                    max(0.0, max_x - float(world_max[0])),
+                    max(0.0, float(world_min[1]) - min_y),
+                    max(0.0, max_y - float(world_max[1])),
+                )
+            )
+            second_wall_gap = wall_gaps[1]
+            corner_bonus = max(0.0, 1.0 - second_wall_gap / 0.75) * 2.0
+            move_penalty = (
+                float(np.linalg.norm(center[:2] - original_center[:2])) * 0.45
+            )
             score = (
-                distance_score
+                distance_score * 0.10
+                + corner_bonus
                 - overlap_penalty
                 - wall_opening_penalty
                 - exact_opening_penalty
+                - move_penalty
             )
             if score > best_score:
                 best_score = score
@@ -2939,12 +3050,19 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         wall_openings = plan.wall_openings if plan else {}
         margin = 0.08
         candidates: list[tuple[str, float, float, float]] = []
+        original = np.asarray(wardrobe.transform.translation(), dtype=float)
         for wall in ("north", "south"):
             y = max_y - margin if wall == "north" else min_y + margin
+            candidates.append(
+                (wall, float(original[0]), y, self._yaw_for_inward_wall(wall))
+            )
             for x in (min_x + 0.7, 0.0, max_x - 0.7):
                 candidates.append((wall, x, y, self._yaw_for_inward_wall(wall)))
         for wall in ("east", "west"):
             x = max_x - margin if wall == "east" else min_x + margin
+            candidates.append(
+                (wall, x, float(original[1]), self._yaw_for_inward_wall(wall))
+            )
             for y in (min_y + 0.7, 0.0, max_y - 0.7):
                 candidates.append((wall, x, y, self._yaw_for_inward_wall(wall)))
 
