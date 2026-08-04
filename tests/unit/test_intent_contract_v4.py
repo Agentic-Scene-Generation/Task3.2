@@ -14,6 +14,7 @@ from scenesmith.scenebenchmark_critic.intent_schema import (
     INTENT_COMPILER_SPEC_VERSION,
     INTENT_CONTRACT_SCHEMA_VERSION,
     canonical_selector_category,
+    intent_contract_json_schema,
     validate_intent_contract,
 )
 from scenesmith.scenebenchmark_critic.intent_compiler import (
@@ -748,6 +749,12 @@ def test_intent_compiler_retries_once_without_task_spec_input() -> None:
     first_user_message = compiler._test_calls[0]["messages"][1]["content"]
     assert "Original scene prompt:" in first_user_message
     assert "TaskSpec" not in first_user_message
+
+    for call in compiler._test_calls:
+        assert call["response_format"] == {
+            "type": "json_object",
+            "schema": intent_contract_json_schema(),
+        }
 
 
 def test_intent_compiler_retry_spells_out_unary_target_cardinality() -> None:

@@ -207,6 +207,12 @@ class IntentCompiler:
                     messages=messages,
                     temperature=self._temperature,
                     max_tokens=self._max_tokens,
+                    # llama.cpp converts this schema to a grammar and constrains
+                    # every generated token to a schema-valid JSON value.
+                    response_format={
+                        "type": "json_object",
+                        "schema": intent_contract_json_schema(),
+                    },
                     extra_body=chat_template_kwargs_from_effort("none"),
                 )
                 raw = self._raw_message(response)
