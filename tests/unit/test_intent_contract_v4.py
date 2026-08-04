@@ -830,6 +830,34 @@ def test_intent_compiler_falls_back_after_semantic_json_failures() -> None:
     assert centered[0]["targets"]["category"] == "wall"
 
 
+def test_deterministic_contract_recognizes_floor_near_manipulands() -> None:
+    prompt = (
+        "A bedroom with a bed, an alarm clock on one nightstand, a book on the "
+        "other, and a small wastebasket near the dresser."
+    )
+
+    contract = build_intent_contract(prompt)
+
+    assert any(
+        row["relation"] == "on_top_of"
+        and row["subjects"]["category"] == "alarm_clock"
+        and row["targets"]["category"] == "nightstand"
+        for row in contract["constraints"]
+    )
+    assert any(
+        row["relation"] == "near"
+        and row["subjects"]["category"] == "wastebasket"
+        and row["targets"]["category"] == "dresser"
+        for row in contract["constraints"]
+    )
+    validated = validate_intent_contract(contract)
+    assert all(
+        row["stage"] == "manipuland"
+        for row in validated["constraints"]
+        if row["subjects"]["category"] in {"alarm_clock", "wastebasket"}
+    )
+
+
 def test_schema_rejects_direction_that_only_qualifies_a_wall() -> None:
     prompt = (
         "A dining room with a dining table in the center, four dining chairs "
