@@ -140,11 +140,12 @@ class TestVisionTools(unittest.TestCase):
             "Rendering failed"
         )
 
-        # Exception should propagate.
-        with self.assertRaises(Exception) as context:
-            self.vision_tools._observe_scene_impl()
+        result = self.vision_tools._observe_scene_impl()
 
-        self.assertEqual(str(context.exception), "Rendering failed")
+        self.assertEqual(len(result), 1)
+        self.assertIsInstance(result[0], ToolOutputText)
+        self.assertIn("Rendering failed", result[0].text)
+        self.assertIn("hard-invalid", result[0].text)
 
     @patch(
         "scenesmith.furniture_agents.tools.vision_tools.encode_image_to_base64",

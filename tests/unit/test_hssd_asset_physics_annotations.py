@@ -14,5 +14,5 @@ def test_bundled_hssd_physics_and_quality_record():
     )
     assert 0.0 <= physics["friction_coefficient"] <= 2.0
     assert quality["is_acceptable"] is True
-    assert quality["watertight"] is None
+    assert quality["watertight"] is False
     assert record["scenebenchmark_fd_sa"]

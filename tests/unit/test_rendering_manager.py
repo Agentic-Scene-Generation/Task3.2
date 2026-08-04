@@ -120,6 +120,7 @@ class TestRenderingManager(unittest.TestCase):
             side_view_start_azimuth_degrees=None,
             include_vertical_views=True,
             override_side_view_count=None,
+            taa_samples=16,
         )
 
         # Verify render counter incremented.
@@ -161,7 +162,10 @@ class TestRenderingManager(unittest.TestCase):
         mock_render_function.assert_called_once()
 
         # Verify cache contains the content-based key.
-        expected_cache_key = "scene_content_test_content_hash_123"
+        expected_cache_key = (
+            "scene_content_test_content_hash_123_profile_final_tw_512_th_512_"
+            "sw_256_sh_256_sc_4_taa_16"
+        )
         self.assertIn(expected_cache_key, self.rendering_manager._render_cache)
         self.assertEqual(
             self.rendering_manager._render_cache[expected_cache_key], result1
@@ -316,7 +320,13 @@ class TestRenderingManager(unittest.TestCase):
             )
 
             # Mock scene.content_hash() to return different values.
-            self.mock_scene.content_hash.side_effect = ["hash1", "hash2"]
+            # Rendering and render-memory persistence each read the scene hash.
+            self.mock_scene.content_hash.side_effect = [
+                "hash1",
+                "hash1",
+                "hash2",
+                "hash2",
+            ]
 
             # Render twice with different content hashes.
             _ = self.rendering_manager.render_scene(
@@ -332,8 +342,14 @@ class TestRenderingManager(unittest.TestCase):
 
             # Verify cache contains both entries.
             self.assertEqual(len(self.rendering_manager._render_cache), 2)
-            self.assertIn("scene_content_hash1", self.rendering_manager._render_cache)
-            self.assertIn("scene_content_hash2", self.rendering_manager._render_cache)
+            self.assertIn(
+                "scene_content_hash1_profile_final_tw_512_th_512_sw_256_sh_256_sc_4_taa_16",
+                self.rendering_manager._render_cache,
+            )
+            self.assertIn(
+                "scene_content_hash2_profile_final_tw_512_th_512_sw_256_sh_256_sc_4_taa_16",
+                self.rendering_manager._render_cache,
+            )
 
 
 if __name__ == "__main__":
