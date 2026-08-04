@@ -153,6 +153,24 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         StatefulFurnitureAgent is None,
         f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
     )
+    def test_generic_wall_repair_applies_to_bedroom_furniture(self) -> None:
+        agent = object.__new__(StatefulFurnitureAgent)
+        nightstand = _FakeFurniture("nightstand_0", (0.0, -1.98, 0.3), (0.5, 0.45, 0.6))
+        agent.scene = _FakeCollisionScene(nightstand)
+        agent.cfg = SimpleNamespace(
+            furniture_safety_controller=SimpleNamespace(
+                deterministic_repair=SimpleNamespace(wall_margin_m=0.08)
+            )
+        )
+
+        self.assertTrue(agent._repair_generic_wall_collisions())
+        lower, _ = nightstand.compute_world_bounds()
+        self.assertGreaterEqual(float(lower[1]), -1.92 - 1e-6)
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
     def test_shallow_collision_repair_preserves_wall_anchor_axis(self) -> None:
         agent = object.__new__(StatefulFurnitureAgent)
         chair = _FakeFurniture("guest_chair_0", (-1.57, 0.0, 0.45), (0.70, 0.70, 0.90))

@@ -815,14 +815,14 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         elif "unresolved prompt-core furniture relation" in reasons:
             actions.extend(self._repair_unresolved_prompt_contract_relations())
 
-        # Bedroom-specific anchors can move a nightstand back into an opening
-        # zone after the generic repair above. Re-run this safety pass after all
-        # bedroom layout and relation repairs so the final pose is authoritative.
-        if (
-            FailureCategory.DOOR_OR_OPENING_CLEARANCE in repair_plan.categories
-            and self._repair_forbidden_zone_conflicts(include_windows=False)
-        ):
+        # Bedroom anchors and relation repairs can reintroduce a wall or opening
+        # conflict even when the current hard failure came from another source.
+        # Always run both geometry-only safety passes last so their final pose is
+        # authoritative for the next hard-state evaluation.
+        if self._repair_forbidden_zone_conflicts(include_windows=False):
             actions.append("revalidated deterministic door/opening forbidden zones")
+        if "collisions" in reasons and self._repair_generic_wall_collisions():
+            actions.append("moved bedroom furniture away from room-wall collisions")
 
         return bool(actions), actions
 
