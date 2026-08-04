@@ -752,9 +752,39 @@ def test_intent_compiler_retries_once_without_task_spec_input() -> None:
 
     for call in compiler._test_calls:
         assert call["response_format"] == {
-            "type": "json_object",
-            "schema": intent_contract_json_schema(),
+            "type": "json_schema",
+            "json_schema": {
+                "name": "intent_contract",
+                "strict": True,
+                "schema": intent_contract_json_schema(),
+            },
         }
+
+
+def test_intent_compiler_canonicalizes_two_object_side_wording_to_flanking() -> None:
+    compiler = _compiler_with_responses(
+        [
+            _response(
+                '{"constraints": [{"relation": "edge_distribution", '
+                '"subjects": {"category": "nightstand", "count": 2}, '
+                '"targets": {"category": "bed", "count": 1}, '
+                '"edge_frame": "target_local_rectangle", '
+                '"groups": [{"edge_class": "short", '
+                '"counts_per_edge": [1, 1]}], '
+                '"orientation": "unconstrained", '
+                '"source": "explicit_prompt", '
+                '"evidence_span": "a nightstand on each side of the bed"}]}'
+            )
+        ]
+    )
+
+    result = compiler.compile("A bedroom with a nightstand on each side of the bed.")
+
+    relation = result["constraints"][0]
+    assert relation["relation"] == "flanking"
+    assert relation["groups"] == []
+    assert relation.get("edge_frame") is None
+    assert relation.get("orientation") is None
 
 
 def test_intent_compiler_retry_spells_out_unary_target_cardinality() -> None:
@@ -777,6 +807,27 @@ def test_intent_compiler_retry_spells_out_unary_target_cardinality() -> None:
     retry_message = compiler._test_calls[1]["messages"][1]["content"]
     assert "remove its secondary_category" in retry_message
     assert "exactly one primary target selector" in retry_message
+
+
+def test_intent_compiler_falls_back_after_semantic_json_failures() -> None:
+    invalid = (
+        '{"constraints": [{"relation": "centered_in_room", '
+        '"subjects": {"category": "conference_table"}, '
+        '"source": "explicit_prompt", '
+        '"evidence_span": "table centered in the room"}]}'
+    )
+    compiler = _compiler_with_responses([_response(invalid), _response(invalid)])
+
+    result = compiler.compile("A bedroom with a bed centered on the main wall.")
+
+    assert result["retry_count"] == 1
+    assert result["warnings"]
+    assert compiler.last_trace["status"] == "fallback"
+    centered = [
+        row for row in result["constraints"] if row["relation"] == "centered_on_wall"
+    ]
+    assert centered
+    assert centered[0]["targets"]["category"] == "wall"
 
 
 def test_schema_rejects_direction_that_only_qualifies_a_wall() -> None:

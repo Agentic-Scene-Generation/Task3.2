@@ -815,6 +815,15 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         elif "unresolved prompt-core furniture relation" in reasons:
             actions.extend(self._repair_unresolved_prompt_contract_relations())
 
+        # Bedroom-specific anchors can move a nightstand back into an opening
+        # zone after the generic repair above. Re-run this safety pass after all
+        # bedroom layout and relation repairs so the final pose is authoritative.
+        if (
+            FailureCategory.DOOR_OR_OPENING_CLEARANCE in repair_plan.categories
+            and self._repair_forbidden_zone_conflicts(include_windows=False)
+        ):
+            actions.append("revalidated deterministic door/opening forbidden zones")
+
         return bool(actions), actions
 
     def _ground_elevated_floor_furniture(
@@ -1824,6 +1833,11 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         gap = float(self._repair_cfg_value("nightstand_gap_m", 0.08))
 
         changed = False
+        forbidden_zones = self._opening_forbidden_zones(include_windows=False)
+        bed_bounds = self._bounds_for_transform(bed, bed.transform)
+        overlap_tolerance = float(
+            self._repair_cfg_value("nightstand_bed_overlap_tolerance_m", 0.03)
+        )
         for side, nightstand in zip((-1.0, 1.0), nightstands):
             ns_dims = self._local_size(nightstand, [0.45, 0.42, 0.55])
             target = (
@@ -1831,13 +1845,66 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 + side * lateral * (bed_dims[0] / 2 + ns_dims[0] / 2 + gap)
                 + head * max(0.0, bed_dims[1] / 2 - ns_dims[1] / 2 - 0.10)
             )
-            transform = self._grounded_transform(
-                nightstand,
-                x=float(target[0]),
-                y=float(target[1]),
-                yaw_deg=yaw,
+            candidates: list[tuple[float, float, float, RigidTransform]] = []
+            # A door can occupy the nominal head-side slot. Search both axes in
+            # the bed-local frame so the nightstand can move inward or toward
+            # the head wall while remaining a reachable bedside surface.
+            for head_retreat_step in range(9):
+                head_retreat = head_retreat_step * 0.08
+                for inward_step in range(6):
+                    inward = inward_step * 0.06
+                    candidate_target = (
+                        target + head * head_retreat - side * lateral * inward
+                    )
+                    raw_candidate = self._grounded_transform(
+                        nightstand,
+                        x=float(candidate_target[0]),
+                        y=float(candidate_target[1]),
+                        yaw_deg=yaw,
+                    )
+                    candidate = raw_candidate
+                    candidate = self._fit_transform_inside_room(nightstand, candidate)
+                    bounds = self._bounds_for_transform(nightstand, candidate)
+                    if bounds is None:
+                        continue
+                    zone_penalty = self._zone_overlap_penalty(bounds, forbidden_zones)
+                    if zone_penalty > 1e-6:
+                        # A clearance repair may need to use the last few
+                        # centimetres beside a wall; keep a positive margin.
+                        candidate = self._fit_transform_inside_room(
+                            nightstand, raw_candidate, margin_m=0.03
+                        )
+                    bounds = self._bounds_for_transform(nightstand, candidate)
+                    if bounds is None:
+                        continue
+                    zone_penalty = self._zone_overlap_penalty(bounds, forbidden_zones)
+                    if bed_bounds is not None:
+                        overlap_x, overlap_y = self._xy_overlap_depths(
+                            bed_bounds, bounds
+                        )
+                        if (
+                            overlap_x > overlap_tolerance
+                            and overlap_y > overlap_tolerance
+                        ):
+                            continue
+                    displacement = float(
+                        np.linalg.norm(
+                            np.asarray(candidate.translation()[:2]) - target[:2]
+                        )
+                    )
+                    candidates.append(
+                        (
+                            zone_penalty,
+                            displacement,
+                            head_retreat + inward,
+                            candidate,
+                        )
+                    )
+            if not candidates:
+                continue
+            _, _, _, transform = min(
+                candidates, key=lambda item: (item[0], item[1], item[2])
             )
-            transform = self._fit_transform_inside_room(nightstand, transform)
             if not self._transform_close(nightstand.transform, transform):
                 self.scene.move_object(nightstand.object_id, transform)
                 changed = True
@@ -2382,7 +2449,11 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         return RigidTransform(R=transform.rotation(), p=translation)
 
     def _fit_transform_inside_room(
-        self, obj: SceneObject, transform: RigidTransform
+        self,
+        obj: SceneObject,
+        transform: RigidTransform,
+        *,
+        margin_m: float | None = None,
     ) -> RigidTransform:
         room_bounds = self._room_bounds_xy()
         bounds = self._bounds_for_transform(obj, transform)
@@ -2390,9 +2461,10 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             return transform
         min_x, min_y, max_x, max_y = room_bounds
         world_min, world_max = bounds
-        margin = max(
-            0.03,
-            float(self._repair_cfg_value("wall_margin_m", 0.08)),
+        margin = (
+            max(0.0, float(margin_m))
+            if margin_m is not None
+            else max(0.03, float(self._repair_cfg_value("wall_margin_m", 0.08)))
         )
         translation = np.asarray(transform.translation(), dtype=float).copy()
         if world_min[0] < min_x + margin:

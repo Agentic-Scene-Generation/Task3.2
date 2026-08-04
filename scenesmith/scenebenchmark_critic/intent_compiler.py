@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,7 @@ from scenesmith.scenebenchmark_critic.intent_schema import (
     intent_contract_json_schema,
     validate_intent_contract,
 )
+from scenesmith.scenebenchmark_critic.intent_contract import build_intent_contract
 from scenesmith.scenebenchmark_critic.relation_registry import RELATION_REGISTRY
 from scenesmith.utils.llm_json import parse_llm_json_object
 
@@ -43,6 +45,45 @@ def _append_llm_debug(record: dict[str, Any]) -> None:
             stream.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
     except Exception as exc:  # pragma: no cover - debug output must not fail a run
         logger.warning("IntentCompiler failed to write LLM debug record: %s", exc)
+
+
+def _normalize_side_distribution(payload: dict[str, Any]) -> dict[str, Any]:
+    """Use the reusable flanking relation for an unqualified two-object pair."""
+    constraints = payload.get("constraints")
+    if not isinstance(constraints, list):
+        return payload
+
+    for index, constraint in enumerate(constraints):
+        if not isinstance(constraint, dict):
+            continue
+        if str(constraint.get("relation") or "") != "edge_distribution":
+            continue
+        subjects = constraint.get("subjects") or {}
+        targets = constraint.get("targets") or {}
+        if subjects.get("count") != 2 or targets.get("count") != 1:
+            continue
+        evidence = " ".join(
+            str(value or "")
+            for value in (constraint.get("evidence_span"), payload.get("prompt"))
+        )
+        if not re.search(
+            r"\b(?:on|at)\s+(?:each|either|both)\s+sides?\s+of\b",
+            evidence,
+            re.IGNORECASE,
+        ):
+            continue
+        if re.search(
+            r"\b(?:long|short)\s+(?:sides?|edges?)\b",
+            evidence,
+            re.IGNORECASE,
+        ):
+            continue
+        normalized = dict(constraint)
+        normalized["relation"] = "flanking"
+        for field in ("edge_frame", "groups", "orientation"):
+            normalized.pop(field, None)
+        constraints[index] = normalized
+    return payload
 
 
 def _system_prompt() -> str:
@@ -73,6 +114,10 @@ requires all subjects to face inward; do not also emit a duplicate faces row.
 Use required_count for every explicitly counted object category used by an
 edge_distribution relation. Do not emit one_per_side; that relation was
 removed. Evidence spans must be copied from the original prompt verbatim.
+For wording such as "two objects on each side of a target", when no long/short
+edge is explicitly named, emit the reusable flanking relation instead of
+edge_distribution. Reserve edge_distribution for explicit finite rectangular
+edge layouts or unambiguous long/short edge wording.
 
 Target cardinality is strict: a relation with registered target arity 1 must
 have exactly one targets selector with count 1 and must leave
@@ -191,6 +236,7 @@ class IntentCompiler:
         normalized_prompt, prompt_hash = self._prompt_metadata(prompt)
         previous_output = ""
         last_error = ""
+        parsed_payload: dict[str, Any] | None = None
         attempts: list[dict[str, Any]] = []
 
         for attempt in range(2):
@@ -207,17 +253,22 @@ class IntentCompiler:
                     messages=messages,
                     temperature=self._temperature,
                     max_tokens=self._max_tokens,
-                    # llama.cpp converts this schema to a grammar and constrains
+                    # llama.cpp converts json_schema to a grammar and constrains
                     # every generated token to a schema-valid JSON value.
                     response_format={
-                        "type": "json_object",
-                        "schema": intent_contract_json_schema(),
+                        "type": "json_schema",
+                        "json_schema": {
+                            "name": "intent_contract",
+                            "strict": True,
+                            "schema": intent_contract_json_schema(),
+                        },
                     },
                     extra_body=chat_template_kwargs_from_effort("none"),
                 )
                 raw = self._raw_message(response)
                 data = parse_llm_json_object(raw)
                 payload = dict(data)
+                parsed_payload = payload
                 payload.setdefault("schema_version", self.SCHEMA_VERSION)
                 payload.setdefault("prompt", normalized_prompt)
                 payload.setdefault("prompt_sha256", prompt_hash)
@@ -226,6 +277,7 @@ class IntentCompiler:
                 payload["prompt_sha256"] = prompt_hash
                 payload["intent_compiler_spec_version"] = self.SPEC_VERSION
                 payload["retry_count"] = attempt
+                payload = _normalize_side_distribution(payload)
                 result = validate_intent_contract(payload)
                 self.last_trace = {
                     "status": "ok",
@@ -290,6 +342,51 @@ class IntentCompiler:
                 logger.warning(
                     "IntentCompiler attempt %d failed: %s", attempt + 1, last_error
                 )
+
+        if parsed_payload is not None:
+            fallback = build_intent_contract(normalized_prompt)
+            fallback["retry_count"] = 1
+            fallback["warnings"] = [
+                "LLM contract failed semantic validation; deterministic prompt parser used"
+            ]
+            try:
+                result = validate_intent_contract(fallback)
+            except Exception:
+                pass
+            else:
+                attempts.append(
+                    {
+                        "attempt": 2,
+                        "status": "deterministic_fallback",
+                        "elapsed_sec": 0.0,
+                    }
+                )
+                self.last_trace = {
+                    "status": "fallback",
+                    "spec_version": self.SPEC_VERSION,
+                    "prompt_sha256": prompt_hash,
+                    "constraints": result.get("constraints", []),
+                    "retry_count": 1,
+                    "failure_reason": last_error,
+                    "attempts": attempts,
+                }
+                _append_llm_debug(
+                    build_llm_call_debug_record(
+                        stage="intent_compiler",
+                        agent_role="intent_compiler",
+                        event="deterministic_fallback",
+                        prompt=self._messages(normalized_prompt),
+                        output=json.dumps(fallback, ensure_ascii=False),
+                        error=last_error,
+                    ).model_dump()
+                    | {
+                        "input": self._messages(normalized_prompt),
+                        "output": fallback,
+                        "status": "fallback",
+                        "attempt": 2,
+                    }
+                )
+                return result
 
         self.last_trace = {
             "status": "error",
