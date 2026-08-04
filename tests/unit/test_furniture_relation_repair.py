@@ -1458,6 +1458,24 @@ def test_repairs_work_seat_to_in_room_side_when_other_side_is_outside(
     assert -2.0 < chair.transform.translation()[1] < 0.0
 
 
+def test_relation_repair_rejects_candidate_failing_hard_validator(
+    tmp_path: Path,
+) -> None:
+    desk = _object("work_surface", "office_desk", (0.0, -1.55, 0.4), (1.4, 0.8, 0.8))
+    chair = _object("task_seat", "office_chair", (0.0, -0.3, 0.45), (0.6, 0.6, 0.9))
+    scene = _scene(tmp_path, desk, chair, text="A study with a desk and chair")
+    old_transform = chair.transform.GetAsMatrix4().copy()
+
+    fixes = improve_furniture_relations(
+        scene,
+        config=CriticConfig(enabled=True, metrics=("functional_dependency",)),
+        candidate_validator=lambda _: False,
+    )
+
+    assert fixes == []
+    np.testing.assert_allclose(chair.transform.GetAsMatrix4(), old_transform)
+
+
 def test_candidate_score_rejects_new_issue() -> None:
     baseline = {
         "results": [

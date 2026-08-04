@@ -596,6 +596,13 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         self._repair_initial_contract_layout()
         return result
 
+    def _is_furniture_relation_candidate_hard_valid(self, scene: RoomScene) -> bool:
+        """Keep critic relation repairs from introducing physical hard failures."""
+        if scene is not self.scene:
+            return True
+        hard_state = self._evaluate_current_furniture_hard_state()
+        return hard_state is None or hard_state.hard_valid
+
     def _repair_initial_contract_layout(self) -> list[str]:
         """Repair contract-authorized furniture relations before first critique.
 
@@ -613,6 +620,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         relation_fixes = improve_furniture_relations(
             self.scene,
             config=critic_config,
+            candidate_validator=self._is_furniture_relation_candidate_hard_valid,
         )
         seating_fixes = align_seating_to_nearest_surface(
             self.scene,
@@ -866,6 +874,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         relation_fixes = improve_furniture_relations(
             self.scene,
             config=critic_config,
+            candidate_validator=self._is_furniture_relation_candidate_hard_valid,
         )
         seating_fixes = align_seating_to_nearest_surface(
             self.scene,

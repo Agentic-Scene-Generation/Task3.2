@@ -379,7 +379,11 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         ):
             actions = agent._repair_initial_contract_layout()
 
-        improve.assert_called_once_with(agent.scene, config=critic_config)
+        improve.assert_called_once_with(
+            agent.scene,
+            config=critic_config,
+            candidate_validator=agent._is_furniture_relation_candidate_hard_valid,
+        )
         seating_targets.assert_called_once_with(agent.scene, config=critic_config)
         align.assert_called_once_with(
             agent.scene,
@@ -467,7 +471,11 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         ):
             actions = agent._repair_relations_after_inventory_change()
 
-        improve.assert_called_once_with(agent.scene, config=critic_config)
+        improve.assert_called_once_with(
+            agent.scene,
+            config=critic_config,
+            candidate_validator=agent._is_furniture_relation_candidate_hard_valid,
+        )
         seating_targets.assert_called_once_with(agent.scene, config=critic_config)
         align.assert_called_once_with(
             agent.scene,

@@ -7,7 +7,7 @@ import math
 import re
 
 from itertools import permutations
-from collections.abc import Collection
+from collections.abc import Callable, Collection
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
@@ -194,12 +194,15 @@ def improve_furniture_relations(
     max_translation_m: float = 3.0,
     max_candidate_evaluations: int = 64,
     allowed_relation_types: Collection[str] | None = None,
+    candidate_validator: Callable[[RoomScene], bool] | None = None,
 ) -> list[FurnitureRelationFix]:
     """Apply selected critic targets when the whole-scene evaluation improves.
 
     ``allowed_relation_types=None`` preserves the historical behavior of repairing
     every supported relation. Callers may provide a narrow allowlist for a delayed
-    stage that owns only one relation family.
+    stage that owns only one relation family.  ``candidate_validator`` can add a
+    stage-owned hard-constraint gate, such as physics validation, before a pose is
+    accepted.  Relation metrics alone cannot observe every hard scene invariant.
     """
     critic_config = (
         config if isinstance(config, CriticConfig) else critic_config_from_any(config)
@@ -291,6 +294,19 @@ def improve_furniture_relations(
                         repair_degraded=True,
                     )
                 candidate_evaluations += 1
+                if candidate_validator is not None:
+                    try:
+                        candidate_valid = bool(candidate_validator(scene))
+                    except Exception:
+                        console_logger.warning(
+                            "Relation repair candidate validator failed; "
+                            "rejecting candidate %s",
+                            target.object_id,
+                            exc_info=True,
+                        )
+                        candidate_valid = False
+                    if not candidate_valid:
+                        continue
                 candidate_payload = evaluate_for_repair()
                 if not _candidate_improves(
                     baseline_payload,
