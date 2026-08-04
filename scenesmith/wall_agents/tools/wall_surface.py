@@ -13,6 +13,7 @@ from pydrake.math import RigidTransform, RotationMatrix
 
 from scenesmith.agent_utils.house import (
     HouseLayout,
+    Opening,
     OpeningType,
     RoomGeometry,
     Wall,
@@ -43,8 +44,8 @@ class WallSurface:
     wall_id: str
     """Wall identifier within the room (e.g., 'living_room_north')."""
 
-    wall_direction: WallDirection
-    """Cardinal direction the wall faces (NORTH/SOUTH/EAST/WEST)."""
+    wall_direction: WallDirection | None
+    """Cardinal direction for rectangular rooms; None for polygon edges."""
 
     bounding_box_min: list[float]
     """Minimum corner [x, y, z] in wall-local frame. Always [0, 0, 0]."""
@@ -57,6 +58,12 @@ class WallSurface:
 
     excluded_regions: list[tuple[float, float, float, float]]
     """Doors/windows as (x_min, z_min, x_max, z_max) in wall-local coordinates."""
+
+    wall_label: str | None = None
+    """Stable agent-facing label (W00, W01, ...) for polygon edges."""
+
+    inward_normal: list[float] | None = None
+    """Room-facing unit normal in room-local XY coordinates."""
 
     @property
     def length(self) -> float:
@@ -179,7 +186,11 @@ class WallSurface:
         return {
             "surface_id": str(self.surface_id),
             "wall_id": self.wall_id,
-            "wall_direction": self.wall_direction.value,
+            "wall_direction": (
+                self.wall_direction.value if self.wall_direction is not None else None
+            ),
+            "wall_label": self.wall_label,
+            "inward_normal": self.inward_normal,
             "bounding_box_min": self.bounding_box_min,
             "bounding_box_max": self.bounding_box_max,
             "transform": _rigid_transform_to_list(self.transform),
@@ -192,7 +203,13 @@ class WallSurface:
         return cls(
             surface_id=UniqueID(data["surface_id"]),
             wall_id=data["wall_id"],
-            wall_direction=WallDirection(data["wall_direction"]),
+            wall_direction=(
+                WallDirection(data["wall_direction"])
+                if data.get("wall_direction") is not None
+                else None
+            ),
+            wall_label=data.get("wall_label"),
+            inward_normal=data.get("inward_normal", [0.0, 0.0]),
             bounding_box_min=data["bounding_box_min"],
             bounding_box_max=data["bounding_box_max"],
             transform=_list_to_rigid_transform(data["transform"]),
@@ -332,13 +349,18 @@ def extract_wall_surfaces(
 
     wall_surfaces = []
 
-    for wall in placed_room.walls:
+    for wall_index, wall in enumerate(placed_room.walls):
         surface = _create_wall_surface(
             wall=wall,
             ceiling_height=ceiling_height,
             offset_x=offset_x,
             offset_y=offset_y,
             wall_thickness=wall_thickness,
+            wall_label=(
+                f"W{wall_index:02d}"
+                if placed_room.footprint_vertices is not None
+                else None
+            ),
         )
         wall_surfaces.append(surface)
 
@@ -351,6 +373,7 @@ def _create_wall_surface(
     offset_x: float = 0.0,
     offset_y: float = 0.0,
     wall_thickness: float = 0.05,
+    wall_label: str | None = None,
 ) -> WallSurface:
     """Create a WallSurface from a Wall dataclass.
 
@@ -364,34 +387,49 @@ def _create_wall_surface(
     Returns:
         WallSurface for this wall (in room-local coordinates).
     """
-    rotation = _compute_wall_rotation(wall.direction)
-    inward_normal = np.array(wall.direction.get_inward_normal())
-
     # Transform wall coordinates from house to room-local coords.
-    direction_str = wall.direction.value
     start = np.array([wall.start_point[0] - offset_x, wall.start_point[1] - offset_y])
     end = np.array([wall.end_point[0] - offset_x, wall.end_point[1] - offset_y])
 
-    # For each direction, determine which corner is the origin based on
-    # the cross-product-derived X axis direction.
-    # Track whether origin is at start (for opening position conversion).
-    origin_is_start = False
-    if direction_str == "north":
-        # X axis points +X (east), so origin is at west end (min X).
-        origin_is_start = start[0] < end[0]
+    if wall.direction is None:
+        edge = end - start
+        edge_length = float(np.linalg.norm(edge))
+        if edge_length <= 0:
+            raise ValueError(f"Wall '{wall.wall_id}' has zero length")
+        tangent = edge / edge_length
+        inward_normal = np.array(
+            wall.inward_normal
+            if wall.inward_normal is not None
+            else [-tangent[1], tangent[0]]
+        )
+        inward_normal = inward_normal / np.linalg.norm(inward_normal)
+        outward_normal = -inward_normal
+        col_y = np.array([outward_normal[0], outward_normal[1], 0.0])
+        col_z = np.array([0.0, 0.0, 1.0])
+        col_x = np.cross(col_y, col_z)
+        rotation = RotationMatrix(np.column_stack([col_x, col_y, col_z]))
+        # For a CCW footprint, the right-handed wall X axis runs end -> start.
+        origin_is_start = bool(np.dot(col_x[:2], tangent) > 0)
         wall_origin = start if origin_is_start else end
-    elif direction_str == "south":
-        # X axis points -X (west), so origin is at east end (max X).
-        origin_is_start = start[0] > end[0]
-        wall_origin = start if origin_is_start else end
-    elif direction_str == "east":
-        # X axis points -Y (south), so origin is at north end (max Y).
-        origin_is_start = start[1] > end[1]
-        wall_origin = start if origin_is_start else end
-    else:  # west
-        # X axis points +Y (north), so origin is at south end (min Y).
-        origin_is_start = start[1] < end[1]
-        wall_origin = start if origin_is_start else end
+    else:
+        rotation = _compute_wall_rotation(wall.direction)
+        inward_normal = np.array(wall.direction.get_inward_normal())
+        direction_str = wall.direction.value
+
+        # Determine the endpoint matching the cross-product-derived X axis.
+        origin_is_start = False
+        if direction_str == "north":
+            origin_is_start = start[0] < end[0]
+            wall_origin = start if origin_is_start else end
+        elif direction_str == "south":
+            origin_is_start = start[0] > end[0]
+            wall_origin = start if origin_is_start else end
+        elif direction_str == "east":
+            origin_is_start = start[1] > end[1]
+            wall_origin = start if origin_is_start else end
+        else:  # west
+            origin_is_start = start[1] < end[1]
+            wall_origin = start if origin_is_start else end
 
     # Offset wall origin inward by wall thickness so surface is at inside
     # face (facing room), not outer room boundary. This matches the offset
@@ -433,6 +471,8 @@ def _create_wall_surface(
         surface_id=UniqueID(wall.wall_id),
         wall_id=wall.wall_id,
         wall_direction=wall.direction,
+        wall_label=wall_label,
+        inward_normal=inward_normal.tolist(),
         bounding_box_min=[0.0, 0.0, 0.0],
         bounding_box_max=[wall.length, 0.0, ceiling_height],
         transform=transform,
@@ -459,6 +499,11 @@ def extract_wall_surfaces_from_room_geometry(
     Returns:
         List of WallSurface objects (one per wall direction found).
     """
+    if room_geometry.footprint_vertices is not None:
+        return _create_polygon_wall_surfaces_from_room_geometry(
+            room_geometry=room_geometry, room_id=room_id
+        )
+
     # Group openings by wall direction.
     openings_by_wall: dict[str, list] = {}
     for opening in room_geometry.openings:
@@ -553,6 +598,8 @@ def extract_wall_surfaces_from_room_geometry(
             surface_id=UniqueID(wall_id),
             wall_id=wall_id,
             wall_direction=direction,
+            wall_label=None,
+            inward_normal=list(direction.get_inward_normal()),
             bounding_box_min=[0.0, 0.0, 0.0],
             bounding_box_max=[wall_length, 0.0, ceiling_height],
             transform=transform,
@@ -577,6 +624,61 @@ def extract_wall_surfaces_from_room_geometry(
         wall_surfaces.append(surface)
 
     return wall_surfaces
+
+
+def _create_polygon_wall_surfaces_from_room_geometry(
+    room_geometry: RoomGeometry, room_id: str | None
+) -> list[WallSurface]:
+    """Reconstruct every polygon edge surface without cardinal inference."""
+    vertices = room_geometry.footprint_vertices
+    if vertices is None:
+        raise ValueError("Polygon wall reconstruction requires footprint vertices")
+
+    openings_by_wall: dict[str, list] = {}
+    for opening in room_geometry.openings:
+        if opening.wall_id is not None:
+            openings_by_wall.setdefault(opening.wall_id, []).append(opening)
+
+    surfaces: list[WallSurface] = []
+    for index, start in enumerate(vertices):
+        end = vertices[(index + 1) % len(vertices)]
+        wall_id = (
+            f"{room_id}_edge_{index:03d}" if room_id else f"polygon_edge_{index:03d}"
+        )
+        edge = np.array(end) - np.array(start)
+        length = float(np.linalg.norm(edge))
+        tangent = edge / length
+        inward = [-float(tangent[1]), float(tangent[0])]
+        wall_openings = [
+            Opening(
+                opening_id=item.opening_id,
+                opening_type=OpeningType(item.opening_type),
+                position_along_wall=item.position_along_wall,
+                width=item.width,
+                height=item.height,
+                sill_height=item.sill_height,
+            )
+            for item in openings_by_wall.get(wall_id, [])
+        ]
+        wall = Wall(
+            wall_id=wall_id,
+            room_id=room_id or "main",
+            direction=None,
+            start_point=tuple(start),
+            end_point=tuple(end),
+            length=length,
+            openings=wall_openings,
+            inward_normal=inward,
+        )
+        surfaces.append(
+            _create_wall_surface(
+                wall=wall,
+                ceiling_height=room_geometry.wall_height,
+                wall_thickness=room_geometry.wall_thickness,
+                wall_label=f"W{index:02d}",
+            )
+        )
+    return surfaces
 
 
 def _create_wall_surfaces_from_dimensions(
@@ -654,6 +756,8 @@ def _create_wall_surface_from_direction(
         surface_id=UniqueID(wall_id),
         wall_id=wall_id,
         wall_direction=direction,
+        wall_label=None,
+        inward_normal=list(direction.get_inward_normal()),
         bounding_box_min=[0.0, 0.0, 0.0],
         bounding_box_max=[wall_length, 0.0, ceiling_height],
         transform=transform,

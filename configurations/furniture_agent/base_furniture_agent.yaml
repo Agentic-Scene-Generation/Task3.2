@@ -560,4 +560,31 @@ placement_noise:
 # image editing API to add suggested furniture placement. The resulting image
 # is provided to the designer agent as creative inspiration (not ground truth).
 context_image_generation:
-  enabled: false
+  enabled: true
+  # "inherit" preserves the existing OpenAI/Gemini image-generator path.
+  # "qwen_local" uses the separately started local Qwen-Image-Edit service.
+  backend: "inherit"
+  # Optional VLM comparison of the original room render and edited candidate.
+  # When disabled, context-image behavior remains a single edit with no judge call.
+  quality_gate:
+    enabled: true
+    # Additional independent samples after the initial attempt.
+    # Total attempts are 1 + this value.
+    max_regenerations: 2
+    # Normal-pass threshold. Structurally eligible lower-scoring candidates may
+    # still be selected as the best-effort fallback after all attempts.
+    min_score: 60
+  qwen_local:
+    base_url: ${oc.env:QWEN_IMAGE_EDIT_BASE_URL,http://127.0.0.1:18020/v1}
+    api_key: ${oc.env:QWEN_IMAGE_EDIT_API_KEY,not-needed}
+    model: ${oc.env:QWEN_IMAGE_EDIT_MODEL_ID,Qwen/Qwen-Image-Edit}
+    # The service reads the uploaded render dimensions. Do not set a fixed size.
+    size: "auto"
+    num_inference_steps: 50
+    true_cfg_scale: 4.0
+    negative_prompt: " "
+    seed: 0
+    timeout_seconds: 120
+    connect_timeout_seconds: 5
+    max_retries: 0
+    write_metadata: true

@@ -298,6 +298,7 @@ def add_coordinate_frame_wall_view(
     wall_length: float,
     wall_height: float,
     wall_direction: str,
+    wall_transform: list[float] | None = None,
 ) -> None:
     """Add coordinate frame at (0,0) corner for wall orthographic view.
 
@@ -364,8 +365,20 @@ def add_coordinate_frame_wall_view(
         # Wall +X direction = toward right in view = world +Y.
         axis_x = Vector((0, 1, 0))
     else:
-        logger.warning(f"Unknown wall direction: {wall_direction}")
-        return
+        if wall_transform is None:
+            logger.warning(f"Unknown wall direction: {wall_direction}")
+            return
+        origin = np.array(wall_transform[:3], dtype=float)
+        qw, qx, qy, qz = wall_transform[3:]
+        rotation = np.array(
+            [
+                [1 - 2 * (qy**2 + qz**2), 2 * (qx * qy - qw * qz), 0.0],
+                [2 * (qx * qy + qw * qz), 1 - 2 * (qx**2 + qz**2), 0.0],
+                [0.0, 0.0, 1.0],
+            ]
+        )
+        frame_pos = origin
+        axis_x = Vector(rotation[:, 0].tolist())
 
     # Z axis is always world +Z (up).
     axis_z = Vector((0, 0, 1))
@@ -393,6 +406,9 @@ def add_coordinate_frame_wall_view(
         frame_pos[0] -= offset_dist  # Move toward camera (-X direction).
     elif wall_dir == "west":
         frame_pos[0] += offset_dist  # Move toward camera (+X direction).
+    else:
+        # Wall local +Y is outward; the room/camera is on local -Y.
+        frame_pos -= rotation[:, 1] * offset_dist
 
     # Small Z offset just to avoid z-fighting with floor (not to reposition frame).
     frame_pos[2] += 0.01

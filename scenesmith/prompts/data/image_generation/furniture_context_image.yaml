@@ -1,12 +1,49 @@
 name: "furniture_context_image"
-version: "2.0"
+version: "3.1"
 description: "Edit a Blender render of an empty room to show furniture placement"
 template_variables: ["scene_description", "width_m", "length_m"]
 prompt: |
-  Using this top-down render of an empty room as reference, show furniture placement.
-  The render shows doors and windows - DO NOT block any openings with furniture.
+  The provided input image is a top-down (overhead) view of an empty room,
+  rendered from above. It is an overhead room-layout reference, not an eye-level,
+  front-facing, or perspective interior photograph.
+
+  Edit the provided empty-room image in place by adding furniture. This is a
+  constrained image-editing task, not a request to generate a new room image.
+
+  HARD CONSTRAINTS — the architecture in the input image is immutable:
+  - Preserve the exact camera, top-down viewpoint, projection, framing, crop,
+    canvas size, image orientation, and black background.
+  - Preserve every wall, room boundary, floor outline, floor material, opening,
+    and architectural feature at exactly the same image location, size, shape,
+    and orientation.
+  - Every door and window is a pixel-aligned invariant. Keep the exact same
+    number, image position, size, shape, orientation, and opening/swing direction
+    as the input. Do not move, resize, rotate, remove, add, redraw, reinterpret,
+    cover, or partially hide any door, window, door opening, or window opening.
+  - Keep every door leaf, door swing/access area, window, and opening clearly
+    visible and recognizable after the edit.
+  - Do not repaint or alter room geometry. Do not invent new doors, windows,
+    wall openings, alcoves, partitions, or floor area.
+
+  Only add furniture on floor pixels that already exist in the input image. Keep
+  all furniture inside the original floor boundary and clear of walls, doors,
+  windows, openings, and door-swing/access areas. Leave usable walking paths.
+  Never change the architecture to make furniture fit. If everything cannot fit
+  safely, omit a non-essential furniture item or leave empty space instead of
+  changing or covering a door, window, wall, opening, or floor boundary.
+
+  Arrange the requested furniture as a coherent top-down layout with realistic
+  scale, spacing, and orientation.
+
+  Match the requested furniture categories and quantities as closely as possible.
+  Do not replace requested furniture with decorations, and do not add people,
+  captions, new text, logos, or watermarks.
 
   Room: {{ scene_description }}
   Dimensions: {{ length_m }}m x {{ width_m }}m
 
-  Style: architectural visualization, clean, minimal, walls visible.
+  Output must remain the same kind of top-down architectural layout image as the
+  input, with the original room fully recognizable and unchanged. Do not convert
+  it into an eye-level, front-facing, perspective, cinematic, or staged interior
+  render. Before returning the image, verify that every original door and window
+  is still visible and aligned one-for-one with its exact input-image position.

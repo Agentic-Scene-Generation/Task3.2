@@ -264,6 +264,64 @@ class TestExportHouse(unittest.TestCase):
             assert "living_room" in region_ids
             assert "kitchen" in region_ids
 
+    def test_export_polygon_room_preserves_floor_and_arbitrary_walls(self) -> None:
+        """Polygon export must not fall back to the footprint AABB."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            vertices = [(0, 0), (6, 0), (6, 2), (3, 2), (3, 5), (0, 5)]
+            walls = []
+            for index, start in enumerate(vertices):
+                end = vertices[(index + 1) % len(vertices)]
+                walls.append(
+                    Wall(
+                        wall_id=f"studio_edge_{index:03d}",
+                        room_id="studio",
+                        direction=None,
+                        start_point=start,
+                        end_point=end,
+                        length=((end[0] - start[0]) ** 2 + (end[1] - start[1]) ** 2)
+                        ** 0.5,
+                    )
+                )
+            placed = PlacedRoom(
+                room_id="studio",
+                position=(0.0, 0.0),
+                width=6.0,
+                depth=5.0,
+                walls=walls,
+                footprint_vertices=vertices,
+            )
+            layout = HouseLayout(
+                room_specs=[
+                    RoomSpec(
+                        room_id="studio",
+                        room_type="studio",
+                        length=6.0,
+                        width=5.0,
+                        footprint_vertices=vertices,
+                    )
+                ],
+                placed_rooms=[placed],
+            )
+            house = HouseScene(
+                layout=layout,
+                rooms={"studio": _create_minimal_room_scene("studio", output_dir)},
+            )
+
+            output_path = SceneEvalExporter.export_house(
+                house, output_dir, SceneEvalExportConfig()
+            )
+            data = json.loads(output_path.read_text(encoding="utf-8"))
+            elements = data["scene"]["arch"]["elements"]
+            floor = next(item for item in elements if item["type"] == "Floor")
+            exported_walls = [item for item in elements if item["type"] == "Wall"]
+
+            assert [point[:2] for point in floor["points"]] == [
+                list(v) for v in vertices
+            ]
+            assert len(exported_walls) == len(vertices)
+            assert "studio_edge_003" in exported_walls[3]["id"]
+
     def test_export_house_room_positions_applied(self) -> None:
         """Room positions are correctly applied to floor polygons."""
         with tempfile.TemporaryDirectory() as tmpdir:

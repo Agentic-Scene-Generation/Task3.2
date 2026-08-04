@@ -48,6 +48,9 @@ from scenesmith.furniture_agents.tools.response_dataclasses import (
     Position3D,
     Rotation3D,
 )
+from scenesmith.floor_plan_agents.tools.polygon_geometry import (
+    room_geometry_covers_object,
+)
 
 console_logger = logging.getLogger(__name__)
 
@@ -327,6 +330,17 @@ class FurnitureTools:
         self, scene_obj: SceneObject, transform: RigidTransform
     ) -> tuple[bool, str]:
         """Validate the full object AABB, not just its center point."""
+        if not room_geometry_covers_object(
+            self.scene.room_geometry,
+            scene_obj,
+            transform=transform,
+        ):
+            return (
+                False,
+                f"Full footprint for {scene_obj.name} would extend outside the "
+                "polygon floor. Choose a pose farther from an edge or concave notch.",
+            )
+
         room_bounds = self._get_room_bounds_xy()
         world_bounds = self._world_bounds_for_transform(scene_obj, transform)
         if room_bounds is None or world_bounds is None:
@@ -1158,6 +1172,37 @@ class FurnitureTools:
                 object_id=object_id,
                 error_type=RescaleErrorType.INVALID_SCALE_FACTOR,
             ).to_json()
+
+        obj = self.scene.get_object(UniqueID(object_id))
+        if (
+            obj is not None
+            and self.scene.room_geometry.footprint_vertices is not None
+            and obj.sdf_path is not None
+        ):
+            affected = [
+                candidate
+                for candidate in self.scene.objects.values()
+                if candidate.sdf_path == obj.sdf_path
+            ]
+            invalid = [
+                str(candidate.object_id)
+                for candidate in affected
+                if not room_geometry_covers_object(
+                    self.scene.room_geometry,
+                    candidate,
+                    bbox_scale=scale_factor,
+                )
+            ]
+            if invalid:
+                return RescaleResult(
+                    success=False,
+                    message=(
+                        "Rescale would move these furniture footprints outside the "
+                        f"polygon floor: {', '.join(invalid)}"
+                    ),
+                    object_id=object_id,
+                    error_type=RescaleErrorType.RESCALE_FAILED,
+                ).to_json()
 
         result = rescale_object_common(
             scene=self.scene,

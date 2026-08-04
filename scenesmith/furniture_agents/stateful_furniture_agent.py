@@ -8,6 +8,7 @@ SQLiteSession agents that maintain conversation memory across interactions.
 import logging
 import math
 import re
+import shutil
 import time
 
 from pathlib import Path
@@ -26,6 +27,15 @@ from scenesmith.agent_utils.base_stateful_agent import (
     BaseStatefulAgent,
     HardStateEvaluation,
     log_agent_usage,
+)
+from scenesmith.agent_utils.context_image_generation import (
+    OpenAICompatibleContextImageEditor,
+)
+from scenesmith.agent_utils.context_image_quality import (
+    ContextImageQualityEvaluator,
+    ContextImageQualityGateConfig,
+    file_sha256,
+    write_context_image_quality_report,
 )
 from scenesmith.agent_utils.furniture_layout_planning import (
     build_bedroom_anchor_plan,
@@ -71,6 +81,9 @@ from scenesmith.furniture_agents.base_furniture_agent import BaseFurnitureAgent
 from scenesmith.furniture_agents.tools.furniture_tools import FurnitureTools
 from scenesmith.furniture_agents.tools.scene_tools import SceneTools
 from scenesmith.furniture_agents.tools.vision_tools import VisionTools
+from scenesmith.floor_plan_agents.tools.polygon_geometry import (
+    room_geometry_covers_object,
+)
 from scenesmith.prompts.registry import FurnitureAgentPrompts
 from scenesmith.scene_expert.repair_taxonomy import FailureCategory, build_repair_plan
 from scenesmith.scenebenchmark_critic.api import seating_orientation_targets
@@ -200,6 +213,10 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
 
         # Context image for designer initialization (furniture-specific).
         self.context_image_path: Path | None = None
+        # Lazily created only when context generation and qwen_local are enabled.
+        self._qwen_context_image_editor: (
+            OpenAICompatibleContextImageEditor | None
+        ) = None
         # Populated per scene only when the optional feature is enabled.
         self._placement_order_reference: str = ""
 
@@ -340,9 +357,38 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             render_name="empty_room_context",
             rendering_mode="furniture_selection",  # Disables grid/frame
             annotate_object_types=[],  # Disables all labels/bboxes
+            show_opening_labels=False,  # Qwen input must not contain text overlays
         )
 
-    def _generate_and_save_context_image(self, scene: RoomScene) -> Path:
+    def _get_context_image_editor(self) -> Any:
+        """Resolve the editor after the top-level context switch is enabled."""
+        context_cfg = self.cfg.context_image_generation
+        backend = str(context_cfg.get("backend", "inherit")).strip().lower()
+        if backend == "inherit":
+            return self.asset_manager.image_generator
+        if backend == "qwen_local":
+            if self._qwen_context_image_editor is None:
+                qwen_cfg = context_cfg.get("qwen_local")
+                if qwen_cfg is None:
+                    raise ValueError(
+                        "context_image_generation.qwen_local config is required "
+                        "when backend=qwen_local"
+                    )
+                self._qwen_context_image_editor = (
+                    OpenAICompatibleContextImageEditor(qwen_cfg)
+                )
+            return self._qwen_context_image_editor
+        raise ValueError(
+            "Unknown context_image_generation.backend="
+            f"{backend!r}; expected 'inherit' or 'qwen_local'"
+        )
+
+    def _generate_and_save_context_image(
+        self,
+        scene: RoomScene,
+        image_editor: Any,
+        quality_gate: ContextImageQualityGateConfig,
+    ) -> Path | None:
         """Generate and save context image for design guidance.
 
         Renders an empty room showing doors/windows, then uses image editing
@@ -364,18 +410,269 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         # Generate context image using the render as reference.
         # Save alongside the input render for easy association.
         output_path = room_render_dir / "context_edited.png"
-        image_path = (
-            self.asset_manager.image_generator.generate_furniture_context_image(
-                reference_image_path=room_render,
-                scene_description=scene.text_description,
-                width_m=scene.room_geometry.width,
-                length_m=scene.room_geometry.length,
+        if quality_gate.enabled:
+            return self._generate_quality_gated_context_image(
+                scene=scene,
+                image_editor=image_editor,
+                room_render=room_render,
                 output_path=output_path,
+                quality_gate=quality_gate,
             )
+        image_path = image_editor.generate_furniture_context_image(
+            reference_image_path=room_render,
+            scene_description=scene.text_description,
+            width_m=scene.room_geometry.width,
+            length_m=scene.room_geometry.length,
+            output_path=output_path,
         )
 
         console_logger.info(f"Context image saved to: {image_path}")
         return image_path
+
+    def _generate_quality_gated_context_image(
+        self,
+        *,
+        scene: RoomScene,
+        image_editor: Any,
+        room_render: Path,
+        output_path: Path,
+        quality_gate: ContextImageQualityGateConfig,
+    ) -> Path | None:
+        """Generate independent candidates and publish the best usable image."""
+        room_render_dir = room_render.parent
+        output_path.unlink(missing_ok=True)
+        output_path.with_suffix(".metadata.json").unlink(missing_ok=True)
+        report_path = room_render_dir / "context_image_quality.json"
+        report: dict[str, Any] = {
+            "schema_version": 2,
+            "quality_gate": {
+                "enabled": quality_gate.enabled,
+                "max_regenerations": quality_gate.max_regenerations,
+                "max_attempts": quality_gate.max_attempts,
+                "min_score": quality_gate.min_score,
+            },
+            "original_image": {
+                "path": str(room_render),
+                "sha256": file_sha256(room_render),
+            },
+            "attempts": [],
+            "final_status": "running",
+            "accepted_attempt": None,
+            "best_attempt": None,
+            "best_score": None,
+            "selection_mode": None,
+            "selection_reason": None,
+            "designer_reference_path": None,
+        }
+        evaluator = ContextImageQualityEvaluator(vlm_service=self.vlm_service)
+        editor_config = getattr(image_editor, "config", None)
+        base_seed = getattr(editor_config, "seed", None)
+        best_candidate_path: Path | None = None
+        best_attempt_number: int | None = None
+        best_rank: tuple[float, int, int] | None = None
+
+        reasoning_config = getattr(self.cfg.openai, "reasoning_effort", None)
+        verbosity_config = getattr(self.cfg.openai, "verbosity", None)
+        reasoning_effort = str(
+            getattr(reasoning_config, "asset_validation", "none")
+        )
+        verbosity = str(getattr(verbosity_config, "asset_validation", "low"))
+
+        def publish_candidate(candidate_path: Path) -> None:
+            shutil.copy2(candidate_path, output_path)
+            candidate_metadata = candidate_path.with_suffix(".metadata.json")
+            if candidate_metadata.exists():
+                shutil.copy2(
+                    candidate_metadata,
+                    output_path.with_suffix(".metadata.json"),
+                )
+
+        for attempt_number in range(1, quality_gate.max_attempts + 1):
+            candidate_path = room_render_dir / (
+                f"context_edited_attempt_{attempt_number:02d}.png"
+            )
+            effective_seed = (
+                (int(base_seed) + attempt_number - 1) % (2**32)
+                if base_seed is not None
+                else None
+            )
+            attempt: dict[str, Any] = {
+                "attempt": attempt_number,
+                "candidate_path": str(candidate_path),
+                "seed": effective_seed,
+                "generation_status": "running",
+                "quality_status": "not_run",
+                "fallback_eligible": False,
+            }
+            report["attempts"].append(attempt)
+            console_logger.info(
+                "Generating independent context image candidate %d/%d (seed=%s)",
+                attempt_number,
+                quality_gate.max_attempts,
+                effective_seed,
+            )
+            generation_start = time.monotonic()
+            try:
+                image_editor.generate_furniture_context_image(
+                    reference_image_path=room_render,
+                    scene_description=scene.text_description,
+                    width_m=scene.room_geometry.width,
+                    length_m=scene.room_geometry.length,
+                    output_path=candidate_path,
+                    seed_override=effective_seed,
+                )
+                attempt["generation_status"] = "success"
+                attempt["generation_seconds"] = time.monotonic() - generation_start
+                attempt["candidate_sha256"] = file_sha256(candidate_path)
+            except Exception as exc:
+                attempt["generation_status"] = "error"
+                attempt["generation_seconds"] = time.monotonic() - generation_start
+                attempt["error_type"] = type(exc).__name__
+                attempt["error"] = str(exc)[:1000]
+                report["final_status"] = (
+                    "retrying_after_edit_error"
+                    if attempt_number < quality_gate.max_attempts
+                    else "edit_error_exhausted"
+                )
+                write_context_image_quality_report(report_path, report)
+                console_logger.warning(
+                    "Context image candidate %d/%d failed: %s",
+                    attempt_number,
+                    quality_gate.max_attempts,
+                    exc,
+                )
+                continue
+
+            console_logger.info(
+                "Evaluating context image candidate %d/%d with VLM",
+                attempt_number,
+                quality_gate.max_attempts,
+            )
+            quality_start = time.monotonic()
+            try:
+                quality_result = evaluator.evaluate(
+                    original_image_path=room_render,
+                    candidate_image_path=candidate_path,
+                    scene_description=scene.text_description,
+                    model=str(self.cfg.openai.model),
+                    min_score=quality_gate.min_score,
+                    reasoning_effort=reasoning_effort,
+                    verbosity=verbosity,
+                )
+            except Exception as exc:
+                attempt["quality_status"] = "error"
+                attempt["quality_seconds"] = time.monotonic() - quality_start
+                attempt["quality_error_type"] = type(exc).__name__
+                attempt["quality_error"] = str(exc)[:1000]
+                report["final_status"] = (
+                    "retrying_after_judge_error"
+                    if attempt_number < quality_gate.max_attempts
+                    else "judge_error_exhausted"
+                )
+                write_context_image_quality_report(report_path, report)
+                console_logger.warning(
+                    "Context image quality judge failed for candidate %d/%d; "
+                    "continuing with independent candidates: %s",
+                    attempt_number,
+                    quality_gate.max_attempts,
+                    exc,
+                )
+                continue
+
+            attempt["quality_status"] = (
+                "passed" if quality_result.passed else "rejected"
+            )
+            attempt["quality_seconds"] = time.monotonic() - quality_start
+            attempt["quality_result"] = quality_result.to_dict()
+            attempt["fallback_eligible"] = quality_result.fallback_eligible
+
+            # Keep the highest-scoring evaluated image even when it fails a
+            # structural criterion. Structural checks determine normal
+            # acceptance, but must not leave Designer without a reference when
+            # every independently generated candidate is rejected.
+            candidate_rank = (
+                quality_result.quality_score,
+                int(quality_result.openings_clear),
+                -attempt_number,
+            )
+            if best_rank is None or candidate_rank > best_rank:
+                best_rank = candidate_rank
+                best_candidate_path = candidate_path
+                best_attempt_number = attempt_number
+                report["best_attempt"] = attempt_number
+                report["best_score"] = quality_result.quality_score
+
+            if quality_result.passed:
+                publish_candidate(candidate_path)
+                report["final_status"] = "accepted"
+                report["accepted_attempt"] = attempt_number
+                report["selection_mode"] = "passed"
+                report["selection_reason"] = (
+                    f"candidate score {quality_result.quality_score:g} met "
+                    f"threshold {quality_gate.min_score:g}"
+                )
+                report["designer_reference_path"] = str(output_path)
+                write_context_image_quality_report(report_path, report)
+                console_logger.info(
+                    "Context image candidate %d/%d passed with score %.1f: %s",
+                    attempt_number,
+                    quality_gate.max_attempts,
+                    quality_result.quality_score,
+                    output_path,
+                )
+                return output_path
+
+            reasons = "; ".join(quality_result.reasons) or "score below threshold"
+            report["final_status"] = (
+                "retrying_after_rejection"
+                if attempt_number < quality_gate.max_attempts
+                else "rejected_exhausted"
+            )
+            write_context_image_quality_report(report_path, report)
+            console_logger.warning(
+                "Context image candidate %d/%d rejected (score %.1f, "
+                "fallback_eligible=%s): %s",
+                attempt_number,
+                quality_gate.max_attempts,
+                quality_result.quality_score,
+                quality_result.fallback_eligible,
+                reasons,
+            )
+
+        if best_candidate_path is not None and best_attempt_number is not None:
+            publish_candidate(best_candidate_path)
+            report["final_status"] = "best_candidate_fallback"
+            report["accepted_attempt"] = best_attempt_number
+            report["selection_mode"] = "best_effort_fallback"
+            report["selection_reason"] = (
+                "no candidate met the normal acceptance criteria; selected the "
+                "highest-scoring evaluated candidate"
+            )
+            report["designer_reference_path"] = str(output_path)
+            write_context_image_quality_report(report_path, report)
+            console_logger.warning(
+                "Context image gate exhausted %d attempt(s); using best candidate "
+                "%d with score %.1f: %s",
+                quality_gate.max_attempts,
+                best_attempt_number,
+                float(report["best_score"]),
+                output_path,
+            )
+            return output_path
+
+        report["final_status"] = "no_scored_candidate"
+        report["selection_mode"] = "none"
+        report["selection_reason"] = (
+            "no generated candidate completed quality scoring"
+        )
+        report["designer_reference_path"] = None
+        write_context_image_quality_report(report_path, report)
+        console_logger.warning(
+            "Context image gate exhausted %d attempt(s) with no scored candidate; "
+            "continuing without a reference image",
+            quality_gate.max_attempts,
+        )
+        return None
 
     async def add_furniture(self, scene: RoomScene) -> None:
         """Add furniture to a scene.
@@ -405,8 +702,18 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
 
         # Generate context image if configured. If generation fails, continue without it.
         if self.cfg.context_image_generation.enabled:
+            # Resolve static backend configuration outside the runtime fail-open
+            # block. This branch is unreachable when the feature is disabled.
+            image_editor = self._get_context_image_editor()
+            quality_gate = ContextImageQualityGateConfig.from_config(
+                self.cfg.context_image_generation.get("quality_gate")
+            )
             try:
-                self.context_image_path = self._generate_and_save_context_image(scene)
+                self.context_image_path = self._generate_and_save_context_image(
+                    scene,
+                    image_editor,
+                    quality_gate,
+                )
             except Exception as e:
                 console_logger.warning(
                     f"Context image generation failed, continuing without it: {e}"
@@ -554,11 +861,17 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         """Get prompt kwargs for initial design instruction.
 
         Returns:
-            Dict with scene description and reference image flag.
+            Dict with scene description, room boundary, and reference image flag.
         """
+        room_geometry = self.scene.room_geometry
         return {
             "scene_description": self.scene.text_description,
             "has_reference_image": self.context_image_path is not None,
+            "room_length": room_geometry.length,
+            "room_width": room_geometry.width,
+            "room_local_footprint_vertices": (
+                room_geometry.room_local_footprint_vertices
+            ),
         }
 
     def _build_initial_design_input(self, instruction: str) -> str | list[dict]:
@@ -569,10 +882,17 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         )
         safety_cfg = getattr(self.cfg, "furniture_safety_controller", None)
         bedroom_cfg = getattr(safety_cfg, "bedroom_layout", None)
-        guidance = format_bedroom_anchor_guidance(
-            scene=self.scene,
-            cfg=bedroom_cfg,
-        )
+        guidance = ""
+        if not self._is_polygon_room():
+            guidance = format_bedroom_anchor_guidance(
+                scene=self.scene,
+                cfg=bedroom_cfg,
+            )
+        else:
+            console_logger.info(
+                "Skipping rectangle/cardinal bedroom guidance for polygon room %s",
+                getattr(self.scene, "room_id", "unknown"),
+            )
         if guidance:
             instruction = (
                 f"{instruction}\n\n"
@@ -712,6 +1032,14 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 actions.append(
                     f"removed {removed_excess} duplicate prompt-required furniture asset(s)"
                 )
+            return bool(actions), actions
+
+        if self._is_polygon_room():
+            console_logger.info(
+                "Skipping rectangle-only bed, nightstand, and wardrobe anchor "
+                "repairs for polygon room %s",
+                getattr(self.scene, "room_id", "unknown"),
+            )
             return bool(actions), actions
 
         if self._anchor_existing_bed():
@@ -1528,11 +1856,27 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             )
             transform = self._grounded_transform(scene_object, x=x, y=y, yaw_deg=yaw)
             transform = self._fit_transform_inside_room(scene_object, transform)
-            if category not in ("bed", "nightstand", "wardrobe", "twin_bed"):
+            if self._is_polygon_room() or category not in (
+                "bed",
+                "nightstand",
+                "wardrobe",
+                "twin_bed",
+            ):
                 transform = self._best_generic_repair_transform(
                     scene_object,
                     fallback=transform,
                 )
+            if not room_geometry_covers_object(
+                self.scene.room_geometry,
+                scene_object,
+                transform=transform,
+            ):
+                console_logger.warning(
+                    "Deterministic repair could not place %s inside the exact "
+                    "polygon footprint",
+                    category,
+                )
+                return False
             scene_object.transform = transform
             self.scene.add_object(scene_object)
             console_logger.info(
@@ -1568,6 +1912,12 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 for yaw in (0.0, 90.0):
                     candidate = self._grounded_transform(obj, x=x, y=y, yaw_deg=yaw)
                     candidate = self._fit_transform_inside_room(obj, candidate)
+                    if not room_geometry_covers_object(
+                        self.scene.room_geometry,
+                        obj,
+                        transform=candidate,
+                    ):
+                        continue
                     bounds = self._bounds_for_transform(obj, candidate)
                     if bounds is None:
                         continue
@@ -2148,6 +2498,16 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
     def _bedroom_layout_cfg(self) -> Any:
         safety_cfg = getattr(self.cfg, "furniture_safety_controller", None)
         return getattr(safety_cfg, "bedroom_layout", None)
+
+    def _is_polygon_room(self) -> bool:
+        """Return whether the current room uses an exact polygon footprint."""
+        if self.scene is None:
+            return False
+        room_geometry = getattr(self.scene, "room_geometry", None)
+        return isinstance(
+            getattr(room_geometry, "footprint_vertices", None),
+            (list, tuple),
+        )
 
     def _room_bounds_xy(self) -> tuple[float, float, float, float] | None:
         if self.scene is None or self.scene.room_geometry is None:

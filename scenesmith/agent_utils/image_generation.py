@@ -64,6 +64,8 @@ class BaseImageGenerator(ABC):
         width_m: float,
         length_m: float,
         output_path: Path,
+        retry_feedback: str | None = None,
+        seed_override: int | None = None,
     ) -> Path:
         """Generate top-down room visualization for furniture placement.
 
@@ -214,6 +216,8 @@ class OpenAIImageGenerator(BaseImageGenerator):
         width_m: float,
         length_m: float,
         output_path: Path,
+        retry_feedback: str | None = None,
+        seed_override: int | None = None,
     ) -> Path:
         """Generate top-down room visualization for furniture placement.
 
@@ -236,6 +240,7 @@ class OpenAIImageGenerator(BaseImageGenerator):
             scene_description=scene_description,
             width_m=width_m,
             length_m=length_m,
+            retry_feedback=retry_feedback or "",
         )
 
         console_logger.info("Generating furniture placement context image")
@@ -444,6 +449,8 @@ class GeminiImageGenerator(BaseImageGenerator):
         width_m: float,
         length_m: float,
         output_path: Path,
+        retry_feedback: str | None = None,
+        seed_override: int | None = None,
     ) -> Path:
         """Generate top-down room visualization for furniture placement using Gemini.
 
@@ -466,6 +473,7 @@ class GeminiImageGenerator(BaseImageGenerator):
             scene_description=scene_description,
             width_m=width_m,
             length_m=length_m,
+            retry_feedback=retry_feedback or "",
         )
 
         console_logger.info("Generating furniture placement context image (Gemini)")

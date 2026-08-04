@@ -19,7 +19,7 @@ import yaml
 
 from agents import Agent, FunctionTool, Runner, RunResult
 from omegaconf import DictConfig
-from pydrake.all import RigidTransform
+from pydrake.all import RigidTransform, RotationMatrix
 
 from scenesmith.agent_utils.action_logger import log_scene_action
 from scenesmith.agent_utils.base_stateful_agent import (
@@ -41,7 +41,13 @@ from scenesmith.agent_utils.house import (
 )
 from scenesmith.agent_utils.placement_noise import PlacementNoiseMode
 from scenesmith.agent_utils.rendering import save_directive_as_blend
-from scenesmith.agent_utils.room import AgentType, ObjectType, SceneObject, UniqueID
+from scenesmith.agent_utils.room import (
+    AgentType,
+    ObjectType,
+    SceneObject,
+    SupportSurface,
+    UniqueID,
+)
 from scenesmith.agent_utils.scoring import (
     FloorPlanCritiqueWithScores,
     format_score_deltas_for_planner,
@@ -55,8 +61,15 @@ from scenesmith.floor_plan_agents.tools.floor_plan_tools import FloorPlanTools
 from scenesmith.floor_plan_agents.tools.geometry_cache import (
     GeometryCache,
     floor_cache_key,
+    polygon_floor_cache_key,
     wall_cache_key,
     window_cache_key,
+)
+from scenesmith.floor_plan_agents.tools.polygon_geometry import (
+    PolygonValidationConfig,
+    polygon_edges,
+    to_room_local_vertices,
+    triangulate_polygon,
 )
 from scenesmith.floor_plan_agents.tools.vision_tools import FloorPlanVisionTools
 from scenesmith.floor_plan_agents.tools.wall_geometry import (
@@ -67,7 +80,11 @@ from scenesmith.floor_plan_agents.tools.wall_geometry import (
 )
 from scenesmith.floor_plan_agents.tools.window_geometry import create_window_mesh
 from scenesmith.prompts.registry import FloorPlanAgentPrompts
-from scenesmith.utils.gltf_generation import create_floor_gltf, get_zup_to_yup_matrix
+from scenesmith.utils.gltf_generation import (
+    create_floor_gltf,
+    create_polygon_floor_gltf,
+    get_zup_to_yup_matrix,
+)
 from scenesmith.utils.logging import BaseLogger
 from scenesmith.utils.material import Material
 
@@ -155,6 +172,7 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
                 generate_geometries_callback=lambda: self._generate_all_room_geometries(
                     output_dir=output_dir
                 ),
+                mode=self.mode,
             )
         return self._vision_tools
 
@@ -187,6 +205,7 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
             wall_height_max=self.cfg.wall_height.max,
             room_dim_min=self.cfg.min_floor_plan_dim_m,
             room_dim_max=self.cfg.max_floor_plan_dim_m,
+            polygon_config=self._create_polygon_validation_config(),
         )
 
         vision_tools = self._get_vision_tools()
@@ -225,9 +244,23 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
             wall_height_max=self.cfg.wall_height.max,
             room_dim_min=self.cfg.min_floor_plan_dim_m,
             room_dim_max=self.cfg.max_floor_plan_dim_m,
+            polygon_config=self._create_polygon_validation_config(),
         )
 
         return list(vision_tools.tools.values()) + [floor_plan_tools.tools["validate"]]
+
+    def _create_polygon_validation_config(self) -> PolygonValidationConfig:
+        """Build polygon limits without affecting rectangle-mode dimension checks."""
+        polygon_cfg = self.cfg.polygon
+        return PolygonValidationConfig(
+            max_vertices=polygon_cfg.max_vertices,
+            min_area_m2=polygon_cfg.min_area_m2,
+            min_edge_length_m=polygon_cfg.min_edge_length_m,
+            min_interior_angle_deg=polygon_cfg.min_interior_angle_deg,
+            coordinate_precision=polygon_cfg.coordinate_precision,
+            min_dimension_m=self.cfg.min_floor_plan_dim_m,
+            max_dimension_m=self.cfg.max_floor_plan_dim_m,
+        )
 
     def _create_designer_agent(self, tools: list[FunctionTool]) -> Agent:
         """Create the designer agent.
@@ -320,7 +353,7 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
         Returns:
             Dictionary of kwargs for initial design prompt.
         """
-        return {}
+        return {"mode": self.mode}
 
     def _set_placement_noise_profile(self, mode: PlacementNoiseMode) -> None:
         """Set placement noise profile.
@@ -580,6 +613,7 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
         # Get instruction.
         instruction = self.prompt_registry.get_prompt(
             prompt_enum=FloorPlanAgentPrompts.DESIGNER_INITIAL_INSTRUCTION,
+            mode=self.mode,
         )
 
         # Run designer.
@@ -820,25 +854,47 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
         Returns:
             Path to the generated floor GLTF file.
         """
-        cache_key = floor_cache_key(
-            width=placed_room.width,
-            depth=placed_room.depth,
-            thickness=floor_thickness,
-            material=floor_material,
+        room_local_footprint = (
+            to_room_local_vertices(placed_room.footprint_vertices)
+            if placed_room.footprint_vertices is not None
+            else None
         )
-
-        def create_fn(output_path: Path) -> None:
-            create_floor_gltf(
+        if room_local_footprint is None:
+            cache_key = floor_cache_key(
                 width=placed_room.width,
                 depth=placed_room.depth,
                 thickness=floor_thickness,
                 material=floor_material,
-                output_path=output_path,
-                texture_scale=0.5,
-                center_x=0.0,
-                center_y=0.0,
-                center_z=-floor_thickness / 2,
             )
+        else:
+            cache_key = polygon_floor_cache_key(
+                vertices=room_local_footprint,
+                thickness=floor_thickness,
+                material=floor_material,
+            )
+
+        def create_fn(output_path: Path) -> None:
+            if room_local_footprint is None:
+                create_floor_gltf(
+                    width=placed_room.width,
+                    depth=placed_room.depth,
+                    thickness=floor_thickness,
+                    material=floor_material,
+                    output_path=output_path,
+                    texture_scale=0.5,
+                    center_x=0.0,
+                    center_y=0.0,
+                    center_z=-floor_thickness / 2,
+                )
+            else:
+                create_polygon_floor_gltf(
+                    vertices=room_local_footprint,
+                    triangles=triangulate_polygon(room_local_footprint),
+                    thickness=floor_thickness,
+                    material=floor_material,
+                    output_path=output_path,
+                    texture_scale=0.5,
+                )
 
         assert self._geometry_cache is not None
         floor_gltf_path = self._geometry_cache.get_or_create_floor(
@@ -848,9 +904,19 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
         # Add floor to SDF.
         floor_gltf_rel = f"../floor_plans/{room_id}/floors/floor.gltf"
         self._add_gltf_floor_visual(link_element, floor_gltf_rel)
-        self._add_floor_collision(
-            link_element, length=placed_room.width, width=placed_room.depth
-        )
+        if room_local_footprint is None:
+            self._add_floor_collision(
+                link_element, length=placed_room.width, width=placed_room.depth
+            )
+        else:
+            self._add_polygon_floor_collisions(
+                link_element=link_element,
+                vertices=room_local_footprint,
+                triangles=triangulate_polygon(room_local_footprint),
+                floor_thickness=floor_thickness,
+                room_id=room_id,
+                floors_dir=floors_dir,
+            )
 
         return floor_gltf_path
 
@@ -865,6 +931,7 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
         room_id: str,
         room_output_dir: Path,
         link_element: ET.Element,
+        yaw: float | None = None,
     ) -> None:
         """Generate window frame mesh and add to SDF.
 
@@ -933,7 +1000,11 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
         window_z = opening.sill_height + opening.height / 2
 
         # Convert position along wall to local room coords.
-        if is_horizontal:
+        if yaw is not None:
+            offset_along_wall = opening_center_along_wall - effective_wall_length / 2
+            window_x = local_x + np.cos(yaw) * offset_along_wall
+            window_y = local_y + np.sin(yaw) * offset_along_wall
+        elif is_horizontal:
             # N/S walls: window moves along X axis.
             window_x = opening_center_along_wall - effective_wall_length / 2
             window_y = local_y
@@ -953,6 +1024,7 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
             pose_x=window_x,
             pose_y=window_y,
             pose_z=window_z,
+            yaw=yaw,
         )
         console_logger.debug(
             f"Added window frame {opening.opening_id} at "
@@ -1084,6 +1156,19 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
         Returns:
             WallSpec for the wall, or None if wall was skipped.
         """
+        if wall.direction is None:
+            return self._generate_polygon_wall(
+                wall=wall,
+                placed_room=placed_room,
+                wall_height=wall_height,
+                wall_thickness=wall_thickness,
+                wall_material=wall_material,
+                room_id=room_id,
+                room_output_dir=room_output_dir,
+                walls_dir=walls_dir,
+                link_element=link_element,
+            )
+
         # Determine wall length for this direction.
         if wall.direction in (WallDirection.NORTH, WallDirection.SOUTH):
             wall_length_dim = placed_room.width
@@ -1253,6 +1338,179 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
 
         return spec
 
+    def _generate_polygon_wall(
+        self,
+        wall: Wall,
+        placed_room: PlacedRoom,
+        wall_height: float,
+        wall_thickness: float,
+        wall_material: Path,
+        room_id: str,
+        room_output_dir: Path,
+        walls_dir: Path,
+        link_element: ET.Element,
+    ) -> WallSpec | None:
+        """Generate one local-X rectangular wall at an arbitrary polygon-edge yaw."""
+        if wall.inward_normal is None or placed_room.footprint_vertices is None:
+            raise ValueError(f"Polygon wall {wall.wall_id} is missing edge geometry.")
+        local_vertices = to_room_local_vertices(placed_room.footprint_vertices)
+        edge = polygon_edges(local_vertices)[
+            next(
+                index
+                for index, candidate in enumerate(placed_room.walls)
+                if candidate.wall_id == wall.wall_id
+            )
+        ]
+        center_x = (edge.start[0] + edge.end[0]) / 2 + edge.inward_normal[
+            0
+        ] * wall_thickness / 2
+        center_y = (edge.start[1] + edge.end[1]) / 2 + edge.inward_normal[
+            1
+        ] * wall_thickness / 2
+        effective_length = wall.length + wall_thickness
+        adjusted_openings = [
+            WallOpening(
+                position_along_wall=opening.position_along_wall + wall_thickness / 2,
+                width=opening.width,
+                height=(
+                    wall_height
+                    if opening.opening_type == OpeningType.OPEN
+                    else opening.height
+                ),
+                sill_height=opening.sill_height,
+                opening_type=opening.opening_type,
+            )
+            for opening in wall.openings
+        ]
+        if any(
+            opening.opening_type == OpeningType.OPEN
+            and opening.width >= wall.length - 0.001
+            for opening in wall.openings
+        ):
+            return None
+
+        dimensions = WallDimensions(
+            width=effective_length,
+            height=wall_height,
+            thickness=wall_thickness,
+        )
+        wall_name = wall.wall_id
+        wall_subdir = walls_dir / wall_name
+        cache_key = wall_cache_key(
+            width=dimensions.width,
+            height=dimensions.height,
+            thickness=dimensions.thickness,
+            material=wall_material,
+            openings=[opening.to_dict() for opening in adjusted_openings] or None,
+        )
+
+        def create_wall_fn(output_path: Path) -> None:
+            create_wall_gltf_with_openings(
+                dimensions=dimensions,
+                openings=adjusted_openings or None,
+                output_path=output_path,
+                uv_scale=0.5,
+                material=wall_material,
+            )
+
+        assert self._geometry_cache is not None
+        self._geometry_cache.get_or_create_wall(
+            cache_key=cache_key, output_dir=wall_subdir, create_fn=create_wall_fn
+        )
+        spec = WallSpec(
+            name=wall_name,
+            center_x=center_x,
+            center_y=center_y,
+            bbox_width=effective_length,
+            bbox_depth=wall_thickness,
+            thickness=wall_thickness,
+            yaw=edge.yaw,
+            inward_normal=edge.inward_normal,
+            wall_id=wall.wall_id,
+        )
+        wall_gltf_rel = f"../floor_plans/{room_id}/walls/{wall_name}/wall.gltf"
+        self._add_gltf_wall_visual_with_pose(
+            link_element=link_element,
+            wall_name=wall_name,
+            gltf_relative_path=wall_gltf_rel,
+            pose_x=center_x,
+            pose_y=center_y,
+            pose_z=0.0,
+            is_horizontal=True,
+            yaw=edge.yaw,
+        )
+        self._add_wall_collision_with_openings(
+            link_element=link_element,
+            wall_spec=spec,
+            wall_height=wall_height,
+            openings=adjusted_openings,
+            wall_length=effective_length,
+            is_horizontal=True,
+            yaw=edge.yaw,
+        )
+
+        for opening in wall.openings:
+            if opening.opening_type == OpeningType.WINDOW:
+                self._generate_window_frame(
+                    opening=opening,
+                    wall_thickness=wall_thickness,
+                    is_horizontal=True,
+                    effective_wall_length=wall.length,
+                    local_x=center_x,
+                    local_y=center_y,
+                    room_id=room_id,
+                    room_output_dir=room_output_dir,
+                    link_element=link_element,
+                    yaw=edge.yaw,
+                )
+        if wall.is_exterior:
+            exterior_material = self.layout.exterior_material or Material.from_path(
+                Path("materials/Plaster001_1K-JPG")
+            )
+            exterior_name = f"{wall_name}_exterior"
+            exterior_subdir = walls_dir / exterior_name
+            exterior_cache_key = wall_cache_key(
+                width=dimensions.width,
+                height=dimensions.height,
+                thickness=dimensions.thickness,
+                material=exterior_material,
+                openings=[opening.to_dict() for opening in adjusted_openings] or None,
+            )
+
+            def create_exterior_fn(output_path: Path) -> None:
+                create_wall_gltf_with_openings(
+                    dimensions=dimensions,
+                    openings=adjusted_openings or None,
+                    output_path=output_path,
+                    uv_scale=0.5,
+                    material=exterior_material,
+                )
+
+            self._geometry_cache.get_or_create_wall(
+                cache_key=exterior_cache_key,
+                output_dir=exterior_subdir,
+                create_fn=create_exterior_fn,
+            )
+            exterior_x = (edge.start[0] + edge.end[0]) / 2 - edge.inward_normal[
+                0
+            ] * wall_thickness / 2
+            exterior_y = (edge.start[1] + edge.end[1]) / 2 - edge.inward_normal[
+                1
+            ] * wall_thickness / 2
+            self._add_gltf_wall_visual_with_pose(
+                link_element=link_element,
+                wall_name=exterior_name,
+                gltf_relative_path=(
+                    f"../floor_plans/{room_id}/walls/{exterior_name}/wall.gltf"
+                ),
+                pose_x=exterior_x,
+                pose_y=exterior_y,
+                pose_z=0.0,
+                is_horizontal=True,
+                yaw=edge.yaw,
+            )
+        return spec
+
     def _generate_room_geometry(
         self, room_spec: RoomSpec, output_dir: Path
     ) -> RoomGeometry:
@@ -1365,6 +1623,23 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
             bbox_max=np.array([placed_room.width / 2, placed_room.depth / 2, 0.0]),
             immutable=True,
         )
+        if placed_room.footprint_vertices is not None:
+            room_local_footprint = to_room_local_vertices(
+                placed_room.footprint_vertices
+            )
+            floor_object.support_surfaces = [
+                SupportSurface(
+                    surface_id=UniqueID(f"floor_surface_{room_spec.room_id}"),
+                    bounding_box_min=np.array(
+                        [-placed_room.width / 2, -placed_room.depth / 2, 0.0]
+                    ),
+                    bounding_box_max=np.array(
+                        [placed_room.width / 2, placed_room.depth / 2, wall_height]
+                    ),
+                    transform=RigidTransform(),
+                    exact_boundary_vertices=room_local_footprint,
+                )
+            ]
 
         # Compute openings data for physics validation and label rendering.
         openings = compute_openings_data(
@@ -1387,6 +1662,11 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
             wall_height=wall_height,
             wall_thickness=wall_thickness,
             openings=openings,
+            footprint_vertices=(
+                to_room_local_vertices(placed_room.footprint_vertices)
+                if placed_room.footprint_vertices is not None
+                else None
+            ),
         )
 
     @staticmethod
@@ -1450,6 +1730,7 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
         pose_y: float,
         pose_z: float,
         is_horizontal: bool,
+        yaw: float | None = None,
     ) -> None:
         """Add GLTF wall visual to SDF link element with pose.
 
@@ -1473,7 +1754,9 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
         # For north/south walls (horizontal), no rotation needed.
         # For east/west walls (vertical), rotate 90° around Z.
         pose = ET.SubElement(visual, "pose")
-        if is_horizontal:
+        if yaw is not None:
+            pose.text = f"{pose_x} {pose_y} {pose_z} 0 0 {yaw}"
+        elif is_horizontal:
             pose.text = f"{pose_x} {pose_y} {pose_z} 0 0 0"
         else:
             # Rotate 90° around Z axis for vertical walls.
@@ -1487,6 +1770,7 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
         pose_x: float,
         pose_y: float,
         pose_z: float,
+        yaw: float | None = None,
     ) -> None:
         """Add GLTF window frame visual to SDF link element with pose.
 
@@ -1506,7 +1790,7 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
 
         # Window mesh rotation is baked in during GLTF export.
         pose = ET.SubElement(visual, "pose")
-        pose.text = f"{pose_x} {pose_y} {pose_z} 0 0 0"
+        pose.text = f"{pose_x} {pose_y} {pose_z} 0 0 {yaw or 0.0}"
 
     def _create_wall_objects(
         self, wall_specs: list[WallSpec], wall_height: float
@@ -1525,7 +1809,8 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
         for spec in wall_specs:
             # Create transform at wall center.
             transform = RigidTransform(
-                p=[spec.center_x, spec.center_y, wall_height / 2.0]
+                R=RotationMatrix.MakeZRotation(spec.yaw),
+                p=np.array([spec.center_x, spec.center_y, wall_height / 2.0]),
             )
 
             # Bounding box in object frame (centered at origin).
@@ -1545,6 +1830,10 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
                 bbox_min=bbox_min,
                 bbox_max=bbox_max,
                 immutable=True,
+                metadata={
+                    "wall_id": spec.wall_id or spec.name,
+                    "inward_normal": spec.inward_normal,
+                },
             )
             walls.append(wall_obj)
 
@@ -1586,6 +1875,50 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
         pose.text = "0 0 -0.05 0 0 0"
 
     @staticmethod
+    def _add_polygon_floor_collisions(
+        link_element: ET.Element,
+        vertices: list[tuple[float, float]],
+        triangles: list[tuple[int, int, int]],
+        floor_thickness: float,
+        room_id: str,
+        floors_dir: Path,
+    ) -> None:
+        """Export one convex triangular prism collision mesh per floor triangle."""
+        collision_dir = floors_dir / "collisions"
+        collision_dir.mkdir(parents=True, exist_ok=True)
+        for index, triangle in enumerate(triangles):
+            xy = [vertices[vertex_index] for vertex_index in triangle]
+            prism_vertices = np.array(
+                [[x, y, 0.0] for x, y in xy] + [[x, y, -floor_thickness] for x, y in xy]
+            )
+            prism_faces = np.array(
+                [
+                    [0, 1, 2],
+                    [5, 4, 3],
+                    [0, 3, 4],
+                    [0, 4, 1],
+                    [1, 4, 5],
+                    [1, 5, 2],
+                    [2, 5, 3],
+                    [2, 3, 0],
+                ]
+            )
+            mesh_path = collision_dir / f"triangle_{index:03d}.obj"
+            trimesh.Trimesh(
+                vertices=prism_vertices, faces=prism_faces, process=True
+            ).export(mesh_path)
+            collision = ET.SubElement(
+                link_element, "collision", name=f"floor_collision_{index:03d}"
+            )
+            geometry = ET.SubElement(collision, "geometry")
+            mesh = ET.SubElement(geometry, "mesh")
+            uri = ET.SubElement(mesh, "uri")
+            uri.text = (
+                f"../floor_plans/{room_id}/floors/collisions/"
+                f"triangle_{index:03d}.obj"
+            )
+
+    @staticmethod
     def _add_wall_collision(
         link_element: ET.Element, wall_spec: WallSpec, wall_height: float
     ) -> None:
@@ -1616,6 +1949,7 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
         openings: list[WallOpening],
         wall_length: float,
         is_horizontal: bool,
+        yaw: float | None = None,
     ) -> None:
         """Add wall collision geometry with cutouts for doors and open connections.
 
@@ -1637,9 +1971,25 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
 
         if not passable_openings:
             # No doors/open connections - use single solid box.
-            StatefulFloorPlanAgent._add_wall_collision(
-                link_element, wall_spec, wall_height
-            )
+            if yaw is None:
+                StatefulFloorPlanAgent._add_wall_collision(
+                    link_element, wall_spec, wall_height
+                )
+            else:
+                collision = ET.SubElement(
+                    link_element,
+                    "collision",
+                    name=f"{wall_spec.name}_collision",
+                )
+                geometry = ET.SubElement(collision, "geometry")
+                box = ET.SubElement(geometry, "box")
+                ET.SubElement(box, "size").text = (
+                    f"{wall_spec.bbox_width} {wall_spec.bbox_depth} {wall_height}"
+                )
+                ET.SubElement(collision, "pose").text = (
+                    f"{wall_spec.center_x} {wall_spec.center_y} "
+                    f"{wall_height / 2.0} 0 0 {yaw}"
+                )
             return
 
         # Sort openings by position along wall.
@@ -1688,5 +2038,13 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
                 pose_x = wall_spec.center_x
                 pose_y = wall_spec.center_y + segment_center_along_wall
 
+            if yaw is not None:
+                cosine, sine = np.cos(yaw), np.sin(yaw)
+                local_offset = segment_center_along_wall
+                pose_x = wall_spec.center_x + cosine * local_offset
+                pose_y = wall_spec.center_y + sine * local_offset
             pose = ET.SubElement(collision, "pose")
-            pose.text = f"{pose_x} {pose_y} {wall_height / 2.0} 0 0 0"
+            pose.text = (
+                f"{pose_x} {pose_y} {wall_height / 2.0} 0 0 "
+                f"{yaw if yaw is not None else 0}"
+            )

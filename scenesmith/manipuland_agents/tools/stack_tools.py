@@ -34,6 +34,9 @@ from scenesmith.manipuland_agents.tools.stacking import (
     compute_initial_stack_transforms,
     simulate_stack_stability,
 )
+from scenesmith.floor_plan_agents.tools.polygon_geometry import (
+    exact_surface_covers_object,
+)
 
 console_logger = logging.getLogger(__name__)
 
@@ -390,6 +393,27 @@ def create_stack_tool_impl(
             num_items=len(asset_ids),
             error_type=ManipulandErrorType.STACK_EXCEEDS_CLEARANCE,
         ).to_json()
+
+    for asset, final_transform in zip(assets, sim_result.final_transforms):
+        candidate = SceneObject(
+            object_id=UniqueID("stack_boundary_candidate"),
+            object_type=ObjectType.MANIPULAND,
+            name=asset.name,
+            description=asset.description,
+            transform=final_transform,
+            bbox_min=asset.bbox_min,
+            bbox_max=asset.bbox_max,
+        )
+        if not exact_surface_covers_object(target_surface, candidate):
+            return StackCreationResult(
+                success=False,
+                message="Settled stack extends beyond the exact support boundary.",
+                stack_object_id=None,
+                stack_height=None,
+                parent_surface_id=surface_id,
+                num_items=len(asset_ids),
+                error_type=ManipulandErrorType.POSITION_OUT_OF_BOUNDS,
+            ).to_json()
 
     # Stack is stable - create composite SceneObject.
     stack_id = generate_unique_id("stack")

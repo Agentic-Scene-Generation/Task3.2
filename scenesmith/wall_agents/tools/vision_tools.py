@@ -12,8 +12,8 @@ from typing import TYPE_CHECKING
 
 from agents import ToolOutputImage, ToolOutputText, function_tool
 from omegaconf import DictConfig
+from shapely.geometry import LineString, box
 
-from scenesmith.agent_utils.house import WallDirection
 from scenesmith.agent_utils.physics_tools import check_physics_violations
 from scenesmith.agent_utils.rendering_manager import RenderingManager
 from scenesmith.agent_utils.room import AgentType, ObjectType, RoomScene
@@ -67,7 +67,7 @@ class WallVisionTools:
 
             Renders views of the room to help with wall object placement:
             - Top-down context view showing all furniture and wall objects
-            - Per-wall orthographic views with coordinate grid for all 4 walls
+            - Per-wall orthographic views with coordinate grid for every wall
 
             The top-down view provides room context (furniture arrangement,
             traffic flow, focal points). Per-wall views show exact placement
@@ -206,7 +206,11 @@ class WallVisionTools:
             Dict with wall surface data for Blender.
         """
         wall_transform = surface.transform
-        direction = surface.wall_direction.name.lower()
+        direction = (
+            surface.wall_direction.name.lower()
+            if surface.wall_direction is not None
+            else "polygon"
+        )
 
         # Compute room_depth based on wall direction and room bounds.
         # For north/south walls, depth is Y extent. For east/west, it's X extent.
@@ -215,12 +219,15 @@ class WallVisionTools:
             min_x, min_y, max_x, max_y = room_bounds
             if direction in ("north", "south"):
                 room_depth = max_y - min_y
-            else:  # east, west
+            elif direction in ("east", "west"):
                 room_depth = max_x - min_x
+            else:
+                room_depth = max(max_x - min_x, max_y - min_y)
 
         result = {
             "surface_id": str(surface.surface_id),
             "wall_id": surface.wall_id,
+            "wall_label": surface.wall_label,
             "direction": direction,
             "length": surface.length,
             "height": surface.height,
@@ -273,6 +280,16 @@ class WallVisionTools:
         Returns:
             Tuple (min_x, min_y, max_x, max_y) or None if walls are insufficient.
         """
+        footprint = self.scene.room_geometry.footprint_vertices
+        if footprint is not None:
+            vertices = list(footprint)
+            return (
+                min(vertex[0] for vertex in vertices),
+                min(vertex[1] for vertex in vertices),
+                max(vertex[0] for vertex in vertices),
+                max(vertex[1] for vertex in vertices),
+            )
+
         if len(self.wall_surfaces) < 2:
             return None
 
@@ -283,6 +300,8 @@ class WallVisionTools:
         for surface in self.wall_surfaces:
             # Get wall center position from transform.
             pos = surface.transform.translation()
+            if surface.wall_direction is None:
+                continue
             direction = surface.wall_direction.name.lower()
 
             if direction in ("north", "south"):
@@ -342,17 +361,12 @@ class WallVisionTools:
                 )
             obj_min, obj_max = world_bounds
 
-            # Get wall position.
-            wall_pos = surface.transform.translation()
-
-            # Check distance based on wall direction.
-            # North/South walls are at constant Y, East/West at constant X.
-            if surface.wall_direction in (WallDirection.NORTH, WallDirection.SOUTH):
-                wall_y = wall_pos[1]
-                dist = min(abs(obj_min[1] - wall_y), abs(obj_max[1] - wall_y))
-            else:  # EAST, WEST
-                wall_x = wall_pos[0]
-                dist = min(abs(obj_min[0] - wall_x), abs(obj_max[0] - wall_x))
+            wall_origin = surface.transform.translation()[:2]
+            wall_x_axis = surface.transform.rotation().matrix()[:2, 0]
+            wall_end = wall_origin + wall_x_axis * surface.length
+            wall_segment = LineString([wall_origin, wall_end])
+            object_footprint = box(obj_min[0], obj_min[1], obj_max[0], obj_max[1])
+            dist = wall_segment.distance(object_footprint)
 
             if dist <= threshold_m:
                 nearby_ids.append(obj.object_id)
