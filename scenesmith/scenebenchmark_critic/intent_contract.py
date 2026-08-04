@@ -1068,6 +1068,14 @@ def _explicit_prompt_constraints(prompt: str, lowered: str) -> list[dict[str, An
     previous_selector: dict[str, Any] | None = None
     for clause in clauses:
         normalized = clause.lower()
+        # Failure examples and negative advice describe poses to avoid, not
+        # user requirements. Do not let them create hard intent contracts.
+        if re.search(
+            r"\b(?:avoid|avoiding|failure\s+patterns?|known\s+failure|"
+            r"do\s+not|don't|must\s+not|should\s+not|off[-\s]?center)\b",
+            normalized,
+        ):
+            continue
         # Keep the subject phrase short.  This accepts paraphrases while
         # requiring the relation words to occur in the same clause.
         for match in re.finditer(
@@ -1125,6 +1133,29 @@ def _explicit_prompt_constraints(prompt: str, lowered: str) -> list[dict[str, An
             r"(?:\s+in|\s+at|\s+of)?\s+(?:the\s+)?(?:center|centre|middle)"
             r"(?:\s+of\s+(?:the\s+)?room)?\b"
             r"(?!\s+of\s+(?:the\s+)?(?!room\b)[a-z])",
+            normalized,
+        ):
+            subject = selector_for_phrase(match.group("subject"))
+            if subject is not None:
+                constraints.append(
+                    _constraint(
+                        "centered_in_room",
+                        subject,
+                        {"category": "room"},
+                        source="explicit_prompt",
+                        evidence_span=clause,
+                    )
+                )
+
+        # Preserve the legacy natural-language form where the object follows
+        # the room-center phrase, for example "the center of the room contains
+        # a bed". This must become a prompt-originated v4 contract as well.
+        for match in re.finditer(
+            r"(?:the\s+)?(?:center|centre|middle)\s+of\s+"
+            r"(?:the\s+)?room\s+"
+            r"(?:contains?|holds?|features?|includes?|has|houses?|"
+            r"is\s+(?:occupied|anchored)\s+by)\s+"
+            r"(?:a|an|the|one)\s+(?P<subject>[a-z0-9_\- ,']{1,70}?)(?:[,.;]|$)",
             normalized,
         ):
             subject = selector_for_phrase(match.group("subject"))

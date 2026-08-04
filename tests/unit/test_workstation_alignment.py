@@ -52,6 +52,7 @@ def _case_pack(*, office_x: float = 0.2) -> dict:
             {
                 "metric": "functional_dependency",
                 "relation_type": "seating_to_work_surface",
+                "check_source": "intent_contract",
                 "subject_id": "office_chair_0",
                 "target_ids": ["study_desk_0"],
             }

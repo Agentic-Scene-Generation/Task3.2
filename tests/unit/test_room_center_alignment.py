@@ -1,5 +1,6 @@
-from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.room_center import (
-    evaluate_room_center_alignment,
+from scenesmith.scenebenchmark_critic.intent_contract import build_intent_contract
+from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.intent_contract import (
+    evaluate_intent_contract_extensions,
 )
 
 
@@ -28,6 +29,19 @@ def _case(prompt: str) -> dict:
     }
 
 
+def _evaluate(prompt: str, *, original_prompt: str | None = None) -> list[dict]:
+    task_prompt = original_prompt or prompt
+    case_pack = _case(prompt)
+    case_pack["stage"] = "furniture"
+    case_pack["original_task_instruction"] = task_prompt
+    case_pack["intent_contract"] = build_intent_contract(task_prompt)
+    return [
+        result
+        for result in evaluate_intent_contract_extensions(case_pack)
+        if result.get("relation_type") == "room_center_alignment"
+    ]
+
+
 def test_room_center_ignores_wall_centering_and_visual_axis_context() -> None:
     prompt = (
         "A bedroom with a bed centered on the main wall. "
@@ -35,13 +49,11 @@ def test_room_center_ignores_wall_centering_and_visual_axis_context() -> None:
         "clear visual axis from bed to dresser."
     )
 
-    assert evaluate_room_center_alignment(_case(prompt)) == []
+    assert _evaluate(prompt) == []
 
 
 def test_room_center_keeps_explicit_anchor_contract() -> None:
-    results = evaluate_room_center_alignment(
-        _case("Place the bed in the center of the room.")
-    )
+    results = _evaluate("Place the bed in the center of the room.")
 
     assert len(results) == 1
     assert results[0]["primary_object"] == "bed_0"
@@ -49,9 +61,7 @@ def test_room_center_keeps_explicit_anchor_contract() -> None:
 
 
 def test_room_center_supports_contains_wording() -> None:
-    results = evaluate_room_center_alignment(
-        _case("The center of the room contains a bed.")
-    )
+    results = _evaluate("The center of the room contains a bed.")
 
     assert len(results) == 1
     assert results[0]["primary_object"] == "bed_0"
@@ -64,7 +74,7 @@ def test_room_center_ignores_stage_brief_failure_examples() -> None:
         "room without wall support."
     )
 
-    assert evaluate_room_center_alignment(_case(prompt)) == []
+    assert _evaluate(prompt) == []
 
 
 def test_room_center_uses_original_task_not_injected_stage_brief() -> None:
@@ -75,24 +85,22 @@ def test_room_center_uses_original_task_not_injected_stage_brief() -> None:
     )
     case_pack["original_task_instruction"] = "A bedroom with a bed against the wall."
 
-    assert evaluate_room_center_alignment(case_pack) == []
-
-
-def test_room_center_does_not_treat_central_anchor_as_room_center() -> None:
     assert (
-        evaluate_room_center_alignment(
-            _case("Use the bed as the central anchor of the sleeping zone.")
+        _evaluate(
+            case_pack["task_instruction"],
+            original_prompt=case_pack["original_task_instruction"],
         )
         == []
     )
 
 
+def test_room_center_does_not_treat_central_anchor_as_room_center() -> None:
+    assert _evaluate("Use the bed as the central anchor of the sleeping zone.") == []
+
+
 def test_room_center_ignores_off_center_counterexample_but_keeps_request() -> None:
-    results = evaluate_room_center_alignment(
-        _case(
-            "Place the bed in the center of the room. "
-            "Avoid leaving the bed off-center."
-        )
+    results = _evaluate(
+        "Place the bed in the center of the room. " "Avoid leaving the bed off-center."
     )
 
     assert len(results) == 1

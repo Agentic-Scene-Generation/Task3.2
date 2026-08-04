@@ -858,6 +858,13 @@ def test_deterministic_contract_recognizes_floor_near_manipulands() -> None:
     )
 
 
+def test_deterministic_contract_recognizes_room_center_contains_wording() -> None:
+    contract = build_intent_contract("The center of the room contains a bed.")
+
+    assert [row["relation"] for row in contract["constraints"]] == ["centered_in_room"]
+    assert contract["constraints"][0]["subjects"]["category"] == "bed"
+
+
 def test_schema_rejects_direction_that_only_qualifies_a_wall() -> None:
     prompt = (
         "A dining room with a dining table in the center, four dining chairs "
