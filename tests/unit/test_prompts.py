@@ -292,6 +292,38 @@ class TestPromptSystem(unittest.TestCase):
         self.assertIn("Concave cutouts are", rendered_prompt)
         self.assertIn("outside the room even when", rendered_prompt)
 
+    def test_furniture_reference_prompt_marks_image_as_non_authoritative(self):
+        """Reference-image guidance is injected only for the enabled path."""
+        common_kwargs = {
+            "scene_description": "A Scandinavian bedroom",
+            "room_length": 5.0,
+            "room_width": 4.5,
+            "room_local_footprint_vertices": [
+                (-2.5, -2.25),
+                (2.5, -2.25),
+                (2.5, 2.25),
+                (-2.5, 2.25),
+            ],
+        }
+        with_reference = prompt_manager.get_prompt(
+            prompt_name=FurnitureAgentPrompts.DESIGNER_INITIAL_INSTRUCTION,
+            has_reference_image=True,
+            **common_kwargs,
+        )
+        without_reference = prompt_manager.get_prompt(
+            prompt_name=FurnitureAgentPrompts.DESIGNER_INITIAL_INSTRUCTION,
+            has_reference_image=False,
+            **common_kwargs,
+        )
+
+        reference_warning = (
+            "reference image above is an AI-edited concept image, NOT a render"
+        )
+        self.assertIn(reference_warning, with_reference)
+        self.assertIn("Furniture visible in that image does not exist", with_reference)
+        self.assertIn("Call observe_scene to inspect the ACTUAL empty room", with_reference)
+        self.assertNotIn(reference_warning, without_reference)
+
     def test_registry_functionality(self):
         """Test registry functionality with actual prompts."""
         # Test getting prompt through registry.

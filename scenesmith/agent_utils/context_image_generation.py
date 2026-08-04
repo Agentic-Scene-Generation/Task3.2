@@ -132,6 +132,7 @@ class OpenAICompatibleContextImageEditor:
         width_m: float,
         length_m: float,
         output_path: Path,
+        seed_override: int | None = None,
     ) -> Path:
         """Edit an empty-room render and preserve its exact output dimensions."""
         prompt = self.prompt_manager.get_prompt(
@@ -144,6 +145,7 @@ class OpenAICompatibleContextImageEditor:
             prompt=prompt,
             reference_image_path=reference_image_path,
             output_path=output_path,
+            seed_override=seed_override,
         )
 
     def _edit_image(
@@ -151,11 +153,17 @@ class OpenAICompatibleContextImageEditor:
         prompt: str,
         reference_image_path: Path,
         output_path: Path,
+        seed_override: int | None = None,
     ) -> Path:
         reference_image_path = Path(reference_image_path)
         output_path = Path(output_path)
         metadata_path = output_path.with_suffix(".metadata.json")
         start_time = time.monotonic()
+        effective_seed = (
+            self.config.seed if seed_override is None else int(seed_override)
+        )
+        if not 0 <= effective_seed <= 2**32 - 1:
+            raise ValueError("seed_override must be between 0 and 2**32-1")
 
         with Image.open(reference_image_path) as reference:
             input_size = reference.size
@@ -171,7 +179,7 @@ class OpenAICompatibleContextImageEditor:
             "num_inference_steps": self.config.num_inference_steps,
             "true_cfg_scale": self.config.true_cfg_scale,
             "negative_prompt": self.config.negative_prompt,
-            "seed": self.config.seed,
+            "seed": effective_seed,
             "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
             "input_image_sha256": _sha256_file(reference_image_path),
             "success": False,
@@ -196,7 +204,7 @@ class OpenAICompatibleContextImageEditor:
                         "num_inference_steps": self.config.num_inference_steps,
                         "true_cfg_scale": self.config.true_cfg_scale,
                         "negative_prompt": self.config.negative_prompt,
-                        "seed": self.config.seed,
+                        "seed": effective_seed,
                     },
                 )
 

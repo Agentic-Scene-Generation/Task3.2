@@ -181,6 +181,7 @@ class ImageGenerationPrompts(PromptEnum):
     ASSET_IMAGE_INITIAL = "asset_image_initial"
     ASSET_IMAGE_CONTINUATION = "asset_image_continuation"
     FURNITURE_CONTEXT_IMAGE = "furniture_context_image"
+    FURNITURE_CONTEXT_IMAGE_QUALITY = "furniture_context_image_quality"
     MANIPULAND_CONTEXT_IMAGE = "manipuland_context_image"
 
 
