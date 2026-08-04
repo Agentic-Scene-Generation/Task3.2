@@ -18,6 +18,7 @@ from scenesmith.agent_utils.blender.surface_utils import (
     find_best_label_position,
     is_point_occluded,
 )
+from tests.test_data.gltf_assets import missing_gltf_buffers
 
 
 class TestSurfaceOcclusion(unittest.TestCase):
@@ -31,8 +32,12 @@ class TestSurfaceOcclusion(unittest.TestCase):
         )
         cls.artistic_shelf_path = cls.test_data_dir / "artistic_shelf_canonical.gltf"
 
-        if not cls.artistic_shelf_path.exists():
-            raise FileNotFoundError(f"Test data not found: {cls.artistic_shelf_path}")
+        missing = missing_gltf_buffers([cls.artistic_shelf_path])
+        if missing:
+            raise unittest.SkipTest(
+                "Missing glTF buffer sidecars: "
+                + ", ".join(str(path) for path in missing)
+            )
 
     def setUp(self):
         """Reset Blender scene before each test."""

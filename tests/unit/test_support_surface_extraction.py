@@ -14,6 +14,7 @@ from scenesmith.agent_utils.support_surface_extraction import (
     SupportSurfaceExtractionConfig,
     extract_support_surfaces_from_mesh,
 )
+from tests.test_data.gltf_assets import missing_gltf_buffers
 
 console_logger = logging.getLogger(__name__)
 
@@ -32,9 +33,14 @@ class TestSupportSurfaceExtraction(unittest.TestCase):
         cls.round_table_path = test_data_dir / "round_table_canonical.gltf"
 
         # Verify test files exist.
-        assert cls.shelf_3x3_path.exists(), f"Missing: {cls.shelf_3x3_path}"
-        assert cls.artistic_shelf_path.exists(), f"Missing: {cls.artistic_shelf_path}"
-        assert cls.round_table_path.exists(), f"Missing: {cls.round_table_path}"
+        missing = missing_gltf_buffers(
+            [cls.shelf_3x3_path, cls.artistic_shelf_path, cls.round_table_path]
+        )
+        if missing:
+            raise unittest.SkipTest(
+                "Missing glTF buffer sidecars: "
+                + ", ".join(str(path) for path in missing)
+            )
 
     def test_round_table_single_surface(self):
         """Round table should have exactly 2 horizontal surfaces (tabletop + base)."""
