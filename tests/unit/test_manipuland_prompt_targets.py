@@ -6,10 +6,12 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, call, patch
 
 import numpy as np
+import pytest
 
 from pydrake.all import RigidTransform, RollPitchYaw
 
 from scenesmith.agent_utils.room import ObjectType, UniqueID
+from scenesmith.agent_utils.base_stateful_agent import Runner
 from scenesmith.agent_utils.scene_analyzer import FurnitureSelection
 from scenesmith.manipuland_agents.cross_stage_inventory import (
     existing_floor_covering_ids,
@@ -45,6 +47,67 @@ def test_dining_prompt_requires_table_and_sideboard_targets() -> None:
         ("dining_table", 1),
         ("sideboard", 1),
     ]
+
+
+def test_planner_retries_when_first_turn_has_no_workflow_tool_call() -> None:
+    agent = object.__new__(StatefulManipulandAgent)
+    agent.planner = SimpleNamespace(instructions="planner instructions")
+    agent.planner_session = object()
+    agent._planner_initial_design_tool_calls = 0
+    agent._planner_budget_exhausted = False
+    agent._reasoning_persistence_context_for_session = lambda _session: nullcontext()
+    agent._create_run_config = Mock(return_value=None)
+    agent._record_module_timing = Mock()
+    agent._record_llm_call_debug = Mock()
+
+    calls = []
+
+    async def fake_run(*, input, **_kwargs):
+        calls.append(input)
+        if len(calls) == 2:
+            # Simulate request_initial_design being executed by the recovered
+            # planner run.
+            agent._planner_initial_design_tool_calls = 1
+        return SimpleNamespace(final_output="completed")
+
+    with patch.object(Runner, "run", new=AsyncMock(side_effect=fake_run)):
+        result = asyncio.run(
+            agent._run_planner_workflow(
+                runner_input="start workflow",
+                max_turns=3,
+            )
+        )
+
+    assert result.final_output == "completed"
+    assert len(calls) == 2
+    assert "request_initial_design()" in calls[1]
+
+
+def test_planner_recovery_fails_if_second_turn_still_has_no_tool_call() -> None:
+    agent = object.__new__(StatefulManipulandAgent)
+    agent.planner = SimpleNamespace(instructions="planner instructions")
+    agent.planner_session = object()
+    agent._planner_initial_design_tool_calls = 0
+    agent._planner_budget_exhausted = False
+    agent._reasoning_persistence_context_for_session = lambda _session: nullcontext()
+    agent._create_run_config = Mock(return_value=None)
+    agent._record_module_timing = Mock()
+    agent._record_llm_call_debug = Mock()
+
+    with (
+        patch.object(
+            Runner,
+            "run",
+            new=AsyncMock(return_value=SimpleNamespace(final_output="acknowledged")),
+        ),
+        pytest.raises(RuntimeError, match="request_initial_design"),
+    ):
+        asyncio.run(
+            agent._run_planner_workflow(
+                runner_input="start workflow",
+                max_turns=3,
+            )
+        )
 
 
 def test_recovery_adds_missing_dining_table_without_duplicate_sideboard() -> None:
@@ -354,8 +417,9 @@ def test_monitor_work_seat_repair_keeps_surface_position_and_fixes_local_yaw() -
     scene = SimpleNamespace(
         room_type="office",
         scene_expert_original_description="An office with a monitor facing a chair.",
-        scene_expert_task_spec={
-            "intent_constraints": [
+        scene_expert_task_spec={},
+        scenebenchmark_intent_contract={
+            "constraints": [
                 {
                     "relation": "faces",
                     "subjects": {"category": "computer_monitor"},

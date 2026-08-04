@@ -19,8 +19,61 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 cd "$PROJECT_ROOT"
 
-EXPERIMENT="${SCENEEXPERT_EXPERIMENT:-ablation_4c_qwen3_hybrid_memory}"
-PYTHON_BIN="${PYTHON_BIN:-python}"
+# Critic probes normally run the non-memory harness. Memory experiments remain
+# opt-in so an omitted environment variable cannot load BGE-M3 unexpectedly.
+EXPERIMENT="${SCENEEXPERT_EXPERIMENT:-ablation_3_qwen3_harness}"
+if [ -n "${PYTHON_BIN:-}" ]; then
+    PYTHON_BIN="$PYTHON_BIN"
+else
+    # A linked worktree normally shares Task3.2's environment rather than
+    # carrying its own .venv. Prefer either project-local location before the
+    # host interpreter so every batch has Hydra and the SceneSmith deps.
+    PYTHON_BIN="python"
+    for candidate in \
+        "$PROJECT_ROOT/.venv/bin/python" \
+        "$PROJECT_ROOT/../../Task3.2/.venv/bin/python"; do
+        if [ -x "$candidate" ]; then
+            PYTHON_BIN="$candidate"
+            break
+        fi
+    done
+fi
+if ! "$PYTHON_BIN" -c 'import hydra' >/dev/null 2>&1; then
+    echo "ERROR: PYTHON_BIN cannot import hydra: $PYTHON_BIN" >&2
+    echo "       Set PYTHON_BIN to the Task3.2 virtualenv interpreter." >&2
+    exit 1
+fi
+
+# A linked worktree has no local ``models`` directory. Resolve BGE-M3 before
+# launching any batch so hybrid/vector-memory workers cannot fail only after
+# their retrieval servers have started. The shared-model fallback is derived
+# from a sibling Task3.2 checkout when one exists, not from the worktree name.
+MEMORY_EMBEDDING_MODEL_DIR="${SCENEEXPERT_MEMORY_EMBEDDING_MODEL_DIR:-}"
+if [ -z "$MEMORY_EMBEDDING_MODEL_DIR" ]; then
+    MODEL_LAYOUT_ROOT="$PROJECT_ROOT"
+    if [ -d "$PROJECT_ROOT/../../Task3.2" ]; then
+        MODEL_LAYOUT_ROOT="$PROJECT_ROOT/../../Task3.2"
+    fi
+    for candidate in \
+        "${SCENEEXPERT_MODELS_DIR:-}/bge-m3" \
+        "$PROJECT_ROOT/models/bge-m3" \
+        "$MODEL_LAYOUT_ROOT/models/bge-m3" \
+        "$(cd "$MODEL_LAYOUT_ROOT/../../.." && pwd)/share_model/Memory/bge-m3"; do
+        if [ -n "$candidate" ] && [ -d "$candidate" ]; then
+            MEMORY_EMBEDDING_MODEL_DIR="$candidate"
+            break
+        fi
+    done
+fi
+if [ "$EXPERIMENT" = "ablation_4b_qwen3_vector_memory" ] \
+    || [ "$EXPERIMENT" = "ablation_4c_qwen3_hybrid_memory" ]; then
+    if [ -z "$MEMORY_EMBEDDING_MODEL_DIR" ] || [ ! -d "$MEMORY_EMBEDDING_MODEL_DIR" ]; then
+        echo "ERROR: local BGE-M3 directory is required for $EXPERIMENT" >&2
+        echo "       Set SCENEEXPERT_MEMORY_EMBEDDING_MODEL_DIR to a valid bge-m3 directory." >&2
+        exit 1
+    fi
+    export SCENEEXPERT_MEMORY_EMBEDDING_MODEL_DIR="$MEMORY_EMBEDDING_MODEL_DIR"
+fi
 MODEL_NAME="${MODEL_NAME:-${SCENEEXPERT_MODEL_ID:-Qwen3.6-27B-Q8_0}}"
 RUN_ID="${RUN_ID:-critic_on_$(date +%Y-%m-%d_%H-%M-%S)}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-$PROJECT_ROOT/outputs/critic_probe/$RUN_ID}"
@@ -43,6 +96,9 @@ fi
 
 SCENE_BATCH_SIZE="${SCENE_BATCH_SIZE:-1}"
 SCENE_WORKERS_PER_PROCESS="${SCENE_WORKERS_PER_PROCESS:-1}"
+# Native Drake/solver crashes cannot be caught in-process.  Keep two clean
+# process retries by default; only failures classified as transient retry.
+SCENE_RETRY_ATTEMPTS="${SCENE_RETRY_ATTEMPTS:-2}"
 CRITIC_PROBE_PARALLEL="${CRITIC_PROBE_PARALLEL:-true}"
 # A Qwen llama-server already reserves tens of GiB in the ACP cgroup.  Keep
 # one Python scene process by default; callers can opt into more concurrency
@@ -81,6 +137,13 @@ DISABLE_BWRAP="${SCENEEXPERT_DISABLE_BWRAP:-false}"
 SKIP_MAIN_BPY_IMPORT="${SCENEEXPERT_SKIP_MAIN_BPY_IMPORT:-true}"
 HSSD_RETRIEVAL_BACKEND="${HSSD_RETRIEVAL_BACKEND:-clip}"
 HSSD_RENDERED_ASSET_CHOICE="${HSSD_RENDERED_ASSET_CHOICE:-false}"
+# A directory check alone is insufficient for BGE-M3: recent Transformers
+# releases reject pickle checkpoints when the active Torch is too old. Load it
+# once in the controller before any batch starts so an incompatible runtime
+# cannot waste several retrieval-server startups and produce failed batches.
+# Memory embedding is opt-in. Critic replays use the harness by default and
+# must not start BGE-M3 merely because the model directory is present.
+SCENEEXPERT_MEMORY_EMBEDDING_PREFLIGHT="${SCENEEXPERT_MEMORY_EMBEDDING_PREFLIGHT:-false}"
 # os.cpu_count() sees the host's 192 logical CPUs in the CCI container.  A
 # critic replay should never inherit the 32-thread YAML default implicitly:
 # each isolated decomposition server gets a small explicit cap.
@@ -172,6 +235,10 @@ csv_quote() {
 
 require_positive_integer SCENE_BATCH_SIZE "$SCENE_BATCH_SIZE"
 require_positive_integer SCENE_WORKERS_PER_PROCESS "$SCENE_WORKERS_PER_PROCESS"
+if [[ ! "$SCENE_RETRY_ATTEMPTS" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: SCENE_RETRY_ATTEMPTS must be a non-negative integer, got '$SCENE_RETRY_ATTEMPTS'" >&2
+    exit 1
+fi
 require_positive_integer CRITIC_PROBE_INNER_PARALLELISM "$CRITIC_PROBE_INNER_PARALLELISM"
 require_positive_integer CRITIC_PROBE_MAX_SAFE_INNER_PARALLELISM "$CRITIC_PROBE_MAX_SAFE_INNER_PARALLELISM"
 require_positive_integer CRITIC_PROBE_PORT_BASE "$CRITIC_PROBE_PORT_BASE"
@@ -240,6 +307,10 @@ if ! HSSD_RENDERED_ASSET_CHOICE="$(normalize_bool "$HSSD_RENDERED_ASSET_CHOICE")
     echo "ERROR: HSSD_RENDERED_ASSET_CHOICE must be true or false" >&2
     exit 1
 fi
+if ! SCENEEXPERT_MEMORY_EMBEDDING_PREFLIGHT="$(normalize_bool "$SCENEEXPERT_MEMORY_EMBEDDING_PREFLIGHT")"; then
+    echo "ERROR: SCENEEXPERT_MEMORY_EMBEDDING_PREFLIGHT must be true or false" >&2
+    exit 1
+fi
 if ! FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS="$(normalize_bool "$FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS")"; then
     echo "ERROR: FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS must be true or false" >&2
     exit 1
@@ -276,6 +347,18 @@ fi
 if [ "$CRITIC_PROBE_PARALLEL" = "true" ] && ! command -v setsid >/dev/null 2>&1; then
     echo "ERROR: setsid is required for isolated parallel batch cleanup" >&2
     exit 1
+fi
+if [ "$INTERNAL_RUN_BATCH" = "false" ] \
+    && [ "$DRY_RUN" = "false" ] \
+    && [ "$SCENEEXPERT_MEMORY_EMBEDDING_PREFLIGHT" = "true" ] \
+    && { [ "$EXPERIMENT" = "ablation_4b_qwen3_vector_memory" ] \
+        || [ "$EXPERIMENT" = "ablation_4c_qwen3_hybrid_memory" ]; }; then
+    echo "preflighting SceneExpert memory embedding runtime: $SCENEEXPERT_MEMORY_EMBEDDING_MODEL_DIR"
+    if ! "$PYTHON_BIN" -c 'from scenesmith.scene_expert.memory.embedding import SceneMemoryEmbedder; SceneMemoryEmbedder(device="cpu")'; then
+        echo "ERROR: SceneExpert memory embedding preflight failed; no critic batches were started." >&2
+        echo "       Use a runtime that can load the configured BGE-M3 checkpoint." >&2
+        exit 1
+    fi
 fi
 
 case "$PIPELINE_STOP_STAGE" in
@@ -315,7 +398,7 @@ fi
 # the same run configuration as the parent.
 export SCENEEXPERT_EXPERIMENT="$EXPERIMENT"
 export PYTHON_BIN MODEL_NAME RUN_ID OUTPUT_ROOT
-export SCENE_BATCH_SIZE SCENE_WORKERS_PER_PROCESS
+export SCENE_BATCH_SIZE SCENE_WORKERS_PER_PROCESS SCENE_RETRY_ATTEMPTS
 export CRITIC_PROBE_PARALLEL CRITIC_PROBE_INNER_PARALLELISM
 export CRITIC_PROBE_MAX_SAFE_INNER_PARALLELISM CRITIC_PROBE_ALLOW_UNSAFE_PARALLELISM
 export CRITIC_PROBE_PORT_BASE CRITIC_PROBE_PORT_BLOCK_SIZE
@@ -408,8 +491,12 @@ echo "run id: $RUN_ID"
 echo "output root: $OUTPUT_ROOT"
 echo "model: $MODEL_NAME"
 echo "OpenAI base URL: $OPENAI_BASE_URL"
+if [ -n "${SCENEEXPERT_MEMORY_EMBEDDING_MODEL_DIR:-}" ]; then
+    echo "SceneExpert memory embedding model: $SCENEEXPERT_MEMORY_EMBEDDING_MODEL_DIR"
+fi
 echo "batch size: $SCENE_BATCH_SIZE"
 echo "parallel batches: $CRITIC_PROBE_PARALLEL ($CRITIC_PROBE_INNER_PARALLELISM)"
+echo "scene retries after transient/native failure: $SCENE_RETRY_ATTEMPTS"
 echo "port allocation: base=$CRITIC_PROBE_PORT_BASE block=$CRITIC_PROBE_PORT_BLOCK_SIZE"
 echo "continue after batch failure: $CRITIC_PROBE_CONTINUE_ON_BATCH_FAILURE"
 echo "final-view parallelism: $CRITIC_PROBE_FINAL_VIEW_PARALLELISM"
@@ -432,6 +519,7 @@ echo "==============================================="
 
 # case_id|critic goal|prompt. Override only selection/count with CASE_FILTER
 # and MAX_CASES; this keeps batch indices stable for reusable shared bases.
+# CASE_FILTER accepts one substring or a comma-separated list of substrings.
 CASES=(
     "default_bedroom|ACP default scene 0|A bedroom with a bed, two nightstands, and a wardrobe in the corner of the room."
     "default_living_room|ACP default scene 1|A living room with a two-seater sofa against the wall, a square rug in the middle in front of the sofa, and two large plants on the floor near the sofa."
@@ -452,9 +540,24 @@ if [ "$INCLUDE_HOLDOUT_CASES" = "true" ]; then
     )
 fi
 
+case_selected() {
+    local case_id="$1"
+    local filter
+    if [ -z "$CASE_FILTER" ]; then
+        return 0
+    fi
+    IFS=',' read -r -a case_filters <<< "$CASE_FILTER"
+    for filter in "${case_filters[@]}"; do
+        if [ -n "$filter" ] && [[ "$case_id" == *"$filter"* ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 COMMON_ARGS=(
     "experiment.num_workers=${SCENE_WORKERS_PER_PROCESS}"
-    "experiment.scene_retry_attempts=1"
+    "experiment.scene_retry_attempts=${SCENE_RETRY_ATTEMPTS}"
     "furniture_agent.fail_stage_on_unresolved_hard_constraints=${FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS}"
     "experiment.pipeline.parallel_rooms=false"
     "experiment.pipeline.max_parallel_rooms=1"
@@ -833,7 +936,7 @@ run_batches() {
 
     for index in "${!CASES[@]}"; do
         IFS='|' read -r case_id critic_goal prompt <<< "${CASES[$index]}"
-        if [ -n "$CASE_FILTER" ] && [[ "$case_id" != *"$CASE_FILTER"* ]]; then continue; fi
+        if ! case_selected "$case_id"; then continue; fi
         if [ "$MAX_CASES" -gt 0 ] && [ "$selected" -ge "$MAX_CASES" ]; then break; fi
         source_batch_index=$((index / SCENE_BATCH_SIZE + 1))
         if [ "${#batch_entries[@]}" -gt 0 ] && [ "$batch_index" -ne "$source_batch_index" ]; then

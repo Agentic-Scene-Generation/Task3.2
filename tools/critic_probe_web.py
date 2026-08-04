@@ -387,17 +387,27 @@ def _repair_records(room_dir: Path) -> list[dict[str, Any]]:
     return sorted(records, key=lambda row: str(row.get("created_at", "")))
 
 
-def _task_compiler_record(room_dir: Path) -> tuple[dict[str, Any], str] | None:
-    """Read the typed TaskCompiler contract written by TraceLogger v1.2."""
+def _compiler_trace_record(
+    room_dir: Path, compiler_name: str
+) -> tuple[dict[str, Any], str] | None:
+    """Read one independent compiler trace written by TraceLogger."""
     paths = (
-        room_dir.parent / "scene_expert" / "trace" / "task_compiler.json",
-        room_dir / "scene_expert" / "trace" / "task_compiler.json",
+        room_dir.parent / "scene_expert" / "trace" / f"{compiler_name}.json",
+        room_dir / "scene_expert" / "trace" / f"{compiler_name}.json",
     )
     for path in paths:
         payload = _read_json(path, {})
         if isinstance(payload, dict) and payload:
             return payload, _iso_mtime(path)
     return None
+
+
+def _task_compiler_record(room_dir: Path) -> tuple[dict[str, Any], str] | None:
+    return _compiler_trace_record(room_dir, "task_compiler")
+
+
+def _intent_compiler_record(room_dir: Path) -> tuple[dict[str, Any], str] | None:
+    return _compiler_trace_record(room_dir, "intent_compiler")
 
 
 def _parse_time(value: str | None) -> datetime | None:
@@ -603,34 +613,59 @@ def _audit_events(room_dir: Path) -> list[dict[str, Any]]:
             if isinstance(compiler.get("task_spec"), dict)
             else {}
         )
-        constraints = task_spec.get("intent_constraints", [])
-        if not isinstance(constraints, list):
-            constraints = []
         compiler_status = str(compiler.get("compiler_status") or "unknown")
-        contract = {
-            "status": compiler_status,
-            "spec_version": compiler.get("compiler_spec_version"),
-            "failure_reason": compiler.get("failure_reason"),
-            "constraints": constraints,
-            "fallback_contract": compiler.get("fallback_contract", []),
-            "task_spec": task_spec,
-        }
         events.append(
             {
-                "id": "contract:task-compiler",
-                "kind": "contract",
+                "id": "task-spec:task-compiler",
+                "kind": "system",
                 "source": "scene_expert_trace",
                 "created_at": created_at,
                 "stage": "task_compiler",
                 "actor": "task_compiler",
-                "function": "compile_contract",
-                "title": "Compiled scene contract",
+                "function": "compile_task_spec",
+                "title": "Compiled task inventory",
                 "audit_status": compiler_status,
                 "has_error": compiler_status == "degraded",
                 "detail": {
                     "compiler_spec_version": compiler.get("compiler_spec_version"),
+                    "failure_reason": compiler.get("failure_reason"),
+                    "task_spec": task_spec,
+                },
+            }
+        )
+    intent_record = _intent_compiler_record(room_dir)
+    if intent_record is not None:
+        compiler, created_at = intent_record
+        constraints = compiler.get("constraints", [])
+        if not isinstance(constraints, list):
+            constraints = []
+        compiler_status = str(compiler.get("status") or "unknown")
+        contract = {
+            "status": compiler_status,
+            "spec_version": compiler.get("spec_version"),
+            "prompt_sha256": compiler.get("prompt_sha256"),
+            "failure_reason": compiler.get("failure_reason"),
+            "constraints": constraints,
+            "retry_count": compiler.get("retry_count", 0),
+            "attempts": compiler.get("attempts", []),
+        }
+        events.append(
+            {
+                "id": "contract:intent-compiler",
+                "kind": "contract",
+                "source": "scene_expert_trace",
+                "created_at": created_at,
+                "stage": "intent_compiler",
+                "actor": "intent_compiler",
+                "function": "compile_contract",
+                "title": "Compiled intent contract",
+                "audit_status": compiler_status,
+                "has_error": compiler_status != "ok",
+                "detail": {
+                    "compiler_spec_version": compiler.get("spec_version"),
                     "constraint_count": len(constraints),
                     "failure_reason": compiler.get("failure_reason"),
+                    "retry_count": compiler.get("retry_count", 0),
                 },
                 "contract": contract,
             }

@@ -407,9 +407,6 @@ class TestRenderedHssdAssetChoice(unittest.TestCase):
                 "student desk",
                 "teacher's desk",
             ],
-            "intent_constraints": [
-                {"subjects": {"category": "student_chair", "count": 6}}
-            ],
         }
         candidates = semantic_name_candidates_for_request(
             task_spec, ["desk", "student_chair"], ObjectType.FURNITURE
@@ -418,7 +415,7 @@ class TestRenderedHssdAssetChoice(unittest.TestCase):
         self.assertEqual(
             candidates,
             [
-                ["student_desk", "teacher_desk", "student_chair", "desk"],
+                ["student_desk", "teacher_desk", "desk"],
                 ["student_desk", "teacher_desk", "student_chair"],
             ],
         )

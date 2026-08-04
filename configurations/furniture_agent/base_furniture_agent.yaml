@@ -346,6 +346,9 @@ furniture_safety_controller:
   max_blocked_tool_calls_per_designer_call: 2
   max_rescales_per_object: 1
   max_generate_assets_calls_after_initial: 0
+  # A partial HSSD batch may leave a required category unresolved. Permit one
+  # bounded recovery batch without allowing repeated generation loops.
+  max_generate_assets_recovery_calls: 1
   min_accept_delta: 0.05
   accept_score_threshold: 0.75
   rescale_min_factor: 0.8

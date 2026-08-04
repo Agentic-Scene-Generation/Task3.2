@@ -41,12 +41,12 @@ console_logger = logging.getLogger(__name__)
 _ISSUE_LABELS = {"fail", "degraded"}
 _FURNITURE_REPAIR_STRATEGIES = (
     "furniture_relation",
-    "table_seat_distribution",
+    "edge_distribution",
     "support_relation",
 )
 _FURNITURE_GATE_STRATEGIES = (
     "furniture_relation",
-    "table_seat_distribution",
+    "edge_distribution",
 )
 _WINDOW_CLEARANCE_RELATION = "window_clearance"
 _WINDOW_CLEARANCE_MARGIN_M = 0.03
@@ -385,6 +385,7 @@ def unresolved_furniture_relation_failures(
         if str(result.get("label") or "").lower() == "fail"
         and str(result.get("scoring_tier") or "").lower()
         not in {"ignored", "auxiliary"}
+        and _is_due_at_furniture_stage(result)
         and (
             str(result.get("relation_type") or "")
             in repair_relation_types(strategies=_FURNITURE_GATE_STRATEGIES)
@@ -393,6 +394,20 @@ def unresolved_furniture_relation_failures(
             or _is_hard_furniture_contract_failure(result)
         )
     ]
+
+
+def _is_due_at_furniture_stage(result: dict[str, Any]) -> bool:
+    """Keep later-stage contract failures out of the furniture hard gate.
+
+    The relation registry describes geometry semantics, while the compiled
+    contract assigns ownership to a generation stage.  A monitor-on-desk
+    relation, for example, is validly unresolved until the manipuland stage
+    creates the monitor.  Legacy or inferred results without contract stage
+    metadata retain the existing furniture-stage behavior.
+    """
+    constraint = (result.get("evidence") or {}).get("intent_constraint") or {}
+    stage = str(constraint.get("stage") or "").strip().lower()
+    return not stage or stage == "furniture"
 
 
 def _is_hard_furniture_contract_failure(result: dict[str, Any]) -> bool:
@@ -496,8 +511,10 @@ def _result_severity(result: dict[str, Any]) -> tuple[int, float]:
     diagnostics = result.get("diagnostics") or {}
     relation = str(result.get("relation_type") or "")
     magnitude = 0.0
-    if relation in {"table_seat_distribution", "dining_seat_distribution"}:
-        for slot in diagnostics.get("seat_slots") or []:
+    if relation == "edge_distribution":
+        for slot in (
+            diagnostics.get("seat_slots") or diagnostics.get("edge_slots") or []
+        ):
             magnitude += max(
                 0.0,
                 float(slot.get("deviation_m") or 0.0)
@@ -717,6 +734,17 @@ def _workstation_focal_repair_targets(
     return [target] if target is not None else []
 
 
+def _faces_room_repair_targets(context: _RepairHandlerContext) -> list[_RepairTarget]:
+    target = _target_from_facing_diagnostics(
+        context.scene,
+        object_id=str(context.result.get("primary_object") or ""),
+        relation_type=context.relation,
+        check_id=context.check_id,
+        diagnostics=context.diagnostics,
+    )
+    return [target] if target is not None else []
+
+
 def _seating_surface_repair_targets(
     context: _RepairHandlerContext,
 ) -> list[_RepairTarget]:
@@ -747,6 +775,74 @@ def _room_center_repair_targets(
         allowed_offset_m=_float_or_none(context.diagnostics.get("allowed_offset_m")),
         group_ids=group_ids,
     )
+
+
+def _centered_edge_distribution_targets(
+    scene: RoomScene, payload: dict[str, Any]
+) -> list[_RepairTarget]:
+    """Center a target and place its edge group in one reversible candidate."""
+    targets: list[_RepairTarget] = []
+    results = payload.get("results") or []
+    for center_result in results:
+        if (
+            center_result.get("label") not in _ISSUE_LABELS
+            or str(center_result.get("relation_type") or "") != "room_center_alignment"
+        ):
+            continue
+        object_id = str(center_result.get("primary_object") or "")
+        room_center = _xy(
+            (center_result.get("diagnostics") or {}).get("room_center_xy")
+        )
+        anchor = scene.objects.get(UniqueID(object_id))
+        anchor_center = _world_center_xy(anchor) if anchor is not None else None
+        if not object_id or room_center is None or anchor_center is None:
+            continue
+        delta = (room_center[0] - anchor_center[0], room_center[1] - anchor_center[1])
+        for edge_result in results:
+            if (
+                edge_result.get("label") not in _ISSUE_LABELS
+                or str(edge_result.get("relation_type") or "") != "edge_distribution"
+                or str(edge_result.get("primary_object") or "") != object_id
+            ):
+                continue
+            edge_context = _RepairHandlerContext(
+                scene=scene,
+                payload=payload,
+                result=edge_result,
+                check_id=str(edge_result.get("check_id") or ""),
+                relation="edge_distribution",
+                diagnostics=edge_result.get("diagnostics") or {},
+                coordinated_front_checks=set(),
+                claimed_near_checks=set(),
+            )
+            for edge_target in _table_seat_repair_targets(edge_context):
+                if not edge_target.member_poses:
+                    continue
+                poses = [
+                    _RepairPose(object_id, room_center, None),
+                    *[
+                        _RepairPose(
+                            pose.object_id,
+                            (
+                                pose.target_center_xy[0] + delta[0],
+                                pose.target_center_xy[1] + delta[1],
+                            ),
+                            pose.target_yaw_deg,
+                        )
+                        for pose in edge_target.member_poses
+                    ],
+                ]
+                targets.append(
+                    _RepairTarget(
+                        object_id,
+                        "room_center_alignment",
+                        str(center_result.get("check_id") or ""),
+                        room_center,
+                        None,
+                        member_poses=tuple(poses),
+                    )
+                )
+    return targets
 
 
 def _between_repair_targets(context: _RepairHandlerContext) -> list[_RepairTarget]:
@@ -933,13 +1029,12 @@ def _back_against_wall_repair_targets(
 
 
 _REPAIR_TARGET_HANDLERS = {
+    "faces": _faces_room_repair_targets,
     _PAIRED_SURFACE_RELATION: _paired_surface_targets,
     "generic_near_relation": _generic_near_repair_targets,
     "corner_of_room": _corner_repair_targets,
     "clear_access": _clear_access_repair_targets,
-    "table_seat_distribution": _table_seat_repair_targets,
-    # Existing checkpoints can contain the pre-generalization relation name.
-    "dining_seat_distribution": _table_seat_repair_targets,
+    "edge_distribution": _table_seat_repair_targets,
     "workstation_focal_alignment": _workstation_focal_repair_targets,
     "seating_to_work_surface": _seating_surface_repair_targets,
     "room_center_alignment": _room_center_repair_targets,
@@ -961,6 +1056,7 @@ def _repair_targets(scene: RoomScene, payload: dict[str, Any]) -> list[_RepairTa
     targets, coordinated_front_checks, claimed_near_checks = (
         _front_alignment_near_group_targets(scene, payload)
     )
+    centered_edge_targets = _centered_edge_distribution_targets(scene, payload)
     for result in payload.get("results") or []:
         if result.get("label") not in _ISSUE_LABELS:
             continue
@@ -1011,10 +1107,11 @@ def _repair_targets(scene: RoomScene, payload: dict[str, Any]) -> list[_RepairTa
             target.object_id,
         )
     )
-    return _order_targets_by_position_dependency(
+    ordered_targets = _order_targets_by_position_dependency(
         payload,
         _prioritize_coordinated_seating_targets(targets),
     )
+    return [*centered_edge_targets, *ordered_targets]
 
 
 def _order_targets_by_position_dependency(
@@ -1956,7 +2053,15 @@ def _coordinated_dining_targets(
     exact_targets: list[_RepairTarget],
     diagnostics: list[dict[str, Any]],
 ) -> list[_RepairTarget]:
-    """Build atomic all-chair candidates at exact and allowed outward slots."""
+    """Build atomic all-chair candidates at exact and outward edge slots.
+
+    Edge evaluators intentionally constrain only the finite edge and tangent
+    slot, not a fixed normal distance from the target.  The exact slot is the
+    right first candidate, but a large chair or a wide interaction zone can
+    make that pose collide with the target or block circulation.  Keep the
+    repair atomic and try progressively more outward poses so the whole-scene
+    gate can select the nearest candidate that satisfies the other hard checks.
+    """
     if len(exact_targets) != len(diagnostics) or not exact_targets:
         return []
     ordered = sorted(
@@ -1997,6 +2102,46 @@ def _coordinated_dining_targets(
                 member_poses=tuple(poses),
             )
         )
+
+    # New v4 edge diagnostics do not expose a fixed normal tolerance.  Their
+    # contract permits any legal outward distance, so offer clearance-oriented
+    # alternatives in addition to the exact slot above.  Candidates are still
+    # filtered by the evaluator's no-new-hard-failure gate and floor bounds.
+    has_normal_allowance = any(
+        _float_or_none(slot.get("allowed_normal_deviation_m")) is not None
+        for _, slot in ordered
+    )
+    if not has_normal_allowance:
+        for offset_m in (0.1, 0.25, 0.4, 0.6, 0.8):
+            poses = []
+            for target, slot in ordered:
+                center = target.target_center_xy
+                facing_target = _xy(slot.get("facing_target_xy_m"))
+                if facing_target is not None:
+                    outward = (
+                        center[0] - facing_target[0],
+                        center[1] - facing_target[1],
+                    )
+                    length = math.hypot(*outward)
+                    if length > 1e-6:
+                        center = (
+                            center[0] + outward[0] / length * offset_m,
+                            center[1] + outward[1] / length * offset_m,
+                        )
+                poses.append(
+                    _RepairPose(target.object_id, center, target.target_yaw_deg)
+                )
+            anchor = poses[0]
+            candidates.append(
+                _RepairTarget(
+                    anchor.object_id,
+                    exact_targets[0].relation_type,
+                    exact_targets[0].check_id,
+                    anchor.target_center_xy,
+                    anchor.target_yaw_deg,
+                    member_poses=tuple(poses),
+                )
+            )
     return candidates
 
 

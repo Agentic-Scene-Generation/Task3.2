@@ -543,6 +543,76 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         StatefulFurnitureAgent is None,
         f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
     )
+    def test_transaction_repairs_checkpoint_only_contract_failure(self) -> None:
+        agent = object.__new__(StatefulFurnitureAgent)
+        remembered: list[tuple[dict[str, Any], str]] = []
+        ended: list[bool] = []
+        agent.scene = SimpleNamespace(to_state_dict=lambda: {"objects": ["repaired"]})
+        agent.furniture_safety_controller = SimpleNamespace(
+            enabled=True,
+            best_scene_state=None,
+            remember_hard_valid_scene_state=lambda scene_state, source: remembered.append(
+                (scene_state, source)
+            ),
+            end_designer_call=lambda: ended.append(True),
+        )
+        physical_state = SimpleNamespace(hard_valid=True, hard_reasons=[])
+        relation_state = SimpleNamespace(
+            hard_valid=False,
+            hard_reasons=[
+                "unresolved prompt-core furniture relation: edge_distribution:table_0"
+            ],
+        )
+        agent._evaluate_current_furniture_hard_state = lambda: physical_state
+        checkpoint_states = iter((relation_state, physical_state))
+        agent._checkpoint_eligible_furniture_hard_state = lambda _state: next(
+            checkpoint_states
+        )
+        repair_calls: list[tuple[str, list[str]]] = []
+
+        def repair(hard_state, *, source):
+            repair_calls.append((source, list(hard_state.hard_reasons)))
+            return (
+                hard_state,
+                None,
+                (
+                    ["bound dining chairs via edge_distribution"]
+                    if source.endswith("contract-transaction")
+                    else []
+                ),
+            )
+
+        agent._try_deterministic_repair_for_hard_state = repair
+
+        result = agent._end_furniture_design_transaction(
+            {
+                "call_kind": "change",
+                "pre_state": {"objects": ["old"]},
+                "pre_hard_valid": False,
+            }
+        )
+
+        self.assertEqual(
+            repair_calls,
+            [
+                ("post-change-transaction", []),
+                (
+                    "post-change-contract-transaction",
+                    [
+                        "unresolved prompt-core furniture relation: "
+                        "edge_distribution:table_0"
+                    ],
+                ),
+            ],
+        )
+        self.assertEqual(remembered, [({"objects": ["repaired"]}, "post-change")])
+        self.assertEqual(ended, [True])
+        self.assertIn("hard checks passed", result)
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
     def test_non_bedroom_missing_required_asset_uses_generic_repair(self) -> None:
         agent = object.__new__(StatefulFurnitureAgent)
         agent.scene = SimpleNamespace(
@@ -594,7 +664,7 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         agent._repair_unresolved_prompt_contract_relations = lambda: (
             repair_calls.append(True)
             or [
-                "bound dining_chair_0 via table_seat_distribution after hard constraint failure"
+                "bound dining_chair_0 via edge_distribution after hard constraint failure"
             ]
         )
 
@@ -603,7 +673,7 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
                 hard_valid=False,
                 hard_reasons=[
                     "unresolved prompt-core furniture relation: "
-                    "table_seat_distribution:table_0"
+                    "edge_distribution:table_0"
                 ],
             )
         )
@@ -613,7 +683,7 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         self.assertEqual(
             actions,
             [
-                "bound dining_chair_0 via table_seat_distribution "
+                "bound dining_chair_0 via edge_distribution "
                 "after hard constraint failure"
             ],
         )
@@ -679,7 +749,6 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
                     "teacher's desk",
                     *["chair"] * 6,
                 ],
-                "intent_constraints": [],
             },
             objects={},
         )
@@ -740,7 +809,6 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
                     "office_chair",
                     "office_chair",
                 ],
-                "intent_constraints": [],
             },
         )
         agent.furniture_safety_controller = SimpleNamespace(
@@ -759,6 +827,35 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         agent.stage_working_memory.set_required_counts.assert_called_once_with(
             {"desk": 2, "office_chair": 2}
         )
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
+    def test_intent_contract_subtype_replaces_generic_task_count(self) -> None:
+        agent = object.__new__(StatefulFurnitureAgent)
+        agent.scene = SimpleNamespace(
+            objects={},
+            scene_expert_task_spec={
+                "required_large_objects": ["chair"] * 9,
+            },
+            scenebenchmark_intent_contract={
+                "constraints": [
+                    {
+                        "relation": "edge_distribution",
+                        "subjects": {
+                            "category": "office_chair",
+                            "count": 7,
+                        },
+                    }
+                ]
+            },
+        )
+        agent.furniture_safety_controller = SimpleNamespace(
+            required_counts={"chair": 9}
+        )
+
+        self.assertEqual(agent._repair_required_counts(), {"office_chair": 7})
 
     @unittest.skipIf(
         StatefulFurnitureAgent is None,

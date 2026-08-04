@@ -313,7 +313,7 @@ class TestFinalFurnitureRescore(unittest.TestCase):
             {
                 "label": "fail",
                 "primary_object": "dining_table_0",
-                "relation_type": "table_seat_distribution",
+                "relation_type": "edge_distribution",
             },
         ]
         with patch(
@@ -323,7 +323,7 @@ class TestFinalFurnitureRescore(unittest.TestCase):
             with self.assertRaisesRegex(
                 RuntimeError,
                 "room_center_alignment:dining_table_0, "
-                "table_seat_distribution:dining_table_0",
+                "edge_distribution:dining_table_0",
             ):
                 _raise_for_unresolved_furniture_relations(
                     scene=object(),

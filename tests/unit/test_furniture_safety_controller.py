@@ -96,6 +96,30 @@ class BoundedFurniture:
 
 
 class FurnitureSafetyControllerTest(unittest.TestCase):
+    def test_asset_generation_recovery_is_allowed_after_partial_failure(self) -> None:
+        controller = FurnitureSafetyController({"enabled": True})
+
+        self.assertTrue(controller.record_generate_assets()[0])
+        controller.record_asset_generation_result(had_failures=True)
+        self.assertTrue(controller.record_generate_assets()[0])
+        controller.record_asset_generation_result(had_failures=True)
+
+        allowed, message = controller.record_generate_assets()
+
+        self.assertFalse(allowed)
+        self.assertIn("recovery allowance", message)
+
+    def test_asset_generation_success_does_not_open_recovery_retry(self) -> None:
+        controller = FurnitureSafetyController({"enabled": True})
+
+        self.assertTrue(controller.record_generate_assets()[0])
+        controller.record_asset_generation_result(had_failures=False)
+
+        allowed, message = controller.record_generate_assets()
+
+        self.assertFalse(allowed)
+        self.assertIn("already succeeded", message)
+
     def test_window_only_issue_is_soft(self) -> None:
         controller = FurnitureSafetyController({"enabled": True})
         evaluation = controller.evaluate_scores(make_scores())

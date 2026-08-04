@@ -376,6 +376,9 @@ class FurnitureSafetyController:
         self.max_generate_assets_calls_after_initial = int(
             _cfg_get(cfg, "max_generate_assets_calls_after_initial", 0)
         )
+        self.max_generate_assets_recovery_calls = int(
+            _cfg_get(cfg, "max_generate_assets_recovery_calls", 1)
+        )
         self.min_accept_delta = float(_cfg_get(cfg, "min_accept_delta", 0.05))
         self.accept_score_threshold = float(
             _cfg_get(cfg, "accept_score_threshold", 0.78)
@@ -456,6 +459,8 @@ class FurnitureSafetyController:
         self.blocked_tool_calls_this_call = 0
         self.moves_by_object_this_call: dict[str, int] = {}
         self.generate_asset_calls = 0
+        self.asset_generation_recovery_calls = 0
+        self.last_asset_generation_had_failures = False
         self.rescale_counts: dict[str, int] = {}
         self.should_finish = False
 
@@ -497,6 +502,8 @@ class FurnitureSafetyController:
         self.blocked_tool_calls_this_call = 0
         self.moves_by_object_this_call = {}
         self.generate_asset_calls = 0
+        self.asset_generation_recovery_calls = 0
+        self.last_asset_generation_had_failures = False
         self.rescale_counts = {}
         self.should_finish = False
         self.reset_best_checkpoint()
@@ -884,16 +891,27 @@ class FurnitureSafetyController:
             return False, stop_message
         max_calls = 1 + self.max_generate_assets_calls_after_initial
         if self.generate_asset_calls >= max_calls:
-            return (
-                False,
-                self._record_tool_denial(
-                    "Safety controller blocked generate_assets: asset generation has "
-                    "already run for this furniture stage. Reuse available assets, "
-                    "repair placement, or finish with the best checkpoint."
-                ),
-            )
+            if (
+                not self.last_asset_generation_had_failures
+                or self.asset_generation_recovery_calls
+                >= self.max_generate_assets_recovery_calls
+            ):
+                return (
+                    False,
+                    self._record_tool_denial(
+                        "Safety controller blocked generate_assets: asset generation "
+                        "already succeeded or exhausted its recovery allowance for "
+                        "this furniture stage. Reuse available assets, repair "
+                        "placement, or finish with the best checkpoint."
+                    ),
+                )
+            self.asset_generation_recovery_calls += 1
         self.generate_asset_calls += 1
         return True, ""
+
+    def record_asset_generation_result(self, *, had_failures: bool) -> None:
+        """Allow one bounded retry when a batch left required assets unresolved."""
+        self.last_asset_generation_had_failures = bool(had_failures)
 
     def record_add(
         self,

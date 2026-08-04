@@ -51,7 +51,7 @@ FURNITURE_RELATIONS = {
     # 2026-07-10 修改原因：bedside_pair 的 FD 结果包含床头柜 front 轴平行性，
     # 需要传给 furniture critic 执行位置/朝向修复。
     "bedside_pair",
-    "table_seat_distribution",
+    "edge_distribution",
     "furniture_faces_furniture",
     "seat_faces_surface",
     "seating_to_media",

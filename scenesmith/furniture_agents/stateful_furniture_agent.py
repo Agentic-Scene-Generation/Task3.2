@@ -79,6 +79,9 @@ from scenesmith.scenebenchmark_critic.config import critic_config_from_any
 from scenesmith.scenebenchmark_critic.furniture_relation_repair import (
     improve_furniture_relations,
 )
+from scenesmith.scenebenchmark_critic.intent_contract import (
+    intent_contract_required_counts,
+)
 from scenesmith.utils.logging import BaseLogger
 
 console_logger = logging.getLogger(__name__)
@@ -1405,7 +1408,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         return int(self._repair_required_counts().get(category, 0) or 0)
 
     def _repair_required_counts(self) -> dict[str, int]:
-        """Use TaskCompiler's role-specific inventory when it is available."""
+        """Merge inventory counts with authoritative prompt-contract counts."""
         controller = getattr(self, "furniture_safety_controller", None)
         counts = dict(getattr(controller, "required_counts", {}) or {})
         task_spec = getattr(self.scene, "scene_expert_task_spec", None)
@@ -1423,31 +1426,32 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             category = self._repair_category_for_task_label(item)
             if category in REPAIR_ASSET_SPECS:
                 semantic_counts[category] = semantic_counts.get(category, 0) + 1
-        intent_constraints = (
-            task_spec.get("intent_constraints", [])
-            if isinstance(task_spec, dict)
-            else getattr(task_spec, "intent_constraints", [])
-        )
-        for constraint in intent_constraints or []:
-            if not isinstance(constraint, dict):
-                continue
-            selector = constraint.get("subjects") or constraint.get("subject")
-            if not isinstance(selector, dict):
-                continue
-            category = self._repair_category_for_task_label(
-                selector.get("category") or ""
-            )
-            if category not in REPAIR_ASSET_SPECS:
-                continue
-            try:
-                count = int(selector.get("count") or 0)
-            except (TypeError, ValueError):
-                count = 0
-            if count > 0:
-                semantic_counts[category] = max(semantic_counts.get(category, 0), count)
+        contract_counts: dict[str, int] = {}
+        for contract_category, count in intent_contract_required_counts(
+            self.scene
+        ).items():
+            category = self._repair_category_for_task_label(contract_category)
+            if category in REPAIR_ASSET_SPECS and count > 0:
+                contract_counts[category] = count
         if semantic_counts:
             counts.update(semantic_counts)
+        if contract_counts:
+            # A contract subtype replaces an overlapping generic inventory
+            # category (for example ``office_chair`` replaces ``chair``).
+            # Remove only non-contract entries: two explicit contract roles
+            # in the same family remain independently authoritative.
+            for contract_category in contract_counts:
+                for category in list(counts):
+                    if category in contract_counts or category == contract_category:
+                        continue
+                    if furniture_category_satisfies(
+                        contract_category, category
+                    ) or furniture_category_satisfies(category, contract_category):
+                        counts.pop(category, None)
+            counts.update(contract_counts)
         for generic in ("desk", "chair"):
+            if generic in contract_counts:
+                continue
             specialized = sum(
                 count
                 for category, count in counts.items()

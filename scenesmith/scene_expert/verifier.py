@@ -318,6 +318,9 @@ def _check_required_objects(
 
 
 _OBJECT_LABEL_ALIASES = {
+    "computer monitor": "monitor",
+    "computer display": "monitor",
+    "display monitor": "monitor",
     "tv": "television",
     "tv display": "television",
     "television display": "television",

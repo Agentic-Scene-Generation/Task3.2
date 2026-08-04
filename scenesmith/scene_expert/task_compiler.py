@@ -14,13 +14,7 @@ import time
 from pathlib import Path
 
 from scenesmith.scene_expert.context_bundle import build_llm_call_debug_record
-from scenesmith.scene_expert.schemas import IntentConstraintSpec, SceneTaskSpec
-from scenesmith.scenebenchmark_critic.relation_registry import (
-    PUBLIC_RELATIONS,
-    ROOM_RELATIVE_WALL_CATEGORIES,
-    WALL_MOUNTED_CATEGORIES,
-    relation_spec,
-)
+from scenesmith.scene_expert.schemas import SceneTaskSpec
 from scenesmith.agent_utils.thinking import chat_template_kwargs_from_effort
 from scenesmith.utils.llm_json import parse_llm_json_object
 
@@ -62,17 +56,6 @@ You MUST output valid JSON matching this exact schema:
     "visual and style constraints",
     "e.g. 'modern material palette', 'balanced visual density', 'avoid overcrowding'"
   ],
-  "intent_constraints": [
-    {
-      "relation": "one of the registered relation names listed below",
-      "subjects": {"category": "canonical object category", "count": 1},
-      "targets": {"category": "canonical target category", "secondary_category": "second target category for between relations only"},
-      "source": "explicit_prompt | model_inferred",
-      "confidence": 0.0,
-      "evidence_span": "exact prompt words for explicit_prompt, otherwise empty",
-      "inference_reason": "short functional reason for model_inferred, otherwise empty"
-    }
-  ]
 }
 
 Rules:
@@ -87,42 +70,7 @@ Rules:
 - Infer reasonable functional zones based on the room type and objects.
 - Infer reachability constraints for any small objects placed on furniture surfaces.
 - Keep object names concise (e.g. "bed" not "a large king-sized bed").
-- Always include "intent_constraints". Emit every atomic relation explicitly
-  stated in the input plus reasonable common-sense functional relations needed
-  for the named objects to work. All emitted relations become hard constraints.
-- Use source "explicit_prompt" and a verbatim evidence_span for directly stated
-  relations. Use source "model_inferred" and a concrete inference_reason for
-  common-sense relations. Confidence is audit metadata only.
-- Use only these registered relations: __REGISTERED_RELATIONS__.
 - Do not invent coordinates, room sides, or nearest-object identities.
-- For explicit wording such as "the rug in front of the sofa", emit
-  "in_front_of" with the rug as subject and sofa as target. Do not add this
-  relation for merely nearby objects.
-- For explicit "X behind Y", emit "behind" with X as subject and Y as target.
-- For "X centered between A and B", emit "centered_between" with A as
-  targets.category and B as targets.secondary_category. For ordinary
-  "X between A and B", emit "between" using the same two-target shape.
-- For "X between the two As", repeat A in targets.category and
-  targets.secondary_category; the contract binder resolves the two instances.
-- For a clear route from an entrance to an object, `entrance` is a virtual
-  clear_access subject and the destination object is the target.
-- Keep every selector minimal: use category and count only when a count is
-  explicit. Omit role and stage fields. When a relational target means one or
-  any member of a repeated category, set count to 1 and quantifier to "minimum".
-- Emit each relation atomically. Do not cap the number of constraints and do not
-  combine independent relations into one row.
-- For a seating topology explicitly described relative to a rectangular table
-  (long or short table sides, equal chair groups, or a side that must remain
-  free), use `one_per_side` with the chairs as subjects and the table as the
-  target. Keep the exact topology wording in `evidence_span`; this relation is
-  interpreted by the table-seat geometry evaluator and does not mean one chair
-  on every edge when the evidence specifies another distribution. Do not emit
-  separate `distributed_evenly` or `faces` rows for the same table-seat
-  topology.
-- `required_count` has no target: omit its `targets` field entirely. Only emit
-  `targets` for relations whose wording names a target.
-- Copy evidence_span verbatim from the input prompt. Do not use StageBrief,
-  retrieved memory, or current object positions as evidence.
 - Output ONLY the JSON object, no other text.
 
 Example input: "A bedroom with a bed, two nightstands, and a wardrobe."
@@ -137,13 +85,8 @@ Example output:
   "functional_zones": ["sleeping_zone", "storage_zone"],
   "interaction_constraints": ["nightstands should be accessible from both sides of the bed"],
   "aesthetic_constraints": ["balanced furniture placement", "clear walking paths"],
-  "intent_constraints": []
 }
 """
-
-_SYSTEM_PROMPT = _SYSTEM_PROMPT.replace(
-    "__REGISTERED_RELATIONS__", ", ".join(sorted(PUBLIC_RELATIONS))
-)
 
 _ROOM_TYPE_KEYWORDS: dict[str, list[str]] = {
     "bedroom": ["bedroom", "bed", "nightstand", "wardrobe", "sleeping"],
@@ -305,13 +248,6 @@ _INVENTORY_CATEGORY_ALIASES = {
     "presentation_screen": "instructional_surface",
 }
 
-_RELATION_TARGET_CATEGORY_FAMILIES = {
-    "against_wall": {"wall", *ROOM_RELATIVE_WALL_CATEGORIES},
-    "centered_in_room": {"room"},
-    "centered_on_wall": {"wall", *ROOM_RELATIVE_WALL_CATEGORIES},
-    "on_wall": {"wall", *ROOM_RELATIVE_WALL_CATEGORIES},
-}
-
 _VIRTUAL_CATEGORIES = {
     "room",
     "wall",
@@ -319,7 +255,19 @@ _VIRTUAL_CATEGORIES = {
     "ceiling",
     "entrance",
     "entry",
-    *ROOM_RELATIVE_WALL_CATEGORIES,
+    "back_wall",
+    "front_wall",
+    "side_wall",
+    "main_wall",
+    "opposite_wall",
+}
+
+_WALL_STAGE_CATEGORIES = {
+    "instructional_surface",
+    "painting",
+    "mirror",
+    "wall_shelf",
+    "wall_light",
 }
 
 # Media supports are furniture even when an LLM mistakes a phrase such as
@@ -333,29 +281,6 @@ _FLOOR_STANDING_MEDIA_SUPPORT_CATEGORIES = frozenset(
         "entertainment_center",
     }
 )
-
-_FURNITURE_RELATIONS = {
-    "across_from",
-    "against_wall",
-    "aligned_with",
-    "between",
-    "behind",
-    "centered_between",
-    "centered_in_room",
-    "centered_on_wall",
-    "clear_access",
-    "corner_of_room",
-    "distributed_evenly",
-    "faces",
-    "flanking",
-    "in_front_of",
-    "near",
-    "next_to",
-    "one_per_side",
-    "operation_zone_at_wall",
-    "paired_with",
-    "surround",
-}
 
 
 def _extract_count_before_alias(text: str, alias: str) -> int:
@@ -489,124 +414,27 @@ def _extract_json_from_text(text: str) -> dict:
 
 
 def _repair_zero_target_relation_payloads(data: dict) -> dict:
-    """Keep valid LLM semantics while isolating malformed atomic constraints.
+    """Return a copied inventory payload for callers of the retired helper.
 
-    Local models commonly emit the schema's illustrative ``targets`` object on
-    every relation.  For a relation such as ``required_count`` that target is
-    structurally forbidden but semantically redundant.  Remove only that field
-    before validation. A relation that requires a target but emits an empty
-    target object is dropped independently. The same applies when a relation
-    has a fixed endpoint family (for example, ``against_wall``) but the model
-    supplies an incompatible target. Retaining the LLM inventory is more useful
-    than discarding the entire compilation, and prompt-originated contract
-    compilation still supplies explicit spatial constraints.
+    Hard relation repair was removed from TaskCompiler in v3.  The name remains
+    as a no-op import compatibility shim for downstream tooling; no relation
+    data is read or written here.
     """
-    constraints = data.get("intent_constraints")
-    if not isinstance(constraints, list):
-        return data
-
-    repaired_constraints: list[object] = []
-    changed = False
-    for constraint in constraints:
-        if not isinstance(constraint, dict):
-            repaired_constraints.append(constraint)
-            continue
-        relation = str(constraint.get("relation") or "").strip().lower()
-        try:
-            has_no_targets = relation_spec(relation).target_arity == 0
-        except ValueError:
-            has_no_targets = False
-        if has_no_targets and "targets" in constraint:
-            repaired = dict(constraint)
-            repaired.pop("targets", None)
-            repaired_constraints.append(repaired)
-            changed = True
-        elif (
-            not has_no_targets
-            and isinstance(constraint.get("targets"), dict)
-            and not str(constraint["targets"].get("category") or "").strip()
-        ):
-            changed = True
-        elif (
-            isinstance(constraint.get("targets"), dict)
-            and (
-                allowed_target_categories := _RELATION_TARGET_CATEGORY_FAMILIES.get(
-                    relation
-                )
-            )
-            is not None
-            and (
-                "_".join(
-                    str(constraint["targets"].get("category") or "")
-                    .strip()
-                    .lower()
-                    .split()
-                )
-                not in allowed_target_categories
-            )
-        ):
-            # A model can describe a chair centered on a table short edge as
-            # `centered_on_wall` because the schema has no table-edge relation.
-            # Preserve this explicit semantic proposal as the existing
-            # table-seat relation instead of discarding the short-edge evidence.
-            if _is_table_edge_seating_payload(constraint):
-                repaired = dict(constraint)
-                repaired["relation"] = "one_per_side"
-                repaired_constraints.append(repaired)
-                changed = True
-            else:
-                changed = True
-        else:
-            repaired_constraints.append(constraint)
-    if not changed:
-        return data
-    repaired_data = dict(data)
-    repaired_data["intent_constraints"] = repaired_constraints
-    return repaired_data
-
-
-def _is_table_edge_seating_payload(constraint: dict) -> bool:
-    """Whether an invalid wall relation is really chair seating at a table edge."""
-    relation = str(constraint.get("relation") or "").strip().lower()
-    subjects = constraint.get("subjects") or {}
-    targets = constraint.get("targets") or {}
-    subject = "_".join(str(subjects.get("category") or "").lower().split())
-    target = "_".join(str(targets.get("category") or "").lower().split())
-    evidence = str(constraint.get("evidence_span") or "").lower()
-    return bool(
-        relation == "centered_on_wall"
-        and ("chair" in subject or "seat" in subject)
-        and "table" in target
-        and re.search(r"\bshort\s+(?:side|edge)\b", evidence)
-    )
+    return dict(data)
 
 
 def _normalize_stage_ownership(
     task_spec: SceneTaskSpec, *, prompt: str = ""
 ) -> SceneTaskSpec:
-    """Keep structurally floor-positioned objects in furniture inventory only."""
+    """Keep each inventory category in one structurally appropriate stage.
 
-    authored_constraints = list(task_spec.intent_constraints)
-    fallback_constraints: list[IntentConstraintSpec] = []
-    if prompt:
-        fallback_constraints = [
-            IntentConstraintSpec.model_validate(row)
-            for row in _fallback_intent_constraints(prompt)
-        ]
-    constraints = [*authored_constraints, *fallback_constraints]
+    Functional relations are intentionally absent here.  Their authoritative
+    representation is the independent critic contract, not TaskCompiler data.
+    """
 
     def inventory_key(value: str) -> str:
         key = "_".join(str(value or "").strip().lower().split())
         return _INVENTORY_CATEGORY_ALIASES.get(key, key)
-
-    explicit_required_counts: dict[str, int] = {}
-    for constraint in constraints:
-        if constraint.relation != "required_count":
-            continue
-        category = inventory_key(constraint.subjects.category)
-        explicit_required_counts[category] = max(
-            explicit_required_counts.get(category, 0), constraint.subjects.count or 1
-        )
 
     inventories = {
         "large": list(task_spec.required_large_objects),
@@ -624,37 +452,20 @@ def _normalize_stage_ownership(
         for value in values:
             existing_stage.setdefault(inventory_key(value), stage)
 
-    # Repair an LLM's stage error without changing a valid mounted-object
-    # relation. The support category is semantic knowledge, not prompt wording:
-    # a TV stand remains furniture even when the prompt says it is "on" a wall.
-    normalized_authored_constraints: list[IntentConstraintSpec] = []
-    for constraint in authored_constraints:
-        subject_category = inventory_key(constraint.subjects.category)
-        if (
-            constraint.relation == "on_wall"
-            and subject_category in _FLOOR_STANDING_MEDIA_SUPPORT_CATEGORIES
-        ):
-            normalized_authored_constraints.append(
-                constraint.model_copy(update={"relation": "against_wall"})
-            )
-        else:
-            normalized_authored_constraints.append(constraint)
-    constraints = [*normalized_authored_constraints, *fallback_constraints]
-
     category_stages: dict[str, str] = dict(existing_stage)
     category_counts: dict[str, int] = {}
     for values in inventories.values():
         for value in values:
             category = inventory_key(value)
             category_counts[category] = category_counts.get(category, 0) + 1
-    for category in WALL_MOUNTED_CATEGORIES:
+    for category in _WALL_STAGE_CATEGORIES:
         if category in category_stages:
             category_stages[category] = "wall"
     for category in _FLOOR_STANDING_MEDIA_SUPPORT_CATEGORIES:
         if category in category_stages:
             category_stages[category] = "large"
-    desired_counts: dict[str, int] = dict(explicit_required_counts)
-    for category in WALL_MOUNTED_CATEGORIES:
+    desired_counts: dict[str, int] = {}
+    for category in _WALL_STAGE_CATEGORIES:
         inventory_count = sum(
             inventory_key(value) == category
             for values in inventories.values()
@@ -673,115 +484,6 @@ def _normalize_stage_ownership(
         if inventory_count:
             desired_counts[category] = max(
                 desired_counts.get(category, 0), inventory_count
-            )
-
-    for constraint in constraints:
-        target = constraint.targets
-        subject_category = inventory_key(constraint.subjects.category)
-        target_category = inventory_key(target.category) if target else ""
-        evidence = str(constraint.evidence_span or "").lower()
-        target_family = _SPECIFIC_INVENTORY_FAMILIES.get(target_category, "")
-        target_words = {
-            target_category.replace("_", " "),
-            target_family.replace("_", " "),
-        } - {""}
-        target_is_explicit_plural = any(
-            re.search(
-                rf"\b{re.escape(word)}(?:s|es)\b",
-                evidence,
-            )
-            for word in target_words
-        )
-        if (
-            target is not None
-            and category_counts.get(target_category, 0) > 1
-            and target_is_explicit_plural
-        ):
-            target.count = category_counts[target_category]
-            target.quantifier = "all"
-        secondary_category = inventory_key(target.secondary_category) if target else ""
-        if (
-            target is not None
-            and constraint.relation in {"between", "centered_between"}
-            and target_category
-            and target_category == secondary_category
-            and category_counts.get(target_category, 0) == 2
-        ):
-            target.count = 2
-            target.quantifier = "all"
-            target.secondary_count = 2
-        if subject_category in _VIRTUAL_CATEGORIES:
-            continue
-        subject_stage = ""
-        if constraint.relation == "on_wall":
-            subject_stage = "wall"
-        elif constraint.relation == "hang_from_ceiling":
-            subject_stage = "ceiling"
-        elif constraint.relation == "on_top_of":
-            subject_stage = "large" if target_category == "floor" else "small"
-            if target_category not in _VIRTUAL_CATEGORIES:
-                category_stages.setdefault(target_category, "large")
-        elif constraint.relation in _FURNITURE_RELATIONS:
-            subject_stage = "large"
-            if target_category not in _VIRTUAL_CATEGORIES:
-                category_stages.setdefault(target_category, "large")
-        if subject_stage:
-            if constraint.relation in {
-                "centered_in_room",
-                "corner_of_room",
-                "hang_from_ceiling",
-                "on_top_of",
-                "on_wall",
-            }:
-                category_stages[subject_category] = subject_stage
-            else:
-                category_stages.setdefault(subject_category, subject_stage)
-
-        subject_desired_count = max(
-            constraint.subjects.count or 1,
-            explicit_required_counts.get(subject_category, 0),
-        )
-        target_desired_count = (
-            max(
-                target.count or 1,
-                explicit_required_counts.get(target_category, 0),
-            )
-            if target_category and target_category not in _VIRTUAL_CATEGORIES
-            else 0
-        )
-        if (
-            constraint.relation == "paired_with"
-            and target is not None
-            and constraint.subjects.quantifier == "all"
-            and target.quantifier == "all"
-        ):
-            # ``paired_with`` is one-to-one. Models often preserve an explicit
-            # count on only one endpoint (for example, six student desks but an
-            # uncounted ``all`` selector for student chairs). Propagate the
-            # known common cardinality before upgrading generic family items.
-            # Conflicting endpoint counts remain untouched so binding reports
-            # the inconsistency instead of silently rewriting user intent.
-            paired_counts = {
-                int(value)
-                for value in (
-                    constraint.subjects.count,
-                    explicit_required_counts.get(subject_category),
-                    target.count,
-                    explicit_required_counts.get(target_category),
-                )
-                if value is not None and int(value) > 0
-            }
-            if len(paired_counts) == 1:
-                paired_count = next(iter(paired_counts))
-                subject_desired_count = max(subject_desired_count, paired_count)
-                target_desired_count = max(target_desired_count, paired_count)
-
-        desired_counts[subject_category] = max(
-            desired_counts.get(subject_category, 0), subject_desired_count
-        )
-        if target_category and target_category not in _VIRTUAL_CATEGORIES:
-            desired_counts[target_category] = max(
-                desired_counts.get(target_category, 0), target_desired_count
             )
 
     for category in desired_counts:
@@ -825,7 +527,6 @@ def _normalize_stage_ownership(
             "required_wall_objects": inventories["wall"],
             "required_ceiling_objects": inventories["ceiling"],
             "required_small_objects": inventories["small"],
-            "intent_constraints": normalized_authored_constraints,
         }
     )
 
@@ -872,7 +573,6 @@ def _fallback_spec_from_prompt(prompt: str) -> SceneTaskSpec:
         style,
         required["large"],
     )
-    intent_constraints = _fallback_intent_constraints(prompt)
     return _normalize_stage_ownership(
         SceneTaskSpec(
             room_type=room_type,
@@ -884,53 +584,10 @@ def _fallback_spec_from_prompt(prompt: str) -> SceneTaskSpec:
             functional_zones=functional_zones,
             interaction_constraints=interaction_constraints,
             aesthetic_constraints=["balanced placement", "clear walking paths"],
-            intent_constraints=intent_constraints,
             compiler_status="degraded",
         ),
         prompt=prompt,
     )
-
-
-def _fallback_intent_constraints(prompt: str) -> list[dict[str, object]]:
-    """Build a small deterministic v2 contract without model-authored data."""
-    from scenesmith.scenebenchmark_critic.intent_contract import (
-        _explicit_prompt_constraints,
-        _explicit_required_count_constraints,
-        _normalize_room_type,
-        _room_ontology_constraints,
-    )
-
-    normalized = " ".join(str(prompt or "").split())
-    lowered = normalized.lower()
-    room_type = _normalize_room_type("", lowered)
-    rows = [
-        *_explicit_required_count_constraints(normalized),
-        *_explicit_prompt_constraints(normalized, lowered),
-        *_room_ontology_constraints(room_type, lowered),
-    ]
-    result: list[dict[str, object]] = []
-    for row in rows:
-        source = str(row.get("source") or "explicit_prompt")
-        if source not in {"explicit_prompt", "model_inferred"}:
-            source = "model_inferred"
-        result.append(
-            {
-                "relation": row["relation"],
-                "subjects": row["subjects"],
-                "targets": row.get("targets") or None,
-                "source": source,
-                "confidence": row.get("confidence", 1.0),
-                "evidence_span": (
-                    row.get("evidence_span", "") if source == "explicit_prompt" else ""
-                ),
-                "inference_reason": (
-                    str(row.get("evidence_span") or "deterministic room ontology")
-                    if source == "model_inferred"
-                    else ""
-                ),
-            }
-        )
-    return result
 
 
 class TaskCompiler:
@@ -1046,7 +703,7 @@ class TaskCompiler:
             }
 
         try:
-            data = _repair_zero_target_relation_payloads(_extract_json_from_text(raw))
+            data = _extract_json_from_text(raw)
             task_spec = _normalize_stage_ownership(
                 SceneTaskSpec.model_validate(data), prompt=prompt
             ).model_copy(
@@ -1066,7 +723,7 @@ class TaskCompiler:
                 update={"compiler_failure_reason": f"{type(e).__name__}: {e}"}
             )
             console_logger.warning(
-                "TaskCompiler output failed v2 validation; using deterministic "
+                "TaskCompiler output failed v3 validation; using deterministic "
                 "contract: %s",
                 e,
             )

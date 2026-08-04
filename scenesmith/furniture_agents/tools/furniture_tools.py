@@ -509,6 +509,7 @@ class FurnitureTools:
                     getattr(self.scene, "scene_expert_task_spec", None),
                     size_policy_result.short_names,
                     ObjectType.FURNITURE,
+                    scene=self.scene,
                 ),
             )
             return self._generate_assets_impl(request)
@@ -1261,6 +1262,9 @@ class FurnitureTools:
 
         # Generate assets using the asset manager.
         result = self.asset_manager.generate_assets(request)
+        controller = self.safety_controller
+        if controller is not None and getattr(controller, "enabled", False):
+            controller.record_asset_generation_result(had_failures=result.has_failures)
 
         # Convert successful assets to DTOs.
         generated_assets = [

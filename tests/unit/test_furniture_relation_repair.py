@@ -31,7 +31,10 @@ from scenesmith.scenebenchmark_critic.furniture_relation_repair import (
     improve_furniture_relations,
     unresolved_furniture_relation_failures,
 )
-from scenesmith.scenebenchmark_critic.intent_contract import SCHEMA_VERSION
+from scenesmith.scenebenchmark_critic.intent_contract import (
+    SCHEMA_VERSION,
+    build_intent_contract,
+)
 from scenesmith.utils.geometry_utils import compute_optimal_facing_yaw
 from scenesmith.wall_agents.tools.wall_surface import (
     extract_wall_surfaces_from_room_geometry,
@@ -116,6 +119,38 @@ def _scene(tmp_path: Path, *objects: SceneObject, text: str = "") -> RoomScene:
     )
 
 
+def _attach_intent_contract(scene: RoomScene, constraints: list[dict]) -> None:
+    scene.scenebenchmark_intent_contract = {
+        "schema_version": SCHEMA_VERSION,
+        "prompt_sha256": hashlib.sha256(
+            " ".join(scene.text_description.split()).encode("utf-8")
+        ).hexdigest(),
+        "constraints": constraints,
+    }
+
+
+def _attach_fixture_contract(scene: RoomScene) -> None:
+    """Construct a v4 fixture contract without restoring runtime fallback behavior."""
+    contract = build_intent_contract(
+        scene.text_description,
+        room_type=scene.room_type,
+        task_spec=getattr(scene, "scene_expert_task_spec", None),
+    )
+    for constraint in contract["constraints"]:
+        if constraint.get("source") == "model_inferred" and not constraint.get(
+            "inference_reason"
+        ):
+            constraint["inference_reason"] = "fixture-only inferred relation"
+    scene.scenebenchmark_intent_contract = contract
+
+
+def _complete_fixture_contract_evidence(scene: RoomScene) -> None:
+    """Make hand-authored fixture constraints valid independent-contract rows."""
+    contract = scene.scenebenchmark_intent_contract
+    for constraint in contract["constraints"]:
+        constraint.setdefault("evidence_span", scene.text_description)
+
+
 def _facing_yaw(origin: tuple[float, float], target=(0.0, 0.0)) -> float:
     return compute_optimal_facing_yaw(
         origin_a=np.array([origin[0], origin[1], 0.0]),
@@ -162,11 +197,12 @@ def test_repairs_rotated_dining_slots_without_moving_unrelated_furniture(
             "around it with one on each side."
         ),
     )
+    _attach_fixture_contract(scene)
     config = CriticConfig(enabled=True, metrics=("functional_dependency",))
 
     unresolved_before = unresolved_furniture_relation_failures(scene, config=config)
     assert {result.get("relation_type") for result in unresolved_before} == {
-        "table_seat_distribution"
+        "edge_distribution"
     }
 
     fixes = improve_furniture_relations(scene, config=config)
@@ -179,7 +215,7 @@ def test_repairs_rotated_dining_slots_without_moving_unrelated_furniture(
     result = next(
         item
         for item in payload["results"]
-        if item.get("relation_type") == "table_seat_distribution"
+        if item.get("relation_type") == "edge_distribution"
     )
     assert result["label"] == "pass"
     assert unresolved_furniture_relation_failures(scene, config=config) == []
@@ -218,6 +254,40 @@ def test_one_per_edge_dining_repair_is_atomic_and_table_local(tmp_path: Path) ->
             "chairs arranged around it with one on each of the four sides."
         ),
     )
+    _attach_intent_contract(
+        scene,
+        [
+            {
+                "relation": "edge_distribution",
+                "subjects": {
+                    "category": "dining_chair",
+                    "count": 4,
+                    "quantifier": "all",
+                },
+                "targets": {
+                    "category": "dining_table",
+                    "count": 1,
+                    "quantifier": "all",
+                },
+                "edge_frame": "target_local_rectangle",
+                "groups": [
+                    {
+                        "edge_class": "long",
+                        "counts_per_edge": [1, 1],
+                        "spacing": "equal_segments",
+                    },
+                    {
+                        "edge_class": "short",
+                        "counts_per_edge": [1, 1],
+                        "spacing": "equal_segments",
+                    },
+                ],
+                "orientation": "toward_target",
+                "source": "explicit_prompt",
+                "evidence_span": "four chairs with one on each of the four sides",
+            }
+        ],
+    )
     old_table = table.transform.GetAsMatrix4().copy()
     config = CriticConfig(enabled=True, metrics=("functional_dependency",))
 
@@ -231,12 +301,134 @@ def test_one_per_edge_dining_repair_is_atomic_and_table_local(tmp_path: Path) ->
     result = next(
         item
         for item in payload["results"]
-        if item.get("relation_type") == "table_seat_distribution"
+        if item.get("relation_type") == "edge_distribution"
     )
     assert result["label"] == "pass"
     for slot in result["diagnostics"]["seat_slots"]:
-        assert slot["aligned"]
-        assert slot["facing_aligned"]
+        assert not slot["failure"]
+        assert slot["facing_error_deg"] <= 10.0
+
+
+def test_centered_table_and_edge_group_repair_as_one_candidate(tmp_path: Path) -> None:
+    table = _object("dining_table_0", "dining_table", (0.0, -1.2, 0.4), (2.0, 0.8, 0.8))
+    seats = [
+        _object(
+            f"dining_chair_{index}",
+            "dining_chair",
+            (*xy, 0.45),
+            (0.5, 0.5, 0.9),
+            yaw_deg=yaw,
+        )
+        for index, (xy, yaw) in enumerate(
+            (
+                ((-1.25, -1.2), 0.0),
+                ((1.25, -1.2), 180.0),
+                ((0.0, -2.0), 90.0),
+                ((0.0, -0.4), -90.0),
+            )
+        )
+    ]
+    scene = _scene(
+        tmp_path,
+        table,
+        *seats,
+        text="A dining room with a dining table in the center and four dining chairs.",
+    )
+    _attach_intent_contract(
+        scene,
+        [
+            {
+                "relation": "centered_in_room",
+                "subjects": {"category": "dining_table", "count": 1},
+                "targets": {"category": "room", "count": 1},
+                "source": "explicit_prompt",
+                "evidence_span": "table in the center",
+            },
+            {
+                "relation": "edge_distribution",
+                "subjects": {
+                    "category": "dining_chair",
+                    "count": 4,
+                    "quantifier": "all",
+                },
+                "targets": {"category": "dining_table", "count": 1},
+                "edge_frame": "target_local_rectangle",
+                "groups": [
+                    {
+                        "edge_class": "long",
+                        "counts_per_edge": [1, 1],
+                        "spacing": "equal_segments",
+                    },
+                    {
+                        "edge_class": "short",
+                        "counts_per_edge": [1, 1],
+                        "spacing": "equal_segments",
+                    },
+                ],
+                "orientation": "toward_target",
+                "source": "explicit_prompt",
+                "evidence_span": "one chair on each side",
+            },
+        ],
+    )
+    config = CriticConfig(enabled=True, metrics=("functional_dependency",))
+
+    fixes = improve_furniture_relations(scene, config=config)
+
+    assert {fix.object_id for fix in fixes} == {
+        "dining_table_0",
+        *{f"dining_chair_{index}" for index in range(4)},
+    }
+    results = evaluate_room_scene(scene, config=config, stage="centered_edge_after")[
+        "results"
+    ]
+    assert {
+        result["relation_type"]: result["label"]
+        for result in results
+        if result.get("relation_type") in {"room_center_alignment", "edge_distribution"}
+    } == {"room_center_alignment": "pass", "edge_distribution": "pass"}
+
+
+def test_repairs_room_facing_contract_with_yaw_only_move(tmp_path: Path) -> None:
+    chair = _object(
+        "guest_chair_0",
+        "guest_chair",
+        (0.0, -1.4, 0.45),
+        (0.5, 0.5, 0.9),
+        yaw_deg=180.0,
+    )
+    scene = _scene(
+        tmp_path,
+        chair,
+        text="A guest chair against the wall facing into the room.",
+    )
+    _attach_intent_contract(
+        scene,
+        [
+            {
+                "relation": "faces",
+                "subjects": {"category": "guest_chair", "count": 1},
+                "targets": {"category": "room", "count": 1},
+                "source": "explicit_prompt",
+                "evidence_span": "guest chair facing into the room",
+            }
+        ],
+    )
+    config = CriticConfig(enabled=True, metrics=("functional_dependency",))
+
+    fixes = improve_furniture_relations(scene, config=config)
+
+    assert [(fix.object_id, fix.relation_type) for fix in fixes] == [
+        ("guest_chair_0", "faces")
+    ]
+    result = next(
+        result
+        for result in evaluate_room_scene(
+            scene, config=config, stage="room_facing_after"
+        )["results"]
+        if result.get("relation_type") == "faces"
+    )
+    assert result["label"] == "pass"
 
 
 def test_repairs_reversed_mixed_table_edge_topology_atomically(tmp_path: Path) -> None:
@@ -270,6 +462,7 @@ def test_repairs_reversed_mixed_table_edge_topology_atomically(tmp_path: Path) -
             "side free of chairs."
         ),
     )
+    _attach_fixture_contract(scene)
     config = CriticConfig(enabled=True, metrics=("functional_dependency",))
 
     fixes = improve_furniture_relations(scene, config=config)
@@ -279,7 +472,7 @@ def test_repairs_reversed_mixed_table_edge_topology_atomically(tmp_path: Path) -
     result = next(
         item
         for item in evaluate_room_scene(scene, config=config, stage="test")["results"]
-        if item.get("relation_type") == "table_seat_distribution"
+        if item.get("relation_type") == "edge_distribution"
     )
     assert result["label"] == "pass"
     edges = [slot["edge"] for slot in result["diagnostics"]["seat_slots"]]
@@ -321,6 +514,7 @@ def test_repairs_reversed_mixed_topology_for_generic_fallback_table(
         ),
     )
     scene.room_type = "meeting_room"
+    _attach_fixture_contract(scene)
     config = CriticConfig(enabled=True, metrics=("functional_dependency",))
 
     fixes = improve_furniture_relations(scene, config=config)
@@ -329,9 +523,67 @@ def test_repairs_reversed_mixed_topology_for_generic_fallback_table(
     result = next(
         item
         for item in evaluate_room_scene(scene, config=config, stage="test")["results"]
-        if item.get("relation_type") == "table_seat_distribution"
+        if item.get("relation_type") == "edge_distribution"
     )
     assert result["label"] == "pass"
+
+
+def test_rotated_asymmetric_edge_seats_do_not_overlap_table(tmp_path: Path) -> None:
+    """Seat slots must use the footprint after their inward-facing rotation."""
+    table = _object(
+        "conference_table_0", "conference_table", (0.0, 0.0, 0.4), (3.0, 0.8, 0.8)
+    )
+    positions = [
+        *[(x, y) for y in (-1.4, 1.4) for x in (-1.0, 0.0, 1.0)],
+        (2.2, 0.0),
+    ]
+    seats = [
+        _object(
+            f"office_chair_{index}",
+            "office_chair",
+            (*position, 0.45),
+            (0.4, 0.9, 0.9),
+            yaw_deg=0.0,
+        )
+        for index, position in enumerate(positions)
+    ]
+    scene = _scene(
+        tmp_path,
+        table,
+        *seats,
+        text=(
+            "A meeting room with one rectangular conference table and seven office "
+            "chairs. Arrange six office chairs in two equal groups of three, evenly "
+            "spaced along the table's two long sides. Place one remaining office chair "
+            "centered along one short side, facing the table. Keep the opposite short "
+            "side free of chairs."
+        ),
+    )
+    _attach_fixture_contract(scene)
+    config = CriticConfig(enabled=True, metrics=("functional_dependency",))
+
+    improve_furniture_relations(scene, config=config)
+
+    result = next(
+        item
+        for item in evaluate_room_scene(scene, config=config, stage="asymmetric_after")[
+            "results"
+        ]
+        if item.get("relation_type") == "edge_distribution"
+    )
+    assert result["label"] == "pass"
+    table_lower, table_upper = table.compute_world_bounds()
+    for seat in seats:
+        lower, upper = seat.compute_world_bounds()
+        overlaps_x = (
+            float(lower[0]) < float(table_upper[0]) - 0.01
+            and float(upper[0]) > float(table_lower[0]) + 0.01
+        )
+        overlaps_y = (
+            float(lower[1]) < float(table_upper[1]) - 0.01
+            and float(upper[1]) > float(table_lower[1]) + 0.01
+        )
+        assert not (overlaps_x and overlaps_y), seat.object_id
 
 
 def test_sideboard_wall_phrase_does_not_bind_dining_chairs_to_wall(
@@ -360,6 +612,7 @@ def test_sideboard_wall_phrase_does_not_bind_dining_chairs_to_wall(
             "wall behind the chairs on one side, and table settings for four."
         ),
     )
+    _attach_fixture_contract(scene)
     config = CriticConfig(enabled=True, metrics=("functional_dependency",))
 
     payload = evaluate_room_scene(scene, config=config, stage="dining_sideboard_prompt")
@@ -397,6 +650,7 @@ def test_instructional_contract_repairs_furniture_then_wall_surface(
         "required_wall_objects": ["chalkboard"],
         "functional_zones": ["teaching_zone", "student_seating_zone"],
     }
+    _attach_fixture_contract(scene)
     config = CriticConfig(
         enabled=True,
         metrics=("functional_dependency",),
@@ -578,6 +832,7 @@ def test_paired_work_surfaces_rotate_toward_their_assigned_seats(
             "desk sits at the front near the chalkboard."
         ),
     )
+    _attach_fixture_contract(scene)
     config = CriticConfig(
         enabled=True,
         metrics=("functional_dependency",),
@@ -637,9 +892,9 @@ def test_repairs_generic_near_contract_for_unrelated_categories(
     armchair = _object("armchair_0", "armchair", (-1.6, 0.0, 0.45), (0.7, 0.7, 0.9))
     plant = _object("plant_0", "plant", (1.4, 0.0, 0.45), (0.6, 0.6, 0.9))
     scene = _scene(tmp_path, armchair, plant)
-    scene.scene_expert_task_spec = {
-        "compiler_status": "ok",
-        "intent_constraints": [
+    _attach_intent_contract(
+        scene,
+        [
             {
                 "relation": "near",
                 "subjects": {"category": "armchair", "count": 1},
@@ -648,7 +903,7 @@ def test_repairs_generic_near_contract_for_unrelated_categories(
                 "evidence_span": "an armchair near a plant",
             }
         ],
-    }
+    )
     config = CriticConfig(enabled=True, metrics=("functional_dependency",))
 
     before = evaluate_room_scene(scene, config=config, stage="generic_near_before")
@@ -677,9 +932,9 @@ def test_repairs_generic_near_contract_for_unrelated_categories(
 def test_repairs_corner_of_room_contract(tmp_path: Path) -> None:
     wardrobe = _object("wardrobe_0", "wardrobe", (-1.6, 1.1, 0.9), (0.8, 0.6, 1.8))
     scene = _scene(tmp_path, wardrobe)
-    scene.scene_expert_task_spec = {
-        "compiler_status": "ok",
-        "intent_constraints": [
+    _attach_intent_contract(
+        scene,
+        [
             {
                 "relation": "corner_of_room",
                 "subjects": {"category": "wardrobe", "count": 1},
@@ -688,7 +943,7 @@ def test_repairs_corner_of_room_contract(tmp_path: Path) -> None:
                 "evidence_span": "wardrobe in the corner of the room",
             }
         ],
-    }
+    )
     config = CriticConfig(enabled=True, metrics=("functional_dependency",))
 
     before = evaluate_room_scene(scene, config=config, stage="corner_before")
@@ -807,8 +1062,9 @@ def test_repairs_multiple_wall_backed_stools_with_wall_normal_orientation(
         west_wall,
         text="A study with two stools placed against the side wall.",
     )
-    scene.scene_expert_task_spec = {
-        "intent_constraints": [
+    _attach_intent_contract(
+        scene,
+        [
             {
                 "relation": "against_wall",
                 "subjects": {"category": "stool", "count": 2},
@@ -816,8 +1072,8 @@ def test_repairs_multiple_wall_backed_stools_with_wall_normal_orientation(
                 "source": "explicit_prompt",
                 "evidence_span": "two stools placed against the side wall",
             }
-        ]
-    }
+        ],
+    )
 
     fixes = improve_furniture_relations(
         scene,
@@ -874,6 +1130,7 @@ def test_wall_backed_repair_uses_door_safe_lateral_pose(tmp_path: Path) -> None:
         text="A living room with a sofa against the side wall.",
     )
     scene.room_type = "living_room"
+    _attach_fixture_contract(scene)
     door = ClearanceOpeningData(
         opening_id="door_0",
         opening_type="door",
@@ -951,6 +1208,32 @@ def test_wall_backed_repair_keeps_nearby_required_relation(tmp_path: Path) -> No
         ),
     )
     scene.room_type = "living_room"
+    _attach_intent_contract(
+        scene,
+        [
+            {
+                "relation": "against_wall",
+                "subjects": {"category": "sofa", "count": 1},
+                "targets": {"category": "wall"},
+                "source": "explicit_prompt",
+                "evidence_span": "sofa against the back wall",
+            },
+            {
+                "relation": "against_wall",
+                "subjects": {"category": "tv_stand", "count": 1},
+                "targets": {"category": "wall"},
+                "source": "explicit_prompt",
+                "evidence_span": "TV stand on the opposite wall",
+            },
+            {
+                "relation": "near",
+                "subjects": {"category": "armchair", "count": 2, "quantifier": "all"},
+                "targets": {"category": "sofa", "count": 1},
+                "source": "explicit_prompt",
+                "evidence_span": "armchairs near each end of the sofa",
+            },
+        ],
+    )
     config = CriticConfig(
         enabled=True,
         metrics=("functional_dependency",),
@@ -986,6 +1269,7 @@ def test_freestanding_television_repair_restores_media_support(tmp_path: Path) -
         text="A living room with a television placed on a TV stand.",
     )
     scene.room_type = "living_room"
+    _attach_fixture_contract(scene)
     config = CriticConfig(
         enabled=True,
         metrics=("functional_dependency",),
@@ -1125,6 +1409,36 @@ def test_hard_furniture_inventory_contract_is_stage_gated(
     assert unresolved_furniture_relation_failures(scene, config=config) == [failure]
 
 
+def test_manipuland_support_contract_is_deferred_from_furniture_gate(
+    tmp_path: Path, monkeypatch
+) -> None:
+    scene = _scene(tmp_path, text="A study with a monitor on a desk.")
+    config = CriticConfig(enabled=True, metrics=("functional_dependency",))
+    failure = {
+        "check_id": "intent_monitor_on_desk",
+        "label": "fail",
+        "contract_state": "failed",
+        "scoring_tier": "core",
+        "relation_type": "object_on_support",
+        "primary_object": "computer_monitor",
+        "selected_related_objects": ["study_desk_0"],
+        "evidence": {
+            "intent_constraint": {
+                "relation": "on_top_of",
+                "stage": "manipuland",
+                "strength": "hard",
+            }
+        },
+    }
+    monkeypatch.setattr(
+        furniture_relation_repair,
+        "_evaluate",
+        lambda *_args, **_kwargs: {"case_pack": {}, "results": [failure]},
+    )
+
+    assert unresolved_furniture_relation_failures(scene, config=config) == []
+
+
 def test_repairs_work_seat_to_in_room_side_when_other_side_is_outside(
     tmp_path: Path,
 ) -> None:
@@ -1183,7 +1497,7 @@ def test_candidate_score_allows_soft_degradation_when_hard_failures_drop() -> No
             {
                 "check_id": "dining_slots",
                 "label": "fail",
-                "relation_type": "table_seat_distribution",
+                "relation_type": "edge_distribution",
             },
             {
                 "check_id": "chair_facing",
@@ -1202,7 +1516,7 @@ def test_candidate_score_allows_soft_degradation_when_hard_failures_drop() -> No
             {
                 "check_id": "dining_slots",
                 "label": "pass",
-                "relation_type": "table_seat_distribution",
+                "relation_type": "edge_distribution",
             },
             {
                 "check_id": "chair_facing",
@@ -1231,7 +1545,7 @@ def test_candidate_score_rejects_soft_regression_without_hard_fail_reduction() -
             {
                 "check_id": "dining_slots",
                 "label": "fail",
-                "relation_type": "table_seat_distribution",
+                "relation_type": "edge_distribution",
             },
             {
                 "check_id": "table_access",
@@ -1245,7 +1559,7 @@ def test_candidate_score_rejects_soft_regression_without_hard_fail_reduction() -
             {
                 "check_id": "dining_slots",
                 "label": "fail",
-                "relation_type": "table_seat_distribution",
+                "relation_type": "edge_distribution",
             },
             {
                 "check_id": "table_access",
@@ -1473,7 +1787,7 @@ def test_dining_chair_repair_does_not_move_table_support_children(
                     {
                         "check_id": "dining_slots",
                         "label": "fail",
-                        "relation_type": "table_seat_distribution",
+                        "relation_type": "edge_distribution",
                         "diagnostics": {
                             "seat_slots": [
                                 {
@@ -1491,7 +1805,7 @@ def test_dining_chair_repair_does_not_move_table_support_children(
                     {
                         "check_id": "dining_slots",
                         "label": "pass",
-                        "relation_type": "table_seat_distribution",
+                        "relation_type": "edge_distribution",
                         "diagnostics": {"seat_slots": []},
                     }
                 ]
@@ -1535,7 +1849,7 @@ def test_dining_chair_repair_uses_outward_slot_when_exact_pose_blocks_access(
     failed_distribution = {
         "check_id": "dining_slots",
         "label": "fail",
-        "relation_type": "table_seat_distribution",
+        "relation_type": "edge_distribution",
         "diagnostics": {
             "seat_slots": [
                 {
@@ -1553,7 +1867,7 @@ def test_dining_chair_repair_uses_outward_slot_when_exact_pose_blocks_access(
     passed_distribution = {
         "check_id": "dining_slots",
         "label": "pass",
-        "relation_type": "table_seat_distribution",
+        "relation_type": "edge_distribution",
         "diagnostics": {"seat_slots": []},
     }
     evaluations = iter(
@@ -1876,6 +2190,7 @@ def test_repairs_explicit_front_alignment_without_moving_centered_rug(
             },
         ],
     }
+    _complete_fixture_contract_evidence(scene)
     config = CriticConfig(
         enabled=True,
         metrics=("functional_dependency",),
@@ -1973,6 +2288,7 @@ def test_front_alignment_moves_explicit_near_dependents_with_sofa(
             },
         ],
     }
+    _complete_fixture_contract_evidence(scene)
     config = CriticConfig(enabled=True, metrics=("functional_dependency",))
 
     before = evaluate_room_scene(scene, config=config, stage="near_group_before")
@@ -2073,6 +2389,7 @@ def test_front_alignment_does_not_reintroduce_door_sweep_blockage(
             },
         ],
     }
+    _complete_fixture_contract_evidence(scene)
     config = CriticConfig(
         enabled=True,
         metrics=("functional_dependency", "interaction_clearance"),
@@ -2123,6 +2440,7 @@ def test_repairs_two_anchor_living_room_group(tmp_path: Path) -> None:
     )
     scene = _scene(tmp_path, sofa, tv_stand, coffee_table, rug, *chairs, text=prompt)
     scene.room_type = "living_room"
+    _attach_fixture_contract(scene)
     config = CriticConfig(
         enabled=True,
         metrics=("functional_dependency",),
@@ -2199,6 +2517,7 @@ def test_centered_anchor_repair_preserves_passing_flanking_clearance(
         ),
     )
     scene.room_type = "living_room"
+    _attach_fixture_contract(scene)
     config = CriticConfig(
         enabled=True,
         metrics=("functional_dependency",),
@@ -2255,7 +2574,10 @@ def test_repairs_paired_workstation_aisle_without_moving_other_furniture(
     scene.scene_expert_task_spec = {
         "compiler_status": "ok",
         "required_large_objects": ["desk", "desk"],
-        "intent_constraints": [
+    }
+    _attach_intent_contract(
+        scene,
+        [
             {
                 "relation": "clear_access",
                 "subjects": {"category": "desk", "count": 2},
@@ -2264,7 +2586,7 @@ def test_repairs_paired_workstation_aisle_without_moving_other_furniture(
                 "evidence_span": "clear walking path between the workstations",
             }
         ],
-    }
+    )
     config = CriticConfig(enabled=True, metrics=("functional_dependency",))
 
     before = evaluate_room_scene(
@@ -2318,7 +2640,10 @@ def test_repairs_work_seats_blocking_a_paired_workstation_aisle(
     scene.scene_expert_task_spec = {
         "compiler_status": "ok",
         "required_large_objects": ["desk", "desk"],
-        "intent_constraints": [
+    }
+    _attach_intent_contract(
+        scene,
+        [
             {
                 "relation": "clear_access",
                 "subjects": {"category": "desk", "count": 2},
@@ -2327,7 +2652,7 @@ def test_repairs_work_seats_blocking_a_paired_workstation_aisle(
                 "evidence_span": "clear walking path between the workstations",
             }
         ],
-    }
+    )
     config = CriticConfig(enabled=True, metrics=("functional_dependency",))
 
     before = evaluate_room_scene(

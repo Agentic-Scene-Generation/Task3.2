@@ -558,41 +558,45 @@ def test_exposes_full_task_compiler_input_and_output(tmp_path: Path) -> None:
     assert detail["has_full_output"] is True
 
 
-def test_exposes_typed_task_compiler_contract(tmp_path: Path) -> None:
+def test_exposes_independent_intent_compiler_contract(tmp_path: Path) -> None:
     room = tmp_path / "run_a" / "batch_001" / "scene_000" / "room_bedroom"
     write(room / "timing_stats.jsonl", "")
     write(
-        room.parent / "scene_expert" / "trace" / "task_compiler.json",
+        room.parent / "scene_expert" / "trace" / "intent_compiler.json",
         json.dumps(
             {
-                "compiler_status": "degraded",
-                "failure_reason": "ValidationError: invalid relation",
-                "compiler_spec_version": "scenesmith.task_compiler.v2",
-                "fallback_contract": [
+                "status": "ok",
+                "spec_version": "scenesmith.intent_compiler.v4",
+                "prompt_sha256": "a" * 64,
+                "retry_count": 1,
+                "attempts": [
+                    {
+                        "attempt": 0,
+                        "status": "retry",
+                    },
+                    {
+                        "attempt": 1,
+                        "status": "ok",
+                    },
+                ],
+                "constraints": [
                     {
                         "relation": "faces",
-                        "subjects": {"category": "chair", "quantifier": "all"},
-                        "targets": {"category": "desk", "quantifier": "all"},
-                        "source": "model_inferred",
+                        "subjects": {
+                            "category": "chair",
+                            "count": 1,
+                            "quantifier": "exactly",
+                        },
+                        "targets": {
+                            "category": "desk",
+                            "count": 1,
+                            "quantifier": "exactly",
+                        },
+                        "source": "explicit_prompt",
                         "confidence": 1.0,
-                        "inference_reason": "deterministic room ontology",
+                        "evidence_span": "chair faces desk",
                     }
                 ],
-                "task_spec": {
-                    "room_type": "office",
-                    "style": "modern",
-                    "required_large_objects": ["desk", "chair"],
-                    "intent_constraints": [
-                        {
-                            "relation": "faces",
-                            "subjects": {"category": "chair", "quantifier": "all"},
-                            "targets": {"category": "desk", "quantifier": "all"},
-                            "source": "model_inferred",
-                            "confidence": 1.0,
-                            "inference_reason": "deterministic room ontology",
-                        }
-                    ],
-                },
             }
         ),
     )
@@ -606,15 +610,16 @@ def test_exposes_typed_task_compiler_contract(tmp_path: Path) -> None:
     event = next(
         item
         for item in payload["audit_events"]
-        if item["id"] == "contract:task-compiler"
+        if item["id"] == "contract:intent-compiler"
     )
 
     assert event["kind"] == "contract"
-    assert event["audit_status"] == "degraded"
-    assert event["has_error"] is True
-    assert event["contract"]["spec_version"] == "scenesmith.task_compiler.v2"
+    assert event["audit_status"] == "ok"
+    assert event["has_error"] is False
+    assert event["contract"]["spec_version"] == "scenesmith.intent_compiler.v4"
     assert event["contract"]["constraints"][0]["relation"] == "faces"
     assert event["detail"]["constraint_count"] == 1
+    assert event["detail"]["retry_count"] == 1
 
 
 def test_exposes_planner_orchestration_and_full_session_trace(tmp_path: Path) -> None:

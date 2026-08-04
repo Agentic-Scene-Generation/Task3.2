@@ -868,6 +868,7 @@ class ManipulandTools:
                     getattr(self.scene, "scene_expert_task_spec", None),
                     short_names,
                     ObjectType.MANIPULAND,
+                    scene=self.scene,
                 ),
             )
             result = self._generate_assets_impl(request)

@@ -1217,6 +1217,35 @@ class BaseStatefulAgent(ABC):
                     "; ".join(repair_actions),
                 )
             checkpoint_hard = self._checkpoint_eligible_furniture_hard_state(hard_eval)
+            # Physical repair can expose a contract-only failure after the
+            # physical gate reports success. Repair that relation before the
+            # transaction is rejected: the furniture implementation owns this
+            # geometry-only recovery path, while later-stage constraints are
+            # excluded by the checkpoint gate itself.
+            if (
+                hard_eval is not None
+                and hard_eval.hard_valid
+                and checkpoint_hard is not None
+                and not checkpoint_hard.hard_valid
+            ):
+                _, _, contract_repair_actions = (
+                    self._try_deterministic_repair_for_hard_state(
+                        checkpoint_hard,
+                        source=f"post-{call_kind}-contract-transaction",
+                    )
+                )
+                if contract_repair_actions:
+                    repair_actions.extend(contract_repair_actions)
+                    console_logger.info(
+                        "Deterministic contract repair before %s transaction "
+                        "rollback: %s",
+                        call_kind,
+                        "; ".join(contract_repair_actions),
+                    )
+                hard_eval = self._evaluate_current_furniture_hard_state()
+                checkpoint_hard = self._checkpoint_eligible_furniture_hard_state(
+                    hard_eval
+                )
             if checkpoint_hard and checkpoint_hard.hard_valid:
                 controller.remember_hard_valid_scene_state(
                     scene_state=copy.deepcopy(self.scene.to_state_dict()),
@@ -1553,47 +1582,94 @@ class BaseStatefulAgent(ABC):
     ) -> RunResult:
         """Run and audit the stage Planner, including its persisted tool history."""
         planner_start = time.time()
-        audit_prompt = {
-            "instructions": getattr(self.planner, "instructions", ""),
-            "runner_input": runner_input,
-        }
-        try:
-            async with self._reasoning_persistence_context_for_session(
-                self.planner_session
-            ):
-                result = await Runner.run(
-                    starting_agent=self.planner,
-                    input=runner_input,
-                    session=self.planner_session,
-                    max_turns=max_turns,
-                    run_config=self._create_run_config(),
+
+        async def run_once(input_value: Any, *, event: str) -> RunResult:
+            """Run one planner turn while keeping each attempt auditable."""
+            attempt_start = time.time()
+            attempt_prompt = {
+                "instructions": getattr(self.planner, "instructions", ""),
+                "runner_input": input_value,
+            }
+            try:
+                async with self._reasoning_persistence_context_for_session(
+                    self.planner_session
+                ):
+                    result = await Runner.run(
+                        starting_agent=self.planner,
+                        input=input_value,
+                        session=self.planner_session,
+                        max_turns=max_turns,
+                        run_config=self._create_run_config(),
+                    )
+            except Exception as exc:
+                self._record_module_timing(
+                    "planner",
+                    event,
+                    attempt_start,
+                    extra={"status": "failed", "error": type(exc).__name__},
                 )
-        except Exception as exc:
+                self._record_llm_call_debug(
+                    agent_role="planner",
+                    event=event,
+                    prompt=attempt_prompt,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+                raise
             self._record_module_timing(
                 "planner",
-                "coordinate_stage",
-                planner_start,
-                extra={"status": "failed", "error": type(exc).__name__},
+                event,
+                attempt_start,
+                extra={"status": "completed"},
             )
             self._record_llm_call_debug(
                 agent_role="planner",
-                event="coordinate_stage",
-                prompt=audit_prompt,
-                error=f"{type(exc).__name__}: {exc}",
+                event=event,
+                prompt=attempt_prompt,
+                output=result.final_output or "",
+                result=result,
             )
-            raise
+            return result
+
+        result = await run_once(runner_input, event="coordinate_stage")
+
+        # A planner can return a natural-language acknowledgement without ever
+        # invoking a workflow tool.  Letting that response pass makes the stage
+        # look successful while leaving required surfaces empty.  The initial
+        # design call is mandatory for every stateful stage, so give the planner
+        # one explicit recovery turn before failing deterministically.
+        if self._planner_initial_design_tool_calls == 0:
+            recovery_input = (
+                "MANDATORY WORKFLOW RECOVERY: your previous turn returned without "
+                "calling a workflow tool, so no design work has been completed. "
+                "Do not return a summary, ask a question, or describe what you "
+                "would do. Immediately execute the workflow now. For placement "
+                "stages, call select_placement_style() first if it has not already "
+                "been called; then call request_initial_design(). For non-placement "
+                "stages, call request_initial_design() immediately. Continue using "
+                "the workflow tools only after the initial design tool has returned."
+            )
+            console_logger.warning(
+                "Planner returned without request_initial_design; running one "
+                "mandatory workflow recovery turn."
+            )
+            # ``finish_stage`` marks the planner budget exhausted.  That marker
+            # is valid only after initial design and must not block this recovery.
+            self._planner_budget_exhausted = False
+            result = await run_once(
+                recovery_input,
+                event="coordinate_stage_recovery",
+            )
+            if self._planner_initial_design_tool_calls == 0:
+                raise RuntimeError(
+                    "Planner exited without calling request_initial_design after "
+                    "the mandatory workflow recovery turn"
+                )
+
         self._record_module_timing(
             "planner",
-            "coordinate_stage",
+            "coordinate_stage_total",
             planner_start,
             extra={"status": "completed"},
-        )
-        self._record_llm_call_debug(
-            agent_role="planner",
-            event="coordinate_stage",
-            prompt=audit_prompt,
-            output=result.final_output or "",
-            result=result,
         )
         return result
 

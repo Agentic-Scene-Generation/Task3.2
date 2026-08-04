@@ -10,9 +10,6 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from scenesmith.scenebenchmark_critic.relation_registry import relation_spec
-
-
 # ---------------------------------------------------------------------------
 # TaskCompiler output
 # ---------------------------------------------------------------------------
@@ -42,46 +39,10 @@ class ObjectSelectorSpec(BaseModel):
         return str(value or "").strip().lower()
 
 
-class IntentConstraintSpec(BaseModel):
-    """One atomic, executable relation produced by TaskCompiler."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    relation: str
-    subjects: ObjectSelectorSpec
-    targets: ObjectSelectorSpec | None = None
-    source: Literal["explicit_prompt", "model_inferred"]
-    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
-    evidence_span: str = ""
-    inference_reason: str = ""
-
-    @field_validator("relation", mode="before")
-    @classmethod
-    def _normalize_relation(cls, value: Any) -> str:
-        relation = str(value or "").strip().lower()
-        relation_spec(relation)
-        return relation
-
-    @model_validator(mode="after")
-    def _validate_arity_and_provenance(self) -> "IntentConstraintSpec":
-        spec = relation_spec(self.relation)
-        target_arity = 0
-        if self.targets is not None:
-            target_arity = 2 if self.targets.secondary_category else 1
-        if target_arity != spec.target_arity:
-            raise ValueError(
-                f"Relation {self.relation!r} requires {spec.target_arity} target(s), "
-                f"got {target_arity}"
-            )
-        if self.source == "explicit_prompt" and not self.evidence_span.strip():
-            raise ValueError("explicit_prompt constraints require evidence_span")
-        if self.source == "model_inferred" and not self.inference_reason.strip():
-            raise ValueError("model_inferred constraints require inference_reason")
-        return self
-
-
 class SceneTaskSpec(BaseModel):
     """Structured scene requirements extracted from a raw text prompt."""
+
+    model_config = ConfigDict(extra="forbid")
 
     room_type: str = Field(
         ..., description="Primary room type, e.g. 'bedroom', 'kitchen'"
@@ -117,16 +78,9 @@ class SceneTaskSpec(BaseModel):
         default_factory=list,
         description="Visual / style constraints: material palette, density, symmetry, etc.",
     )
-    intent_constraints: list[IntentConstraintSpec] = Field(
-        default_factory=list,
-        description=(
-            "Atomic explicit and common-sense functional relations. All validated "
-            "rows are hard contract constraints."
-        ),
-    )
     compiler_status: Literal["ok", "degraded"] = "ok"
     compiler_failure_reason: str = ""
-    compiler_spec_version: str = "scenesmith.task_compiler.v2"
+    compiler_spec_version: str = "scenesmith.task_compiler.v3"
 
 
 # ---------------------------------------------------------------------------

@@ -32,6 +32,7 @@ ROOM_RELATIVE_WALL_CATEGORIES = frozenset(
         "side_wall",
         "main_wall",
         "opposite_wall",
+        "adjacent_wall",
     }
 )
 
@@ -52,17 +53,34 @@ CEILING_MOUNTED_CATEGORIES = frozenset(
 )
 MANIPULAND_CATEGORIES = frozenset(
     {
+        "alarm_clock",
+        "bedside_lamp",
         "book",
         "bottle",
         "bowl",
+        "coaster",
+        "computer_display",
+        "computer_monitor",
         "cup",
+        "cutlery",
+        "desk_lamp",
+        "flower",
+        "glass",
         "keyboard",
         "laptop",
         "magazine",
         "mug",
+        "monitor",
+        "notebook",
         "plate",
+        "pen",
+        "pen_holder",
         "remote",
+        "table_lamp",
+        "table_setting",
+        "trash_can",
         "vase",
+        "wastebasket",
     }
 )
 
@@ -210,6 +228,7 @@ _RELATIONS = (
         thresholds={"max_angle_deg": 60.0},
         repair_strategy="furniture_relation",
         repair_relation_types=(
+            "faces",
             "furniture_faces_furniture",
             "front_axis_alignment",
             "seating_to_work_surface",
@@ -296,15 +315,15 @@ _RELATIONS = (
         dependency_binding="any_endpoint",
     ),
     _relation(
-        "one_per_side",
+        "edge_distribution",
         1,
         "furniture",
-        "one_per_side",
-        "one subject on each side of target",
+        "edge_distribution",
+        "subjects distributed across the finite long/short edges of a rectangular target",
         dependencies=("required_count",),
         dependency_binding="any_endpoint",
-        repair_strategy="table_seat_distribution",
-        repair_relation_types=("table_seat_distribution",),
+        repair_strategy="edge_distribution",
+        repair_relation_types=("edge_distribution",),
     ),
     _relation(
         "corner_of_room",

@@ -1037,6 +1037,10 @@ def _generate_room(
         text_description=room_prompt,
         action_log_path=room_dir / "action_log.json",
     )
+    intent_contract = cfg_dict.get("_scenebenchmark_intent_contract")
+    if isinstance(intent_contract, dict) and intent_contract:
+        setattr(scene, "scenebenchmark_intent_contract", intent_contract)
+        scene.metadata["scenebenchmark_intent_contract"] = intent_contract
     for wall in room_geometry.walls:
         scene.add_object(wall)
     # Note: Floor is NOT added to scene.objects to avoid duplicate

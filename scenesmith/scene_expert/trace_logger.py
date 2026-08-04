@@ -70,25 +70,26 @@ class TraceLogger:
         self._full_report: FullVerifyReport | None = None
         self._exports: dict = {}
         self._task_compiler: dict = {}
+        self._intent_compiler: dict = {}
 
     def record_task_compiler(self, task_spec: SceneTaskSpec) -> Path:
-        """Persist compiler status and deterministic fallback contract."""
+        """Persist the inventory-only TaskCompiler result."""
         self._task_compiler = {
             "compiler_status": task_spec.compiler_status,
             "failure_reason": task_spec.compiler_failure_reason,
             "compiler_spec_version": task_spec.compiler_spec_version,
-            "fallback_contract": (
-                [
-                    row.model_dump(mode="json", exclude_none=True)
-                    for row in task_spec.intent_constraints
-                ]
-                if task_spec.compiler_status == "degraded"
-                else []
-            ),
             "task_spec": task_spec.model_dump(mode="json", exclude_none=True),
         }
         path = self._trace_debug_dir / "task_compiler.json"
         self._write_json(path, self._task_compiler)
+        self.save_partial(status="running")
+        return path
+
+    def record_intent_compiler(self, trace: dict) -> Path:
+        """Persist independent intent compilation status and contract details."""
+        self._intent_compiler = dict(trace or {})
+        path = self._trace_debug_dir / "intent_compiler.json"
+        self._write_json(path, self._intent_compiler)
         self.save_partial(status="running")
         return path
 
@@ -217,6 +218,7 @@ class TraceLogger:
             "config_hash": self._config_hash,
             "prompt": self._prompt,
             "task_compiler": self._task_compiler,
+            "intent_compiler": self._intent_compiler,
             "model": model,
             "total_time_sec": round(time.time() - self._start_time, 1),
             "stages": [entry.model_dump() for entry in self._stage_entries],
@@ -237,6 +239,7 @@ class TraceLogger:
             "config_hash": self._config_hash,
             "prompt": self._prompt,
             "task_compiler": self._task_compiler,
+            "intent_compiler": self._intent_compiler,
             "total_time_sec": round(time.time() - self._start_time, 1),
             "stages": [entry.model_dump() for entry in self._stage_entries],
         }
@@ -257,6 +260,7 @@ class TraceLogger:
                 "config_hash": self._config_hash,
                 "prompt": self._prompt,
                 "task_compiler": self._task_compiler,
+                "intent_compiler": self._intent_compiler,
                 "stages": [entry.model_dump() for entry in self._stage_entries],
             }
 

@@ -216,6 +216,7 @@ class CeilingTools:
                     getattr(self.scene, "scene_expert_task_spec", None),
                     short_names,
                     ObjectType.CEILING_MOUNTED,
+                    scene=self.scene,
                 ),
             )
             return self._generate_assets_impl(request)

@@ -70,6 +70,9 @@ from scenesmith.scenebenchmark_critic.metrics.functional_dependency.seat_surface
     assign_work_seats_to_surfaces,
     room_bounds_from_case_pack,
 )
+from scenesmith.scenebenchmark_critic.intent_contract import (
+    intent_contract_constraints_for_scene,
+)
 from scenesmith.utils.logging import BaseLogger
 
 console_logger = logging.getLogger(__name__)
@@ -933,17 +936,7 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
         return moved
 
     def _task_requires_monitor_work_seat_facing(self) -> bool:
-        task_spec = getattr(self.scene, "scene_expert_task_spec", None)
-        if not task_spec:
-            task_spec = (getattr(self.scene, "metadata", {}) or {}).get(
-                "scene_expert_task_spec"
-            )
-        constraints = (
-            task_spec.get("intent_constraints", [])
-            if isinstance(task_spec, dict)
-            else getattr(task_spec, "intent_constraints", [])
-        )
-        for constraint in constraints or []:
+        for constraint in intent_contract_constraints_for_scene(self.scene):
             relation = (
                 str(constraint.get("relation") or "")
                 if isinstance(constraint, dict)

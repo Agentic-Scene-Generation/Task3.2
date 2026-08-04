@@ -263,6 +263,22 @@ class SceneExpertPipeline:
             task_spec = SceneTaskSpec(room_type="room", style="standard")
         trace_logger.record_task_compiler(task_spec)
 
+        # Hard relations are compiled independently of TaskCompiler.  The
+        # helper is a no-op when the embedded critic is disabled, preserving
+        # the critic-off request budget and baseline behavior.
+        from scenesmith.scene_expert.hooks import (
+            _compile_intent_contract_if_enabled,
+        )
+
+        _intent_contract, intent_trace = _compile_intent_contract_if_enabled(
+            prompt=prompt,
+            scene_id=scene_id,
+            output_dir=output_dir,
+            cfg_dict=cfg_dict,
+        )
+        if intent_trace:
+            trace_logger.record_intent_compiler(intent_trace)
+
         # Determine stage range from config
         pipeline_cfg = cfg_dict.get("experiment", {}).get("pipeline", {})
         start_stage = pipeline_cfg.get("start_stage", "floor_plan")

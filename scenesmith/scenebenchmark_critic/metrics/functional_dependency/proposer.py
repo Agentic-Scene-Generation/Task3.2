@@ -1,7 +1,8 @@
 """Compatibility surface for the removed geometry relation proposer.
 
-Intent-contract v2 is the sole authority for functional relations.  These
-entry points remain so registry/plugin callers do not need a parallel mode.
+The compiled v4 intent contract is the sole authority for functional
+relations. These entry points remain so registry/plugin callers do not need a
+parallel mode.
 """
 
 from __future__ import annotations

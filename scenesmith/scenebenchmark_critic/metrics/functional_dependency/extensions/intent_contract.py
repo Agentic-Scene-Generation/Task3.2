@@ -17,6 +17,7 @@ from scenesmith.scenebenchmark_critic.core.geometry import (
     object_footprint_polygon,
 )
 from scenesmith.scenebenchmark_critic.intent_contract import (
+    _normalize_selector_category,
     bound_ids,
     contract_constraints,
     selected_ids,
@@ -54,15 +55,9 @@ def evaluate_intent_contract_extensions(
     results: list[dict[str, Any]] = []
     for constraint in contract_constraints(case_pack):
         relation = str(constraint.get("relation") or "")
-        if _is_long_side_table_seating_constraint(constraint):
-            # ``one_per_side`` is retained as the compiled relation name for
-            # checkpoint compatibility.  Its legacy group evaluator means one
-            # subject per cardinal edge, which conflicts with a prompt that
-            # explicitly puts several chairs on one table long edge.  The
-            # table-seat extension owns both endpoint binding and geometry.
-            # Check this before generic binding: a six-chair long-side clause
-            # is intentionally evaluated against a seven-chair mixed topology,
-            # so the generic count-based binder cannot identify a unique subset.
+        if relation == "edge_distribution":
+            # The dedicated edge evaluator owns complete subject binding and
+            # slot assignment.  It must run before generic relation binding.
             continue
         binding_result = _binding_state_result(case_pack, constraint, objects)
         if binding_result is not None:
@@ -75,15 +70,6 @@ def evaluate_intent_contract_extensions(
         if result is not None:
             results.extend(result if isinstance(result, list) else [result])
     return results
-
-
-def _is_long_side_table_seating_constraint(constraint: dict[str, Any]) -> bool:
-    return str(constraint.get("relation") or "") == "one_per_side" and bool(
-        re.search(
-            r"\blong\s+(?:side|edge)s?\b",
-            str(constraint.get("evidence_span") or "").lower(),
-        )
-    )
 
 
 def _evaluate_between(
@@ -201,9 +187,48 @@ def _evaluate_required_count(
 ) -> dict[str, Any] | None:
     selector = constraint.get("subjects") or {}
     required = int(selector.get("count") or 1)
+    category = str(selector.get("category") or "required_object")
+    if _normalize_selector_category(category) == "table_setting":
+        component_selectors = {
+            "plate": {"category": "plate", "quantifier": "at_least"},
+            "cutlery": {"category": "cutlery", "quantifier": "at_least"},
+            "glass": {"category": "glass", "quantifier": "at_least"},
+        }
+        component_counts = {
+            name: selector_match_count(component, objects)
+            for name, component in component_selectors.items()
+        }
+        match_count = min(component_counts.values(), default=0)
+        matched = sorted(
+            {
+                object_id
+                for component in component_selectors.values()
+                for object_id in selected_ids(component, objects)
+            }
+        )
+        return _result(
+            constraint,
+            suffix=category,
+            label="pass" if match_count >= required else "fail",
+            primary=matched[0] if matched else category,
+            related=matched,
+            relation_type="required_count",
+            tier=tier,
+            reason=(
+                f"Prompt/room contract requires at least {required} usable table "
+                f"setting(s); component counts are {component_counts} and support "
+                f"{match_count} complete setting(s)."
+            ),
+            diagnostics={
+                "required_count": required,
+                "observed_count": match_count,
+                "component_counts": component_counts,
+                "observed_ids": matched,
+            },
+        )
+
     matched = selected_ids(selector, objects)
     match_count = selector_match_count(selector, objects)
-    category = str(selector.get("category") or "required_object")
     return _result(
         constraint,
         suffix=category,
@@ -265,6 +290,66 @@ def _evaluate_centered_in_room(
                     "room_center_xy": [round(center[0], 6), round(center[1], 6)],
                     "offset_m": round(offset, 6),
                     "allowed_offset_m": round(allowed, 6),
+                    "room_bounds_xy": list(bounds),
+                },
+            )
+        )
+    return results
+
+
+def _evaluate_faces_room(
+    constraint: dict[str, Any],
+    geometry: dict[str, Any],
+    objects: list[dict[str, Any]],
+    tier: str,
+) -> list[dict[str, Any]]:
+    """Evaluate a prompt's ``faces into the room`` clause against room center."""
+    target_category = _normalize_selector_category(
+        (constraint.get("targets") or {}).get("category")
+    )
+    if target_category != "room":
+        return []
+    bounds = _room_bounds(geometry)
+    if bounds is None:
+        return []
+    room_center = ((bounds[0] + bounds[2]) / 2.0, (bounds[1] + bounds[3]) / 2.0)
+    allowed_error = float(relation_spec("faces").thresholds.get("max_angle_deg", 60.0))
+    by_id = {str(obj["id"]): obj for obj in objects}
+    results: list[dict[str, Any]] = []
+    for object_id in bound_ids(constraint.get("subjects"), objects):
+        obj = by_id.get(object_id)
+        center = bbox_center_xy(obj) if obj is not None else None
+        if center is None:
+            continue
+        desired = (room_center[0] - center[0], room_center[1] - center[1])
+        error = (
+            0.0
+            if math.hypot(*desired) <= 1e-6
+            else _vector_angle_deg(front_vector(obj), desired)
+        )
+        results.append(
+            _result(
+                constraint,
+                suffix=object_id,
+                label="pass" if error <= allowed_error else "fail",
+                primary=object_id,
+                related=[],
+                relation_type="faces",
+                tier=tier,
+                reason=(
+                    f"`{object_id}` faces into the room."
+                    if error <= allowed_error
+                    else f"`{object_id}` faces {error:.0f} degrees away from the room interior."
+                ),
+                diagnostics={
+                    "target_center_xy_m": [round(center[0], 6), round(center[1], 6)],
+                    "facing_target_xy_m": [
+                        round(room_center[0], 6),
+                        round(room_center[1], 6),
+                    ],
+                    "current_front_xy": list(front_vector(obj)),
+                    "facing_error_deg": round(error, 6),
+                    "allowed_facing_error_deg": allowed_error,
                     "room_bounds_xy": list(bounds),
                 },
             )
@@ -919,10 +1004,11 @@ def _binding_state_result(
     virtual_targets = {"room", "ceiling"}
     target_selector = constraint.get("targets") or {}
     target_category = str(target_selector.get("category") or "")
-    positional_wall_target = (
-        relation in {"against_wall", "centered_on_wall"}
-        and target_category in ROOM_RELATIVE_WALL_CATEGORIES
-    )
+    positional_wall_target = relation in {
+        "against_wall",
+        "centered_on_wall",
+        "on_wall",
+    } and target_category in {"wall", *ROOM_RELATIVE_WALL_CATEGORIES}
     if target_category in virtual_targets:
         target_matches = [target_category]
         target_ids = target_matches
@@ -975,7 +1061,7 @@ def _binding_state_result(
         "flanking",
         "surround",
         "distributed_evenly",
-        "one_per_side",
+        "edge_distribution",
     }
     target_is_existential = str(target_selector.get("quantifier") or "") in {
         "at_least",
@@ -1080,19 +1166,17 @@ def _constraint_stage(constraint: dict[str, Any]) -> str:
     stage = str(constraint.get("stage") or relation_spec(relation).earliest_stage)
     targets = constraint.get("targets") or {}
     categories = {
-        str((constraint.get("subjects") or {}).get("category") or ""),
-        str(targets.get("category") or ""),
-        str(targets.get("secondary_category") or ""),
+        _normalize_selector_category(
+            str((constraint.get("subjects") or {}).get("category") or "")
+        ),
+        _normalize_selector_category(str(targets.get("category") or "")),
+        _normalize_selector_category(str(targets.get("secondary_category") or "")),
     }
     if relation == "on_wall" or categories & WALL_MOUNTED_CATEGORIES:
         stage = "wall_mounted"
     elif relation == "hang_from_ceiling" or categories & CEILING_MOUNTED_CATEGORIES:
         stage = "ceiling_mounted"
-    elif (
-        relation == "on_top_of"
-        and str((constraint.get("subjects") or {}).get("category") or "")
-        in MANIPULAND_CATEGORIES
-    ):
+    elif categories & MANIPULAND_CATEGORIES or "table_setting" in categories:
         stage = "manipuland"
     return stage
 
@@ -1163,7 +1247,7 @@ def _evaluate_group_distribution(
                 )
                 axis = 0 if abs(projections[0]) >= abs(projections[1]) else 1
                 sides.add((axis, 1 if projections[axis] >= 0 else -1))
-            if relation == "one_per_side" and len(centers) == 2:
+            if relation == "edge_distribution" and len(centers) == 2:
                 # A pair has no way to occupy all four cardinal sides.  It is
                 # correctly distributed when both objects occupy opposing
                 # sides of the same target-local axis (for example, the two
@@ -1926,15 +2010,16 @@ _EXTENSION_EVALUATORS = {
             tier=tier,
         )
     ),
+    "faces": lambda constraint, geometry, objects, _case_pack, tier: (
+        _evaluate_faces_room(constraint, geometry, objects, tier)
+    ),
     "flanking": lambda constraint, _geometry, objects, _case_pack, tier: (
         _evaluate_flanking(constraint, objects, tier)
     ),
     "distributed_evenly": lambda constraint, _geometry, objects, _case_pack, tier: (
         _evaluate_group_distribution(constraint, objects, tier)
     ),
-    "one_per_side": lambda constraint, _geometry, objects, _case_pack, tier: (
-        _evaluate_group_distribution(constraint, objects, tier)
-    ),
+    "edge_distribution": lambda constraint, _geometry, objects, _case_pack, tier: [],
     "surround": lambda constraint, _geometry, objects, _case_pack, tier: (
         _evaluate_group_distribution(constraint, objects, tier)
     ),

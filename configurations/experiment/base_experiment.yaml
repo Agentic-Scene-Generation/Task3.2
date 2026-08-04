@@ -196,7 +196,11 @@ projection:
 
   final:
     enabled: true             # Enable final scene post-processing.
-    xy_only: false            # XYZ (default for manipulands - allow vertical).
+    # Final post-processing resolves residual XY overlaps after stage-specific
+    # placement has established support heights.  Letting this pass move
+    # manipulands along Z can push a supported object through its support and
+    # make the forward simulation remove it as fallen.
+    xy_only: true             # Preserve established support heights.
     fix_rotation: true        # Fix rotations during projection.
     influence_distance: 0.02
     solver_name: "snopt"

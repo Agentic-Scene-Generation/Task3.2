@@ -7,6 +7,7 @@ import types
 
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
@@ -31,6 +32,10 @@ from scenesmith.scene_expert.memory.writer import MemoryWriter
 from scenesmith.scene_expert.context_bundle import (
     build_llm_call_debug_record,
     build_stage_context_bundle,
+)
+from scenesmith.scene_expert.hooks import (
+    SceneExpertHookRunner,
+    _reconcile_task_spec_stage_ownership,
 )
 from scenesmith.scene_expert.global_planner import (
     GlobalPlanner,
@@ -417,6 +422,68 @@ class SceneExpertMemoryTest(unittest.TestCase):
             self.assertTrue(report.pass_stage)
             self.assertEqual([], report.issues)
 
+    def test_contract_stage_ownership_reassigns_monitor_before_verification(
+        self,
+    ) -> None:
+        task_spec = SceneTaskSpec(
+            room_type="study",
+            style="standard",
+            required_large_objects=["desk", "computer monitor", "trash can"],
+            required_small_objects=["desk lamp", "notebook", "pen holder"],
+        )
+        contract = {
+            "constraints": [
+                {
+                    "stage": "furniture",
+                    "strength": "hard",
+                    "subjects": {"category": "desk", "count": 1},
+                    "targets": {"category": "back_wall", "count": 1},
+                },
+                {
+                    "stage": "manipuland",
+                    "strength": "hard",
+                    "subjects": {"category": "computer_monitor", "count": 1},
+                    "targets": {"category": "desk", "count": 1},
+                },
+                {
+                    "stage": "manipuland",
+                    "strength": "hard",
+                    "subjects": {"category": "trash_can", "count": 1},
+                    "targets": {"category": "desk", "count": 1},
+                },
+            ]
+        }
+
+        reconciled = _reconcile_task_spec_stage_ownership(task_spec, contract)
+
+        self.assertEqual(["desk"], reconciled.required_large_objects)
+        self.assertCountEqual(
+            ["computer monitor", "trash can", "desk lamp", "notebook", "pen holder"],
+            reconciled.required_small_objects,
+        )
+        report = StageVerifier(pass_threshold=0.6).verify(
+            stage="furniture",
+            stage_output_dir="/path/that/does/not/exist",
+            task_spec=reconciled,
+            scene_state_info={"object_names": ["desk_0"]},
+        )
+        self.assertEqual([], report.issues)
+        manipuland_report = StageVerifier(pass_threshold=0.6).verify(
+            stage="manipuland",
+            stage_output_dir="/path/that/does/not/exist",
+            task_spec=reconciled,
+            scene_state_info={
+                "object_names": [
+                    "computer_monitor_0",
+                    "trash_can_0",
+                    "desk_lamp_0",
+                    "notebook_0",
+                    "pen_holder_0",
+                ]
+            },
+        )
+        self.assertEqual([], manipuland_report.issues)
+
     def test_manipuland_verifier_normalizes_names_and_enforces_counts(self) -> None:
         task_spec = SceneTaskSpec(
             room_type="bedroom",
@@ -480,6 +547,38 @@ class SceneExpertMemoryTest(unittest.TestCase):
             scene_state_info={"object_names": ["vase_flowers_0"]},
         )
 
+        self.assertTrue(report.pass_stage)
+        self.assertEqual([], report.issues)
+
+    def test_live_composite_metadata_exposes_component_names_to_verifier(self) -> None:
+        scene = SimpleNamespace(
+            objects={
+                "filled_container_0": SimpleNamespace(
+                    name="filled_vase",
+                    metadata={
+                        "composite_type": "filled_container",
+                        "container_asset": {"name": "vase"},
+                        "fill_assets": [{"name": "flowers"}],
+                    },
+                )
+            }
+        )
+        runner = object.__new__(SceneExpertHookRunner)
+
+        scene_state_info = runner._extract_scene_state_info_from_scene(scene)
+        report = StageVerifier(pass_threshold=0.6).verify(
+            stage="manipuland",
+            stage_output_dir="/path/that/does/not/exist",
+            task_spec=SceneTaskSpec(
+                room_type="dining room",
+                style="standard",
+                required_small_objects=["vase", "flowers"],
+            ),
+            scene_state_info=scene_state_info,
+        )
+
+        self.assertIn("vase", scene_state_info["object_names"])
+        self.assertIn("flowers", scene_state_info["object_names"])
         self.assertTrue(report.pass_stage)
         self.assertEqual([], report.issues)
 

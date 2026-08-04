@@ -258,8 +258,10 @@ def _is_lamp_subject(subject: dict[str, Any]) -> bool:
         return False
     if _is_floor_lamp_subject(subject) or _is_mounted_lamp_subject(subject):
         return False
-    return object_category(subject) in LAMPS or _text_has_any(
-        subject, ("desk_lamp", "table_lamp", "bedside_lamp")
+    return (
+        object_category(subject) in LAMPS
+        or _semantic_name_has_family(subject, "lamp")
+        or _token_text_has_any(subject, ("desk_lamp", "table_lamp", "bedside_lamp"))
     )
 
 
