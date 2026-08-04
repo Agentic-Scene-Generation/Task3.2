@@ -329,7 +329,11 @@ _OBJECT_LABEL_ALIASES = {
 
 def _normalize_object_label(label: str) -> str:
     """Normalize human labels and scene identifiers to a comparable phrase."""
-    words = re.sub(r"[^a-z0-9]+", " ", str(label).lower()).split()
+    label_text = str(label).lower()
+    # Keep possessive labels such as "teacher's desk" comparable to generated
+    # identifiers such as "teacher_desk_0".
+    label_text = re.sub(r"\b([a-z0-9]+)'s\b", r"\1", label_text)
+    words = re.sub(r"[^a-z0-9]+", " ", label_text).split()
     while words and words[-1].isdigit():
         words.pop()
     if not words:

@@ -596,6 +596,21 @@ class SceneExpertMemoryTest(unittest.TestCase):
 
         self.assertEqual([], report.issues)
 
+    def test_verifier_normalizes_english_possessive_labels(self) -> None:
+        report = StageVerifier(pass_threshold=0.6).verify(
+            stage="furniture",
+            stage_output_dir="/path/that/does/not/exist",
+            task_spec=SceneTaskSpec(
+                room_type="classroom",
+                style="standard",
+                required_large_objects=["teacher's desk"],
+            ),
+            scene_state_info={"object_names": ["teacher_desk_0"]},
+        )
+
+        self.assertTrue(report.pass_stage)
+        self.assertEqual([], report.issues)
+
     def test_layout_plausibility_maps_to_scene_expert_category(self) -> None:
         mapped = _map_scenesmith_scores(
             {
