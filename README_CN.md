@@ -1616,3 +1616,136 @@ bash scripts/run_experiment.sh ablation_4_qwen3_harness_memory
 SCENEEXPERT_ENV_FILE=/share/configs/sceneexpert_qwen36.env \
   bash scripts/run_experiment.sh ablation_4_qwen3_harness_memory
 ```
+
+## 13. Furniture 使用本地 Qwen-Image-Edit
+
+该功能只替换 furniture reference context image 的编辑后端，不影响资产图片、材质图片或
+manipuland。Qwen-Image-Edit 在独立 Python 3.10 环境中作为单卡常驻 HTTP 服务运行，模型
+只加载一次。
+
+### 13.1 安装服务环境
+
+当前机器已有环境：
+
+```bash
+/mnt/afs/visitor33/miniconda3/envs/qwen-image/bin/python -m pip install \
+  "python-multipart>=0.0.9,<1"
+```
+
+完整依赖版本记录在：
+
+```text
+scripts/requirements-qwen-image-edit-server.txt
+```
+
+模型默认从以下本地目录加载，不会在服务启动时联网下载：
+
+```text
+/mnt/afs/visitor33/Task3.2/models/Qwen-Image-Edit
+```
+
+### 13.2 启动常驻服务
+
+以下命令只启动图像服务，不会修改、启动或停止 llama.cpp：
+
+```bash
+cd /mnt/afs/visitor33/Task3.2
+
+QWEN_IMAGE_EDIT_CUDA_VISIBLE_DEVICES=1 \
+  bash scripts/start_qwen_image_edit_server.sh --background
+```
+
+首次启动需要把约 54GB 权重迁移到 GPU，可能需要数分钟。启动脚本会等待 `/ready`，后续
+room 直接复用同一个进程和 pipeline。
+
+```bash
+bash scripts/start_qwen_image_edit_server.sh --status
+curl -fsS http://127.0.0.1:18020/health
+curl -fsS http://127.0.0.1:18020/ready
+curl -fsS http://127.0.0.1:18020/v1/models
+bash scripts/start_qwen_image_edit_server.sh --stop
+```
+
+日志和 PID 默认保存在：
+
+```text
+logs/qwen_image_edit_server.log
+logs/qwen_image_edit_server.pid
+```
+
+### 13.3 Furniture 配置
+
+开关关闭时完全保持原行为，不渲染 reference context，也不会解析或访问本地服务：
+
+```yaml
+furniture_agent:
+  context_image_generation:
+    enabled: false
+```
+
+启用旧的 OpenAI/Gemini 路径：
+
+```yaml
+furniture_agent:
+  context_image_generation:
+    enabled: true
+    backend: inherit
+```
+
+启用本地 Qwen：
+
+```yaml
+furniture_agent:
+  context_image_generation:
+    enabled: true
+    backend: qwen_local
+```
+
+等价的 Hydra overrides：
+
+```bash
+furniture_agent.context_image_generation.enabled=true \
+furniture_agent.context_image_generation.backend=qwen_local
+```
+
+`qwen_local.size` 固定为 `auto`。服务读取
+`empty_room_context/0_top.png` 的实际像素宽高，并把它们显式传给 Qwen pipeline；服务端
+和 client 都会校验 `context_edited.png` 与 reference render 尺寸完全一致，不会静默
+resize、crop 或 pad。
+
+默认使用官方参数：
+
+```text
+num_inference_steps=50
+true_cfg_scale=4.0
+negative_prompt=" "
+seed=0
+```
+
+这些参数通过本地 OpenAI-compatible request 的扩展字段传入，不会触发模型重载。
+
+### 13.4 输出与降级
+
+成功时产生：
+
+```text
+empty_room_context/0_top.png
+empty_room_context/context_edited.png
+empty_room_context/context_edited.metadata.json
+```
+
+metadata 包含实际尺寸、steps、seed、队列等待、推理耗时和显存峰值，不包含图片 base64、
+API key 或完整 prompt。
+
+服务未启动、超时、OOM 或返回非法图片时，现有 furniture fail-open 行为会记录 warning，
+并继续执行后续 furniture 流程。立即回滚可使用：
+
+```text
+furniture_agent.context_image_generation.enabled=false
+```
+
+或者保留 context image 但恢复旧 provider：
+
+```text
+furniture_agent.context_image_generation.backend=inherit
+```
