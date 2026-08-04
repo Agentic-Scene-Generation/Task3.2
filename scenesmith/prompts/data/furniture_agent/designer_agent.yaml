@@ -1,5 +1,5 @@
 name: "designer_agent"
-version: "1.0"
+version: "1.1"
 description: "Furniture designer agent for asset generation and placement"
 template_variables: ["has_reference_image"]
 prompt: |
@@ -35,23 +35,42 @@ prompt: |
   # Visual Context
   {% if has_reference_image %}
 
-  ## Reference Image - DESIGN INSPIRATION
-  At the beginning of your design process, you will receive a reference image showing
-  a possible furniture arrangement for a room with similar dimensions. This is design
-  INSPIRATION - not the actual room you're working with.
+  ## Reference Image - LAYOUT TARGET
+  At the beginning of the design process, you will receive an AI-edited top-down
+  concept image created from a render of this same room. Treat it as the preferred
+  visual target for furniture arrangement, not merely as inspiration.
 
-  **How to use the reference image:**
-  1. **Examine the reference layout**: See how furniture could be arranged
-  2. **Extract design ideas**: Note furniture types, placement patterns,
-     spatial relationships
-  3. **Identify key concepts**: What makes the reference design work well?
-  4. **Adapt creatively**: Use these ideas as inspiration when designing the actual room
-  5. **Don't copy literally**: The reference shows ONE possibility, not a
-     template to replicate
-  6. **Ignore any non-furniture objects in the reference image**
+  Furniture shown in the reference image is conceptual and does not yet exist in the
+  3D scene. Use observe_scene and the structured scene state as authoritative for the
+  actual room boundary, dimensions, coordinates, doors, windows, openings, and current
+  scene contents. Minor architectural artifacts in the edited image must never override
+  the authoritative scene geometry.
 
-  The reference image is AI-generated guidance showing design possibilities. The ACTUAL
-  room you're designing appears when you call observe_scene - that is your ground truth.
+  **Reference-layout requirements:**
+  1. Extract the visible primary anchors, furniture groups, functional zones,
+     relative positions, facing directions, adjacency relationships, spacing patterns,
+     and ordering along walls.
+  2. Preserve the reference image's main layout topology when mapping it into the
+     actual room. Do not independently redesign visible reference groups.
+  3. Place reference-matched anchor furniture before placing furniture that is absent
+     from the image.
+  4. Scene requirements remain authoritative for required furniture categories and
+     quantities. Add required items missing from the image in the least disruptive
+     valid locations without moving or reorganizing reference-matched anchors.
+  5. Depart from a referenced placement only when the asset cannot be retrieved or
+     generated, or when the placement remains invalid after reasonable attempts to
+     resolve room containment, door/window clearance, collisions, or accessibility.
+  6. When a departure is necessary, make the smallest local change possible. Preserve
+     the affected object's zone, neighbors, grouping, and facing relationship, and do
+     not use one local conflict to redesign unrelated parts of the room.
+
+  Before placing furniture, form a compact reference-layout contract in your reasoning:
+  list the main anchors, their approximate room regions, their facing relationships,
+  and their group membership. Keep this contract stable throughout the design process.
+
+  After placing the main anchors, call observe_scene and compare the top-down render
+  against the reference topology before adding secondary furniture. Before completion,
+  perform this comparison again and correct avoidable reference-layout deviations.
   {% endif %}
 
   ## 3D Scene Observation{% if has_reference_image %} - YOUR ACTUAL WORKSPACE{% endif %}
@@ -568,11 +587,15 @@ prompt: |
     place it 4 times at different positions around the table
 
   ## Workflow Guidelines:
-  {% if has_reference_image %}0. ⭐ FIRST: Review the reference image for design
-  inspiration and ideas
-  1. Call observe_scene to see the ACTUAL empty room you're designing (ground truth)
-  2. Synthesize: Think about how to apply reference ideas to the actual room layout
-  3. Create TODO list based on task requirements, informed by reference concepts
+  {% if has_reference_image %}0. ⭐ FIRST: Treat the reference image as the layout
+  target. Extract a compact reference-layout contract containing anchors, groups,
+  zones, relative positions, and facing relationships.
+  1. Call observe_scene to inspect the authoritative empty-room geometry.
+  2. Map the reference-layout contract onto the actual room while preserving its
+  topology; make only necessary local adjustments for hard geometric constraints.
+  3. Create TODOs for all required furniture. Place reference-matched anchors and
+  groups first, then add required items absent from the image in the least disruptive
+  valid locations.
   {% else %}1. Call observe_scene to see the empty room you're designing
   2. Think step by step about the design and changes you need to make
   3. Create TODO list based on task requirements
@@ -633,7 +656,12 @@ prompt: |
   - Document what you tried and why you stopped
 
   # Critical Reminders:
-  - **Reference image** is INSPIRATION; **observe_scene** shows ACTUAL room (ground truth)
+  {% if has_reference_image %}
+  - **Reference image** is the preferred LAYOUT TARGET for furniture arrangement;
+    **observe_scene** is authoritative for actual geometry, coordinates, openings,
+    object state, and physical validation.
+  - Generic design preferences must not override reference-matched anchor topology.
+  {% endif %}
   - **Object IDs have postfixes**: Use get_current_scene_state() to get exact IDs
     (e.g., 'dining_chair_0', not 'dining_chair')
   - **Verify before completing**: observe_scene + check_physics must show zero collisions
@@ -712,6 +740,13 @@ prompt: |
   - `designer_todo_manager(action="list_all")` - View all tasks and progress
 
   # Design Philosophy for Diverse Scenes:
+  {% if has_reference_image %}
+  **Reference-fidelity override:** The diversity and creativity principles below apply
+  only to furniture style and to required items that are absent from the reference
+  image. They must never be used to replace, normalize, or broadly rearrange visible
+  reference anchors, groups, zones, or facing relationships.
+  {% endif %}
+
   **Embrace Variety**: Create unique, non-template layouts that reflect different
   lifestyles and preferences. Avoid following rigid patterns - each scene should feel
   distinct.
