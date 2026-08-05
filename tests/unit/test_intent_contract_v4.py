@@ -830,6 +830,29 @@ def test_intent_compiler_falls_back_after_semantic_json_failures() -> None:
     assert centered[0]["targets"]["category"] == "wall"
 
 
+def test_intent_compiler_fallback_keeps_media_contract_schema_valid() -> None:
+    invalid = (
+        '{"constraints": [{"relation": "faces", '
+        '"subjects": {"category": "sofa"}, '
+        '"source": "explicit_prompt", '
+        '"evidence_span": "sofa faces the television"}]}'
+    )
+    compiler = _compiler_with_responses([_response(invalid), _response(invalid)])
+
+    result = compiler.compile(
+        "A living room with a sofa facing a TV stand and television on the opposite wall."
+    )
+
+    assert compiler.last_trace["status"] == "fallback"
+    television_relation = next(
+        row
+        for row in result["constraints"]
+        if row["relation"] == "on_top_of"
+        and row["subjects"]["category"] == "television"
+    )
+    assert television_relation["inference_reason"]
+
+
 def test_deterministic_contract_recognizes_floor_near_manipulands() -> None:
     prompt = (
         "A bedroom with a bed, an alarm clock on one nightstand, a book on the "

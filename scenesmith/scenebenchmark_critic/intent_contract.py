@@ -2026,6 +2026,10 @@ def _room_ontology_constraints(
                 source="model_inferred",
                 confidence=0.7,
                 evidence_span="possible freestanding television and media-support pairing",
+                inference_reason=(
+                    "The prompt names a television with a media support and does "
+                    "not explicitly require wall mounting."
+                ),
             )
         )
     return constraints
