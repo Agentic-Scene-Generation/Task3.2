@@ -851,6 +851,26 @@ class FurnitureSafetyControllerTest(unittest.TestCase):
         self.assertFalse(allowed)
         self.assertIn("already used 2 move", message)
 
+    def test_design_change_allows_a_bounded_coordinated_group(self) -> None:
+        controller = FurnitureSafetyController(
+            {
+                "enabled": True,
+                "max_moves_design_change": 16,
+            }
+        )
+        controller.begin_designer_call("change")
+
+        for index in range(13):
+            self.assertTrue(controller.record_move(f"furniture_{index}")[0])
+
+        for index in range(3):
+            self.assertTrue(controller.record_move(f"reserve_{index}")[0])
+
+        allowed, message = controller.record_move("over_budget")
+
+        self.assertFalse(allowed)
+        self.assertIn("already used 16 move", message)
+
     def test_per_object_move_budget_is_enforced(self) -> None:
         controller = FurnitureSafetyController(
             {
