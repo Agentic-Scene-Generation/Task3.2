@@ -14,6 +14,7 @@ from scenesmith.agent_utils.room import ObjectType, UniqueID
 from scenesmith.agent_utils.base_stateful_agent import Runner
 from scenesmith.agent_utils.scene_analyzer import FurnitureSelection
 from scenesmith.manipuland_agents.cross_stage_inventory import (
+    contract_bound_support_object_ids,
     existing_floor_covering_ids,
     redundant_floor_covering_request_indices,
 )
@@ -46,6 +47,40 @@ def test_dining_prompt_requires_table_and_sideboard_targets() -> None:
     assert [(item.category, item.target_count) for item in obligations] == [
         ("dining_table", 1),
         ("sideboard", 1),
+    ]
+
+
+def test_hard_support_contract_exposes_existing_cross_stage_object() -> None:
+    tv_stand = SimpleNamespace(
+        object_id=UniqueID("tv_stand_0"),
+        name="tv_stand",
+        description="Low media console TV stand",
+        object_type=ObjectType.FURNITURE,
+        metadata={"semantic_name": "tv_stand"},
+    )
+    television = SimpleNamespace(
+        object_id=UniqueID("television_0"),
+        name="television",
+        description="Slim flat-screen television display",
+        object_type=ObjectType.FURNITURE,
+        metadata={"semantic_name": "television"},
+    )
+    scene = SimpleNamespace(
+        objects={tv_stand.object_id: tv_stand, television.object_id: television},
+        scenebenchmark_intent_contract={
+            "constraints": [
+                {
+                    "relation": "on_top_of",
+                    "strength": "hard",
+                    "subjects": {"category": "television", "count": 1},
+                    "targets": {"category": "tv_stand", "count": 1},
+                }
+            ]
+        },
+    )
+
+    assert contract_bound_support_object_ids(scene, tv_stand.object_id) == [
+        "television_0"
     ]
 
 

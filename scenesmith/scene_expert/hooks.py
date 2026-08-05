@@ -407,6 +407,13 @@ _INVENTORY_CATEGORY_ALIASES = {
     "computer_monitor": "monitor",
     "computer_display": "monitor",
     "display_monitor": "monitor",
+    "chalkboard": "instructional_surface",
+    "blackboard": "instructional_surface",
+    "whiteboard": "instructional_surface",
+    "projection_screen": "instructional_surface",
+    "projector_screen": "instructional_surface",
+    "teaching_screen": "instructional_surface",
+    "presentation_screen": "instructional_surface",
     "wastebasket": "trash_can",
 }
 _GENERIC_INVENTORY_CATEGORIES = frozenset({"chair", "desk", "table"})
@@ -1500,16 +1507,20 @@ class SceneExpertHookRunner:
         """Extract object names from the live RoomScene for rule-based checks."""
         try:
             names: list[str] = []
+            records: list[dict[str, Any]] = []
 
             def append_name(value: Any) -> None:
                 if isinstance(value, str) and value.strip():
                     names.append(value.strip())
 
-            def append_component_names(value: Any) -> None:
+            def append_component_names(value: Any, aliases: list[str]) -> None:
                 """Collect semantic names from supported composite metadata."""
                 if not isinstance(value, dict):
                     return
-                append_name(value.get("name"))
+                component_name = value.get("name")
+                append_name(component_name)
+                if isinstance(component_name, str) and component_name.strip():
+                    aliases.append(component_name.strip())
                 for key in (
                     "container_asset",
                     "fill_assets",
@@ -1519,18 +1530,32 @@ class SceneExpertHookRunner:
                 ):
                     nested = value.get(key)
                     if isinstance(nested, dict):
-                        append_component_names(nested)
+                        append_component_names(nested, aliases)
                     elif isinstance(nested, list):
                         for item in nested:
-                            append_component_names(item)
+                            append_component_names(item, aliases)
 
             for obj in scene.objects.values():
-                append_name(getattr(obj, "name", None))
+                name = getattr(obj, "name", None)
+                append_name(name)
+                description = getattr(obj, "description", None)
+                aliases: list[str] = []
                 metadata = getattr(obj, "metadata", None)
-                if not isinstance(metadata, dict) or not metadata.get("composite_type"):
-                    continue
-                append_component_names(metadata)
-            return {"object_names": names}
+                if isinstance(metadata, dict) and metadata.get("composite_type"):
+                    append_component_names(metadata, aliases)
+                records.append(
+                    {
+                        "name": name if isinstance(name, str) else "",
+                        "description": (
+                            description if isinstance(description, str) else ""
+                        ),
+                        "aliases": aliases,
+                    }
+                )
+            return {
+                "object_names": names,
+                "object_records": records,
+            }
         except Exception:
             return {"object_names": []}
 

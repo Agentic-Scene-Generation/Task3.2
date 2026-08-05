@@ -44,6 +44,7 @@ from scenesmith.agent_utils.room import (
     serialize_rigid_transform,
 )
 from scenesmith.manipuland_agents.cross_stage_inventory import (
+    contract_bound_support_object_ids,
     existing_floor_covering_ids,
     redundant_floor_covering_request_indices,
 )
@@ -2448,11 +2449,31 @@ class ManipulandTools:
             surface_infos.append(surface_info)
 
         # Build structured response with manipulands grouped by surface.
+        contract_bound_objects = []
+        for object_id in contract_bound_support_object_ids(
+            self.scene, self.current_furniture_id
+        ):
+            obj = self.scene.get_object(UniqueID(object_id))
+            if obj is None:
+                continue
+            contract_bound_objects.append(
+                {
+                    "object_id": object_id,
+                    "description": obj.description,
+                    "object_type": obj.object_type.value,
+                    "relationship": (
+                        "hard contract object already realized on the current "
+                        "furniture; preserve it and do not generate a duplicate"
+                    ),
+                }
+            )
+
         result = {
             "current_furniture": asdict(furniture_info),
             "surfaces": [asdict(s) for s in surface_infos],
             "num_surfaces": len(surface_infos),
             "total_manipuland_count": total_manipuland_count,
+            "contract_bound_objects": contract_bound_objects,
         }
 
         return json.dumps(result, indent=2)

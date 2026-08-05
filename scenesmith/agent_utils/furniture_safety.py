@@ -93,6 +93,15 @@ DEFAULT_ALIASES = {
         "tv console",
         "media console",
     ],
+    "television": [
+        "television",
+        "televisions",
+        "tv",
+        "tvs",
+        "flat-screen television",
+        "flat-screen tv",
+        "display",
+    ],
     "sideboard": ["sideboard", "sideboards", "buffet cabinet"],
 }
 

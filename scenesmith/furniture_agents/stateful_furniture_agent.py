@@ -128,6 +128,7 @@ REPAIR_ASSET_SPECS: dict[str, tuple[str, list[float]]] = {
     "armchair": ("Compact upholstered armchair", [0.75, 0.75, 0.95]),
     "floor_lamp": ("Slim standing floor lamp", [0.40, 0.40, 1.60]),
     "tv_stand": ("Low media console TV stand", [1.60, 0.45, 0.65]),
+    "television": ("Slim flat-screen television display", [1.10, 0.18, 0.65]),
     "sideboard": ("Compact dining room sideboard", [1.40, 0.45, 0.80]),
 }
 
@@ -765,6 +766,16 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                     actions.append(
                         "moved generic furniture away from room walls to the deterministic margin"
                     )
+                # A supported object is expected to overlap its support in XY,
+                # so horizontal collision separation would destroy the prompt
+                # relation.  Let the existing contract-aware repair first move
+                # it to the support's top surface; ordinary shallow collisions
+                # remain eligible for the generic fallback below.
+                actions.extend(
+                    self._repair_prompt_contract_relations(
+                        "after physical collision repair"
+                    )
+                )
                 actions.extend(self._repair_shallow_furniture_collisions())
             removed_excess = self._remove_excess_required_furniture(required_counts)
             if removed_excess:

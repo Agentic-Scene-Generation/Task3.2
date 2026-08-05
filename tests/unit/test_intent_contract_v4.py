@@ -555,6 +555,40 @@ def test_existential_target_member_does_not_fail_contract_binding() -> None:
     )
 
 
+def test_singular_target_wording_is_normalized_to_existential_binding() -> None:
+    contract = validate_intent_contract(
+        {
+            "schema_version": INTENT_CONTRACT_SCHEMA_VERSION,
+            "prompt": "a floor lamp beside one armchair",
+            "constraints": [
+                {
+                    "relation": "near",
+                    "subjects": {"category": "floor_lamp", "count": 1},
+                    "targets": {"category": "armchair", "count": 1},
+                    "source": "explicit_prompt",
+                    "evidence_span": "a floor lamp beside one armchair",
+                }
+            ],
+        }
+    )
+
+    assert contract["constraints"][0]["targets"]["quantifier"] == "minimum"
+    objects = [
+        _record("floor_lamp_0", "floor_lamp", (0.0, 0.0), (0.4, 0.4, 1.6)),
+        _record("armchair_0", "armchair", (0.5, 0.0), (0.7, 0.7, 0.9)),
+        _record("armchair_1", "armchair", (2.5, 0.0), (0.7, 0.7, 0.9)),
+    ]
+
+    assert (
+        _binding_state_result(
+            {"stage": "final", "intent_contract": contract},
+            contract["constraints"][0],
+            objects,
+        )
+        is None
+    )
+
+
 def test_collective_subject_does_not_fail_contract_binding() -> None:
     contract = validate_intent_contract(
         {

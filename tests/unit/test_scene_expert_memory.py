@@ -484,6 +484,39 @@ class SceneExpertMemoryTest(unittest.TestCase):
         )
         self.assertEqual([], manipuland_report.issues)
 
+    def test_contract_stage_ownership_reassigns_wall_alias_before_verification(
+        self,
+    ) -> None:
+        task_spec = SceneTaskSpec(
+            room_type="classroom",
+            style="standard",
+            required_large_objects=["chalkboard", "teacher's desk"],
+        )
+        reconciled = _reconcile_task_spec_stage_ownership(
+            task_spec,
+            {
+                "constraints": [
+                    {
+                        "stage": "wall_mounted",
+                        "strength": "hard",
+                        "subjects": {"category": "chalkboard", "count": 1},
+                        "targets": {"category": "wall", "count": 1},
+                    }
+                ]
+            },
+        )
+
+        self.assertEqual(["teacher's desk"], reconciled.required_large_objects)
+        self.assertEqual(["chalkboard"], reconciled.required_wall_objects)
+        report = StageVerifier(pass_threshold=0.6).verify(
+            stage="furniture",
+            stage_output_dir="/path/that/does/not/exist",
+            task_spec=reconciled,
+            scene_state_info={"object_names": ["teacher_desk_0"]},
+        )
+        self.assertTrue(report.pass_stage)
+        self.assertEqual([], report.issues)
+
     def test_manipuland_verifier_normalizes_names_and_enforces_counts(self) -> None:
         task_spec = SceneTaskSpec(
             room_type="bedroom",
@@ -579,6 +612,36 @@ class SceneExpertMemoryTest(unittest.TestCase):
 
         self.assertIn("vase", scene_state_info["object_names"])
         self.assertIn("flowers", scene_state_info["object_names"])
+        self.assertTrue(report.pass_stage)
+        self.assertEqual([], report.issues)
+
+    def test_live_manipuland_description_exposes_compound_component(self) -> None:
+        scene = SimpleNamespace(
+            objects={
+                "vase_0": SimpleNamespace(
+                    name="vase",
+                    description=(
+                        "Elegant ceramic vase with a bouquet of fresh flowers"
+                    ),
+                    object_type="manipuland",
+                    metadata={},
+                )
+            }
+        )
+        runner = object.__new__(SceneExpertHookRunner)
+
+        scene_state_info = runner._extract_scene_state_info_from_scene(scene)
+        report = StageVerifier(pass_threshold=0.6).verify(
+            stage="manipuland",
+            stage_output_dir="/path/that/does/not/exist",
+            task_spec=SceneTaskSpec(
+                room_type="dining room",
+                style="standard",
+                required_small_objects=["vase", "flowers"],
+            ),
+            scene_state_info=scene_state_info,
+        )
+
         self.assertTrue(report.pass_stage)
         self.assertEqual([], report.issues)
 

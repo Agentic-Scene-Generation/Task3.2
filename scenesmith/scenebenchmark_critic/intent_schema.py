@@ -249,6 +249,20 @@ class IntentRelation(BaseModel):
         if self.stage and self.stage not in STAGE_ORDER:
             raise ValueError(f"Unknown intent contract stage: {self.stage!r}")
 
+        # A singular target can still be existential when the prompt says
+        # "one of two chairs" or "beside one armchair". Keeping the default
+        # ``all`` quantifier here makes a valid relation fail as soon as the
+        # room contains multiple candidates, even though any one candidate
+        # can satisfy the relation. Subjects retain their declared
+        # cardinality; this normalization only applies to the target endpoint.
+        if (
+            self.targets is not None
+            and self.targets.count == 1
+            and self.targets.quantifier == "all"
+            and _evidence_names_one_target(self.evidence_span, self.targets.category)
+        ):
+            self.targets.quantifier = "minimum"
+
         spec = relation_spec(self.relation)
         if self.relation == "edge_distribution":
             if (
@@ -293,6 +307,22 @@ class IntentRelation(BaseModel):
                     f"got {target_arity}"
                 )
         return self
+
+
+def _evidence_names_one_target(evidence: str, category: str) -> bool:
+    """Return whether evidence selects one member of a target category."""
+    normalized_category = " ".join(str(category or "").replace("_", " ").split())
+    if not evidence or not normalized_category:
+        return False
+    noun = normalized_category.rsplit(" ", 1)[-1]
+    return (
+        re.search(
+            rf"\b(?:one|any|either|another|other)\s+"
+            rf"(?:[a-z0-9_-]+\s+){{0,3}}{re.escape(noun)}(?:s|es)?\b",
+            evidence.lower(),
+        )
+        is not None
+    )
 
 
 class IntentContract(BaseModel):

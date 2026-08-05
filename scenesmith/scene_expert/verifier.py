@@ -285,6 +285,36 @@ def _check_required_objects(
 
     present_objects = scene_state_info.get("object_names", [])
     present_labels = [str(name) for name in present_objects]
+    present_records = scene_state_info.get("object_records", [])
+    if isinstance(present_records, list) and present_records:
+        present_entries = [
+            (
+                [
+                    (
+                        str(record.get("name"))
+                        if isinstance(record, dict) and record.get("name")
+                        else ""
+                    ),
+                    *(
+                        str(alias)
+                        for alias in (record.get("aliases") or [])
+                        if isinstance(record, dict)
+                    ),
+                ],
+                (
+                    str(record.get("description") or "")
+                    if isinstance(record, dict)
+                    else ""
+                ),
+            )
+            for record in present_records
+        ]
+    else:
+        descriptions = scene_state_info.get("object_descriptions", [])
+        present_entries = [
+            ([present], str(descriptions[index]) if index < len(descriptions) else "")
+            for index, present in enumerate(present_labels)
+        ]
     consumed_by_required_label: dict[str, set[int]] = {}
 
     for required in stage_required:
@@ -293,9 +323,19 @@ def _check_required_objects(
         match_index = next(
             (
                 index
-                for index, present in enumerate(present_labels)
+                for index, (present_aliases, description) in enumerate(present_entries)
                 if index not in consumed_indices
-                and _object_labels_match(required, present)
+                and (
+                    any(
+                        _object_labels_match(required, present)
+                        for present in present_aliases
+                    )
+                    or (
+                        stage == "manipuland"
+                        and description
+                        and _description_contains_object_label(required, description)
+                    )
+                )
             ),
             None,
         )
@@ -357,6 +397,29 @@ def _object_labels_match(required: str, present: str) -> bool:
     return (
         f" {required_label} " in f" {present_label} "
         or f" {present_label} " in f" {required_label} "
+    )
+
+
+def _description_contains_object_label(required: str, description: str) -> bool:
+    """Match a required component mentioned in a manipuland asset description.
+
+    Some asset libraries return one mesh for a compound item such as a vase
+    with flowers, without recording composite metadata. Token-wise
+    normalization lets that description satisfy the component requirement
+    while the caller still consumes only one scene object instance.
+    """
+    required_tokens = _normalize_object_label(required).split()
+    if not required_tokens:
+        return False
+    description_tokens = [
+        _normalize_object_label(token)
+        for token in re.sub(r"[^a-z0-9]+", " ", str(description).lower()).split()
+    ]
+    description_tokens = [token for token in description_tokens if token]
+    width = len(required_tokens)
+    return any(
+        description_tokens[index : index + width] == required_tokens
+        for index in range(len(description_tokens) - width + 1)
     )
 
 
