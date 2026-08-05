@@ -1811,15 +1811,134 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         wall = plan.bed_head_wall if plan and plan.bed_head_wall else "north"
         yaw = self._yaw_for_head_wall(wall)
         current = np.asarray(bed.transform.translation(), dtype=float)
-        transform = self._grounded_transform(
+        anchored = self._grounded_transform(
             bed, x=float(current[0]), y=float(current[1]), yaw_deg=yaw
         )
-        transform = self._snap_transform_to_wall(bed, transform, wall)
-        transform = self._fit_transform_inside_room(bed, transform)
+        anchored = self._snap_transform_to_wall(bed, anchored, wall)
+        anchored = self._fit_transform_inside_room(bed, anchored)
+        transform = self._best_window_safe_bed_anchor_transform(
+            bed=bed,
+            transform=anchored,
+            wall=wall,
+        )
         if self._transform_close(bed.transform, transform):
             return False
         self.scene.move_object(bed.object_id, transform)
         return True
+
+    def _best_window_safe_bed_anchor_transform(
+        self,
+        *,
+        bed: SceneObject,
+        transform: RigidTransform,
+        wall: str,
+    ) -> RigidTransform:
+        """Shift a wall-anchored bed sideways when its headboard blocks an opening."""
+        bounds = self._bounds_for_transform(bed, transform)
+        room_bounds = self._room_bounds_xy()
+        if bounds is None or room_bounds is None:
+            return transform
+        if not self._bed_anchor_overlaps_opening(bounds, wall):
+            return transform
+
+        tangent_axis = 0 if wall in {"north", "south"} else 1
+        lower, upper = bounds
+        current_center = float((lower[tangent_axis] + upper[tangent_axis]) / 2.0)
+        half_span = float((upper[tangent_axis] - lower[tangent_axis]) / 2.0)
+        room_min = float(room_bounds[tangent_axis]) + 0.03 + half_span
+        room_max = float(room_bounds[tangent_axis + 2]) - 0.03 - half_span
+        if room_min > room_max:
+            return transform
+
+        candidates = [min(max(current_center, room_min), room_max), 0.0]
+        for opening in list(getattr(self.scene.room_geometry, "openings", []) or []):
+            opening_wall = str(
+                getattr(
+                    getattr(opening, "wall_direction", ""),
+                    "value",
+                    getattr(opening, "wall_direction", ""),
+                )
+            ).lower()
+            opening_type = str(
+                getattr(
+                    getattr(opening, "opening_type", ""),
+                    "value",
+                    getattr(opening, "opening_type", ""),
+                )
+            ).lower()
+            if opening_wall != wall or opening_type not in {"window", "door", "open"}:
+                continue
+            center = getattr(opening, "center_world", None)
+            width = getattr(opening, "width", None)
+            try:
+                opening_center = float(center[tangent_axis])
+                opening_half_span = float(width) / 2.0
+            except (IndexError, TypeError, ValueError):
+                continue
+            clearance = half_span + opening_half_span + 0.04
+            candidates.extend((opening_center - clearance, opening_center + clearance))
+
+        best: tuple[float, RigidTransform] | None = None
+        for tangent_center in candidates:
+            tangent_center = min(max(float(tangent_center), room_min), room_max)
+            translation = np.asarray(transform.translation(), dtype=float).copy()
+            translation[tangent_axis] += tangent_center - current_center
+            candidate = RigidTransform(R=transform.rotation(), p=translation)
+            candidate = self._fit_transform_inside_room(bed, candidate)
+            candidate_bounds = self._bounds_for_transform(bed, candidate)
+            if candidate_bounds is None or self._bed_anchor_overlaps_opening(
+                candidate_bounds, wall
+            ):
+                continue
+            displacement = float(
+                np.linalg.norm(
+                    np.asarray(candidate.translation()[:2])
+                    - np.asarray(transform.translation()[:2])
+                )
+            )
+            if best is None or displacement < best[0]:
+                best = (displacement, candidate)
+        return best[1] if best is not None else transform
+
+    def _bed_anchor_overlaps_opening(
+        self,
+        bounds: tuple[np.ndarray, np.ndarray],
+        wall: str,
+    ) -> bool:
+        """Return whether a bed headboard span intersects an opening on its wall."""
+        if self.scene is None or self.scene.room_geometry is None:
+            return False
+        tangent_axis = 0 if wall in {"north", "south"} else 1
+        bed_min, bed_max = bounds
+        for opening in list(getattr(self.scene.room_geometry, "openings", []) or []):
+            opening_wall = str(
+                getattr(
+                    getattr(opening, "wall_direction", ""),
+                    "value",
+                    getattr(opening, "wall_direction", ""),
+                )
+            ).lower()
+            opening_type = str(
+                getattr(
+                    getattr(opening, "opening_type", ""),
+                    "value",
+                    getattr(opening, "opening_type", ""),
+                )
+            ).lower()
+            if opening_wall != wall or opening_type not in {"window", "door", "open"}:
+                continue
+            center = getattr(opening, "center_world", None)
+            width = getattr(opening, "width", None)
+            try:
+                opening_min = float(center[tangent_axis]) - float(width) / 2.0
+                opening_max = float(center[tangent_axis]) + float(width) / 2.0
+            except (IndexError, TypeError, ValueError):
+                continue
+            if max(float(bed_min[tangent_axis]), opening_min) <= min(
+                float(bed_max[tangent_axis]), opening_max
+            ):
+                return True
+        return False
 
     def _repair_bedside_nightstands(self) -> bool:
         beds = self._furniture_by_category("bed")

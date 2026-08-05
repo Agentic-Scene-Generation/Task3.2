@@ -2729,12 +2729,52 @@ _GENERIC_SELECTOR_PARENTS = {
     "reception_desk": "desk",
 }
 
+_GENERIC_SELECTOR_SUFFIX_PARENTS = frozenset(
+    {
+        "bed",
+        "chair",
+        "desk",
+        "lamp",
+        "plant",
+        "rug",
+        "sofa",
+        "table",
+    }
+)
+
+
+def _generic_selector_parent(category: str) -> str | None:
+    """Return a broad asset class only when a specialized selector has none.
+
+    Asset retrieval often preserves a descriptive modifier in a prompt selector
+    (for example, ``square_rug``) while the generated asset is labeled with its
+    stable broad class (``rug``).  The fallback is deliberately directional and
+    only runs after exact matching, so a specialized generated asset remains
+    preferred whenever it is available.
+    """
+    normalized = _normalize_selector_category(category)
+    parent = _GENERIC_SELECTOR_PARENTS.get(normalized)
+    if parent is not None:
+        return parent
+    for candidate in _GENERIC_SELECTOR_SUFFIX_PARENTS:
+        if normalized.endswith(f"_{candidate}"):
+            return candidate
+    return None
+
+
+def _matches_category_or_instance_suffix(expected: str, observed: str) -> bool:
+    """Match a semantic category or a generator-added numeric instance suffix."""
+    if observed == expected:
+        return True
+    suffix = observed.removeprefix(f"{expected}_")
+    return bool(suffix) and suffix.isdigit()
+
 
 def _selector_matches_generic_fallback(
     category: str, role: str, obj: dict[str, Any]
 ) -> bool:
     """Match a broad asset label to a specialized selector conservatively."""
-    parent = _GENERIC_SELECTOR_PARENTS.get(_normalize_selector_category(category))
+    parent = _generic_selector_parent(category)
     if parent is None:
         return False
     object_category_value = _normalize_selector_category(object_category(obj))
@@ -2772,12 +2812,14 @@ def _selector_matches_object(category: str, role: str, obj: dict[str, Any]) -> b
         and category not in CEILING_MOUNTED_CATEGORIES
     ):
         return False
-    if semantic_name == category:
+    if _matches_category_or_instance_suffix(category, semantic_name):
         return _role_matches_object(role, obj)
     base_category = _normalize_selector_category(
         obj.get("category_norm") or obj.get("category")
     )
-    if object_cat == category or base_category == category:
+    if _matches_category_or_instance_suffix(
+        category, object_cat
+    ) or _matches_category_or_instance_suffix(category, base_category):
         return _role_matches_object(role, obj)
 
     # Generated wall/ceiling decor often includes the furniture it accompanies

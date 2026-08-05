@@ -73,6 +73,83 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         StatefulFurnitureAgent is None,
         f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
     )
+    def test_bed_anchor_detects_only_openings_on_its_head_wall(self) -> None:
+        agent = object.__new__(StatefulFurnitureAgent)
+        agent.scene = SimpleNamespace(
+            room_geometry=SimpleNamespace(
+                openings=[
+                    SimpleNamespace(
+                        opening_type="window",
+                        wall_direction="north",
+                        center_world=(0.5, 2.0, 1.5),
+                        width=1.0,
+                    ),
+                    SimpleNamespace(
+                        opening_type="window",
+                        wall_direction="east",
+                        center_world=(2.0, 0.0, 1.5),
+                        width=1.0,
+                    ),
+                ]
+            )
+        )
+
+        blocked = (
+            np.array([0.1, 1.6, 0.0]),
+            np.array([0.9, 2.0, 1.0]),
+        )
+        clear = (
+            np.array([-1.8, 1.6, 0.0]),
+            np.array([-0.8, 2.0, 1.0]),
+        )
+
+        self.assertTrue(agent._bed_anchor_overlaps_opening(blocked, "north"))
+        self.assertFalse(agent._bed_anchor_overlaps_opening(clear, "north"))
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
+    def test_window_safe_bed_anchor_shifts_sideways_without_leaving_wall(self) -> None:
+        bed = _FakeFurniture("bed_0", (-0.05, 1.42, 0.0), (1.6, 1.8, 1.0))
+        agent = object.__new__(StatefulFurnitureAgent)
+        agent.cfg = SimpleNamespace(furniture_safety_controller=None)
+        agent.scene = SimpleNamespace(
+            room_geometry=SimpleNamespace(
+                length=5.5,
+                width=4.8,
+                openings=[
+                    SimpleNamespace(
+                        opening_type="window",
+                        wall_direction="north",
+                        center_world=(1.0, 2.4, 1.6),
+                        width=1.5,
+                    )
+                ],
+            )
+        )
+
+        anchored = RigidTransform(p=(-0.05, 1.42, 0.0))
+        repaired = agent._best_window_safe_bed_anchor_transform(
+            bed=bed,
+            transform=anchored,
+            wall="north",
+        )
+        repaired_bounds = agent._bounds_for_transform(bed, repaired)
+
+        self.assertIsNotNone(repaired_bounds)
+        self.assertNotAlmostEqual(
+            float(repaired.translation()[0]), float(anchored.translation()[0])
+        )
+        self.assertAlmostEqual(
+            float(repaired.translation()[1]), float(anchored.translation()[1])
+        )
+        self.assertFalse(agent._bed_anchor_overlaps_opening(repaired_bounds, "north"))
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
     def test_contract_relation_failure_only_disqualifies_checkpoint(self) -> None:
         agent = object.__new__(StatefulFurnitureAgent)
         agent.scene = SimpleNamespace()

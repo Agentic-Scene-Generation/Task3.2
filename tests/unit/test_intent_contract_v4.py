@@ -23,6 +23,7 @@ from scenesmith.scenebenchmark_critic.intent_compiler import (
 )
 from scenesmith.scenebenchmark_critic.intent_contract import (
     apply_contract_execution_states,
+    bound_ids,
     build_intent_contract,
     intent_contract_required_counts,
     selected_ids,
@@ -268,6 +269,32 @@ def test_plural_large_plant_selector_binds_all_matching_objects() -> None:
 
     assert selected_ids(selector, objects) == ["large_plant_0", "large_plant_1"]
     assert selector_match_count(selector, objects) == 2
+
+
+def test_modified_selector_can_bind_a_generic_retrieved_asset() -> None:
+    objects = [_record("rug_0", "rug", (0.0, 0.0), (1.8, 1.8, 0.03))]
+
+    selector = {"category": "square_rug", "count": 1}
+
+    assert selected_ids(selector, objects) == ["rug_0"]
+    assert bound_ids(selector, objects) == ["rug_0"]
+
+
+def test_selector_matches_generator_added_numeric_category_suffix() -> None:
+    objects = [
+        _record("large_plant_0", "large_plant", (1.0, 1.0), (0.5, 0.5, 1.2)),
+        _record(
+            "large_plant_2_0",
+            "large_plant_2",
+            (1.0, -1.0),
+            (0.5, 0.5, 1.2),
+        ),
+    ]
+
+    selector = {"category": "large_plant", "count": 2, "quantifier": "exactly"}
+
+    assert selected_ids(selector, objects) == ["large_plant_0", "large_plant_2_0"]
+    assert bound_ids(selector, objects) == ["large_plant_0", "large_plant_2_0"]
 
 
 def test_schema_derives_manipuland_stage_for_common_small_objects() -> None:
