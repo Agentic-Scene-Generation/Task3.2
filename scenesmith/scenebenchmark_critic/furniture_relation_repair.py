@@ -1137,6 +1137,20 @@ def _paired_support_window_targets(
         center = list(support_center)
         center[tangent_axis] = tangent_value
         pair_center = (float(center[0]), float(center[1]))
+        member_poses = (
+            _RepairPose(str(support.object_id), pair_center, None),
+            _RepairPose(
+                str(subject.object_id),
+                pair_center,
+                None,
+                target_center_z,
+            ),
+            *_support_pair_between_dependents(
+                context,
+                support=support,
+                target_support_center=pair_center,
+            ),
+        )
         targets.append(
             _RepairTarget(
                 str(subject.object_id),
@@ -1144,19 +1158,127 @@ def _paired_support_window_targets(
                 context.check_id,
                 pair_center,
                 None,
-                member_poses=(
-                    _RepairPose(str(support.object_id), pair_center, None),
-                    _RepairPose(
-                        str(subject.object_id),
-                        pair_center,
-                        None,
-                        target_center_z,
-                    ),
-                ),
+                member_poses=member_poses,
                 target_center_z=target_center_z,
             )
         )
     return targets
+
+
+def _support_pair_between_dependents(
+    context: _RepairHandlerContext,
+    *,
+    support: SceneObject,
+    target_support_center: tuple[float, float],
+) -> tuple[_RepairPose, ...]:
+    """Keep valid hard between-contract dependents valid as a media pair moves."""
+    support_id = str(support.object_id)
+    current_support_center = _world_center_xy(support)
+    if current_support_center is None:
+        return ()
+
+    poses: list[_RepairPose] = []
+    claimed_ids: set[str] = {
+        support_id,
+        str(context.result.get("primary_object") or ""),
+    }
+    for result in context.payload.get("results") or []:
+        relation = str(result.get("relation_type") or "")
+        if relation not in {"between_alignment", "centered_between_alignment"}:
+            continue
+        if str(result.get("label") or "").lower() != "pass":
+            continue
+        constraint = (result.get("evidence") or {}).get("intent_constraint") or {}
+        if (
+            str(constraint.get("stage") or "").lower() != "furniture"
+            or str(constraint.get("strength") or "").lower() != "hard"
+        ):
+            continue
+
+        subject_id = str(result.get("primary_object") or "")
+        anchor_ids = [
+            str(object_id)
+            for object_id in (
+                result.get("selected_related_objects")
+                or result.get("related_objects")
+                or (result.get("diagnostics") or {}).get("anchor_ids")
+                or []
+            )
+            if str(object_id)
+        ]
+        if (
+            subject_id in claimed_ids
+            or support_id not in anchor_ids
+            or len(anchor_ids) != 2
+        ):
+            continue
+        other_id = next(
+            (object_id for object_id in anchor_ids if object_id != support_id), ""
+        )
+        subject_obj = context.scene.objects.get(UniqueID(subject_id))
+        other_obj = context.scene.objects.get(UniqueID(other_id))
+        if (
+            subject_obj is None
+            or other_obj is None
+            or subject_obj.object_type != ObjectType.FURNITURE
+            or other_obj.object_type != ObjectType.FURNITURE
+        ):
+            continue
+        subject_center = _world_center_xy(subject_obj)
+        other_center = _world_center_xy(other_obj)
+        if subject_center is None or other_center is None:
+            continue
+
+        target_center = _preserved_between_center(
+            subject_center=subject_center,
+            other_center=other_center,
+            support_center=current_support_center,
+            target_support_center=target_support_center,
+            centered=relation == "centered_between_alignment",
+        )
+        if target_center is None:
+            continue
+        poses.append(_RepairPose(subject_id, target_center, None))
+        claimed_ids.add(subject_id)
+    return tuple(poses)
+
+
+def _preserved_between_center(
+    *,
+    subject_center: tuple[float, float],
+    other_center: tuple[float, float],
+    support_center: tuple[float, float],
+    target_support_center: tuple[float, float],
+    centered: bool,
+) -> tuple[float, float] | None:
+    """Map a between-dependent into the coordinate system of a moved anchor."""
+    old_axis = np.asarray(support_center, dtype=float) - np.asarray(
+        other_center, dtype=float
+    )
+    new_axis = np.asarray(target_support_center, dtype=float) - np.asarray(
+        other_center, dtype=float
+    )
+    old_length = float(np.linalg.norm(old_axis))
+    new_length = float(np.linalg.norm(new_axis))
+    if old_length < 1e-6 or new_length < 1e-6:
+        return None
+    if centered:
+        target = np.asarray(other_center, dtype=float) + new_axis / 2.0
+    else:
+        relative = np.asarray(subject_center, dtype=float) - np.asarray(
+            other_center, dtype=float
+        )
+        fraction = float(np.dot(relative, old_axis) / (old_length * old_length))
+        lateral_m = float(
+            (old_axis[0] * relative[1] - old_axis[1] * relative[0]) / old_length
+        )
+        new_perpendicular = np.array([-new_axis[1], new_axis[0]]) / new_length
+        target = (
+            np.asarray(other_center, dtype=float)
+            + fraction * new_axis
+            + lateral_m * new_perpendicular
+        )
+    return float(target[0]), float(target[1])
 
 
 def _wall_backed_storage_repair_targets(
