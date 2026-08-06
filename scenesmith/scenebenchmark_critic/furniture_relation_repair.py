@@ -1171,17 +1171,22 @@ def _support_pair_between_dependents(
     support: SceneObject,
     target_support_center: tuple[float, float],
 ) -> tuple[_RepairPose, ...]:
-    """Keep valid hard between-contract dependents valid as a media pair moves."""
+    """Keep valid hard between-contract dependency chains valid as media moves."""
     support_id = str(support.object_id)
     current_support_center = _world_center_xy(support)
     if current_support_center is None:
         return ()
 
-    poses: list[_RepairPose] = []
-    claimed_ids: set[str] = {
-        support_id,
-        str(context.result.get("primary_object") or ""),
-    }
+    dependent_rows: list[
+        tuple[
+            dict[str, Any],
+            str,
+            str,
+            SceneObject,
+            tuple[float, float],
+            tuple[float, float],
+        ]
+    ] = []
     for result in context.payload.get("results") or []:
         relation = str(result.get("relation_type") or "")
         if relation not in {"between_alignment", "centered_between_alignment"}:
@@ -1206,11 +1211,7 @@ def _support_pair_between_dependents(
             )
             if str(object_id)
         ]
-        if (
-            subject_id in claimed_ids
-            or support_id not in anchor_ids
-            or len(anchor_ids) != 2
-        ):
+        if not subject_id or support_id not in anchor_ids or len(anchor_ids) != 2:
             continue
         other_id = next(
             (object_id for object_id in anchor_ids if object_id != support_id), ""
@@ -1228,16 +1229,56 @@ def _support_pair_between_dependents(
         other_center = _world_center_xy(other_obj)
         if subject_center is None or other_center is None:
             continue
+        dependent_rows.append(
+            (
+                result,
+                subject_id,
+                other_id,
+                subject_obj,
+                subject_center,
+                other_center,
+            )
+        )
 
+    poses: list[_RepairPose] = []
+    claimed_ids: set[str] = {
+        support_id,
+        str(context.result.get("primary_object") or ""),
+    }
+    planned_centers = {support_id: target_support_center}
+    dependent_subject_ids = {row[1] for row in dependent_rows}
+    remaining_rows = list(dependent_rows)
+    while remaining_rows:
+        row_index = next(
+            (
+                index
+                for index, row in enumerate(remaining_rows)
+                if row[2] not in dependent_subject_ids or row[2] in planned_centers
+            ),
+            0,
+        )
+        (
+            result,
+            subject_id,
+            other_id,
+            _subject_obj,
+            subject_center,
+            other_center,
+        ) = remaining_rows.pop(row_index)
+        if subject_id in claimed_ids:
+            continue
+        relation = str(result.get("relation_type") or "")
         target_center = _preserved_between_center(
             subject_center=subject_center,
             other_center=other_center,
+            target_other_center=planned_centers.get(other_id, other_center),
             support_center=current_support_center,
             target_support_center=target_support_center,
             centered=relation == "centered_between_alignment",
         )
         if target_center is None:
             continue
+        planned_centers[subject_id] = target_center
         dependent_target = _preserve_passing_flanking_group(
             context.scene,
             context.payload,
@@ -1265,23 +1306,24 @@ def _preserved_between_center(
     *,
     subject_center: tuple[float, float],
     other_center: tuple[float, float],
+    target_other_center: tuple[float, float],
     support_center: tuple[float, float],
     target_support_center: tuple[float, float],
     centered: bool,
 ) -> tuple[float, float] | None:
-    """Map a between-dependent into the coordinate system of a moved anchor."""
+    """Map a between-dependent into the coordinate system of moved anchors."""
     old_axis = np.asarray(support_center, dtype=float) - np.asarray(
         other_center, dtype=float
     )
     new_axis = np.asarray(target_support_center, dtype=float) - np.asarray(
-        other_center, dtype=float
+        target_other_center, dtype=float
     )
     old_length = float(np.linalg.norm(old_axis))
     new_length = float(np.linalg.norm(new_axis))
     if old_length < 1e-6 or new_length < 1e-6:
         return None
     if centered:
-        target = np.asarray(other_center, dtype=float) + new_axis / 2.0
+        target = np.asarray(target_other_center, dtype=float) + new_axis / 2.0
     else:
         relative = np.asarray(subject_center, dtype=float) - np.asarray(
             other_center, dtype=float
@@ -1292,7 +1334,7 @@ def _preserved_between_center(
         )
         new_perpendicular = np.array([-new_axis[1], new_axis[0]]) / new_length
         target = (
-            np.asarray(other_center, dtype=float)
+            np.asarray(target_other_center, dtype=float)
             + fraction * new_axis
             + lateral_m * new_perpendicular
         )
@@ -1850,13 +1892,15 @@ def _preserve_passing_flanking_group(
     *,
     require_hard_furniture_contract: bool = False,
 ) -> _RepairTarget:
-    """Move a flanked anchor and its valid side slots as one candidate.
+    """Move a flanked anchor and its valid side group as one candidate.
 
     A collision repair can move a table away from its semantic midpoint while
     leaving the two side seats in a valid flanking arrangement. Moving only the
     table back can create shallow seat collisions, after which physics moves the
-    table away again. Translate the evaluator's already-valid side slots with
-    the anchor so the whole-scene gate scores the stable group pose.
+    table away again. Preserve actual member poses only when the group also has
+    a passing hard proximity relation, such as a seat being near a sofa.
+    Otherwise the evaluator's canonical side slots remain the most stable repair
+    target.
     """
     anchor = scene.objects.get(UniqueID(target.object_id))
     current_center = _world_center_xy(anchor) if anchor is not None else None
@@ -1892,23 +1936,80 @@ def _preserve_passing_flanking_group(
             target.target_yaw_deg,
         )
     ]
-    for slot in (flanking.get("diagnostics") or {}).get("target_slots") or []:
-        object_id = str(slot.get("object_id") or "")
-        center = _xy(slot.get("target_center_xy_m"))
-        yaw = _float_or_none(slot.get("target_yaw_deg"))
-        if not object_id or center is None or yaw is None:
-            continue
-        poses.append(
-            _RepairPose(
-                object_id,
-                (center[0] + delta[0], center[1] + delta[1]),
-                yaw,
+    member_ids = tuple(
+        flanking.get("selected_related_objects")
+        or flanking.get("related_objects")
+        or []
+    )
+    if _flanking_members_have_external_hard_relation(
+        payload,
+        anchor_id=str(target.object_id),
+        member_ids=member_ids,
+    ):
+        for object_id in member_ids:
+            object_id = str(object_id or "")
+            member = scene.objects.get(UniqueID(object_id))
+            center = _world_center_xy(member) if member is not None else None
+            if not object_id or member is None or center is None:
+                continue
+            yaw = math.degrees(RollPitchYaw(member.transform.rotation()).yaw_angle())
+            poses.append(
+                _RepairPose(
+                    object_id,
+                    (center[0] + delta[0], center[1] + delta[1]),
+                    yaw,
+                )
             )
-        )
+    else:
+        for slot in (flanking.get("diagnostics") or {}).get("target_slots") or []:
+            object_id = str(slot.get("object_id") or "")
+            center = _xy(slot.get("target_center_xy_m"))
+            yaw = _float_or_none(slot.get("target_yaw_deg"))
+            if not object_id or center is None or yaw is None:
+                continue
+            poses.append(
+                _RepairPose(
+                    object_id,
+                    (center[0] + delta[0], center[1] + delta[1]),
+                    yaw,
+                )
+            )
     unique_poses = tuple({pose.object_id: pose for pose in poses}.values())
     if len(unique_poses) < 3:
         return target
     return replace(target, member_poses=unique_poses)
+
+
+def _flanking_members_have_external_hard_relation(
+    payload: dict[str, Any],
+    *,
+    anchor_id: str,
+    member_ids: Collection[str],
+) -> bool:
+    """Whether a hard proximity relation requires preserving member offsets."""
+    group_ids = {str(anchor_id), *(str(object_id) for object_id in member_ids)}
+    member_ids_set = group_ids - {str(anchor_id)}
+    for result in payload.get("results") or []:
+        if (
+            result.get("label") != "pass"
+            or str(result.get("relation_type") or "") != "generic_near_relation"
+            or not _is_hard_furniture_contract_result(result)
+        ):
+            continue
+        involved_ids = {
+            str(result.get("primary_object") or ""),
+            *(
+                str(object_id)
+                for object_id in (
+                    result.get("selected_related_objects")
+                    or result.get("related_objects")
+                    or []
+                )
+            ),
+        }
+        if involved_ids & member_ids_set and involved_ids - group_ids:
+            return True
+    return False
 
 
 def _is_hard_furniture_contract_result(result: dict[str, Any]) -> bool:

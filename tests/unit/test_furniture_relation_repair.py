@@ -1582,6 +1582,79 @@ def test_media_support_pair_preserves_hard_between_dependent(tmp_path: Path) -> 
     )
 
 
+def test_preserved_flanking_group_keeps_member_relative_poses(tmp_path: Path) -> None:
+    table = _object("coffee_table_0", "coffee_table", (0.0, 0.0, 0.2), (1.2, 0.7, 0.4))
+    left_chair = _object(
+        "armchair_0",
+        "armchair",
+        (-1.2, -1.4, 0.4),
+        (0.75, 0.8, 0.8),
+        yaw_deg=-30,
+    )
+    right_chair = _object(
+        "armchair_1",
+        "armchair",
+        (1.2, -1.4, 0.4),
+        (0.75, 0.8, 0.8),
+        yaw_deg=30,
+    )
+    sofa = _object("sofa_0", "sofa", (0.0, -1.6, 0.4), (2.0, 0.8, 0.8))
+    scene = _scene(tmp_path, table, left_chair, right_chair, sofa)
+    payload = {
+        "results": [
+            {
+                "relation_type": "flanking",
+                "label": "pass",
+                "primary_object": "coffee_table_0",
+                "selected_related_objects": ["armchair_0", "armchair_1"],
+                "diagnostics": {
+                    "target_slots": [
+                        {
+                            "object_id": "armchair_0",
+                            "target_center_xy_m": [-1.2, 0.0],
+                            "target_yaw_deg": -90.0,
+                        },
+                        {
+                            "object_id": "armchair_1",
+                            "target_center_xy_m": [1.2, 0.0],
+                            "target_yaw_deg": 90.0,
+                        },
+                    ]
+                },
+            },
+            {
+                "relation_type": "generic_near_relation",
+                "label": "pass",
+                "primary_object": "armchair_0",
+                "selected_related_objects": ["sofa_0"],
+                "evidence": {
+                    "intent_constraint": {
+                        "stage": "furniture",
+                        "strength": "hard",
+                    }
+                },
+            },
+        ]
+    }
+    target = _RepairTarget(
+        "coffee_table_0",
+        "centered_between_alignment",
+        "table_midpoint",
+        (0.4, 0.2),
+        None,
+    )
+
+    preserved = furniture_relation_repair._preserve_passing_flanking_group(
+        scene, payload, target
+    )
+    poses = {pose.object_id: pose for pose in preserved.member_poses}
+
+    assert poses["armchair_0"].target_center_xy == pytest.approx((-0.8, -1.2))
+    assert poses["armchair_1"].target_center_xy == pytest.approx((1.6, -1.2))
+    assert poses["armchair_0"].target_yaw_deg == pytest.approx(-30.0)
+    assert poses["armchair_1"].target_yaw_deg == pytest.approx(30.0)
+
+
 def test_floor_plant_support_failure_is_not_repaired_or_hard_gated(
     tmp_path: Path, monkeypatch
 ) -> None:
