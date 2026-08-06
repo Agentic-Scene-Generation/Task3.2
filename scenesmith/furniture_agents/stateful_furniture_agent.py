@@ -836,8 +836,14 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         # authoritative for the next hard-state evaluation.
         if self._repair_forbidden_zone_conflicts(include_windows=False):
             actions.append("revalidated deterministic door/opening forbidden zones")
-        if "collisions" in reasons and self._repair_generic_wall_collisions():
-            actions.append("moved bedroom furniture away from room-wall collisions")
+        if "collisions" in reasons:
+            if self._repair_generic_wall_collisions():
+                actions.append("moved bedroom furniture away from room-wall collisions")
+            # Moving a bed out of a door or window zone can leave a shallow
+            # collision with an optional foot bench or other small furniture.
+            # Use the same bounded geometry repair as other rooms after the
+            # bed/nightstand poses have settled.
+            actions.extend(self._repair_shallow_furniture_collisions())
 
         return bool(actions), actions
 
@@ -1129,6 +1135,11 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         }
         before_pairs = self._furniture_aabb_overlap_pairs()
         for first_id, second_id, penetration in reported:
+            # Earlier bedroom repairs can already have resolved a collision
+            # described by the cached physics context. Never move furniture
+            # for an obsolete report.
+            if frozenset((first_id, second_id)) not in before_pairs:
+                continue
             first = objects_by_id.get(first_id)
             second = objects_by_id.get(second_id)
             if first is None or second is None:
