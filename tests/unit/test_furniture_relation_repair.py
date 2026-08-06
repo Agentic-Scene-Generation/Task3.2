@@ -1387,6 +1387,15 @@ def test_media_support_pair_preserves_hard_between_dependent(tmp_path: Path) -> 
         "coffee_table_0", "coffee_table", (0.0, 0.25, 0.2), (1.2, 0.7, 0.4)
     )
     rug = _object("rug_0", "rug", (0.0, 0.75, 0.01), (1.4, 1.4, 0.02))
+    chairs = [
+        _object(
+            f"armchair_{index}",
+            "armchair",
+            (x, 0.25, 0.4),
+            (0.75, 0.8, 0.8),
+        )
+        for index, x in enumerate((-1.15, 1.15))
+    ]
     scene = _scene(
         tmp_path,
         tv_stand,
@@ -1394,7 +1403,12 @@ def test_media_support_pair_preserves_hard_between_dependent(tmp_path: Path) -> 
         sofa,
         coffee_table,
         rug,
-        text="A living room with a television placed on a TV stand.",
+        *chairs,
+        text=(
+            "A living room with a television placed on a TV stand, a rug between "
+            "the coffee table and TV stand, a coffee table centered between the "
+            "sofa and TV stand, and two armchairs flanking the coffee table."
+        ),
     )
     scene.room_type = "living_room"
     scene.room_geometry.openings = [
@@ -1453,6 +1467,15 @@ def test_media_support_pair_preserves_hard_between_dependent(tmp_path: Path) -> 
                 "source": "explicit_prompt",
                 "evidence_span": "coffee table centered between the sofa and TV stand",
             },
+            {
+                "relation": "flanking",
+                "stage": "furniture",
+                "strength": "hard",
+                "subjects": {"category": "armchair", "count": 2},
+                "targets": {"category": "coffee_table", "count": 1},
+                "source": "explicit_prompt",
+                "evidence_span": "two armchairs flanking the coffee table",
+            },
         ],
     )
     config = CriticConfig(
@@ -1467,13 +1490,47 @@ def test_media_support_pair_preserves_hard_between_dependent(tmp_path: Path) -> 
         + coffee_table.compute_world_bounds()[1][:2]
     ) / 2.0
 
-    fixes = improve_furniture_relations(scene, config=config)
+    before = evaluate_room_scene(scene, config=config, stage="media_window_between")
+    assert (
+        next(
+            result
+            for result in before["results"]
+            if result.get("relation_type") == "flanking"
+            and result.get("primary_object") == "coffee_table_0"
+        )["label"]
+        == "pass"
+    )
+
+    def candidate_validator(candidate: RoomScene) -> bool:
+        table = candidate.objects[UniqueID("coffee_table_0")]
+        table_bounds = table.compute_world_bounds()
+        assert table_bounds is not None
+        for chair in chairs:
+            chair_bounds = candidate.objects[chair.object_id].compute_world_bounds()
+            assert chair_bounds is not None
+            overlaps_xy = bool(
+                table_bounds[0][0] < chair_bounds[1][0]
+                and table_bounds[1][0] > chair_bounds[0][0]
+                and table_bounds[0][1] < chair_bounds[1][1]
+                and table_bounds[1][1] > chair_bounds[0][1]
+            )
+            if overlaps_xy:
+                return False
+        return True
+
+    fixes = improve_furniture_relations(
+        scene,
+        config=config,
+        candidate_validator=candidate_validator,
+    )
 
     assert {fix.object_id for fix in fixes} == {
         "television_0",
         "tv_stand_0",
         "rug_0",
         "coffee_table_0",
+        "armchair_0",
+        "armchair_1",
     }
     new_rug_center = (
         rug.compute_world_bounds()[0][:2] + rug.compute_world_bounds()[1][:2]
@@ -1510,6 +1567,15 @@ def test_media_support_pair_preserves_hard_between_dependent(tmp_path: Path) -> 
             result
             for result in payload["results"]
             if result.get("relation_type") == "centered_between_alignment"
+            and result.get("primary_object") == "coffee_table_0"
+        )["label"]
+        == "pass"
+    )
+    assert (
+        next(
+            result
+            for result in payload["results"]
+            if result.get("relation_type") == "flanking"
             and result.get("primary_object") == "coffee_table_0"
         )["label"]
         == "pass"

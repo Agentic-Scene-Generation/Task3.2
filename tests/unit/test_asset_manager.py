@@ -97,6 +97,40 @@ def test_separate_display_rewrites_composite_media_console_request() -> None:
     assert normalized.semantic_name_candidates == [["tv_stand", "television"]]
 
 
+def test_separate_display_preserves_standalone_television_with_style_details() -> None:
+    request = AssetGenerationRequest(
+        object_descriptions=["Large flat-screen television with slim black frame"],
+        short_names=["television"],
+        object_type=ObjectType.FURNITURE,
+        desired_dimensions=[[1.2, 0.15, 0.7]],
+        scene_prompt_context=(
+            "A living room with a TV stand and television on the opposite wall."
+        ),
+        semantic_name_candidates=[["tv_stand", "television"]],
+    )
+
+    normalized = _normalize_independent_media_requests(request)
+
+    assert normalized is request
+
+
+def test_separate_display_rewrites_named_media_console_with_display() -> None:
+    request = AssetGenerationRequest(
+        object_descriptions=["Modern media console with a television mounted on top"],
+        short_names=["media_console"],
+        object_type=ObjectType.FURNITURE,
+        desired_dimensions=[[1.6, 0.45, 1.1]],
+        scene_prompt_context=(
+            "A living room with a TV stand and television on the opposite wall."
+        ),
+    )
+
+    normalized = _normalize_independent_media_requests(request)
+
+    assert normalized.short_names == ["tv_stand"]
+    assert "without a television" in normalized.object_descriptions[0]
+
+
 class TestAssetManager(unittest.TestCase):
     """Test AssetManager functionality."""
 

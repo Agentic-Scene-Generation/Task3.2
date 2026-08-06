@@ -1238,8 +1238,26 @@ def _support_pair_between_dependents(
         )
         if target_center is None:
             continue
-        poses.append(_RepairPose(subject_id, target_center, None))
-        claimed_ids.add(subject_id)
+        dependent_target = _preserve_passing_flanking_group(
+            context.scene,
+            context.payload,
+            _RepairTarget(
+                subject_id,
+                relation,
+                str(result.get("check_id") or ""),
+                target_center,
+                None,
+            ),
+            require_hard_furniture_contract=True,
+        )
+        dependent_poses = dependent_target.member_poses or (
+            _RepairPose(subject_id, target_center, None),
+        )
+        for pose in dependent_poses:
+            if not pose.object_id or pose.object_id in claimed_ids:
+                continue
+            poses.append(pose)
+            claimed_ids.add(pose.object_id)
     return tuple(poses)
 
 
@@ -1829,6 +1847,8 @@ def _preserve_passing_flanking_group(
     scene: RoomScene,
     payload: dict[str, Any],
     target: _RepairTarget,
+    *,
+    require_hard_furniture_contract: bool = False,
 ) -> _RepairTarget:
     """Move a flanked anchor and its valid side slots as one candidate.
 
@@ -1851,6 +1871,10 @@ def _preserve_passing_flanking_group(
             and str(result.get("primary_object") or "") == target.object_id
             and str(result.get("scoring_tier") or "").lower()
             not in {"ignored", "auxiliary"}
+            and (
+                not require_hard_furniture_contract
+                or _is_hard_furniture_contract_result(result)
+            )
         ),
         None,
     )
@@ -1885,6 +1909,14 @@ def _preserve_passing_flanking_group(
     if len(unique_poses) < 3:
         return target
     return replace(target, member_poses=unique_poses)
+
+
+def _is_hard_furniture_contract_result(result: dict[str, Any]) -> bool:
+    constraint = (result.get("evidence") or {}).get("intent_constraint") or {}
+    return bool(
+        str(constraint.get("stage") or "").lower() == "furniture"
+        and str(constraint.get("strength") or "").lower() == "hard"
+    )
 
 
 def _is_paired_surface_facing_result(

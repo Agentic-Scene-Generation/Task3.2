@@ -99,9 +99,19 @@ _HSSD_FRONT_AXIS_SOURCES = {
     "annotations",
 }
 _VALID_HORIZONTAL_FRONT_AXES = {"+X", "-X", "+Y", "-Y"}
+_MEDIA_SUPPORT_SHORT_NAME = re.compile(
+    r"(?:^|_)(?:tv|television|media|entertainment)_"
+    r"(?:stand|console|center|unit|cabinet)(?:_|$)",
+    re.IGNORECASE,
+)
 _COMPOSITE_MEDIA_REQUEST = re.compile(
-    r"\b(?:tv|television)\s*(?:stand|console|center)\b.*\b(?:with|and|mounted)\b.*\b(?:tv|television|screen|display)\b|"
-    r"\b(?:tv|television|screen|display)\b.*\b(?:mounted\s+on\s+top|with)\b",
+    r"\b(?:tv|television)\s*(?:stand|console|center|unit|cabinet)\b"
+    r".*\b(?:with|and|mounted)\b.*\b(?:tv|television|screen|display)\b|"
+    r"\b(?:tv|television|screen|display)\b.*\bmounted\s+on\s+top(?:\s+of)?\b",
+    re.IGNORECASE,
+)
+_COMPOSITE_MEDIA_SHORT_NAME = re.compile(
+    r"(?:^|_)(?:with|and|mounted)_(?:tv|television|screen|display)(?:_|$)",
     re.IGNORECASE,
 )
 _SEPARATE_MEDIA_ROLES = re.compile(
@@ -131,7 +141,13 @@ def _normalize_independent_media_requests(
     )
     changed = False
     for index, (description, name) in enumerate(zip(descriptions, names)):
-        if not _COMPOSITE_MEDIA_REQUEST.search(f"{name} {description}"):
+        normalized_name = normalize_semantic_name(name)
+        if not _MEDIA_SUPPORT_SHORT_NAME.search(normalized_name):
+            continue
+        if not (
+            _COMPOSITE_MEDIA_REQUEST.search(description)
+            or _COMPOSITE_MEDIA_SHORT_NAME.search(normalized_name)
+        ):
             continue
         descriptions[index] = (
             "Low media console / TV stand only, without a television, monitor, "
