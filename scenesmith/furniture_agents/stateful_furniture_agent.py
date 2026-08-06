@@ -27,7 +27,10 @@ from scenesmith.agent_utils.base_stateful_agent import (
     HardStateEvaluation,
     log_agent_usage,
 )
-from scenesmith.agent_utils.clearance_zones import WALL_HEIGHT_TOLERANCE_M
+from scenesmith.agent_utils.clearance_zones import (
+    WALL_HEIGHT_TOLERANCE_M,
+    door_swing_clearance_bounds,
+)
 from scenesmith.agent_utils.furniture_layout_planning import (
     build_bedroom_anchor_plan,
     format_bedroom_anchor_guidance,
@@ -147,6 +150,7 @@ _SHALLOW_FURNITURE_COLLISION_RE = re.compile(
     r"(?P<unit>mm|cm|m)\s+penetration\)",
     re.IGNORECASE | re.MULTILINE,
 )
+_OPENING_SAFE_WALL_MARGIN_M = 0.03
 
 
 class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
@@ -1053,6 +1057,14 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         if self.scene is None or self._room_bounds_xy() is None:
             return False
 
+        bed_head_wall: str | None = None
+        if is_bedroom_scene(self.scene):
+            plan = build_bedroom_anchor_plan(
+                self.scene,
+                self._bedroom_layout_cfg(),
+            )
+            bed_head_wall = plan.bed_head_wall if plan else "north"
+
         changed = False
         for obj in self.scene.objects.values():
             if getattr(obj, "immutable", False):
@@ -1060,6 +1072,18 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             if getattr(obj, "object_type", None) != ObjectType.FURNITURE:
                 continue
             transform = self._fit_transform_inside_room(obj, obj.transform)
+            if (
+                bed_head_wall is not None
+                and self._category_for_object(obj.object_id, obj) == "bed"
+            ):
+                # The conservative generic margin can undo the narrow lateral
+                # slot selected by the bedroom anchor and re-block its window.
+                transform = self._opening_safe_bed_transform(
+                    bed=obj,
+                    transform=transform,
+                    wall=bed_head_wall,
+                    fallback=transform,
+                )
             if self._transform_close(obj.transform, transform):
                 continue
             self.scene.move_object(obj.object_id, transform)
@@ -1811,20 +1835,176 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         wall = plan.bed_head_wall if plan and plan.bed_head_wall else "north"
         yaw = self._yaw_for_head_wall(wall)
         current = np.asarray(bed.transform.translation(), dtype=float)
+        # Preserve an in-room fallback. A wall anchor is preferred only when it
+        # clears every opening; otherwise a soft window warning must not turn
+        # an already feasible interior layout into a wall collision.
+        fallback = self._grounded_transform(
+            bed, x=float(current[0]), y=float(current[1]), yaw_deg=yaw
+        )
+        fallback = self._fit_transform_inside_room(bed, fallback)
         anchored = self._grounded_transform(
             bed, x=float(current[0]), y=float(current[1]), yaw_deg=yaw
         )
         anchored = self._snap_transform_to_wall(bed, anchored, wall)
         anchored = self._fit_transform_inside_room(bed, anchored)
-        transform = self._best_window_safe_bed_anchor_transform(
+        transform = self._opening_safe_bed_transform(
             bed=bed,
             transform=anchored,
             wall=wall,
+            fallback=fallback,
         )
         if self._transform_close(bed.transform, transform):
             return False
         self.scene.move_object(bed.object_id, transform)
         return True
+
+    def _opening_safe_bed_transform(
+        self,
+        *,
+        bed: SceneObject,
+        transform: RigidTransform,
+        wall: str,
+        fallback: RigidTransform | None = None,
+    ) -> RigidTransform:
+        """Preserve a wall anchor when possible, otherwise use a safe interior pose.
+
+        A bed can clear a window on its head wall by shifting sideways, yet still
+        block a door or window on the perpendicular wall in a compact room.  In
+        that case there is no usable wall anchor, so prefer the nearest interior
+        placement that leaves every opening clearance zone unobstructed.
+        """
+        fallback = fallback if fallback is not None else transform
+        wall_candidate = self._best_window_safe_bed_anchor_transform(
+            bed=bed,
+            transform=transform,
+            wall=wall,
+        )
+        if self._bed_transform_clears_openings(bed, wall_candidate):
+            return wall_candidate
+        interior_candidate = self._best_opening_safe_interior_bed_transform(
+            bed=bed,
+            transform=wall_candidate,
+        )
+        # No complete escape exists when other required furniture occupies the
+        # only interior slot. Retain the in-room fallback rather than swapping
+        # one window warning for a perpendicular-wall collision.
+        return interior_candidate if interior_candidate is not None else fallback
+
+    def _bed_transform_clears_openings(
+        self, bed: SceneObject, transform: RigidTransform
+    ) -> bool:
+        zones = self._opening_forbidden_zones(include_windows=True)
+        if not zones:
+            return True
+        return self._zone_overlap_penalty_for_transform(bed, transform, zones) <= 1e-6
+
+    def _best_opening_safe_interior_bed_transform(
+        self,
+        *,
+        bed: SceneObject,
+        transform: RigidTransform,
+    ) -> RigidTransform | None:
+        """Find the closest interior bed pose when no wall anchor clears openings."""
+        room_bounds = self._room_bounds_xy()
+        bounds = self._bounds_for_transform(bed, transform)
+        if room_bounds is None or bounds is None:
+            return None
+
+        zones = self._opening_forbidden_zones(include_windows=True)
+        if not zones:
+            return None
+
+        lower, upper = bounds
+        half_span = (upper - lower) / 2.0
+        min_x, min_y, max_x, max_y = room_bounds
+        margin = max(0.03, float(self._repair_cfg_value("wall_margin_m", 0.08)))
+        x_min = min_x + float(half_span[0]) + margin
+        x_max = max_x - float(half_span[0]) - margin
+        y_min = min_y + float(half_span[1]) + margin
+        y_max = max_y - float(half_span[1]) - margin
+        if x_min > x_max or y_min > y_max:
+            return None
+
+        base_translation = np.asarray(transform.translation(), dtype=float)
+        x_values = {
+            min(max(float(base_translation[0]), x_min), x_max),
+            0.0,
+            x_min,
+            x_max,
+        }
+        y_values = {
+            min(max(float(base_translation[1]), y_min), y_max),
+            0.0,
+            y_min,
+            y_max,
+        }
+        for _, _, zone_min, zone_max in zones:
+            x_values.update(
+                (
+                    float(zone_min[0]) - float(half_span[0]) - margin,
+                    float(zone_max[0]) + float(half_span[0]) + margin,
+                )
+            )
+            y_values.update(
+                (
+                    float(zone_min[1]) - float(half_span[1]) - margin,
+                    float(zone_max[1]) + float(half_span[1]) + margin,
+                )
+            )
+
+        best: tuple[float, RigidTransform] | None = None
+        for x in x_values:
+            if x < x_min - 1e-6 or x > x_max + 1e-6:
+                continue
+            for y in y_values:
+                if y < y_min - 1e-6 or y > y_max + 1e-6:
+                    continue
+                translation = base_translation.copy()
+                translation[0] = float(x)
+                translation[1] = float(y)
+                candidate = RigidTransform(R=transform.rotation(), p=translation)
+                candidate = self._fit_transform_inside_room(
+                    bed, candidate, margin_m=margin
+                )
+                if not self._bed_transform_clears_openings(bed, candidate):
+                    continue
+                if self._bed_candidate_hits_unrelated_furniture(bed, candidate):
+                    continue
+                displacement = float(
+                    np.linalg.norm(
+                        np.asarray(candidate.translation()[:2]) - base_translation[:2]
+                    )
+                )
+                if best is None or displacement < best[0]:
+                    best = (displacement, candidate)
+        return best[1] if best is not None else None
+
+    def _bed_candidate_hits_unrelated_furniture(
+        self, bed: SceneObject, transform: RigidTransform
+    ) -> bool:
+        if self.scene is None:
+            return False
+        candidate_bounds = self._bounds_for_transform(bed, transform)
+        if candidate_bounds is None:
+            return True
+        for object_id, obj in self.scene.objects.items():
+            if object_id == bed.object_id or getattr(obj, "immutable", False):
+                continue
+            if getattr(obj, "object_type", None) != ObjectType.FURNITURE:
+                continue
+            # Bedside anchors are recomputed immediately after the bed moves.
+            # Other furniture must not be displaced implicitly by this fallback.
+            if self._category_for_object(object_id, obj) in {"bed", "nightstand"}:
+                continue
+            obstacle_bounds = obj.compute_world_bounds()
+            if obstacle_bounds is None:
+                continue
+            overlap_x, overlap_y = self._xy_overlap_depths(
+                candidate_bounds, obstacle_bounds
+            )
+            if overlap_x > 1e-4 and overlap_y > 1e-4:
+                return True
+        return False
 
     def _best_window_safe_bed_anchor_transform(
         self,
@@ -1884,7 +2064,14 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             translation = np.asarray(transform.translation(), dtype=float).copy()
             translation[tangent_axis] += tangent_center - current_center
             candidate = RigidTransform(R=transform.rotation(), p=translation)
-            candidate = self._fit_transform_inside_room(bed, candidate)
+            # Keep the normal wall anchor conservative, but a lateral opening
+            # avoidance move may need the same 3 cm boundary margin used by
+            # deterministic relation repairs to fit in a narrow valid slot.
+            candidate = self._fit_transform_inside_room(
+                bed,
+                candidate,
+                margin_m=_OPENING_SAFE_WALL_MARGIN_M,
+            )
             candidate_bounds = self._bounds_for_transform(bed, candidate)
             if candidate_bounds is None or self._bed_anchor_overlaps_opening(
                 candidate_bounds, wall
@@ -2050,9 +2237,15 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             return False
         candidates = self._wardrobe_candidate_transforms(wardrobe)
         forbidden_zones = self._opening_forbidden_zones(include_windows=False)
-        obstacles = self._furniture_by_category("bed") + self._furniture_by_category(
-            "nightstand"
-        )
+        # A wardrobe anchor must not trade a wall/window violation for an
+        # overlap with a dresser, desk, or any other existing furniture.
+        obstacles = [
+            obj
+            for object_id, obj in self.scene.objects.items()
+            if str(object_id) != str(wardrobe.object_id)
+            and getattr(obj, "object_type", None) == ObjectType.FURNITURE
+        ]
+        beds = self._furniture_by_category("bed")
         best_transform = None
         best_score = -1e9
         for transform, wall_opening_penalty in candidates:
@@ -2072,11 +2265,21 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 if obstacle_bounds is None:
                     continue
                 overlap_x, overlap_y = self._xy_overlap_depths(bounds, obstacle_bounds)
-                overlap_penalty += overlap_x * overlap_y * 100.0
+                lower, upper = bounds
+                obstacle_lower, obstacle_upper = obstacle_bounds
+                overlap_z = max(
+                    0.0,
+                    float(
+                        min(upper[2], obstacle_upper[2])
+                        - max(lower[2], obstacle_lower[2])
+                    ),
+                )
+                if overlap_x > 1e-5 and overlap_y > 1e-5 and overlap_z > 1e-5:
+                    overlap_penalty += overlap_x * overlap_y * 100.0
             center = np.asarray(transform.translation(), dtype=float)
             bed_center = (
-                np.asarray(obstacles[0].transform.translation(), dtype=float)
-                if obstacles
+                np.asarray(beds[0].transform.translation(), dtype=float)
+                if beds
                 else np.zeros(3)
             )
             distance_score = float(np.linalg.norm(center[:2] - bed_center[:2]))
@@ -2312,13 +2515,15 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
     ) -> tuple[np.ndarray, np.ndarray] | None:
         zone_min = getattr(opening, "clearance_bbox_min", None)
         zone_max = getattr(opening, "clearance_bbox_max", None)
+        opening_type_raw = getattr(opening, "opening_type", "")
+        opening_type = str(getattr(opening_type_raw, "value", opening_type_raw)).lower()
         if zone_min is not None and zone_max is not None:
+            if opening_type == "door":
+                swing_bounds = door_swing_clearance_bounds(opening)
+                if swing_bounds is not None:
+                    zone_min, zone_max = swing_bounds
             return np.asarray(zone_min, dtype=float), np.asarray(zone_max, dtype=float)
 
-            opening_type_raw = getattr(opening, "opening_type", "")
-            opening_type = str(
-                getattr(opening_type_raw, "value", opening_type_raw)
-            ).lower()
         if opening_type != "open":
             return None
         try:

@@ -81,6 +81,7 @@ class _RepairPose:
     object_id: str
     target_center_xy: tuple[float, float]
     target_yaw_deg: float | None
+    target_center_z: float | None = None
 
 
 @dataclass(frozen=True)
@@ -270,6 +271,21 @@ def improve_furniture_relations(
                 # with it, and their valid final slots may be farther than the
                 # single-object repair budget.
                 translation_limit *= 1.5
+            elif target.relation_type == "object_on_support" and target.member_poses:
+                # A hard media/support contract can be discovered only after a
+                # display was placed on a distant wall or outside the room. The
+                # coordinated candidate preserves the support relation and is
+                # still subject to the whole-scene no-regression gate, so it may
+                # traverse the room but never farther than its diagonal.
+                geometry = scene.room_geometry
+                if geometry is not None:
+                    translation_limit = max(
+                        translation_limit,
+                        math.hypot(
+                            float(getattr(geometry, "length", 0.0) or 0.0),
+                            float(getattr(geometry, "width", 0.0) or 0.0),
+                        ),
+                    )
             if _target_max_translation(scene, target) > translation_limit:
                 continue
             snapshot = _ScenePoseSnapshot.capture(scene)
@@ -971,16 +987,176 @@ def _support_repair_targets(context: _RepairHandlerContext) -> list[_RepairTarge
         return []
     subject_height = float(subject_bounds[1][2] - subject_bounds[0][2])
     target_center_z = float(support_bounds[1][2]) + 0.01 + subject_height / 2.0
+    direct_target = _RepairTarget(
+        object_id,
+        context.relation,
+        context.check_id,
+        support_center,
+        None,
+        target_center_z=target_center_z,
+    )
     return [
-        _RepairTarget(
-            object_id,
-            context.relation,
-            context.check_id,
-            support_center,
-            None,
-            target_center_z=target_center_z,
-        )
+        direct_target,
+        *_support_window_clearance_targets(
+            context,
+            subject=subject,
+            support=support,
+            direct_target=direct_target,
+        ),
     ]
+
+
+def _support_window_clearance_targets(
+    context: _RepairHandlerContext,
+    *,
+    subject: SceneObject,
+    support: SceneObject,
+    direct_target: _RepairTarget,
+) -> list[_RepairTarget]:
+    """Generate a lateral media-pair move when raising a display blocks a window."""
+    subject_transform = _transform_for_target(subject, direct_target)
+    support_bounds = support.compute_world_bounds()
+    if subject_transform is None or support_bounds is None:
+        return []
+
+    old_subject_transform = subject.transform
+    try:
+        subject.transform = subject_transform
+        subject_bounds = subject.compute_world_bounds()
+    finally:
+        subject.transform = old_subject_transform
+    if subject_bounds is None:
+        return []
+
+    geometry = context.scene.room_geometry
+    support_center = _world_center_xy(support)
+    if geometry is None or support_center is None:
+        return []
+
+    targets: list[_RepairTarget] = []
+    for opening in getattr(geometry, "openings", ()) or ():
+        opening_type = getattr(opening, "opening_type", "")
+        if hasattr(opening_type, "value"):
+            opening_type = opening_type.value
+        if str(opening_type).lower() != "window":
+            continue
+        if not _bounds_block_opening(subject_bounds, opening):
+            continue
+
+        wall = _window_wall(context.scene, opening, support)
+        wall_bounds = wall.compute_world_bounds() if wall is not None else None
+        if wall_bounds is None or _xy_aabb_gap(support_bounds, wall_bounds) > 0.25:
+            continue
+        targets.extend(
+            _paired_support_window_targets(
+                context=context,
+                subject=subject,
+                support=support,
+                opening=opening,
+                support_center=support_center,
+                support_bounds=support_bounds,
+                subject_bounds=subject_bounds,
+                wall_bounds=wall_bounds,
+                target_center_z=direct_target.target_center_z,
+            )
+        )
+    return targets
+
+
+def _bounds_block_opening(bounds: tuple[np.ndarray, np.ndarray], opening: Any) -> bool:
+    zone_min = getattr(opening, "clearance_bbox_min", None)
+    zone_max = getattr(opening, "clearance_bbox_max", None)
+    try:
+        lower = np.asarray(bounds[0], dtype=float)
+        upper = np.asarray(bounds[1], dtype=float)
+        clearance_min = np.asarray(zone_min, dtype=float)
+        clearance_max = np.asarray(zone_max, dtype=float)
+        sill_height = float(getattr(opening, "sill_height", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return False
+    return bool(
+        upper[2] > sill_height
+        and lower[2] < clearance_max[2]
+        and lower[0] < clearance_max[0]
+        and upper[0] > clearance_min[0]
+        and lower[1] < clearance_max[1]
+        and upper[1] > clearance_min[1]
+    )
+
+
+def _paired_support_window_targets(
+    *,
+    context: _RepairHandlerContext,
+    subject: SceneObject,
+    support: SceneObject,
+    opening: Any,
+    support_center: tuple[float, float],
+    support_bounds: tuple[np.ndarray, np.ndarray],
+    subject_bounds: tuple[np.ndarray, np.ndarray],
+    wall_bounds: tuple[np.ndarray, np.ndarray],
+    target_center_z: float | None,
+) -> list[_RepairTarget]:
+    """Return window-safe slots for the support and its raised subject."""
+    zone_min = getattr(opening, "clearance_bbox_min", None)
+    zone_max = getattr(opening, "clearance_bbox_max", None)
+    try:
+        clearance_min = np.asarray(zone_min, dtype=float)
+        clearance_max = np.asarray(zone_max, dtype=float)
+        wall_min = np.asarray(wall_bounds[0], dtype=float)
+        wall_max = np.asarray(wall_bounds[1], dtype=float)
+    except (TypeError, ValueError):
+        return []
+
+    wall_span = wall_max - wall_min
+    normal_axis = 0 if float(wall_span[0]) < float(wall_span[1]) else 1
+    tangent_axis = 1 - normal_axis
+    support_half_span = (
+        float(support_bounds[1][tangent_axis] - support_bounds[0][tangent_axis]) / 2.0
+    )
+    subject_half_span = (
+        float(subject_bounds[1][tangent_axis] - subject_bounds[0][tangent_axis]) / 2.0
+    )
+    half_span = max(support_half_span, subject_half_span)
+    tangent_min = float(wall_min[tangent_axis]) + half_span + _WINDOW_CLEARANCE_MARGIN_M
+    tangent_max = float(wall_max[tangent_axis]) - half_span - _WINDOW_CLEARANCE_MARGIN_M
+    if tangent_min > tangent_max:
+        return []
+
+    current_tangent = float(support_center[tangent_axis])
+    candidate_values = (
+        float(clearance_min[tangent_axis]) - half_span - _WINDOW_CLEARANCE_MARGIN_M,
+        float(clearance_max[tangent_axis]) + half_span + _WINDOW_CLEARANCE_MARGIN_M,
+    )
+    targets: list[_RepairTarget] = []
+    for tangent_value in sorted(
+        candidate_values,
+        key=lambda value: (abs(value - current_tangent), value),
+    ):
+        if tangent_value < tangent_min or tangent_value > tangent_max:
+            continue
+        center = list(support_center)
+        center[tangent_axis] = tangent_value
+        pair_center = (float(center[0]), float(center[1]))
+        targets.append(
+            _RepairTarget(
+                str(subject.object_id),
+                "object_on_support",
+                context.check_id,
+                pair_center,
+                None,
+                member_poses=(
+                    _RepairPose(str(support.object_id), pair_center, None),
+                    _RepairPose(
+                        str(subject.object_id),
+                        pair_center,
+                        None,
+                        target_center_z,
+                    ),
+                ),
+                target_center_z=target_center_z,
+            )
+        )
+    return targets
 
 
 def _wall_backed_storage_repair_targets(
@@ -2867,6 +3043,7 @@ def _apply_repair_target(
                 target.check_id,
                 pose.target_center_xy,
                 pose.target_yaw_deg,
+                target_center_z=pose.target_center_z,
             )
             transform = _transform_for_target(obj, pose_target)
             if transform is None or not _within_floor_bounds(scene, obj, transform):

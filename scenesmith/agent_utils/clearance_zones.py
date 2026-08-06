@@ -10,6 +10,7 @@ This module provides:
 import logging
 
 from dataclasses import dataclass
+from typing import Any
 
 from scenesmith.agent_utils.house import (
     ClearanceOpeningData,
@@ -402,6 +403,48 @@ def _compute_penetration_depth(
     return min(penetration_x, penetration_y, penetration_z)
 
 
+def door_swing_clearance_bounds(
+    opening: Any,
+) -> tuple[list[float], list[float]] | None:
+    """Return a door's clearance rectangle enlarged to its 90-degree sweep.
+
+    Floor-plan metadata supplies a configurable passage depth, whereas the
+    interaction critic reserves a depth equal to the door width for either
+    possible hinge.  Use the larger of those two regions for hard-state
+    validation and deterministic placement so they cannot disagree.
+    """
+    opening_type = getattr(getattr(opening, "opening_type", None), "value", None)
+    if opening_type is None:
+        opening_type = getattr(opening, "opening_type", None)
+    if str(opening_type or "").lower() != "door":
+        return None
+
+    try:
+        lower = [float(value) for value in opening.clearance_bbox_min]
+        upper = [float(value) for value in opening.clearance_bbox_max]
+        width = float(opening.width)
+    except (AttributeError, TypeError, ValueError):
+        return None
+    if len(lower) < 3 or len(upper) < 3 or width <= 0.0:
+        return None
+
+    direction = getattr(getattr(opening, "wall_direction", None), "value", None)
+    if direction is None:
+        direction = getattr(opening, "wall_direction", "")
+    direction = str(direction or "").lower()
+    if direction == "north":
+        lower[1] = min(lower[1], upper[1] - width)
+    elif direction == "south":
+        upper[1] = max(upper[1], lower[1] + width)
+    elif direction == "east":
+        lower[0] = min(lower[0], upper[0] - width)
+    elif direction == "west":
+        upper[0] = max(upper[0], lower[0] + width)
+    else:
+        return None
+    return lower, upper
+
+
 def compute_door_clearance_violations(
     scene: RoomScene,
 ) -> list[DoorClearanceViolation]:
@@ -419,13 +462,10 @@ def compute_door_clearance_violations(
         return violations
 
     for opening in room_geom.openings:
-        if opening.opening_type != "door":
+        clearance_bounds = door_swing_clearance_bounds(opening)
+        if clearance_bounds is None:
             continue
-
-        zone_min = opening.clearance_bbox_min
-        zone_max = opening.clearance_bbox_max
-        if zone_min is None or zone_max is None:
-            continue
+        zone_min, zone_max = clearance_bounds
 
         for obj in scene.objects.values():
             # Skip structural elements and thin coverings - they don't block doors.

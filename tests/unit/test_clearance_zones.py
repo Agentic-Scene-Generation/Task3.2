@@ -255,6 +255,21 @@ class TestClearanceZonesWallFiltering(unittest.TestCase):
             "Furniture in door clearance zone should be flagged",
         )
 
+    def test_door_clearance_reserves_full_swing_depth(self):
+        """A narrow configured passage must not miss the 90-degree door sweep."""
+        swing_blocker = self._create_furniture_object(
+            name="swing_blocker",
+            position=np.array([1.25, 0.0, 1.0]),
+            size=np.array([0.1, 0.4, 2.0]),
+        )
+        self.scene.add_object(swing_blocker)
+
+        violations = compute_door_clearance_violations(self.scene)
+
+        self.assertEqual(
+            [violation.furniture_id for violation in violations], ["swing_blocker"]
+        )
+
     def test_open_connection_ignores_structural_elements(self):
         """Test that walls and floor are not flagged as blocking open connections."""
         # Add south wall (contains the open connection) and floor.

@@ -1315,6 +1315,68 @@ def test_freestanding_television_repair_restores_media_support(tmp_path: Path) -
     assert after["label"] == "pass"
 
 
+def test_media_support_repair_moves_pair_clear_of_window(tmp_path: Path) -> None:
+    tv_stand = _object("tv_stand_0", "tv_stand", (0.0, 1.7, 0.3), (1.4, 0.5, 0.6))
+    television = _object(
+        "television_0", "television", (-2.0, -1.2, 0.31), (0.9, 0.18, 0.6)
+    )
+    scene = _scene(
+        tmp_path,
+        tv_stand,
+        television,
+        text="A living room with a television placed on a TV stand.",
+    )
+    scene.room_type = "living_room"
+    scene.room_geometry.openings = [
+        ClearanceOpeningData(
+            opening_id="window_0",
+            opening_type="window",
+            wall_direction="north",
+            center_world=[0.0, 2.0, 1.5],
+            width=1.5,
+            sill_height=0.9,
+            height=1.2,
+            clearance_bbox_min=[-0.75, 1.5, 0.0],
+            clearance_bbox_max=[0.75, 2.1, 2.1],
+            wall_start=[-2.5, 2.0],
+            wall_end=[2.5, 2.0],
+            position_along_wall=2.5,
+        )
+    ]
+    _attach_intent_contract(
+        scene,
+        [
+            {
+                "relation": "on_top_of",
+                "stage": "furniture",
+                "strength": "hard",
+                "subjects": {"category": "television", "count": 1},
+                "targets": {"category": "tv_stand", "count": 1},
+                "source": "explicit_prompt",
+                "evidence_span": "television placed on a TV stand",
+            }
+        ],
+    )
+    config = CriticConfig(
+        enabled=True,
+        metrics=("functional_dependency", "interaction_clearance"),
+    )
+
+    fixes = improve_furniture_relations(scene, config=config)
+
+    assert {fix.object_id for fix in fixes} == {"television_0", "tv_stand_0"}
+    payload = evaluate_room_scene(scene, config=config, stage="media_window_after")
+    result_by_id = {result["check_id"]: result for result in payload["results"]}
+    support_result = next(
+        result
+        for result in payload["results"]
+        if result.get("relation_type") == "object_on_support"
+        and result.get("primary_object") == "television_0"
+    )
+    assert support_result["label"] == "pass"
+    assert result_by_id["window_clearance__window_0"]["label"] == "pass"
+
+
 def test_floor_plant_support_failure_is_not_repaired_or_hard_gated(
     tmp_path: Path, monkeypatch
 ) -> None:
