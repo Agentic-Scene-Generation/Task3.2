@@ -304,8 +304,8 @@ def _compile_intent_contract_if_enabled(
 
     The private config entries are consumed by ``_generate_room`` so the
     contract survives the floor-plan boundary even when SceneExpert itself is
-    disabled.  A failed second attempt is intentionally allowed to abort before
-    any floor agent starts.
+    disabled.  The compiler itself falls back to the deterministic prompt
+    parser when the model cannot return a valid contract.
     """
     critic_config = critic_config_from_any(cfg_dict)
     if not critic_config.enabled:

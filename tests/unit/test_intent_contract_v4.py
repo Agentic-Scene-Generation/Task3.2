@@ -17,10 +17,7 @@ from scenesmith.scenebenchmark_critic.intent_schema import (
     intent_contract_json_schema,
     validate_intent_contract,
 )
-from scenesmith.scenebenchmark_critic.intent_compiler import (
-    IntentCompilationError,
-    IntentCompiler,
-)
+from scenesmith.scenebenchmark_critic.intent_compiler import IntentCompiler
 from scenesmith.scenebenchmark_critic.intent_contract import (
     apply_contract_execution_states,
     bound_ids,
@@ -760,7 +757,9 @@ def _response(content: str) -> SimpleNamespace:
     )
 
 
-def _compiler_with_responses(responses: list[SimpleNamespace]) -> IntentCompiler:
+def _compiler_with_responses(
+    responses: list[SimpleNamespace | BaseException],
+) -> IntentCompiler:
     compiler = object.__new__(IntentCompiler)
     compiler._model = "test-model"
     compiler._max_tokens = 256
@@ -770,7 +769,10 @@ def _compiler_with_responses(responses: list[SimpleNamespace]) -> IntentCompiler
 
     def create(**kwargs):
         calls.append(kwargs)
-        return responses.pop(0)
+        response = responses.pop(0)
+        if isinstance(response, BaseException):
+            raise response
+        return response
 
     compiler._client = SimpleNamespace(
         chat=SimpleNamespace(completions=SimpleNamespace(create=create))
@@ -1024,15 +1026,43 @@ def test_legacy_contract_parser_keeps_wall_qualified_behind_as_wall_relation() -
     assert [row["relation"] for row in sideboard_relations] == ["against_wall"]
 
 
-def test_intent_compiler_fails_after_second_invalid_response() -> None:
+def test_intent_compiler_falls_back_after_unparseable_responses() -> None:
     compiler = _compiler_with_responses([_response("no json"), _response("still bad")])
 
-    with pytest.raises(IntentCompilationError):
-        compiler.compile("A room with a desk.")
+    result = compiler.compile("A room with a desk.")
 
-    assert compiler.last_trace["status"] == "error"
+    assert result["warnings"]
+    assert compiler.last_trace["status"] == "fallback"
     assert compiler.last_trace["retry_count"] == 1
-    assert len(compiler.last_trace["attempts"]) == 2
+    assert [item["status"] for item in compiler.last_trace["attempts"]] == [
+        "error",
+        "error",
+        "deterministic_fallback",
+    ]
+
+
+def test_intent_compiler_falls_back_after_transport_errors() -> None:
+    compiler = _compiler_with_responses(
+        [ConnectionError("temporary outage"), ConnectionError("temporary outage")]
+    )
+
+    result = compiler.compile(
+        "A living room with a sofa facing a TV stand and television on the opposite wall."
+    )
+
+    assert compiler.last_trace["status"] == "fallback"
+    assert compiler.last_trace["failure_reason"] == "ConnectionError: temporary outage"
+    assert [item["status"] for item in compiler.last_trace["attempts"]] == [
+        "error",
+        "error",
+        "deterministic_fallback",
+    ]
+    assert any(
+        row["relation"] == "on_top_of"
+        and row["subjects"]["category"] == "television"
+        and row["targets"]["category"] == "tv_stand"
+        for row in result["constraints"]
+    )
 
 
 def test_intent_compiler_is_disabled_without_critic_request(

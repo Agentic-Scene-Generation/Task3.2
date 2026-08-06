@@ -236,7 +236,6 @@ class IntentCompiler:
         normalized_prompt, prompt_hash = self._prompt_metadata(prompt)
         previous_output = ""
         last_error = ""
-        parsed_payload: dict[str, Any] | None = None
         attempts: list[dict[str, Any]] = []
 
         for attempt in range(2):
@@ -268,7 +267,6 @@ class IntentCompiler:
                 raw = self._raw_message(response)
                 data = parse_llm_json_object(raw)
                 payload = dict(data)
-                parsed_payload = payload
                 payload.setdefault("schema_version", self.SCHEMA_VERSION)
                 payload.setdefault("prompt", normalized_prompt)
                 payload.setdefault("prompt_sha256", prompt_hash)
@@ -343,50 +341,49 @@ class IntentCompiler:
                     "IntentCompiler attempt %d failed: %s", attempt + 1, last_error
                 )
 
-        if parsed_payload is not None:
-            fallback = build_intent_contract(normalized_prompt)
-            fallback["retry_count"] = 1
-            fallback["warnings"] = [
-                "LLM contract failed semantic validation; deterministic prompt parser used"
-            ]
-            try:
-                result = validate_intent_contract(fallback)
-            except Exception:
-                pass
-            else:
-                attempts.append(
-                    {
-                        "attempt": 2,
-                        "status": "deterministic_fallback",
-                        "elapsed_sec": 0.0,
-                    }
-                )
-                self.last_trace = {
-                    "status": "fallback",
-                    "spec_version": self.SPEC_VERSION,
-                    "prompt_sha256": prompt_hash,
-                    "constraints": result.get("constraints", []),
-                    "retry_count": 1,
-                    "failure_reason": last_error,
-                    "attempts": attempts,
+        fallback = build_intent_contract(normalized_prompt)
+        fallback["retry_count"] = 1
+        fallback["warnings"] = [
+            "LLM contract unavailable or invalid; deterministic prompt parser used"
+        ]
+        try:
+            result = validate_intent_contract(fallback)
+        except Exception:
+            pass
+        else:
+            attempts.append(
+                {
+                    "attempt": 2,
+                    "status": "deterministic_fallback",
+                    "elapsed_sec": 0.0,
                 }
-                _append_llm_debug(
-                    build_llm_call_debug_record(
-                        stage="intent_compiler",
-                        agent_role="intent_compiler",
-                        event="deterministic_fallback",
-                        prompt=self._messages(normalized_prompt),
-                        output=json.dumps(fallback, ensure_ascii=False),
-                        error=last_error,
-                    ).model_dump()
-                    | {
-                        "input": self._messages(normalized_prompt),
-                        "output": fallback,
-                        "status": "fallback",
-                        "attempt": 2,
-                    }
-                )
-                return result
+            )
+            self.last_trace = {
+                "status": "fallback",
+                "spec_version": self.SPEC_VERSION,
+                "prompt_sha256": prompt_hash,
+                "constraints": result.get("constraints", []),
+                "retry_count": 1,
+                "failure_reason": last_error,
+                "attempts": attempts,
+            }
+            _append_llm_debug(
+                build_llm_call_debug_record(
+                    stage="intent_compiler",
+                    agent_role="intent_compiler",
+                    event="deterministic_fallback",
+                    prompt=self._messages(normalized_prompt),
+                    output=json.dumps(fallback, ensure_ascii=False),
+                    error=last_error,
+                ).model_dump()
+                | {
+                    "input": self._messages(normalized_prompt),
+                    "output": fallback,
+                    "status": "fallback",
+                    "attempt": 2,
+                }
+            )
+            return result
 
         self.last_trace = {
             "status": "error",
