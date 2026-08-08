@@ -1206,6 +1206,56 @@ class TestFallenFurnitureRemoval(PhysicalFeasibilityTestCase):
                     transform.GetAsMatrix4(),
                 )
 
+    def test_repeated_proxy_restores_when_one_copy_falls_through_floor(self) -> None:
+        """A shared proxy failure must retain a repeated required floor asset."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            scene = RoomScene(
+                room_geometry=self.room_geometry,
+                scene_dir=Path(tmp_dir),
+                text_description="Repeated unstable floor plants",
+            )
+            object_ids = [UniqueID("plant_0"), UniqueID("plant_1")]
+            original_transforms = {
+                object_ids[0]: RigidTransform(p=[-1.2, -0.9, 0.0]),
+                object_ids[1]: RigidTransform(p=[1.2, -0.9, 0.0]),
+            }
+            for object_id in object_ids:
+                scene.add_object(
+                    SceneObject(
+                        object_id=object_id,
+                        object_type=ObjectType.FURNITURE,
+                        name="plant",
+                        description="Repeated HSSD floor plant",
+                        transform=RigidTransform(
+                            R=RotationMatrix(RollPitchYaw(0.0, np.radians(75.0), 0.0)),
+                            p=original_transforms[object_id].translation(),
+                        ),
+                        sdf_path=Path(tmp_dir) / str(object_id) / "plant.sdf",
+                        metadata={
+                            "asset_source": "hssd",
+                            "hssd_mesh_id": "shared-plant-mesh",
+                        },
+                    )
+                )
+
+            scene.get_object(object_ids[1]).transform = original_transforms[
+                object_ids[1]
+            ]
+            restored = _restore_collectively_unstable_instances(
+                scene,
+                original_transforms,
+                [object_ids[0]],
+                tilt_threshold_degrees=45.0,
+                restored_through_floor_ids=[object_ids[1]],
+            )
+
+            self.assertEqual(restored, object_ids)
+            for object_id, transform in original_transforms.items():
+                np.testing.assert_allclose(
+                    scene.get_object(object_id).transform.GetAsMatrix4(),
+                    transform.GetAsMatrix4(),
+                )
+
 
 class TestFallenManipulandRemoval(PhysicalFeasibilityTestCase):
     """Tests for fallen manipuland removal functionality."""

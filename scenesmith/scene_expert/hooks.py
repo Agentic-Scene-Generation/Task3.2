@@ -1321,7 +1321,7 @@ class SceneExpertHookRunner:
     # Finalize: called after all stages complete
     # ------------------------------------------------------------------
 
-    def finalize(self, final_scene_path: str) -> None:
+    def finalize(self, final_scene_path: str) -> FullVerifyReport:
         """Run full verifier, save trace, update memory.
 
         Called from _generate_single_scene after _run_sequential_room_generation
@@ -1405,6 +1405,7 @@ class SceneExpertHookRunner:
             "[SceneExpertTiming] stage=full_scene module=finalize_total elapsed=%.2fs",
             time.time() - finalize_start,
         )
+        return full_report
 
     def save_partial_trace(self, error: str = "") -> None:
         """Persist a partial trace from an exception path."""

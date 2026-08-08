@@ -19,6 +19,7 @@ from scenesmith.scenebenchmark_critic.intent_schema import (
 )
 from scenesmith.scenebenchmark_critic.intent_compiler import IntentCompiler
 from scenesmith.scenebenchmark_critic.intent_contract import (
+    augment_contract_checks,
     apply_contract_execution_states,
     bound_ids,
     build_intent_contract,
@@ -35,8 +36,10 @@ from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.e
     evaluate_edge_distribution,
 )
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.relations import (
+    evaluate_functional_dependency,
     _relation_target_is_valid,
 )
+from scenesmith.scenebenchmark_critic.core.geometry import load_geometry
 from scenesmith.scene_expert import hooks
 from scenesmith.scene_expert.schemas import SceneTaskSpec
 
@@ -246,6 +249,7 @@ def test_schema_canonicalizes_dining_aliases_and_derives_manipuland_stage() -> N
     [
         ("large_plants", "large_plant"),
         ("two_seater_sofas", "two_seater_sofa"),
+        ("teacher's desk", "teacher_desk"),
         ("office_chairs", "office_chair"),
         ("batteries", "battery"),
     ],
@@ -1007,10 +1011,188 @@ def test_intent_compiler_retries_wall_qualified_directional_relation() -> None:
     result = compiler.compile(prompt)
 
     assert result["retry_count"] == 1
-    assert [row["relation"] for row in result["constraints"]] == ["against_wall"]
+    assert result["constraints"][0]["relation"] == "against_wall"
+    assert sum(row["relation"] == "against_wall" for row in result["constraints"]) == 1
     retry_message = compiler._test_calls[1]["messages"][1]["content"]
     assert "wall-relative directional relation" in retry_message
     assert "Do not convert 'X against the wall" in retry_message
+
+
+def test_intent_compiler_restores_explicit_floor_support_omitted_by_llm() -> None:
+    prompt = (
+        "A living room with a two-seater sofa and two large potted plants on "
+        "the floor near the sofa."
+    )
+    compiler = _compiler_with_responses(
+        [
+            _response(
+                '{"constraints": [{"relation": "near", '
+                '"subjects": {"category": "large_plant", "count": 2}, '
+                '"targets": {"category": "two_seater_sofa", "count": 1}, '
+                '"source": "explicit_prompt", '
+                '"evidence_span": "plants near the sofa"}]}'
+            )
+        ]
+    )
+
+    result = compiler.compile(prompt)
+
+    assert any(
+        row["relation"] == "on_top_of"
+        and row["subjects"]["category"] == "plant"
+        and row["targets"]["category"] == "floor"
+        for row in result["constraints"]
+    )
+    assert compiler.last_trace["enriched_constraints"]
+
+
+def test_intent_compiler_restores_classroom_operation_zone_ontology() -> None:
+    prompt = (
+        "A classroom with a teacher's desk, six student desks with chairs, "
+        "and a chalkboard."
+    )
+    compiler = _compiler_with_responses([_response('{"constraints": []}')])
+
+    result = compiler.compile(prompt)
+
+    assert {row["relation"] for row in result["constraints"]} >= {
+        "operation_zone_at_wall",
+        "instructional_surface_alignment",
+    }
+
+
+def test_floor_supported_near_relation_rejects_containment() -> None:
+    plant = _record("large_plant_0", "large_plant", (0.0, 0.0), (0.4, 0.4, 1.6))
+    sofa = _record("two_seater_sofa_0", "two_seater_sofa", (0.0, 0.0), (2.0, 0.9, 1.0))
+    floor = _record("floor_0", "floor", (0.0, 0.0), (6.0, 6.0, 0.05))
+    case_pack = {
+        "scene_geometry": {"objects": [plant, sofa, floor]},
+        "intent_contract": validate_intent_contract(
+            {
+                "schema_version": INTENT_CONTRACT_SCHEMA_VERSION,
+                "prompt": "plant on the floor near the sofa",
+                "constraints": [
+                    {
+                        "relation": "on_top_of",
+                        "subjects": {"category": "large_plant", "count": 1},
+                        "targets": {"category": "floor", "count": 1},
+                        "source": "explicit_prompt",
+                        "evidence_span": "plant on the floor",
+                    },
+                    {
+                        "relation": "near",
+                        "subjects": {"category": "large_plant", "count": 1},
+                        "targets": {"category": "two_seater_sofa", "count": 1},
+                        "source": "explicit_prompt",
+                        "evidence_span": "near the sofa",
+                    },
+                ],
+            }
+        ),
+    }
+
+    assert augment_contract_checks(case_pack)
+    near_check = next(
+        check
+        for check in case_pack["checks"]
+        if check["relation_type"] == "generic_near_relation"
+    )
+    assert near_check["evidence"]["dependency"]["requires_external_adjacency"]
+    result = evaluate_functional_dependency(load_geometry(case_pack), near_check)
+
+    assert result["label"] == "fail"
+    assert "not external adjacency" in result["reason"]
+
+
+def test_floor_supported_near_existing_check_gets_external_adjacency_guard() -> None:
+    plant = _record("large_plant_0", "large_plant", (0.0, 0.0), (0.4, 0.4, 1.6))
+    sofa = _record("two_seater_sofa_0", "two_seater_sofa", (0.0, 0.0), (2.0, 0.9, 1.0))
+    floor = _record("floor_0", "floor", (0.0, 0.0), (6.0, 6.0, 0.05))
+    near_constraint = {
+        "relation": "near",
+        "subjects": {"category": "large_plant", "count": 1},
+        "targets": {"category": "two_seater_sofa", "count": 1},
+        "source": "model_inferred",
+        "evidence_span": "near the sofa",
+        "inference_reason": "The model preserved a nearby plant relationship.",
+    }
+    case_pack = {
+        "scene_geometry": {"objects": [plant, sofa, floor]},
+        "intent_contract": validate_intent_contract(
+            {
+                "schema_version": INTENT_CONTRACT_SCHEMA_VERSION,
+                "prompt": "plant on the floor near the sofa",
+                "constraints": [
+                    {
+                        "relation": "on_top_of",
+                        "subjects": {"category": "large_plant", "count": 1},
+                        "targets": {"category": "floor", "count": 1},
+                        "source": "explicit_prompt",
+                        "evidence_span": "plant on the floor",
+                    },
+                    near_constraint,
+                ],
+            }
+        ),
+        "checks": [
+            {
+                "check_id": "existing_near_check",
+                "metric": "functional_dependency",
+                "subject_id": "large_plant_0",
+                "target_ids": ["two_seater_sofa_0"],
+                "relation_type": "generic_near_relation",
+                "expected_use": "near",
+                "check_source": "intent_contract",
+                "scoring_tier": "core",
+                "evidence": {"intent_constraint": near_constraint},
+            }
+        ],
+    }
+
+    assert augment_contract_checks(case_pack)
+    near_check = case_pack["checks"][0]
+    assert near_check["evidence"]["dependency"]["requires_external_adjacency"]
+
+
+def test_floor_supported_near_wall_does_not_get_furniture_containment_guard() -> None:
+    plant = _record("large_plant_0", "large_plant", (0.0, 0.0), (0.4, 0.4, 1.6))
+    wall = _record("north_wall", "wall", (0.0, 2.5), (6.0, 0.1, 2.8))
+    wall["object_type"] = "wall"
+    floor = _record("floor_0", "floor", (0.0, 0.0), (6.0, 6.0, 0.05))
+    floor["object_type"] = "floor"
+    case_pack = {
+        "scene_geometry": {"objects": [plant, wall, floor]},
+        "intent_contract": validate_intent_contract(
+            {
+                "schema_version": INTENT_CONTRACT_SCHEMA_VERSION,
+                "prompt": "plant on the floor near the north wall",
+                "constraints": [
+                    {
+                        "relation": "on_top_of",
+                        "subjects": {"category": "large_plant", "count": 1},
+                        "targets": {"category": "floor", "count": 1},
+                        "source": "explicit_prompt",
+                        "evidence_span": "plant on the floor",
+                    },
+                    {
+                        "relation": "near",
+                        "subjects": {"category": "large_plant", "count": 1},
+                        "targets": {"category": "wall", "count": 1},
+                        "source": "explicit_prompt",
+                        "evidence_span": "near the north wall",
+                    },
+                ],
+            }
+        ),
+    }
+
+    assert augment_contract_checks(case_pack)
+    near_check = next(
+        check
+        for check in case_pack["checks"]
+        if check["relation_type"] == "generic_near_relation"
+    )
+    assert not near_check["evidence"]["dependency"].get("requires_external_adjacency")
 
 
 def test_legacy_contract_parser_keeps_wall_qualified_behind_as_wall_relation() -> None:

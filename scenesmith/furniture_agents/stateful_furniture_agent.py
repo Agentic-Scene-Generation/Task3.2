@@ -787,6 +787,8 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                     f"removed {removed_excess} duplicate prompt-required furniture asset(s)"
                 )
             if inventory_changed:
+                if self._repair_forbidden_zone_conflicts(include_windows=False):
+                    actions.append("cleared deterministic door/opening forbidden zones")
                 actions.extend(self._repair_relations_after_inventory_change())
             elif "unresolved prompt-core furniture relation" in reasons:
                 # A later design change can break a hard prompt relation even
@@ -826,6 +828,8 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 f"removed {removed_excess} duplicate prompt-required furniture asset(s)"
             )
         if inventory_changed:
+            if self._repair_forbidden_zone_conflicts(include_windows=False):
+                actions.append("cleared deterministic door/opening forbidden zones")
             actions.extend(self._repair_relations_after_inventory_change())
         elif "unresolved prompt-core furniture relation" in reasons:
             actions.extend(self._repair_unresolved_prompt_contract_relations())
@@ -2634,14 +2638,37 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         zones: list[tuple[str, str, np.ndarray, np.ndarray]],
     ) -> RigidTransform | None:
         candidates = self._generic_wall_candidate_transforms(obj)
+        room_bounds = self._room_bounds_xy()
+        if room_bounds is not None:
+            min_x, min_y, max_x, max_y = room_bounds
+            current_yaw = RollPitchYaw(obj.transform.rotation()).yaw_angle()
+            grid_step = max(
+                0.4,
+                float(self._repair_cfg_value("forbidden_zone_grid_step_m", 0.6)),
+            )
+            x_values = np.arange(min_x + 0.35, max_x - 0.34, grid_step)
+            y_values = np.arange(min_y + 0.35, max_y - 0.34, grid_step)
+            for x in x_values:
+                for y in y_values:
+                    candidates.append(
+                        self._fit_transform_inside_room(
+                            obj,
+                            self._grounded_transform(
+                                obj,
+                                x=float(x),
+                                y=float(y),
+                                yaw_deg=math.degrees(current_yaw),
+                            ),
+                        )
+                    )
         if not candidates:
             return None
         obstacles = [
             other
-            for other in self._furniture_by_category("bed")
-            + self._furniture_by_category("nightstand")
-            + self._furniture_by_category("wardrobe")
-            if other.object_id != obj.object_id
+            for other_id, other in self.scene.objects.items()
+            if str(other_id) != str(obj.object_id)
+            and not getattr(other, "immutable", False)
+            and getattr(other, "object_type", None) == ObjectType.FURNITURE
         ]
         best_transform = None
         best_score = -1e18
@@ -2650,20 +2677,31 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             bounds = self._bounds_for_transform(obj, transform)
             if bounds is None:
                 continue
-            zone_penalty = self._zone_overlap_penalty(bounds, zones)
-            overlap_penalty = 0.0
+            has_furniture_overlap = False
             for obstacle in obstacles:
                 obstacle_bounds = obstacle.compute_world_bounds()
                 if obstacle_bounds is None:
                     continue
                 overlap_x, overlap_y = self._xy_overlap_depths(bounds, obstacle_bounds)
-                overlap_penalty += overlap_x * overlap_y * 400.0
+                overlap_z = max(
+                    0.0,
+                    float(
+                        min(bounds[1][2], obstacle_bounds[1][2])
+                        - max(bounds[0][2], obstacle_bounds[0][2])
+                    ),
+                )
+                if overlap_x > 1e-4 and overlap_y > 1e-4 and overlap_z > 1e-4:
+                    has_furniture_overlap = True
+                    break
+            if has_furniture_overlap:
+                continue
+            zone_penalty = self._zone_overlap_penalty(bounds, zones)
             center = np.asarray(transform.translation(), dtype=float)
             move_penalty = (
                 float(np.linalg.norm(center[:2] - original_center[:2])) * 0.15
             )
             wall_bonus = 0.25
-            score = wall_bonus - zone_penalty - overlap_penalty - move_penalty
+            score = wall_bonus - zone_penalty - move_penalty
             if score > best_score:
                 best_score = score
                 best_transform = transform

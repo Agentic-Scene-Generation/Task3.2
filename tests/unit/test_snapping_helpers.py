@@ -150,3 +150,36 @@ def test_floor_furniture_wall_closest_point_snap_never_changes_elevation(
 
     assert movement[2] == 0.0
     assert abs(movement[1]) > 1e-6
+
+
+def test_high_poly_target_uses_bounded_vertex_pair_for_snap_direction(
+    monkeypatch,
+) -> None:
+    """A small source must not query every face on a high-poly target."""
+    source = _object("nightstand", (-2.0, 0.0, 0.0))
+    target = _object("bed", (2.0, 0.0, 0.0))
+    source_mesh = trimesh.creation.box(extents=(0.5, 0.5, 0.5))
+    target_mesh = trimesh.creation.icosphere(subdivisions=3, radius=1.0)
+    meshes = iter((source_mesh, target_mesh))
+
+    monkeypatch.setattr(
+        snapping_helpers.trimesh,
+        "load",
+        lambda *args, **kwargs: next(meshes).copy(),
+    )
+    monkeypatch.setattr(
+        snapping_helpers.trimesh.proximity,
+        "closest_point",
+        lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("high-poly target should not use full mesh proximity")
+        ),
+    )
+    cfg = OmegaConf.create({"snap_to_object": {"max_sample_vertices": 64}})
+
+    direction = snapping_helpers.compute_snap_direction_mesh_to_mesh(
+        source, target, cfg
+    )
+
+    assert direction[0] > 0.9
+    assert abs(direction[1]) < 0.1
+    assert abs(direction[2]) < 0.1

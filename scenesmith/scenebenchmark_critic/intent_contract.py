@@ -627,6 +627,83 @@ def augment_contract_checks(case_pack: dict[str, Any]) -> bool:
     }
     added = False
     checks = list(case_pack.get("checks") or [])
+    floor_supported_subject_ids: set[str] = set()
+    for floor_constraint in contract_constraints(case_pack, relations=("on_top_of",)):
+        target_category = _normalize_selector_category(
+            (floor_constraint.get("targets") or {}).get("category")
+        )
+        if target_category == "floor":
+            floor_supported_subject_ids.update(
+                bound_ids(floor_constraint.get("subjects"), objects)
+            )
+
+    def floor_near_target_is_furniture(
+        check: dict[str, Any], constraint: dict[str, Any]
+    ) -> bool:
+        """Scope floor-object external-adjacency guards to furniture targets.
+
+        A floor-supported object may also be near a wall, opening, or another
+        structural object.  The containment rejection is intended for the
+        original failure mode (for example, a plant hidden inside a sofa), so
+        do not apply it to non-furniture targets.  Older synthetic geometry
+        records omit ``object_type``; in that case use the semantic selector
+        and conservatively treat structural categories as non-furniture.
+        """
+        target_ids = [
+            str(item) for item in (check.get("target_ids") or []) if str(item)
+        ]
+        records = {
+            str(item.get("id")): item
+            for item in objects
+            if isinstance(item, dict) and item.get("id")
+        }
+        resolved = [records[item] for item in target_ids if item in records]
+        typed = [str(item.get("object_type") or "").lower() for item in resolved]
+        if any(typed):
+            return bool(typed) and all(item == "furniture" for item in typed)
+        category = _normalize_selector_category(
+            (constraint.get("targets") or {}).get("category")
+        )
+        return category not in {
+            "wall",
+            "floor",
+            "ceiling",
+            "door",
+            "window",
+            "opening",
+        }
+
+    # A valid LLM contract may already have emitted the pairwise near check.
+    # Apply the floor-support interpretation to those existing checks too;
+    # otherwise the safety rule would depend on whether deterministic
+    # enrichment happened to create the check first.
+    for check in checks:
+        if not isinstance(check, dict):
+            continue
+        if (
+            str(check.get("relation_type") or "") != "generic_near_relation"
+            or str(check.get("subject_id") or "") not in floor_supported_subject_ids
+        ):
+            continue
+        evidence = check.setdefault("evidence", {})
+        if not isinstance(evidence, dict):
+            evidence = {}
+            check["evidence"] = evidence
+        constraint = evidence.get("intent_constraint") or {}
+        target_category = _normalize_selector_category(
+            (constraint.get("targets") or {}).get("category")
+        )
+        if target_category == "floor" or not floor_near_target_is_furniture(
+            check, constraint
+        ):
+            continue
+        dependency = evidence.setdefault("dependency", {})
+        if not isinstance(dependency, dict):
+            dependency = {}
+            evidence["dependency"] = dependency
+        if not dependency.get("requires_external_adjacency"):
+            dependency["requires_external_adjacency"] = True
+            added = True
     for constraint in contract_constraints(case_pack):
         if str(constraint.get("relation") or "") == "edge_distribution":
             # The dedicated extension binds the complete subject group and
@@ -697,6 +774,18 @@ def augment_contract_checks(case_pack: dict[str, Any]) -> bool:
             )
             if check_id in existing:
                 continue
+            dependency = _relation_threshold_dependency(constraint)
+            if (
+                relation_type == "generic_near_relation"
+                and subject_id in floor_supported_subject_ids
+                and floor_near_target_is_furniture(
+                    {"target_ids": check_target_ids}, constraint
+                )
+            ):
+                # "On the floor near X" requires exterior adjacency.  Without
+                # this flag, a footprint contained by X reports a 0m gap and is
+                # incorrectly accepted as a successful near relation.
+                dependency["requires_external_adjacency"] = True
             checks.append(
                 {
                     "check_id": check_id,
@@ -709,7 +798,7 @@ def augment_contract_checks(case_pack: dict[str, Any]) -> bool:
                     "scoring_tier": "core",
                     "evidence": {
                         "intent_constraint": constraint,
-                        "dependency": _relation_threshold_dependency(constraint),
+                        "dependency": dependency,
                     },
                 }
             )
@@ -3023,7 +3112,7 @@ def _fd_relation_for_constraint(constraint: dict[str, Any]) -> str | None:
 
 def _relation_threshold_dependency(
     constraint: dict[str, Any],
-) -> dict[str, float]:
+) -> dict[str, Any]:
     thresholds = relation_spec(str(constraint.get("relation") or "")).thresholds
     max_gap = thresholds.get("max_gap_m")
     if max_gap is None:

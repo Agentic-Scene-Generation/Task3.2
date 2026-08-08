@@ -507,9 +507,11 @@ def compute_door_clearance_violations(
 def compute_window_clearance_violations(
     scene: RoomScene,
 ) -> list[WindowClearanceViolation]:
-    """Check furniture above sill height intersecting window clearance zones.
+    """Check furniture intersecting the full 3D window clearance zone.
 
-    Only reports violations where furniture top exceeds window sill height.
+    An object must overlap the window opening's horizontal footprint *and* its
+    vertical extent. Objects below the sill or above the window head (for
+    example ceiling-mounted beams) do not block the opening.
 
     Args:
         scene: RoomScene with furniture objects.
@@ -528,9 +530,10 @@ def compute_window_clearance_violations(
 
         zone_min = opening.clearance_bbox_min
         zone_max = opening.clearance_bbox_max
-        sill_height = opening.sill_height
         if zone_min is None or zone_max is None:
             continue
+        opening_min_z = float(opening.sill_height)
+        opening_max_z = opening_min_z + float(opening.height)
 
         for obj in scene.objects.values():
             # Skip structural elements and thin coverings - they don't block windows.
@@ -546,24 +549,20 @@ def compute_window_clearance_violations(
             obj_min = list(world_bounds[0])
             obj_max = list(world_bounds[1])
 
-            # Check if furniture top exceeds sill height.
-            furniture_top = obj_max[2]
-            if furniture_top <= sill_height:
-                continue  # Furniture below window sill is OK.
-
-            # Check XY intersection with clearance zone.
             if (
                 obj_min[0] < zone_max[0]
                 and obj_max[0] > zone_min[0]
                 and obj_min[1] < zone_max[1]
                 and obj_max[1] > zone_min[1]
+                and obj_min[2] < opening_max_z
+                and obj_max[2] > opening_min_z
             ):
                 violations.append(
                     WindowClearanceViolation(
                         furniture_id=str(obj.object_id),
                         window_label=opening.opening_id,
-                        furniture_top_height=furniture_top,
-                        sill_height=sill_height,
+                        furniture_top_height=float(obj_max[2]),
+                        sill_height=float(opening.sill_height),
                     )
                 )
 

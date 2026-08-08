@@ -13,9 +13,11 @@ from scenesmith.scenebenchmark_critic.core.geometry import (
     distance_xy,
     front_vector,
     object_category,
+    object_footprint_polygon,
     seating_angle_to_target_deg,
     side_vector,
 )
+from shapely.geometry import Point, Polygon
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.constants import *
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.profiles import (
     object_function_profile,
@@ -299,6 +301,9 @@ def _eval_relation_over_targets(
                     target,
                     target_relation,
                     max_gap=(float(max_gap) if max_gap is not None else None),
+                    require_external_adjacency=bool(
+                        dependency.get("requires_external_adjacency", False)
+                    ),
                 )
             else:
                 label, confidence, reason = evaluator(subject, target, target_relation)
@@ -1470,7 +1475,12 @@ def _eval_generic_near_relation(
     relation_type: str,
     *,
     max_gap: float | None = None,
+    require_external_adjacency: bool = False,
 ) -> tuple[str, float, str]:
+    if require_external_adjacency:
+        overlap_reason = _floor_supported_near_overlap_reason(subject, target)
+        if overlap_reason:
+            return "fail", 0.96, overlap_reason
     gap = bbox_gap_xy(subject, target)
     if gap is None:
         return "unknown", 0.0, "missing distance geometry."
@@ -1492,6 +1502,54 @@ def _eval_generic_near_relation(
         "fail",
         0.75,
         f"generic `{relation_type}` target is too far with {gap:.2f}m gap.",
+    )
+
+
+def _floor_supported_near_overlap_reason(
+    subject: dict[str, Any], target: dict[str, Any]
+) -> str:
+    """Describe an unauthorized floor-object containment, if geometry proves it."""
+    subject_footprint = object_footprint_polygon(subject)
+    target_footprint = object_footprint_polygon(target)
+    subject_span = bbox_height_span(subject)
+    target_span = bbox_height_span(target)
+    if (
+        subject_footprint is None
+        or target_footprint is None
+        or subject_span is None
+        or target_span is None
+    ):
+        return ""
+    try:
+        subject_polygon = Polygon(subject_footprint)
+        target_polygon = Polygon(target_footprint)
+    except (TypeError, ValueError):
+        return ""
+    if (
+        subject_polygon.is_empty
+        or target_polygon.is_empty
+        or subject_polygon.area <= 1e-8
+        or not subject_polygon.is_valid
+        or not target_polygon.is_valid
+    ):
+        return ""
+    vertical_overlap = min(subject_span[1], target_span[1]) - max(
+        subject_span[0], target_span[0]
+    )
+    if vertical_overlap <= 0.02:
+        return ""
+    overlap_ratio = (
+        subject_polygon.intersection(target_polygon).area / subject_polygon.area
+    )
+    center = bbox_center_xy(subject)
+    center_contained = center is not None and target_polygon.covers(Point(center))
+    if not center_contained and overlap_ratio < 0.50:
+        return ""
+    mode = "center lies inside" if center_contained else "footprint overlaps"
+    return (
+        "floor-supported near relation is not external adjacency: subject "
+        f"{mode} target footprint (overlap {overlap_ratio:.2f}, vertical overlap "
+        f"{vertical_overlap:.2f}m)."
     )
 
 

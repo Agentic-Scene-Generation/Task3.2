@@ -152,6 +152,35 @@ class SceneExpertMemoryTest(unittest.TestCase):
 
         self.assertNotIn("only the bed", reconciled.to_injection_text().lower())
 
+    def test_structural_only_ceiling_brief_does_not_invent_lighting_requirement(
+        self,
+    ) -> None:
+        brief = StageBrief(
+            stage="ceiling_mounted",
+            stage_objective="Install exposed beams and pendant lighting.",
+            constraints_for_designer=[
+                "Place exposed beams across the ceiling.",
+                "Add a pendant light at the room center.",
+            ],
+            checks_for_critic=[
+                "Verify the beams are clear of furniture.",
+                "Fail the stage when lighting is absent.",
+            ],
+        )
+
+        reconciled = _reconcile_stage_brief(
+            brief,
+            original_task="A bedroom with rustic decor and exposed wooden beams.",
+            room_type="bedroom",
+            required_objects=["exposed wooden beams"],
+        )
+        text = reconciled.to_injection_text().lower()
+
+        self.assertNotIn("pendant", text)
+        self.assertNotIn("fail the stage when lighting is absent", text)
+        self.assertIn("structural ceiling spans", text)
+        self.assertIn("absent lighting as a ceiling-stage failure", text)
+
     def test_empty_stage_inventory_uses_noop_brief(self) -> None:
         context = HarnessContext(
             stage="wall_mounted",
@@ -421,6 +450,40 @@ class SceneExpertMemoryTest(unittest.TestCase):
 
             self.assertTrue(report.pass_stage)
             self.assertEqual([], report.issues)
+
+    def test_deterministic_hard_fail_is_never_advisory(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scores_dir = root / "scene_states" / "ceiling"
+            scores_dir.mkdir(parents=True)
+            (scores_dir / "scores.yaml").write_text(
+                "\n".join(
+                    [
+                        "Realism:",
+                        "  grade: 3",
+                        "Functionality:",
+                        "  grade: 2",
+                        'Summary: "DETERMINISTIC HARD-CHECK FAILED BEFORE VLM SCORING. Hard issues: collisions."',
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            stage_report = StageVerifier(pass_threshold=0.6).verify(
+                stage="ceiling_mounted",
+                stage_output_dir=str(root),
+                task_spec=SceneTaskSpec(room_type="bedroom", style="standard"),
+                scene_state_info={"object_names": []},
+            )
+            full_report = FullVerifier().verify([stage_report])
+
+        self.assertFalse(stage_report.pass_stage)
+        self.assertIn(
+            "deterministic_hard_failure",
+            {issue.issue_type for issue in stage_report.issues},
+        )
+        self.assertFalse(full_report.deterministic_pass)
+        self.assertFalse(full_report.pass_scene)
 
     def test_contract_stage_ownership_reassigns_monitor_before_verification(
         self,

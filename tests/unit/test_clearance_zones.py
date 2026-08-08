@@ -179,6 +179,34 @@ class TestClearanceZonesWallFiltering(unittest.TestCase):
             "Tall cabinet should be flagged as blocking window",
         )
 
+    def test_window_clearance_ignores_objects_above_window_head(self):
+        """Ceiling-mounted objects above the window do not block its opening."""
+        beam = self._create_furniture_object(
+            name="ceiling_beam",
+            position=np.array([0.0, 1.7, 2.8]),
+            size=np.array([0.6, 0.4, 0.12]),
+        )
+        self.scene.add_object(beam)
+
+        violations = compute_window_clearance_violations(self.scene)
+
+        self.assertEqual(
+            [v for v in violations if "ceiling_beam" in v.furniture_id], []
+        )
+
+    def test_window_clearance_ignores_objects_below_window_sill(self):
+        """Furniture entirely below a window sill does not block its opening."""
+        low_table = self._create_furniture_object(
+            name="low_table",
+            position=np.array([0.0, 1.7, 0.35]),
+            size=np.array([0.6, 0.4, 0.6]),
+        )
+        self.scene.add_object(low_table)
+
+        violations = compute_window_clearance_violations(self.scene)
+
+        self.assertEqual([v for v in violations if "low_table" in v.furniture_id], [])
+
     def test_wall_height_tolerance_allows_ceiling_contact_not_overrun(self):
         """Ignore transform noise at the ceiling but retain real overruns."""
         ceiling_contact = SceneObject(

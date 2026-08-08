@@ -442,10 +442,10 @@ def _evaluate_operation_zone_at_wall(
     if frame is None:
         return []
     normal_axis, tangent_axis, inward, inner_face, wall_center = frame
-    wallward = [0.0, 0.0]
-    wallward[normal_axis] = -inward
-    wallward_xy = (float(wallward[0]), float(wallward[1]))
-    subject_half_depth = _projected_half_extent(subject, front_vector(subject))
+    inward_vector = [0.0, 0.0]
+    inward_vector[normal_axis] = inward
+    inward_xy = (float(inward_vector[0]), float(inward_vector[1]))
+    subject_half_depth = _projected_half_extent(subject, inward_xy)
     room_depth = bounds[2 + normal_axis] - bounds[normal_axis]
     required_clearance = min(1.0, max(0.65, 0.10 * room_depth))
     target = [float(center[0]), float(center[1])]
@@ -454,7 +454,7 @@ def _evaluate_operation_zone_at_wall(
         subject_half_depth + required_clearance
     )
     target_xy = (float(target[0]), float(target[1]))
-    target_yaw = math.degrees(math.atan2(-wallward_xy[0], wallward_xy[1]))
+    target_yaw = math.degrees(math.atan2(-inward_xy[0], inward_xy[1]))
 
     tangent_error = abs(center[tangent_axis] - target_xy[tangent_axis])
     normal_error = abs(center[normal_axis] - target_xy[normal_axis])
@@ -462,7 +462,7 @@ def _evaluate_operation_zone_at_wall(
         0.0,
         inward * (center[normal_axis] - inner_face) - subject_half_depth,
     )
-    facing_error = _front_error_deg(subject, wallward_xy)
+    facing_error = _front_error_deg(subject, inward_xy)
     allowed_tangent = max(
         0.18, 0.05 * min(bounds[2] - bounds[0], bounds[3] - bounds[1])
     )
@@ -483,8 +483,9 @@ def _evaluate_operation_zone_at_wall(
             tier=tier,
             reason=(
                 f"`{subject_id}` must be centered on its functional wall with its "
-                f"usable front facing the wall and a {required_clearance:.2f}m "
-                f"operator zone between them; tangent error is {tangent_error:.2f}m, "
+                f"rear edge toward the wall, usable front facing into the room, "
+                f"and a {required_clearance:.2f}m operator zone between them; "
+                f"tangent error is {tangent_error:.2f}m, "
                 f"normal error is {normal_error:.2f}m, facing error is "
                 f"{facing_error:.0f}deg, and current clearance is "
                 f"{observed_clearance:.2f}m."

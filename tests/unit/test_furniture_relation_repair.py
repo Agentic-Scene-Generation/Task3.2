@@ -673,7 +673,7 @@ def test_instructional_contract_repairs_furniture_then_wall_surface(
     teacher_center = teacher.transform.translation()
     teacher_yaw = math.degrees(RollPitchYaw(teacher.transform.rotation()).yaw_angle())
     assert abs(teacher_center[0]) < 1e-6
-    assert abs(teacher_yaw) < 1e-6
+    assert abs(abs(teacher_yaw) - 180.0) < 1e-6
     furniture_after = evaluate_room_scene(scene, config=config, stage="furniture_after")
     operation = next(
         item

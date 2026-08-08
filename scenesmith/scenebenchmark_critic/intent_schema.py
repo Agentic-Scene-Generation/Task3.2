@@ -45,6 +45,8 @@ _GENERIC_SELECTOR_FAMILIES = {
         }
     ),
     "desk": frozenset({"desk", "student_desk", "teacher_desk", "reception_desk"}),
+    "plant": frozenset({"plant", "large_plant", "potted_plant"}),
+    "sofa": frozenset({"sofa", "two_seater_sofa", "loveseat", "sectional_sofa"}),
 }
 
 
@@ -92,15 +94,20 @@ def _singularize_selector_category(normalized: str) -> str:
 
 def canonical_selector_category(value: Any) -> str:
     """Normalize compiler selector spellings to stable semantic categories."""
-    normalized = "_".join(str(value or "").strip().lower().split())
-    normalized = normalized.replace("-", "_")
+    normalized = str(value or "").strip().lower()
+    # Possessive role labels identify the same category ("teacher's desk" and
+    # "teacher desk").  Keep compiler selectors aligned with asset semantic
+    # names so a hard relation can bind the retrieved object.
+    normalized = re.sub(r"(?<=[a-z])['\u2019]s\b", "", normalized)
+    normalized = re.sub(r"[^a-z0-9]+", "_", normalized).strip("_")
     aliased = _SELECTOR_CATEGORY_ALIASES.get(normalized)
     if aliased is not None:
         return aliased
     return _singularize_selector_category(normalized)
 
 
-def _selector_categories_overlap(first: str, second: str) -> bool:
+def selector_categories_overlap(first: str, second: str) -> bool:
+    """Return whether two selector categories can denote the same object."""
     if first == second:
         return True
     return any(
@@ -110,8 +117,12 @@ def _selector_categories_overlap(first: str, second: str) -> bool:
     )
 
 
+# Keep the private spelling for existing schema validation call sites.
+_selector_categories_overlap = selector_categories_overlap
+
+
 INTENT_CONTRACT_SCHEMA_VERSION = "scenesmith.intent_contract.v4"
-INTENT_COMPILER_SPEC_VERSION = "scenesmith.intent_compiler.v4"
+INTENT_COMPILER_SPEC_VERSION = "scenesmith.intent_compiler.v5"
 
 _WALL_QUALIFIED_DIRECTION_PATTERN = re.compile(
     r"(?P<subject>[^,.;!?]{1,100}?)\s+against\s+"

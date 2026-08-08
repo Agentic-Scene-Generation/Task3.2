@@ -2401,7 +2401,14 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                             "Stopping after floor_plan stage as configured"
                         )
                         if scene_expert_hooks:
-                            scene_expert_hooks.finalize(final_scene_path=str(scene_dir))
+                            verify_report = scene_expert_hooks.finalize(
+                                final_scene_path=str(scene_dir)
+                            )
+                            if not verify_report.deterministic_pass:
+                                raise RuntimeError(
+                                    "SceneExpert deterministic verification failed; "
+                                    "refusing to mark scene successful"
+                                )
                         console_logger.info(
                             "Scene generation completed successfully in "
                             f"{timedelta(seconds=time.time() - scene_generation_start_time)}"
@@ -2470,9 +2477,14 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
 
                     # SceneExpert: finalize trace + memory update after all rooms done.
                     if scene_expert_hooks:
-                        scene_expert_hooks.finalize(
+                        verify_report = scene_expert_hooks.finalize(
                             final_scene_path=str(scene_dir / "combined_house")
                         )
+                        if not verify_report.deterministic_pass:
+                            raise RuntimeError(
+                                "SceneExpert deterministic verification failed; "
+                                "refusing to mark scene successful"
+                            )
 
                     # Assemble house with intermediate snapshots filtered by object type.
                     # Each snapshot includes objects from completed stages only.

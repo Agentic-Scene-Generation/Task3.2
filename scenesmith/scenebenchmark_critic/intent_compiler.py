@@ -16,7 +16,9 @@ from scenesmith.scene_expert.context_bundle import build_llm_call_debug_record
 from scenesmith.scenebenchmark_critic.intent_schema import (
     INTENT_COMPILER_SPEC_VERSION,
     INTENT_CONTRACT_SCHEMA_VERSION,
+    canonical_selector_category,
     intent_contract_json_schema,
+    selector_categories_overlap,
     validate_intent_contract,
 )
 from scenesmith.scenebenchmark_critic.intent_contract import build_intent_contract
@@ -84,6 +86,104 @@ def _normalize_side_distribution(payload: dict[str, Any]) -> dict[str, Any]:
             normalized.pop(field, None)
         constraints[index] = normalized
     return payload
+
+
+_DETERMINISTIC_ENRICHMENT_SOURCES = frozenset({"explicit_prompt", "room_ontology"})
+_HIGH_CONFIDENCE_EXPLICIT_RELATIONS = frozenset(
+    {
+        "required_count",
+        "on_top_of",
+        "mounted_to_wall",
+        "mounted_to_ceiling",
+    }
+)
+
+
+def _selectors_semantically_overlap(
+    first: dict[str, Any] | None, second: dict[str, Any] | None
+) -> bool:
+    """Compare contract endpoints without discarding role-qualified intent."""
+    if not isinstance(first, dict) or not isinstance(second, dict):
+        return first is None and second is None
+    first_category = canonical_selector_category(first.get("category"))
+    second_category = canonical_selector_category(second.get("category"))
+    if not selector_categories_overlap(first_category, second_category):
+        return False
+    first_role = str(first.get("role") or "").strip().lower()
+    second_role = str(second.get("role") or "").strip().lower()
+    return not first_role or not second_role or first_role == second_role
+
+
+def _constraints_semantically_overlap(
+    first: dict[str, Any], second: dict[str, Any]
+) -> bool:
+    """Identify duplicate hard relations despite generic/specific selectors."""
+    if str(first.get("relation") or "") != str(second.get("relation") or ""):
+        return False
+    if not _selectors_semantically_overlap(
+        first.get("subjects"), second.get("subjects")
+    ):
+        return False
+    return _selectors_semantically_overlap(first.get("targets"), second.get("targets"))
+
+
+def _is_high_confidence_deterministic_constraint(candidate: dict[str, Any]) -> bool:
+    """Limit enrichment to deterministic facts whose parser has no direction ambiguity."""
+    source = str(candidate.get("source") or "")
+    if source == "room_ontology":
+        return True
+    return (
+        source == "explicit_prompt"
+        and str(candidate.get("relation") or "") in _HIGH_CONFIDENCE_EXPLICIT_RELATIONS
+    )
+
+
+def _enrich_with_deterministic_constraints(
+    llm_contract: dict[str, Any], prompt: str
+) -> tuple[dict[str, Any], list[dict[str, str]]]:
+    """Restore explicit and ontology constraints omitted by a valid LLM response.
+
+    The independent compiler has higher recall for nuanced prompt relations, but
+    the deterministic parser owns a small set of high-confidence facts.  A valid
+    LLM response must therefore supplement rather than replace those facts.
+    """
+    deterministic = build_intent_contract(prompt)
+    constraints = list(llm_contract.get("constraints") or [])
+    added: list[dict[str, str]] = []
+    for candidate in deterministic.get("constraints") or []:
+        if not isinstance(candidate, dict):
+            continue
+        source = str(candidate.get("source") or "")
+        if (
+            source not in _DETERMINISTIC_ENRICHMENT_SOURCES
+            or not _is_high_confidence_deterministic_constraint(candidate)
+        ):
+            continue
+        if any(
+            isinstance(existing, dict)
+            and _constraints_semantically_overlap(existing, candidate)
+            for existing in constraints
+        ):
+            continue
+        constraints.append(candidate)
+        added.append(
+            {
+                "constraint_id": str(candidate.get("constraint_id") or ""),
+                "relation": str(candidate.get("relation") or ""),
+                "source": source,
+            }
+        )
+
+    if not added:
+        return llm_contract, added
+    enriched = dict(llm_contract)
+    enriched["constraints"] = constraints
+    warnings = list(enriched.get("warnings") or [])
+    warnings.append(
+        "LLM contract enriched with deterministic explicit/room-ontology constraints"
+    )
+    enriched["warnings"] = warnings
+    return validate_intent_contract(enriched), added
 
 
 def _system_prompt() -> str:
@@ -277,11 +377,15 @@ class IntentCompiler:
                 payload["retry_count"] = attempt
                 payload = _normalize_side_distribution(payload)
                 result = validate_intent_contract(payload)
+                result, enriched_constraints = _enrich_with_deterministic_constraints(
+                    result, normalized_prompt
+                )
                 self.last_trace = {
                     "status": "ok",
                     "spec_version": self.SPEC_VERSION,
                     "prompt_sha256": prompt_hash,
                     "constraints": result.get("constraints", []),
+                    "enriched_constraints": enriched_constraints,
                     "retry_count": attempt,
                     "failure_reason": "",
                 }
@@ -307,6 +411,7 @@ class IntentCompiler:
                         "output": raw,
                         "status": "ok",
                         "attempt": attempt,
+                        "enriched_constraints": enriched_constraints,
                     }
                 )
                 return result

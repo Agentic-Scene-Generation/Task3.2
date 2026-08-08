@@ -12,6 +12,7 @@ import signal
 import tempfile
 import time
 
+from collections.abc import Collection
 from pathlib import Path
 
 import numpy as np
@@ -290,18 +291,20 @@ def _restore_collectively_unstable_instances(
     pre_simulation_transforms: dict[UniqueID, RigidTransform],
     fallen_ids: list[UniqueID],
     tilt_threshold_degrees: float,
+    restored_through_floor_ids: Collection[UniqueID] = (),
 ) -> list[UniqueID]:
     """Keep an intact set when one shared collision proxy topples every copy.
 
     A bad SDF/collision proxy can make every instance of one asset fall during a
     single simulation pass.  The final timestep can leave one copy just below
     the removal threshold while the others have crossed it, so treat a group as
-    collectively unstable when every copy has toppled or is nearly toppled.
-    Restoring that set is safer than deleting an otherwise valid repeated
-    furniture group. Genuine isolated falls retain the existing removal
-    behaviour.
+    collectively unstable when every copy has toppled, is nearly toppled, or
+    was rolled back after falling through the floor. Restoring that set is
+    safer than deleting an otherwise valid repeated furniture group. Genuine
+    isolated falls retain the existing removal behaviour.
     """
     fallen_set = set(fallen_ids)
+    restored_through_floor_set = set(restored_through_floor_ids)
     groups: dict[str, list[UniqueID]] = {}
     for obj in scene.objects.values():
         if obj.object_type != ObjectType.FURNITURE:
@@ -326,6 +329,7 @@ def _restore_collectively_unstable_instances(
             continue
         if not all(
             obj_id in fallen_set
+            or obj_id in restored_through_floor_set
             or (
                 (obj := scene.get_object(obj_id)) is not None
                 and compute_tilt_angle_degrees(obj.transform)
@@ -1757,7 +1761,7 @@ def apply_forward_simulation(
             operation_name="Simulation",
         )
 
-        _restore_furniture_that_fell_through_floor(
+        restored_through_floor_ids = _restore_furniture_that_fell_through_floor(
             scene,
             pre_simulation_transforms,
         )
@@ -1795,6 +1799,7 @@ def apply_forward_simulation(
                 pre_simulation_transforms,
                 removed_ids,
                 fallen_tilt_threshold_degrees,
+                restored_through_floor_ids,
             )
             if restored_ids:
                 restored_set = set(restored_ids)

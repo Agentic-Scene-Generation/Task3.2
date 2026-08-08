@@ -61,6 +61,7 @@ _SCENESMITH_SCORE_MAPPING = {
     "room_layout_quality": "semantic",
     "space_utilization": "semantic",
 }
+_DETERMINISTIC_HARD_CHECK_MARKER = "DETERMINISTIC HARD-CHECK FAILED BEFORE VLM SCORING"
 
 
 def _load_scores_yaml(scores_yaml_path: Path) -> tuple[dict[str, float], str]:
@@ -536,6 +537,21 @@ class StageVerifier:
                 "interaction": 0.5,
             }
 
+        if _DETERMINISTIC_HARD_CHECK_MARKER in critique_summary.upper():
+            _add_issue_once(
+                issues,
+                VerifyIssue(
+                    issue_type="deterministic_hard_failure",
+                    description=(
+                        "SceneSmith deterministic hard-check failed before visual "
+                        "scoring completed"
+                    ),
+                ),
+            )
+            repair_suggestions.append(
+                "Resolve deterministic hard-check failures before accepting the stage"
+            )
+
         # --- 2. Rule-based checks ---
         if scene_state_info:
             if stage == "floor_plan":
@@ -742,6 +758,7 @@ class FullVerifier:
             reachability_score=interaction,
             support_relation_accuracy=interaction,  # proxy
             overall_score=overall,
+            deterministic_pass=deterministic_pass,
             pass_scene=(
                 deterministic_pass and visual_scores_pass
                 if self._visual_score_hard_gate

@@ -234,6 +234,7 @@ class FullVerifyReport(BaseModel):
     reachability_score: float = 0.0
     support_relation_accuracy: float = 0.0
     overall_score: float = 0.0
+    deterministic_pass: bool = False
     pass_scene: bool = False
 
 

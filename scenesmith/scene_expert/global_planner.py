@@ -160,6 +160,50 @@ _ONLY_INVENTORY_CLAUSE_PATTERNS = (
     ),
 )
 
+_STRUCTURAL_CEILING_TERMS = frozenset(
+    {"beam", "beams", "joist", "joists", "rafter", "rafters"}
+)
+_LIGHTING_TERMS = frozenset(
+    {
+        "candelabra",
+        "chandelier",
+        "chandeliers",
+        "downlight",
+        "downlights",
+        "fixture",
+        "fixtures",
+        "lamp",
+        "lamps",
+        "light",
+        "lights",
+        "lighting",
+        "pendant",
+        "pendants",
+        "recessed",
+        "sconce",
+        "sconces",
+    }
+)
+
+
+def _text_mentions_lighting(text: str) -> bool:
+    """Return whether a brief statement introduces a lighting fixture."""
+    terms = set(re.findall(r"[a-z0-9]+", str(text or "").lower()))
+    return bool(terms & _LIGHTING_TERMS)
+
+
+def _is_structural_only_ceiling_task(original_task: str) -> bool:
+    """Identify prompts that name structural spans but no ceiling lighting.
+
+    A beam, joist, or rafter is architectural decoration rather than a request
+    to complete the room's lighting design.  This narrow prompt-grounded case
+    prevents the planner from turning an optional fixture into a missing
+    ceiling-stage requirement, while prompts that explicitly request lighting
+    retain the normal same-stage supporting-object policy.
+    """
+    terms = set(re.findall(r"[a-z0-9]+", str(original_task or "").lower()))
+    return bool(terms & _STRUCTURAL_CEILING_TERMS) and not bool(terms & _LIGHTING_TERMS)
+
 
 def _text_closes_stage_inventory(text: str) -> bool:
     """Return whether planner text makes a stage's required inventory exclusive."""
@@ -206,6 +250,11 @@ def _reconcile_stage_brief(
     if _task_explicitly_closes_inventory(original_task, required_objects):
         return brief
 
+    structural_only_ceiling = (
+        brief.stage == "ceiling_mounted"
+        and _is_structural_only_ceiling_task(original_task)
+    )
+
     fields = (
         "constraints_for_designer",
         "checks_for_critic",
@@ -215,12 +264,23 @@ def _reconcile_stage_brief(
     removed = 0
     for field in fields:
         values = list(getattr(brief, field))
-        kept = [value for value in values if not _text_closes_stage_inventory(value)]
+        kept = [
+            value
+            for value in values
+            if not _text_closes_stage_inventory(value)
+            and not (structural_only_ceiling and _text_mentions_lighting(value))
+        ]
         removed += len(values) - len(kept)
         if len(kept) != len(values):
             updates[field] = kept
 
-    if _text_closes_stage_inventory(brief.stage_objective):
+    if structural_only_ceiling and _text_mentions_lighting(brief.stage_objective):
+        updates["stage_objective"] = (
+            "Install the prompt-requested structural ceiling spans while "
+            "maintaining clear vertical clearance"
+        )
+        removed += 1
+    elif _text_closes_stage_inventory(brief.stage_objective):
         updates["stage_objective"] = (
             f"Complete the {brief.stage} stage for a {room_type}"
         )
@@ -233,10 +293,22 @@ def _reconcile_stage_brief(
         updates.get("constraints_for_designer", brief.constraints_for_designer)
     )
     constraints = constraints[:5]
-    constraints.append(
-        "Treat required objects as a minimum; additional objects owned by this "
-        "stage are allowed when they improve room function or completeness."
-    )
+    if structural_only_ceiling:
+        constraints.append(
+            "The prompt requests structural ceiling spans only; do not add or "
+            "treat lighting fixtures as required unless the user explicitly asks."
+        )
+        checks = list(updates.get("checks_for_critic", brief.checks_for_critic))
+        checks.append(
+            "Evaluate the requested structural spans without treating absent "
+            "lighting as a ceiling-stage failure."
+        )
+        updates["checks_for_critic"] = checks
+    else:
+        constraints.append(
+            "Treat required objects as a minimum; additional objects owned by this "
+            "stage are allowed when they improve room function or completeness."
+        )
     updates["constraints_for_designer"] = constraints
     console_logger.warning(
         "GlobalPlanner removed %d invented inventory-closing instruction(s) from "
