@@ -53,6 +53,7 @@ from scenesmith.scene_expert.schemas import (
     SceneTaskSpec,
     StageBrief,
     StageVerifyReport,
+    VerifyIssue,
 )
 from scenesmith.agent_utils.scoring import CategoryScore, FurnitureCritiqueWithScores
 from scenesmith.agent_utils.stage_working_memory import StageWorkingMemory
@@ -484,6 +485,35 @@ class SceneExpertMemoryTest(unittest.TestCase):
         )
         self.assertFalse(full_report.deterministic_pass)
         self.assertFalse(full_report.pass_scene)
+
+    def test_later_clean_stage_recovers_transient_hard_failure(self) -> None:
+        failed_wall = StageVerifyReport(
+            stage="wall_mounted",
+            pass_stage=False,
+            issues=[VerifyIssue(issue_type="deterministic_hard_failure")],
+            critique_summary=(
+                "DETERMINISTIC HARD-CHECK FAILED BEFORE VLM SCORING. "
+                "Hard issues: collisions."
+            ),
+        )
+        clean_ceiling = StageVerifyReport(stage="ceiling_mounted", pass_stage=True)
+
+        full_report = FullVerifier().verify([failed_wall, clean_ceiling])
+
+        self.assertTrue(full_report.deterministic_pass)
+        self.assertTrue(full_report.pass_scene)
+
+    def test_later_clean_stage_does_not_recover_missing_objects(self) -> None:
+        failed_wall = StageVerifyReport(
+            stage="wall_mounted",
+            pass_stage=False,
+            issues=[VerifyIssue(issue_type="missing_object", object_name="television")],
+        )
+        clean_ceiling = StageVerifyReport(stage="ceiling_mounted", pass_stage=True)
+
+        full_report = FullVerifier().verify([failed_wall, clean_ceiling])
+
+        self.assertFalse(full_report.deterministic_pass)
 
     def test_contract_stage_ownership_reassigns_monitor_before_verification(
         self,

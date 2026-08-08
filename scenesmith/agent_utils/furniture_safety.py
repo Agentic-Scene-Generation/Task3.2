@@ -1229,7 +1229,7 @@ class FurnitureSafetyController:
             if plausibility_report is not None and plausibility_report.issues:
                 hard_plausibility, soft_plausibility = (
                     self._classify_bedroom_plausibility_issues(
-                        plausibility_report.issues
+                        plausibility_report.issues, scene=scene
                     )
                 )
                 hard_reasons.extend(hard_plausibility)
@@ -1267,7 +1267,7 @@ class FurnitureSafetyController:
         return str(value).lower() == "furniture"
 
     def _classify_bedroom_plausibility_issues(
-        self, issues: list[str]
+        self, issues: list[str], *, scene: Any
     ) -> tuple[list[str], list[str]]:
         if not self.bedroom_hard_plausibility_issues:
             return [], list(issues)
@@ -1276,6 +1276,12 @@ class FurnitureSafetyController:
         soft_reasons: list[str] = []
         for issue in issues:
             issue_l = issue.lower()
+            # Generated bedside furniture is decorative unless the user asked for
+            # it.  Its bilateral layout remains useful feedback, but must not
+            # reject an otherwise valid bedroom that only requested a bed/style.
+            if "nightstand" in issue_l and not self._prompt_requires_nightstands(scene):
+                soft_reasons.append(issue)
+                continue
             if any(term in issue_l for term in self.bedroom_hard_issue_terms):
                 hard_reasons.append(issue)
             else:
@@ -1342,7 +1348,7 @@ class FurnitureSafetyController:
                             f"gap {self.storage_pair_max_gap_m:.2f}m"
                         )
 
-        if not beds or not nightstands:
+        if not beds or not nightstands or not self._prompt_requires_nightstands(scene):
             return hard_reasons
 
         bed_id, bed = beds[0]
@@ -1440,6 +1446,16 @@ class FurnitureSafetyController:
                 rf"{dresser}.{{0,50}}(?:next|adjacent)\s+to.{{0,30}}{wardrobe}", text
             )
         )
+
+    @staticmethod
+    def _prompt_requires_nightstands(scene: Any) -> bool:
+        """Return whether bedside furniture is part of the original user task."""
+        text = str(
+            getattr(scene, "scene_expert_original_description", "")
+            or getattr(scene, "text_description", "")
+            or ""
+        ).lower()
+        return bool(re.search(r"\b(?:nightstand|bedside\s+table)s?\b", text))
 
     def _safe_world_bounds(
         self, obj: Any

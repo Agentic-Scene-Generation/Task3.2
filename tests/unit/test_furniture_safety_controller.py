@@ -592,6 +592,48 @@ class FurnitureSafetyControllerTest(unittest.TestCase):
             )
         )
 
+    def test_unrequested_nightstands_are_advisory(self) -> None:
+        controller = FurnitureSafetyController({"enabled": True})
+        yaw_0 = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
+        scene = SimpleNamespace(
+            room_type="bedroom",
+            text_description="A bedroom featuring rustic farmhouse decor.",
+            objects={
+                "bed_0": BoundedFurniture(
+                    name="bed",
+                    description="farmhouse bed",
+                    world_min=(-1.0, -1.0, 0.0),
+                    world_max=(1.0, 1.0, 0.8),
+                    rotation_matrix=yaw_0,
+                ),
+                "nightstand_0": BoundedFurniture(
+                    name="nightstand",
+                    description="farmhouse nightstand",
+                    world_min=(1.2, -0.2, 0.0),
+                    world_max=(1.6, 0.2, 0.6),
+                ),
+                "nightstand_1": BoundedFurniture(
+                    name="nightstand",
+                    description="farmhouse nightstand",
+                    world_min=(1.7, -0.2, 0.0),
+                    world_max=(2.1, 0.2, 0.6),
+                ),
+            },
+        )
+
+        evaluation = controller.evaluate_scene_state(scene)
+        hard_issues, soft_issues = controller._classify_bedroom_plausibility_issues(
+            ["bedroom plausibility: nightstands are not on opposite bed sides"],
+            scene=scene,
+        )
+
+        self.assertTrue(evaluation.hard_valid)
+        self.assertEqual([], hard_issues)
+        self.assertEqual(
+            ["bedroom plausibility: nightstands are not on opposite bed sides"],
+            soft_issues,
+        )
+
     def test_required_counts_parse_two_nightstands(self) -> None:
         controller = FurnitureSafetyController({"enabled": True})
         controller.reset_for_scene(

@@ -745,7 +745,7 @@ class FullVerifier:
         has_plausibility = "plausibility" in all_scores
         pass_plausibility = not has_plausibility or plausibility >= self._pass_threshold
 
-        deterministic_pass = all(report.pass_stage for report in stage_reports)
+        deterministic_pass = self._deterministic_stage_passes(stage_reports)
         visual_scores_pass = overall >= self._pass_threshold and pass_plausibility
         report = FullVerifyReport(
             semantic_score=semantic,
@@ -775,3 +775,33 @@ class FullVerifier:
             f"visual_gate={self._visual_score_hard_gate}"
         )
         return report
+
+    @staticmethod
+    def _deterministic_stage_passes(stage_reports: list[StageVerifyReport]) -> bool:
+        """Evaluate stage hard gates against the latest validated scene state.
+
+        A stage can record a transient deterministic failure (usually a collision)
+        and a later stage can repair it while validating the complete scene again.
+        The terminal verdict should retain unresolved inventory/contract failures,
+        but must not reject that later clean state solely from the stale marker.
+        """
+        for index, report in enumerate(stage_reports):
+            if report.pass_stage:
+                continue
+            issue_types = {issue.issue_type for issue in report.issues}
+            is_transient_hard_failure = issue_types == {"deterministic_hard_failure"}
+            later_clean_validation = any(
+                later.pass_stage
+                and _DETERMINISTIC_HARD_CHECK_MARKER
+                not in later.critique_summary.upper()
+                for later in stage_reports[index + 1 :]
+            )
+            if is_transient_hard_failure and later_clean_validation:
+                console_logger.info(
+                    "FullVerifier: accepting recovered deterministic failure from "
+                    "stage=%s after a later clean validation",
+                    report.stage,
+                )
+                continue
+            return False
+        return True
