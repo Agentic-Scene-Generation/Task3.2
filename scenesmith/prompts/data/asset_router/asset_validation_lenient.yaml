@@ -1,16 +1,35 @@
 name: "asset_validation_lenient"
-version: "1.0"
-description: "Lenient validation for pre-existing dataset assets (articulated objects)"
-template_variables: ["description", "num_images"]
+version: "3.2"
+description: "Lenient validation and orientation calibration for dataset assets"
+template_variables: ["description", "num_images", "asset_role", "placement_scope"]
 prompt: |
   <role>
   You validate whether a retrieved 3D mesh is semantically correct for the request.
   This is for pre-existing dataset objects with limited cosmetic variation.
   </role>
 
+  <placement_role>
+  The target SceneSmith placement role is "{{ asset_role }}".
+  Its support/placement scope is:
+  "{{ placement_scope }}"
+  The role is a stage-ownership tag, NOT a narrow object taxonomy.
+  Judge completeness relative to that role:
+  - wall_mounted assets such as paintings, canvases, mirrors, boards, and thin
+    shelves are expected to be flat or shallow. They do NOT need legs, a stand,
+    or freestanding furniture depth.
+  - ceiling_mounted lights may include a canopy, cord, or mounting plate.
+  - manipulands may be small, thin, soft, or visually simple.
+  - furniture means any standalone floor-supported layout object. It includes
+    conventional furniture as well as floor plants in pots, floor lamps, rugs,
+    baskets, and other freestanding decor.
+  Never reject a role-correct mounted or small object for lacking freestanding
+  furniture structure. Never reject a floor plant merely because it is not
+  conventional furniture.
+  </placement_role>
+
   <task>
   Analyze the {{ num_images }} multi-view renders:
-  1. Identify what object TYPE is shown (wardrobe, dresser, cabinet, etc.)
+  1. Identify what object TYPE is shown
   2. Compare to "{{ description }}" - focus on OBJECT TYPE, not style
   3. Check structural criteria below
   </task>
@@ -20,13 +39,27 @@ prompt: |
   1. Object TYPE matches (wardrobe→wardrobe, dresser→dresser, cabinet→cabinet)
   2. Basic structure is present (doors/drawers if expected)
   3. Object is complete (not cut off or missing major parts)
-  4. Single object (not multiple separate items)
-     EXCEPTION: Beds with bedding (mattress, blankets, pillows) count as one object
+  4. Single role-correct asset (not multiple separate functional objects)
+     EXCEPTIONS:
+     - Beds with bedding (mattress, blankets, pillows) count as one asset
+     - Sofas with integral seat/back cushions or decorative throw pillows count as
+       one asset. These cushions are part of the upholstered product, not separate
+       scene manipulands.
+  5. The requested functional object DOMINATES the mesh and fills most of its own
+     rendered bounding box. A small requested object embedded inside a much larger
+     frame, booth, display, or staging shell is not a standalone asset.
+  6. The mesh contains NO architectural or scene context. Walls, wall panels,
+     floors, room corners, ceilings, door/window frames, exhibition backdrops, and
+     surrounding room shells are never intrinsic parts of furniture.
 
   REJECT only if:
-  1. Wrong object category: "wardrobe" but shows bookshelf/desk/chair
+  1. Wrong object category: the requested category is not the visible object
   2. Completely wrong structure: "3-door" but has no doors at all
   3. Wrong material category: "wooden" but clearly metal industrial
+  4. Compound scene fragment: the requested bed/sofa/table/etc. is accompanied by
+     walls, floors, a room corner, architectural panels, or a large staging frame
+  5. Mis-cropped asset: the requested object is visibly small while unrelated
+     geometry determines most of the overall width/depth/height
   </validation_criteria>
 
   <style_guidance>
@@ -35,15 +68,42 @@ prompt: |
   - Era/style: "modern", "antique", "contemporary" - ignore these qualifiers
   - Specific counts: "6-drawer" showing 4 drawers - accept if has drawers
   - Finish details: "polished", "rustic", "weathered" - ignore
+  - Placement adjectives: "corner", "against-wall", "front-of-room" - ignore
+    unless the request explicitly requires an intrinsic shape such as "L-shaped"
 
-  Focus ONLY on: Is this the RIGHT TYPE of furniture?
+  Focus ONLY on: Is this the RIGHT TYPE for "{{ description }}", and is its
+  support/mount mode compatible with "{{ placement_scope }}"?
   </style_guidance>
+
+  <orientation_contract>
+  `front` has one universal meaning: the object's FUNCTIONAL FRONT pointing
+  OUTWARD, toward the user or usable open space. After canonicalization this
+  direction becomes local +Y; local +Z is up; dimensions are always
+  [width, depth, height] = [X, Y, Z].
+
+  Images 0 and 1 are top and bottom views. Images 2, 3, 4, and 5 are four
+  evenly spaced side views. For directional furniture, identify which SIDE image
+  most directly shows the functional outward direction:
+  - bed: from the headboard toward the foot/open access area (the headboard is back)
+  - sofa/chair: from the backrest through the seat toward the sitting/open side
+  - wardrobe/cabinet/dresser/nightstand: outward from doors or drawers
+  - desk: from the desk toward the seated user/access side
+
+  Never choose image 0 or 1 as the front. If the front is genuinely
+  ambiguous or the object is rotationally symmetric, return null and low confidence.
+  This orientation field is calibration metadata and must not by itself cause a
+  semantically correct asset to be rejected.
+  </orientation_contract>
 
   <output_schema>
   {
     "is_acceptable": boolean,
     "reason": "string (brief explanation)",
-    "suggestions": ["string"] (if rejected)
+    "suggestions": ["string"] (if rejected),
+    "front_view_image_index": integer or null,
+    "orientation_confidence": number between 0 and 1,
+    "contains_architectural_context": boolean,
+    "requested_object_is_dominant": boolean
   }
   </output_schema>
 
@@ -52,28 +112,55 @@ prompt: |
   {
     "is_acceptable": true,
     "reason": "Mesh shows a wardrobe with doors - matches requested wardrobe type",
-    "suggestions": []
+    "suggestions": [],
+    "front_view_image_index": 3,
+    "orientation_confidence": 0.95,
+    "contains_architectural_context": false,
+    "requested_object_is_dominant": true
   }
 
   Example 2 - Reject (wrong type):
   {
     "is_acceptable": false,
     "reason": "Requested wardrobe but mesh shows a bookshelf with open shelves",
-    "suggestions": ["Retrieve different object - need enclosed storage"]
+    "suggestions": ["Retrieve different object - need enclosed storage"],
+    "front_view_image_index": 3,
+    "orientation_confidence": 0.8,
+    "contains_architectural_context": false,
+    "requested_object_is_dominant": true
   }
 
   Example 3 - Accept (structure close enough):
   {
     "is_acceptable": true,
     "reason": "Mesh shows dresser with multiple drawers - matches requested dresser",
-    "suggestions": []
+    "suggestions": [],
+    "front_view_image_index": 4,
+    "orientation_confidence": 0.9,
+    "contains_architectural_context": false,
+    "requested_object_is_dominant": true
   }
 
   Example 4 - Reject (wrong material category):
   {
     "is_acceptable": false,
     "reason": "Requested wooden wardrobe but mesh shows metal industrial locker",
-    "suggestions": ["Retrieve wooden furniture variant"]
+    "suggestions": ["Retrieve wooden furniture variant"],
+    "front_view_image_index": 2,
+    "orientation_confidence": 0.75,
+    "contains_architectural_context": false,
+    "requested_object_is_dominant": true
+  }
+
+  Example 5 - Reject (bed embedded in architectural shell):
+  {
+    "is_acceptable": false,
+    "reason": "A small bed is surrounded by large wall/floor panels that dominate the asset bounds",
+    "suggestions": ["Retrieve a standalone bed without room or staging geometry"],
+    "front_view_image_index": 3,
+    "orientation_confidence": 0.7,
+    "contains_architectural_context": true,
+    "requested_object_is_dominant": false
   }
   </examples>
 

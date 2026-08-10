@@ -1397,8 +1397,8 @@ class BlenderRenderer(
             wall_surfaces: List of wall surface dicts for wall rendering modes.
                 Each dict contains wall_id, direction, length, height, transform,
                 and excluded_regions.
-            room_bounds: Room XY bounds (min_x, min_y, max_x, max_y) for ceiling mode.
-            ceiling_height: Ceiling height in meters for ceiling mode.
+            room_bounds: Architectural room XY bounds used for stable camera framing.
+            ceiling_height: Architectural room height used for stable camera framing.
 
         Returns:
             List of paths to rendered PNG files, ordered (top first, then sides).
@@ -1416,6 +1416,8 @@ class BlenderRenderer(
 
         # Store wall normals, support surfaces, and debug flags for use during rendering.
         self._wall_normals = wall_normals or {}
+        self._room_bounds = room_bounds
+        self._ceiling_height = ceiling_height
         self._show_support_surface = show_support_surface
         self._wall_surfaces_for_labels = wall_surfaces_for_labels
 
@@ -2446,7 +2448,37 @@ class BlenderRenderer(
         self._setup_scene(params)
         self._import_and_organize_gltf(params.scene)
 
-        bbox_center, max_dim = compute_scene_bounds(self._client_objects)
+        scene_bbox_center, scene_max_dim = compute_scene_bounds(self._client_objects)
+        bbox_center = scene_bbox_center
+        max_dim = scene_max_dim
+        room_bounds = getattr(self, "_room_bounds", None)
+        ceiling_height = getattr(self, "_ceiling_height", None)
+        if room_bounds is not None:
+            min_x, min_y, max_x, max_y = (float(value) for value in room_bounds)
+            room_width = max_x - min_x
+            room_depth = max_y - min_y
+            room_height = (
+                float(ceiling_height)
+                if ceiling_height is not None and float(ceiling_height) > 0.0
+                else min(max(room_width, room_depth), 3.0)
+            )
+            if room_width > 0.0 and room_depth > 0.0:
+                bbox_center = Vector(
+                    (
+                        (min_x + max_x) / 2.0,
+                        (min_y + max_y) / 2.0,
+                        room_height / 2.0,
+                    )
+                )
+                max_dim = max(room_width, room_depth, room_height)
+                if scene_max_dim > max_dim * 3.0:
+                    console_logger.warning(
+                        "Ignoring pathological scene bounds for room camera framing "
+                        "(scene_max_dim=%.3fm, room_frame=%.3fm). The imported "
+                        "asset geometry should be inspected.",
+                        scene_max_dim,
+                        max_dim,
+                    )
         camera_obj = configure_metric_camera(params=params)
         apply_render_settings(params=params, view_size=view_size)
         setup_metric_world()
@@ -2528,6 +2560,8 @@ class BlenderRenderer(
         self._wall_normals = {}
         self._show_support_surface = False
         self._scene_objects = None
+        self._room_bounds = None
+        self._ceiling_height = None
         self._current_convex_hull = None
         self._current_surface_id = None
         self._overlay_mesh_objects = []

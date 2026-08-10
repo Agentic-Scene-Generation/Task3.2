@@ -84,6 +84,21 @@ class ValidationResult:
     suggestions: list[str] = field(default_factory=list)
     """Suggestions if rejected (what to try differently)."""
 
+    front_view_image_index: int | None = None
+    """Side-view image that shows the semantic front, when identifiable."""
+
+    orientation_confidence: float | None = None
+    """Confidence in ``front_view_image_index`` on a 0-1 scale."""
+
+    contains_architectural_context: bool | None = None
+    """Whether walls/floors/room shells or other scene context contaminate the asset."""
+
+    requested_object_is_dominant: bool | None = None
+    """Whether the requested functional object dominates the rendered asset bounds."""
+
+    failure_kind: str | None = None
+    """Machine-readable failure class for retry/admission policy."""
+
 
 @dataclass
 class GeneratedGeometry:

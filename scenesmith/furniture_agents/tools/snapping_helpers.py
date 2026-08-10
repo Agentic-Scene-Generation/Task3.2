@@ -26,7 +26,6 @@ from scenesmith.utils.geometry_utils import (
 )
 from scenesmith.utils.mesh_loading import (
     get_collision_vertices_world,
-    load_collision_meshes_from_sdf,
     load_object_collision_geometry,
 )
 
@@ -603,15 +602,10 @@ def resolve_collision_if_penetrating(
         console_logger.info(f"Object {obj.name} has no SDF, skipping collision check")
         return np.zeros(3)
 
-    obj_collision_meshes = load_collision_meshes_from_sdf(obj.sdf_path)
+    obj_collision_meshes = load_object_collision_geometry(obj)
     if not obj_collision_meshes:
         console_logger.info(f"No collision geometry for {obj.name}, skipping")
         return np.zeros(3)
-
-    # Apply object's runtime scale_factor (set by rescale operations).
-    if obj.scale_factor != 1.0:
-        for mesh in obj_collision_meshes:
-            mesh.vertices *= obj.scale_factor
 
     obj_vertices_local = np.vstack([m.vertices for m in obj_collision_meshes])
     transform_matrix = rigid_transform_to_matrix(obj.transform)

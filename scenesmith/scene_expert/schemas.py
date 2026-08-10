@@ -66,6 +66,15 @@ class SceneTaskSpec(BaseModel):
         default_factory=list,
         description="Manipuland-scale objects required (books, cups, etc.)",
     )
+    required_architectural_features: list[str] = Field(
+        default_factory=list,
+        description="Explicit structural features such as windows and exposed beams",
+    )
+    suggested_large_objects: list[str] = Field(default_factory=list)
+    suggested_wall_objects: list[str] = Field(default_factory=list)
+    suggested_ceiling_objects: list[str] = Field(default_factory=list)
+    suggested_small_objects: list[str] = Field(default_factory=list)
+    requirement_sources: dict[str, list[str]] = Field(default_factory=dict)
     functional_zones: list[str] = Field(
         default_factory=list,
         description="Spatial zones within the room, e.g. ['sleeping_zone', 'working_zone']",
@@ -110,6 +119,34 @@ class MemoryPack(BaseModel):
             "Injected directly into the designer prompt, bypassing GlobalPlanner."
         ),
     )
+    success_case_ids: list[str] = Field(default_factory=list)
+    failure_case_ids: list[str] = Field(default_factory=list)
+    skill_names: list[str] = Field(default_factory=list)
+
+    def deduplicated(self) -> "MemoryPack":
+        """Return an order-preserving copy without repeated prompt content."""
+
+        def unique_text(values: list[str]) -> list[str]:
+            seen: set[str] = set()
+            result: list[str] = []
+            for value in values:
+                text = " ".join(str(value or "").split())
+                key = text.casefold()
+                if text and key not in seen:
+                    result.append(text)
+                    seen.add(key)
+            return result
+
+        return self.model_copy(
+            update={
+                "success_hints": unique_text(self.success_hints),
+                "failure_hints": unique_text(self.failure_hints),
+                "skill_texts": unique_text(self.skill_texts),
+                "success_case_ids": unique_text(self.success_case_ids),
+                "failure_case_ids": unique_text(self.failure_case_ids),
+                "skill_names": unique_text(self.skill_names),
+            }
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -120,8 +157,54 @@ class MemoryPack(BaseModel):
 class StageBudget(BaseModel):
     """Per-stage execution budget."""
 
+    execution_control_enabled: bool = False
+    execution_control_profile: str = "scenesmith_native"
     max_designer_iterations: int = 2
     max_repair_steps: int = 1
+    max_planner_turns: int = 0
+    max_designer_turns: int = 0
+    max_critic_turns: int = 0
+    max_wall_clock_seconds: float = 0.0
+    planner_active_max_seconds: float = 0.0
+    designer_active_max_seconds: float = 0.0
+    critic_active_max_seconds: float = 0.0
+    planner_max_output_tokens: int = 0
+    designer_max_output_tokens: int = 0
+    critic_max_output_tokens: int = 0
+    critic_retry_max_output_tokens: int = 0
+    critic_max_attempts: int = 2
+    critic_evaluation_max_seconds: float = 0.0
+    critic_reserve_fraction: float = 0.25
+    fallback_reserve_fraction: float = 0.10
+    finalization_reserve_fraction: float = 0.05
+    critical_retry_budget_multiplier: float = 1.5
+    repair_max_wall_clock_seconds: float = 0.0
+    repair_designer_active_max_seconds: float = 0.0
+    regeneration_max_wall_clock_seconds: float = 0.0
+    regeneration_planner_active_max_seconds: float = 0.0
+    regeneration_designer_active_max_seconds: float = 0.0
+    regeneration_critic_active_max_seconds: float = 0.0
+    continuation_max_wall_clock_seconds: float = 0.0
+    continuation_planner_active_max_seconds: float = 0.0
+    continuation_designer_active_max_seconds: float = 0.0
+    continuation_critic_active_max_seconds: float = 0.0
+    fallback_critic_evaluation_max_seconds: float = 0.0
+    critic_retry_evaluation_max_seconds: float = 0.0
+    max_asset_requests: int = 0
+    asset_acquisition_timeout_seconds: int = 300
+    asset_validation_timeout_seconds: float = 90.0
+    asset_validation_total_timeout_seconds: float = 240.0
+    asset_validation_max_output_tokens: int = 512
+    asset_validation_retry_max_output_tokens: int = 1024
+    asset_validation_max_candidates: int = 4
+    asset_validation_family_retries: int = 1
+    max_optional_object_families: int = 0
+    max_assets_per_request: int = 0
+    max_semantic_retries_per_family: int = 2
+    min_output_objects: int = 0
+    max_output_objects: int = 0
+    max_stage_regenerations: int = 1
+    min_visual_score: float = 0.60
 
 
 class HarnessContext(BaseModel):
@@ -211,14 +294,21 @@ class StageVerifyReport(BaseModel):
     pass_stage: bool
     scores: dict[str, float] = Field(
         default_factory=dict,
-        description="Scores 0-1 for semantic, aesthetic, physics, interaction",
+        description="Backward-compatible alias of visual_scores",
     )
+    visual_scores: dict[str, float] = Field(default_factory=dict)
+    rule_scores: dict[str, float] = Field(default_factory=dict)
     issues: list[VerifyIssue] = Field(default_factory=list)
+    informational_issues: list[VerifyIssue] = Field(default_factory=list)
     repair_suggestions: list[str] = Field(default_factory=list)
     critique_summary: str = Field(
         default="",
         description="Full critic summary text from SceneSmith scores.yaml — richest signal for memory",
     )
+    score_source: str = "unknown"
+    vlm_scoring_performed: bool = False
+    hard_check_report: dict = Field(default_factory=dict)
+    runtime_repair_events: list[str] = Field(default_factory=list)
 
 
 class FullVerifyReport(BaseModel):
@@ -236,6 +326,13 @@ class FullVerifyReport(BaseModel):
     overall_score: float = 0.0
     deterministic_pass: bool = False
     pass_scene: bool = False
+    expected_stages: list[str] = Field(default_factory=list)
+    completed_stages: list[str] = Field(default_factory=list)
+    missing_stages: list[str] = Field(default_factory=list)
+    outcome_status: str = "COMPLETE"
+    degraded_reasons: list[str] = Field(default_factory=list)
+    measured_metrics: dict[str, bool] = Field(default_factory=dict)
+    metric_sources: dict[str, str] = Field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -263,6 +360,19 @@ class StageCost(BaseModel):
     stage_time_sec: float = 0.0
 
 
+class StageExecutionEvidence(BaseModel):
+    """Auditable proof that optional guidance reached a stage agent."""
+
+    task_spec_source: str = "unknown"
+    stage_brief_source: str = "unknown"
+    retrieved_memory_ids: list[str] = Field(default_factory=list)
+    context_bundle_hash: str = ""
+    injected_brief_hash: str = ""
+    designer_prompt_hash: str = ""
+    designer_prompt_contains_brief: bool = False
+    degraded: bool = False
+
+
 class StageTraceEntry(BaseModel):
     stage: str
     memory_pack: MemoryPack
@@ -271,3 +381,6 @@ class StageTraceEntry(BaseModel):
     verify_report: StageVerifyReport | None = None
     repair_actions: list[RepairResult] = Field(default_factory=list)
     cost: StageCost = Field(default_factory=StageCost)
+    execution_evidence: StageExecutionEvidence = Field(
+        default_factory=StageExecutionEvidence
+    )

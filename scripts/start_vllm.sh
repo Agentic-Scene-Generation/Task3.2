@@ -7,6 +7,8 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 ENV_FILE="${SCENEEXPERT_ENV_FILE:-$PROJECT_DIR/.env}"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/vllm_runtime.sh"
 
 source_env_file() {
     local env_path="$1"
@@ -47,6 +49,11 @@ TOOL_CALL_PARSER="${SCENEEXPERT_TOOL_CALL_PARSER:-qwen3_xml}"
 REASONING_PARSER="${SCENEEXPERT_REASONING_PARSER:-qwen3}"
 VLLM_LOG="${SCENEEXPERT_VLLM_LOG:-$PROJECT_DIR/vllm_server.log}"
 
+if [ "${SCENEEXPERT_SKIP_PYTHON_PREFLIGHT:-0}" != "1" ]; then
+    echo "运行 runtime dependency compatibility preflight..."
+    PYTHONDONTWRITEBYTECODE=1 python "$PROJECT_DIR/scripts/check_runtime_compatibility.py" --scope client
+fi
+
 if [ ! -d "$MODEL_DIR" ]; then
     echo "错误：模型目录不存在: $MODEL_DIR"
     echo "请先运行 bash scripts/deploy_qwen.sh 下载模型"
@@ -80,22 +87,10 @@ if command -v nvidia-smi >/dev/null 2>&1; then
     fi
 fi
 
-VLLM_LAUNCH_MODE=""
-if ! command -v vllm >/dev/null 2>&1; then
-    if python -c "import importlib.util; raise SystemExit(0 if importlib.util.find_spec('vllm.entrypoints.openai.api_server') else 1)" >/dev/null 2>&1; then
-        VLLM_LAUNCH_MODE="python-module"
-        echo "未找到 vllm 命令，改用当前 Python 的 vLLM 模块入口启动。"
-    else
-        echo "错误：找不到 vLLM 命令，当前 Python 也无法导入 vLLM。"
-        echo "  当前 Python: $(python -c 'import sys; print(sys.executable)')"
-        echo "  安装示例：python -m pip install vllm -i https://pypi.tuna.tsinghua.edu.cn/simple"
-        echo "  离线安装：python -m pip install --no-index --find-links /path/to/wheelhouse vllm"
-        echo "  如果已有其他 OpenAI-compatible 本地服务，请设置 SCENEEXPERT_START_VLLM=0 并使用 run_experiment.sh 连接它。"
-        exit 1
-    fi
-else
-    VLLM_LAUNCH_MODE="cli"
-fi
+sceneexpert_resolve_vllm_runtime "$PROJECT_DIR"
+VLLM_LAUNCH_MODE="$SCENEEXPERT_RESOLVED_VLLM_LAUNCH_MODE"
+VLLM_EXECUTABLE="$SCENEEXPERT_RESOLVED_VLLM_EXECUTABLE"
+VLLM_PYTHON="$SCENEEXPERT_RESOLVED_VLLM_PYTHON"
 
 echo "启动 vLLM 服务..."
 echo "  模型: $MODEL_DIR"
@@ -114,6 +109,7 @@ echo "  engine ready timeout: ${VLLM_ENGINE_READY_TIMEOUT_S}s"
 echo "  DeepGEMM: use=${USE_DEEP_GEMM}, moe_use=${MOE_USE_DEEP_GEMM}, warmup=${DEEP_GEMM_WARMUP}"
 echo "  enforce eager: ${ENFORCE_EAGER}"
 echo "  启动方式: $VLLM_LAUNCH_MODE"
+echo "  vLLM Python: $VLLM_PYTHON"
 
 # 设置环境变量
 export SCENEEXPERT_MODEL_ID="$MODEL_ID"
@@ -128,7 +124,7 @@ export VLLM_DEEP_GEMM_WARMUP="$DEEP_GEMM_WARMUP"
 # 后台启动，日志写入文件
 if [ "$VLLM_LAUNCH_MODE" = "cli" ]; then
     VLLM_ARGS=(
-        vllm serve "$MODEL_DIR"
+        "$VLLM_EXECUTABLE" serve "$MODEL_DIR"
         --served-model-name "$MODEL_ID"
         --tensor-parallel-size "$TENSOR_PARALLEL_SIZE"
         --port "$VLLM_PORT"
@@ -139,7 +135,7 @@ if [ "$VLLM_LAUNCH_MODE" = "cli" ]; then
     )
 else
     VLLM_ARGS=(
-        python -m vllm.entrypoints.openai.api_server
+        "$VLLM_PYTHON" -m vllm.entrypoints.openai.api_server
         --model "$MODEL_DIR"
         --served-model-name "$MODEL_ID"
         --tensor-parallel-size "$TENSOR_PARALLEL_SIZE"

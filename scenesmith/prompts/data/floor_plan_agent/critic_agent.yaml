@@ -375,36 +375,40 @@ prompt: |
 
   **Poor**: "Looks good but maybe adjust the bathroom size." (unnecessary risk)
 
-  # Output Format
+  # Final Structured Output Contract
 
-  Your response must include:
+  After completing the required tool workflow, return exactly one JSON object.
+  Do not return Markdown headings, prose outside the object, or code fences.
+  The JSON object must have this shape:
 
-  ## 1. Summary
-  A concise (2-4 sentence) overall assessment of the floor plan quality and
-  its suitability for the stated design brief.
+  {
+    "critique": "Concise overall assessment plus prioritized actionable feedback",
+    "room_proportions": {
+      "name": "room_proportions",
+      "grade": 0,
+      "comment": "Brief justification"
+    },
+    "spatial_flow": {
+      "name": "spatial_flow",
+      "grade": 0,
+      "comment": "Brief justification"
+    },
+    "natural_lighting": {
+      "name": "natural_lighting",
+      "grade": 0,
+      "comment": "Brief justification"
+    },
+    "material_consistency": {
+      "name": "material_consistency",
+      "grade": 0,
+      "comment": "Brief justification"
+    },
+    "prompt_following": {
+      "name": "prompt_following",
+      "grade": 0,
+      "comment": "Brief justification"
+    }
+  }
 
-  ## 2. Category Scores
-  For each of the 5 categories:
-  - Grade (0-10)
-  - Brief justification (1-2 sentences explaining the score)
-
-  Format:
-  ```
-  Room Proportions: X/10 - [justification]
-  Spatial Flow: X/10 - [justification]
-  Natural Lighting: X/10 - [justification]
-  Material Consistency: X/10 - [justification]
-  Prompt Following: X/10 - [justification]
-  ```
-
-  ## 3. Detailed Critique
-  Actionable observations organized by priority:
-  - What works well (strengths to preserve)
-  - What needs attention (issues to fix, in priority order)
-  - Specific recommendations (concrete actions to improve)
-
-  ## 4. Improvement Suggestions
-  If scores could be improved, provide specific recommendations:
-  - Which changes would have the biggest impact?
-  - What are the trade-offs of suggested changes?
-  - When is the design "good enough" to proceed?
+  Replace each example grade with an integer from 0 through 10. Keep the full
+  assessment and improvement suggestions inside the "critique" string.

@@ -13,10 +13,12 @@ from __future__ import annotations
 
 import logging
 import re
+
 from pathlib import Path
 
 import yaml
 
+from scenesmith.agent_utils.room_size_policy import normalize_room_dimensions
 from scenesmith.scene_expert.schemas import (
     FullVerifyReport,
     SceneTaskSpec,
@@ -424,7 +426,18 @@ def _description_contains_object_label(required: str, description: str) -> bool:
     )
 
 
-def _check_floor_plan_layout(scene_state_info: dict) -> list[VerifyIssue]:
+def _first_not_none(mapping: dict, *keys: str) -> object | None:
+    for key in keys:
+        if key in mapping and mapping[key] is not None:
+            return mapping[key]
+    return None
+
+
+def _check_floor_plan_layout(
+    scene_state_info: dict,
+    *,
+    room_size_check_enabled: bool = False,
+) -> list[VerifyIssue]:
     """Check minimal structural validity of the generated floor plan."""
     issues: list[VerifyIssue] = []
     if not scene_state_info.get("layout_exists", True):
@@ -446,17 +459,43 @@ def _check_floor_plan_layout(scene_state_info: dict) -> list[VerifyIssue]:
         )
 
     invalid_rooms: list[str] = []
+    single_room = room_count == 1
     for room in scene_state_info.get("rooms", []):
         if not isinstance(room, dict):
             continue
         room_id = str(room.get("room_id") or room.get("id") or room.get("name") or "")
-        width = room.get("width") or room.get("width_m")
-        depth = room.get("depth") or room.get("depth_m")
+        width = _first_not_none(room, "length", "depth", "length_m", "depth_m")
+        depth = _first_not_none(room, "width", "width_m")
         try:
             if width is not None and float(width) <= 0:
                 invalid_rooms.append(room_id or "<unknown>")
             if depth is not None and float(depth) <= 0:
                 invalid_rooms.append(room_id or "<unknown>")
+            if (
+                room_size_check_enabled
+                and single_room
+                and width is not None
+                and depth is not None
+            ):
+                adjustment = normalize_room_dimensions(
+                    room_type=str(room.get("type") or room.get("room_type") or "room"),
+                    width=float(width),
+                    depth=float(depth),
+                    prompt=str(room.get("prompt") or ""),
+                    mode="room",
+                )
+                if adjustment.changed:
+                    issues.append(
+                        VerifyIssue(
+                            issue_type="implausible_room_scale",
+                            object_name=room_id,
+                            description=(
+                                f"Room '{room_id or '<unknown>'}' is "
+                                f"{float(width):g}m x {float(depth):g}m, outside "
+                                "its configured professional scale envelope"
+                            ),
+                        )
+                    )
         except (TypeError, ValueError):
             invalid_rooms.append(room_id or "<unknown>")
 
@@ -487,9 +526,15 @@ class StageVerifier:
         self,
         pass_threshold: float = 0.6,
         visual_score_hard_gate: bool = False,
+        critic_bridge_enabled: bool = True,
+        room_size_check_enabled: bool = False,
+        placeholder_check_enabled: bool = True,
     ) -> None:
         self._pass_threshold = pass_threshold
         self._visual_score_hard_gate = bool(visual_score_hard_gate)
+        self._critic_bridge_enabled = bool(critic_bridge_enabled)
+        self._room_size_check_enabled = bool(room_size_check_enabled)
+        self._placeholder_check_enabled = bool(placeholder_check_enabled)
 
     def verify(
         self,
@@ -518,16 +563,29 @@ class StageVerifier:
         repair_suggestions: list[str] = []
 
         # --- 1. Load SceneSmith scores ---
-        scores_path = _find_scores_yaml(stage_output_dir, stage=stage)
+        scores_path = (
+            _find_scores_yaml(stage_output_dir, stage=stage)
+            if self._critic_bridge_enabled
+            else None
+        )
         raw_scores, critique_summary = (
             _load_scores_yaml(scores_path) if scores_path else ({}, "")
         )
         mapped_scores = _map_scenesmith_scores(raw_scores)
+        bridged_scores = dict(mapped_scores)
 
         # If no scores available, use conservative defaults
         if not mapped_scores:
-            console_logger.warning(
-                f"No scores.yaml found for stage {stage}, using defaults"
+            reason = (
+                "no scores.yaml was found"
+                if self._critic_bridge_enabled
+                else "the critic bridge is disabled"
+            )
+            console_logger.info(
+                "StageVerifier: %s for stage %s; using neutral deterministic "
+                "verification scores",
+                reason,
+                stage,
             )
             mapped_scores = {
                 "semantic": 0.5,
@@ -555,7 +613,10 @@ class StageVerifier:
         # --- 2. Rule-based checks ---
         if scene_state_info:
             if stage == "floor_plan":
-                layout_issues = _check_floor_plan_layout(scene_state_info)
+                layout_issues = _check_floor_plan_layout(
+                    scene_state_info,
+                    room_size_check_enabled=self._room_size_check_enabled,
+                )
                 issues.extend(layout_issues)
                 if layout_issues:
                     repair_suggestions.append(
@@ -567,6 +628,27 @@ class StageVerifier:
                 for issue in object_issues:
                     repair_suggestions.append(
                         f"Add missing object '{issue.object_name}' to the scene"
+                    )
+            if stage == "furniture" and self._placeholder_check_enabled:
+                placeholder_names = sorted(
+                    {
+                        str(name)
+                        for name in scene_state_info.get("placeholder_names", [])
+                        if str(name).strip()
+                    }
+                )
+                if placeholder_names:
+                    issues.append(
+                        VerifyIssue(
+                            issue_type="placeholder_asset",
+                            description=(
+                                "Furniture acquisition degraded to placeholders: "
+                                + ", ".join(placeholder_names)
+                            ),
+                        )
+                    )
+                    repair_suggestions.append(
+                        "Replace placeholder furniture with admitted real assets"
                     )
 
         # --- 2b. Optional visual-score ablation gate ---
@@ -672,9 +754,19 @@ class StageVerifier:
             stage=stage,
             pass_stage=pass_stage,
             scores=mapped_scores,
+            visual_scores=bridged_scores,
+            rule_scores={"deterministic_issue_free": 1.0 if not issues else 0.0},
             issues=issues,
             repair_suggestions=repair_suggestions,
             critique_summary=critique_summary,
+            score_source=(
+                "scenebenchmark_critic"
+                if self._critic_bridge_enabled and bool(bridged_scores)
+                else "neutral_default"
+            ),
+            vlm_scoring_performed=(
+                self._critic_bridge_enabled and bool(bridged_scores)
+            ),
         )
 
 
@@ -706,10 +798,16 @@ class FullVerifier:
         if not stage_reports:
             return FullVerifyReport()
 
-        # Aggregate scores across stages
+        # Aggregate authoritative visual scores across stages. ``scores`` remains
+        # a backward-compatible field for older callers, but the explicit
+        # neutral default produced while the critic bridge is disabled must not
+        # be treated as critic evidence or flow into memory-quality signals.
         all_scores: dict[str, list[float]] = {}
         for report in stage_reports:
-            for category, score in report.scores.items():
+            report_scores = report.visual_scores
+            if not report_scores and report.score_source == "unknown":
+                report_scores = report.scores
+            for category, score in report_scores.items():
                 all_scores.setdefault(category, []).append(score)
 
         def avg(key: str) -> float:

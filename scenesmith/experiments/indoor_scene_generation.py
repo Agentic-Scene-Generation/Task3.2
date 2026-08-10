@@ -50,11 +50,11 @@ from scenesmith.furniture_agents.stateful_furniture_agent import StatefulFurnitu
 from scenesmith.manipuland_agents.stateful_manipuland_agent import (
     StatefulManipulandAgent,
 )
-from scenesmith.scenebenchmark_critic.config import critic_config_from_any
 from scenesmith.scenebenchmark_critic.api import (
     seating_orientation_targets,
     write_room_stage_report,
 )
+from scenesmith.scenebenchmark_critic.config import critic_config_from_any
 from scenesmith.scenebenchmark_critic.furniture_relation_repair import (
     improve_furniture_relations,
     unresolved_furniture_relation_failures,
@@ -1567,6 +1567,19 @@ def _generate_floor_plan_worker(
                     logger=logger,
                     render_gpu_id=render_gpu_id,
                 )
+                from scenesmith.scene_expert.config_utils import (
+                    resolve_scene_expert_stage_budget,
+                )
+
+                configure_budget = getattr(
+                    floor_plan_agent,
+                    "configure_stage_runtime_budget",
+                    None,
+                )
+                if callable(configure_budget):
+                    configure_budget(
+                        resolve_scene_expert_stage_budget(cfg_dict, "floor_plan")
+                    )
                 try:
                     house_layout = asyncio.run(
                         floor_plan_agent.generate_house_layout(
@@ -2732,13 +2745,17 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
         # concurrent harness_memory/full scenes can interleave JSONL updates or
         # retrieve a stale index. Preserve correctness by serializing those
         # modes; disabled/harness_only experiments remain scene-parallel.
-        scene_expert_mode = OmegaConf.select(
-            self.cfg, "scene_expert.mode", default="disabled"
+        from scenesmith.scene_expert.config_utils import resolve_component_flags
+
+        resolved_cfg = OmegaConf.to_container(self.cfg, resolve=True)
+        component_flags = resolve_component_flags(resolved_cfg)
+        shared_memory_writes = (
+            component_flags["memory_writer"] or component_flags["stage_working_memory"]
         )
-        if num_workers > 1 and scene_expert_mode in {"harness_memory", "full"}:
+        if num_workers > 1 and shared_memory_writes:
             console_logger.warning(
-                f"scene_expert.mode={scene_expert_mode!r} uses a shared online "
-                "memory bank; forcing experiment.num_workers=1"
+                "Enabled memory writers use a shared online memory bank; "
+                "forcing experiment.num_workers=1"
             )
             num_workers = 1
 

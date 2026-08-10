@@ -31,7 +31,7 @@ from pydrake.all import (
 )
 
 from scenesmith.agent_utils.room import SceneObject
-from scenesmith.utils.mesh_loading import load_collision_meshes_from_sdf
+from scenesmith.utils.mesh_loading import load_object_collision_geometry
 
 console_logger = logging.getLogger(__name__)
 
@@ -185,9 +185,7 @@ def simulate_stack_stability(
 
         # Compute XY bounding box of bottom object for ground surface.
         # This ensures unstable objects fall off and are reliably detected.
-        bottom_collision_meshes = load_collision_meshes_from_sdf(
-            scene_objects[0].sdf_path
-        )
+        bottom_collision_meshes = load_object_collision_geometry(scene_objects[0])
         if not bottom_collision_meshes:
             # Clean up Meshcat before early return (see comment in finally block).
             if meshcat is not None:
@@ -199,12 +197,6 @@ def simulate_stack_stability(
                 unstable_indices=list(range(len(scene_objects))),
                 error_message="Bottom object has no collision geometry",
             )
-
-        # Apply bottom object's scale_factor to collision meshes.
-        bottom_scale = scene_objects[0].scale_factor
-        if bottom_scale != 1.0:
-            for mesh in bottom_collision_meshes:
-                mesh.vertices *= bottom_scale
 
         x_min = min(m.vertices[:, 0].min() for m in bottom_collision_meshes)
         x_max = max(m.vertices[:, 0].max() for m in bottom_collision_meshes)

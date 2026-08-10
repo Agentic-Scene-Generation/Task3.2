@@ -1,19 +1,21 @@
 name: "request_analysis_furniture"
-version: "1.0"
-description: "Extract furniture items from requests, filtering out manipulands"
+version: "1.1"
+description: "Extract floor-supported layout objects, filtering out surface manipulands"
 template_variables: ["description", "dimensions"]
 prompt: |
   <role>
-  You extract ONLY furniture from asset requests.
+  You extract floor-supported layout objects from furniture-stage requests.
   Manipulands (small objects placed ON furniture) are filtered out.
   They will be added later by a separate agent.
   </role>
 
   <definitions>
-  FURNITURE: Standalone objects that occupy floor space and define room layout.
+  FURNITURE is a placement-stage tag: standalone floor-supported objects that
+  occupy floor space or define room layout. It is not a narrow product taxonomy.
   Ask yourself: Is this a single, space-defining object (not meant to be arranged/stacked)?
   Examples: tables, chairs, sofas, beds, wardrobes, shelves, desks, cabinets,
-  ladders, floor lamps, rugs, vehicles (cars, motorcycles), large equipment.
+  ladders, floor lamps, rugs, full-size potted floor plants, baskets,
+  freestanding decor, vehicles (cars, motorcycles), and large equipment.
   NOT handled here: wall-mounted items, ceiling-mounted items (reject with error).
 
   MANIPULANDS: Objects meant to be placed, arranged, or stacked. Added separately.
@@ -23,8 +25,11 @@ prompt: |
   Note: Size does NOT determine category - a tire is a manipuland because it's
   typically stacked/arranged, even though it's large.
 
-  EITHER: Ambiguous items that could be furniture OR manipuland by context.
-  Examples: potted plant, waste bin, laundry basket, small side table.
+  EITHER: Items whose support mode is genuinely unspecified.
+  A large/tall/floor plant is FURNITURE. A small tabletop succulent is a
+  MANIPULAND. An unqualified potted plant requested in this furniture stage is
+  floor-supported FURNITURE unless the description or dimensions clearly say
+  tabletop/hand-scale.
 
   <classification_reasoning>
   When unsure, apply these questions in order:
@@ -39,7 +44,8 @@ prompt: |
   2. Multiple furniture items: split into separate items
   3. Purely manipulands: reject with error directing to manipuland agent
   4. "Stack of N X" or "group of X" patterns: reject as manipuland (designer uses create_stack)
-  5. "potted plant" or "flower pot" standalone: EITHER type, ONE item
+  5. A floor-supported potted plant: FURNITURE type, ONE item. Only an explicitly
+     small/tabletop plant is a MANIPULAND.
   6. Beds with bedding (mattress, blanket, pillows, sheets): Keep as composite, FURNITURE
      (Bedding is integral to a bed - not separate manipulands)
   7. Furniture WITH objects on top: ALWAYS split into furniture + discarded manipulands.
@@ -220,14 +226,14 @@ prompt: |
     "discarded_manipulands": null
   }
 
-  Input: "potted plant", dimensions=[0.3, 0.3, 0.6]
+  Input: "potted floor plant", dimensions=[0.5, 0.5, 1.6]
   Output:
   {
     "items": [{
-      "description": "potted plant",
+      "description": "potted floor plant",
       "short_name": "potted_plant",
-      "dimensions": [0.3, 0.3, 0.6],
-      "object_type": "EITHER",
+      "dimensions": [0.5, 0.5, 1.6],
+      "object_type": "FURNITURE",
       "strategies": ["generated"]
     }],
     "original_description": null,

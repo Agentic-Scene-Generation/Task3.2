@@ -1,0 +1,40 @@
+{
+  "schema_version": "1.0",
+  "assets": [
+    {
+      "mesh_id": "16100ba2844b8f89c2ba6e30677d13ffe45d82a7",
+      "status": "blocked",
+      "families": ["bed"],
+      "reason": "Compound HSSD scene fragment: the bed includes an oversized wall or backdrop panel that dominates placement bounds.",
+      "evidence": "Confirmed in the 2026-07-30 ACP run and the source HSSD mesh metadata."
+    },
+    {
+      "mesh_id": "cdcbb79d18ce406593cc699cb35a2adc9fddc99e",
+      "status": "blocked",
+      "families": ["sofa"],
+      "reason": "Compound HSSD scene fragment: the sofa includes an oversized backing or staging panel that is not intrinsic furniture geometry.",
+      "evidence": "Confirmed in the 2026-07-30 ACP run and the source HSSD mesh metadata."
+    },
+    {
+      "mesh_id": "02e22ed56270338bef5f8436e82023c36cd29104",
+      "status": "blocked",
+      "families": ["bed"],
+      "reason": "Compound HSSD scene fragment: the bed includes a 2.10m-high vertical backdrop submesh rather than an intrinsic headboard.",
+      "evidence": "Confirmed across scene_000, scene_003, and scene_004 in the 2026-08-01 ACP run; source Shader7 dimensions are approximately [1.747, 0.151, 2.105]m."
+    },
+    {
+      "mesh_id": "bf0d188b37ed02e5567e8651df3425c57fbff7bd",
+      "status": "blocked",
+      "families": ["bed"],
+      "reason": "Compound HSSD scene fragment: the bed includes a large attached architectural or staging panel rather than only intrinsic bed geometry.",
+      "evidence": "Confirmed by the task0 2026-08-03 render and original GLB submesh inspection; legacy flattened structural admission incorrectly reported component_count=1."
+    },
+    {
+      "mesh_id": "8891ab09f161d9274aaf1f9e4d06889b550350cb",
+      "status": "blocked",
+      "families": ["sofa"],
+      "reason": "Compound HSSD scene fragment: the sofa includes an oversized attached backing or staging panel.",
+      "evidence": "Confirmed by the task1 2026-08-03 source review; the original GLB contains a roughly [2.012, 0.030, 0.799]m broad thin submesh that was lost by force-mesh flattening."
+    }
+  ]
+}

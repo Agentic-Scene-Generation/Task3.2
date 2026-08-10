@@ -1,0 +1,455 @@
+import asyncio
+import json
+import time
+import unittest
+
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
+
+from scenesmith.agent_utils.asset_runtime import AssetRuntimeGate
+from scenesmith.agent_utils.scoring import FurnitureCritiqueWithScores
+from scenesmith.scene_expert.critic_feedback import (
+    critic_feedback_contract,
+    direct_critic_scoring_instructions,
+    feedback_repair_text,
+    parse_critic_feedback,
+    scope_critic_feedback,
+)
+from scenesmith.scene_expert.harness import Harness
+from scenesmith.scene_expert.runtime_state import (
+    ScenePausedError,
+    candidate_state_hash,
+    is_scene_paused_error,
+    mark_retryable_pause_resolved,
+    persist_retryable_pause,
+)
+
+try:
+    from scenesmith.agent_utils.base_stateful_agent import BaseStatefulAgent
+except ModuleNotFoundError as exc:
+    BaseStatefulAgent = None
+    _BASE_AGENT_IMPORT_ERROR = exc
+else:
+    _BASE_AGENT_IMPORT_ERROR = None
+
+
+class SceneExpertRuntimeContractTest(unittest.TestCase):
+    def test_runtime_asset_reuse_rejects_quarantined_hssd_mesh(self) -> None:
+        asset = SimpleNamespace(
+            metadata={"hssd_mesh_id": "16100ba2844b8f89c2ba6e30677d13ffe45d82a7"}
+        )
+
+        self.assertFalse(AssetRuntimeGate.is_asset_admitted(asset))
+        self.assertTrue(
+            AssetRuntimeGate.is_asset_admitted(
+                SimpleNamespace(metadata={"hssd_mesh_id": "standalone_bed"})
+            )
+        )
+        self.assertFalse(
+            AssetRuntimeGate.is_asset_admitted(
+                SimpleNamespace(
+                    metadata={
+                        "hssd_mesh_id": "new_candidate",
+                        "asset_structure_status": "reject",
+                    }
+                )
+            )
+        )
+
+    @unittest.skipIf(
+        BaseStatefulAgent is None,
+        f"requires OpenAI Agents SDK: {_BASE_AGENT_IMPORT_ERROR}",
+    )
+    def test_floor_plan_cache_reset_uses_layout_contract(self) -> None:
+        state = {"hash": "layout-a"}
+        agent = SimpleNamespace(
+            layout=SimpleNamespace(content_hash=lambda: state["hash"]),
+            _critic_candidate_cache={},
+        )
+
+        BaseStatefulAgent._reset_critic_candidate_cache(agent)
+
+        self.assertTrue(BaseStatefulAgent._cache_valid_for_current_scene(agent))
+        state["hash"] = "layout-b"
+        self.assertFalse(BaseStatefulAgent._cache_valid_for_current_scene(agent))
+
+    def test_compact_critic_feedback_preserves_action_and_acceptance(self) -> None:
+        feedback = parse_critic_feedback(
+            """
+STATUS: REPAIR_REQUIRED
+SUMMARY: The wardrobe blocks the bedroom window.
+FINDING 1
+SEVERITY: BLOCKING
+CATEGORY: window_clearance
+OBJECTS: wardrobe_0, window_1
+OBSERVATION: wardrobe_0 overlaps the visible window opening.
+REASON: The window cannot provide light or be accessed.
+REQUIRED_CHANGE: Move wardrobe_0 to an uninterrupted wall segment.
+PRESERVE: keep bed_0 and nightstand_0 fixed; preserve the door path
+ACCEPTANCE_CHECK: the full window opening is visible and unobstructed.
+END_FINDING
+""".strip()
+        )
+
+        self.assertTrue(feedback.structured)
+        self.assertEqual("REPAIR_REQUIRED", feedback.status)
+        self.assertEqual(1, len(feedback.blocking_findings))
+        finding = feedback.findings[0]
+        self.assertEqual(["wardrobe_0", "window_1"], finding.object_ids)
+        self.assertIn("Verify:", feedback_repair_text(finding))
+        designer_text = feedback.to_designer_text()
+        self.assertIn("wardrobe_0", designer_text)
+        self.assertIn("Preserve:", designer_text)
+        self.assertIn("Accept when:", designer_text)
+
+    def test_contract_caps_findings_without_dropping_blocking_evidence(self) -> None:
+        contract = critic_feedback_contract()
+
+        self.assertIn("at most three FINDING blocks", contract)
+        self.assertIn("all blocking issue classes", contract)
+        self.assertIn("Merge related evidence", contract)
+        self.assertIn("do not emit", contract)
+
+    def test_direct_scoring_contract_overrides_impossible_tool_workflow(self) -> None:
+        instructions = direct_critic_scoring_instructions(
+            stage="floor_plan",
+            scene_context="A modern bedroom with natural light.",
+            category_names=[
+                "room_proportions",
+                "spatial_flow",
+                "natural_lighting",
+            ],
+        )
+
+        self.assertNotIn("MUST call observe_scene", instructions)
+        self.assertIn("No tools are available or required", instructions)
+        self.assertIn("Required score categories: room_proportions", instructions)
+        self.assertIn("Return exactly the structured object", instructions)
+        self.assertIn("modern bedroom", instructions)
+        self.assertIn("Furniture and all decorative", instructions)
+        self.assertIn("must not lower a current-stage", instructions)
+
+    def test_floor_plan_scope_drops_missing_furniture_but_keeps_window_issue(
+        self,
+    ) -> None:
+        feedback = parse_critic_feedback(
+            """
+STATUS: REPAIR_REQUIRED
+SUMMARY: Furniture is absent and a window needs revision.
+FINDING 1
+SEVERITY: BLOCKING
+CATEGORY: missing_furniture
+OBJECTS: bedroom
+OBSERVATION: No bed is visible.
+REASON: The room brief requests a bed.
+REQUIRED_CHANGE: Place a bed.
+PRESERVE: walls
+ACCEPTANCE_CHECK: A bed is visible.
+END_FINDING
+FINDING 2
+SEVERITY: BLOCKING
+CATEGORY: window_placement
+OBJECTS: window_2
+OBSERVATION: The window is too close to the exterior door.
+REASON: The opening layout is architecturally awkward.
+REQUIRED_CHANGE: Move window_2 along its wall.
+PRESERVE: window_1
+ACCEPTANCE_CHECK: Door and window openings have safe separation.
+END_FINDING
+""".strip()
+        )
+
+        scoped = scope_critic_feedback(feedback, "floor_plan")
+
+        self.assertEqual(["window_placement"], [f.category for f in scoped.findings])
+        self.assertEqual("REPAIR_REQUIRED", scoped.status)
+
+    def test_floor_plan_scope_drops_ambiguous_missing_bed_finding(self) -> None:
+        feedback = parse_critic_feedback(
+            """
+STATUS: REPAIR_REQUIRED
+SUMMARY: A required object is absent.
+FINDING 1
+SEVERITY: BLOCKING
+CATEGORY: missing_required_object
+OBJECTS: bed_0
+OBSERVATION: No bed is visible.
+REASON: The downstream room brief requests a bed.
+REQUIRED_CHANGE: Place a bed.
+PRESERVE: walls
+ACCEPTANCE_CHECK: A bed is visible.
+END_FINDING
+""".strip()
+        )
+
+        scoped = scope_critic_feedback(feedback, "floor_plan")
+
+        self.assertEqual([], scoped.findings)
+        self.assertEqual("PASS", scoped.status)
+
+    def test_legacy_critic_text_remains_available_as_fallback(self) -> None:
+        feedback = parse_critic_feedback(
+            "The sofa faces the wall. Rotate it toward the conversation area."
+        )
+
+        self.assertFalse(feedback.structured)
+        self.assertIn("sofa faces the wall", feedback.to_designer_text())
+
+    def test_stage_budget_inherits_exclusive_role_limits(self) -> None:
+        cfg = SimpleNamespace(
+            stage_budget=SimpleNamespace(
+                default=SimpleNamespace(
+                    planner_active_max_seconds=120,
+                    designer_active_max_seconds=360,
+                    critic_active_max_seconds=300,
+                    planner_max_output_tokens=768,
+                    designer_max_output_tokens=1536,
+                    critic_max_output_tokens=2048,
+                    critic_retry_max_output_tokens=3072,
+                    critic_max_attempts=2,
+                ),
+                wall_mounted=SimpleNamespace(
+                    designer_active_max_seconds=240,
+                ),
+            )
+        )
+
+        budget = Harness(cfg)._get_stage_budget("wall_mounted")
+
+        self.assertEqual(120, budget.planner_active_max_seconds)
+        self.assertEqual(240, budget.designer_active_max_seconds)
+        self.assertEqual(300, budget.critic_active_max_seconds)
+        self.assertEqual(768, budget.planner_max_output_tokens)
+        self.assertEqual(2048, budget.critic_max_output_tokens)
+        self.assertEqual(3072, budget.critic_retry_max_output_tokens)
+        self.assertEqual(2, budget.critic_max_attempts)
+
+    def test_retryable_pause_persists_candidate_without_success_marker(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest_path = persist_retryable_pause(
+                scene_root_dir=root,
+                stage="furniture",
+                reason="visual critic unavailable",
+                candidate_state={"objects": ["sofa_0"]},
+                candidate_hash="candidate-hash",
+                render_dir=root / "renders_001",
+                attempt_count=2,
+            )
+
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            candidate_path = Path(manifest["candidate_state_path"])
+            error = ScenePausedError(
+                "furniture",
+                manifest["reason"],
+                str(manifest_path),
+            )
+
+            self.assertEqual("PAUSED_RETRYABLE", manifest["status"])
+            self.assertEqual("retry_critic_only", manifest["resume_action"])
+            self.assertTrue(candidate_path.exists())
+            self.assertTrue(is_scene_paused_error(error))
+            self.assertFalse((root / "_SUCCESS").exists())
+
+            resolved_path = mark_retryable_pause_resolved(root)
+            self.assertIsNotNone(resolved_path)
+            self.assertFalse(manifest_path.exists())
+            resolved = json.loads(resolved_path.read_text(encoding="utf-8"))
+            self.assertEqual("RESOLVED", resolved["status"])
+
+    def test_asset_pause_persists_stage_resume_contract(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest_path = persist_retryable_pause(
+                scene_root_dir=root,
+                stage="furniture",
+                role="asset",
+                reason="asset_unavailable: no admitted bed",
+                resume_action="retry_stage_asset_acquisition",
+                candidate_state={"objects": []},
+            )
+
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual("asset", manifest["role"])
+            self.assertEqual(
+                "retry_stage_asset_acquisition",
+                manifest["resume_action"],
+            )
+
+
+class NestedPlannerBudgetTest(unittest.IsolatedAsyncioTestCase):
+    @unittest.skipIf(
+        BaseStatefulAgent is None,
+        f"requires OpenAI Agents SDK: {_BASE_AGENT_IMPORT_ERROR}",
+    )
+    async def test_direct_critic_uses_full_initial_and_expanded_retry_tokens(
+        self,
+    ) -> None:
+        budget = {
+            "critic_max_attempts": 2,
+            "critic_evaluation_max_seconds": 360,
+            "critic_max_output_tokens": 2048,
+            "critic_retry_max_output_tokens": 3072,
+        }
+        structured_client = MagicMock()
+        structured_client.complete.return_value = SimpleNamespace(
+            success=False,
+            status_dict=lambda: {
+                "attempt_count": 2,
+                "final_error_kind": "length",
+                "final_error": "truncated",
+            },
+        )
+        agent = SimpleNamespace(
+            _stage_budget_value=lambda name, default: budget.get(name, default),
+            agent_type=SimpleNamespace(value="furniture"),
+            _stage_role_active_consumed={},
+            _current_phase_role_consumption=lambda: agent._stage_role_active_consumed,
+            _direct_critic_system_instructions=lambda response_type: "score",
+            _sceneexpert_critic_llm_client=lambda: structured_client,
+            _pause_parent_execution_lease=lambda role: None,
+            _resume_parent_execution_lease=lambda lease: None,
+            _record_llm_call_debug=lambda **kwargs: None,
+            _chat_completion_image_parts=lambda parts: parts,
+        )
+
+        result = await BaseStatefulAgent._run_sceneexpert_direct_critic_score(
+            agent,
+            evidence_text="compact evidence",
+            image_parts=[],
+            response_type=FurnitureCritiqueWithScores,
+            event="test_critic",
+        )
+
+        self.assertIsNone(result)
+        profile = structured_client.complete.call_args.kwargs["profile"]
+        self.assertEqual(2048, profile.max_tokens)
+        self.assertEqual(3072, profile.retry_max_tokens)
+        self.assertEqual(2, profile.max_attempts)
+
+    @unittest.skipIf(
+        BaseStatefulAgent is None,
+        f"requires OpenAI Agents SDK: {_BASE_AGENT_IMPORT_ERROR}",
+    )
+    async def test_semantic_noop_retry_is_sceneexpert_only_and_progress_aware(
+        self,
+    ) -> None:
+        scene = SimpleNamespace(to_state_dict=lambda: {"objects": {}})
+        admitted_assets = ()
+        agent = SimpleNamespace(
+            _stage_runtime_budget={"max_wall_clock_seconds": 60.0},
+            scene=scene,
+            _admitted_stage_asset_ids=lambda: admitted_assets,
+        )
+        scene_hash = candidate_state_hash(scene)
+        result = SimpleNamespace(final_output="I reviewed the scene.")
+
+        self.assertTrue(
+            BaseStatefulAgent._should_retry_initial_design_semantic_noop(
+                agent,
+                result=result,
+                scene_hash_before=scene_hash,
+                admitted_assets_before=(),
+            )
+        )
+
+        agent._stage_runtime_budget = {}
+        self.assertFalse(
+            BaseStatefulAgent._should_retry_initial_design_semantic_noop(
+                agent,
+                result=result,
+                scene_hash_before=scene_hash,
+                admitted_assets_before=(),
+            )
+        )
+        agent._stage_runtime_budget = {"max_wall_clock_seconds": 60.0}
+        admitted_assets = ("asset_1",)
+        self.assertFalse(
+            BaseStatefulAgent._should_retry_initial_design_semantic_noop(
+                agent,
+                result=result,
+                scene_hash_before=scene_hash,
+                admitted_assets_before=(),
+            )
+        )
+
+    @unittest.skipIf(
+        BaseStatefulAgent is None,
+        f"requires OpenAI Agents SDK: {_BASE_AGENT_IMPORT_ERROR}",
+    )
+    async def test_planner_active_lease_pauses_for_nested_designer(self) -> None:
+        class ConcreteAgent(BaseStatefulAgent):
+            @property
+            def agent_type(self):
+                return SimpleNamespace(value="test", is_placement_agent=False)
+
+            def _get_final_scores_directory(self):
+                return Path()
+
+            def _get_critique_prompt_enum(self):
+                return None
+
+            def _set_placement_noise_profile(self, mode):
+                del mode
+
+            def _get_design_change_prompt_enum(self):
+                return None
+
+            def _get_initial_design_prompt_enum(self):
+                return None
+
+            def _get_initial_design_prompt_kwargs(self):
+                return {}
+
+        agent = object.__new__(ConcreteAgent)
+        agent._stage_runtime_budget = {
+            "max_wall_clock_seconds": 1.0,
+            "planner_active_max_seconds": 0.08,
+            "designer_active_max_seconds": 0.20,
+            "critic_active_max_seconds": 0.20,
+            "critic_reserve_fraction": 0.0,
+            "fallback_reserve_fraction": 0.0,
+            "finalization_reserve_fraction": 0.0,
+        }
+        agent._stage_runtime_started_at = time.monotonic()
+        agent._critic_evaluation_started_at = None
+        agent._stage_runtime_phase = "agent"
+        agent._stage_runtime_exhausted = False
+        agent._planner_budget_exhausted = False
+        agent._stage_role_active_consumed = {}
+        agent._agent_execution_leases = []
+
+        async def fake_run(**kwargs):
+            if kwargs["starting_agent"] == "planner":
+                child = await agent._run_agent_with_stage_sla(
+                    starting_agent="designer",
+                    input={},
+                    role="designer",
+                    event="nested_design",
+                )
+                self.assertIsNotNone(child)
+                await asyncio.sleep(0.03)
+                return SimpleNamespace(final_output="planner complete")
+            await asyncio.sleep(0.10)
+            return SimpleNamespace(final_output="design complete")
+
+        with patch(
+            "scenesmith.agent_utils.base_stateful_agent.Runner.run",
+            side_effect=fake_run,
+        ):
+            result = await agent._run_agent_with_stage_sla(
+                starting_agent="planner",
+                input={},
+                role="planner",
+                event="planner",
+            )
+
+        self.assertIsNotNone(result)
+        self.assertGreaterEqual(agent._stage_role_active_consumed["designer"], 0.09)
+        self.assertLess(agent._stage_role_active_consumed["planner"], 0.08)
+
+
+if __name__ == "__main__":
+    unittest.main()

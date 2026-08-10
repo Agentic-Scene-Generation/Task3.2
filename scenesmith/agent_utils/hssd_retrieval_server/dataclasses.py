@@ -87,10 +87,25 @@ class HssdRetrievalResult:
     """CLIP similarity score in range [0, 1], higher is better match."""
 
     size: tuple[float, float, float]
-    """Object size (width, depth, height) in meters."""
+    """Raw exported mesh extents in meters; not a semantic dimension order."""
 
     category: str
     """Object category (e.g., 'tables', 'seating')."""
+
+    front_axis: str | None = None
+    """Functional front in SceneSmith's Z-up input frame, when dataset-verified."""
+
+    up_axis: str | None = None
+    """Up axis in SceneSmith's Z-up input frame, when dataset-verified."""
+
+    orientation_source: str | None = None
+    """Provenance for the supplied orientation axes."""
+
+    extent_frame: str = "unresolved"
+    """Frame of ``size``. It is never a semantic width/depth/height contract."""
+
+    structure_mesh_path: str | None = None
+    """Original topology-preserving GLB used only for structural admission."""
 
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""
@@ -114,6 +129,11 @@ class HssdRetrievalResult:
             similarity_score=data["similarity_score"],
             size=tuple(data["size"]),
             category=data["category"],
+            front_axis=data.get("front_axis"),
+            up_axis=data.get("up_axis"),
+            orientation_source=data.get("orientation_source"),
+            extent_frame=str(data.get("extent_frame", "unresolved")),
+            structure_mesh_path=data.get("structure_mesh_path"),
         )
 
 

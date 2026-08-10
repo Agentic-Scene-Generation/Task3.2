@@ -11,11 +11,13 @@ import logging
 import os
 import re
 import time
-from pathlib import Path
 
+from pathlib import Path
+from typing import Any
+
+from scenesmith.agent_utils.thinking import chat_template_kwargs_from_effort
 from scenesmith.scene_expert.context_bundle import build_llm_call_debug_record
 from scenesmith.scene_expert.schemas import SceneTaskSpec
-from scenesmith.agent_utils.thinking import chat_template_kwargs_from_effort
 from scenesmith.utils.llm_json import parse_llm_json_object
 
 console_logger = logging.getLogger(__name__)
@@ -600,17 +602,21 @@ class TaskCompiler:
         api_key: str | None = None,
         max_tokens: int = 1536,
         temperature: float = 0.0,
+        llm_client: Any | None = None,
     ) -> None:
-        from openai import OpenAI
-
         self._model = model
         self._max_tokens = max_tokens
         self._temperature = temperature
-        self._client = OpenAI(
-            base_url=api_base_url
-            or os.environ.get("OPENAI_BASE_URL", "http://localhost:8000/v1"),
-            api_key=api_key or os.environ.get("OPENAI_API_KEY", "dummy"),
-        )
+        self._structured_llm = llm_client
+        self._client = None
+        if self._structured_llm is None:
+            from openai import OpenAI
+
+            self._client = OpenAI(
+                base_url=api_base_url
+                or os.environ.get("OPENAI_BASE_URL", "http://localhost:8000/v1"),
+                api_key=api_key or os.environ.get("OPENAI_API_KEY", "dummy"),
+            )
 
     def compile(self, prompt: str) -> SceneTaskSpec:
         """Parse a raw text prompt into a SceneTaskSpec.
@@ -630,6 +636,32 @@ class TaskCompiler:
             {"role": "system", "content": _SYSTEM_PROMPT},
             {"role": "user", "content": user_message},
         ]
+        if self._structured_llm is not None:
+            result = self._structured_llm.complete(
+                role="task_compiler",
+                stage="task_compiler",
+                event="compile",
+                messages=messages,
+                response_model=SceneTaskSpec,
+            )
+            if result.value is None:
+                reason = (f"{result.final_error_kind}: {result.final_error}").strip(
+                    ": "
+                )
+                console_logger.warning(
+                    "Structured TaskCompiler failed; using deterministic contract: %s",
+                    reason,
+                )
+                return _fallback_spec_from_prompt(prompt).model_copy(
+                    update={"compiler_failure_reason": reason}
+                )
+            return _normalize_stage_ownership(
+                result.value,
+                prompt=prompt,
+            ).model_copy(
+                update={"compiler_status": "ok", "compiler_failure_reason": ""}
+            )
+
         started_at = time.perf_counter()
 
         try:

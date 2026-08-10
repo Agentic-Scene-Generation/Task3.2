@@ -4,6 +4,8 @@ Adapted from geometry_generation_server for CLIP-based semantic search.
 """
 
 import logging
+import os
+import shutil
 import time
 import uuid
 
@@ -294,10 +296,13 @@ class HssdRetrievalApp(flask.Flask):
             raise FatalRetrievalError(self._fatal_error)
         retriever = self._get_retriever()
 
-        # Convert dimensions tuple to numpy array if provided.
+        # Preserve the SceneSmith [width, depth, height] request contract here.
+        # The retriever handles both evaluated Z-up and raw glTF Y-up candidate
+        # extents because HSSD's sparse orientation metadata leaves both forms
+        # present in the corpus.
         desired_dimensions = None
         if request.desired_dimensions:
-            desired_dimensions = np.array(request.desired_dimensions)
+            desired_dimensions = np.asarray(request.desired_dimensions, dtype=float)
 
         # Retrieve candidates sorted by bbox_score, limited by num_candidates.
         candidates = retriever.retrieve_multiple(
@@ -327,7 +332,37 @@ class HssdRetrievalApp(flask.Flask):
             mesh_path = output_dir / mesh_filename
             candidate.mesh.export(str(mesh_path))
 
+            # ``candidate.mesh`` is intentionally flattened for downstream
+            # canonicalization and SDF generation.  Structural admission must
+            # inspect the original scene graph, otherwise connected furniture
+            # plus backdrop fragments collapse to one component and bypass the
+            # compound-asset contract.
+            source_mesh_path = getattr(candidate, "source_mesh_path", None)
+            structure_mesh_path: Path | None = None
+            if source_mesh_path:
+                source_path = Path(source_mesh_path)
+                if source_path.exists():
+                    structure_mesh_path = (
+                        output_dir / f"{candidate.mesh_id}.structure.glb"
+                    )
+                    structure_mesh_path.unlink(missing_ok=True)
+                    try:
+                        # Retrieval output normally lives on the same shared
+                        # filesystem as HSSD.  A hard link preserves the source
+                        # scene graph without duplicating large GLBs per query.
+                        os.link(source_path, structure_mesh_path)
+                    except OSError:
+                        # Separate mounts/filesystems cannot hard-link.  Copying
+                        # is the portable fallback and keeps the API contract
+                        # self-contained for remote retrieval workers.
+                        shutil.copy2(source_path, structure_mesh_path)
+
             console_logger.debug(f"Exported candidate mesh to {mesh_path}")
+
+            metadata = getattr(candidate, "metadata", None)
+            has_dataset_axes = bool(
+                getattr(metadata, "up", "") and getattr(metadata, "front", "")
+            )
 
             result = HssdRetrievalResult(
                 mesh_path=str(mesh_path),
@@ -336,6 +371,20 @@ class HssdRetrievalApp(flask.Flask):
                 similarity_score=float(candidate.clip_score),
                 size=tuple(gltf_y_up_dimensions_to_scene_z_up(candidate.mesh.extents)),
                 category=category,
+                # retrieve_multiple() has already applied the dataset transform.
+                # In glTF Y-up this is +Z front; Blender/SceneSmith's inverse
+                # mapping makes it -Y front and +Z up.
+                front_axis=("-Y" if has_dataset_axes else None),
+                up_axis=("+Z" if has_dataset_axes else None),
+                orientation_source=(
+                    "hssd_dataset_aligned" if has_dataset_axes else None
+                ),
+                extent_frame="exported_hssd_mesh",
+                structure_mesh_path=(
+                    str(structure_mesh_path)
+                    if structure_mesh_path is not None
+                    else None
+                ),
             )
             results.append(result)
 

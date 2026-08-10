@@ -32,7 +32,7 @@ from scenesmith.agent_utils.asset_router.rendered_asset_choice import (
     infer_floor_covering_footprint_shape,
     is_floor_covering_request,
 )
-from scenesmith.agent_utils.semantic_names import normalize_semantic_name
+from scenesmith.agent_utils.asset_runtime import AssetRuntimeGate, semantic_asset_family
 from scenesmith.agent_utils.convex_decomposition_server import ConvexDecompositionClient
 from scenesmith.agent_utils.geometry_generation_server.client import (
     GeometryGenerationClient,
@@ -79,6 +79,7 @@ from scenesmith.agent_utils.sdf_generator import (
     generate_drake_sdf,
 )
 from scenesmith.agent_utils.sdf_mesh_utils import combine_sdf_meshes_at_joint_angles
+from scenesmith.agent_utils.semantic_names import normalize_semantic_name
 from scenesmith.agent_utils.thin_covering_generator import (
     generate_thin_covering_sdf,
     infer_thin_covering_shape,
@@ -526,6 +527,39 @@ class AssetManager:
         # Track duplicate requests from the last generate_assets call.
         self.last_duplicate_info: dict[str, list[int]] | None = None
         self._fatal_asset_error: str | None = None
+        # The runtime gate is inert until the optional execution-control plane
+        # supplies a non-empty asset budget. This preserves SceneSmith's native
+        # acquisition behavior for main/default runs.
+        self._runtime_gate = AssetRuntimeGate()
+        self._execution_clock: object | None = None
+
+    def configure_runtime_budget(
+        self,
+        *,
+        stage: str,
+        budget: dict,
+        required_objects: list[str],
+        execution_clock: object | None = None,
+    ) -> None:
+        """Enable the opt-in per-stage asset request and reuse limits."""
+        self._execution_clock = execution_clock
+        effective_budget = (
+            dict(budget) if bool(budget.get("execution_control_enabled", False)) else {}
+        )
+        self._runtime_gate.configure(
+            stage=stage,
+            budget=effective_budget,
+            required_objects=required_objects,
+        )
+        if self._runtime_gate.enabled:
+            console_logger.info(
+                "Asset runtime gate configured for %s: requests=%d, "
+                "optional_families=%d, assets_per_request=%d",
+                stage,
+                self._runtime_gate.max_asset_requests,
+                self._runtime_gate.max_optional_families,
+                self._runtime_gate.max_assets_per_request,
+            )
 
     def _analyze_mesh_physics(
         self,
@@ -678,6 +712,9 @@ class AssetManager:
             < _LINEAR_CEILING_REQUEST_ASPECT_MIN
         ):
             return ()
+        pause = getattr(self._execution_clock, "pause_for_external_operation", None)
+        resume = getattr(self._execution_clock, "resume_from_external_operation", None)
+        pause_token = pause("asset_acquisition") if callable(pause) else None
         try:
             mesh = load_mesh_as_trimesh(canonical_path, force_merge=True)
             bbox_min, bbox_max = gltf_y_up_bounds_to_scene_z_up(mesh.bounds)
@@ -1845,6 +1882,52 @@ class AssetManager:
             AssetGenerationResult with successful assets and failure information.
         """
         request = _normalize_independent_media_requests(request)
+        original_request = request
+        gate_plan = None
+        prefetched_assets: list[SceneObject] = []
+        gate_failures: list[FailedAsset] = []
+        original_indices = list(range(len(request.object_descriptions)))
+        if self._runtime_gate.enabled and (
+            len(request.object_descriptions)
+            == len(request.short_names)
+            == len(request.desired_dimensions)
+        ):
+            gate_plan = self._runtime_gate.plan(
+                request.object_descriptions,
+                request.short_names,
+            )
+            prefetched_assets = list(gate_plan.cached_assets)
+            gate_failures = [
+                FailedAsset(
+                    index=failure.index,
+                    description=failure.description,
+                    error_message=failure.reason,
+                )
+                for failure in gate_plan.failures
+            ]
+            original_indices = gate_plan.allowed_indices
+            if not original_indices:
+                return AssetGenerationResult(
+                    successful_assets=prefetched_assets,
+                    failed_assets=gate_failures,
+                )
+            request = AssetGenerationRequest(
+                object_descriptions=[
+                    original_request.object_descriptions[index]
+                    for index in original_indices
+                ],
+                short_names=[
+                    original_request.short_names[index] for index in original_indices
+                ],
+                object_type=original_request.object_type,
+                desired_dimensions=[
+                    original_request.desired_dimensions[index]
+                    for index in original_indices
+                ],
+                style_context=original_request.style_context,
+                operation_type=original_request.operation_type,
+                scene_id=original_request.scene_id,
+            )
         console_logger.info(
             f"Starting {request.object_type.value} asset acquisition for "
             f"{len(request.object_descriptions)} items using "
@@ -1858,21 +1941,63 @@ class AssetManager:
         try:
             # If router is enabled, analyze and potentially modify the request.
             if self.router is not None:
-                return self._generate_assets_with_router(request)
+                result = self._generate_assets_with_router(request)
 
             # Dispatch based on asset source (router disabled).
-            if self.general_asset_source == "hssd":
-                return self._retrieve_hssd_assets(request)
+            elif self.general_asset_source == "hssd":
+                result = self._retrieve_hssd_assets(request)
             elif self.general_asset_source == "objaverse":
-                return self._retrieve_objaverse_assets(request)
+                result = self._retrieve_objaverse_assets(request)
             elif self.general_asset_source == "generated":
-                return self._generate_assets_with_model(request)
+                result = self._generate_assets_with_model(request)
             else:
                 # This should never happen due to __init__ validation.
                 raise ValueError(f"Unknown asset source: {self.general_asset_source}")
         except FatalRetrievalError as e:
             self._fatal_asset_error = str(e)
-            return self._fatal_generation_result(request, str(e))
+            result = self._fatal_generation_result(request, str(e))
+        finally:
+            if callable(resume):
+                resume(pause_token)
+
+        if gate_plan is None:
+            return result
+
+        allowed_families = [
+            gate_plan.families_by_index[index] for index in original_indices
+        ]
+        allowed_family_set = set(allowed_families)
+        for result_index, asset in enumerate(result.successful_assets):
+            inferred_family = semantic_asset_family(
+                str(getattr(asset, "description", "")),
+                str(getattr(asset, "name", "")),
+            )
+            if inferred_family not in allowed_family_set:
+                inferred_family = allowed_families[
+                    min(result_index, len(allowed_families) - 1)
+                ]
+            self._runtime_gate.remember_success(inferred_family, asset)
+
+        remapped_failures = []
+        for failure in result.failed_assets:
+            relative_index = int(failure.index)
+            original_index = (
+                original_indices[relative_index]
+                if 0 <= relative_index < len(original_indices)
+                else relative_index
+            )
+            remapped_failures.append(
+                FailedAsset(
+                    index=original_index,
+                    description=failure.description,
+                    error_message=failure.error_message,
+                )
+            )
+        return AssetGenerationResult(
+            successful_assets=prefetched_assets + result.successful_assets,
+            failed_assets=gate_failures + remapped_failures,
+            modification_info=result.modification_info,
+        )
 
     def _fatal_generation_result(
         self, request: AssetGenerationRequest, error_message: str
