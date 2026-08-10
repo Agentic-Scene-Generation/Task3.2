@@ -4,6 +4,7 @@ from datetime import datetime
 from pathlib import Path
 from time import sleep
 
+import pytest
 from PIL import Image
 
 from tools.critic_probe_web import _command_runs_this_script, create_app
@@ -781,7 +782,17 @@ def test_exposes_planner_orchestration_and_full_session_trace(tmp_path: Path) ->
     assert all(message["agent"] == "planner" for message in detail["messages"])
 
 
-def test_exposes_hssd_retrieval_and_vlm_trace_for_add_furniture(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "tool_name",
+    [
+        "_add_furniture_to_scene_impl",
+        "_place_wall_object_impl",
+        "_place_ceiling_object_impl",
+    ],
+)
+def test_exposes_hssd_retrieval_and_vlm_trace_for_asset_placement(
+    tmp_path: Path, tool_name: str
+) -> None:
     room = (
         tmp_path
         / "run_a"
@@ -798,7 +809,7 @@ def test_exposes_hssd_retrieval_and_vlm_trace_for_add_furniture(tmp_path: Path) 
                 {
                     "step_number": 1,
                     "timestamp": "2026-07-28T12:00:08Z",
-                    "tool_name": "_add_furniture_to_scene_impl",
+                    "tool_name": tool_name,
                     "arguments": {"asset_id": "chair_0"},
                 }
             ]

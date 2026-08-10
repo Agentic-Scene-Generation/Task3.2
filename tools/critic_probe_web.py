@@ -512,8 +512,10 @@ def _retrieval_backend(decision: dict[str, Any]) -> str:
 def _selection_trace_for_action(
     room_dir: Path, action: dict[str, Any]
 ) -> dict[str, Any]:
-    """Resolve an Add Furniture action to its recorded retrieval decision."""
-    if "add_furniture" not in str(action.get("tool_name", "")).lower():
+    """Resolve an asset-placement action to its recorded retrieval decision."""
+    arguments = action.get("arguments", {})
+    asset_id = arguments.get("asset_id") if isinstance(arguments, dict) else None
+    if not isinstance(asset_id, str) or not asset_id:
         return {"status": "not_applicable"}
     asset = _asset_record_for_action(room_dir, action)
     if asset is None:
