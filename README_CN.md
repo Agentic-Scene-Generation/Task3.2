@@ -1043,6 +1043,23 @@ blender -b --python scripts/render_critic_final_views.py -- \
 `CRITIC_PROBE_RENDER_FINAL_VIEWS=true`，由
 `scripts/run_parallel_critic_on.sh` 在所有 batch 完成后自动生成。
 
+### 将 critic 回放输出写入可清理的 tmp 目录
+
+回放脚本的默认输出目录是 `outputs/critic_probe/<run_id>`。需要临时批量
+回放时，可在脚本参数中明确指定输出根目录：
+
+```bash
+RUN_ID=20260801_week31_parallel \
+CRITIC_PROBE_INNER_PARALLELISM=6 \
+CRITIC_PROBE_ALLOW_UNSAFE_PARALLELISM=true \
+bash scripts/run_parallel_critic_on.sh \
+  --output-dir outputs/tmp/20260801_week31_parallel
+```
+
+`--output-root` 是等价别名；也可以通过 `OUTPUT_ROOT=outputs/tmp/<run_id>`
+设置。脚本默认保持单场景并发；只有确认模型服务与内存足够时才将并发提高到
+6。每次运行使用独立子目录，以便后续统一删除 `outputs/tmp/`。
+
 
 ## 9. SceneExpert trace 与 memory
 

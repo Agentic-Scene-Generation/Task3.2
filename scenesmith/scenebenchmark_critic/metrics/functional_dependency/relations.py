@@ -13,9 +13,11 @@ from scenesmith.scenebenchmark_critic.core.geometry import (
     distance_xy,
     front_vector,
     object_category,
+    object_footprint_polygon,
     seating_angle_to_target_deg,
     side_vector,
 )
+from shapely.geometry import Point, Polygon
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.constants import *
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.profiles import (
     object_function_profile,
@@ -217,14 +219,12 @@ def _eval_relation_over_targets(
         eval_target = target
         direction_note = ""
         if relation_type == "generic_near_relation":
-            inferred = _infer_relation_type(subject, target)
-            if inferred and _relation_target_is_valid(subject, target, inferred):
-                target_relation = inferred
-            elif _relation_target_is_valid(target, subject, "object_on_support"):
-                target_relation = "object_on_support"
-                eval_subject = target
-                eval_target = subject
-                direction_note = f"interpreted reversed support direction: `{target.get('id')}` is supported by `{subject.get('id')}`; "
+            # An explicit ``near`` / ``next_to`` relation is planar adjacency,
+            # not an implicit request to place a small object on its neighbor.
+            # Semantic inference remains useful for unconstrained template
+            # proposals, but applying it here made floor objects near a desk or
+            # dresser fail a support-surface check despite satisfying the prompt.
+            target_relation = "generic_near_relation"
         elif not _relation_target_is_valid(subject, target, relation_type):
             inferred = _infer_relation_type(subject, target)
             if inferred and _relation_target_is_valid(subject, target, inferred):
@@ -293,6 +293,18 @@ def _eval_relation_over_targets(
                     label, confidence, reason = _eval_seating_to_surface(
                         subject, target, target_relation
                     )
+            elif evaluator is _eval_generic_near_relation:
+                dependency = _dependency_payload(check)
+                max_gap = dependency.get("max_distance_m")
+                label, confidence, reason = _eval_generic_near_relation(
+                    subject,
+                    target,
+                    target_relation,
+                    max_gap=(float(max_gap) if max_gap is not None else None),
+                    require_external_adjacency=bool(
+                        dependency.get("requires_external_adjacency", False)
+                    ),
+                )
             else:
                 label, confidence, reason = evaluator(subject, target, target_relation)
             scored.append(
@@ -1458,18 +1470,29 @@ def _dependency_float(dependency: dict[str, Any], key: str, default: float) -> f
 
 
 def _eval_generic_near_relation(
-    subject: dict[str, Any], target: dict[str, Any], relation_type: str
+    subject: dict[str, Any],
+    target: dict[str, Any],
+    relation_type: str,
+    *,
+    max_gap: float | None = None,
+    require_external_adjacency: bool = False,
 ) -> tuple[str, float, str]:
+    if require_external_adjacency:
+        overlap_reason = _floor_supported_near_overlap_reason(subject, target)
+        if overlap_reason:
+            return "fail", 0.96, overlap_reason
     gap = bbox_gap_xy(subject, target)
     if gap is None:
         return "unknown", 0.0, "missing distance geometry."
-    if gap <= 0.6:
+    pass_gap = 0.6 if max_gap is None else max(0.0, max_gap)
+    degraded_gap = 1.2 if max_gap is None else pass_gap * 1.5
+    if gap <= pass_gap:
         return (
             "pass",
             0.75,
             f"generic `{relation_type}` target is nearby with {gap:.2f}m gap.",
         )
-    if gap <= 1.2:
+    if gap <= degraded_gap:
         return (
             "degraded",
             0.65,
@@ -1479,6 +1502,54 @@ def _eval_generic_near_relation(
         "fail",
         0.75,
         f"generic `{relation_type}` target is too far with {gap:.2f}m gap.",
+    )
+
+
+def _floor_supported_near_overlap_reason(
+    subject: dict[str, Any], target: dict[str, Any]
+) -> str:
+    """Describe an unauthorized floor-object containment, if geometry proves it."""
+    subject_footprint = object_footprint_polygon(subject)
+    target_footprint = object_footprint_polygon(target)
+    subject_span = bbox_height_span(subject)
+    target_span = bbox_height_span(target)
+    if (
+        subject_footprint is None
+        or target_footprint is None
+        or subject_span is None
+        or target_span is None
+    ):
+        return ""
+    try:
+        subject_polygon = Polygon(subject_footprint)
+        target_polygon = Polygon(target_footprint)
+    except (TypeError, ValueError):
+        return ""
+    if (
+        subject_polygon.is_empty
+        or target_polygon.is_empty
+        or subject_polygon.area <= 1e-8
+        or not subject_polygon.is_valid
+        or not target_polygon.is_valid
+    ):
+        return ""
+    vertical_overlap = min(subject_span[1], target_span[1]) - max(
+        subject_span[0], target_span[0]
+    )
+    if vertical_overlap <= 0.02:
+        return ""
+    overlap_ratio = (
+        subject_polygon.intersection(target_polygon).area / subject_polygon.area
+    )
+    center = bbox_center_xy(subject)
+    center_contained = center is not None and target_polygon.covers(Point(center))
+    if not center_contained and overlap_ratio < 0.50:
+        return ""
+    mode = "center lies inside" if center_contained else "footprint overlaps"
+    return (
+        "floor-supported near relation is not external adjacency: subject "
+        f"{mode} target footprint (overlap {overlap_ratio:.2f}, vertical overlap "
+        f"{vertical_overlap:.2f}m)."
     )
 
 

@@ -1,0 +1,16 @@
+# Installed packages and package-manager metadata
+node_modules/
+.pnpm-store/
+
+# Vite and TypeScript build output
+dist/
+*.tsbuildinfo
+
+# Local development configuration and logs
+.env.local
+.env.*.local
+*.log
+
+# Browser-test artifacts
+playwright-report/
+test-results/

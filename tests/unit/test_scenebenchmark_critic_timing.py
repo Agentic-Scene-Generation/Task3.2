@@ -18,7 +18,6 @@ def test_evaluate_room_scene_writes_timing_record(tmp_path, monkeypatch) -> None
         "room_scene_to_case_pack",
         lambda _scene, *, stage, metrics: case_pack,
     )
-    monkeypatch.setattr(api, "constraint_mode", lambda _config: "contract")
 
     def _run_checks(_case_pack, *, config, timing):
         timing["run_case_pack_checks_sec"] = 0.001
@@ -28,12 +27,22 @@ def test_evaluate_room_scene_writes_timing_record(tmp_path, monkeypatch) -> None
     monkeypatch.setattr(
         api,
         "build_evaluation_payload",
-        lambda **kwargs: {"results": kwargs["results"]},
+        lambda **kwargs: {
+            "results": [
+                {
+                    **kwargs["results"][0],
+                    "label": "fail",
+                    "reason": "bed blocks the window",
+                }
+            ],
+            "summary": {"scene_summary": {"fail": 1}},
+            "gate": {"blocked": True, "label": "fail"},
+        },
     )
 
     payload = api.evaluate_room_scene(scene, config=config, stage="furniture")
 
-    assert payload["results"] == [{"check_id": "check_1"}]
+    assert payload["results"][0]["reason"] == "bed blocks the window"
     timing_path = (
         tmp_path / "scene_expert" / "timing" / "scenebenchmark_critic_timing.jsonl"
     )
@@ -43,5 +52,17 @@ def test_evaluate_room_scene_writes_timing_record(tmp_path, monkeypatch) -> None
     assert record["scope"] == "room:bedroom_01"
     assert record["stage"] == "furniture"
     assert record["details"]["case_pack_check_count"] == 1
+    assert record["evaluation"] == {
+        "results": [
+            {
+                "check_id": "check_1",
+                "label": "fail",
+                "reason": "bed blocks the window",
+            }
+        ],
+        "summary": {"scene_summary": {"fail": 1}},
+        "gate": {"blocked": True, "label": "fail"},
+    }
+    assert "case_pack" not in record
     assert "case_pack_build_sec" in record["steps"]
     assert "check_execution_wall_sec" in record["steps"]

@@ -51,7 +51,10 @@ from scenesmith.manipuland_agents.stateful_manipuland_agent import (
     StatefulManipulandAgent,
 )
 from scenesmith.scenebenchmark_critic.config import critic_config_from_any
-from scenesmith.scenebenchmark_critic.api import seating_orientation_targets
+from scenesmith.scenebenchmark_critic.api import (
+    seating_orientation_targets,
+    write_room_stage_report,
+)
 from scenesmith.scenebenchmark_critic.furniture_relation_repair import (
     improve_furniture_relations,
     unresolved_furniture_relation_failures,
@@ -91,6 +94,28 @@ STAGE_ASSET_DIRS = {
 
 _SCENE_STATUS_FILENAME = "scene_status.json"
 _SCENE_SUCCESS_MARKER = "_SUCCESS"
+
+
+def _write_final_critic_report(
+    scene: RoomScene, room_dir: Path, cfg_dict: dict
+) -> dict | None:
+    """Evaluate the immutable hard contract after final physics processing.
+
+    Intermediate critic calls drive the furniture, wall, and manipuland agents,
+    but they do not establish the final contract state after manipuland
+    projection/simulation.  Keep that final evaluation in the core generation
+    path so a completed replay always has an auditable final-state report.
+    """
+    critic_config = critic_config_from_any(cfg_dict)
+    if not critic_config.enabled or not critic_config.room_stage_enabled("final_scene"):
+        return None
+    return write_room_stage_report(
+        scene,
+        room_dir / "scenebenchmark_critic" / "final_scene",
+        config=critic_config,
+        stage="final_scene",
+        raw_config=cfg_dict,
+    )
 
 
 def _write_scene_status(
@@ -447,11 +472,67 @@ async def _rescore_furniture_after_postprocessing(
     await furniture_agent._finalize_scene_and_scores()
 
 
+def _furniture_object_ids(scene: RoomScene) -> frozenset[str]:
+    """Return the furniture identities represented by the current scene state."""
+    object_ids: set[str] = set()
+    for object_id, obj in getattr(scene, "objects", {}).items():
+        object_type = getattr(obj, "object_type", None)
+        value = getattr(object_type, "value", object_type)
+        if str(value).lower() == ObjectType.FURNITURE.value:
+            object_ids.add(str(object_id))
+    return frozenset(object_ids)
+
+
+def _run_furniture_physical_postprocessing(
+    *,
+    scene: RoomScene,
+    cfg_dict: dict,
+    simulation_html_path: Path | None = None,
+) -> tuple[RoomScene, bool, list[str]]:
+    """Run the configured furniture projection and dynamic validation once."""
+    projection_cfg = cfg_dict["experiment"]["projection"]
+    furniture_cfg = projection_cfg["furniture"]
+    sim_cfg = projection_cfg["simulation"]
+    physics_cfg = cfg_dict["furniture_agent"]["physics_validation"]
+    return apply_physical_feasibility_postprocessing(
+        scene=scene,
+        weld_furniture=False,
+        projection_enabled=True,
+        projection_influence_distance=furniture_cfg["influence_distance"],
+        projection_solver_name=furniture_cfg["solver_name"],
+        projection_iteration_limit=furniture_cfg["iteration_limit"],
+        projection_time_limit_s=furniture_cfg["time_limit_s"],
+        projection_xy_only=furniture_cfg["xy_only"],
+        projection_fix_rotation=furniture_cfg["fix_rotation"],
+        simulation_enabled=sim_cfg["enabled"],
+        simulation_time_s=sim_cfg["simulation_time_s"],
+        simulation_time_step_s=sim_cfg["time_step_s"],
+        simulation_timeout_s=sim_cfg["timeout_s"],
+        simulation_html_path=simulation_html_path,
+        remove_fallen_furniture=physics_cfg["remove_fallen_furniture"],
+        fallen_tilt_threshold_degrees=physics_cfg["fallen_tilt_threshold_degrees"],
+    )
+
+
+def _raise_for_unvalidated_furniture(
+    *,
+    scene: RoomScene,
+    physically_validated_ids: frozenset[str],
+) -> None:
+    added_ids = sorted(_furniture_object_ids(scene) - physically_validated_ids)
+    if added_ids:
+        raise RuntimeError(
+            "Furniture inventory changed after its bounded physical revalidation; "
+            "refusing to persist unvalidated furniture: " + ", ".join(added_ids)
+        )
+
+
 async def _apply_and_rescore_final_furniture_state(
     furniture_agent: StatefulFurnitureAgent,
     scene: RoomScene,
     cfg_dict: dict,
     previous_scene_hash: str,
+    physically_validated_furniture_ids: frozenset[str] | None = None,
 ) -> bool:
     """Apply final furniture guards before rendering the canonical stage state."""
     _apply_final_furniture_guards(scene=scene, cfg_dict=cfg_dict)
@@ -470,6 +551,56 @@ async def _apply_and_rescore_final_furniture_state(
     # before deciding whether the actual persisted layout is valid.
     _apply_final_furniture_guards(scene=scene, cfg_dict=cfg_dict)
     _raise_for_unresolved_furniture_relations(scene=scene, cfg_dict=cfg_dict)
+
+    newly_added_ids = (
+        _furniture_object_ids(scene) - physically_validated_furniture_ids
+        if physically_validated_furniture_ids is not None
+        else frozenset()
+    )
+    if newly_added_ids:
+        console_logger.info(
+            "Canonical furniture repair added/replaced %d object(s); running one "
+            "bounded physical revalidation: %s",
+            len(newly_added_ids),
+            sorted(newly_added_ids),
+        )
+        scene, projection_success, removed_ids = _run_furniture_physical_postprocessing(
+            scene=scene,
+            cfg_dict=cfg_dict,
+        )
+        furniture_agent.scene = scene
+        if removed_ids:
+            console_logger.warning(
+                "Bounded furniture revalidation removed %d unstable object(s): %s",
+                len(removed_ids),
+                removed_ids,
+            )
+        if not projection_success:
+            raise RuntimeError(
+                "Furniture projection failed during bounded post-repair revalidation"
+            )
+
+        revalidated_ids = _furniture_object_ids(scene)
+        _apply_final_furniture_guards(scene=scene, cfg_dict=cfg_dict)
+        _raise_for_unvalidated_furniture(
+            scene=scene,
+            physically_validated_ids=revalidated_ids,
+        )
+        _raise_for_unresolved_furniture_relations(scene=scene, cfg_dict=cfg_dict)
+
+        # Refresh the canonical render/scores for the physically authoritative
+        # state. Any inventory repair triggered by this pass is deliberately not
+        # simulated in a loop; it fails the stage below instead.
+        await _rescore_furniture_after_postprocessing(
+            furniture_agent=furniture_agent,
+            scene=scene,
+        )
+        _apply_final_furniture_guards(scene=scene, cfg_dict=cfg_dict)
+        _raise_for_unvalidated_furniture(
+            scene=scene,
+            physically_validated_ids=revalidated_ids,
+        )
+        _raise_for_unresolved_furniture_relations(scene=scene, cfg_dict=cfg_dict)
     return True
 
 
@@ -488,6 +619,25 @@ def _apply_final_furniture_guards(*, scene: RoomScene, cfg_dict: dict) -> None:
         scene,
         allowed_targets_by_seat=seating_orientation_targets(scene, config=cfg_dict),
     )
+
+
+def _apply_final_wall_functional_guards(*, scene: RoomScene, cfg_dict: dict) -> None:
+    """Resolve contracts whose wall-mounted endpoint appears after furniture."""
+    critic_config = critic_config_from_any(cfg_dict)
+    if not critic_config.enabled:
+        return
+    fixes = improve_furniture_relations(
+        scene,
+        config=cfg_dict,
+        allowed_relation_types={"instructional_surface_alignment"},
+    )
+    if fixes:
+        console_logger.info(
+            "Post-wall functional contract repair moved %d object(s): %s",
+            len(fixes),
+            ", ".join(f"{fix.object_id}:{fix.relation_type}" for fix in fixes),
+        )
+    _raise_for_unresolved_furniture_relations(scene=scene, cfg_dict=cfg_dict)
 
 
 def _furniture_stage_hard_gate_enabled(cfg_dict: dict) -> bool:
@@ -887,6 +1037,10 @@ def _generate_room(
         text_description=room_prompt,
         action_log_path=room_dir / "action_log.json",
     )
+    intent_contract = cfg_dict.get("_scenebenchmark_intent_contract")
+    if isinstance(intent_contract, dict) and intent_contract:
+        setattr(scene, "scenebenchmark_intent_contract", intent_contract)
+        scene.metadata["scenebenchmark_intent_contract"] = intent_contract
     for wall in room_geometry.walls:
         scene.add_object(wall)
     # Note: Floor is NOT added to scene.objects to avoid duplicate
@@ -926,6 +1080,7 @@ def _generate_room(
                 )
 
                 pre_postprocess_hash = scene.content_hash()
+                physically_validated_furniture_ids = None
 
                 # Furniture post-processing (projection + simulation).
                 if projection_cfg["enabled"] and projection_cfg["furniture"]["enabled"]:
@@ -949,34 +1104,14 @@ def _generate_room(
                             / "furniture_simulation.html"
                         )
 
-                    # Get fallen furniture config from physics_validation.
-                    physics_val_cfg = cfg_dict["furniture_agent"]["physics_validation"]
                     scene, projection_success, removed_ids = (
-                        apply_physical_feasibility_postprocessing(
+                        _run_furniture_physical_postprocessing(
                             scene=scene,
-                            weld_furniture=False,
-                            projection_enabled=True,
-                            projection_influence_distance=furniture_cfg[
-                                "influence_distance"
-                            ],
-                            projection_solver_name=furniture_cfg["solver_name"],
-                            projection_iteration_limit=furniture_cfg["iteration_limit"],
-                            projection_time_limit_s=furniture_cfg["time_limit_s"],
-                            projection_xy_only=furniture_cfg["xy_only"],
-                            projection_fix_rotation=furniture_cfg["fix_rotation"],
-                            simulation_enabled=sim_cfg["enabled"],
-                            simulation_time_s=sim_cfg["simulation_time_s"],
-                            simulation_time_step_s=sim_cfg["time_step_s"],
-                            simulation_timeout_s=sim_cfg["timeout_s"],
+                            cfg_dict=cfg_dict,
                             simulation_html_path=furniture_sim_html_path,
-                            remove_fallen_furniture=physics_val_cfg[
-                                "remove_fallen_furniture"
-                            ],
-                            fallen_tilt_threshold_degrees=physics_val_cfg[
-                                "fallen_tilt_threshold_degrees"
-                            ],
                         )
                     )
+                    physically_validated_furniture_ids = _furniture_object_ids(scene)
                     postprocess_end_time = time.time()
                     if removed_ids:
                         console_logger.info(
@@ -1004,6 +1139,9 @@ def _generate_room(
                             scene=scene,
                             cfg_dict=cfg_dict,
                             previous_scene_hash=pre_postprocess_hash,
+                            physically_validated_furniture_ids=(
+                                physically_validated_furniture_ids
+                            ),
                         )
                     )
                 except Exception as e:
@@ -1091,6 +1229,7 @@ def _generate_room(
             )
             try:
                 asyncio.run(wall_agent.add_wall_objects(scene=scene))
+                _apply_final_wall_functional_guards(scene=scene, cfg_dict=cfg_dict)
             finally:
                 # Always cleanup server subprocesses.
                 wall_agent.cleanup()
@@ -1300,6 +1439,7 @@ def _generate_room(
     _export_scene_blend_file(
         scene=scene, scene_dir=room_dir, cfg_dict=cfg_dict, name="final_scene"
     )
+    _write_final_critic_report(scene, room_dir, cfg_dict)
     if scene_expert_hooks:
         scene_expert_hooks.post_stage("manipuland", scene, room_dir)
 
@@ -2261,7 +2401,14 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                             "Stopping after floor_plan stage as configured"
                         )
                         if scene_expert_hooks:
-                            scene_expert_hooks.finalize(final_scene_path=str(scene_dir))
+                            verify_report = scene_expert_hooks.finalize(
+                                final_scene_path=str(scene_dir)
+                            )
+                            if not verify_report.deterministic_pass:
+                                raise RuntimeError(
+                                    "SceneExpert deterministic verification failed; "
+                                    "refusing to mark scene successful"
+                                )
                         console_logger.info(
                             "Scene generation completed successfully in "
                             f"{timedelta(seconds=time.time() - scene_generation_start_time)}"
@@ -2330,9 +2477,14 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
 
                     # SceneExpert: finalize trace + memory update after all rooms done.
                     if scene_expert_hooks:
-                        scene_expert_hooks.finalize(
+                        verify_report = scene_expert_hooks.finalize(
                             final_scene_path=str(scene_dir / "combined_house")
                         )
+                        if not verify_report.deterministic_pass:
+                            raise RuntimeError(
+                                "SceneExpert deterministic verification failed; "
+                                "refusing to mark scene successful"
+                            )
 
                     # Assemble house with intermediate snapshots filtered by object type.
                     # Each snapshot includes objects from completed stages only.

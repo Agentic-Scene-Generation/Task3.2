@@ -5,14 +5,17 @@ This module implements manipuland placement using persistent agents that work
 per-furniture, with fresh contexts for each furniture surface to bound token usage.
 """
 
+import copy
 import logging
 import math
+import re
 
 from pathlib import Path
 from typing import Any
 
 from agents import Agent, FunctionTool, Runner, RunResult, custom_span
 from omegaconf import DictConfig, OmegaConf
+from pydrake.all import RollPitchYaw
 
 from scenesmith.agent_utils.base_stateful_agent import (
     BaseStatefulAgent,
@@ -63,9 +66,52 @@ from scenesmith.scenebenchmark_critic.manipuland_targets import (
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.dining_place_setting import (
     evaluate_dining_place_setting_alignment,
 )
+from scenesmith.scenebenchmark_critic.metrics.functional_dependency.seat_surface_assignment import (
+    assign_work_seats_to_surfaces,
+    room_bounds_from_case_pack,
+)
+from scenesmith.scenebenchmark_critic.intent_contract import (
+    intent_contract_constraints_for_scene,
+)
 from scenesmith.utils.logging import BaseLogger
 
 console_logger = logging.getLogger(__name__)
+
+
+_EXPLICIT_FLOOR_PLACEMENT_PATTERN = re.compile(
+    r"\b(?:on|onto|at|placed\s+on|resting\s+on)\s+(?:the\s+)?floor\b|"
+    r"\bfloor[-\s]+(?:standing|placed|item)\b",
+    re.IGNORECASE,
+)
+
+
+def _selector_category(selector: Any) -> str:
+    if isinstance(selector, dict):
+        value = selector.get("category")
+    else:
+        value = getattr(selector, "category", "")
+    return "_".join(str(value or "").strip().lower().split())
+
+
+def _is_monitor_category(category: str) -> bool:
+    return _selector_category({"category": category}) in {
+        "computer_display",
+        "computer_monitor",
+        "display",
+        "monitor",
+        "screen",
+    }
+
+
+def _geometry_center_xy(record: dict[str, Any] | None) -> tuple[float, float] | None:
+    center = ((record or {}).get("bbox_world") or {}).get("center") or []
+    if len(center) < 2:
+        return None
+    return float(center[0]), float(center[1])
+
+
+def _yaw_distance_deg(first: float, second: float) -> float:
+    return abs((first - second + 180.0) % 360.0 - 180.0)
 
 
 class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
@@ -610,7 +656,50 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
         self.previous_scores = None
         self.previous_checkpoint_render_dir = None
         self.checkpoint_render_dir = None
+        self.final_render_dir = None
+        self.checkpoint_scene_hash = None
+        self._last_scored_scene_hash = None
         # Keep placement_style as-is (it persists across furniture iterations).
+
+    def _final_hard_validation_enabled(self) -> bool:
+        """Require manipuland targets to finish without hard physics violations."""
+        try:
+            configured = OmegaConf.select(
+                self.cfg,
+                "fail_stage_on_unresolved_hard_constraints",
+                default=False,
+            )
+        except Exception:
+            configured = getattr(
+                self.cfg,
+                "fail_stage_on_unresolved_hard_constraints",
+                False,
+            )
+        return bool(configured)
+
+    def _apply_per_furniture_postprocessing(self, furniture_id: UniqueID) -> None:
+        """Settle one target's manipulands before its final scored critique."""
+        postprocessing_cfg = self.cfg.per_furniture_postprocessing
+        if not postprocessing_cfg.enabled:
+            return
+
+        simulation_cfg = postprocessing_cfg.simulation
+        simulation_html_path = None
+        if simulation_cfg.save_html:
+            simulation_html_path = (
+                self.scene.scene_dir
+                / "simulation"
+                / "per_furniture"
+                / f"{furniture_id}_simulation.html"
+            )
+        self.scene = apply_per_furniture_postprocessing(
+            full_scene=self.scene,
+            furniture_id=furniture_id,
+            config=postprocessing_cfg,
+            simulation_html_path=simulation_html_path,
+        )
+        self.rendering_manager.clear_cache()
+        self._reset_critic_candidate_cache()
 
     def _setup_furniture_agents(
         self, furniture_id: UniqueID, furniture_description: str
@@ -666,11 +755,9 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
             prompt_enum=planner_runner_prompt,
         )
 
-        result: RunResult = await Runner.run(
-            starting_agent=self.planner,
-            input=runner_instruction,
+        result: RunResult = await self._run_planner_workflow(
+            runner_input=runner_instruction,
             max_turns=self.cfg.agents.planner_agent.max_turns,
-            run_config=self._create_run_config(),
         )
         log_agent_usage(result=result, agent_name="PLANNER (MANIPULAND)")
 
@@ -682,7 +769,13 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
         # The final critic can identify a bad one-to-one dining assignment even
         # when the planner does not execute its repair recommendation. Enforce the
         # same deterministic contract before the final scored critique.
+        self._enforce_monitor_work_seat_orientation(furniture_id)
         self._enforce_dining_place_setting_alignment(furniture_id)
+
+        # Projection and simulation must settle the candidate before the final
+        # critic observes it. Otherwise pre-repair collisions can be scored and
+        # persisted as a completed furniture target.
+        self._apply_per_furniture_postprocessing(furniture_id)
 
         # Compute final critique and scores for completed furniture.
         # Check if scene changed since last checkpoint to avoid redundant critique.
@@ -751,6 +844,124 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
         )
         return False
 
+    def _enforce_monitor_work_seat_orientation(self, furniture_id: UniqueID) -> bool:
+        """Point monitors on this work surface towards its assigned work seat."""
+        if not self._task_requires_monitor_work_seat_facing():
+            return False
+        tools = getattr(self, "manipuland_tools", None)
+        support_surfaces = getattr(tools, "support_surfaces", {})
+        if not tools or not support_surfaces:
+            return False
+
+        case_pack = room_scene_to_case_pack(
+            self.scene, stage="monitor_work_seat_orientation_repair"
+        )
+        geometry = case_pack.get("scene_geometry") or {}
+        objects = [
+            item
+            for item in geometry.get("objects") or []
+            if isinstance(item, dict) and item.get("id")
+        ]
+        by_id = {str(item["id"]): item for item in objects}
+        original_task = str(
+            getattr(self.scene, "scene_expert_original_description", "")
+            or case_pack.get("original_task_instruction")
+            or case_pack.get("task_instruction")
+            or ""
+        )
+        assignments = assign_work_seats_to_surfaces(
+            objects,
+            task_instruction=original_task,
+            room_type=str(case_pack.get("room_type") or ""),
+            room_bounds=room_bounds_from_case_pack(case_pack),
+        )
+        assigned_seat_id = next(
+            (
+                assignment.seat_id
+                for assignment in assignments
+                if assignment.surface_id == str(furniture_id)
+            ),
+            "",
+        )
+        chair = by_id.get(assigned_seat_id)
+        chair_center = _geometry_center_xy(chair)
+        if chair_center is None:
+            return False
+
+        moved = False
+        for record in objects:
+            if not _is_monitor_category(str(record.get("category") or "")):
+                continue
+            placement = record.get("placement_info") or {}
+            surface_id = str(placement.get("parent_surface_id") or "")
+            surface = support_surfaces.get(surface_id)
+            monitor_id = str(record["id"])
+            monitor = self.scene.get_object(UniqueID(monitor_id))
+            monitor_center = _geometry_center_xy(record)
+            if surface is None or monitor is None or monitor_center is None:
+                continue
+            direction = (
+                chair_center[0] - monitor_center[0],
+                chair_center[1] - monitor_center[1],
+            )
+            if math.hypot(*direction) <= 1e-6:
+                continue
+            desired_world_yaw = math.degrees(math.atan2(-direction[0], direction[1]))
+            current_world_yaw = float(record.get("yaw_deg") or 0.0)
+            if _yaw_distance_deg(current_world_yaw, desired_world_yaw) <= 1.0:
+                continue
+            position = getattr(
+                getattr(monitor, "placement_info", None), "position_2d", None
+            )
+            if position is None or len(position) < 2:
+                continue
+            surface_yaw = math.degrees(
+                RollPitchYaw(surface.transform.rotation()).yaw_angle()
+            )
+            local_yaw = (desired_world_yaw - surface_yaw) % 360.0
+            tools._move_manipuland_impl(
+                object_id=monitor_id,
+                surface_id=surface_id,
+                position_x=float(position[0]),
+                position_z=float(position[1]),
+                rotation_degrees=local_yaw,
+            )
+            moved = True
+            console_logger.info(
+                "Aligned monitor %s toward assigned work seat %s on %s",
+                monitor_id,
+                assigned_seat_id,
+                furniture_id,
+            )
+        return moved
+
+    def _task_requires_monitor_work_seat_facing(self) -> bool:
+        for constraint in intent_contract_constraints_for_scene(self.scene):
+            relation = (
+                str(constraint.get("relation") or "")
+                if isinstance(constraint, dict)
+                else str(getattr(constraint, "relation", "") or "")
+            )
+            subjects = (
+                constraint.get("subjects") or {}
+                if isinstance(constraint, dict)
+                else getattr(constraint, "subjects", None)
+            )
+            targets = (
+                constraint.get("targets") or {}
+                if isinstance(constraint, dict)
+                else getattr(constraint, "targets", None)
+            )
+            subject_category = _selector_category(subjects)
+            target_category = _selector_category(targets)
+            if (
+                relation == "faces"
+                and _is_monitor_category(subject_category)
+                and target_category in {"chair", "office_chair"}
+            ):
+                return True
+        return False
+
     def _get_final_scores_directory(self) -> Path:
         """Get the directory path for saving per-furniture manipuland placement state.
 
@@ -807,6 +1018,10 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
         # Phase 1: Initial analysis - identify which furniture to populate.
         furniture_data = await self._analyze_furniture_for_placement(scene)
         furniture_data = self._recover_prompt_required_manipuland_targets(
+            scene=scene,
+            furniture_data=furniture_data,
+        )
+        furniture_data = self._route_explicit_floor_selections(
             scene=scene,
             furniture_data=furniture_data,
         )
@@ -908,6 +1123,7 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
                     )
                     continue
 
+                target_scene_snapshot = copy.deepcopy(self.scene.to_state_dict())
                 try:
                     # Set up per-furniture context.
                     self._setup_furniture_context(furniture_selection)
@@ -957,27 +1173,15 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
                     # Run multi-agent workflow.
                     await self._run_furniture_workflow(furniture_id)
 
-                    # Per-furniture post-processing (after manipulands placed).
-                    if self.cfg.per_furniture_postprocessing.enabled:
-                        sim_cfg = self.cfg.per_furniture_postprocessing.simulation
-                        sim_html_path = None
-                        if sim_cfg.save_html:
-                            sim_html_path = (
-                                self.scene.scene_dir
-                                / "simulation"
-                                / "per_furniture"
-                                / f"{furniture_id}_simulation.html"
-                            )
-                        self.scene = apply_per_furniture_postprocessing(
-                            full_scene=self.scene,
-                            furniture_id=furniture_id,
-                            config=self.cfg.per_furniture_postprocessing,
-                            simulation_html_path=sim_html_path,
-                        )
-
                 except Exception as e:
+                    self.scene.restore_from_state_dict(target_scene_snapshot)
+                    self.rendering_manager.clear_cache()
+                    self._reset_critic_candidate_cache()
                     console_logger.error(
-                        f"Error populating furniture {furniture_id}: {e}", exc_info=True
+                        "Error populating furniture %s; restored pre-target scene: %s",
+                        furniture_id,
+                        e,
+                        exc_info=True,
                     )
                     # Continue to next furniture piece.
                     continue
@@ -1018,6 +1222,88 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
                 continue
             retained.append(selection)
         return retained
+
+    def _route_explicit_floor_selections(
+        self,
+        *,
+        scene: RoomScene,
+        furniture_data: list[FurnitureSelection],
+    ) -> list[FurnitureSelection]:
+        """Move explicit floor-item requests off an accidentally selected surface.
+
+        The VLM selection can correctly describe an item as floor-standing while
+        assigning it to a nearby dresser or desk.  A surface-local workflow has
+        no way to place that item on the room floor, so retain the original
+        placement instructions but target the floor support surface instead.
+        """
+        floor_id = next(
+            (
+                object_id
+                for object_id, obj in getattr(scene, "objects", {}).items()
+                if is_floor_target(scene, object_id)
+            ),
+            None,
+        )
+        if floor_id is None:
+            return furniture_data
+
+        routed: list[FurnitureSelection] = []
+        floor_selection: FurnitureSelection | None = None
+        for selection in furniture_data:
+            placement_text = " ".join(
+                (
+                    selection.suggested_items or "",
+                    selection.prompt_constraints or "",
+                    selection.style_notes or "",
+                )
+            )
+            if is_floor_target(scene, selection.furniture_id) or not (
+                _EXPLICIT_FLOOR_PLACEMENT_PATTERN.search(placement_text)
+            ):
+                routed.append(selection)
+                if selection.furniture_id == floor_id:
+                    floor_selection = selection
+                continue
+
+            if floor_selection is None:
+                floor_selection = FurnitureSelection(
+                    furniture_id=floor_id,
+                    suggested_items=selection.suggested_items,
+                    prompt_constraints=selection.prompt_constraints,
+                    style_notes=selection.style_notes,
+                    context_furniture_ids=[selection.furniture_id],
+                )
+                routed.append(floor_selection)
+            else:
+                floor_selection.suggested_items = "\n".join(
+                    value
+                    for value in (
+                        floor_selection.suggested_items,
+                        selection.suggested_items,
+                    )
+                    if value
+                )
+                floor_selection.prompt_constraints = "\n".join(
+                    value
+                    for value in (
+                        floor_selection.prompt_constraints,
+                        selection.prompt_constraints,
+                    )
+                    if value
+                )
+                floor_selection.style_notes = "\n".join(
+                    value
+                    for value in (floor_selection.style_notes, selection.style_notes)
+                    if value
+                )
+                if selection.furniture_id not in floor_selection.context_furniture_ids:
+                    floor_selection.context_furniture_ids.append(selection.furniture_id)
+            console_logger.info(
+                "Rerouted explicit floor-item request from %s to %s",
+                selection.furniture_id,
+                floor_id,
+            )
+        return routed
 
     def _recover_prompt_required_manipuland_targets(
         self,
@@ -1108,7 +1394,10 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
                 category_rank = 5
             return (required_boost, category_rank, str(selection.furniture_id))
 
-        return sorted(furniture_data, key=priority)[:max_target_furniture]
+        ranked = sorted(furniture_data, key=priority)
+        required_count = sum(priority(selection)[0] == 0 for selection in ranked)
+        effective_limit = max(max_target_furniture, required_count)
+        return ranked[:effective_limit]
 
     async def _analyze_furniture_for_placement(
         self, scene: RoomScene

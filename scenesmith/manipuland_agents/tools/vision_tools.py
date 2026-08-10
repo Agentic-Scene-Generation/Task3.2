@@ -16,6 +16,9 @@ from omegaconf import DictConfig
 from scenesmith.agent_utils.physics_tools import check_physics_violations
 from scenesmith.agent_utils.rendering_manager import RenderingManager
 from scenesmith.agent_utils.room import AgentType, ObjectType, RoomScene, UniqueID
+from scenesmith.manipuland_agents.cross_stage_inventory import (
+    contract_bound_support_object_ids,
+)
 from scenesmith.utils.openai import encode_image_to_base64
 
 if TYPE_CHECKING:
@@ -149,6 +152,9 @@ class ManipulandVisionTools:
         )
 
         manipuland_ids = [obj.object_id for obj in manipulands_on_furniture]
+        contract_bound_ids = contract_bound_support_object_ids(
+            self.scene, self.current_furniture_id
+        )
 
         # Build list of objects to include based on furniture type.
         if is_floor_observation:
@@ -173,8 +179,13 @@ class ManipulandVisionTools:
                 for ctx_id in self.context_furniture_ids
                 if ctx_id in self.scene.objects
             ]
-            include_objects = (
-                [self.current_furniture_id] + manipuland_ids + valid_context_ids
+            include_objects = list(
+                dict.fromkeys(
+                    [self.current_furniture_id]
+                    + manipuland_ids
+                    + contract_bound_ids
+                    + valid_context_ids
+                )
             )
             exclude_room_geometry = True
             context_info = (
@@ -182,7 +193,8 @@ class ManipulandVisionTools:
             )
             console_logger.info(
                 f"Rendering focused view: 1 furniture + {len(manipuland_ids)} "
-                f"manipulands{context_info}"
+                f"manipulands + {len(contract_bound_ids)} contract-bound objects"
+                f"{context_info}"
             )
 
         # Get all support surfaces for this furniture.
@@ -271,7 +283,8 @@ class ManipulandVisionTools:
                 ToolOutputText(
                     text=f"Current furniture and its manipulands observed from {num_images} "
                     f"viewpoints ({surface_text}). Visual feedback now available. "
-                    f"(Showing: {furniture.name} + {len(manipuland_ids)} manipulands)"
+                    f"(Showing: {furniture.name} + {len(manipuland_ids)} manipulands"
+                    f" + {len(contract_bound_ids)} contract-bound objects)"
                 )
             )
 

@@ -75,6 +75,14 @@ Guidelines:
   facing relations are authoritative. Memory and current-scene observations may
   refine only non-conflicting details. Omit a suggestion instead of replacing an
   explicit user relation with a design convention.
+- The Task Specification owns objects by stage. Never create, move, or
+  reinterpret an object assigned to another stage. A non-empty "Required objects
+  for this stage" inventory is a minimum, not an exhaustive list: same-stage
+  supporting objects may be suggested when they improve function or completeness,
+  unless the Immutable User Task explicitly forbids them. When that inventory is
+  empty, emit an observation-only brief with no object-placement instruction.
+- Never turn a non-empty required inventory into an "only these objects" rule
+  unless that exclusivity appears explicitly in the Immutable User Task.
 - Keep constraints_for_designer to 3-6 items max. More is not better.
 - The designer will read this brief directly — write for it, not for humans.
 - Output ONLY the JSON object, no other text.
@@ -87,6 +95,228 @@ _STAGE_DESCRIPTIONS = {
     "ceiling_mounted": "Place ceiling-mounted objects (lights, fans) on the ceiling.",
     "manipuland": "Place small manipulable objects (books, cups, plants) on furniture surfaces.",
 }
+
+_INVENTORY_CLOSING_PATTERNS = (
+    re.compile(
+        r"\b(?:do not|don't|must not|never)\s+"
+        r"(?:add|create|include|place|generate)\s+"
+        r"(?:any\s+)?(?:other|additional|extra)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bavoid\s+(?:adding|creating|including|placing|generating)\s+"
+        r"(?:any\s+)?(?:other|additional|extra)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:no|without)\s+(?:other|additional|extra)\s+"
+        r"(?:furniture|objects?|items?|fixtures?|decor(?:ation)?s?)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bonly\s+(?:the\s+)?"
+        r"(?!(?:furniture|objects?|items?|fixtures?|decorations?)\b)"
+        r"[a-z0-9][a-z0-9 _-]{0,48}\s+(?:is|are)\s+"
+        r"(?:required|needed)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:add|create|include|place|generate)\s+only\s+(?:the\s+)?"
+        r"(?!(?:furniture|objects?|items?|fixtures?|decorations?)\b)"
+        r"[a-z0-9][a-z0-9 _-]{0,48}",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:limit|restrict)\s+(?:this\s+stage|the\s+stage|placements?|inventory)"
+        r"\s+to\s+(?:the\s+)?required\b",
+        re.IGNORECASE,
+    ),
+)
+
+_EXPLICITLY_CLOSED_TASK_PATTERNS = (
+    re.compile(
+        r"\b(?:no|without)\s+(?:other|additional|extra)\s+"
+        r"(?:furniture|objects?|items?|fixtures?|decor(?:ation)?s?)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\bnothing\s+else\b", re.IGNORECASE),
+)
+
+_ONLY_INVENTORY_CLAUSE_PATTERNS = (
+    re.compile(
+        r"\b(?:with|containing|contains|including|includes|featuring|features)"
+        r"\s+only\b(?P<inventory>[^.\n]{0,100})",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:furnished|decorated|equipped)\s+(?:only|solely|exclusively)\s+with\b"
+        r"(?P<inventory>[^.\n]{0,100})",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:consists?|consisting)\s+(?:only|solely|exclusively)\s+of\b"
+        r"(?P<inventory>[^.\n]{0,100})",
+        re.IGNORECASE,
+    ),
+)
+
+_STRUCTURAL_CEILING_TERMS = frozenset(
+    {"beam", "beams", "joist", "joists", "rafter", "rafters"}
+)
+_LIGHTING_TERMS = frozenset(
+    {
+        "candelabra",
+        "chandelier",
+        "chandeliers",
+        "downlight",
+        "downlights",
+        "fixture",
+        "fixtures",
+        "lamp",
+        "lamps",
+        "light",
+        "lights",
+        "lighting",
+        "pendant",
+        "pendants",
+        "recessed",
+        "sconce",
+        "sconces",
+    }
+)
+
+
+def _text_mentions_lighting(text: str) -> bool:
+    """Return whether a brief statement introduces a lighting fixture."""
+    terms = set(re.findall(r"[a-z0-9]+", str(text or "").lower()))
+    return bool(terms & _LIGHTING_TERMS)
+
+
+def _is_structural_only_ceiling_task(original_task: str) -> bool:
+    """Identify prompts that name structural spans but no ceiling lighting.
+
+    A beam, joist, or rafter is architectural decoration rather than a request
+    to complete the room's lighting design.  This narrow prompt-grounded case
+    prevents the planner from turning an optional fixture into a missing
+    ceiling-stage requirement, while prompts that explicitly request lighting
+    retain the normal same-stage supporting-object policy.
+    """
+    terms = set(re.findall(r"[a-z0-9]+", str(original_task or "").lower()))
+    return bool(terms & _STRUCTURAL_CEILING_TERMS) and not bool(terms & _LIGHTING_TERMS)
+
+
+def _text_closes_stage_inventory(text: str) -> bool:
+    """Return whether planner text makes a stage's required inventory exclusive."""
+    normalized = " ".join(str(text or "").split())
+    return any(pattern.search(normalized) for pattern in _INVENTORY_CLOSING_PATTERNS)
+
+
+def _task_explicitly_closes_inventory(
+    original_task: str,
+    required_objects: list[str],
+) -> bool:
+    """Recognize user-authored requests for an intentionally sparse inventory."""
+    normalized = " ".join(str(original_task or "").split())
+    if any(pattern.search(normalized) for pattern in _EXPLICITLY_CLOSED_TASK_PATTERNS):
+        return True
+
+    required_terms = {
+        " ".join(re.sub(r"[^a-z0-9]+", " ", value.lower()).split())
+        for value in required_objects
+        if str(value).strip()
+    }
+    for pattern in _ONLY_INVENTORY_CLAUSE_PATTERNS:
+        match = pattern.search(normalized)
+        if not match:
+            continue
+        inventory = " ".join(
+            re.sub(r"[^a-z0-9]+", " ", match.group("inventory").lower()).split()
+        )
+        if any(
+            re.search(rf"\b{re.escape(term)}\b", inventory) for term in required_terms
+        ):
+            return True
+    return False
+
+
+def _reconcile_stage_brief(
+    brief: StageBrief,
+    *,
+    original_task: str,
+    room_type: str,
+    required_objects: list[str],
+) -> StageBrief:
+    """Remove planner-invented exclusivity that can deadlock designer and critic."""
+    if _task_explicitly_closes_inventory(original_task, required_objects):
+        return brief
+
+    structural_only_ceiling = (
+        brief.stage == "ceiling_mounted"
+        and _is_structural_only_ceiling_task(original_task)
+    )
+
+    fields = (
+        "constraints_for_designer",
+        "checks_for_critic",
+        "failure_patterns_to_avoid",
+    )
+    updates: dict[str, object] = {}
+    removed = 0
+    for field in fields:
+        values = list(getattr(brief, field))
+        kept = [
+            value
+            for value in values
+            if not _text_closes_stage_inventory(value)
+            and not (structural_only_ceiling and _text_mentions_lighting(value))
+        ]
+        removed += len(values) - len(kept)
+        if len(kept) != len(values):
+            updates[field] = kept
+
+    if structural_only_ceiling and _text_mentions_lighting(brief.stage_objective):
+        updates["stage_objective"] = (
+            "Install the prompt-requested structural ceiling spans while "
+            "maintaining clear vertical clearance"
+        )
+        removed += 1
+    elif _text_closes_stage_inventory(brief.stage_objective):
+        updates["stage_objective"] = (
+            f"Complete the {brief.stage} stage for a {room_type}"
+        )
+        removed += 1
+
+    if not removed:
+        return brief
+
+    constraints = list(
+        updates.get("constraints_for_designer", brief.constraints_for_designer)
+    )
+    constraints = constraints[:5]
+    if structural_only_ceiling:
+        constraints.append(
+            "The prompt requests structural ceiling spans only; do not add or "
+            "treat lighting fixtures as required unless the user explicitly asks."
+        )
+        checks = list(updates.get("checks_for_critic", brief.checks_for_critic))
+        checks.append(
+            "Evaluate the requested structural spans without treating absent "
+            "lighting as a ceiling-stage failure."
+        )
+        updates["checks_for_critic"] = checks
+    else:
+        constraints.append(
+            "Treat required objects as a minimum; additional objects owned by this "
+            "stage are allowed when they improve room function or completeness."
+        )
+    updates["constraints_for_designer"] = constraints
+    console_logger.warning(
+        "GlobalPlanner removed %d invented inventory-closing instruction(s) from "
+        "the %s brief",
+        removed,
+        brief.stage,
+    )
+    return brief.model_copy(update=updates)
 
 
 def _format_memory_for_prompt(memory_pack: MemoryPack) -> str:
@@ -105,6 +335,19 @@ def _format_memory_for_prompt(memory_pack: MemoryPack) -> str:
     return "\n".join(parts) if parts else "No relevant memory retrieved for this stage."
 
 
+def _stage_required_objects(task_spec: SceneTaskSpec, stage: str) -> list[str]:
+    """Return the TaskCompiler-owned inventory for one pipeline stage."""
+    return list(
+        {
+            "floor_plan": task_spec.required_large_objects,
+            "furniture": task_spec.required_large_objects,
+            "wall_mounted": task_spec.required_wall_objects,
+            "ceiling_mounted": task_spec.required_ceiling_objects,
+            "manipuland": task_spec.required_small_objects,
+        }.get(stage, [])
+    )
+
+
 def _format_task_spec(task_spec: SceneTaskSpec, stage: str) -> str:
     """Format task spec focusing on stage-relevant requirements."""
     lines = [
@@ -112,16 +355,20 @@ def _format_task_spec(task_spec: SceneTaskSpec, stage: str) -> str:
         f"Style: {task_spec.style}",
     ]
 
-    stage_objects = {
-        "floor_plan": task_spec.required_large_objects,
-        "furniture": task_spec.required_large_objects,
-        "wall_mounted": task_spec.required_wall_objects,
-        "ceiling_mounted": task_spec.required_ceiling_objects,
-        "manipuland": task_spec.required_small_objects,
-    }
-    required = stage_objects.get(stage, [])
+    required = _stage_required_objects(task_spec, stage)
     if required:
-        lines.append(f"Required objects for this stage: {', '.join(required)}")
+        lines.append(
+            "Required objects for this stage (minimum, not exhaustive): "
+            f"{', '.join(required)}"
+        )
+    else:
+        lines.extend(
+            (
+                "Required objects for this stage: none.",
+                "Stage ownership: do not create, move, or reinterpret objects "
+                "assigned to another stage.",
+            )
+        )
 
     if task_spec.functional_zones:
         lines.append(f"Functional zones: {', '.join(task_spec.functional_zones)}")
@@ -190,6 +437,16 @@ class GlobalPlanner:
         stage = context.stage
         console_logger.info(f"GlobalPlanner: generating StageBrief for stage '{stage}'")
 
+        # Empty inventories must be a true no-op.  Letting an LLM read the
+        # original prompt here can otherwise recreate a manipuland or furniture
+        # object in the wall stage, contradicting the compiled contract.
+        if not _stage_required_objects(context.task_spec, stage):
+            console_logger.info(
+                "GlobalPlanner: %s has no TaskCompiler-owned objects; using no-op brief",
+                stage,
+            )
+            return self._fallback_brief(context)
+
         user_message = self._build_user_message(
             context,
             scene_state_summary,
@@ -226,6 +483,12 @@ class GlobalPlanner:
             # Ensure stage field is set correctly
             data["stage"] = stage
             brief = StageBrief.model_validate(data)
+            brief = _reconcile_stage_brief(
+                brief,
+                original_task=original_task,
+                room_type=context.task_spec.room_type,
+                required_objects=_stage_required_objects(context.task_spec, stage),
+            )
             console_logger.info(
                 f"GlobalPlanner: brief for {stage}: {len(brief.constraints_for_designer)} constraints, "
                 f"{len(brief.failure_patterns_to_avoid)} failure patterns"
@@ -300,30 +563,37 @@ class GlobalPlanner:
     def _fallback_brief(self, context: HarnessContext) -> StageBrief:
         """Minimal safe StageBrief used when the model call fails."""
         stage = context.stage
-        required = {
-            "floor_plan": context.task_spec.required_large_objects,
-            "furniture": context.task_spec.required_large_objects,
-            "wall_mounted": context.task_spec.required_wall_objects,
-            "ceiling_mounted": context.task_spec.required_ceiling_objects,
-            "manipuland": context.task_spec.required_small_objects,
-        }.get(stage, [])
+        required = _stage_required_objects(context.task_spec, stage)
 
         constraints = []
         if required:
             constraints.append(
                 f"Ensure these objects are present: {', '.join(required)}"
             )
-        constraints.append(f"Follow {context.task_spec.style} aesthetic style")
-        constraints.append("Maintain clear walking paths and avoid overcrowding")
+            constraints.append(f"Follow {context.task_spec.style} aesthetic style")
+            constraints.append("Maintain clear walking paths and avoid overcrowding")
+        else:
+            constraints.append(
+                "No objects are allocated to this stage; do not create, move, or "
+                "reinterpret objects owned by another stage."
+            )
 
         return StageBrief(
             stage=stage,
-            stage_objective=f"Complete the {stage} stage for a {context.task_spec.room_type}",
+            stage_objective=(
+                f"Complete the {stage} stage for a {context.task_spec.room_type}"
+                if required
+                else f"Preserve the existing scene during the empty {stage} stage"
+            ),
             recommended_skills=[],
             constraints_for_designer=constraints,
             checks_for_critic=[
-                "Verify all required objects are present",
-                "Check for collisions",
+                (
+                    "Verify all required objects are present"
+                    if required
+                    else "Verify no cross-stage object was created or moved"
+                ),
+                "Check for collisions" if required else "Preserve existing geometry",
             ],
             failure_patterns_to_avoid=[],
         )

@@ -76,7 +76,14 @@ class BaseExperiment(ABC):
             else cfg_dict
         )
 
-        agent_config = config_dict["floor_plan_agent"]
+        agent_config = dict(config_dict["floor_plan_agent"])
+        experiment_config = OmegaConf.create(config_dict["experiment"])
+        materials_server_config = experiment_config.materials_retrieval_server
+        agent_config["materials"] = {
+            **dict(agent_config["materials"]),
+            "retrieval_server_host": materials_server_config.host,
+            "retrieval_server_port": materials_server_config.port,
+        }
         agent_name = agent_config["_name"]
 
         if agent_name not in compatible_agents:
@@ -280,9 +287,7 @@ class BaseExperiment(ABC):
         )
         # Window repair in the wall stage reuses the floor-plan geometry builder.
         # Keep the dependency scoped to the wall agent configuration.
-        agent_config["floor_plan_geometry_config"] = config_dict[
-            "floor_plan_agent"
-        ]
+        agent_config["floor_plan_geometry_config"] = config_dict["floor_plan_agent"]
         agent_name = agent_config["_name"]
 
         if agent_name not in compatible_agents:

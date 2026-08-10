@@ -340,12 +340,19 @@ furniture_safety_controller:
   max_critique_design_cycles: 2
   max_move_calls: 36
   max_moves_initial_design: 18
-  max_moves_design_change: 8
+  # A corrective layout may need to move a coordinated furniture group (for
+  # example, a set of desks, seats, and its focal work surface) in one call.
+  # Keep that operation bounded below the total move budget while allowing the
+  # group to reach a hard-valid state before the next critique.
+  max_moves_design_change: 16
   max_moves_per_object_per_call: 2
   max_physics_checks_per_designer_call: 2
   max_blocked_tool_calls_per_designer_call: 2
   max_rescales_per_object: 1
   max_generate_assets_calls_after_initial: 0
+  # A partial HSSD batch may leave a required category unresolved. Permit one
+  # bounded recovery batch without allowing repeated generation loops.
+  max_generate_assets_recovery_calls: 1
   min_accept_delta: 0.05
   accept_score_threshold: 0.75
   rescale_min_factor: 0.8

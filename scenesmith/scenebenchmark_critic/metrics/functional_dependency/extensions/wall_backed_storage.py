@@ -37,16 +37,13 @@ def evaluate_wall_backed_storage_alignment(
 ) -> list[dict[str, Any]]:
     geometry = case_pack.get("scene_geometry") or {}
     objects = [obj for obj in geometry.get("objects") or [] if isinstance(obj, dict)]
-    contract_mode = str(case_pack.get("intent_contract_mode") or "legacy")
-    contracted_ids: set[str] | None = None
-    if contract_mode == "contract":
-        contracted_ids = set()
-        for constraint in contract_constraints(
-            case_pack,
-            relations=("against_wall", "centered_on_wall"),
-            include_auxiliary=False,
-        ):
-            contracted_ids.update(selected_ids(constraint.get("subjects"), objects))
+    contracted_ids: set[str] = set()
+    for constraint in contract_constraints(
+        case_pack,
+        relations=("against_wall", "centered_on_wall"),
+        include_auxiliary=False,
+    ):
+        contracted_ids.update(selected_ids(constraint.get("subjects"), objects))
     walls = [obj for obj in objects if object_category(obj) == "wall"]
     room_center = _room_center(geometry)
     if not walls or room_center is None:
@@ -56,10 +53,7 @@ def evaluate_wall_backed_storage_alignment(
     for obj in objects:
         if not _is_wall_backed_storage(obj):
             continue
-        if (
-            contracted_ids is not None
-            and str(obj.get("id") or "") not in contracted_ids
-        ):
+        if str(obj.get("id") or "") not in contracted_ids:
             # A storage category alone is not semantic evidence that it belongs
             # against a wall (it may be an island, divider, or display piece).
             continue
@@ -78,7 +72,22 @@ def evaluate_wall_backed_storage_alignment(
             for item in candidates
             if float(item.get("dining_table_wall_error_deg", 0.0)) <= 20.0
         ]
-        nearest = min(preferred or candidates, key=lambda item: item["translation_m"])
+        # Table-axis alignment is a useful *repair* preference, but it must not
+        # override a storage piece that is already correctly backed by another
+        # wall.  For example, a sideboard can sit behind the north dining chair
+        # while the table's long axis would otherwise prefer an east/west wall.
+        # Evaluate an actually valid wall pose first; use the table preference
+        # only to select the best diagnosis when no wall is currently valid.
+        valid = [
+            item
+            for item in candidates
+            if float(item.get("wall_gap_m", float("inf"))) <= 0.1
+            and float(item.get("front_error_deg", float("inf"))) <= 20.0
+        ]
+        nearest = min(
+            valid or preferred or candidates,
+            key=lambda item: item["translation_m"],
+        )
         gap = float(nearest["wall_gap_m"])
         front_error = float(nearest["front_error_deg"])
         if gap <= 0.1 and front_error <= 20.0:

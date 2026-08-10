@@ -200,10 +200,7 @@ def is_bedroom_scene(scene: Any) -> bool:
         "scene_expert_original_description",
         getattr(scene, "text_description", ""),
     )
-    text = (
-        f"{_text(getattr(scene, 'room_type', ''))} "
-        f"{_text(original_description)}"
-    )
+    text = f"{_text(getattr(scene, 'room_type', ''))} " f"{_text(original_description)}"
     return (
         "bedroom" in text
         or "nightstand" in text
@@ -520,9 +517,148 @@ def _intervals_overlap(a: tuple[float, float], b: tuple[float, float]) -> bool:
     return max(a[0], b[0]) <= min(a[1], b[1])
 
 
+def _opening_clearance_bounds_xy(
+    opening: Any,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    if isinstance(opening, dict):
+        lower = opening.get("clearance_bbox_min")
+        upper = opening.get("clearance_bbox_max")
+        center = opening.get("center_world")
+        width = opening.get("width")
+    else:
+        lower = getattr(opening, "clearance_bbox_min", None)
+        upper = getattr(opening, "clearance_bbox_max", None)
+        center = getattr(opening, "center_world", None)
+        width = getattr(opening, "width", None)
+    if lower is not None and upper is not None:
+        try:
+            return (
+                np.asarray(lower, dtype=float)[:2],
+                np.asarray(upper, dtype=float)[:2],
+            )
+        except (TypeError, ValueError):
+            return None
+
+    wall = _opening_wall(opening)
+    opening_type = _opening_type(opening)
+    if wall not in WALLS or center is None or width is None:
+        return None
+    try:
+        center_xy = np.asarray(center, dtype=float)[:2]
+        half_width = float(width) / 2.0
+    except (TypeError, ValueError):
+        return None
+    depth = 0.8 if opening_type in {"door", "open"} else 0.5
+    lower_xy = center_xy.copy()
+    upper_xy = center_xy.copy()
+    if wall in {"north", "south"}:
+        lower_xy[0] -= half_width
+        upper_xy[0] += half_width
+        if wall == "north":
+            lower_xy[1] -= depth
+        else:
+            upper_xy[1] += depth
+    else:
+        lower_xy[1] -= half_width
+        upper_xy[1] += half_width
+        if wall == "east":
+            lower_xy[0] -= depth
+        else:
+            upper_xy[0] += depth
+    return lower_xy, upper_xy
+
+
+def _rectangles_overlap(
+    lower_a: np.ndarray,
+    upper_a: np.ndarray,
+    lower_b: np.ndarray,
+    upper_b: np.ndarray,
+) -> bool:
+    return bool(
+        min(float(upper_a[0]), float(upper_b[0]))
+        > max(float(lower_a[0]), float(lower_b[0]))
+        and min(float(upper_a[1]), float(upper_b[1]))
+        > max(float(lower_a[1]), float(lower_b[1]))
+    )
+
+
+def _bed_has_opening_safe_wall_anchor(scene: Any, bed: Any) -> bool:
+    """Return whether a compact bed can touch some wall without blocking openings."""
+    room_bounds = _room_bounds(scene)
+    dims = _object_dimensions(bed)
+    if room_bounds is None or dims is None:
+        return True
+    bed_width, bed_depth = sorted(dims[:2])
+    if bed_width <= 0.0 or bed_depth <= 0.0:
+        return True
+
+    room_geometry = getattr(scene, "room_geometry", None)
+    margin = max(0.03, float(getattr(room_geometry, "wall_thickness", 0.08) or 0.08))
+    opening_bounds = [
+        bounds
+        for opening in list(getattr(room_geometry, "openings", []) or [])
+        if (bounds := _opening_clearance_bounds_xy(opening)) is not None
+    ]
+    if not opening_bounds:
+        return True
+
+    min_x, min_y, max_x, max_y = room_bounds
+    for wall in WALLS:
+        tangent_axis = 0 if wall in {"north", "south"} else 1
+        tangent_half = bed_width / 2.0
+        normal_half = bed_depth / 2.0
+        tangent_min = (min_x if tangent_axis == 0 else min_y) + tangent_half + margin
+        tangent_max = (max_x if tangent_axis == 0 else max_y) - tangent_half - margin
+        if tangent_min > tangent_max:
+            continue
+        tangent_values = {0.0, tangent_min, tangent_max}
+        for lower, upper in opening_bounds:
+            tangent_values.update(
+                (
+                    float(lower[tangent_axis]) - tangent_half - margin,
+                    float(upper[tangent_axis]) + tangent_half + margin,
+                )
+            )
+        for tangent in tangent_values:
+            if tangent < tangent_min - 1e-6 or tangent > tangent_max + 1e-6:
+                continue
+            if wall == "north":
+                center = np.array([tangent, max_y - normal_half - margin])
+                half = np.array([tangent_half, normal_half])
+            elif wall == "south":
+                center = np.array([tangent, min_y + normal_half + margin])
+                half = np.array([tangent_half, normal_half])
+            elif wall == "east":
+                center = np.array([max_x - normal_half - margin, tangent])
+                half = np.array([normal_half, tangent_half])
+            else:
+                center = np.array([min_x + normal_half + margin, tangent])
+                half = np.array([normal_half, tangent_half])
+            lower = center - half
+            upper = center + half
+            if not any(
+                _rectangles_overlap(lower, upper, opening_lower, opening_upper)
+                for opening_lower, opening_upper in opening_bounds
+            ):
+                return True
+    return False
+
+
 def _bed_overlaps_opening_on_wall(
     scene: Any, bounds: tuple[np.ndarray, np.ndarray], wall: str
 ) -> str | None:
+    # The tangent intervals alone are not enough: a deliberately interior bed
+    # can share an X/Y projection with a window while its headboard is well
+    # inside the room. Only call this a headboard-opening conflict when the
+    # headboard is actually close enough to that wall to be an anchor.
+    room_bounds = _room_bounds(scene)
+    if room_bounds is not None:
+        room_geometry = getattr(scene, "room_geometry", None)
+        wall_thickness = float(getattr(room_geometry, "wall_thickness", 0.08) or 0.08)
+        anchor_distance = max(0.25, wall_thickness + 0.03)
+        if _distance_to_wall(bounds, room_bounds, wall) > anchor_distance:
+            return None
+
     room_geometry = getattr(scene, "room_geometry", None)
     openings = list(getattr(room_geometry, "openings", []) or [])
     obj_interval = _object_axis_interval(bounds, wall)
@@ -595,11 +731,18 @@ def evaluate_bedroom_layout_plausibility(
             wall_distance = _distance_to_wall(bed_bounds, room_bounds, anchor_wall)
             max_distance = _cfg_float(cfg, "bed_wall_anchor_max_distance_m", 0.25)
             if wall_distance > max_distance:
-                issues.append(
-                    "bedroom plausibility: bed headboard is not anchored to "
-                    f"{anchor_wall}_wall (distance {wall_distance:.2f}m)"
-                )
-                penalty += 0.12
+                if _bed_has_opening_safe_wall_anchor(scene, bed):
+                    issues.append(
+                        "bedroom plausibility: bed headboard is not anchored to "
+                        f"{anchor_wall}_wall (distance {wall_distance:.2f}m)"
+                    )
+                    penalty += 0.12
+                else:
+                    issues.append(
+                        "bedroom plausibility: bed uses an interior opening-safe "
+                        "layout because every wall anchor blocks an opening"
+                    )
+                    penalty += 0.04
 
         opening_type = _bed_overlaps_opening_on_wall(
             scene, bed_bounds, actual_head_wall

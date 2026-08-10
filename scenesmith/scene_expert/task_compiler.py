@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import re
+import time
 from pathlib import Path
 
 from scenesmith.scene_expert.context_bundle import build_llm_call_debug_record
@@ -45,7 +46,7 @@ You MUST output valid JSON matching this exact schema:
   "required_large_objects": ["list of furniture-scale objects that must be in the room"],
   "required_wall_objects": ["list of wall-mounted objects (paintings, mirrors, shelves, lights)"],
   "required_ceiling_objects": ["list of ceiling-mounted objects (lights, fans, sprinklers)"],
-  "required_small_objects": ["list of small manipulable objects (books, cups, plants, tools)"],
+  "required_small_objects": ["list of small manipulable objects (books, cups, tools)"],
   "functional_zones": ["list of spatial zones within the room (e.g. sleeping_zone, working_zone)"],
   "interaction_constraints": [
     "constraints about robot reachability, clearance, support surfaces",
@@ -55,41 +56,21 @@ You MUST output valid JSON matching this exact schema:
     "visual and style constraints",
     "e.g. 'modern material palette', 'balanced visual density', 'avoid overcrowding'"
   ],
-  "intent_constraints": [
-    {
-      "relation": "against_wall | centered_on_wall | centered_in_room | centered_between | between | in_front_of | faces | on_top_of | near | aligned_with | flanking | distributed_evenly | one_per_side | clear_access",
-      "subjects": {"category": "canonical object category", "count": 1},
-      "targets": {"category": "canonical target category", "secondary_category": "second target category for between relations only"},
-      "source": "model_inferred",
-      "confidence": 0.0,
-      "evidence_span": "exact supporting words copied from the input prompt"
-    }
-  ]
 }
 
 Rules:
 - Be comprehensive — extract ALL objects mentioned in the prompt.
+- Classify floor-standing objects as required_large_objects, even when they are
+  decorative or compact. Objects explicitly supported by the floor must never
+  also appear in required_small_objects.
+- Use on_wall only for objects explicitly described as mounted or hung. A
+  floor-standing item that is on, against, or opposite a wall uses against_wall;
+  a TV stand/media console is always floor-standing. Room-relative wall labels
+  such as back_wall and opposite_wall are relation targets, never inventory.
 - Infer reasonable functional zones based on the room type and objects.
 - Infer reachability constraints for any small objects placed on furniture surfaces.
 - Keep object names concise (e.g. "bed" not "a large king-sized bed").
-- Always include "intent_constraints". Add only spatial relations explicitly
-  stated in the input; use [] when there are none.
-- Every intent constraint MUST use source "model_inferred". It is auxiliary
-  evidence only, never a hard requirement.
-- Use only the relation names listed in the schema. Do not invent coordinates,
-  room sides, nearest-object relations, or relations based on design convention.
-- For explicit wording such as "the rug in front of the sofa", emit
-  "in_front_of" with the rug as subject and sofa as target. Do not add this
-  relation for merely nearby objects.
-- For "X centered between A and B", emit "centered_between" with A as
-  targets.category and B as targets.secondary_category. For ordinary
-  "X between A and B", emit "between" using the same two-target shape.
-- Keep every selector minimal: use category and count only when a count is
-  explicit. Omit role, quantifier, and stage fields.
-- Emit at most eight intent constraints, preferring complete relations over
-  redundant restatements.
-- Copy evidence_span verbatim from the input prompt. Do not use StageBrief,
-  retrieved memory, or current object positions as evidence.
+- Do not invent coordinates, room sides, or nearest-object identities.
 - Output ONLY the JSON object, no other text.
 
 Example input: "A bedroom with a bed, two nightstands, and a wardrobe."
@@ -104,13 +85,20 @@ Example output:
   "functional_zones": ["sleeping_zone", "storage_zone"],
   "interaction_constraints": ["nightstands should be accessible from both sides of the bed"],
   "aesthetic_constraints": ["balanced furniture placement", "clear walking paths"],
-  "intent_constraints": []
 }
 """
 
 _ROOM_TYPE_KEYWORDS: dict[str, list[str]] = {
     "bedroom": ["bedroom", "bed", "nightstand", "wardrobe", "sleeping"],
     "living room": ["living room", "living", "sofa", "couch", "tv", "coffee table"],
+    "classroom": [
+        "classroom",
+        "chalkboard",
+        "blackboard",
+        "whiteboard",
+        "student desk",
+        "teacher's desk",
+    ],
     "kitchen": ["kitchen", "stove", "oven", "fridge", "sink", "counter"],
     "bathroom": ["bathroom", "toilet", "bathtub", "shower", "sink"],
     "office": ["office", "desk", "chair", "computer", "monitor", "study"],
@@ -141,6 +129,60 @@ _NUMBER_WORDS: dict[str, int] = {
 }
 
 _OBJECT_ALIASES: dict[str, tuple[str, list[str], str]] = {
+    "reception desk": (
+        "large",
+        ["reception desk", "reception desks", "reception counter"],
+        "reception_desk",
+    ),
+    "side table": (
+        "large",
+        ["side table", "side tables", "end table", "end tables"],
+        "side_table",
+    ),
+    "conference table": (
+        "large",
+        [
+            "conference table",
+            "conference tables",
+            "meeting table",
+            "meeting tables",
+            "boardroom table",
+            "boardroom tables",
+        ],
+        "conference_table",
+    ),
+    "filing cabinet": (
+        "large",
+        ["filing cabinet", "filing cabinets", "file cabinet"],
+        "filing_cabinet",
+    ),
+    "office chair": (
+        "large",
+        ["office chair", "office chairs", "desk chair", "desk chairs"],
+        "office_chair",
+    ),
+    "rocking chair": (
+        "large",
+        ["rocking chair", "rocking chairs"],
+        "rocking_chair",
+    ),
+    "guest chair": (
+        "large",
+        ["guest chair", "guest chairs", "visitor chair", "visitor chairs"],
+        "guest_chair",
+    ),
+    "chalkboard": (
+        "wall",
+        [
+            "chalkboard",
+            "blackboard",
+            "whiteboard",
+            "projection screen",
+            "projector screen",
+            "teaching screen",
+        ],
+        "chalkboard",
+    ),
     "bed": ("large", ["bed", "beds"], "bed"),
     "nightstand": (
         "large",
@@ -149,7 +191,8 @@ _OBJECT_ALIASES: dict[str, tuple[str, list[str], str]] = {
     ),
     "wardrobe": ("large", ["wardrobe", "wardrobes", "closet", "closets"], "wardrobe"),
     "sofa": ("large", ["sofa", "sofas", "couch", "couches"], "sofa"),
-    "table": ("large", ["table", "tables", "desk", "desks"], "table"),
+    "desk": ("large", ["desk", "desks"], "desk"),
+    "table": ("large", ["table", "tables"], "table"),
     "chair": ("large", ["chair", "chairs"], "chair"),
     "painting": ("wall", ["painting", "paintings", "artwork", "artworks"], "painting"),
     "mirror": ("wall", ["mirror", "mirrors"], "mirror"),
@@ -165,7 +208,79 @@ _OBJECT_ALIASES: dict[str, tuple[str, list[str], str]] = {
     ),
     "book": ("small", ["book", "books"], "book"),
     "plant": ("small", ["plant", "plants"], "plant"),
+    "monitor": (
+        "small",
+        ["computer monitor", "computer monitors", "monitor", "monitors"],
+        "monitor",
+    ),
+    "printer": ("small", ["printer", "printers"], "printer"),
+    "brochure holder": (
+        "small",
+        ["brochure holder", "brochure holders", "leaflet holder"],
+        "brochure_holder",
+    ),
 }
+
+_SPECIFIC_INVENTORY_FAMILIES = {
+    "reception_desk": "desk",
+    "student_desk": "desk",
+    "teacher_desk": "desk",
+    "side_table": "table",
+    "coffee_table": "table",
+    "dining_table": "table",
+    "conference_table": "table",
+    "office_chair": "chair",
+    "guest_chair": "chair",
+    "student_chair": "chair",
+    "dining_chair": "chair",
+    "rocking_chair": "chair",
+}
+
+_INVENTORY_CATEGORY_ALIASES = {
+    "computer_monitor": "monitor",
+    "computer_display": "monitor",
+    "chalkboard": "instructional_surface",
+    "blackboard": "instructional_surface",
+    "whiteboard": "instructional_surface",
+    "projection_screen": "instructional_surface",
+    "projector_screen": "instructional_surface",
+    "teaching_screen": "instructional_surface",
+    "presentation_screen": "instructional_surface",
+}
+
+_VIRTUAL_CATEGORIES = {
+    "room",
+    "wall",
+    "floor",
+    "ceiling",
+    "entrance",
+    "entry",
+    "back_wall",
+    "front_wall",
+    "side_wall",
+    "main_wall",
+    "opposite_wall",
+}
+
+_WALL_STAGE_CATEGORIES = {
+    "instructional_surface",
+    "painting",
+    "mirror",
+    "wall_shelf",
+    "wall_light",
+}
+
+# Media supports are furniture even when an LLM mistakes a phrase such as
+# "TV stand on the opposite wall" for a wall-mounted placement.
+_FLOOR_STANDING_MEDIA_SUPPORT_CATEGORIES = frozenset(
+    {
+        "tv_stand",
+        "television_stand",
+        "media_console",
+        "media_cabinet",
+        "entertainment_center",
+    }
+)
 
 
 def _extract_count_before_alias(text: str, alias: str) -> int:
@@ -202,7 +317,89 @@ def _extract_required_objects_from_prompt(prompt_lower: str) -> dict[str, list[s
             count = max(count, _extract_count_before_alias(prompt_lower, alias))
         if count > 0:
             required[bucket].extend([canonical] * count)
+    for bucket in required:
+        for specific, generic in _SPECIFIC_INVENTORY_FAMILIES.items():
+            specific_count = required[bucket].count(specific)
+            for _ in range(min(specific_count, required[bucket].count(generic))):
+                required[bucket].remove(generic)
     return required
+
+
+def _aliases_for_canonical(canonical: str) -> list[str]:
+    """Return prompt aliases for an inventory category."""
+    for _name, (_bucket, aliases, value) in _OBJECT_ALIASES.items():
+        if value == canonical:
+            return aliases
+    return [canonical.replace("_", " ")]
+
+
+def _prompt_mentions_standalone_generic(
+    prompt: str, *, specific: str, generic: str
+) -> bool:
+    """Whether a generic item remains after removing a specific family phrase."""
+    remainder = str(prompt or "").lower().replace("_", " ")
+    for alias in _aliases_for_canonical(specific):
+        alias_pattern = re.escape(alias.lower()).replace(r"\ ", r"\s+")
+        remainder = re.sub(
+            rf"(?<![a-z0-9]){alias_pattern}(?:s|es)?(?![a-z0-9])",
+            " ",
+            remainder,
+        )
+    for alias in _aliases_for_canonical(generic):
+        alias_pattern = re.escape(alias.lower()).replace(r"\ ", r"\s+")
+        for match in re.finditer(
+            rf"(?<![a-z0-9]){alias_pattern}(?:s|es)?(?![a-z0-9])", remainder
+        ):
+            # Later references such as ``the table`` and ``this chair`` name
+            # an already-introduced specific object. They must not preserve a
+            # second generic inventory entry beside ``conference_table`` or
+            # another typed family member.
+            before = remainder[: match.start()].rstrip()
+            if re.search(
+                r"\b(?:the|this|that|these|those|its|their)(?:\s+[a-z]+){0,2}$",
+                before,
+            ):
+                continue
+            if _extract_count_before_alias(remainder, alias) > 0:
+                return True
+    return False
+
+
+def _remove_spurious_generic_inventory_entries(
+    inventories: dict[str, list[str]], *, prompt: str
+) -> None:
+    """Undo model inventory overlap such as ``rocking_chair`` plus ``chair``.
+
+    A broad family item remains valid when the immutable prompt also mentions a
+    standalone generic item (for example, "a rocking chair and a chair").
+    """
+    if not prompt:
+        return
+    for values in inventories.values():
+        normalized_values = [
+            "_".join(str(value or "").strip().lower().split()) for value in values
+        ]
+        for specific, generic in _SPECIFIC_INVENTORY_FAMILIES.items():
+            specific_count = normalized_values.count(specific)
+            if (
+                specific_count == 0
+                or generic not in normalized_values
+                or _prompt_mentions_standalone_generic(
+                    prompt, specific=specific, generic=generic
+                )
+            ):
+                continue
+            remaining = specific_count
+            retained: list[str] = []
+            for value, normalized in zip(values, normalized_values, strict=True):
+                if normalized == generic and remaining > 0:
+                    remaining -= 1
+                    continue
+                retained.append(value)
+            values[:] = retained
+            normalized_values = [
+                "_".join(str(value or "").strip().lower().split()) for value in values
+            ]
 
 
 def _extract_json_from_text(text: str) -> dict:
@@ -214,6 +411,124 @@ def _extract_json_from_text(text: str) -> dict:
     the authority on whether the recovered payload is usable.
     """
     return parse_llm_json_object(text)
+
+
+def _repair_zero_target_relation_payloads(data: dict) -> dict:
+    """Return a copied inventory payload for callers of the retired helper.
+
+    Hard relation repair was removed from TaskCompiler in v3.  The name remains
+    as a no-op import compatibility shim for downstream tooling; no relation
+    data is read or written here.
+    """
+    return dict(data)
+
+
+def _normalize_stage_ownership(
+    task_spec: SceneTaskSpec, *, prompt: str = ""
+) -> SceneTaskSpec:
+    """Keep each inventory category in one structurally appropriate stage.
+
+    Functional relations are intentionally absent here.  Their authoritative
+    representation is the independent critic contract, not TaskCompiler data.
+    """
+
+    def inventory_key(value: str) -> str:
+        key = "_".join(str(value or "").strip().lower().split())
+        return _INVENTORY_CATEGORY_ALIASES.get(key, key)
+
+    inventories = {
+        "large": list(task_spec.required_large_objects),
+        "wall": list(task_spec.required_wall_objects),
+        "ceiling": list(task_spec.required_ceiling_objects),
+        "small": list(task_spec.required_small_objects),
+    }
+    _remove_spurious_generic_inventory_entries(inventories, prompt=prompt)
+    for values in inventories.values():
+        values[:] = [
+            value for value in values if inventory_key(value) not in _VIRTUAL_CATEGORIES
+        ]
+    existing_stage: dict[str, str] = {}
+    for stage, values in inventories.items():
+        for value in values:
+            existing_stage.setdefault(inventory_key(value), stage)
+
+    category_stages: dict[str, str] = dict(existing_stage)
+    category_counts: dict[str, int] = {}
+    for values in inventories.values():
+        for value in values:
+            category = inventory_key(value)
+            category_counts[category] = category_counts.get(category, 0) + 1
+    for category in _WALL_STAGE_CATEGORIES:
+        if category in category_stages:
+            category_stages[category] = "wall"
+    for category in _FLOOR_STANDING_MEDIA_SUPPORT_CATEGORIES:
+        if category in category_stages:
+            category_stages[category] = "large"
+    desired_counts: dict[str, int] = {}
+    for category in _WALL_STAGE_CATEGORIES:
+        inventory_count = sum(
+            inventory_key(value) == category
+            for values in inventories.values()
+            for value in values
+        )
+        if inventory_count:
+            desired_counts[category] = max(
+                desired_counts.get(category, 0), inventory_count
+            )
+    for category in _FLOOR_STANDING_MEDIA_SUPPORT_CATEGORIES:
+        inventory_count = sum(
+            inventory_key(value) == category
+            for values in inventories.values()
+            for value in values
+        )
+        if inventory_count:
+            desired_counts[category] = max(
+                desired_counts.get(category, 0), inventory_count
+            )
+
+    for category in desired_counts:
+        category_stages.setdefault(category, existing_stage.get(category, "large"))
+
+    # Move each known category to its single owning stage before filling counts.
+    for stage, values in inventories.items():
+        inventories[stage] = [
+            value
+            for value in values
+            if category_stages.get(inventory_key(value), stage) == stage
+        ]
+
+    for category, desired_count in desired_counts.items():
+        stage = category_stages[category]
+        values = inventories[stage]
+        current = sum(
+            inventory_key(value) == category
+            or _SPECIFIC_INVENTORY_FAMILIES.get(inventory_key(value)) == category
+            for value in values
+        )
+        family = _SPECIFIC_INVENTORY_FAMILIES.get(category)
+        while current < desired_count and family:
+            generic_index = next(
+                (
+                    index
+                    for index, value in enumerate(values)
+                    if inventory_key(value) == family
+                ),
+                None,
+            )
+            if generic_index is None:
+                break
+            values[generic_index] = category
+            current += 1
+        values.extend([category] * max(0, desired_count - current))
+
+    return task_spec.model_copy(
+        update={
+            "required_large_objects": inventories["large"],
+            "required_wall_objects": inventories["wall"],
+            "required_ceiling_objects": inventories["ceiling"],
+            "required_small_objects": inventories["small"],
+        }
+    )
 
 
 def _fallback_spec_from_prompt(prompt: str) -> SceneTaskSpec:
@@ -258,16 +573,20 @@ def _fallback_spec_from_prompt(prompt: str) -> SceneTaskSpec:
         style,
         required["large"],
     )
-    return SceneTaskSpec(
-        room_type=room_type,
-        style=style,
-        required_large_objects=required["large"],
-        required_wall_objects=required["wall"],
-        required_ceiling_objects=required["ceiling"],
-        required_small_objects=required["small"],
-        functional_zones=functional_zones,
-        interaction_constraints=interaction_constraints,
-        aesthetic_constraints=["balanced placement", "clear walking paths"],
+    return _normalize_stage_ownership(
+        SceneTaskSpec(
+            room_type=room_type,
+            style=style,
+            required_large_objects=required["large"],
+            required_wall_objects=required["wall"],
+            required_ceiling_objects=required["ceiling"],
+            required_small_objects=required["small"],
+            functional_zones=functional_zones,
+            interaction_constraints=interaction_constraints,
+            aesthetic_constraints=["balanced placement", "clear walking paths"],
+            compiler_status="degraded",
+        ),
+        prompt=prompt,
     )
 
 
@@ -280,7 +599,7 @@ class TaskCompiler:
         api_base_url: str | None = None,
         api_key: str | None = None,
         max_tokens: int = 1536,
-        temperature: float = 0.1,
+        temperature: float = 0.0,
     ) -> None:
         from openai import OpenAI
 
@@ -307,17 +626,44 @@ class TaskCompiler:
         """
         console_logger.info(f"TaskCompiler: compiling prompt: {prompt[:100]}...")
         user_message = f"Extract scene requirements from: {prompt}"
+        messages = [
+            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "user", "content": user_message},
+        ]
+        started_at = time.perf_counter()
 
-        response = self._client.chat.completions.create(
-            model=self._model,
-            messages=[
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": user_message},
-            ],
-            temperature=self._temperature,
-            max_tokens=self._max_tokens,
-            extra_body=chat_template_kwargs_from_effort("none"),
-        )
+        try:
+            response = self._client.chat.completions.create(
+                model=self._model,
+                messages=messages,
+                temperature=self._temperature,
+                max_tokens=self._max_tokens,
+                extra_body=chat_template_kwargs_from_effort("none"),
+            )
+        except Exception as exc:
+            record = build_llm_call_debug_record(
+                stage="task_compiler",
+                agent_role="task_compiler",
+                event="compile",
+                prompt=messages,
+                error=f"{type(exc).__name__}: {exc}",
+            ).model_dump()
+            record.update(
+                {
+                    "input": messages,
+                    "output": "",
+                    "elapsed_sec": round(time.perf_counter() - started_at, 6),
+                    "status": "error",
+                }
+            )
+            _append_llm_debug(record)
+            fallback = _fallback_spec_from_prompt(prompt).model_copy(
+                update={"compiler_failure_reason": f"{type(exc).__name__}: {exc}"}
+            )
+            console_logger.warning(
+                "TaskCompiler model call failed; using deterministic contract: %s", exc
+            )
+            return fallback
 
         message = response.choices[0].message
         raw = message.content
@@ -329,26 +675,56 @@ class TaskCompiler:
             if isinstance(extra, dict):
                 raw = extra.get("reasoning_content")
         console_logger.debug(f"TaskCompiler raw response: {raw}")
-        _append_llm_debug(
-            build_llm_call_debug_record(
-                stage="task_compiler",
-                agent_role="task_compiler",
-                event="compile",
-                prompt=user_message,
-                output=raw or "",
-                raw_response=response,
-            ).model_dump()
+        record = build_llm_call_debug_record(
+            stage="task_compiler",
+            agent_role="task_compiler",
+            event="compile",
+            prompt=messages,
+            output=raw or "",
+            raw_response=response,
+        ).model_dump()
+        record.update(
+            {
+                "input": messages,
+                "output": raw or "",
+                "elapsed_sec": round(time.perf_counter() - started_at, 6),
+                "status": "ok",
+            }
         )
+        usage = getattr(response, "usage", None)
+        if usage is not None:
+            usage_payload = (
+                usage.model_dump() if hasattr(usage, "model_dump") else vars(usage)
+            )
+            record["token_usage"] = {
+                str(key): int(value)
+                for key, value in usage_payload.items()
+                if isinstance(value, int)
+            }
 
         try:
             data = _extract_json_from_text(raw)
-            task_spec = SceneTaskSpec.model_validate(data)
+            task_spec = _normalize_stage_ownership(
+                SceneTaskSpec.model_validate(data), prompt=prompt
+            ).model_copy(
+                update={"compiler_status": "ok", "compiler_failure_reason": ""}
+            )
+            _append_llm_debug(record)
             console_logger.info(
                 f"TaskCompiler: room_type={task_spec.room_type}, style={task_spec.style}, "
                 f"large_objects={task_spec.required_large_objects}"
             )
             return task_spec
         except Exception as e:
-            raise ValueError(
-                f"TaskCompiler failed to parse model response: {e}\nRaw: {raw}"
-            ) from e
+            record["status"] = "error"
+            record["error"] = f"{type(e).__name__}: {e}"
+            _append_llm_debug(record)
+            fallback = _fallback_spec_from_prompt(prompt).model_copy(
+                update={"compiler_failure_reason": f"{type(e).__name__}: {e}"}
+            )
+            console_logger.warning(
+                "TaskCompiler output failed v3 validation; using deterministic "
+                "contract: %s",
+                e,
+            )
+            return fallback

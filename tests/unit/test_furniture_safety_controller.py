@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from scenesmith.agent_utils.furniture_safety import (
     FurnitureSafetyController,
+    HardStateEvaluation,
     furniture_object_category_matches,
 )
 from scenesmith.agent_utils.scoring import CategoryScore, CritiqueWithScores
@@ -95,6 +96,30 @@ class BoundedFurniture:
 
 
 class FurnitureSafetyControllerTest(unittest.TestCase):
+    def test_asset_generation_recovery_is_allowed_after_partial_failure(self) -> None:
+        controller = FurnitureSafetyController({"enabled": True})
+
+        self.assertTrue(controller.record_generate_assets()[0])
+        controller.record_asset_generation_result(had_failures=True)
+        self.assertTrue(controller.record_generate_assets()[0])
+        controller.record_asset_generation_result(had_failures=True)
+
+        allowed, message = controller.record_generate_assets()
+
+        self.assertFalse(allowed)
+        self.assertIn("recovery allowance", message)
+
+    def test_asset_generation_success_does_not_open_recovery_retry(self) -> None:
+        controller = FurnitureSafetyController({"enabled": True})
+
+        self.assertTrue(controller.record_generate_assets()[0])
+        controller.record_asset_generation_result(had_failures=False)
+
+        allowed, message = controller.record_generate_assets()
+
+        self.assertFalse(allowed)
+        self.assertIn("already succeeded", message)
+
     def test_window_only_issue_is_soft(self) -> None:
         controller = FurnitureSafetyController({"enabled": True})
         evaluation = controller.evaluate_scores(make_scores())
@@ -114,6 +139,80 @@ class FurnitureSafetyControllerTest(unittest.TestCase):
 
         self.assertFalse(collision_eval.hard_valid)
         self.assertTrue(clean_eval.hard_valid)
+
+    def test_collision_free_and_clear_door_language_is_not_hard(self) -> None:
+        controller = FurnitureSafetyController({"enabled": True})
+
+        evaluation = controller.evaluate_scores(
+            make_scores(
+                critique=(
+                    "The bedside group is collision-free with 0 collisions. No "
+                    "blocked doorways or windows remain, and door clearance is "
+                    "sufficient."
+                )
+            )
+        )
+
+        self.assertTrue(evaluation.hard_valid)
+        self.assertEqual(evaluation.hard_reasons, [])
+
+    def test_asserted_door_blockage_is_hard_without_deterministic_state(self) -> None:
+        controller = FurnitureSafetyController({"enabled": True})
+
+        evaluation = controller.evaluate_scores(
+            make_scores(critique="The wardrobe blocks the west door.")
+        )
+
+        self.assertFalse(evaluation.hard_valid)
+        self.assertIn(
+            "door or open-connection blockage indicated by critique",
+            evaluation.hard_reasons,
+        )
+
+        clearance_evaluation = controller.evaluate_scores(
+            make_scores(critique="A door clearance violation remains.")
+        )
+        self.assertFalse(clearance_evaluation.hard_valid)
+
+    def test_deterministic_hard_state_overrides_free_form_issue_language(self) -> None:
+        controller = FurnitureSafetyController({"enabled": True})
+
+        decision = controller.consider_candidate(
+            make_scores(
+                critique="A collision remains and the wardrobe blocks the west door."
+            ),
+            {"state": "complete-bedroom"},
+            None,
+            hard_state_evaluation=HardStateEvaluation(hard_valid=True),
+        )
+
+        self.assertTrue(decision.accepted)
+        self.assertTrue(decision.evaluation.hard_valid)
+        self.assertEqual(controller.best_scene_state, {"state": "complete-bedroom"})
+
+    def test_deterministic_hard_failure_overrides_clean_free_form_language(
+        self,
+    ) -> None:
+        controller = FurnitureSafetyController({"enabled": True})
+
+        decision = controller.consider_candidate(
+            make_scores(
+                critique="No collisions remain and all doorways are unobstructed."
+            ),
+            {"state": "blocked-bedroom"},
+            None,
+            hard_state_evaluation=HardStateEvaluation(
+                hard_valid=False,
+                hard_reasons=["door swing clearance violation"],
+            ),
+        )
+
+        self.assertFalse(decision.accepted)
+        self.assertFalse(decision.evaluation.hard_valid)
+        self.assertIn(
+            "door swing clearance violation",
+            decision.evaluation.hard_reasons,
+        )
 
     def test_required_object_removal_is_blocked(self) -> None:
         controller = FurnitureSafetyController({"enabled": True})
@@ -163,6 +262,30 @@ class FurnitureSafetyControllerTest(unittest.TestCase):
                     "desk",
                 )
             )
+
+    def test_plural_teacher_asset_name_satisfies_teacher_desk_inventory(self) -> None:
+        controller = FurnitureSafetyController({"enabled": True})
+        controller.reset_for_scene("A classroom with a teacher's desk.")
+        scene = SimpleNamespace(
+            room_type="classroom",
+            text_description=controller.scene_description,
+            room_geometry=None,
+            objects={
+                "teachers_desk_0": SimpleNamespace(
+                    name="teachers_desk",
+                    description="wooden instructor desk with drawer storage",
+                    immutable=False,
+                )
+            },
+        )
+
+        evaluation = controller.evaluate_scene_state(scene)
+
+        self.assertTrue(evaluation.hard_valid)
+        self.assertNotIn(
+            "missing required teacher_desk: expected 1, found 0",
+            evaluation.hard_reasons,
+        )
 
     def test_role_specific_chair_satisfies_generic_chair_inventory(self) -> None:
         self.assertTrue(
@@ -469,6 +592,48 @@ class FurnitureSafetyControllerTest(unittest.TestCase):
             )
         )
 
+    def test_unrequested_nightstands_are_advisory(self) -> None:
+        controller = FurnitureSafetyController({"enabled": True})
+        yaw_0 = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
+        scene = SimpleNamespace(
+            room_type="bedroom",
+            text_description="A bedroom featuring rustic farmhouse decor.",
+            objects={
+                "bed_0": BoundedFurniture(
+                    name="bed",
+                    description="farmhouse bed",
+                    world_min=(-1.0, -1.0, 0.0),
+                    world_max=(1.0, 1.0, 0.8),
+                    rotation_matrix=yaw_0,
+                ),
+                "nightstand_0": BoundedFurniture(
+                    name="nightstand",
+                    description="farmhouse nightstand",
+                    world_min=(1.2, -0.2, 0.0),
+                    world_max=(1.6, 0.2, 0.6),
+                ),
+                "nightstand_1": BoundedFurniture(
+                    name="nightstand",
+                    description="farmhouse nightstand",
+                    world_min=(1.7, -0.2, 0.0),
+                    world_max=(2.1, 0.2, 0.6),
+                ),
+            },
+        )
+
+        evaluation = controller.evaluate_scene_state(scene)
+        hard_issues, soft_issues = controller._classify_bedroom_plausibility_issues(
+            ["bedroom plausibility: nightstands are not on opposite bed sides"],
+            scene=scene,
+        )
+
+        self.assertTrue(evaluation.hard_valid)
+        self.assertEqual([], hard_issues)
+        self.assertEqual(
+            ["bedroom plausibility: nightstands are not on opposite bed sides"],
+            soft_issues,
+        )
+
     def test_required_counts_parse_two_nightstands(self) -> None:
         controller = FurnitureSafetyController({"enabled": True})
         controller.reset_for_scene(
@@ -572,7 +737,37 @@ class FurnitureSafetyControllerTest(unittest.TestCase):
 
         self.assertEqual(controller.required_counts.get("desk"), 7)
         self.assertEqual(controller.required_counts.get("chair"), 6)
+        self.assertEqual(controller.required_counts.get("student_chair"), 6)
         self.assertNotIn("table", controller.required_counts)
+
+    def test_teacher_chair_cannot_satisfy_role_specific_student_inventory(self) -> None:
+        controller = FurnitureSafetyController({"enabled": True})
+        controller.reset_for_scene(
+            "A classroom with six student desks, each with a chair. A teacher's "
+            "desk sits at the front."
+        )
+        objects = {
+            "teacher_chair_0": SimpleNamespace(
+                name="teacher_chair", description="teacher armchair", immutable=False
+            ),
+            **{
+                f"student_chair_{index}": SimpleNamespace(
+                    name="student_chair",
+                    description="student classroom chair",
+                    immutable=False,
+                )
+                for index in range(5)
+            },
+        }
+
+        evaluation = controller.evaluate_scene_state(
+            SimpleNamespace(objects=objects, room_geometry=None)
+        )
+
+        self.assertIn(
+            "missing required student_chair: expected 6, found 5",
+            evaluation.hard_reasons,
+        )
 
     def test_living_room_prompt_tracks_rug_and_plant_counts(self) -> None:
         controller = FurnitureSafetyController({"enabled": True})
@@ -698,6 +893,26 @@ class FurnitureSafetyControllerTest(unittest.TestCase):
         self.assertFalse(allowed)
         self.assertIn("already used 2 move", message)
 
+    def test_design_change_allows_a_bounded_coordinated_group(self) -> None:
+        controller = FurnitureSafetyController(
+            {
+                "enabled": True,
+                "max_moves_design_change": 16,
+            }
+        )
+        controller.begin_designer_call("change")
+
+        for index in range(13):
+            self.assertTrue(controller.record_move(f"furniture_{index}")[0])
+
+        for index in range(3):
+            self.assertTrue(controller.record_move(f"reserve_{index}")[0])
+
+        allowed, message = controller.record_move("over_budget")
+
+        self.assertFalse(allowed)
+        self.assertIn("already used 16 move", message)
+
     def test_per_object_move_budget_is_enforced(self) -> None:
         controller = FurnitureSafetyController(
             {
@@ -726,7 +941,7 @@ class FurnitureSafetyControllerTest(unittest.TestCase):
         self.assertFalse(allowed)
         self.assertIn("already used 1", message)
 
-    def test_repeated_blocked_tools_end_designer_call(self) -> None:
+    def test_repeated_blocked_tools_leave_incomplete_scene_recoverable(self) -> None:
         controller = FurnitureSafetyController(
             {
                 "enabled": True,
@@ -741,8 +956,10 @@ class FurnitureSafetyControllerTest(unittest.TestCase):
         allowed, message = controller.record_move("bed_0")
 
         self.assertFalse(allowed)
-        self.assertTrue(controller.should_finish)
+        self.assertFalse(controller.should_finish)
         self.assertIn("STOP:", message)
+        self.assertIn("next critique-guided repair", message)
+        self.assertTrue(controller.record_move("nightstand_0")[0])
 
 
 if __name__ == "__main__":

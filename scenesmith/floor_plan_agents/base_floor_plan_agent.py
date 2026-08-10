@@ -73,6 +73,8 @@ class BaseFloorPlanAgent(ABC):
             default_wall_material=self.cfg.materials.default_wall_material,
             default_floor_material=self.cfg.materials.default_floor_material,
             output_dir=output_dir,
+            retrieval_server_host=self.cfg.materials.retrieval_server_host,
+            retrieval_server_port=self.cfg.materials.retrieval_server_port,
         )
 
     def _create_door_window_config(self) -> DoorWindowConfig:

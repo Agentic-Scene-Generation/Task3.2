@@ -22,6 +22,7 @@ class ManipulandTargetObligation:
 _CATEGORY_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("dining_table", ("dining table",)),
     ("coffee_table", ("coffee table",)),
+    ("tv_stand", ("tv stand", "television stand", "media console")),
     ("nightstand", ("nightstand", "bedside table")),
     ("sideboard", ("sideboard", "buffet cabinet")),
     ("bookshelf", ("bookshelf", "bookcase")),
@@ -29,6 +30,29 @@ _CATEGORY_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("dresser", ("dresser", "chest of drawers")),
     ("table", ("table",)),
 )
+
+_COUNT_WORDS = {
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+}
+
+
+def _explicit_noun_count(text: str, noun: str) -> int | None:
+    match = re.search(
+        rf"\b({'|'.join(_COUNT_WORDS)}|\d+)\s+{re.escape(noun)}s?\b", text
+    )
+    if match is None:
+        return None
+    token = match.group(1)
+    return int(token) if token.isdigit() else _COUNT_WORDS[token]
 
 
 def classify_manipuland_furniture(obj: Any, object_id: Any = "") -> str | None:
@@ -83,6 +107,27 @@ def infer_prompt_manipuland_obligations(
             )
         )
 
+    has_tv_stand = bool(
+        re.search(r"\b(?:tv|television)\s+stand\b|\bmedia\s+console\b", text)
+    )
+    has_television = bool(re.search(r"\b(?:television|tv)\b", text))
+    wall_mounted_television = bool(
+        re.search(
+            r"\b(?:television|tv)\b.{0,80}\b(?:wall[- ]mounted|mounted|hung|hanging)\b|"
+            r"\b(?:wall[- ]mounted|mounted|hung|hanging)\b.{0,80}\b(?:television|tv)\b",
+            text,
+        )
+    )
+    if has_tv_stand and has_television and not wall_mounted_television:
+        obligations.append(
+            ManipulandTargetObligation(
+                category="tv_stand",
+                required_items=(
+                    "the prompt-required television positioned on the TV stand"
+                ),
+            )
+        )
+
     nightstand_items = re.search(
         r"\btable\s+lamps?\b|\balarm\s+clocks?\b|\bbooks?\b|\bphones?\b",
         text,
@@ -115,17 +160,23 @@ def infer_prompt_manipuland_obligations(
             )
         )
 
-    if re.search(r"\bdesk\b", text) and re.search(
-        r"\b(?:monitor|desk\s+lamp|notebook|pen\s+holder|laptop)\b.{0,80}"
-        r"\b(?:on|atop)\s+(?:the\s+)?desk\b|"
-        r"\b(?:on|atop)\s+(?:the\s+)?desk\b.{0,100}"
-        r"\b(?:monitor|desk\s+lamp|notebook|pen\s+holder|laptop)\b",
+    desk_item = r"(?:monitor|desk\s+lamp|notebook|pen\s+holder|laptop)s?"
+    desk_assignment = re.search(
+        rf"\b{desk_item}\b.{{0,80}}\b(?:on|atop)\s+(?:the\s+)?desk\b|"
+        rf"\b(?:on|atop)\s+(?:the\s+)?desk\b.{{0,100}}\b{desk_item}\b|"
+        rf"\b{desk_item}\b.{{0,80}}\b(?:at|on)\s+(?:each|every)\s+desk\b|"
+        rf"\b(?:each|every)\s+desk\b.{{0,100}}\b{desk_item}\b",
         text,
-    ):
+    )
+    if re.search(r"\bdesks?\b", text) and desk_assignment:
+        distributed = bool(re.search(r"\b(?:each|every)\s+desk\b", text))
         obligations.append(
             ManipulandTargetObligation(
                 category="desk",
                 required_items="monitor, desk lamp, notebook, pen holder, or laptop explicitly assigned to the desk",
+                target_count=(
+                    _explicit_noun_count(text, "desk") or 1 if distributed else 1
+                ),
             )
         )
 

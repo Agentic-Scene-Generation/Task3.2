@@ -62,6 +62,14 @@ def snap_mesh_to_aabb(
     Raises:
         ValueError: If collision geometry cannot be loaded or no bbox.
     """
+    # Floor furniture touching a wall must stay on its support plane.  A wall's
+    # AABB center sits at mid-height, so using its full 3D center here can pull
+    # a grounded object upward on every closest-point snap.
+    horizontal_wall_snap = (
+        obj.object_type == ObjectType.FURNITURE
+        and target.object_type == ObjectType.WALL
+    )
+
     # Load collision geometry with automatic fallback to visual geometry.
     obj_collision_meshes = load_object_collision_geometry(obj)
 
@@ -108,6 +116,8 @@ def snap_mesh_to_aabb(
         obj_center = obj.transform.translation()
         target_center = (bbox_min + bbox_max) / 2
         pushout_direction = obj_center - target_center
+        if horizontal_wall_snap:
+            pushout_direction[2] = 0.0
         pushout_norm = np.linalg.norm(pushout_direction)
 
         if pushout_norm < DEGENERATE_VOLUME_THRESHOLD:
@@ -138,6 +148,8 @@ def snap_mesh_to_aabb(
     # Compute snap distance using collision detection.
     # Binary search to find exact distance where objects touch.
     snap_direction = box_center - (obj.transform.translation() + total_movement)
+    if horizontal_wall_snap:
+        snap_direction[2] = 0.0
     snap_norm = np.linalg.norm(snap_direction)
 
     if snap_norm < ZERO_DISTANCE_THRESHOLD:
@@ -281,15 +293,39 @@ def compute_snap_direction_mesh_to_mesh(
     else:
         sampled_points = obj_mesh.vertices
 
-    # Find closest points between meshes using downsampled vertices.
-    closest_on_target, distances, _ = trimesh.proximity.closest_point(
-        mesh=target_mesh, points=sampled_points
-    )
+    # A closest-point query still considers every face in the target mesh.  The
+    # object-side sample cap above therefore cannot bound work when snapping a
+    # small object to a high-poly target (for example, a nightstand to a bed).
+    # For that case, sampled target vertices are sufficient to select a snap
+    # direction; the iterative collision check below still determines the exact
+    # final contact distance using collision geometry.
+    target_vertex_count = len(target_mesh.vertices)
+    if target_vertex_count > max_sample_vertices:
+        target_indices = np.linspace(
+            0,
+            target_vertex_count - 1,
+            num=max_sample_vertices,
+            dtype=int,
+        )
+        sampled_target_points = target_mesh.vertices[target_indices]
+        closest_on_obj, closest_on_target_pt = _closest_vertex_pair(
+            sampled_points,
+            sampled_target_points,
+        )
+        console_logger.info(
+            f"Using bounded vertex-pair proximity for {target.name}: "
+            f"{target_vertex_count} target vertices sampled to "
+            f"{len(sampled_target_points)}"
+        )
+    else:
+        closest_on_target, distances, _ = trimesh.proximity.closest_point(
+            mesh=target_mesh, points=sampled_points
+        )
 
-    # Find vertex that's closest to target.
-    min_idx = np.argmin(distances)
-    closest_on_obj = sampled_points[min_idx]
-    closest_on_target_pt = closest_on_target[min_idx]
+        # Find vertex that's closest to target.
+        min_idx = np.argmin(distances)
+        closest_on_obj = sampled_points[min_idx]
+        closest_on_target_pt = closest_on_target[min_idx]
 
     # Compute direction vector.
     direction = closest_on_target_pt - closest_on_obj
@@ -311,10 +347,36 @@ def compute_snap_direction_mesh_to_mesh(
     # Explicitly free mesh memory to prevent accumulation across multiple snaps.
     # Trimesh uses C++ libraries (e.g., FCL) that may not be immediately freed by
     # Python's garbage collector.
-    del obj_mesh, target_mesh, closest_on_target, distances, sampled_points
+    del obj_mesh, target_mesh, sampled_points
     gc.collect()
 
     return direction_unit
+
+
+def _closest_vertex_pair(
+    source_points: np.ndarray,
+    target_points: np.ndarray,
+    chunk_size: int = 256,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return the closest pair from bounded point sets without an O(n*m) array."""
+    best_distance_sq = float("inf")
+    best_source = source_points[0]
+    best_target = target_points[0]
+
+    for start in range(0, len(source_points), chunk_size):
+        source_chunk = source_points[start : start + chunk_size]
+        deltas = source_chunk[:, np.newaxis, :] - target_points[np.newaxis, :, :]
+        distance_sq = np.einsum("ijk,ijk->ij", deltas, deltas)
+        source_idx, target_idx = np.unravel_index(
+            np.argmin(distance_sq), distance_sq.shape
+        )
+        candidate_distance_sq = distance_sq[source_idx, target_idx]
+        if candidate_distance_sq < best_distance_sq:
+            best_distance_sq = candidate_distance_sq
+            best_source = source_chunk[source_idx]
+            best_target = target_points[target_idx]
+
+    return best_source, best_target
 
 
 def snap_with_iterative_collision_check(

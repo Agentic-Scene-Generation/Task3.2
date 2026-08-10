@@ -21,9 +21,8 @@ from scenesmith.scenebenchmark_critic.metrics.spatial_accessibility.companions i
     attach_expected_access_companions,
 )
 from scenesmith.scenebenchmark_critic.intent_contract import (
+    apply_contract_execution_states,
     augment_contract_checks,
-    constraint_mode,
-    set_contract_mode,
 )
 
 
@@ -52,10 +51,6 @@ def prepare_case_pack(
     config: CriticConfig | Any | None = None,
 ) -> tuple[CriticConfig, tuple[Any, ...]]:
     critic_config = _coerce_config(config)
-    set_contract_mode(case_pack, constraint_mode(critic_config))
-    # Contract checks are inserted before legacy plugin augmenters.  In shadow
-    # mode they are deliberately ignored for scoring, which gives replay logs a
-    # side-by-side comparison without changing the current repair loop.
     augment_contract_checks(case_pack)
     plugins = get_metric_plugins(critic_config.metrics)
     rule_config = _to_rule_config(critic_config)
@@ -135,7 +130,7 @@ def run_case_pack_checks(
         timing["run_case_pack_checks_sec"] = round(
             time.perf_counter() - timing_start, 6
         )
-    return results
+    return apply_contract_execution_states(case_pack, results)
 
 
 def evaluate_case_pack(

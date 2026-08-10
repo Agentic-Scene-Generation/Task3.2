@@ -116,6 +116,36 @@ CATEGORY_ALIASES = {
     "wall shelf": "wall_shelf",
     "wine cabinet": "wine_cabinet",
 }
+
+# Generated mounted-object names often include the furniture they accompany,
+# such as ``bed_artwork`` or ``dresser_mirror``.  Those companion tokens must
+# not outrank the mounted object's own function when building critic records.
+_WALL_MOUNTED_CATEGORY_PATTERNS = (
+    (
+        "instructional_surface",
+        re.compile(
+            r"\b(?:blackboard|chalkboard|whiteboard|projection screen|"
+            r"projector screen|teaching screen)\b"
+        ),
+    ),
+    ("mirror", re.compile(r"\bmirror\b")),
+    ("wall_shelf", re.compile(r"\b(?:wall shelf|shelf|shelving)\b")),
+    ("wall_light", re.compile(r"\b(?:wall light|sconce)\b")),
+    (
+        "painting",
+        re.compile(
+            r"\b(?:art|artwork|canvas|painting|photo|photograph|picture|"
+            r"poster|print)\b"
+        ),
+    ),
+    ("television", re.compile(r"\b(?:television|tv)\b")),
+)
+_CEILING_MOUNTED_CATEGORY_PATTERNS = (
+    ("chandelier", re.compile(r"\bchandelier\b")),
+    ("pendant_light", re.compile(r"\bpendant(?: light)?\b")),
+    ("ceiling_fan", re.compile(r"\b(?:ceiling fan|fan)\b")),
+    ("ceiling_light", re.compile(r"\b(?:ceiling light|light|lamp)\b")),
+)
 HEURISTIC_AFFORDANCE_MAP = {
     "armchair": {"sittable"},
     "bar_stool": {"sittable"},
@@ -323,8 +353,9 @@ def room_scene_to_case_pack(
 ) -> dict[str, Any]:
     scene_geometry = _room_scene_geometry(scene)
     case_pack = {
-        "schema_version": "scenesmith.scenebenchmark_critic.v1",
+        "schema_version": "scenesmith.scenebenchmark_critic.v2",
         "scene_id": f"{scene.room_id}:{stage}",
+        "stage": stage,
         "source_method": "scenesmith_online",
         "task_instruction": scene.text_description,
         "room_type": scene.room_type,
@@ -361,8 +392,9 @@ def house_scene_to_case_pack(
         relations.extend(room_geom["relations"])
 
     case_pack = {
-        "schema_version": "scenesmith.scenebenchmark_critic.v1",
+        "schema_version": "scenesmith.scenebenchmark_critic.v2",
         "scene_id": f"house:{stage}",
+        "stage": stage,
         "source_method": "scenesmith_online",
         "task_instruction": (
             getattr(house.layout, "house_prompt", "")
@@ -915,14 +947,50 @@ def _offset_xy_polygon(raw: Any, offset: np.ndarray) -> Any:
 
 
 def _category_for_object(obj: SceneObject) -> str:
+    mounted_category = _mounted_category_for_object(obj)
+    if mounted_category is not None:
+        return mounted_category
     semantic_name = obj.metadata.get("semantic_name")
     if semantic_name:
-        return str(semantic_name).strip().lower().replace(" ", "_")
+        # Retrieval names often preserve style or capacity (for example,
+        # ``farmhouse_bed``). Contracts bind the functional noun, while the
+        # original semantic name remains available in metadata for visual and
+        # orientation checks.
+        return _canonical_category(str(semantic_name))
     for key in ("category_norm", "category", "asset_category"):
         raw = obj.metadata.get(key)
         if raw:
             return _canonical_category(str(raw))
     return _canonical_category(f"{obj.object_id} {obj.name} {obj.description}")
+
+
+def _mounted_category_for_object(obj: SceneObject) -> str | None:
+    """Prefer a mounted asset's own function over companion-name tokens."""
+    object_type = getattr(obj, "object_type", None)
+    object_type_name = str(getattr(object_type, "value", object_type) or "").lower()
+    patterns = None
+    if object_type_name == ObjectType.WALL_MOUNTED.value:
+        patterns = _WALL_MOUNTED_CATEGORY_PATTERNS
+    elif object_type_name == ObjectType.CEILING_MOUNTED.value:
+        patterns = _CEILING_MOUNTED_CATEGORY_PATTERNS
+    if patterns is None:
+        return None
+
+    metadata = getattr(obj, "metadata", {}) or {}
+    identity = _normalize_category_text(
+        " ".join(
+            str(value or "")
+            for value in (
+                metadata.get("semantic_name"),
+                getattr(obj, "name", ""),
+                getattr(obj, "description", ""),
+            )
+        )
+    )
+    for category, pattern in patterns:
+        if pattern.search(identity):
+            return category
+    return None
 
 
 def _functional_hints(

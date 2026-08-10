@@ -11,6 +11,7 @@ from pydrake.all import RigidTransform
 from scenesmith.agent_utils.clearance_zones import (
     compute_door_clearance_violations,
     compute_open_connection_blocked_violations,
+    compute_wall_height_violations,
     compute_window_clearance_violations,
 )
 from scenesmith.agent_utils.house import ClearanceOpeningData, RoomGeometry
@@ -178,6 +179,61 @@ class TestClearanceZonesWallFiltering(unittest.TestCase):
             "Tall cabinet should be flagged as blocking window",
         )
 
+    def test_window_clearance_ignores_objects_above_window_head(self):
+        """Ceiling-mounted objects above the window do not block its opening."""
+        beam = self._create_furniture_object(
+            name="ceiling_beam",
+            position=np.array([0.0, 1.7, 2.8]),
+            size=np.array([0.6, 0.4, 0.12]),
+        )
+        self.scene.add_object(beam)
+
+        violations = compute_window_clearance_violations(self.scene)
+
+        self.assertEqual(
+            [v for v in violations if "ceiling_beam" in v.furniture_id], []
+        )
+
+    def test_window_clearance_ignores_objects_below_window_sill(self):
+        """Furniture entirely below a window sill does not block its opening."""
+        low_table = self._create_furniture_object(
+            name="low_table",
+            position=np.array([0.0, 1.7, 0.35]),
+            size=np.array([0.6, 0.4, 0.6]),
+        )
+        self.scene.add_object(low_table)
+
+        violations = compute_window_clearance_violations(self.scene)
+
+        self.assertEqual([v for v in violations if "low_table" in v.furniture_id], [])
+
+    def test_wall_height_tolerance_allows_ceiling_contact_not_overrun(self):
+        """Ignore transform noise at the ceiling but retain real overruns."""
+        ceiling_contact = SceneObject(
+            object_id=UniqueID("ceiling_contact"),
+            object_type=ObjectType.CEILING_MOUNTED,
+            name="Ceiling contact",
+            description="A ceiling-attached fixture",
+            transform=RigidTransform(p=[0.0, 0.0, 2.7]),
+            bbox_min=np.array([-0.1, -0.1, -0.4]),
+            bbox_max=np.array([0.1, 0.1, 1e-8]),
+        )
+        actual_overrun = SceneObject(
+            object_id=UniqueID("actual_overrun"),
+            object_type=ObjectType.FURNITURE,
+            name="Actual overrun",
+            description="An object above the room height",
+            transform=RigidTransform(p=[0.0, 0.0, 2.7]),
+            bbox_min=np.array([-0.1, -0.1, -0.4]),
+            bbox_max=np.array([0.1, 0.1, 0.001]),
+        )
+        self.scene.add_object(ceiling_contact)
+        self.scene.add_object(actual_overrun)
+
+        violations = compute_wall_height_violations(self.scene)
+
+        self.assertEqual([v.object_id for v in violations], ["actual_overrun"])
+
     def test_door_clearance_ignores_structural_elements(self):
         """Test that walls and floor are not flagged as blocking doors."""
         # Add east wall (contains the door) and floor.
@@ -225,6 +281,21 @@ class TestClearanceZonesWallFiltering(unittest.TestCase):
             len(furniture_violations),
             1,
             "Furniture in door clearance zone should be flagged",
+        )
+
+    def test_door_clearance_reserves_full_swing_depth(self):
+        """A narrow configured passage must not miss the 90-degree door sweep."""
+        swing_blocker = self._create_furniture_object(
+            name="swing_blocker",
+            position=np.array([1.25, 0.0, 1.0]),
+            size=np.array([0.1, 0.4, 2.0]),
+        )
+        self.scene.add_object(swing_blocker)
+
+        violations = compute_door_clearance_violations(self.scene)
+
+        self.assertEqual(
+            [violation.furniture_id for violation in violations], ["swing_blocker"]
         )
 
     def test_open_connection_ignores_structural_elements(self):

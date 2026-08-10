@@ -34,16 +34,12 @@ def evaluate_workstation_focal_alignment(
         if isinstance(region, dict) and region.get("region_id")
     }
     results: list[dict[str, Any]] = []
-    contract_mode = str(case_pack.get("intent_contract_mode") or "legacy")
     for check in case_pack.get("checks") or []:
         if check.get("metric") != "functional_dependency":
             continue
         if check.get("relation_type") != WORK_RELATION:
             continue
-        if (
-            contract_mode == "contract"
-            and check.get("check_source") != "intent_contract"
-        ):
+        if check.get("check_source") != "intent_contract":
             # Do not promote a nearest desk inferred from the current layout
             # into a focal-alignment hard requirement.
             continue

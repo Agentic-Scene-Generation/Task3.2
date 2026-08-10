@@ -14,6 +14,19 @@ def _bbox(center, size):
 
 def _case_pack(storage_x: float, *, yaw_deg: float = 270.0) -> dict:
     return {
+        "intent_contract": {
+            "constraints": [
+                {
+                    "relation": "against_wall",
+                    "subjects": {
+                        "category": "shelving_unit",
+                        "quantifier": "all",
+                    },
+                    "targets": {"category": "wall", "quantifier": "all"},
+                    "source": "explicit_prompt",
+                }
+            ]
+        },
         "scene_geometry": {
             "rooms": [{"bbox": {"min": [-2.5, -2.0, 0.0], "max": [2.5, 2.0, 2.7]}}],
             "objects": [
@@ -37,7 +50,7 @@ def _case_pack(storage_x: float, *, yaw_deg: float = 270.0) -> dict:
                     "functional_hints": {"category_group": "storage"},
                 },
             ],
-        }
+        },
     }
 
 
@@ -67,6 +80,7 @@ def test_storage_at_wall_with_front_parallel_to_wall_fails() -> None:
 
 def test_dining_sideboard_prefers_wall_parallel_to_table_long_axis() -> None:
     case_pack = _case_pack(-2.05)
+    case_pack["intent_contract"]["constraints"][0]["subjects"]["category"] = "sideboard"
     objects = case_pack["scene_geometry"]["objects"]
     objects[1]["category"] = "sideboard"
     objects.extend(
@@ -99,7 +113,9 @@ def test_dining_sideboard_prefers_wall_parallel_to_table_long_axis() -> None:
 
     result = evaluate_wall_backed_storage_alignment(case_pack)[0]
 
-    assert result["label"] == "fail"
+    # Candidate ordering still favors north/south to preserve the dining-table
+    # axis, but the existing west-wall pose is already physically valid.
+    assert result["label"] == "pass"
     candidates = result["diagnostics"]["candidate_poses"]
     assert [candidate["wall_id"] for candidate in candidates[:2]] == [
         "north_boundary",
@@ -111,3 +127,67 @@ def test_dining_sideboard_prefers_wall_parallel_to_table_long_axis() -> None:
     assert all(
         candidate["dining_table_wall_error_deg"] == 0.0 for candidate in candidates[:2]
     )
+
+
+def test_storage_at_valid_nonpreferred_dining_wall_passes() -> None:
+    """An existing valid wall pose beats a table-axis repair preference."""
+    case_pack = _case_pack(0.0, yaw_deg=180.0)
+    case_pack["intent_contract"] = {
+        "constraints": [
+            {
+                "relation": "against_wall",
+                "subjects": {"category": "sideboard", "quantifier": "all"},
+                "targets": {"category": "wall", "quantifier": "all"},
+                "source": "explicit_prompt",
+            }
+        ]
+    }
+    objects = case_pack["scene_geometry"]["objects"]
+    objects[1]["category"] = "sideboard"
+    objects[1]["bbox_world"] = _bbox((0.0, 1.75), (0.8, 0.3, 1.8))
+    objects[1]["footprint_world"] = [
+        [-0.4, 1.6],
+        [0.4, 1.6],
+        [0.4, 1.9],
+        [-0.4, 1.9],
+    ]
+    objects.extend(
+        [
+            {
+                "id": "north_boundary",
+                "category": "wall",
+                "bbox_world": _bbox((0.0, 2.0), (5.0, 0.1, 2.7)),
+            },
+            {
+                "id": "south_boundary",
+                "category": "wall",
+                "bbox_world": _bbox((0.0, -2.0), (5.0, 0.1, 2.7)),
+            },
+            {
+                # This rotated table makes east/west the preferred repair
+                # walls. The sideboard is nevertheless already valid at north.
+                "id": "dining_table_0",
+                "object_type": "furniture",
+                "category": "dining_table",
+                "yaw_deg": 90.0,
+                "bbox_world": _bbox((0.0, 0.0), (0.9, 1.8, 0.75)),
+                "footprint_world": [
+                    [-0.45, -0.9],
+                    [0.45, -0.9],
+                    [0.45, 0.9],
+                    [-0.45, 0.9],
+                ],
+            },
+        ]
+    )
+
+    result = evaluate_wall_backed_storage_alignment(case_pack)[0]
+
+    assert result["label"] == "pass"
+    assert result["related_objects"] == ["north_boundary"]
+    north_candidate = next(
+        candidate
+        for candidate in result["diagnostics"]["candidate_poses"]
+        if candidate["wall_id"] == "north_boundary"
+    )
+    assert north_candidate["dining_table_wall_error_deg"] == 90.0

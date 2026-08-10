@@ -177,13 +177,71 @@ class FurnitureLayoutPlanningTest(unittest.TestCase):
         self.assertLess(report.score, 1.0)
         self.assertTrue(any("expected east_wall" in issue for issue in report.issues))
 
+    def test_opening_limited_bedroom_allows_verified_interior_bed_layout(self) -> None:
+        scene = DummyScene(
+            room_geometry=DummyRoomGeometry(
+                openings=[
+                    {
+                        "opening_type": "window",
+                        "wall_direction": "north",
+                        "center_world": [0.0, 2.0, 1.5],
+                        "width": 1.2,
+                        "clearance_bbox_min": [-0.6, 1.5, 0.0],
+                        "clearance_bbox_max": [0.6, 2.0, 2.1],
+                    },
+                    {
+                        "opening_type": "window",
+                        "wall_direction": "south",
+                        "center_world": [0.54, -2.0, 1.5],
+                        "width": 1.2,
+                        "clearance_bbox_min": [-0.06, -2.0, 0.0],
+                        "clearance_bbox_max": [1.14, -1.5, 2.1],
+                    },
+                    {
+                        "opening_type": "window",
+                        "wall_direction": "east",
+                        "center_world": [2.25, -0.08, 1.5],
+                        "width": 1.2,
+                        "clearance_bbox_min": [1.75, -0.68, 0.0],
+                        "clearance_bbox_max": [2.25, 0.52, 2.1],
+                    },
+                    {
+                        "opening_type": "door",
+                        "wall_direction": "west",
+                        "center_world": [-2.25, 0.0, 1.05],
+                        "width": 0.9,
+                        "clearance_bbox_min": [-2.25, -0.45, 0.0],
+                        "clearance_bbox_max": [-1.45, 0.45, 2.1],
+                    },
+                ]
+            ),
+            text_description="A compact bedroom with a bed.",
+        )
+        yaw_north = np.diag([-1.0, -1.0, 1.0])
+        scene.objects["bed_0"] = DummyObject(
+            object_type="furniture",
+            name="bed",
+            description="Compact standard double bed",
+            bbox_min=np.array([-0.8, -0.908, 0.0]),
+            bbox_max=np.array([0.8, 0.908, 1.0]),
+            transform=DummyTransform((0.0, 0.51, 0.0), rotation=yaw_north),
+        )
+
+        report = evaluate_bedroom_layout_plausibility(scene)
+
+        self.assertFalse(any("is not anchored" in issue for issue in report.issues))
+        self.assertTrue(
+            any("interior opening-safe" in issue for issue in report.issues)
+        )
+        self.assertFalse(
+            any("headboard overlaps/targets" in issue for issue in report.issues)
+        )
+
     def test_bed_head_is_opposite_asset_facing_arrow(self) -> None:
         scene = make_bedroom_scene()
         # A -90 degree yaw points the asset's +Y arrow east, while its
         # headboard points west and therefore misses the planned east wall.
-        quarter_turn = np.array(
-            [[0.0, 1.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 0.0, 1.0]]
-        )
+        quarter_turn = np.array([[0.0, 1.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
         scene.objects["bed_0"] = DummyObject(
             object_type="furniture",
             name="bed",

@@ -45,6 +45,11 @@ prompt: |
 
   **STEP 2: Get Object IDs**
   Call get_current_scene_state() to retrieve exact object IDs with their random suffixes.
+  The returned `front_direction_x`, `front_direction_y`, and
+  `front_direction_cardinal` fields are the auditable world direction of the
+  object's canonical local +Y front. Never infer a facing failure from the yaw
+  number alone. In this coordinate convention yaw +90 degrees faces world -X,
+  while yaw -90 degrees faces world +X.
 
   **STEP 3: Validate Facing Relationships** (REQUIRED)
 
@@ -63,6 +68,11 @@ prompt: |
   - Sofas/seating → TVs (direction="toward") — but conversation areas may have
     sofas facing each other
   - Appliances/wardrobes → walls (direction="away")
+
+  For any wall-backed directional furniture, including chairs placed along a
+  wall, call check_facing_tool(object_id, wall_id, direction="away") before
+  reporting that it faces the wall. Do not recommend a yaw change when the
+  applicable check_facing_tool call reports `is_facing=True`.
 
   Facing validation is scene-dependent. Consider the room's purpose and layout before
   flagging orientation issues. A chair facing "nothing" may be correct if it faces
@@ -99,10 +109,18 @@ prompt: |
   - Verify each relationship (use check_facing_tool where applicable)
   - Note any missing furniture or unsatisfied relationships for the prompt_following score
 
+  This is the furniture stage. Do not report missing manipulands (for example
+  monitors, keyboards, lamps placed on desks, books, or remotes), wall-mounted
+  objects, or ceiling objects as a furniture-stage failure; those are generated
+  and validated by their later owning stages.
+
   CRITICAL: Tool validation overrides visual assessment. If check_facing_tool reports
   is_facing=False, the furniture IS incorrectly oriented regardless of how it appears
   in images. DO NOT assess orientation from images alone - camera angles create optical
   illusions that make incorrect orientations appear correct.
+  The converse is equally mandatory: if the relevant check reports
+  `is_facing=True`, do not claim that yaw or the rendered view proves it faces
+  the wrong direction.
 
   Coordinate and rotation values in tool outputs are metric meters and degrees.
   In particular, yaw values are degrees, not radians. A yaw difference below about

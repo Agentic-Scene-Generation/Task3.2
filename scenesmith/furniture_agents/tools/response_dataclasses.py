@@ -103,6 +103,12 @@ class SimplifiedFurnitureInfo(JSONSerializable):
     """Y position in room coordinates (meters)."""
     rotation_degrees: float
     """Rotation around Z-axis (degrees). This is the yaw angle."""
+    front_direction_x: float
+    """World X component of the canonical local +Y furniture front."""
+    front_direction_y: float
+    """World Y component of the canonical local +Y furniture front."""
+    front_direction_cardinal: str
+    """Nearest world cardinal direction of the furniture front."""
     dimensions: BoundingBox3D | None
     """Object dimensions (width, depth, height) in meters."""
 
@@ -118,6 +124,12 @@ class SimplifiedFurnitureInfo(JSONSerializable):
         # Extract yaw from rotation.
         rpy = RollPitchYaw(obj.transform.rotation())
         yaw_degrees = math.degrees(rpy.yaw_angle())
+        front_x = -math.sin(rpy.yaw_angle())
+        front_y = math.cos(rpy.yaw_angle())
+        if abs(front_x) >= abs(front_y):
+            front_cardinal = "east (+X)" if front_x >= 0.0 else "west (-X)"
+        else:
+            front_cardinal = "north (+Y)" if front_y >= 0.0 else "south (-Y)"
 
         # Compute dimensions from bounding box.
         dimensions = None
@@ -135,6 +147,9 @@ class SimplifiedFurnitureInfo(JSONSerializable):
             position_x=float(translation[0]),
             position_y=float(translation[1]),
             rotation_degrees=yaw_degrees,
+            front_direction_x=float(front_x),
+            front_direction_y=float(front_y),
+            front_direction_cardinal=front_cardinal,
             dimensions=dimensions,
         )
 

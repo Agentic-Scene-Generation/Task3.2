@@ -46,6 +46,14 @@ from scenesmith.scene_expert.schemas import (
 from scenesmith.scene_expert.task_compiler import TaskCompiler
 from scenesmith.scene_expert.trace_logger import TraceLogger
 from scenesmith.scene_expert.verifier import FullVerifier, StageVerifier
+from scenesmith.scenebenchmark_critic.config import critic_config_from_any
+from scenesmith.scenebenchmark_critic.intent_compiler import IntentCompiler
+from scenesmith.scenebenchmark_critic.intent_schema import canonical_selector_category
+from scenesmith.scenebenchmark_critic.relation_registry import (
+    CEILING_MOUNTED_CATEGORIES,
+    MANIPULAND_CATEGORIES,
+    WALL_MOUNTED_CATEGORIES,
+)
 
 console_logger = logging.getLogger(__name__)
 
@@ -197,6 +205,15 @@ def _format_memory_directives(memory_pack: MemoryPack) -> str:
     )
 
 
+def _format_intent_contract(contract: dict[str, Any]) -> str:
+    """Render the hard contract as a separate prompt block."""
+    return (
+        "=== SceneExpert Hard Intent Contract (authoritative) ===\n"
+        + json.dumps(contract, ensure_ascii=False, sort_keys=True)
+        + "\n=== End SceneExpert Hard Intent Contract ==="
+    )
+
+
 def _build_hybrid_retriever(
     memory_store: FastMemoryStore,
     memory_dir: str,
@@ -269,6 +286,262 @@ def _build_hybrid_retriever(
     )
 
 
+def _intent_compiler_model(cfg_dict: dict) -> str:
+    return (
+        cfg_dict.get("furniture_agent", {})
+        .get("openai", {})
+        .get(
+            "model",
+            cfg_dict.get("llm", {}).get("model_id", "Qwen/Qwen3.5-35B-A3B"),
+        )
+    )
+
+
+def _compile_intent_contract_if_enabled(
+    *, prompt: str, scene_id: int, output_dir: Path, cfg_dict: dict
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Compile v4 exactly once when the embedded critic is enabled.
+
+    The private config entries are consumed by ``_generate_room`` so the
+    contract survives the floor-plan boundary even when SceneExpert itself is
+    disabled.  The compiler itself falls back to the deterministic prompt
+    parser when the model cannot return a valid contract.
+    """
+    critic_config = critic_config_from_any(cfg_dict)
+    if not critic_config.enabled:
+        return {}, {}
+    normalized_prompt = " ".join(str(prompt or "").split())
+    prompt_hash = hashlib.sha256(normalized_prompt.encode("utf-8")).hexdigest()
+    cache_key = {
+        "prompt_sha256": prompt_hash,
+        "spec_version": IntentCompiler.SPEC_VERSION,
+    }
+    cached_contract = cfg_dict.get("_scenebenchmark_intent_contract")
+    cached_trace = cfg_dict.get("_scenebenchmark_intent_trace")
+    cached_key = cfg_dict.get("_scenebenchmark_intent_cache_key")
+    if (
+        isinstance(cached_contract, dict)
+        and isinstance(cached_trace, dict)
+        and (
+            cached_key == cache_key
+            or (
+                cached_contract.get("prompt_sha256") == prompt_hash
+                and cached_contract.get("intent_compiler_spec_version")
+                == IntentCompiler.SPEC_VERSION
+                and cached_trace.get("prompt_sha256") == prompt_hash
+                and cached_trace.get("spec_version") == IntentCompiler.SPEC_VERSION
+            )
+        )
+    ):
+        return cached_contract, cached_trace
+    compiler_cfg = critic_config.intent_compiler
+    compiler = IntentCompiler(
+        model=_intent_compiler_model(cfg_dict),
+        api_base_url=os.environ.get("OPENAI_BASE_URL", "http://localhost:8000/v1"),
+        api_key=os.environ.get("OPENAI_API_KEY", "dummy"),
+        max_tokens=_cfg_int(compiler_cfg.get("max_tokens"), 2048),
+        temperature=0.0,
+    )
+    try:
+        contract = compiler.compile(prompt)
+    except Exception:
+        trace = getattr(compiler, "last_trace", {})
+        trace_path = (
+            output_dir
+            / f"scene_{scene_id:03d}"
+            / "scene_expert"
+            / "trace"
+            / "intent_compiler.json"
+        )
+        trace_path.parent.mkdir(parents=True, exist_ok=True)
+        trace_path.write_text(
+            json.dumps(trace, indent=2, ensure_ascii=False, default=str),
+            encoding="utf-8",
+            newline="\n",
+        )
+        raise
+    trace = dict(getattr(compiler, "last_trace", {}))
+    trace_path = (
+        output_dir
+        / f"scene_{scene_id:03d}"
+        / "scene_expert"
+        / "trace"
+        / "intent_compiler.json"
+    )
+    trace_path.parent.mkdir(parents=True, exist_ok=True)
+    trace_path.write_text(
+        json.dumps(trace, indent=2, ensure_ascii=False, default=str),
+        encoding="utf-8",
+        newline="\n",
+    )
+    cfg_dict["_scenebenchmark_intent_contract"] = contract
+    cfg_dict["_scenebenchmark_intent_trace"] = trace
+    cfg_dict["_scenebenchmark_intent_cache_key"] = cache_key
+    return contract, trace
+
+
+_TASK_SPEC_STAGE_FIELDS = {
+    "furniture": "required_large_objects",
+    "wall_mounted": "required_wall_objects",
+    "ceiling_mounted": "required_ceiling_objects",
+    "manipuland": "required_small_objects",
+}
+_NON_OBJECT_INVENTORY_CATEGORIES = frozenset(
+    {
+        "",
+        "room",
+        "floor",
+        "ceiling",
+        "wall",
+        "back_wall",
+        "front_wall",
+        "side_wall",
+        "main_wall",
+        "opposite_wall",
+        "adjacent_wall",
+        "entrance",
+        "entry",
+    }
+)
+_INVENTORY_CATEGORY_ALIASES = {
+    "computer_monitor": "monitor",
+    "computer_display": "monitor",
+    "display_monitor": "monitor",
+    "chalkboard": "instructional_surface",
+    "blackboard": "instructional_surface",
+    "whiteboard": "instructional_surface",
+    "projection_screen": "instructional_surface",
+    "projector_screen": "instructional_surface",
+    "teaching_screen": "instructional_surface",
+    "presentation_screen": "instructional_surface",
+    "wastebasket": "trash_can",
+}
+_GENERIC_INVENTORY_CATEGORIES = frozenset({"chair", "desk", "table"})
+
+
+def _inventory_category(value: Any) -> str:
+    category = canonical_selector_category(value)
+    return _INVENTORY_CATEGORY_ALIASES.get(category, category)
+
+
+def _categories_match_inventory(first: str, second: str) -> bool:
+    if first == second:
+        return True
+    if first in _GENERIC_INVENTORY_CATEGORIES:
+        return second.endswith(f"_{first}")
+    if second in _GENERIC_INVENTORY_CATEGORIES:
+        return first.endswith(f"_{second}")
+    return False
+
+
+def _intrinsic_contract_stage(category: str) -> str:
+    if category in MANIPULAND_CATEGORIES:
+        return "manipuland"
+    if category in WALL_MOUNTED_CATEGORIES:
+        return "wall_mounted"
+    if category in CEILING_MOUNTED_CATEGORIES:
+        return "ceiling_mounted"
+    return "furniture"
+
+
+def _contract_inventory_ownership(
+    contract: dict[str, Any],
+) -> dict[str, tuple[str, int]]:
+    """Return contract-owned inventory categories and their generation stages."""
+    ownership: dict[str, tuple[str, int]] = {}
+
+    def record(selector: Any, stage: str) -> None:
+        if not isinstance(selector, dict):
+            return
+        category = _inventory_category(selector.get("category"))
+        if category in _NON_OBJECT_INVENTORY_CATEGORIES:
+            return
+        try:
+            count = max(1, int(selector.get("count") or 1))
+        except (TypeError, ValueError):
+            count = 1
+        previous = ownership.get(category)
+        if previous is None or count > previous[1]:
+            ownership[category] = (stage, count)
+
+    constraints = contract.get("constraints") if isinstance(contract, dict) else []
+    intrinsic_categories = (
+        MANIPULAND_CATEGORIES | WALL_MOUNTED_CATEGORIES | CEILING_MOUNTED_CATEGORIES
+    )
+    for constraint in constraints or []:
+        if not isinstance(constraint, dict):
+            continue
+        if str(constraint.get("strength") or "hard").lower() != "hard":
+            continue
+        constraint_stage = str(constraint.get("stage") or "furniture")
+        subject = constraint.get("subjects")
+        subject_category = _inventory_category(
+            subject.get("category") if isinstance(subject, dict) else ""
+        )
+        if subject_category not in _NON_OBJECT_INVENTORY_CATEGORIES:
+            subject_stage = (
+                _intrinsic_contract_stage(subject_category)
+                if subject_category in intrinsic_categories
+                else constraint_stage
+            )
+            record(subject, subject_stage)
+
+        # A target can be the only explicit mention of an object. It keeps its
+        # intrinsic owner instead of inheriting a relation's later stage.
+        target = constraint.get("targets")
+        target_category = _inventory_category(
+            target.get("category") if isinstance(target, dict) else ""
+        )
+        record(target, _intrinsic_contract_stage(target_category))
+
+    return ownership
+
+
+def _reconcile_task_spec_stage_ownership(
+    task_spec: SceneTaskSpec, contract: dict[str, Any]
+) -> SceneTaskSpec:
+    """Move contract-owned inventory to its validated pipeline stage.
+
+    The legacy TaskCompiler remains a recall fallback for categories absent from
+    the independent intent contract. Contract-covered categories, however, must
+    not be generated or verified before their dependencies exist.
+    """
+    ownership = _contract_inventory_ownership(contract)
+    if not ownership:
+        return task_spec
+
+    reconciled = {stage: [] for stage in _TASK_SPEC_STAGE_FIELDS}
+    matched_counts = {category: 0 for category in ownership}
+    for source_stage, field in _TASK_SPEC_STAGE_FIELDS.items():
+        for label in getattr(task_spec, field):
+            category = _inventory_category(label)
+            matched_category = next(
+                (
+                    owned
+                    for owned in ownership
+                    if _categories_match_inventory(category, owned)
+                ),
+                None,
+            )
+            if matched_category is None:
+                reconciled[source_stage].append(label)
+                continue
+            target_stage, _count = ownership[matched_category]
+            reconciled.get(target_stage, reconciled[source_stage]).append(label)
+            matched_counts[matched_category] += 1
+
+    for category, (stage, count) in ownership.items():
+        if stage in reconciled:
+            reconciled[stage].extend(
+                [category] * max(0, count - matched_counts[category])
+            )
+
+    updates = {
+        field: reconciled[stage] for stage, field in _TASK_SPEC_STAGE_FIELDS.items()
+    }
+    return task_spec.model_copy(update=updates)
+
+
 class SceneExpertHookRunner:
     """Per-scene hook runner that wraps SceneSmith stage execution.
 
@@ -297,6 +570,8 @@ class SceneExpertHookRunner:
         experiment_name: str = "",
         config_hash: str = "",
         start_stage: str = "floor_plan",
+        intent_contract: dict[str, Any] | None = None,
+        intent_trace: dict[str, Any] | None = None,
     ) -> None:
         self._prompt = prompt
         self._scene_id = scene_id
@@ -321,6 +596,8 @@ class SceneExpertHookRunner:
         self._experiment_name = experiment_name
         self._config_hash = config_hash
         self._start_stage = start_stage
+        self._intent_contract = dict(intent_contract or {})
+        self._intent_trace = dict(intent_trace or {})
         self._stage_order_baseline = self._initial_completed_stages(start_stage)
         self._room_start_stage = (
             "furniture" if start_stage == "floor_plan" else start_stage
@@ -336,9 +613,12 @@ class SceneExpertHookRunner:
             experiment_name=experiment_name,
             config_hash=config_hash,
         )
+        self._trace_logger.record_task_compiler(task_spec)
+        if self._intent_trace:
+            self._trace_logger.record_intent_compiler(self._intent_trace)
         self._stage_reports: list[StageVerifyReport] = []
         self._completed_stages: list[str] = list(self._stage_order_baseline)
-        self._qwen_calls = 0
+        self._qwen_calls = len(self._intent_trace.get("attempts") or [])
 
         # Current stage state (populated in pre_stage, consumed in post_stage)
         self._current_stage: str = ""
@@ -900,7 +1180,18 @@ class SceneExpertHookRunner:
                 f"[SceneExpert] Injected placement reference for {stage} "
                 f"({placement_ref.count(chr(10))+1} lines)"
             )
+        if self._intent_contract:
+            intent_text = _format_intent_contract(self._intent_contract)
+            scene.text_description = scene.text_description + "\n\n" + intent_text
+            setattr(scene, "scene_expert_intent_contract", self._intent_contract)
         setattr(scene, "scene_expert_task_spec", self._task_spec.model_dump())
+        if self._intent_contract:
+            setattr(scene, "scenebenchmark_intent_contract", self._intent_contract)
+            metadata = getattr(scene, "metadata", None)
+            if not isinstance(metadata, dict):
+                metadata = {}
+                setattr(scene, "metadata", metadata)
+            metadata["scenebenchmark_intent_contract"] = self._intent_contract
         setattr(scene, "scene_expert_stage", stage)
         self._save_context_bundle(
             stage=stage,
@@ -1030,7 +1321,7 @@ class SceneExpertHookRunner:
     # Finalize: called after all stages complete
     # ------------------------------------------------------------------
 
-    def finalize(self, final_scene_path: str) -> None:
+    def finalize(self, final_scene_path: str) -> FullVerifyReport:
         """Run full verifier, save trace, update memory.
 
         Called from _generate_single_scene after _run_sequential_room_generation
@@ -1114,6 +1405,7 @@ class SceneExpertHookRunner:
             "[SceneExpertTiming] stage=full_scene module=finalize_total elapsed=%.2fs",
             time.time() - finalize_start,
         )
+        return full_report
 
     def save_partial_trace(self, error: str = "") -> None:
         """Persist a partial trace from an exception path."""
@@ -1215,12 +1507,56 @@ class SceneExpertHookRunner:
     def _extract_scene_state_info_from_scene(self, scene: RoomScene) -> dict:
         """Extract object names from the live RoomScene for rule-based checks."""
         try:
-            names = [
-                obj.name
-                for obj in scene.objects.values()
-                if hasattr(obj, "name") and obj.name
-            ]
-            return {"object_names": names}
+            names: list[str] = []
+            records: list[dict[str, Any]] = []
+
+            def append_name(value: Any) -> None:
+                if isinstance(value, str) and value.strip():
+                    names.append(value.strip())
+
+            def append_component_names(value: Any, aliases: list[str]) -> None:
+                """Collect semantic names from supported composite metadata."""
+                if not isinstance(value, dict):
+                    return
+                component_name = value.get("name")
+                append_name(component_name)
+                if isinstance(component_name, str) and component_name.strip():
+                    aliases.append(component_name.strip())
+                for key in (
+                    "container_asset",
+                    "fill_assets",
+                    "member_assets",
+                    "components",
+                    "members",
+                ):
+                    nested = value.get(key)
+                    if isinstance(nested, dict):
+                        append_component_names(nested, aliases)
+                    elif isinstance(nested, list):
+                        for item in nested:
+                            append_component_names(item, aliases)
+
+            for obj in scene.objects.values():
+                name = getattr(obj, "name", None)
+                append_name(name)
+                description = getattr(obj, "description", None)
+                aliases: list[str] = []
+                metadata = getattr(obj, "metadata", None)
+                if isinstance(metadata, dict) and metadata.get("composite_type"):
+                    append_component_names(metadata, aliases)
+                records.append(
+                    {
+                        "name": name if isinstance(name, str) else "",
+                        "description": (
+                            description if isinstance(description, str) else ""
+                        ),
+                        "aliases": aliases,
+                    }
+                )
+            return {
+                "object_names": names,
+                "object_records": records,
+            }
         except Exception:
             return {"object_names": []}
 
@@ -1255,6 +1591,12 @@ def build_hook_runner(
     root_se_cfg = cfg_dict.get("scene_expert", {})
     exp_se_cfg = cfg_dict.get("experiment", {}).get("scene_expert")
     se_cfg = exp_se_cfg or root_se_cfg
+    intent_contract, intent_trace = _compile_intent_contract_if_enabled(
+        prompt=prompt,
+        scene_id=scene_id,
+        output_dir=output_dir,
+        cfg_dict=cfg_dict,
+    )
     if not se_cfg:
         return None
     memory_cfg = _deep_merge_dicts(
@@ -1276,14 +1618,7 @@ def build_hook_runner(
     console_logger.info(f"[SceneExpert] Building hook runner (mode={mode})")
 
     # Model / API settings (shared with SceneSmith agents)
-    model = (
-        cfg_dict.get("furniture_agent", {})
-        .get("openai", {})
-        .get(
-            "model",
-            cfg_dict.get("llm", {}).get("model_id", "Qwen/Qwen3.5-35B-A3B"),
-        )
-    )
+    model = _intent_compiler_model(cfg_dict)
     api_base = os.environ.get("OPENAI_BASE_URL", "http://localhost:8000/v1")
     api_key = os.environ.get("OPENAI_API_KEY", "dummy")
 
@@ -1361,6 +1696,8 @@ def build_hook_runner(
 
         task_spec = _fallback_spec_from_prompt(prompt)
 
+    task_spec = _reconcile_task_spec_stage_ownership(task_spec, intent_contract)
+
     # Harness (always active when mode != "disabled")
     from omegaconf import OmegaConf
 
@@ -1394,4 +1731,6 @@ def build_hook_runner(
         experiment_name=cfg_dict.get("name", ""),
         config_hash=_stable_config_hash(cfg_dict),
         start_stage=start_stage,
+        intent_contract=intent_contract,
+        intent_trace=intent_trace,
     )

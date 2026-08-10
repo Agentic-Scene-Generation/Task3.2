@@ -98,7 +98,99 @@ _HSSD_FRONT_AXIS_SOURCES = {
     "annotation",
     "annotations",
 }
+_LINEAR_CEILING_REQUEST_ASPECT_MIN = 4.0
+_LINEAR_CEILING_CANDIDATE_ASPECT_MIN = 3.0
+_LINEAR_CEILING_AXIS_SCALE_MAX = 6.0
+_STRUCTURAL_CEILING_TERMS = frozenset({"beam", "joist", "rafter"})
+_NON_STRUCTURAL_CEILING_TERMS = frozenset(
+    {"chair", "chandelier", "lamp", "light", "pendant", "stool"}
+)
 _VALID_HORIZONTAL_FRONT_AXES = {"+X", "-X", "+Y", "-Y"}
+_MEDIA_SUPPORT_SHORT_NAME = re.compile(
+    r"(?:^|_)(?:tv|television|media|entertainment)_"
+    r"(?:stand|console|center|unit|cabinet)(?:_|$)",
+    re.IGNORECASE,
+)
+_COMPOSITE_MEDIA_REQUEST = re.compile(
+    r"\b(?:tv|television)\s*(?:stand|console|center|unit|cabinet)\b"
+    r".*\b(?:with|and|mounted)\b.*\b(?:tv|television|screen|display)\b|"
+    r"\b(?:tv|television|screen|display)\b.*\bmounted\s+on\s+top(?:\s+of)?\b",
+    re.IGNORECASE,
+)
+_COMPOSITE_MEDIA_SHORT_NAME = re.compile(
+    r"(?:^|_)(?:with|and|mounted)_(?:tv|television|screen|display)(?:_|$)",
+    re.IGNORECASE,
+)
+_SEPARATE_MEDIA_ROLES = re.compile(
+    r"\b(?:tv|television)\s*(?:stand|console|center)\b\s+and\s+(?:a\s+)?(?:tv|television|screen|display)\b|"
+    r"\b(?:tv|television|screen|display)\b.*\b(?:above|on\s+top\s+of|with)\s+(?:the\s+)?(?:tv|television)\s*(?:stand|console|center)\b",
+    re.IGNORECASE,
+)
+
+
+def _normalize_independent_media_requests(
+    request: "AssetGenerationRequest",
+) -> "AssetGenerationRequest":
+    """Avoid a display-bearing console when the scene requests a second display."""
+    context = str(request.scene_prompt_context or "")
+    if request.object_type != ObjectType.FURNITURE or not _SEPARATE_MEDIA_ROLES.search(
+        context
+    ):
+        return request
+
+    descriptions = list(request.object_descriptions)
+    names = list(request.short_names)
+    dimensions = [list(values) for values in request.desired_dimensions]
+    semantic_candidates = (
+        [list(values) for values in request.semantic_name_candidates]
+        if request.semantic_name_candidates is not None
+        else None
+    )
+    changed = False
+    for index, (description, name) in enumerate(zip(descriptions, names)):
+        normalized_name = normalize_semantic_name(name)
+        if not _MEDIA_SUPPORT_SHORT_NAME.search(normalized_name):
+            continue
+        if not (
+            _COMPOSITE_MEDIA_REQUEST.search(description)
+            or _COMPOSITE_MEDIA_SHORT_NAME.search(normalized_name)
+        ):
+            continue
+        descriptions[index] = (
+            "Low media console / TV stand only, without a television, monitor, "
+            "or built-in display"
+        )
+        names[index] = "tv_stand"
+        if len(dimensions[index]) >= 3:
+            width = max(0.45, float(dimensions[index][0]))
+            dimensions[index][2] = min(
+                float(dimensions[index][2]), min(0.9, width * 0.58)
+            )
+        if semantic_candidates is not None and index < len(semantic_candidates):
+            semantic_candidates[index] = list(
+                dict.fromkeys(
+                    "tv_stand" if value == "tv_stand_with_tv" else value
+                    for value in semantic_candidates[index]
+                )
+            )
+        changed = True
+    if not changed:
+        return request
+    console_logger.info(
+        "Normalized composite media request(s) because the scene asks for a "
+        "separate display."
+    )
+    return AssetGenerationRequest(
+        object_descriptions=descriptions,
+        short_names=names,
+        object_type=request.object_type,
+        desired_dimensions=dimensions,
+        style_context=request.style_context,
+        scene_prompt_context=request.scene_prompt_context,
+        operation_type=request.operation_type,
+        scene_id=request.scene_id,
+        semantic_name_candidates=semantic_candidates,
+    )
 
 
 def _get_hssd_front_axis_annotation_record(
@@ -488,6 +580,12 @@ class AssetManager:
         exact_fit_axes: tuple[int, ...] = (),
     ) -> tuple[Path, np.ndarray, np.ndarray, float]:
         """Scale canonical Y-up glTF and expose SceneSmith-frame bounds."""
+        if desired_dimensions is not None and len(desired_dimensions) == 0:
+            console_logger.warning(
+                "Empty desired dimensions; preserving the canonical asset scale"
+            )
+            desired_dimensions = None
+
         applied_scale = 1.0
         if desired_dimensions is not None:
             scene_to_gltf_axis = {0: 0, 1: 2, 2: 1}
@@ -551,6 +649,163 @@ class AssetManager:
             return 0.5
         hssd_cfg = self.cfg.asset_manager.get("hssd", {}) or {}
         return float(hssd_cfg.get("plant_uniform_fit_min_ratio", 0.45))
+
+    def _linear_ceiling_exact_fit_axes(
+        self,
+        *,
+        canonical_path: Path,
+        desired_dimensions: list[float] | tuple[float, ...],
+    ) -> tuple[int, ...]:
+        """Allow a bounded single-axis fit for genuinely linear ceiling assets.
+
+        Structural rails, beams, and similar spans are intentionally resizable
+        along their run.  This remains geometry-driven: both the request and
+        retrieved mesh must already have a strongly elongated horizontal
+        footprint, so a round stool or fixture cannot become a beam merely by
+        satisfying the requested dimensions.
+        """
+        if len(desired_dimensions) != 3:
+            return ()
+        desired = np.asarray(desired_dimensions, dtype=float)
+        if np.any(desired <= 0.0):
+            return ()
+        request_horizontal = desired[:2]
+        requested_axis = int(np.argmax(request_horizontal))
+        request_minor = float(np.min(request_horizontal))
+        if (
+            request_minor <= 0.0
+            or float(np.max(request_horizontal)) / request_minor
+            < _LINEAR_CEILING_REQUEST_ASPECT_MIN
+        ):
+            return ()
+        try:
+            mesh = load_mesh_as_trimesh(canonical_path, force_merge=True)
+            bbox_min, bbox_max = gltf_y_up_bounds_to_scene_z_up(mesh.bounds)
+        except Exception as exc:
+            console_logger.warning(
+                "Cannot inspect canonical ceiling mesh for linear fit: %s", exc
+            )
+            return ()
+        actual = np.asarray(bbox_max - bbox_min, dtype=float)
+        candidate_horizontal = actual[:2]
+        candidate_minor = float(np.min(candidate_horizontal))
+        if (
+            candidate_minor <= 0.0
+            or float(np.max(candidate_horizontal)) / candidate_minor
+            < _LINEAR_CEILING_CANDIDATE_ASPECT_MIN
+        ):
+            return ()
+        # This mirrors the uniform fitter so the extra axis-only multiplier is
+        # bounded even though the actual mesh is scaled in a separate helper.
+        uniform_scale = float(np.median(desired / actual))
+        preliminary_length = float(actual[requested_axis]) * uniform_scale
+        if preliminary_length <= 0.0:
+            return ()
+        axis_scale = float(desired[requested_axis]) / preliminary_length
+        if axis_scale > _LINEAR_CEILING_AXIS_SCALE_MAX:
+            return ()
+        return (requested_axis,)
+
+    @staticmethod
+    def _is_structural_ceiling_span_request(
+        *,
+        description: str,
+        short_name: str,
+        desired_dimensions: list[float] | tuple[float, ...],
+    ) -> bool:
+        """Return whether a request is eligible for a procedural timber span.
+
+        HSSD has broad furniture coverage but no guarantee of a usable
+        architectural beam.  This fallback is intentionally narrower than an
+        arbitrary elongated ceiling decoration: it only creates an unambiguous
+        structural member when the request explicitly names one and its desired
+        horizontal footprint is a real long span.
+        """
+        if len(desired_dimensions) != 3:
+            return False
+        try:
+            dimensions = np.asarray(desired_dimensions, dtype=float)
+        except (TypeError, ValueError):
+            return False
+        if np.any(dimensions <= 0.0):
+            return False
+        horizontal = dimensions[:2]
+        minor = float(np.min(horizontal))
+        if (
+            minor <= 0.0
+            or float(np.max(horizontal)) / minor < _LINEAR_CEILING_REQUEST_ASPECT_MIN
+        ):
+            return False
+        terms = set(re.findall(r"[a-z0-9]+", f"{description} {short_name}".lower()))
+        if terms & _NON_STRUCTURAL_CEILING_TERMS:
+            return False
+        return bool(terms & _STRUCTURAL_CEILING_TERMS)
+
+    def _create_procedural_structural_ceiling_span(
+        self,
+        *,
+        request: AssetGenerationRequest,
+        index: int,
+        config: AssetPathConfig,
+        semantic_name: str | None,
+    ) -> SceneObject:
+        """Create a rectangular timber beam when retrieval has no valid beam.
+
+        This is a semantic fallback, not a scale escape hatch for an HSSD
+        candidate.  The mesh is a genuine box with the requested dimensions,
+        so a round fixture or stool can never be registered as a structural
+        ceiling span after a retrieval miss.
+        """
+        desired_scene = np.asarray(request.desired_dimensions[index], dtype=float)
+        gltf_dimensions = np.asarray(
+            scene_dimensions_to_gltf_y_up(desired_scene), dtype=float
+        )
+        final_gltf_path = config.sdf_dir / f"{config.short_name}.gltf"
+        mesh = trimesh.creation.box(extents=gltf_dimensions)
+        # Ceiling-mounted assets are canonicalized with their top at Z=0 in
+        # SceneSmith coordinates.  In glTF Y-up that is the Y axis.
+        mesh.apply_translation([0.0, -gltf_dimensions[1] / 2.0, 0.0])
+        mesh.visual.face_colors = np.tile(
+            np.asarray([99, 59, 31, 255], dtype=np.uint8), (len(mesh.faces), 1)
+        )
+        mesh.export(final_gltf_path)
+
+        collision_pieces = self._generate_collision_geometry(final_gltf_path)
+        volume_m3 = float(np.prod(desired_scene))
+        mass_kg = min(45.0, max(2.0, 650.0 * volume_m3))
+        physics_analysis = MeshPhysicsAnalysis(
+            up_axis="+Z",
+            front_axis="+Y",
+            material="wood",
+            mass_kg=mass_kg,
+            mass_range_kg=(max(1.0, mass_kg * 0.5), mass_kg * 2.0),
+        )
+        sdf_path = config.sdf_dir / f"{config.short_name}.sdf"
+        generate_drake_sdf(
+            visual_mesh_path=final_gltf_path,
+            collision_pieces=collision_pieces,
+            physics_analysis=physics_analysis,
+            output_path=sdf_path,
+            asset_name=config.short_name,
+        )
+        bbox_min, bbox_max = gltf_y_up_bounds_to_scene_z_up(
+            load_mesh_as_trimesh(final_gltf_path, force_merge=True).bounds
+        )
+        return self._create_scene_object(
+            config=config,
+            object_type=ObjectType.CEILING_MOUNTED,
+            sdf_path=sdf_path,
+            final_gltf_path=final_gltf_path,
+            bbox_min=bbox_min,
+            bbox_max=bbox_max,
+            additional_metadata={
+                "asset_source": "procedural_structural",
+                "requested_dimensions": desired_scene.tolist(),
+                "actual_dimensions": (bbox_max - bbox_min).tolist(),
+            },
+            semantic_name=semantic_name,
+            semantic_name_source="procedural_structural",
+        )
 
     @staticmethod
     def _sanitize_filename(name: str, max_length: int = 50) -> str:
@@ -959,6 +1214,22 @@ class AssetManager:
                     rendered_assets_dir=rendered_assets_dir,
                 )
                 candidates = choice.candidates
+                if choice.selected_hssd_id:
+                    selected_candidates = [
+                        candidate
+                        for candidate in candidates
+                        if candidate.hssd_id == choice.selected_hssd_id
+                    ]
+                    if selected_candidates:
+                        candidates = selected_candidates
+                    else:
+                        console_logger.warning(
+                            "Rendered HSSD choice selected unknown candidate %s for '%s'; "
+                            "falling back to original retrieval order.",
+                            choice.selected_hssd_id,
+                            desc,
+                        )
+                        candidates = list(response.results)
                 candidate_errors: list[str] = []
                 for candidate_number, candidate in enumerate(candidates, start=1):
                     try:
@@ -992,6 +1263,27 @@ class AssetManager:
                     )
                     break
                 else:
+                    if (
+                        request.object_type == ObjectType.CEILING_MOUNTED
+                        and self._is_structural_ceiling_span_request(
+                            description=desc,
+                            short_name=config.short_name,
+                            desired_dimensions=request.desired_dimensions[index],
+                        )
+                    ):
+                        scene_obj = self._create_procedural_structural_ceiling_span(
+                            request=request,
+                            index=index,
+                            config=config,
+                            semantic_name=choice.semantic_name,
+                        )
+                        successful_objects.append(scene_obj)
+                        console_logger.info(
+                            "Generated procedural structural ceiling span for '%s' "
+                            "after no retrieved candidate passed geometry checks.",
+                            desc,
+                        )
+                        continue
                     raise ValueError(
                         "All HSSD candidates failed: " + "; ".join(candidate_errors)
                     )
@@ -1053,6 +1345,13 @@ class AssetManager:
                 if request.semantic_name_candidates
                 and index < len(request.semantic_name_candidates)
                 else None
+            ),
+            # Keep a per-room, machine-readable trail for the observability UI.
+            audit_path=self.output_dir / "audit" / "hssd_rendered_choice.jsonl",
+            retrieval_backend=str(
+                (self.cfg.asset_manager.get("hssd", {}) or {}).get(
+                    "retrieval_backend", "unknown"
+                )
             ),
         )
         if choice.selected_hssd_id:
@@ -1165,7 +1464,14 @@ class AssetManager:
                         request.object_descriptions[index], request.short_names[index]
                     )
                     == "square"
-                    else ()
+                    else (
+                        self._linear_ceiling_exact_fit_axes(
+                            canonical_path=canonical_path,
+                            desired_dimensions=request.desired_dimensions[index],
+                        )
+                        if request.object_type == ObjectType.CEILING_MOUNTED
+                        else ()
+                    )
                 ),
             )
         )
@@ -1538,6 +1844,7 @@ class AssetManager:
         Returns:
             AssetGenerationResult with successful assets and failure information.
         """
+        request = _normalize_independent_media_requests(request)
         console_logger.info(
             f"Starting {request.object_type.value} asset acquisition for "
             f"{len(request.object_descriptions)} items using "

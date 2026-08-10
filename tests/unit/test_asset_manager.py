@@ -16,7 +16,11 @@ from scenesmith.agent_utils.asset_manager import (
     AssetManager,
     AssetPathConfig,
     FailedAsset,
+    _normalize_independent_media_requests,
     _normalize_hssd_annotation_front_axis,
+)
+from scenesmith.agent_utils.asset_router.rendered_asset_choice import (
+    RenderedAssetChoice,
 )
 from scenesmith.agent_utils.geometry_generation_server.dataclasses import (
     GeometryGenerationServerResponse,
@@ -53,6 +57,7 @@ def create_mock_cfg():
             # The SAM3D config uses ${paths.checkpoints_dir}; keep the unit
             # fixture self-contained instead of relying on the Hydra root.
             "checkpoints_dir": str(Path(tempfile.gettempdir()) / "checkpoints"),
+            "hssd_data_dir": str(Path(tempfile.gettempdir()) / "hssd_data"),
         },
         "openai": {
             "model": "gpt-4o-mini",  # Cheaper model for testing
@@ -71,6 +76,63 @@ def create_mock_cfg():
 
     # Merge configurations (base config provides all other values).
     return OmegaConf.merge(base_config, test_overrides)
+
+
+def test_separate_display_rewrites_composite_media_console_request() -> None:
+    request = AssetGenerationRequest(
+        object_descriptions=[
+            "Modern TV stand cabinet with flat-screen television mounted on top"
+        ],
+        short_names=["tv_stand_with_tv"],
+        object_type=ObjectType.FURNITURE,
+        desired_dimensions=[[1.6, 0.45, 1.2]],
+        scene_prompt_context=(
+            "A living room with a sofa facing a TV stand and television on the "
+            "opposite wall."
+        ),
+        semantic_name_candidates=[["tv_stand_with_tv", "television"]],
+    )
+
+    normalized = _normalize_independent_media_requests(request)
+
+    assert normalized.short_names == ["tv_stand"]
+    assert "without a television" in normalized.object_descriptions[0]
+    assert normalized.desired_dimensions[0][2] <= 0.9
+    assert normalized.semantic_name_candidates == [["tv_stand", "television"]]
+
+
+def test_separate_display_preserves_standalone_television_with_style_details() -> None:
+    request = AssetGenerationRequest(
+        object_descriptions=["Large flat-screen television with slim black frame"],
+        short_names=["television"],
+        object_type=ObjectType.FURNITURE,
+        desired_dimensions=[[1.2, 0.15, 0.7]],
+        scene_prompt_context=(
+            "A living room with a TV stand and television on the opposite wall."
+        ),
+        semantic_name_candidates=[["tv_stand", "television"]],
+    )
+
+    normalized = _normalize_independent_media_requests(request)
+
+    assert normalized is request
+
+
+def test_separate_display_rewrites_named_media_console_with_display() -> None:
+    request = AssetGenerationRequest(
+        object_descriptions=["Modern media console with a television mounted on top"],
+        short_names=["media_console"],
+        object_type=ObjectType.FURNITURE,
+        desired_dimensions=[[1.6, 0.45, 1.1]],
+        scene_prompt_context=(
+            "A living room with a TV stand and television on the opposite wall."
+        ),
+    )
+
+    normalized = _normalize_independent_media_requests(request)
+
+    assert normalized.short_names == ["tv_stand"]
+    assert "without a television" in normalized.object_descriptions[0]
 
 
 class TestAssetManager(unittest.TestCase):
@@ -294,6 +356,230 @@ class TestAssetManager(unittest.TestCase):
         self.assertEqual(result.successful_assets, [recovered])
         self.assertEqual(result.failed_assets, [])
 
+    def test_selected_hssd_beam_uses_procedural_fallback_without_retrying_rejects(self):
+        """A rejected HSSD candidate cannot replace a failed selected beam."""
+        request = AssetGenerationRequest(
+            object_descriptions=["Long exposed wooden ceiling beam"],
+            short_names=["wooden_beam"],
+            object_type=ObjectType.CEILING_MOUNTED,
+            desired_dimensions=[[4.5, 0.2, 0.15]],
+        )
+        candidates = [
+            HssdRetrievalResult(
+                mesh_path=f"/tmp/beam_{index}.glb",
+                hssd_id=f"beam_{index}",
+                object_name=f"beam candidate {index}",
+                similarity_score=0.9 - index * 0.01,
+                size=(1.2, 0.2, 0.15),
+                category="beam",
+            )
+            for index in range(2)
+        ]
+        response = HssdRetrievalServerResponse(
+            results=candidates,
+            query_description=request.object_descriptions[0],
+        )
+        self.asset_manager.hssd_client = MagicMock()
+        self.asset_manager.hssd_client.retrieve_objects.return_value = iter(
+            [(0, response)]
+        )
+
+        procedural_beam = MagicMock(spec=SceneObject)
+        with (
+            patch.object(
+                self.asset_manager,
+                "_rank_direct_hssd_candidates",
+                return_value=RenderedAssetChoice(
+                    candidates=candidates,
+                    selected_hssd_id="beam_0",
+                    selected_index=1,
+                ),
+            ),
+            patch.object(
+                self.asset_manager,
+                "_process_direct_hssd_candidate",
+                side_effect=ValueError("selected beam cannot be fitted"),
+            ) as process_candidate,
+            patch.object(
+                self.asset_manager,
+                "_create_procedural_structural_ceiling_span",
+                return_value=procedural_beam,
+            ) as create_procedural_beam,
+        ):
+            result = self.asset_manager._retrieve_hssd_assets(request)
+
+        self.assertEqual(
+            [
+                call.kwargs["candidate"].hssd_id
+                for call in process_candidate.call_args_list
+            ],
+            ["beam_0"],
+        )
+        self.assertEqual(result.successful_assets, [procedural_beam])
+        self.assertEqual(result.failed_assets, [])
+        create_procedural_beam.assert_called_once()
+
+    def test_unknown_rendered_choice_id_falls_back_to_retrieval_order(self):
+        request = AssetGenerationRequest(
+            object_descriptions=["A wooden desk"],
+            short_names=["desk"],
+            object_type=ObjectType.FURNITURE,
+            desired_dimensions=[[1.2, 0.6, 0.75]],
+        )
+        candidates = [
+            HssdRetrievalResult(
+                mesh_path=f"/tmp/desk_{index}.glb",
+                hssd_id=f"desk_{index}",
+                object_name=f"desk candidate {index}",
+                similarity_score=0.9 - index * 0.01,
+                size=(1.2, 0.6, 0.75),
+                category="desk",
+            )
+            for index in range(2)
+        ]
+        response = HssdRetrievalServerResponse(
+            results=candidates,
+            query_description=request.object_descriptions[0],
+        )
+        self.asset_manager.hssd_client = MagicMock()
+        self.asset_manager.hssd_client.retrieve_objects.return_value = iter(
+            [(0, response)]
+        )
+        recovered = MagicMock(spec=SceneObject)
+        with (
+            patch.object(
+                self.asset_manager,
+                "_rank_direct_hssd_candidates",
+                return_value=RenderedAssetChoice(
+                    candidates=candidates,
+                    selected_hssd_id="not-in-retrieval",
+                    selected_index=1,
+                ),
+            ),
+            patch.object(
+                self.asset_manager,
+                "_process_direct_hssd_candidate",
+                side_effect=[ValueError("first candidate invalid"), recovered],
+            ) as process_candidate,
+        ):
+            result = self.asset_manager._retrieve_hssd_assets(request)
+
+        self.assertEqual(
+            [
+                call.kwargs["candidate"].hssd_id
+                for call in process_candidate.call_args_list
+            ],
+            ["desk_0", "desk_1"],
+        )
+        self.assertEqual(result.successful_assets, [recovered])
+
+    def test_linear_ceiling_asset_can_fit_its_requested_span(self):
+        canonical_path = self.temp_dir / "beam_canonical.gltf"
+        final_path = self.temp_dir / "beam.gltf"
+        # glTF Y-up extents map to SceneSmith [width, depth, height].
+        trimesh.creation.box(extents=[1.2, 0.15, 0.2]).export(canonical_path)
+
+        exact_axes = self.asset_manager._linear_ceiling_exact_fit_axes(
+            canonical_path=canonical_path,
+            desired_dimensions=[4.5, 0.2, 0.15],
+        )
+        _, bbox_min, bbox_max, _ = self.asset_manager._scale_and_measure_canonical_mesh(
+            canonical_path=canonical_path,
+            final_path=final_path,
+            desired_dimensions=[4.5, 0.2, 0.15],
+            exact_fit_axes=exact_axes,
+        )
+
+        self.assertEqual(exact_axes, (0,))
+        np.testing.assert_allclose(
+            bbox_max - bbox_min, [4.5, 0.2, 0.15], rtol=1e-5, atol=1e-5
+        )
+
+    def test_linear_ceiling_fit_rejects_round_or_extreme_candidate(self):
+        round_path = self.temp_dir / "round_fixture.gltf"
+        extreme_path = self.temp_dir / "tiny_beam.gltf"
+        trimesh.creation.box(extents=[0.8, 0.2, 0.8]).export(round_path)
+        trimesh.creation.box(extents=[0.1, 0.15, 0.2]).export(extreme_path)
+
+        self.assertEqual(
+            self.asset_manager._linear_ceiling_exact_fit_axes(
+                canonical_path=round_path,
+                desired_dimensions=[4.5, 0.2, 0.15],
+            ),
+            (),
+        )
+        self.assertEqual(
+            self.asset_manager._linear_ceiling_exact_fit_axes(
+                canonical_path=extreme_path,
+                desired_dimensions=[4.5, 0.2, 0.15],
+            ),
+            (),
+        )
+
+    def test_procedural_structural_span_requires_unambiguous_beam_request(self):
+        self.assertTrue(
+            self.asset_manager._is_structural_ceiling_span_request(
+                description="Exposed reclaimed-wood ceiling beam",
+                short_name="rustic_beam",
+                desired_dimensions=[4.5, 0.2, 0.15],
+            )
+        )
+        self.assertFalse(
+            self.asset_manager._is_structural_ceiling_span_request(
+                description="Round wooden stool used as a ceiling decoration",
+                short_name="beam",
+                desired_dimensions=[4.5, 0.2, 0.15],
+            )
+        )
+        self.assertFalse(
+            self.asset_manager._is_structural_ceiling_span_request(
+                description="Rustic wooden beam",
+                short_name="rustic_beam",
+                desired_dimensions=[1.0, 0.5, 0.15],
+            )
+        )
+
+    def test_procedural_structural_span_has_requested_beam_geometry(self):
+        request = AssetGenerationRequest(
+            object_descriptions=["Exposed reclaimed-wood ceiling beam"],
+            short_names=["rustic_beam"],
+            object_type=ObjectType.CEILING_MOUNTED,
+            desired_dimensions=[[4.5, 0.2, 0.15]],
+        )
+        config = self.asset_manager._create_asset_paths(
+            request.object_descriptions, request.short_names
+        )[0]
+        config.sdf_dir.mkdir(parents=True, exist_ok=True)
+        sdf_path = config.sdf_dir / "rustic_beam.sdf"
+
+        with (
+            patch.object(
+                self.asset_manager,
+                "_generate_collision_geometry",
+                return_value=[trimesh.creation.box(extents=[1.0, 1.0, 1.0])],
+            ),
+            patch(
+                "scenesmith.agent_utils.asset_manager.generate_drake_sdf",
+                return_value=sdf_path,
+            ),
+        ):
+            beam = self.asset_manager._create_procedural_structural_ceiling_span(
+                request=request,
+                index=0,
+                config=config,
+                semantic_name="rustic_beam",
+            )
+
+        self.assertEqual(beam.metadata["asset_source"], "procedural_structural")
+        self.assertEqual(beam.metadata["semantic_name"], "rustic_beam")
+        np.testing.assert_allclose(
+            beam.bbox_max - beam.bbox_min,
+            [4.5, 0.2, 0.15],
+            rtol=1e-5,
+            atol=1e-5,
+        )
+        self.assertTrue(beam.geometry_path.exists())
+
     def test_direct_hssd_candidate_preserves_baked_scale_for_support_surfaces(self):
         """Direct retries must keep the scale used by HSSD surface annotations."""
         request = AssetGenerationRequest(
@@ -470,6 +756,25 @@ class TestAssetManager(unittest.TestCase):
 
         np.testing.assert_allclose(
             (bbox_max - bbox_min)[:2], [2.0, 2.0], rtol=1e-5, atol=1e-5
+        )
+
+    def test_empty_dimensions_preserve_canonical_asset_scale(self):
+        canonical_path = self.temp_dir / "clock_canonical.gltf"
+        final_path = self.temp_dir / "clock.gltf"
+        trimesh.creation.box(extents=[0.3, 0.2, 0.4]).export(canonical_path)
+
+        _, bbox_min, bbox_max, applied_scale = (
+            self.asset_manager._scale_and_measure_canonical_mesh(
+                canonical_path=canonical_path,
+                final_path=final_path,
+                desired_dimensions=[],
+            )
+        )
+
+        self.assertEqual(applied_scale, 1.0)
+        self.assertTrue(final_path.exists())
+        np.testing.assert_allclose(
+            bbox_max - bbox_min, [0.3, 0.4, 0.2], rtol=1e-5, atol=1e-5
         )
 
     def test_plant_uniform_fit_relaxation_is_targeted(self):

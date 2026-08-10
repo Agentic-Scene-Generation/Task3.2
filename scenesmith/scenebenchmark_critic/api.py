@@ -20,13 +20,8 @@ from scenesmith.scenebenchmark_critic.adapter import (
     room_scene_to_case_pack,
 )
 from scenesmith.scenebenchmark_critic.config import CriticConfig, critic_config_from_any
-from scenesmith.scenebenchmark_critic.metrics.functional_dependency.orientation_contracts import (
-    stabilize_orientation_contracts,
-)
-from scenesmith.scenebenchmark_critic.intent_contract import constraint_mode
 from scenesmith.scenebenchmark_critic.intent_contract import (
     contract_seating_targets,
-    set_contract_mode,
 )
 from scenesmith.scenebenchmark_critic.evaluator import run_case_pack_checks
 from scenesmith.scenebenchmark_critic.reports import (
@@ -75,6 +70,7 @@ def _record_critic_timing(
     started_at: float,
     steps: dict[str, Any],
     details: dict[str, Any] | None = None,
+    evaluation: dict[str, Any] | None = None,
     error: str | None = None,
 ) -> None:
     """Append one independent timing record; never affect critic execution."""
@@ -95,6 +91,8 @@ def _record_critic_timing(
     }
     if error:
         record["error"] = error
+    if evaluation is not None:
+        record["evaluation"] = evaluation
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8", newline="\n") as stream:
@@ -127,19 +125,14 @@ def evaluate_room_scene(
         # Asset annotation/VLM filtering stays outside this branch, so no model
         # request is made while building prompt feedback.
         case_pack = room_scene_to_case_pack(
-            scene, stage=stage, metrics=list(critic_config.metrics)
+            scene,
+            stage=stage,
+            metrics=list(critic_config.metrics),
         )
         timing_steps["case_pack_build_sec"] = round(time.perf_counter() - step_start, 6)
         step_start = time.perf_counter()
-        # The historical orientation contract remains available while
-        # shadowing legacy behavior, but contract mode only uses prompt targets.
-        if constraint_mode(critic_config) != "contract":
-            stabilize_orientation_contracts(
-                case_pack,
-                scene,
-                critic_config,
-                stage=stage,
-            )
+        # Prompt contracts own orientation. The stabilizer only fills asset
+        # metadata and cannot create an additional layout requirement.
         timing_steps["orientation_contract_sec"] = round(
             time.perf_counter() - step_start, 6
         )
@@ -172,6 +165,11 @@ def evaluate_room_scene(
                 "metrics": list(critic_config.metrics),
                 "case_pack_check_count": len(case_pack.get("checks") or []),
                 "result_count": len(results),
+            },
+            evaluation={
+                "results": payload.get("results", []),
+                "summary": payload.get("summary", {}),
+                "gate": payload.get("gate", {}),
             },
         )
         return payload
@@ -240,6 +238,11 @@ def evaluate_house_scene(
                 "include_object_types": [
                     str(item) for item in (include_object_types or [])
                 ],
+            },
+            evaluation={
+                "results": payload.get("results", []),
+                "summary": payload.get("summary", {}),
+                "gate": payload.get("gate", {}),
             },
         )
         return payload
@@ -323,10 +326,10 @@ def seating_orientation_targets(
     prompt contract as later geometry evaluation.
     """
     critic_config = _coerce_config(config)
-    if constraint_mode(critic_config) != "contract":
-        return None
-    case_pack = room_scene_to_case_pack(scene, metrics=("functional_dependency",))
-    set_contract_mode(case_pack, "contract")
+    case_pack = room_scene_to_case_pack(
+        scene,
+        metrics=("functional_dependency",),
+    )
     return contract_seating_targets(case_pack)
 
 

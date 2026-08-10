@@ -20,17 +20,14 @@ from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.c
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.dining_place_setting import (
     evaluate_dining_place_setting_alignment,
 )
-from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.dining_seat import (
-    evaluate_dining_seat_distribution,
+from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.edge_distribution import (
+    evaluate_edge_distribution,
 )
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.intent_contract import (
     evaluate_intent_contract_extensions,
 )
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.manipuland_completeness import (
     evaluate_manipuland_completeness,
-)
-from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.media_support import (
-    evaluate_media_support_alignment,
 )
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.room_center import (
     evaluate_room_center_alignment,
@@ -90,13 +87,12 @@ METRIC_REGISTRY: dict[str, MetricPlugin] = {
         rule_evaluator=evaluate_functional_dependency,
         check_augmenter=augment_functional_dependency_checks,
         extension_evaluators=(
-            evaluate_media_support_alignment,
             evaluate_intent_contract_extensions,
             evaluate_bedside_group_alignment,
             evaluate_classroom_workstation_distribution,
             evaluate_room_center_alignment,
             evaluate_study_furniture_layout,
-            evaluate_dining_seat_distribution,
+            evaluate_edge_distribution,
             evaluate_manipuland_completeness,
             evaluate_dining_place_setting_alignment,
             evaluate_workstation_focal_alignment,

@@ -16,6 +16,7 @@ from scenesmith.agent_utils.blender.server_manager import BlenderServer
 from scenesmith.agent_utils.house import RoomGeometry
 from scenesmith.agent_utils.rendering import render_scene_for_agent_observation
 from scenesmith.agent_utils.room import ObjectType, RoomScene, SceneObject, UniqueID
+from tests.test_data.gltf_assets import missing_gltf_buffers
 
 console_logger = logging.getLogger(__name__)
 
@@ -105,6 +106,19 @@ class TestRenderingAnnotations(unittest.TestCase):
         # Set up test data paths.
         test_data_dir = Path(__file__).parent.parent / "test_data" / "realistic_scene"
         floor_plan_path = test_data_dir / "room_geometry.sdf"
+        gltf_paths = [
+            test_data_dir / "generated_assets/sdf/work_desk_1761578426/work_desk.gltf",
+            test_data_dir
+            / "generated_assets/sdf/office_chair_1761578426/office_chair.gltf",
+            test_data_dir / "generated_assets/sdf/printer_1761578426/printer.gltf",
+            test_data_dir / "generated_assets/sdf/king_bed_1761578419/king_bed.gltf",
+        ]
+        missing = missing_gltf_buffers(gltf_paths)
+        if missing:
+            self.skipTest(
+                "Missing glTF buffer sidecars: "
+                + ", ".join(str(path) for path in missing)
+            )
 
         # Verify test data exists.
         if not floor_plan_path.exists():

@@ -59,6 +59,31 @@ def _score(name: str, grade: int) -> CategoryScore:
 
 
 class StageWorkingMemoryTest(unittest.TestCase):
+    def test_repair_event_is_saved_with_pose_changes(self) -> None:
+        with TemporaryDirectory() as tmp:
+            memory = StageWorkingMemory(Path(tmp) / "room_bedroom", "furniture")
+            record = memory.record_repair_event(
+                source="initial_design",
+                strategy="prompt_contract_furniture_relations",
+                status="accepted",
+                trigger_reasons=["window_clearance__wardrobe_0"],
+                actions=["wardrobe_0:window_clearance"],
+                affected_objects=[
+                    {
+                        "object_id": "wardrobe_0",
+                        "before": {"xy": [-1.8, -1.7]},
+                        "after": {"xy": [0.58, -1.7]},
+                    }
+                ],
+            )
+
+            rows = memory.debug_repair_path.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(1, len(rows))
+            saved = json.loads(rows[0])
+            self.assertEqual(record, saved)
+            self.assertEqual("accepted", saved["status"])
+            self.assertEqual([0.58, -1.7], saved["affected_objects"][0]["after"]["xy"])
+
     def test_score_total_and_stage_canonicalization(self) -> None:
         scores = FurnitureCritiqueWithScores(
             critique="layout is usable",
@@ -182,6 +207,35 @@ class StageWorkingMemoryTest(unittest.TestCase):
                 quality["observed_counts"],
             )
             self.assertEqual([], quality["missing_required_objects"])
+
+    def test_planner_orchestration_records_dispatch_and_resume(self) -> None:
+        with TemporaryDirectory() as tmp:
+            memory = StageWorkingMemory(Path(tmp), "furniture", enabled=True)
+
+            memory.record_planner_orchestration(
+                call_id="furniture:request_initial_design:001",
+                phase="dispatch",
+                operation="request_initial_design",
+                child_agent="designer",
+                status="started",
+            )
+            memory.record_planner_orchestration(
+                call_id="furniture:request_initial_design:001",
+                phase="resume",
+                operation="request_initial_design",
+                child_agent="designer",
+                status="completed",
+            )
+
+            records = [
+                json.loads(line)
+                for line in memory.debug_orchestration_path.read_text(
+                    encoding="utf-8"
+                ).splitlines()
+            ]
+            self.assertEqual(["dispatch", "resume"], [row["phase"] for row in records])
+            self.assertEqual("designer", records[0]["child_agent"])
+            self.assertTrue(records[0]["created_at"].endswith("Z"))
 
 
 if __name__ == "__main__":

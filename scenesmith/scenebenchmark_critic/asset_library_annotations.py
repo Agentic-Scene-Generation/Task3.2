@@ -353,15 +353,20 @@ def _scenebenchmark_accessibility_policy(
     affordances: set[str],
     scene_object_type: str,
     group: str,
+    mobility_class: str,
 ) -> str:
     policy = record.get("week27_asset_policy") or {}
     if scene_object_type in {"wall_mounted", "ceiling_mounted"} or group == "decor":
         return "ignored"
     raw = str(policy.get("accessibility_policy") or "").strip()
-    if raw in {"required", "optional", "ignored"}:
+    if raw in {"optional", "ignored"}:
         return raw
     if group == "small_object" or scene_object_type == "manipuland":
         return "ignored"
+    if mobility_class == "movable" and "sittable" in affordances:
+        return "optional"
+    if raw == "required":
+        return raw
     return "required" if affordances else "ignored"
 
 
@@ -617,7 +622,7 @@ def build_scenebenchmark_annotation(record: dict[str, Any]) -> dict[str, Any]:
     scene_object_type = _scenebenchmark_scene_object_type(record, group)
     mobility_class = _scenebenchmark_mobility_class(record, group, scene_object_type)
     accessibility_policy = _scenebenchmark_accessibility_policy(
-        record, affordances, scene_object_type, group
+        record, affordances, scene_object_type, group, mobility_class
     )
     front_hint = _scenebenchmark_front_hint(record, affordances)
     access_sides = _scenebenchmark_access_sides(record, affordances, front_hint)
@@ -681,6 +686,13 @@ def build_scenebenchmark_annotation(record: dict[str, Any]) -> dict[str, Any]:
         )
         hints["semantic_directions"] = canonical_front.get("semantic_directions", [])
         hints["functional_directions"] = record.get("functional_directions", [])
+
+    asset_quality = record.get("asset_quality") or {}
+    if isinstance(asset_quality, dict):
+        for field in ("mesh_topology", "physics_proxy", "support_stability"):
+            value = asset_quality.get(field)
+            if isinstance(value, dict):
+                hints[field] = value
 
     return {
         "schema_version": "scenebenchmark_hssd_fd_sa@0.1",
@@ -1037,6 +1049,15 @@ class AssetLibraryAnnotationStore:
             raise KeyError(f"HSSD id not found in annotation lookup: {normalized}")
         return record
 
+    def get_physics_proxy_policy(self, hssd_id: str) -> dict[str, Any] | None:
+        """Return the reviewed open-mesh physics policy for an HSSD asset."""
+        record = self.get(hssd_id)
+        if record is None:
+            return None
+        quality = record.get("asset_quality") or {}
+        policy = quality.get("physics_proxy") if isinstance(quality, dict) else None
+        return dict(policy) if isinstance(policy, dict) else None
+
     def search_category(self, query: str, limit: int = 20) -> list[dict[str, Any]]:
         q = str(query or "").strip().lower().replace("_", " ")
         if not q:
@@ -1066,3 +1087,11 @@ def get_hssd_asset_annotations(hssd_id: str) -> dict[str, Any] | None:
     if _DEFAULT_STORE is None:
         _DEFAULT_STORE = AssetLibraryAnnotationStore()
     return _DEFAULT_STORE.get(hssd_id)
+
+
+def get_hssd_physics_proxy_policy(hssd_id: str) -> dict[str, Any] | None:
+    """Return a machine-readable proxy policy without requiring full expansion."""
+    global _DEFAULT_STORE
+    if _DEFAULT_STORE is None:
+        _DEFAULT_STORE = AssetLibraryAnnotationStore()
+    return _DEFAULT_STORE.get_physics_proxy_policy(hssd_id)

@@ -7,6 +7,9 @@ import re
 from typing import Any
 
 from scenesmith.agent_utils.room import ObjectType
+from scenesmith.scenebenchmark_critic.intent_contract import (
+    intent_contract_constraints_for_scene,
+)
 
 
 def normalize_semantic_name(value: object) -> str:
@@ -25,6 +28,8 @@ def semantic_name_candidates_for_request(
     task_spec: Any,
     short_names: list[str],
     object_type: ObjectType,
+    *,
+    scene: Any | None = None,
 ) -> list[list[str]]:
     """Build per-asset VLM labels from TaskCompiler-owned vocabulary.
 
@@ -47,7 +52,7 @@ def semantic_name_candidates_for_request(
     allowed: list[str] = []
     if stage_key:
         allowed.extend(get(stage_key, []) or [])
-    for constraint in get("intent_constraints", []) or []:
+    for constraint in intent_contract_constraints_for_scene(scene):
         if not isinstance(constraint, dict):
             continue
         for selector_key in ("subjects", "subject", "targets", "target"):

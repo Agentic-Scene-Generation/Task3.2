@@ -811,6 +811,9 @@ class RoomScene:
     text_description: str = ""
     """Text description of the overall room."""
 
+    metadata: dict[str, Any] = field(default_factory=dict)
+    """Scene-level metadata persisted in checkpoints."""
+
     action_log_path: Path | None = None
     """Path to action log file for scene replication/replay."""
 
@@ -1591,6 +1594,7 @@ class RoomScene:
             "room_geometry": room_geometry_data,
             "objects": objects_dict,
             "text_description": self.text_description,
+            "metadata": self.metadata,
         }
 
     def restore_from_state_dict(self, state_dict: dict[str, Any]) -> None:
@@ -1620,6 +1624,13 @@ class RoomScene:
 
         # Restore text description.
         self.text_description = state_dict["text_description"]
+        self.metadata = dict(state_dict.get("metadata") or {})
+        if self.metadata.get("scenebenchmark_intent_contract"):
+            setattr(
+                self,
+                "scenebenchmark_intent_contract",
+                self.metadata["scenebenchmark_intent_contract"],
+            )
 
         # Restore objects.
         for obj_data in state_dict["objects"].values():

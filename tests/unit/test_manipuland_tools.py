@@ -11,11 +11,17 @@ import numpy as np
 import trimesh
 
 from omegaconf import OmegaConf
-from pydrake.all import RigidTransform
+from pydrake.all import RigidTransform, RollPitchYaw
 
 from scenesmith.agent_utils.asset_manager import AssetManager
 from scenesmith.agent_utils.placement_noise import PlacementNoiseMode
-from scenesmith.agent_utils.room import RoomScene, SupportSurface, UniqueID
+from scenesmith.agent_utils.room import (
+    ObjectType,
+    RoomScene,
+    SceneObject,
+    SupportSurface,
+    UniqueID,
+)
 from scenesmith.manipuland_agents.tools.manipuland_tools import ManipulandTools
 
 
@@ -123,7 +129,9 @@ class TestManipulandTools(unittest.TestCase):
             [surface("S_left", 0.0), surface("S_right", 1.0)]
         )
 
-        self.assertEqual([str(surface.surface_id) for surface in result], ["S_left", "S_right"])
+        self.assertEqual(
+            [str(surface.surface_id) for surface in result], ["S_left", "S_right"]
+        )
 
     @patch.object(ManipulandTools, "_dining_position_is_valid", return_value=True)
     def test_dining_target_uses_critic_selected_segmented_surface(self, _mock_valid):
@@ -488,6 +496,76 @@ class TestManipulandTools(unittest.TestCase):
         )
         self.assertTrue(is_valid)
         self.assertIsNone(error_msg)
+
+    def test_collision_frame_bbox_overrides_misaligned_visual_mesh(self):
+        """SDF-frame bounds must prevent placements a rotated GLTF would accept."""
+        visual_mesh = trimesh.creation.box(extents=[0.16, 0.02, 0.20])
+        mesh_path = self.temp_dir / "misaligned_book.obj"
+        visual_mesh.export(mesh_path)
+        surface = SupportSurface(
+            surface_id=UniqueID("shelf_surface"),
+            bounding_box_min=np.array([-0.5, -0.5, 0.0]),
+            bounding_box_max=np.array([0.5, 0.5, 0.5]),
+            transform=RigidTransform(p=[0.0, 0.0, 1.0]),
+        )
+
+        is_valid, error_msg = self.manipuland_tools._validate_convex_hull_footprint(
+            target_surface=surface,
+            geometry_path=mesh_path,
+            position_2d=np.array([0.0, 0.45]),
+            rotation_degrees=0.0,
+            bounding_box_min=np.array([-0.08, -0.10, 0.0]),
+            bounding_box_max=np.array([0.08, 0.10, 0.03]),
+        )
+
+        self.assertFalse(is_valid)
+        self.assertIn("surface boundary", error_msg)
+
+    def test_wall_side_of_support_surface_requires_clearance(self):
+        """A valid support point cannot put the full object footprint in a wall."""
+        wall = SceneObject(
+            object_id=UniqueID("east_wall"),
+            object_type=ObjectType.WALL,
+            name="east_wall",
+            description="Room east wall",
+            transform=RigidTransform(p=[2.475, 0.0, 1.35]),
+            bbox_min=np.array([-0.025, -2.0, -1.35]),
+            bbox_max=np.array([0.025, 2.0, 1.35]),
+        )
+        self.mock_scene.objects = {wall.object_id: wall}
+        shelf_surface = SupportSurface(
+            surface_id=UniqueID("S_2"),
+            bounding_box_min=np.array([-0.40, -0.155, 0.0]),
+            bounding_box_max=np.array([0.40, 0.155, 0.5]),
+            transform=RigidTransform(
+                rpy=RollPitchYaw(0.0, 0.0, math.pi / 2),
+                p=np.array([2.295, 0.0, 1.52]),
+            ),
+        )
+        bbox_min = np.array([-0.08, -0.10, 0.0])
+        bbox_max = np.array([0.08, 0.10, 0.03])
+
+        blocked, error_msg = self.manipuland_tools._validate_convex_hull_footprint(
+            target_surface=shelf_surface,
+            geometry_path=self.temp_dir / "unused.obj",
+            position_2d=np.array([0.0, -0.05]),
+            rotation_degrees=0.0,
+            bounding_box_min=bbox_min,
+            bounding_box_max=bbox_max,
+        )
+        clear, clear_error = self.manipuland_tools._validate_convex_hull_footprint(
+            target_surface=shelf_surface,
+            geometry_path=self.temp_dir / "unused.obj",
+            position_2d=np.array([0.0, 0.0]),
+            rotation_degrees=0.0,
+            bounding_box_min=bbox_min,
+            bounding_box_max=bbox_max,
+        )
+
+        self.assertFalse(blocked)
+        self.assertIn("east_wall", error_msg)
+        self.assertTrue(clear)
+        self.assertIsNone(clear_error)
 
     def test_top_surface_uses_overlap_tolerance(self):
         """Test that top surfaces use configured overlap tolerance."""

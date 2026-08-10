@@ -127,8 +127,21 @@ def compute_reachability(scene: RoomScene, robot_width: float) -> ReachabilityRe
 def _get_floor_polygon(scene: RoomScene) -> Polygon:
     """Create floor polygon from room dimensions.
 
-    Floor is a rectangle from (0,0) to (length, width) in world coordinates.
+    Prefer the serialized floor object because generated rooms are commonly
+    centered around the world origin rather than anchored at ``(0, 0)``.
+    Keep the dimension fallback for lightweight tests and legacy scenes that
+    do not carry an explicit floor object.
     """
+    floor_object = getattr(scene.room_geometry, "floor", None)
+    if (
+        floor_object is not None
+        and getattr(floor_object, "bbox_min", None) is not None
+        and getattr(floor_object, "bbox_max", None) is not None
+    ):
+        polygon = _get_furniture_obb_2d(floor_object)
+        if not polygon.is_empty and polygon.area > 0.0:
+            return polygon
+
     length = scene.room_geometry.length
     width = scene.room_geometry.width
     return Polygon([(0, 0), (length, 0), (length, width), (0, width)])

@@ -63,7 +63,16 @@ DEFAULT_ALIASES = {
         "visitor armchairs",
     ],
     "student_desk": ["student desk", "student desks"],
-    "teacher_desk": ["teacher desk", "teacher desks", "teacher's desk"],
+    "teacher_desk": [
+        "teacher desk",
+        "teacher desks",
+        "teacher's desk",
+        "teachers desk",
+        "teachers' desk",
+        "instructor desk",
+        "instructor desks",
+        "instructor's desk",
+    ],
     "dining_chair": ["dining chair", "dining chairs"],
     "student_chair": ["student chair", "student chairs"],
     "armchair": ["armchair", "armchairs", "arm chair", "arm chairs"],
@@ -83,6 +92,15 @@ DEFAULT_ALIASES = {
         "tvstands",
         "tv console",
         "media console",
+    ],
+    "television": [
+        "television",
+        "televisions",
+        "tv",
+        "tvs",
+        "flat-screen television",
+        "flat-screen tv",
+        "display",
     ],
     "sideboard": ["sideboard", "sideboards", "buffet cabinet"],
 }
@@ -276,24 +294,64 @@ def _is_non_furniture_table_reference(text: str, end: int) -> bool:
 
 
 def _has_unnegated_collision(text: str) -> bool:
-    terms = ("collision", "collisions", "colliding", "penetration")
-    negations = (
-        "no collision",
-        "no collisions",
-        "zero collision",
-        "zero collisions",
-        "without collision",
-        "without collisions",
-        "no new collision",
-        "no new collisions",
+    normalized = text.lower()
+    negated_patterns = (
+        r"\b(?:no|zero)\s+(?:(?:new|remaining|detectable|physical)\s+)?"
+        r"(?:collisions?|penetration)\b",
+        r"\b0\s+(?:collisions?|penetration)\b",
+        r"\bno\s+(?:(?:physics|physical)\s+)?violations?\s+"
+        r"(?:or|and)\s+(?:collisions?|penetration)\b",
+        r"\bwithout\s+(?:any\s+|new\s+)?(?:collisions?|penetration)\b",
+        r"\bfree\s+of\s+(?:any\s+)?(?:collisions?|penetration)\b",
+        r"\b(?:collisions?|penetration)[ -]free\b",
+        r"\bnon[ -]?colliding\b",
+        r"\b(?:collisions?|penetration)\s*(?:is|are|was|were|has been|have been)?"
+        r"\s*(?:absent|resolved|cleared|not detected)\b",
+        r"\bcollision\s+(?:check|test|validation)\s+" r"(?:passes|passed|is clear)\b",
+        r"\bcollision\s+count\s*(?:is|=|:)\s*(?:zero|0)\b",
+        r"\bcollisions?\s*(?:is|are|=|:)\s*(?:none|zero|0)\b",
     )
-    for term in terms:
-        for match in re.finditer(re.escape(term), text):
-            window = text[max(0, match.start() - 24) : match.end() + 24]
-            if any(negation in window for negation in negations):
-                continue
-            return True
-    return False
+    for pattern in negated_patterns:
+        normalized = re.sub(pattern, " ", normalized)
+    return (
+        re.search(r"\b(?:collisions?|colliding|penetration)\b", normalized) is not None
+    )
+
+
+def _has_unnegated_door_blockage(text: str) -> bool:
+    normalized = text.lower()
+    opening = r"(?:doors?|doorways?|door\s+swings?|open\s+connections?)"
+    negated_patterns = (
+        rf"\bno\s+(?:blocked|obstructed)\s+{opening}\b",
+        rf"\bno\s+{opening}\s+(?:is\s+|are\s+)?(?:blocked|obstructed)\b",
+        rf"\b{opening}\s+(?:is\s+|are\s+|remains?\s+)?"
+        r"(?:clear|unblocked|unobstructed|accessible)\b",
+        rf"\b(?:does\s+not|doesn't|do\s+not|don't|not)\s+"
+        rf"(?:block|obstruct)\s+(?:the\s+)?(?:\w+\s+){{0,2}}{opening}\b",
+        rf"\bwithout\s+(?:\w+\s+){{0,2}}(?:blocking|obstructing)\s+"
+        rf"(?:the\s+)?(?:\w+\s+){{0,2}}{opening}\b",
+        rf"\bnothing\s+(?:is\s+)?(?:blocking|obstructing)\s+"
+        rf"(?:the\s+)?(?:\w+\s+){{0,2}}{opening}\b",
+        rf"\b{opening}\s+clearance\s+(?:is\s+|remains?\s+)?"
+        r"(?:adequate|sufficient|maintained|clear|unobstructed|passes|passed)\b",
+        rf"\b(?:adequate|sufficient)\s+{opening}\s+clearance\b",
+    )
+    for pattern in negated_patterns:
+        normalized = re.sub(pattern, " ", normalized)
+
+    asserted_patterns = (
+        rf"\b(?:blocked|obstructed)\s+(?:the\s+)?(?:\w+\s+){{0,2}}{opening}\b",
+        rf"\b{opening}\s+(?:is\s+|are\s+|remains?\s+)?"
+        r"(?:blocked|obstructed|inaccessible)\b",
+        rf"\b(?:blocks|obstructs)\s+(?:the\s+)?(?:\w+\s+){{0,2}}{opening}\b",
+        rf"\b{opening}\s+clearance\s+(?:is\s+)?"
+        r"(?:insufficient|inadequate|violated|violation|violations|failing|failed)\b",
+        rf"\b(?:insufficient|inadequate|violated|failing|failed)\s+"
+        rf"{opening}\s+clearance\b",
+        rf"\b{opening}\b[^.;:\n]{{0,24}}\b(?:cannot|can't|unable\s+to)\s+"
+        r"(?:fully\s+)?open\b",
+    )
+    return any(re.search(pattern, normalized) for pattern in asserted_patterns)
 
 
 class FurnitureSafetyController:
@@ -326,6 +384,9 @@ class FurnitureSafetyController:
         self.max_rescales_per_object = int(_cfg_get(cfg, "max_rescales_per_object", 1))
         self.max_generate_assets_calls_after_initial = int(
             _cfg_get(cfg, "max_generate_assets_calls_after_initial", 0)
+        )
+        self.max_generate_assets_recovery_calls = int(
+            _cfg_get(cfg, "max_generate_assets_recovery_calls", 1)
         )
         self.min_accept_delta = float(_cfg_get(cfg, "min_accept_delta", 0.05))
         self.accept_score_threshold = float(
@@ -407,6 +468,8 @@ class FurnitureSafetyController:
         self.blocked_tool_calls_this_call = 0
         self.moves_by_object_this_call: dict[str, int] = {}
         self.generate_asset_calls = 0
+        self.asset_generation_recovery_calls = 0
+        self.last_asset_generation_had_failures = False
         self.rescale_counts: dict[str, int] = {}
         self.should_finish = False
 
@@ -448,6 +511,8 @@ class FurnitureSafetyController:
         self.blocked_tool_calls_this_call = 0
         self.moves_by_object_this_call = {}
         self.generate_asset_calls = 0
+        self.asset_generation_recovery_calls = 0
+        self.last_asset_generation_had_failures = False
         self.rescale_counts = {}
         self.should_finish = False
         self.reset_best_checkpoint()
@@ -583,6 +648,16 @@ class FurnitureSafetyController:
                         )
                         if re.search(pattern, text):
                             counts[target] = max(counts.get(target, 0), source_count)
+                            source_match = re.fullmatch(
+                                rf"({'|'.join(DISTINCT_FURNITURE_ROLES)})_(desk|chair)",
+                                source,
+                            )
+                            if source_match and target in {"desk", "chair"}:
+                                role_target = f"{source_match.group(1)}_{target}"
+                                if role_target in DEFAULT_ALIASES:
+                                    counts[role_target] = max(
+                                        counts.get(role_target, 0), source_count
+                                    )
                             found = True
                             break
                     if found:
@@ -702,7 +777,14 @@ class FurnitureSafetyController:
         self.moves_by_object_this_call = {}
 
     def _record_tool_denial(self, message: str) -> str:
-        """Escalate repeated blocked tool calls into an explicit designer stop."""
+        """Escalate repeated blocked calls without stranding an invalid scene.
+
+        A tool-call model can ignore a textual stop instruction and continue
+        issuing calls in the same turn.  Ending the whole stage solely because
+        two calls were rejected makes that behavior unrecoverable when the
+        initial layout still lacks required objects.  A hard-valid checkpoint,
+        when available, is the only safe basis for ending the stage here.
+        """
         self.blocked_tool_calls_this_call += 1
         if (
             self.active_designer_call
@@ -710,11 +792,21 @@ class FurnitureSafetyController:
             and self.blocked_tool_calls_this_call
             >= self.max_blocked_tool_calls_per_designer_call
         ):
-            self.should_finish = True
+            if self.best_scene_state is not None:
+                self.should_finish = True
+                next_step = (
+                    "A hard-valid checkpoint is available, so finish the furniture "
+                    "stage without further changes."
+                )
+            else:
+                next_step = (
+                    "Do not repeat rejected operations. Return a concise summary so "
+                    "the next critique-guided repair call can continue completing the "
+                    "required layout."
+                )
             return (
                 f"{message} STOP: {self.blocked_tool_calls_this_call} tool calls "
-                "have been blocked in this designer call. Return your concise "
-                "designer summary now without calling another tool."
+                f"have been blocked in this designer call. {next_step}"
             )
         return message
 
@@ -808,16 +900,27 @@ class FurnitureSafetyController:
             return False, stop_message
         max_calls = 1 + self.max_generate_assets_calls_after_initial
         if self.generate_asset_calls >= max_calls:
-            return (
-                False,
-                self._record_tool_denial(
-                    "Safety controller blocked generate_assets: asset generation has "
-                    "already run for this furniture stage. Reuse available assets, "
-                    "repair placement, or finish with the best checkpoint."
-                ),
-            )
+            if (
+                not self.last_asset_generation_had_failures
+                or self.asset_generation_recovery_calls
+                >= self.max_generate_assets_recovery_calls
+            ):
+                return (
+                    False,
+                    self._record_tool_denial(
+                        "Safety controller blocked generate_assets: asset generation "
+                        "already succeeded or exhausted its recovery allowance for "
+                        "this furniture stage. Reuse available assets, repair "
+                        "placement, or finish with the best checkpoint."
+                    ),
+                )
+            self.asset_generation_recovery_calls += 1
         self.generate_asset_calls += 1
         return True, ""
+
+    def record_asset_generation_result(self, *, had_failures: bool) -> None:
+        """Allow one bounded retry when a batch left required assets unresolved."""
+        self.last_asset_generation_had_failures = bool(had_failures)
 
     def record_add(
         self,
@@ -961,8 +1064,12 @@ class FurnitureSafetyController:
                 )
         return ""
 
-    def evaluate_scores(self, scores: CritiqueWithScores) -> SafetyEvaluation:
-        """Compute weighted score and classify hard vs soft issues."""
+    def evaluate_scores(
+        self,
+        scores: CritiqueWithScores,
+        hard_state_evaluation: HardStateEvaluation | None = None,
+    ) -> SafetyEvaluation:
+        """Compute quality while keeping deterministic hard evidence authoritative."""
         score_by_name = {
             _normalize_score_name(score.name): score for score in scores.get_scores()
         }
@@ -1017,22 +1124,19 @@ class FurnitureSafetyController:
                     f"{self.reachability_hard_min}"
                 )
 
-        if _has_unnegated_collision(text):
-            hard_reasons.append("physics collision indicated by critique")
-
-        door_terms = (
-            "door blocked",
-            "blocked door",
-            "doorway blocked",
-            "blocks the door",
-            "blocks door",
-            "door clearance",
-            "open connection blocked",
-        )
-        if any(term in text for term in door_terms):
-            hard_reasons.append(
-                "door or open-connection blockage indicated by critique"
-            )
+        # Free-form critic prose is only a fallback when no deterministic hard
+        # state is available. Physics and opening-clearance checks are structured
+        # upstream, so wording such as "collision-free" must not override them.
+        if hard_state_evaluation is None:
+            if _has_unnegated_collision(text):
+                hard_reasons.append("physics collision indicated by critique")
+            if _has_unnegated_door_blockage(text):
+                hard_reasons.append(
+                    "door or open-connection blockage indicated by critique"
+                )
+        else:
+            hard_reasons.extend(hard_state_evaluation.hard_reasons)
+            soft_reasons.extend(hard_state_evaluation.soft_reasons)
 
         if "window" in text and not hard_reasons:
             soft_reasons.append(
@@ -1042,7 +1146,10 @@ class FurnitureSafetyController:
 
         return SafetyEvaluation(
             weighted_score=weighted_score,
-            hard_valid=not hard_reasons,
+            hard_valid=(
+                not hard_reasons
+                and (hard_state_evaluation is None or hard_state_evaluation.hard_valid)
+            ),
             hard_reasons=hard_reasons,
             soft_reasons=soft_reasons,
         )
@@ -1122,7 +1229,7 @@ class FurnitureSafetyController:
             if plausibility_report is not None and plausibility_report.issues:
                 hard_plausibility, soft_plausibility = (
                     self._classify_bedroom_plausibility_issues(
-                        plausibility_report.issues
+                        plausibility_report.issues, scene=scene
                     )
                 )
                 hard_reasons.extend(hard_plausibility)
@@ -1160,7 +1267,7 @@ class FurnitureSafetyController:
         return str(value).lower() == "furniture"
 
     def _classify_bedroom_plausibility_issues(
-        self, issues: list[str]
+        self, issues: list[str], *, scene: Any
     ) -> tuple[list[str], list[str]]:
         if not self.bedroom_hard_plausibility_issues:
             return [], list(issues)
@@ -1169,6 +1276,12 @@ class FurnitureSafetyController:
         soft_reasons: list[str] = []
         for issue in issues:
             issue_l = issue.lower()
+            # Generated bedside furniture is decorative unless the user asked for
+            # it.  Its bilateral layout remains useful feedback, but must not
+            # reject an otherwise valid bedroom that only requested a bed/style.
+            if "nightstand" in issue_l and not self._prompt_requires_nightstands(scene):
+                soft_reasons.append(issue)
+                continue
             if any(term in issue_l for term in self.bedroom_hard_issue_terms):
                 hard_reasons.append(issue)
             else:
@@ -1235,7 +1348,7 @@ class FurnitureSafetyController:
                             f"gap {self.storage_pair_max_gap_m:.2f}m"
                         )
 
-        if not beds or not nightstands:
+        if not beds or not nightstands or not self._prompt_requires_nightstands(scene):
             return hard_reasons
 
         bed_id, bed = beds[0]
@@ -1333,6 +1446,16 @@ class FurnitureSafetyController:
                 rf"{dresser}.{{0,50}}(?:next|adjacent)\s+to.{{0,30}}{wardrobe}", text
             )
         )
+
+    @staticmethod
+    def _prompt_requires_nightstands(scene: Any) -> bool:
+        """Return whether bedside furniture is part of the original user task."""
+        text = str(
+            getattr(scene, "scene_expert_original_description", "")
+            or getattr(scene, "text_description", "")
+            or ""
+        ).lower()
+        return bool(re.search(r"\b(?:nightstand|bedside\s+table)s?\b", text))
 
     def _safe_world_bounds(
         self, obj: Any
@@ -1470,13 +1593,11 @@ class FurnitureSafetyController:
         hard_state_evaluation: HardStateEvaluation | None = None,
     ) -> CandidateDecision:
         """Evaluate a critiqued candidate and update/rollback best state metadata."""
-        evaluation = self.evaluate_scores(scores)
+        evaluation = self.evaluate_scores(
+            scores,
+            hard_state_evaluation=hard_state_evaluation,
+        )
         if hard_state_evaluation is not None:
-            evaluation.hard_reasons.extend(hard_state_evaluation.hard_reasons)
-            evaluation.soft_reasons.extend(hard_state_evaluation.soft_reasons)
-            evaluation.hard_valid = (
-                evaluation.hard_valid and hard_state_evaluation.hard_valid
-            )
             if hard_state_evaluation.weighted_score_penalty > 0:
                 raw_score = evaluation.weighted_score
                 evaluation.weighted_score = max(

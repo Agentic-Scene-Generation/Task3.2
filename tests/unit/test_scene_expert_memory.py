@@ -7,6 +7,7 @@ import types
 
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
@@ -32,7 +33,15 @@ from scenesmith.scene_expert.context_bundle import (
     build_llm_call_debug_record,
     build_stage_context_bundle,
 )
-from scenesmith.scene_expert.global_planner import GlobalPlanner, _SYSTEM_PROMPT
+from scenesmith.scene_expert.hooks import (
+    SceneExpertHookRunner,
+    _reconcile_task_spec_stage_ownership,
+)
+from scenesmith.scene_expert.global_planner import (
+    GlobalPlanner,
+    _SYSTEM_PROMPT,
+    _reconcile_stage_brief,
+)
 from scenesmith.scene_expert.repair_taxonomy import (
     FailureCategory,
     classify_hard_reasons,
@@ -44,6 +53,7 @@ from scenesmith.scene_expert.schemas import (
     SceneTaskSpec,
     StageBrief,
     StageVerifyReport,
+    VerifyIssue,
 )
 from scenesmith.agent_utils.scoring import CategoryScore, FurnitureCritiqueWithScores
 from scenesmith.agent_utils.stage_working_memory import StageWorkingMemory
@@ -77,6 +87,124 @@ class SceneExpertMemoryTest(unittest.TestCase):
         self.assertIn("takes priority over", message)
         self.assertIn("explicit object, position, or facing", brief.to_injection_text())
         self.assertIn("Immutable User Task", _SYSTEM_PROMPT)
+        self.assertIn("minimum, not an exhaustive list", _SYSTEM_PROMPT)
+
+    def test_stage_brief_removes_planner_invented_inventory_exclusivity(self) -> None:
+        brief = StageBrief(
+            stage="furniture",
+            stage_objective="Place only the bed required by the task",
+            constraints_for_designer=[
+                "Place the bed in the sleeping zone.",
+                "Do not place any other furniture; only the bed is required.",
+                "Only place furniture objects during the furniture stage.",
+            ],
+            checks_for_critic=["Verify only the bed is required."],
+            failure_patterns_to_avoid=["Avoid adding any additional furniture."],
+        )
+
+        reconciled = _reconcile_stage_brief(
+            brief,
+            original_task="A bedroom with rustic farmhouse decor.",
+            room_type="bedroom",
+            required_objects=["bed"],
+        )
+        text = reconciled.to_injection_text()
+
+        self.assertNotIn("only the bed", text.lower())
+        self.assertNotIn("additional furniture", text.lower())
+        self.assertIn("Only place furniture objects", text)
+        self.assertIn("additional objects owned by this stage are allowed", text)
+
+    def test_stage_brief_preserves_user_requested_sparse_inventory(self) -> None:
+        constraint = "Do not place any other furniture; only the bed is required."
+        brief = StageBrief(
+            stage="furniture",
+            stage_objective="Place only the bed required by the task",
+            constraints_for_designer=[constraint],
+        )
+
+        reconciled = _reconcile_stage_brief(
+            brief,
+            original_task="A bedroom with only a bed and no other furniture.",
+            room_type="bedroom",
+            required_objects=["bed"],
+        )
+
+        self.assertEqual([constraint], reconciled.constraints_for_designer)
+        self.assertEqual(brief.stage_objective, reconciled.stage_objective)
+
+    def test_stage_brief_does_not_treat_only_aesthetic_as_closed_inventory(
+        self,
+    ) -> None:
+        brief = StageBrief(
+            stage="furniture",
+            stage_objective="Place only the bed required by the task",
+            constraints_for_designer=[
+                "Do not place any other furniture; only the bed is required."
+            ],
+        )
+
+        reconciled = _reconcile_stage_brief(
+            brief,
+            original_task="A bedroom with only warm colors and rustic decor.",
+            room_type="bedroom",
+            required_objects=["bed"],
+        )
+
+        self.assertNotIn("only the bed", reconciled.to_injection_text().lower())
+
+    def test_structural_only_ceiling_brief_does_not_invent_lighting_requirement(
+        self,
+    ) -> None:
+        brief = StageBrief(
+            stage="ceiling_mounted",
+            stage_objective="Install exposed beams and pendant lighting.",
+            constraints_for_designer=[
+                "Place exposed beams across the ceiling.",
+                "Add a pendant light at the room center.",
+            ],
+            checks_for_critic=[
+                "Verify the beams are clear of furniture.",
+                "Fail the stage when lighting is absent.",
+            ],
+        )
+
+        reconciled = _reconcile_stage_brief(
+            brief,
+            original_task="A bedroom with rustic decor and exposed wooden beams.",
+            room_type="bedroom",
+            required_objects=["exposed wooden beams"],
+        )
+        text = reconciled.to_injection_text().lower()
+
+        self.assertNotIn("pendant", text)
+        self.assertNotIn("fail the stage when lighting is absent", text)
+        self.assertIn("structural ceiling spans", text)
+        self.assertIn("absent lighting as a ceiling-stage failure", text)
+
+    def test_empty_stage_inventory_uses_noop_brief(self) -> None:
+        context = HarnessContext(
+            stage="wall_mounted",
+            task_spec=SceneTaskSpec(
+                room_type="living room",
+                style="standard",
+                required_large_objects=["tv_stand"],
+                required_small_objects=["television"],
+            ),
+            memory_pack=MemoryPack(),
+        )
+        planner = object.__new__(GlobalPlanner)
+
+        brief = planner.generate_stage_brief(
+            context,
+            original_task=(
+                "A sofa faces a TV stand and television on the opposite wall."
+            ),
+        )
+
+        self.assertIn("empty wall_mounted stage", brief.stage_objective)
+        self.assertIn("No objects are allocated", brief.constraints_for_designer[0])
+        self.assertNotIn("television", "\n".join(brief.constraints_for_designer))
 
     def test_llm_debug_record_marks_scenebenchmark_prompt_context(self) -> None:
         record = build_llm_call_debug_record(
@@ -324,6 +452,164 @@ class SceneExpertMemoryTest(unittest.TestCase):
             self.assertTrue(report.pass_stage)
             self.assertEqual([], report.issues)
 
+    def test_deterministic_hard_fail_is_never_advisory(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scores_dir = root / "scene_states" / "ceiling"
+            scores_dir.mkdir(parents=True)
+            (scores_dir / "scores.yaml").write_text(
+                "\n".join(
+                    [
+                        "Realism:",
+                        "  grade: 3",
+                        "Functionality:",
+                        "  grade: 2",
+                        'Summary: "DETERMINISTIC HARD-CHECK FAILED BEFORE VLM SCORING. Hard issues: collisions."',
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            stage_report = StageVerifier(pass_threshold=0.6).verify(
+                stage="ceiling_mounted",
+                stage_output_dir=str(root),
+                task_spec=SceneTaskSpec(room_type="bedroom", style="standard"),
+                scene_state_info={"object_names": []},
+            )
+            full_report = FullVerifier().verify([stage_report])
+
+        self.assertFalse(stage_report.pass_stage)
+        self.assertIn(
+            "deterministic_hard_failure",
+            {issue.issue_type for issue in stage_report.issues},
+        )
+        self.assertFalse(full_report.deterministic_pass)
+        self.assertFalse(full_report.pass_scene)
+
+    def test_later_clean_stage_recovers_transient_hard_failure(self) -> None:
+        failed_wall = StageVerifyReport(
+            stage="wall_mounted",
+            pass_stage=False,
+            issues=[VerifyIssue(issue_type="deterministic_hard_failure")],
+            critique_summary=(
+                "DETERMINISTIC HARD-CHECK FAILED BEFORE VLM SCORING. "
+                "Hard issues: collisions."
+            ),
+        )
+        clean_ceiling = StageVerifyReport(stage="ceiling_mounted", pass_stage=True)
+
+        full_report = FullVerifier().verify([failed_wall, clean_ceiling])
+
+        self.assertTrue(full_report.deterministic_pass)
+        self.assertTrue(full_report.pass_scene)
+
+    def test_later_clean_stage_does_not_recover_missing_objects(self) -> None:
+        failed_wall = StageVerifyReport(
+            stage="wall_mounted",
+            pass_stage=False,
+            issues=[VerifyIssue(issue_type="missing_object", object_name="television")],
+        )
+        clean_ceiling = StageVerifyReport(stage="ceiling_mounted", pass_stage=True)
+
+        full_report = FullVerifier().verify([failed_wall, clean_ceiling])
+
+        self.assertFalse(full_report.deterministic_pass)
+
+    def test_contract_stage_ownership_reassigns_monitor_before_verification(
+        self,
+    ) -> None:
+        task_spec = SceneTaskSpec(
+            room_type="study",
+            style="standard",
+            required_large_objects=["desk", "computer monitor", "trash can"],
+            required_small_objects=["desk lamp", "notebook", "pen holder"],
+        )
+        contract = {
+            "constraints": [
+                {
+                    "stage": "furniture",
+                    "strength": "hard",
+                    "subjects": {"category": "desk", "count": 1},
+                    "targets": {"category": "back_wall", "count": 1},
+                },
+                {
+                    "stage": "manipuland",
+                    "strength": "hard",
+                    "subjects": {"category": "computer_monitor", "count": 1},
+                    "targets": {"category": "desk", "count": 1},
+                },
+                {
+                    "stage": "manipuland",
+                    "strength": "hard",
+                    "subjects": {"category": "trash_can", "count": 1},
+                    "targets": {"category": "desk", "count": 1},
+                },
+            ]
+        }
+
+        reconciled = _reconcile_task_spec_stage_ownership(task_spec, contract)
+
+        self.assertEqual(["desk"], reconciled.required_large_objects)
+        self.assertCountEqual(
+            ["computer monitor", "trash can", "desk lamp", "notebook", "pen holder"],
+            reconciled.required_small_objects,
+        )
+        report = StageVerifier(pass_threshold=0.6).verify(
+            stage="furniture",
+            stage_output_dir="/path/that/does/not/exist",
+            task_spec=reconciled,
+            scene_state_info={"object_names": ["desk_0"]},
+        )
+        self.assertEqual([], report.issues)
+        manipuland_report = StageVerifier(pass_threshold=0.6).verify(
+            stage="manipuland",
+            stage_output_dir="/path/that/does/not/exist",
+            task_spec=reconciled,
+            scene_state_info={
+                "object_names": [
+                    "computer_monitor_0",
+                    "trash_can_0",
+                    "desk_lamp_0",
+                    "notebook_0",
+                    "pen_holder_0",
+                ]
+            },
+        )
+        self.assertEqual([], manipuland_report.issues)
+
+    def test_contract_stage_ownership_reassigns_wall_alias_before_verification(
+        self,
+    ) -> None:
+        task_spec = SceneTaskSpec(
+            room_type="classroom",
+            style="standard",
+            required_large_objects=["chalkboard", "teacher's desk"],
+        )
+        reconciled = _reconcile_task_spec_stage_ownership(
+            task_spec,
+            {
+                "constraints": [
+                    {
+                        "stage": "wall_mounted",
+                        "strength": "hard",
+                        "subjects": {"category": "chalkboard", "count": 1},
+                        "targets": {"category": "wall", "count": 1},
+                    }
+                ]
+            },
+        )
+
+        self.assertEqual(["teacher's desk"], reconciled.required_large_objects)
+        self.assertEqual(["chalkboard"], reconciled.required_wall_objects)
+        report = StageVerifier(pass_threshold=0.6).verify(
+            stage="furniture",
+            stage_output_dir="/path/that/does/not/exist",
+            task_spec=reconciled,
+            scene_state_info={"object_names": ["teacher_desk_0"]},
+        )
+        self.assertTrue(report.pass_stage)
+        self.assertEqual([], report.issues)
+
     def test_manipuland_verifier_normalizes_names_and_enforces_counts(self) -> None:
         task_spec = SceneTaskSpec(
             room_type="bedroom",
@@ -375,6 +661,83 @@ class SceneExpertMemoryTest(unittest.TestCase):
             ["table lamp"], [issue.object_name for issue in missing_one_lamp]
         )
 
+    def test_manipuland_verifier_allows_compound_asset_components(self) -> None:
+        report = StageVerifier(pass_threshold=0.6).verify(
+            stage="manipuland",
+            stage_output_dir="/path/that/does/not/exist",
+            task_spec=SceneTaskSpec(
+                room_type="dining room",
+                style="standard",
+                required_small_objects=["vase", "flowers"],
+            ),
+            scene_state_info={"object_names": ["vase_flowers_0"]},
+        )
+
+        self.assertTrue(report.pass_stage)
+        self.assertEqual([], report.issues)
+
+    def test_live_composite_metadata_exposes_component_names_to_verifier(self) -> None:
+        scene = SimpleNamespace(
+            objects={
+                "filled_container_0": SimpleNamespace(
+                    name="filled_vase",
+                    metadata={
+                        "composite_type": "filled_container",
+                        "container_asset": {"name": "vase"},
+                        "fill_assets": [{"name": "flowers"}],
+                    },
+                )
+            }
+        )
+        runner = object.__new__(SceneExpertHookRunner)
+
+        scene_state_info = runner._extract_scene_state_info_from_scene(scene)
+        report = StageVerifier(pass_threshold=0.6).verify(
+            stage="manipuland",
+            stage_output_dir="/path/that/does/not/exist",
+            task_spec=SceneTaskSpec(
+                room_type="dining room",
+                style="standard",
+                required_small_objects=["vase", "flowers"],
+            ),
+            scene_state_info=scene_state_info,
+        )
+
+        self.assertIn("vase", scene_state_info["object_names"])
+        self.assertIn("flowers", scene_state_info["object_names"])
+        self.assertTrue(report.pass_stage)
+        self.assertEqual([], report.issues)
+
+    def test_live_manipuland_description_exposes_compound_component(self) -> None:
+        scene = SimpleNamespace(
+            objects={
+                "vase_0": SimpleNamespace(
+                    name="vase",
+                    description=(
+                        "Elegant ceramic vase with a bouquet of fresh flowers"
+                    ),
+                    object_type="manipuland",
+                    metadata={},
+                )
+            }
+        )
+        runner = object.__new__(SceneExpertHookRunner)
+
+        scene_state_info = runner._extract_scene_state_info_from_scene(scene)
+        report = StageVerifier(pass_threshold=0.6).verify(
+            stage="manipuland",
+            stage_output_dir="/path/that/does/not/exist",
+            task_spec=SceneTaskSpec(
+                room_type="dining room",
+                style="standard",
+                required_small_objects=["vase", "flowers"],
+            ),
+            scene_state_info=scene_state_info,
+        )
+
+        self.assertTrue(report.pass_stage)
+        self.assertEqual([], report.issues)
+
     def test_wall_verifier_matches_tv_display_to_television(self) -> None:
         report = StageVerifier(pass_threshold=0.6).verify(
             stage="wall_mounted",
@@ -387,6 +750,21 @@ class SceneExpertMemoryTest(unittest.TestCase):
             scene_state_info={"object_names": ["tv_display"]},
         )
 
+        self.assertEqual([], report.issues)
+
+    def test_verifier_normalizes_english_possessive_labels(self) -> None:
+        report = StageVerifier(pass_threshold=0.6).verify(
+            stage="furniture",
+            stage_output_dir="/path/that/does/not/exist",
+            task_spec=SceneTaskSpec(
+                room_type="classroom",
+                style="standard",
+                required_large_objects=["teacher's desk"],
+            ),
+            scene_state_info={"object_names": ["teacher_desk_0"]},
+        )
+
+        self.assertTrue(report.pass_stage)
         self.assertEqual([], report.issues)
 
     def test_layout_plausibility_maps_to_scene_expert_category(self) -> None:

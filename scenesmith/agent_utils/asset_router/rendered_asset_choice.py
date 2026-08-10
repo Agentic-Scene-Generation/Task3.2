@@ -132,6 +132,77 @@ class _CandidateRenderEvidence:
     views: tuple[tuple[str, Path], ...]
 
 
+def _render_material_quality(
+    evidence: _CandidateRenderEvidence,
+) -> dict[str, object]:
+    """Return a conservative material-evidence score for an HSSD render."""
+    if not evidence.views:
+        return {"score": 0.0, "issues": ["missing_render_evidence"]}
+
+    image_path = next(
+        (path for label, path in evidence.views if label == "iso"), evidence.views[0][1]
+    )
+    try:
+        with Image.open(image_path) as source:
+            image = source.convert("RGB")
+            pixels = list(image.getdata())
+    except Exception as exc:
+        return {
+            "score": 0.0,
+            "issues": ["unreadable_render_evidence"],
+            "error": str(exc),
+        }
+    if not pixels:
+        return {"score": 0.0, "issues": ["empty_render_evidence"]}
+
+    width, height = image.size
+    corners = (
+        pixels[0],
+        pixels[max(0, width - 1)],
+        pixels[max(0, (height - 1) * width)],
+        pixels[-1],
+    )
+    background = tuple(
+        sum(pixel[channel] for pixel in corners) / len(corners) for channel in range(3)
+    )
+    foreground = [
+        pixel
+        for pixel in pixels
+        if sum(abs(pixel[channel] - background[channel]) for channel in range(3)) > 30.0
+    ]
+    coverage = len(foreground) / len(pixels)
+    if not foreground:
+        return {
+            "score": 0.0,
+            "issues": ["blank_render"],
+            "foreground_coverage": round(coverage, 4),
+        }
+
+    luminance = sorted(sum(pixel) / 3.0 for pixel in foreground)
+    chroma = sum(max(pixel) - min(pixel) for pixel in foreground) / len(foreground)
+    p10 = luminance[len(luminance) // 10]
+    p90 = luminance[min(len(luminance) - 1, len(luminance) * 9 // 10)]
+    mean_luminance = sum(luminance) / len(luminance)
+    issues: list[str] = []
+    if coverage < 0.015:
+        issues.append("tiny_visible_subject")
+    if mean_luminance >= 202.0 and chroma <= 2.5 and p90 - p10 <= 32.0:
+        issues.append("low_material_detail")
+    score = 1.0
+    if "tiny_visible_subject" in issues:
+        score -= 0.65
+    if "low_material_detail" in issues:
+        score -= 0.55
+    return {
+        "score": round(max(0.0, score), 3),
+        "issues": issues,
+        "foreground_coverage": round(coverage, 4),
+        "mean_luminance": round(mean_luminance, 2),
+        "mean_chroma": round(chroma, 2),
+        "luminance_range": [round(p10, 2), round(p90, 2)],
+    }
+
+
 def _encode_candidate_views_as_one_image(
     views: tuple[tuple[str, Path], ...],
     identity_label: str | None = None,
@@ -229,11 +300,15 @@ def _write_choice_audit(
     verbosity: str,
     vision_detail: str,
     status: str,
+    audit_path: Path | None = None,
     **details: object,
 ) -> None:
     """Append a complete rendered-choice decision to the optional JSONL audit."""
     audit_path_raw = os.environ.get("HSSD_RENDERED_ASSET_CHOICE_AUDIT_PATH", "").strip()
-    if not audit_path_raw:
+    resolved_audit_path = audit_path or (
+        Path(audit_path_raw) if audit_path_raw else None
+    )
+    if resolved_audit_path is None:
         return
 
     candidate_records = []
@@ -284,14 +359,13 @@ def _write_choice_audit(
     event.update(details)
 
     try:
-        audit_path = Path(audit_path_raw)
-        audit_path.parent.mkdir(parents=True, exist_ok=True)
-        with audit_path.open("a", encoding="utf-8") as stream:
+        resolved_audit_path.parent.mkdir(parents=True, exist_ok=True)
+        with resolved_audit_path.open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(event, ensure_ascii=False, default=str) + "\n")
             stream.flush()
     except Exception as exc:  # pragma: no cover - audit must never break retrieval
         console_logger.warning(
-            "Could not write HSSD choice audit %s: %s", audit_path_raw, exc
+            "Could not write HSSD choice audit %s: %s", resolved_audit_path, exc
         )
 
 
@@ -410,6 +484,8 @@ def choose_hssd_candidate_from_iso_renders(
     requested_dimensions: list[float] | tuple[float, ...] | None = None,
     requested_shape: str | None = None,
     semantic_name_candidates: list[str] | None = None,
+    audit_path: Path | None = None,
+    retrieval_backend: str | None = None,
 ) -> RenderedAssetChoice:
     """Optionally reorder candidates using pre-rendered HSSD visual evidence."""
     fallback_semantic_name = normalize_semantic_name(object_short_name)
@@ -422,6 +498,7 @@ def choose_hssd_candidate_from_iso_renders(
         allowed_semantic_names.append(fallback_semantic_name)
     if top_n <= 1 or len(candidates) <= 1:
         _write_choice_audit(
+            audit_path=audit_path,
             object_description=object_description,
             scene_context=scene_context,
             object_short_name=object_short_name,
@@ -435,6 +512,7 @@ def choose_hssd_candidate_from_iso_renders(
             verbosity=verbosity,
             vision_detail=vision_detail,
             status="skipped",
+            retrieval_backend=retrieval_backend,
             reason="top_n_or_candidate_count_too_small",
         )
         return RenderedAssetChoice(
@@ -459,6 +537,16 @@ def choose_hssd_candidate_from_iso_renders(
             )
         )
 
+    render_quality_by_id = {
+        record.candidate.hssd_id: _render_material_quality(record)
+        for record in evidence_records
+    }
+    quality_eligible_ids = {
+        hssd_id
+        for hssd_id, quality in render_quality_by_id.items()
+        if float(quality["score"]) >= 0.5
+    }
+
     used_view_count = sum(len(record.views) for record in evidence_records)
     # Keep one multimodal image per asset; multiple views are stitched below.
     used_image_count = len(evidence_records)
@@ -472,6 +560,7 @@ def choose_hssd_candidate_from_iso_renders(
     )
     if len(evidence_records) <= 1:
         _write_choice_audit(
+            audit_path=audit_path,
             object_description=object_description,
             scene_context=scene_context,
             object_short_name=object_short_name,
@@ -485,6 +574,7 @@ def choose_hssd_candidate_from_iso_renders(
             verbosity=verbosity,
             vision_detail=vision_detail,
             status="insufficient_evidence",
+            retrieval_backend=retrieval_backend,
             used_image_count=used_image_count,
             used_view_count=used_view_count,
         )
@@ -502,13 +592,17 @@ def choose_hssd_candidate_from_iso_renders(
 
     candidate_lines = [
         "- index {index}: hssd_id={hssd_id}, name={name}, category={category}, "
-        "size_m={size}, embedding_score={score:.4f}".format(
+        "size_m={size}, embedding_score={score:.4f}, render_quality={quality}".format(
             index=record.original_index,
             hssd_id=record.candidate.hssd_id,
             name=record.candidate.object_name or "(unnamed)",
             category=record.candidate.category or "(unknown)",
             size=tuple(round(float(axis), 3) for axis in record.candidate.size),
             score=float(record.candidate.similarity_score),
+            quality=json.dumps(
+                render_quality_by_id[record.candidate.hssd_id],
+                sort_keys=True,
+            ),
         )
         for record in evidence_records
     ]
@@ -556,7 +650,10 @@ def choose_hssd_candidate_from_iso_renders(
         "reported size as [width, depth, height] and reject visibly incompatible "
         "relative proportions rather than assuming later scaling can fix them. "
         "In particular, an upright dining, desk, or task chair must not be "
-        "replaced by a low lounge chair or armchair." + covering_guidance + "\n"
+        "replaced by a low lounge chair or armchair. Prefer candidates with "
+        "material evidence; `low_material_detail` means the render is nearly "
+        "monochrome and untextured, unless the request explicitly calls for that "
+        "appearance." + covering_guidance + "\n"
         'Return JSON only: {"selected_index": <index number>, '
         '"selected_hssd_id": "<hssd_id>", '
         '"semantic_name": "<one allowed semantic name>", '
@@ -607,6 +704,7 @@ def choose_hssd_candidate_from_iso_renders(
         )
     except Exception as exc:
         _write_choice_audit(
+            audit_path=audit_path,
             object_description=object_description,
             scene_context=scene_context,
             object_short_name=object_short_name,
@@ -620,6 +718,7 @@ def choose_hssd_candidate_from_iso_renders(
             verbosity=verbosity,
             vision_detail=vision_detail,
             status="vlm_error",
+            retrieval_backend=retrieval_backend,
             used_image_count=used_image_count,
             used_view_count=used_view_count,
             error=str(exc),
@@ -667,6 +766,7 @@ def choose_hssd_candidate_from_iso_renders(
 
     if selected_candidate is None:
         _write_choice_audit(
+            audit_path=audit_path,
             object_description=object_description,
             scene_context=scene_context,
             object_short_name=object_short_name,
@@ -680,6 +780,7 @@ def choose_hssd_candidate_from_iso_renders(
             verbosity=verbosity,
             vision_detail=vision_detail,
             status="invalid_selection",
+            retrieval_backend=retrieval_backend,
             used_image_count=used_image_count,
             used_view_count=used_view_count,
             raw_response=response_text,
@@ -700,6 +801,27 @@ def choose_hssd_candidate_from_iso_renders(
             candidates=candidates,
             semantic_name=fallback_semantic_name or None,
             used_image_count=used_image_count,
+        )
+
+    quality_fallback_used = False
+    if quality_eligible_ids and selected_candidate.hssd_id not in quality_eligible_ids:
+        rejected_candidate = selected_candidate
+        selected_candidate = next(
+            record.candidate
+            for record in evidence_records
+            if record.candidate.hssd_id in quality_eligible_ids
+        )
+        quality_fallback_used = True
+        reason = (
+            "material-evidence guard overrode rendered choice "
+            f"{rejected_candidate.hssd_id}; selected {selected_candidate.hssd_id}"
+        )
+        console_logger.warning(
+            "Rendered HSSD choice for '%s' selected low-material-detail asset %s; "
+            "using %s instead",
+            object_description,
+            rejected_candidate.hssd_id,
+            selected_candidate.hssd_id,
         )
 
     if str(requested_shape or "").strip().lower() == "square":
@@ -729,6 +851,7 @@ def choose_hssd_candidate_from_iso_renders(
 
     original_index = candidates.index(selected_candidate) + 1
     _write_choice_audit(
+        audit_path=audit_path,
         object_description=object_description,
         scene_context=scene_context,
         object_short_name=object_short_name,
@@ -742,6 +865,7 @@ def choose_hssd_candidate_from_iso_renders(
         verbosity=verbosity,
         vision_detail=vision_detail,
         status="selected",
+        retrieval_backend=retrieval_backend,
         used_image_count=used_image_count,
         used_view_count=used_view_count,
         raw_response=response_text,
@@ -752,6 +876,8 @@ def choose_hssd_candidate_from_iso_renders(
         allowed_semantic_names=allowed_semantic_names,
         returned_semantic_name=raw_semantic_name or None,
         reason=str(reason) if reason is not None else None,
+        render_quality_by_hssd_id=render_quality_by_id,
+        quality_fallback_used=quality_fallback_used,
     )
 
     reordered = [selected_candidate] + [

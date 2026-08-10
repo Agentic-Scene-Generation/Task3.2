@@ -188,8 +188,12 @@ def _normalize_result(result: dict[str, Any], check: dict[str, Any]) -> dict[str
     normalized.setdefault("reason", "")
     normalized.setdefault("check_id", check.get("check_id"))
     normalized.setdefault("metric", check.get("metric"))
-    if "evidence" not in normalized and isinstance(normalized.get("diagnostics"), dict):
-        normalized["evidence"] = normalized["diagnostics"]
+    normalized.setdefault("scoring_tier", check.get("scoring_tier", "core"))
+    if "evidence" not in normalized:
+        if isinstance(check.get("evidence"), dict):
+            normalized["evidence"] = check["evidence"]
+        elif isinstance(normalized.get("diagnostics"), dict):
+            normalized["evidence"] = normalized["diagnostics"]
     return normalized
 
 

@@ -6,18 +6,43 @@ type safety and easy JSON serialization across the pipeline.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
-
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 # ---------------------------------------------------------------------------
 # TaskCompiler output
 # ---------------------------------------------------------------------------
 
 
+class ObjectSelectorSpec(BaseModel):
+    """Semantic endpoint selector; generated object ids are bound later."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    category: str = Field(min_length=1)
+    count: int | None = Field(default=None, ge=1)
+    quantifier: Literal["all", "exactly", "at_least", "minimum"] = "all"
+    role: str = ""
+    secondary_category: str = ""
+    secondary_count: int | None = Field(default=None, ge=1)
+    secondary_role: str = ""
+
+    @field_validator("category", "secondary_category", mode="before")
+    @classmethod
+    def _normalize_category(cls, value: Any) -> str:
+        return "_".join(str(value or "").strip().lower().split())
+
+    @field_validator("role", "secondary_role", mode="before")
+    @classmethod
+    def _normalize_role(cls, value: Any) -> str:
+        return str(value or "").strip().lower()
+
+
 class SceneTaskSpec(BaseModel):
     """Structured scene requirements extracted from a raw text prompt."""
+
+    model_config = ConfigDict(extra="forbid")
 
     room_type: str = Field(
         ..., description="Primary room type, e.g. 'bedroom', 'kitchen'"
@@ -53,17 +78,9 @@ class SceneTaskSpec(BaseModel):
         default_factory=list,
         description="Visual / style constraints: material palette, density, symmetry, etc.",
     )
-    # Constraint rows are deliberately permissive at this boundary because the
-    # model compiler is best-effort.  The critic normalizes them into its
-    # versioned, finite intent-contract schema and refuses malformed/inferred
-    # hard constraints there.
-    intent_constraints: list[dict[str, Any]] = Field(
-        default_factory=list,
-        description=(
-            "Prompt-originated spatial relations with relation, subjects, targets, "
-            "source, confidence, and evidence_span."
-        ),
-    )
+    compiler_status: Literal["ok", "degraded"] = "ok"
+    compiler_failure_reason: str = ""
+    compiler_spec_version: str = "scenesmith.task_compiler.v3"
 
 
 # ---------------------------------------------------------------------------
@@ -217,6 +234,7 @@ class FullVerifyReport(BaseModel):
     reachability_score: float = 0.0
     support_relation_accuracy: float = 0.0
     overall_score: float = 0.0
+    deterministic_pass: bool = False
     pass_scene: bool = False
 
 

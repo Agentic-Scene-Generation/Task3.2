@@ -61,6 +61,7 @@ _SCENESMITH_SCORE_MAPPING = {
     "room_layout_quality": "semantic",
     "space_utilization": "semantic",
 }
+_DETERMINISTIC_HARD_CHECK_MARKER = "DETERMINISTIC HARD-CHECK FAILED BEFORE VLM SCORING"
 
 
 def _load_scores_yaml(scores_yaml_path: Path) -> tuple[dict[str, float], str]:
@@ -284,20 +285,67 @@ def _check_required_objects(
         return issues
 
     present_objects = scene_state_info.get("object_names", [])
-    unmatched_present = [str(name) for name in present_objects]
+    present_labels = [str(name) for name in present_objects]
+    present_records = scene_state_info.get("object_records", [])
+    if isinstance(present_records, list) and present_records:
+        present_entries = [
+            (
+                [
+                    (
+                        str(record.get("name"))
+                        if isinstance(record, dict) and record.get("name")
+                        else ""
+                    ),
+                    *(
+                        str(alias)
+                        for alias in (record.get("aliases") or [])
+                        if isinstance(record, dict)
+                    ),
+                ],
+                (
+                    str(record.get("description") or "")
+                    if isinstance(record, dict)
+                    else ""
+                ),
+            )
+            for record in present_records
+        ]
+    else:
+        descriptions = scene_state_info.get("object_descriptions", [])
+        present_entries = [
+            ([present], str(descriptions[index]) if index < len(descriptions) else "")
+            for index, present in enumerate(present_labels)
+        ]
+    consumed_by_required_label: dict[str, set[int]] = {}
 
     for required in stage_required:
+        required_label = _normalize_object_label(required)
+        consumed_indices = consumed_by_required_label.setdefault(required_label, set())
         match_index = next(
             (
                 index
-                for index, present in enumerate(unmatched_present)
-                if _object_labels_match(required, present)
+                for index, (present_aliases, description) in enumerate(present_entries)
+                if index not in consumed_indices
+                and (
+                    any(
+                        _object_labels_match(required, present)
+                        for present in present_aliases
+                    )
+                    or (
+                        stage == "manipuland"
+                        and description
+                        and _description_contains_object_label(required, description)
+                    )
+                )
             ),
             None,
         )
         if match_index is not None:
-            # Consume one scene instance so repeated requirements enforce cardinality.
-            unmatched_present.pop(match_index)
+            # Repeated requirements of the same semantic label consume distinct
+            # instances. A compound asset may still satisfy distinct component
+            # labels (for example one ``vase_flowers`` satisfies both ``vase``
+            # and ``flowers``).
+            consumed_indices.add(match_index)
         else:
             issues.append(
                 VerifyIssue(
@@ -311,6 +359,9 @@ def _check_required_objects(
 
 
 _OBJECT_LABEL_ALIASES = {
+    "computer monitor": "monitor",
+    "computer display": "monitor",
+    "display monitor": "monitor",
     "tv": "television",
     "tv display": "television",
     "television display": "television",
@@ -319,7 +370,11 @@ _OBJECT_LABEL_ALIASES = {
 
 def _normalize_object_label(label: str) -> str:
     """Normalize human labels and scene identifiers to a comparable phrase."""
-    words = re.sub(r"[^a-z0-9]+", " ", str(label).lower()).split()
+    label_text = str(label).lower()
+    # Keep possessive labels such as "teacher's desk" comparable to generated
+    # identifiers such as "teacher_desk_0".
+    label_text = re.sub(r"\b([a-z0-9]+)'s\b", r"\1", label_text)
+    words = re.sub(r"[^a-z0-9]+", " ", label_text).split()
     while words and words[-1].isdigit():
         words.pop()
     if not words:
@@ -343,6 +398,29 @@ def _object_labels_match(required: str, present: str) -> bool:
     return (
         f" {required_label} " in f" {present_label} "
         or f" {present_label} " in f" {required_label} "
+    )
+
+
+def _description_contains_object_label(required: str, description: str) -> bool:
+    """Match a required component mentioned in a manipuland asset description.
+
+    Some asset libraries return one mesh for a compound item such as a vase
+    with flowers, without recording composite metadata. Token-wise
+    normalization lets that description satisfy the component requirement
+    while the caller still consumes only one scene object instance.
+    """
+    required_tokens = _normalize_object_label(required).split()
+    if not required_tokens:
+        return False
+    description_tokens = [
+        _normalize_object_label(token)
+        for token in re.sub(r"[^a-z0-9]+", " ", str(description).lower()).split()
+    ]
+    description_tokens = [token for token in description_tokens if token]
+    width = len(required_tokens)
+    return any(
+        description_tokens[index : index + width] == required_tokens
+        for index in range(len(description_tokens) - width + 1)
     )
 
 
@@ -458,6 +536,21 @@ class StageVerifier:
                 "physics": 0.5,
                 "interaction": 0.5,
             }
+
+        if _DETERMINISTIC_HARD_CHECK_MARKER in critique_summary.upper():
+            _add_issue_once(
+                issues,
+                VerifyIssue(
+                    issue_type="deterministic_hard_failure",
+                    description=(
+                        "SceneSmith deterministic hard-check failed before visual "
+                        "scoring completed"
+                    ),
+                ),
+            )
+            repair_suggestions.append(
+                "Resolve deterministic hard-check failures before accepting the stage"
+            )
 
         # --- 2. Rule-based checks ---
         if scene_state_info:
@@ -652,7 +745,7 @@ class FullVerifier:
         has_plausibility = "plausibility" in all_scores
         pass_plausibility = not has_plausibility or plausibility >= self._pass_threshold
 
-        deterministic_pass = all(report.pass_stage for report in stage_reports)
+        deterministic_pass = self._deterministic_stage_passes(stage_reports)
         visual_scores_pass = overall >= self._pass_threshold and pass_plausibility
         report = FullVerifyReport(
             semantic_score=semantic,
@@ -665,6 +758,7 @@ class FullVerifier:
             reachability_score=interaction,
             support_relation_accuracy=interaction,  # proxy
             overall_score=overall,
+            deterministic_pass=deterministic_pass,
             pass_scene=(
                 deterministic_pass and visual_scores_pass
                 if self._visual_score_hard_gate
@@ -681,3 +775,33 @@ class FullVerifier:
             f"visual_gate={self._visual_score_hard_gate}"
         )
         return report
+
+    @staticmethod
+    def _deterministic_stage_passes(stage_reports: list[StageVerifyReport]) -> bool:
+        """Evaluate stage hard gates against the latest validated scene state.
+
+        A stage can record a transient deterministic failure (usually a collision)
+        and a later stage can repair it while validating the complete scene again.
+        The terminal verdict should retain unresolved inventory/contract failures,
+        but must not reject that later clean state solely from the stale marker.
+        """
+        for index, report in enumerate(stage_reports):
+            if report.pass_stage:
+                continue
+            issue_types = {issue.issue_type for issue in report.issues}
+            is_transient_hard_failure = issue_types == {"deterministic_hard_failure"}
+            later_clean_validation = any(
+                later.pass_stage
+                and _DETERMINISTIC_HARD_CHECK_MARKER
+                not in later.critique_summary.upper()
+                for later in stage_reports[index + 1 :]
+            )
+            if is_transient_hard_failure and later_clean_validation:
+                console_logger.info(
+                    "FullVerifier: accepting recovered deterministic failure from "
+                    "stage=%s after a later clean validation",
+                    report.stage,
+                )
+                continue
+            return False
+        return True

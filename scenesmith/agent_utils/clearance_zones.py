@@ -10,6 +10,7 @@ This module provides:
 import logging
 
 from dataclasses import dataclass
+from typing import Any
 
 from scenesmith.agent_utils.house import (
     ClearanceOpeningData,
@@ -21,6 +22,11 @@ from scenesmith.agent_utils.house import (
 from scenesmith.agent_utils.room import ObjectType, RoomScene
 
 console_logger = logging.getLogger(__name__)
+
+# Mesh export and rigid-transform arithmetic can place a ceiling-attached AABB
+# a few nanometers above its intended contact plane. Keep the tolerance far
+# below meaningful room-geometry violations.
+WALL_HEIGHT_TOLERANCE_M = 1e-6
 
 
 @dataclass
@@ -397,6 +403,48 @@ def _compute_penetration_depth(
     return min(penetration_x, penetration_y, penetration_z)
 
 
+def door_swing_clearance_bounds(
+    opening: Any,
+) -> tuple[list[float], list[float]] | None:
+    """Return a door's clearance rectangle enlarged to its 90-degree sweep.
+
+    Floor-plan metadata supplies a configurable passage depth, whereas the
+    interaction critic reserves a depth equal to the door width for either
+    possible hinge.  Use the larger of those two regions for hard-state
+    validation and deterministic placement so they cannot disagree.
+    """
+    opening_type = getattr(getattr(opening, "opening_type", None), "value", None)
+    if opening_type is None:
+        opening_type = getattr(opening, "opening_type", None)
+    if str(opening_type or "").lower() != "door":
+        return None
+
+    try:
+        lower = [float(value) for value in opening.clearance_bbox_min]
+        upper = [float(value) for value in opening.clearance_bbox_max]
+        width = float(opening.width)
+    except (AttributeError, TypeError, ValueError):
+        return None
+    if len(lower) < 3 or len(upper) < 3 or width <= 0.0:
+        return None
+
+    direction = getattr(getattr(opening, "wall_direction", None), "value", None)
+    if direction is None:
+        direction = getattr(opening, "wall_direction", "")
+    direction = str(direction or "").lower()
+    if direction == "north":
+        lower[1] = min(lower[1], upper[1] - width)
+    elif direction == "south":
+        upper[1] = max(upper[1], lower[1] + width)
+    elif direction == "east":
+        lower[0] = min(lower[0], upper[0] - width)
+    elif direction == "west":
+        upper[0] = max(upper[0], lower[0] + width)
+    else:
+        return None
+    return lower, upper
+
+
 def compute_door_clearance_violations(
     scene: RoomScene,
 ) -> list[DoorClearanceViolation]:
@@ -414,13 +462,10 @@ def compute_door_clearance_violations(
         return violations
 
     for opening in room_geom.openings:
-        if opening.opening_type != "door":
+        clearance_bounds = door_swing_clearance_bounds(opening)
+        if clearance_bounds is None:
             continue
-
-        zone_min = opening.clearance_bbox_min
-        zone_max = opening.clearance_bbox_max
-        if zone_min is None or zone_max is None:
-            continue
+        zone_min, zone_max = clearance_bounds
 
         for obj in scene.objects.values():
             # Skip structural elements and thin coverings - they don't block doors.
@@ -462,9 +507,11 @@ def compute_door_clearance_violations(
 def compute_window_clearance_violations(
     scene: RoomScene,
 ) -> list[WindowClearanceViolation]:
-    """Check furniture above sill height intersecting window clearance zones.
+    """Check furniture intersecting the full 3D window clearance zone.
 
-    Only reports violations where furniture top exceeds window sill height.
+    An object must overlap the window opening's horizontal footprint *and* its
+    vertical extent. Objects below the sill or above the window head (for
+    example ceiling-mounted beams) do not block the opening.
 
     Args:
         scene: RoomScene with furniture objects.
@@ -483,9 +530,10 @@ def compute_window_clearance_violations(
 
         zone_min = opening.clearance_bbox_min
         zone_max = opening.clearance_bbox_max
-        sill_height = opening.sill_height
         if zone_min is None or zone_max is None:
             continue
+        opening_min_z = float(opening.sill_height)
+        opening_max_z = opening_min_z + float(opening.height)
 
         for obj in scene.objects.values():
             # Skip structural elements and thin coverings - they don't block windows.
@@ -501,24 +549,20 @@ def compute_window_clearance_violations(
             obj_min = list(world_bounds[0])
             obj_max = list(world_bounds[1])
 
-            # Check if furniture top exceeds sill height.
-            furniture_top = obj_max[2]
-            if furniture_top <= sill_height:
-                continue  # Furniture below window sill is OK.
-
-            # Check XY intersection with clearance zone.
             if (
                 obj_min[0] < zone_max[0]
                 and obj_max[0] > zone_min[0]
                 and obj_min[1] < zone_max[1]
                 and obj_max[1] > zone_min[1]
+                and obj_min[2] < opening_max_z
+                and obj_max[2] > opening_min_z
             ):
                 violations.append(
                     WindowClearanceViolation(
                         furniture_id=str(obj.object_id),
                         window_label=opening.opening_id,
-                        furniture_top_height=furniture_top,
-                        sill_height=sill_height,
+                        furniture_top_height=float(obj_max[2]),
+                        sill_height=float(opening.sill_height),
                     )
                 )
 
@@ -722,7 +766,7 @@ def compute_wall_height_violations(
         # Object top height.
         obj_top = obj_max[2]
 
-        if obj_top > wall_height:
+        if obj_top > wall_height + WALL_HEIGHT_TOLERANCE_M:
             violations.append(
                 WallHeightExceededViolation(
                     object_id=str(obj.object_id),

@@ -15,6 +15,8 @@ prompt: |
   5. Implement the proposed solutions exactly as specified
   6. Use full object_ids (from get_current_scene_state) for operations
      - For chair-facing feedback, call check_facing_tool before and after the fix.
+       If the pre-fix check reports `is_facing=True`, do not rotate the chair;
+       report that the proposed yaw correction is inconsistent with geometry.
      - For multiple chairs against one side wall, snap them to the same wall with
        orientation="away" so they share a wall-parallel yaw. Omit yaw when later
        changing only their spacing; do not reintroduce different decorative angles.

@@ -5,6 +5,7 @@ import unittest
 import xml.etree.ElementTree as ET
 
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 
@@ -13,8 +14,10 @@ from pydrake.all import RigidTransform, RollPitchYaw, RotationMatrix
 from scenesmith.agent_utils.house import RoomGeometry
 from scenesmith.agent_utils.physical_feasibility import (
     _apply_floor_penetration_fallback,
+    _furniture_simulation_instability_reason,
     _get_colliding_object_ids,
     _restore_collectively_unstable_instances,
+    _restore_furniture_that_fell_through_floor,
     apply_forward_simulation,
     apply_non_penetration_projection,
     apply_physical_feasibility_postprocessing,
@@ -623,6 +626,68 @@ class TestApplyPhysicalFeasibilityPostprocessing(PhysicalFeasibilityTestCase):
                 np.allclose(box1_after.transform.translation(), initial_pos)
             )
 
+    def test_anomalous_projection_jump_is_restored_before_simulation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            scene = self._create_non_overlapping_boxes_scene(Path(tmp_dir))
+            box = scene.get_object(UniqueID("box_1"))
+            initial_transform = box.transform
+
+            def project(**kwargs):
+                projected_scene = kwargs["scene"]
+                projected_scene.get_object(UniqueID("box_1")).transform = (
+                    RigidTransform(p=[10.0, 0.0, 0.25])
+                )
+                return projected_scene, True
+
+            with patch(
+                "scenesmith.agent_utils.physical_feasibility.apply_non_penetration_projection",
+                side_effect=project,
+            ):
+                processed_scene, success, _ = apply_physical_feasibility_postprocessing(
+                    scene=scene,
+                    weld_furniture=False,
+                    projection_enabled=True,
+                    simulation_enabled=False,
+                )
+
+            self.assertTrue(success)
+            self.assertTrue(
+                np.allclose(
+                    processed_scene.get_object(
+                        UniqueID("box_1")
+                    ).transform.translation(),
+                    initial_transform.translation(),
+                )
+            )
+
+    def test_large_projection_inside_room_is_preserved(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            scene = self._create_non_overlapping_boxes_scene(Path(tmp_dir))
+
+            def project(**kwargs):
+                projected_scene = kwargs["scene"]
+                projected_scene.get_object(UniqueID("box_1")).transform = (
+                    RigidTransform(p=[-2.0, 0.0, 0.25])
+                )
+                return projected_scene, True
+
+            with patch(
+                "scenesmith.agent_utils.physical_feasibility.apply_non_penetration_projection",
+                side_effect=project,
+            ):
+                processed_scene, success, _ = apply_physical_feasibility_postprocessing(
+                    scene=scene,
+                    weld_furniture=False,
+                    projection_enabled=True,
+                    simulation_enabled=False,
+                )
+
+            self.assertTrue(success)
+            np.testing.assert_allclose(
+                processed_scene.get_object(UniqueID("box_1")).transform.translation(),
+                [-2.0, 0.0, 0.25],
+            )
+
     def test_disabled_simulation(self) -> None:
         """Test that disabled simulation skips simulation stage."""
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -867,6 +932,328 @@ class TestFallenFurnitureRemoval(PhysicalFeasibilityTestCase):
                     compute_tilt_angle_degrees(scene.get_object(object_id).transform),
                     0.0,
                     places=5,
+                )
+
+    def test_floor_supported_furniture_is_restored_after_simulation_fallthrough(
+        self,
+    ) -> None:
+        """A valid floor pose must survive a collision-proxy fallthrough."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            scene = RoomScene(
+                room_geometry=self.room_geometry,
+                scene_dir=Path(tmp_dir),
+                text_description="Furniture falling through the floor",
+            )
+            object_id = UniqueID("plant_0")
+            pre_transform = RigidTransform(p=[0.0, 0.0, 0.0])
+            scene.add_object(
+                SceneObject(
+                    object_id=object_id,
+                    object_type=ObjectType.FURNITURE,
+                    name="plant",
+                    description="Floor plant",
+                    transform=RigidTransform(
+                        R=RotationMatrix(RollPitchYaw(0.0, np.radians(40.0), 0.0)),
+                        p=[0.0, 0.0, 0.01],
+                    ),
+                    bbox_min=np.asarray([-0.2, -0.2, 0.0]),
+                    bbox_max=np.asarray([0.2, 0.2, 1.2]),
+                )
+            )
+
+            restored = _restore_furniture_that_fell_through_floor(
+                scene,
+                {object_id: pre_transform},
+            )
+
+            self.assertEqual(restored, [object_id])
+            np.testing.assert_allclose(
+                scene.get_object(object_id).transform.GetAsMatrix4(),
+                pre_transform.GetAsMatrix4(),
+            )
+
+    def test_initially_penetrating_furniture_is_not_restored(self) -> None:
+        """The safeguard must not conceal furniture already below the floor."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            scene = RoomScene(
+                room_geometry=self.room_geometry,
+                scene_dir=Path(tmp_dir),
+                text_description="Initially penetrating furniture",
+            )
+            object_id = UniqueID("box_0")
+            pre_transform = RigidTransform(p=[0.0, 0.0, 0.1])
+            post_transform = RigidTransform(p=[0.0, 0.0, 0.0])
+            scene.add_object(
+                SceneObject(
+                    object_id=object_id,
+                    object_type=ObjectType.FURNITURE,
+                    name="box",
+                    description="Penetrating box",
+                    transform=post_transform,
+                    bbox_min=np.asarray([-0.25, -0.25, -0.25]),
+                    bbox_max=np.asarray([0.25, 0.25, 0.25]),
+                )
+            )
+
+            restored = _restore_furniture_that_fell_through_floor(
+                scene,
+                {object_id: pre_transform},
+            )
+
+            self.assertEqual(restored, [])
+            np.testing.assert_allclose(
+                scene.get_object(object_id).transform.GetAsMatrix4(),
+                post_transform.GetAsMatrix4(),
+            )
+
+    def test_repeated_hssd_asset_is_restored_across_generated_sdf_paths(self) -> None:
+        """Copies of one HSSD mesh must group despite per-placement SDF paths."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            scene = RoomScene(
+                room_geometry=self.room_geometry,
+                scene_dir=Path(tmp_dir),
+                text_description="Repeated HSSD furniture group",
+            )
+            object_ids = [UniqueID("plant_0"), UniqueID("plant_1")]
+            upright = {
+                object_ids[0]: RigidTransform(p=[-1.0, 0.0, 0.5]),
+                object_ids[1]: RigidTransform(p=[1.0, 0.0, 0.5]),
+            }
+            for index, object_id in enumerate(object_ids):
+                scene.add_object(
+                    SceneObject(
+                        object_id=object_id,
+                        object_type=ObjectType.FURNITURE,
+                        name="plant",
+                        description="Repeated HSSD plant",
+                        transform=RigidTransform(
+                            R=RotationMatrix(RollPitchYaw(np.pi / 2.0, 0.0, 0.0)),
+                            p=upright[object_id].translation(),
+                        ),
+                        sdf_path=Path(tmp_dir) / f"placement_{index}" / "plant.sdf",
+                        metadata={
+                            "asset_source": "hssd",
+                            "hssd_mesh_id": "shared-plant-mesh",
+                        },
+                    )
+                )
+
+            restored = _restore_collectively_unstable_instances(
+                scene, upright, object_ids, tilt_threshold_degrees=45.0
+            )
+
+            self.assertEqual(restored, object_ids)
+            for object_id, transform in upright.items():
+                np.testing.assert_allclose(
+                    scene.get_object(object_id).transform.GetAsMatrix4(),
+                    transform.GetAsMatrix4(),
+                )
+
+    def test_repeated_proxy_restores_when_all_copies_nearly_topple(self) -> None:
+        """A shared proxy near-failure must not delete only one required copy."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            scene = RoomScene(
+                room_geometry=self.room_geometry,
+                scene_dir=Path(tmp_dir),
+                text_description="Repeated near-toppled furniture group",
+            )
+            object_ids = [UniqueID("plant_0"), UniqueID("plant_1")]
+            upright = {
+                object_ids[0]: RigidTransform(p=[-1.0, 0.0, 0.0]),
+                object_ids[1]: RigidTransform(p=[1.0, 0.0, 0.0]),
+            }
+            tilt_degrees = (75.0, 44.2)
+            for index, object_id in enumerate(object_ids):
+                scene.add_object(
+                    SceneObject(
+                        object_id=object_id,
+                        object_type=ObjectType.FURNITURE,
+                        name="plant",
+                        description="Repeated HSSD plant",
+                        transform=RigidTransform(
+                            R=RotationMatrix(
+                                RollPitchYaw(0.0, np.radians(tilt_degrees[index]), 0.0)
+                            ),
+                            p=upright[object_id].translation(),
+                        ),
+                        sdf_path=Path(tmp_dir) / f"placement_{index}" / "plant.sdf",
+                        metadata={
+                            "asset_source": "hssd",
+                            "hssd_mesh_id": "shared-plant-mesh",
+                        },
+                    )
+                )
+
+            restored = _restore_collectively_unstable_instances(
+                scene,
+                upright,
+                [object_ids[0]],
+                tilt_threshold_degrees=45.0,
+            )
+
+            self.assertEqual(restored, object_ids)
+            for object_id, transform in upright.items():
+                np.testing.assert_allclose(
+                    scene.get_object(object_id).transform.GetAsMatrix4(),
+                    transform.GetAsMatrix4(),
+                )
+
+    def test_catastrophic_translation_is_unstable_below_tilt_threshold(self) -> None:
+        obj = SceneObject(
+            object_id=UniqueID("plant_0"),
+            object_type=ObjectType.FURNITURE,
+            name="plant",
+            description="Test floor plant",
+            transform=RigidTransform(
+                R=RotationMatrix(RollPitchYaw(np.radians(35.0), 0.0, 0.0)),
+                p=[11.0, -3.0, -376.0],
+            ),
+            sdf_path=TEST_DATA_DIR / "simple_box.sdf",
+            bbox_min=np.asarray([-0.3, -0.35, 0.0]),
+            bbox_max=np.asarray([0.3, 0.35, 1.1]),
+        )
+
+        reason = _furniture_simulation_instability_reason(
+            obj,
+            RigidTransform(p=[-1.2, -0.9, 0.0]),
+            tilt_threshold_degrees=45.0,
+        )
+
+        self.assertIsNotNone(reason)
+        self.assertIn("displacement=", reason)
+
+    def test_local_settling_motion_remains_valid(self) -> None:
+        obj = SceneObject(
+            object_id=UniqueID("plant_0"),
+            object_type=ObjectType.FURNITURE,
+            name="plant",
+            description="Test floor plant",
+            transform=RigidTransform(
+                R=RotationMatrix(RollPitchYaw(np.radians(3.7), 0.0, 0.0)),
+                p=[-1.198, -0.897, -0.002],
+            ),
+            sdf_path=TEST_DATA_DIR / "simple_box.sdf",
+            bbox_min=np.asarray([-0.3, -0.35, 0.0]),
+            bbox_max=np.asarray([0.3, 0.35, 1.1]),
+        )
+
+        reason = _furniture_simulation_instability_reason(
+            obj,
+            RigidTransform(p=[-1.2, -0.9, 0.0]),
+            tilt_threshold_degrees=45.0,
+        )
+
+        self.assertIsNone(reason)
+
+    def test_repeated_proxy_restores_mixed_catastrophic_failures(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            scene = RoomScene(
+                room_geometry=self.room_geometry,
+                scene_dir=Path(tmp_dir),
+                text_description="Repeated unstable furniture group",
+            )
+            box_sdf_path = TEST_DATA_DIR / "simple_box.sdf"
+            original_transforms = {
+                UniqueID("plant_0"): RigidTransform(p=[-1.2, -0.9, 0.0]),
+                UniqueID("plant_1"): RigidTransform(p=[1.2, -0.9, 0.0]),
+            }
+            simulated_transforms = {
+                UniqueID("plant_0"): RigidTransform(
+                    R=RotationMatrix(RollPitchYaw(np.radians(35.0), 0.0, 0.0)),
+                    p=[11.0, -3.0, -376.0],
+                ),
+                UniqueID("plant_1"): RigidTransform(
+                    R=RotationMatrix(RollPitchYaw(np.radians(172.0), 0.0, 0.0)),
+                    p=[1.16, -1.17, 1.14],
+                ),
+            }
+            for object_id, transform in simulated_transforms.items():
+                scene.add_object(
+                    SceneObject(
+                        object_id=object_id,
+                        object_type=ObjectType.FURNITURE,
+                        name="plant",
+                        description="Repeated test plant",
+                        transform=transform,
+                        sdf_path=box_sdf_path,
+                        bbox_min=np.asarray([-0.3, -0.35, 0.0]),
+                        bbox_max=np.asarray([0.3, 0.35, 1.1]),
+                    )
+                )
+
+            unstable_ids = [
+                object_id
+                for object_id in original_transforms
+                if _furniture_simulation_instability_reason(
+                    scene.get_object(object_id),
+                    original_transforms[object_id],
+                    tilt_threshold_degrees=45.0,
+                )
+                is not None
+            ]
+            restored = _restore_collectively_unstable_instances(
+                scene,
+                original_transforms,
+                unstable_ids,
+                tilt_threshold_degrees=45.0,
+            )
+
+            self.assertEqual(unstable_ids, list(original_transforms))
+            self.assertEqual(restored, list(original_transforms))
+            for object_id, transform in original_transforms.items():
+                np.testing.assert_allclose(
+                    scene.get_object(object_id).transform.GetAsMatrix4(),
+                    transform.GetAsMatrix4(),
+                )
+
+    def test_repeated_proxy_restores_when_one_copy_falls_through_floor(self) -> None:
+        """A shared proxy failure must retain a repeated required floor asset."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            scene = RoomScene(
+                room_geometry=self.room_geometry,
+                scene_dir=Path(tmp_dir),
+                text_description="Repeated unstable floor plants",
+            )
+            object_ids = [UniqueID("plant_0"), UniqueID("plant_1")]
+            original_transforms = {
+                object_ids[0]: RigidTransform(p=[-1.2, -0.9, 0.0]),
+                object_ids[1]: RigidTransform(p=[1.2, -0.9, 0.0]),
+            }
+            for object_id in object_ids:
+                scene.add_object(
+                    SceneObject(
+                        object_id=object_id,
+                        object_type=ObjectType.FURNITURE,
+                        name="plant",
+                        description="Repeated HSSD floor plant",
+                        transform=RigidTransform(
+                            R=RotationMatrix(RollPitchYaw(0.0, np.radians(75.0), 0.0)),
+                            p=original_transforms[object_id].translation(),
+                        ),
+                        sdf_path=Path(tmp_dir) / str(object_id) / "plant.sdf",
+                        metadata={
+                            "asset_source": "hssd",
+                            "hssd_mesh_id": "shared-plant-mesh",
+                        },
+                    )
+                )
+
+            scene.get_object(object_ids[1]).transform = original_transforms[
+                object_ids[1]
+            ]
+            restored = _restore_collectively_unstable_instances(
+                scene,
+                original_transforms,
+                [object_ids[0]],
+                tilt_threshold_degrees=45.0,
+                restored_through_floor_ids=[object_ids[1]],
+            )
+
+            self.assertEqual(restored, object_ids)
+            for object_id, transform in original_transforms.items():
+                np.testing.assert_allclose(
+                    scene.get_object(object_id).transform.GetAsMatrix4(),
+                    transform.GetAsMatrix4(),
                 )
 
 
@@ -1193,6 +1580,94 @@ class TestApplyFloorPenetrationFallback(PhysicalFeasibilityTestCase):
             box_after = updated_scene.get_object(UniqueID("box_0"))
             self.assertTrue(
                 np.allclose(box_after.transform.translation(), initial_pos, atol=1e-6)
+            )
+
+    def test_implausible_penetration_larger_than_object_is_not_lifted(self) -> None:
+        """A corrupt floor proxy must not lift furniture above its own height."""
+
+        class FakePair:
+            id_A = "floor_geometry"
+            id_B = "plant_geometry"
+            distance = -1.51
+
+        class FakeInspector:
+            @staticmethod
+            def GetName(geometry_id: str) -> str:
+                return str(geometry_id)
+
+        class FakeQuery:
+            @staticmethod
+            def ComputeSignedDistancePairwiseClosestPoints(
+                max_distance: float,
+            ) -> list[FakePair]:
+                self.assertEqual(max_distance, 0.0)
+                return [FakePair()]
+
+            @staticmethod
+            def inspector() -> FakeInspector:
+                return FakeInspector()
+
+        class FakePort:
+            @staticmethod
+            def Eval(_context: object) -> FakeQuery:
+                return FakeQuery()
+
+        class FakeSceneGraph:
+            @staticmethod
+            def GetMyContextFromRoot(_context: object) -> object:
+                return object()
+
+            @staticmethod
+            def get_query_output_port() -> FakePort:
+                return FakePort()
+
+        class FakeDiagram:
+            @staticmethod
+            def CreateDefaultContext() -> object:
+                return object()
+
+        class FakeBuilder:
+            @staticmethod
+            def Build() -> FakeDiagram:
+                return FakeDiagram()
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            scene = RoomScene(
+                room_geometry=self.room_geometry,
+                scene_dir=Path(tmp_dir),
+                text_description="Scene with corrupt floor proxy",
+            )
+            plant = SceneObject(
+                object_id=UniqueID("plant_0"),
+                object_type=ObjectType.FURNITURE,
+                name="plant",
+                description="Tall floor plant",
+                transform=RigidTransform(p=[0.0, 0.0, 0.6]),
+                bbox_min=np.array([-0.2, -0.2, 0.0]),
+                bbox_max=np.array([0.2, 0.2, 1.2]),
+            )
+            scene.add_object(plant)
+            initial_z = plant.transform.translation()[2]
+
+            with (
+                patch(
+                    "scenesmith.agent_utils.physical_feasibility.DiagramBuilder",
+                    return_value=FakeBuilder(),
+                ),
+                patch(
+                    "scenesmith.agent_utils.physical_feasibility."
+                    "create_drake_plant_and_scene_graph_from_scene",
+                    return_value=(None, FakeSceneGraph()),
+                ),
+            ):
+                updated_scene, lifted_count = _apply_floor_penetration_fallback(scene)
+
+            self.assertEqual(lifted_count, 0)
+            self.assertAlmostEqual(
+                updated_scene.get_object(UniqueID("plant_0")).transform.translation()[
+                    2
+                ],
+                initial_z,
             )
 
 
