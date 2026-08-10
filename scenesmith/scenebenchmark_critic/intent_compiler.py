@@ -22,7 +22,10 @@ from scenesmith.scenebenchmark_critic.intent_schema import (
     validate_intent_contract,
 )
 from scenesmith.scenebenchmark_critic.intent_contract import build_intent_contract
-from scenesmith.scenebenchmark_critic.relation_registry import RELATION_REGISTRY
+from scenesmith.scenebenchmark_critic.relation_registry import (
+    RELATION_REGISTRY,
+    relation_spec,
+)
 from scenesmith.utils.llm_json import parse_llm_json_object
 
 logger = logging.getLogger(__name__)
@@ -97,6 +100,13 @@ _HIGH_CONFIDENCE_EXPLICIT_RELATIONS = frozenset(
         "mounted_to_ceiling",
     }
 )
+_RECOVERABLE_MISSING_TARGET_RELATIONS = frozenset(
+    {
+        "centered_in_room",
+        "corner_of_room",
+        "flanking",
+    }
+)
 
 
 def _selectors_semantically_overlap(
@@ -125,6 +135,82 @@ def _constraints_semantically_overlap(
     ):
         return False
     return _selectors_semantically_overlap(first.get("targets"), second.get("targets"))
+
+
+def _restore_missing_target_selectors(
+    payload: dict[str, Any], prompt: str
+) -> tuple[dict[str, Any], list[dict[str, str]]]:
+    """Fill an omitted target only when the deterministic parser agrees.
+
+    llama.cpp's JSON grammar guarantees object syntax but does not enforce the
+    relation-dependent ``if/then`` clauses emitted by Pydantic.  The model can
+    therefore correctly identify a relation such as ``flanking`` while omit
+    its target selector.  Reuse a target only when the deterministic parser
+    extracted the same relation for the same subject from the original prompt.
+    Recovery is deliberately limited to room anchors and flanking: for other
+    relations, an incomplete LLM contract must still fall back so it cannot
+    silently discard unrelated semantic relations from the prompt.
+    """
+
+    constraints = payload.get("constraints")
+    if not isinstance(constraints, list):
+        return payload, []
+
+    deterministic_constraints = build_intent_contract(prompt).get("constraints") or []
+    restored: list[dict[str, str]] = []
+    normalized_constraints = list(constraints)
+    for index, constraint in enumerate(normalized_constraints):
+        if not isinstance(constraint, dict):
+            continue
+        try:
+            spec = relation_spec(str(constraint.get("relation") or ""))
+        except ValueError:
+            continue
+        target = constraint.get("targets")
+        has_target = isinstance(target, dict) and bool(target.get("category"))
+        if (
+            spec.target_arity == 0
+            or spec.name not in _RECOVERABLE_MISSING_TARGET_RELATIONS
+            or has_target
+        ):
+            continue
+
+        matches = [
+            candidate
+            for candidate in deterministic_constraints
+            if isinstance(candidate, dict)
+            and str(candidate.get("relation") or "") == spec.name
+            and _selectors_semantically_overlap(
+                constraint.get("subjects"), candidate.get("subjects")
+            )
+            and isinstance(candidate.get("targets"), dict)
+            and candidate["targets"].get("category")
+        ]
+        if len(matches) != 1:
+            continue
+        repaired = dict(constraint)
+        repaired["targets"] = dict(matches[0]["targets"])
+        normalized_constraints[index] = repaired
+        restored.append(
+            {
+                "relation": spec.name,
+                "subject_category": str(
+                    (repaired.get("subjects") or {}).get("category") or ""
+                ),
+                "target_category": str(repaired["targets"].get("category") or ""),
+            }
+        )
+
+    if not restored:
+        return payload, restored
+    normalized = dict(payload)
+    normalized["constraints"] = normalized_constraints
+    warnings = list(normalized.get("warnings") or [])
+    warnings.append(
+        "Missing relation targets restored from the deterministic prompt parser"
+    )
+    normalized["warnings"] = warnings
+    return normalized, restored
 
 
 def _is_high_confidence_deterministic_constraint(candidate: dict[str, Any]) -> bool:
@@ -188,8 +274,18 @@ def _enrich_with_deterministic_constraints(
 
 def _system_prompt() -> str:
     relation_lines = "\n".join(
-        f"- {name}: {spec.prompt_description}"
+        f"- {name} (target arity {spec.target_arity}): {spec.prompt_description}"
         for name, spec in sorted(RELATION_REGISTRY.items())
+    )
+    unary_relations = ", ".join(
+        sorted(
+            name for name, spec in RELATION_REGISTRY.items() if spec.target_arity == 1
+        )
+    )
+    binary_relations = ", ".join(
+        sorted(
+            name for name, spec in RELATION_REGISTRY.items() if spec.target_arity == 2
+        )
     )
     schema = json.dumps(
         intent_contract_json_schema(), ensure_ascii=False, sort_keys=True
@@ -203,6 +299,15 @@ output, inventory object positions, memory, StageBrief, or current scene state.
 
 Registered relations:
 {relation_lines}
+
+Target rule is mandatory.  Relations with target arity 1 ({unary_relations})
+MUST include a non-null ``targets`` selector with the target category from the
+prompt.  ``corner_of_room`` and ``centered_in_room`` use
+``{{"category": "room", "count": 1}}`` as that selector.  For example:
+``{{"relation": "flanking", "subjects": {{"category": "nightstand", "count": 2}}, "targets": {{"category": "bed", "count": 1}}, "source": "explicit_prompt", "evidence_span": "..."}}``.
+Relations with target arity 2 ({binary_relations}) must use a target selector
+whose ``secondary_category`` identifies the second target.  Only target arity
+0 relations, such as ``required_count``, may omit ``targets``.
 
 For a rectangular target with edge-specific distribution, emit exactly one
 edge_distribution relation. It must contain subjects.count, a target selector
@@ -376,6 +481,9 @@ class IntentCompiler:
                 payload["intent_compiler_spec_version"] = self.SPEC_VERSION
                 payload["retry_count"] = attempt
                 payload = _normalize_side_distribution(payload)
+                payload, restored_targets = _restore_missing_target_selectors(
+                    payload, normalized_prompt
+                )
                 result = validate_intent_contract(payload)
                 result, enriched_constraints = _enrich_with_deterministic_constraints(
                     result, normalized_prompt
@@ -386,6 +494,7 @@ class IntentCompiler:
                     "prompt_sha256": prompt_hash,
                     "constraints": result.get("constraints", []),
                     "enriched_constraints": enriched_constraints,
+                    "restored_targets": restored_targets,
                     "retry_count": attempt,
                     "failure_reason": "",
                 }
@@ -412,6 +521,7 @@ class IntentCompiler:
                         "status": "ok",
                         "attempt": attempt,
                         "enriched_constraints": enriched_constraints,
+                        "restored_targets": restored_targets,
                     }
                 )
                 return result

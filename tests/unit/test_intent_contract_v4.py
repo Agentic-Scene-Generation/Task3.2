@@ -828,6 +828,35 @@ def test_intent_compiler_retries_once_without_task_spec_input() -> None:
         }
 
 
+def test_intent_schema_requires_target_for_endpoint_relations() -> None:
+    relation_schema = intent_contract_json_schema()["$defs"]["IntentRelation"]
+    conditions = relation_schema["allOf"]
+
+    unary_condition = next(
+        condition
+        for condition in conditions
+        if "flanking" in condition["if"]["properties"]["relation"]["enum"]
+    )
+    binary_condition = next(
+        condition
+        for condition in conditions
+        if "between" in condition["if"]["properties"]["relation"]["enum"]
+    )
+
+    assert "targets" in unary_condition["then"]["required"]
+    assert unary_condition["then"]["properties"]["targets"] == {
+        "$ref": "#/$defs/IntentSelector"
+    }
+    assert "targets" in binary_condition["then"]["required"]
+    assert binary_condition["then"]["properties"]["targets"]["allOf"][1] == {
+        "required": ["secondary_category"]
+    }
+    assert all(
+        "required_count" not in condition["if"]["properties"]["relation"]["enum"]
+        for condition in conditions
+    )
+
+
 def test_intent_compiler_canonicalizes_two_object_side_wording_to_flanking() -> None:
     compiler = _compiler_with_responses(
         [
@@ -852,6 +881,37 @@ def test_intent_compiler_canonicalizes_two_object_side_wording_to_flanking() -> 
     assert relation["groups"] == []
     assert relation.get("edge_frame") is None
     assert relation.get("orientation") is None
+
+
+def test_intent_compiler_restores_missing_target_from_prompt_parser() -> None:
+    compiler = _compiler_with_responses(
+        [
+            _response(
+                '{"constraints": [{"relation": "flanking", '
+                '"subjects": {"category": "nightstand", "count": 2}, '
+                '"source": "explicit_prompt", '
+                '"evidence_span": "two nightstands on either side of the bed"}]}'
+            )
+        ]
+    )
+
+    result = compiler.compile(
+        "A bedroom with two nightstands on either side of the bed."
+    )
+
+    flanking = next(
+        constraint
+        for constraint in result["constraints"]
+        if constraint["relation"] == "flanking"
+    )
+    assert flanking["targets"]["category"] == "bed"
+    assert compiler.last_trace["restored_targets"] == [
+        {
+            "relation": "flanking",
+            "subject_category": "nightstand",
+            "target_category": "bed",
+        }
+    ]
 
 
 def test_intent_compiler_retry_spells_out_unary_target_cardinality() -> None:

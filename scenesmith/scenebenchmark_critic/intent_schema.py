@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from copy import deepcopy
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -17,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from scenesmith.scenebenchmark_critic.relation_registry import (
     CEILING_MOUNTED_CATEGORIES,
     MANIPULAND_CATEGORIES,
+    RELATION_REGISTRY,
     STAGE_ORDER,
     WALL_MOUNTED_CATEGORIES,
     relation_spec,
@@ -480,6 +482,52 @@ def validate_intent_contract(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def intent_contract_json_schema() -> dict[str, Any]:
-    """Return the exact schema supplied to the independent LLM request."""
+    """Return an LLM schema that enforces relation-specific target arity.
 
-    return IntentContract.model_json_schema()
+    Pydantic's ``IntentRelation`` must keep ``targets`` optional because count
+    relations have no endpoint.  A plain model schema consequently lets an LLM
+    omit ``targets`` for every relation, including ``flanking`` and
+    ``corner_of_room``.  Encode the registry's target arity in JSON Schema as
+    well, so decoders that honor JSON Schema conditionals require an object
+    target whenever the selected relation has an endpoint.  The compiler keeps
+    a separate post-parse safeguard for llama.cpp's more limited grammar.
+    """
+
+    schema = deepcopy(IntentContract.model_json_schema())
+    relation_schema = schema["$defs"]["IntentRelation"]
+    relation_properties = relation_schema["properties"]
+    relation_names_by_arity = {
+        arity: sorted(
+            name
+            for name, spec in RELATION_REGISTRY.items()
+            if spec.target_arity == arity
+        )
+        for arity in (0, 1, 2)
+    }
+    relation_properties["relation"] = {"enum": sorted(RELATION_REGISTRY)}
+
+    endpoint_conditions: list[dict[str, Any]] = []
+    for arity in (1, 2):
+        relation_names = relation_names_by_arity[arity]
+        target_schema: dict[str, Any] = {"$ref": "#/$defs/IntentSelector"}
+        if arity == 2:
+            target_schema = {
+                "allOf": [
+                    target_schema,
+                    {"required": ["secondary_category"]},
+                ]
+            }
+        endpoint_conditions.append(
+            {
+                "if": {
+                    "properties": {"relation": {"enum": relation_names}},
+                    "required": ["relation"],
+                },
+                "then": {
+                    "required": ["targets"],
+                    "properties": {"targets": target_schema},
+                },
+            }
+        )
+    relation_schema["allOf"] = endpoint_conditions
+    return schema
