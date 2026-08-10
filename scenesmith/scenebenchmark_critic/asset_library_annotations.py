@@ -353,15 +353,20 @@ def _scenebenchmark_accessibility_policy(
     affordances: set[str],
     scene_object_type: str,
     group: str,
+    mobility_class: str,
 ) -> str:
     policy = record.get("week27_asset_policy") or {}
     if scene_object_type in {"wall_mounted", "ceiling_mounted"} or group == "decor":
         return "ignored"
     raw = str(policy.get("accessibility_policy") or "").strip()
-    if raw in {"required", "optional", "ignored"}:
+    if raw in {"optional", "ignored"}:
         return raw
     if group == "small_object" or scene_object_type == "manipuland":
         return "ignored"
+    if mobility_class == "movable" and "sittable" in affordances:
+        return "optional"
+    if raw == "required":
+        return raw
     return "required" if affordances else "ignored"
 
 
@@ -617,7 +622,7 @@ def build_scenebenchmark_annotation(record: dict[str, Any]) -> dict[str, Any]:
     scene_object_type = _scenebenchmark_scene_object_type(record, group)
     mobility_class = _scenebenchmark_mobility_class(record, group, scene_object_type)
     accessibility_policy = _scenebenchmark_accessibility_policy(
-        record, affordances, scene_object_type, group
+        record, affordances, scene_object_type, group, mobility_class
     )
     front_hint = _scenebenchmark_front_hint(record, affordances)
     access_sides = _scenebenchmark_access_sides(record, affordances, front_hint)

@@ -43,7 +43,10 @@ def test_high_risk_open_mesh_assets_are_merged_into_lookup():
         quality = lookup[asset_id]["asset_quality"]
         assert quality["mesh_topology"]["measured"] is True
         assert quality["mesh_topology"]["runtime_watertight_observation"] is False
-        assert quality["mesh_topology"]["topology_detail_status"] == "resolved_glb_scan_complete"
+        assert (
+            quality["mesh_topology"]["topology_detail_status"]
+            == "resolved_glb_scan_complete"
+        )
         assert quality["physics_proxy"]["policy"] in {
             "bbox_inertia",
             "weld_or_static",
@@ -80,6 +83,20 @@ def test_scenebenchmark_hints_expose_open_mesh_policy():
     assert hints["support_stability"]["stable_with_recommended_proxy"] is True
 
 
+def test_movable_seating_defaults_to_optional_accessibility():
+    hints = build_scenebenchmark_annotation(
+        {
+            "category_key": "office_chair",
+            "description": "Modern office chair with wheels and armrests",
+            "week27_asset_policy": {"accessibility_policy": "required"},
+        }
+    )["functional_hints"]
+
+    assert hints["mobility_class"] == "movable"
+    assert hints["accessibility_policy"] == "optional"
+    assert hints["metric_relevance"]["spatial_accessibility"] == 1.0
+
+
 def test_audit_is_explicit_about_unavailable_measurements():
     audit = json.loads(AUDIT.read_text(encoding="utf-8"))
     assert audit["scope"]["asset_count"] == 6
@@ -106,8 +123,6 @@ def test_full_library_mesh_physics_audit_is_complete():
 
 def test_zero_thickness_wall_art_is_attached_instead_of_rejected():
     store = AssetLibraryAnnotationStore(lookup_path=LOOKUP)
-    policy = store.get_physics_proxy_policy(
-        "775a3ca949c41b0f143a1c919efa402817172e1f"
-    )
+    policy = store.get_physics_proxy_policy("775a3ca949c41b0f143a1c919efa402817172e1f")
     assert policy["policy"] == "weld_or_static"
     assert policy["is_usable_in_physics"] is True
