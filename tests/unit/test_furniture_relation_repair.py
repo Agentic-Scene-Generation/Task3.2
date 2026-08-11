@@ -3118,6 +3118,46 @@ def test_repairs_paired_workstation_aisle_without_moving_other_furniture(
     assert after_clear_access["diagnostics"]["free_depth_m"] >= 0.8
 
 
+def test_repairs_local_clear_access_by_moving_reported_blocker(
+    tmp_path: Path,
+) -> None:
+    dressing_table = _object(
+        "dressing_table_0", "dressing_table", (0.0, 0.0, 0.4), (1.0, 0.5, 0.8)
+    )
+    blocker = _object("nightstand_0", "nightstand", (0.2, 0.6, 0.3), (0.45, 0.4, 0.6))
+    scene = _scene(
+        tmp_path,
+        dressing_table,
+        blocker,
+        text="A bedroom with usable space in front of a dressing table.",
+    )
+    scene.room_type = "bedroom"
+    _attach_intent_contract(
+        scene,
+        [
+            {
+                "relation": "clear_access",
+                "subjects": {"category": "dressing_table", "count": 1},
+                "targets": {"category": "room", "count": 1},
+                "source": "explicit_prompt",
+                "strength": "hard",
+                "evidence_span": "usable space in front of the dressing table",
+            }
+        ],
+    )
+    config = CriticConfig(enabled=True, metrics=("functional_dependency",))
+
+    fixes = improve_furniture_relations(scene, config=config)
+
+    assert [fix.object_id for fix in fixes] == ["nightstand_0"]
+    after = evaluate_room_scene(scene, config=config, stage="furniture_relation_repair")
+    clear_access = next(
+        item for item in after["results"] if item.get("relation_type") == "clear_access"
+    )
+    assert clear_access["label"] == "pass"
+    assert clear_access["diagnostics"]["blocking_ids"] == []
+
+
 def test_repairs_work_seats_blocking_a_paired_workstation_aisle(
     tmp_path: Path,
 ) -> None:

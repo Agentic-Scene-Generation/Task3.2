@@ -63,6 +63,7 @@ _WALL_BACKED_GAP_MARGIN_M = 0.02
 _ROOM_CENTER_REPAIR_MARGIN_M = 0.01
 _WORK_SEAT_SURFACE_GAP_M = 0.12
 _WORKSTATION_AISLE_REPAIR_MARGIN_M = 0.01
+_LOCAL_ACCESS_REPAIR_MARGIN_M = 0.02
 
 
 @dataclass(frozen=True)
@@ -732,7 +733,62 @@ def _clear_access_repair_targets(
     target = _workstation_aisle_target(
         context.scene, context.diagnostics, context.check_id
     )
-    return [target] if target is not None else []
+    if target is not None:
+        return [target]
+    return _local_access_repair_targets(context)
+
+
+def _local_access_repair_targets(
+    context: _RepairHandlerContext,
+) -> list[_RepairTarget]:
+    """Move reported local-access blockers sideways out of a usable front zone."""
+    subject_id = str(context.result.get("primary_object") or "")
+    subject = context.scene.objects.get(UniqueID(subject_id))
+    subject_center = _world_center_xy(subject) if subject is not None else None
+    if subject is None or subject_center is None:
+        return []
+    rotation = subject.transform.rotation().matrix()
+    front = (float(rotation[0, 1]), float(rotation[1, 1]))
+    magnitude = math.hypot(*front)
+    if magnitude <= 1e-6:
+        return []
+    side = (-front[1] / magnitude, front[0] / magnitude)
+    half_width = _float_or_none(context.diagnostics.get("half_width_m"))
+    if half_width is None or half_width <= 0.0:
+        return []
+
+    targets: list[_RepairTarget] = []
+    for blocker_id in context.diagnostics.get("blocking_ids") or []:
+        blocker = context.scene.objects.get(UniqueID(str(blocker_id)))
+        blocker_center = _world_center_xy(blocker) if blocker is not None else None
+        if blocker is None or blocker_center is None:
+            continue
+        lateral = (blocker_center[0] - subject_center[0]) * side[0] + (
+            blocker_center[1] - subject_center[1]
+        ) * side[1]
+        direction = 1.0 if lateral >= 0.0 else -1.0
+        required_lateral = half_width + _LOCAL_ACCESS_REPAIR_MARGIN_M
+        shift = max(0.0, required_lateral - abs(lateral))
+        if shift <= 1e-6:
+            continue
+        target_center = (
+            blocker_center[0] + direction * side[0] * shift,
+            blocker_center[1] + direction * side[1] * shift,
+        )
+        candidate = _RepairTarget(
+            str(blocker_id),
+            "clear_access",
+            context.check_id,
+            target_center,
+            None,
+        )
+        if _member_poses_fit_floor(
+            context.scene,
+            (_RepairPose(candidate.object_id, target_center, None),),
+            context.check_id,
+        ):
+            targets.append(candidate)
+    return targets
 
 
 def _table_seat_repair_targets(context: _RepairHandlerContext) -> list[_RepairTarget]:
