@@ -122,6 +122,14 @@ DEFAULT_ALIASES = {
         "display",
     ],
     "sideboard": ["sideboard", "sideboards", "buffet cabinet"],
+    "water_dispenser": [
+        "water dispenser",
+        "water dispensers",
+        "water cooler",
+        "water coolers",
+        "drinking water dispenser",
+        "drinking water dispensers",
+    ],
 }
 
 # Keep specific categories for asset selection and repair, while allowing a

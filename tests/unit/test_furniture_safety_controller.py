@@ -352,6 +352,34 @@ class FurnitureSafetyControllerTest(unittest.TestCase):
             evaluation.hard_reasons,
         )
 
+    def test_water_dispenser_identity_satisfies_contract_inventory(self) -> None:
+        controller = FurnitureSafetyController({"enabled": True})
+        controller.required_counts = {"water_dispenser": 1}
+        controller.required_terms = {"water_dispenser"}
+        scene = SimpleNamespace(
+            room_type="office",
+            text_description="An office with a water dispenser.",
+            room_geometry=None,
+            objects={
+                "water_dispenser_0": SimpleNamespace(
+                    name="water_dispenser",
+                    description=(
+                        "Freestanding water cooler with bottle on top and "
+                        "dispensing spigots"
+                    ),
+                    immutable=False,
+                )
+            },
+        )
+
+        evaluation = controller.evaluate_scene_state(scene)
+
+        self.assertTrue(evaluation.hard_valid)
+        self.assertNotIn(
+            "missing required water_dispenser: expected 1, found 0",
+            evaluation.hard_reasons,
+        )
+
     def test_chair_requirements_preserve_explicit_subtype_counts(self) -> None:
         controller = FurnitureSafetyController({"enabled": True})
         controller.reset_for_scene(
