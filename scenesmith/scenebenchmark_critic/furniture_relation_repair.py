@@ -700,6 +700,32 @@ def _corner_repair_targets(context: _RepairHandlerContext) -> list[_RepairTarget
     return _corner_of_room_targets(context.scene, context.result, context.check_id)
 
 
+def _corner_distribution_repair_targets(
+    context: _RepairHandlerContext,
+) -> list[_RepairTarget]:
+    candidates = _corner_of_room_targets(
+        context.scene, context.result, context.check_id
+    )
+    target = (context.diagnostics.get("assignment") or {}).get("target_corner_xy_m")
+    if not candidates or not isinstance(target, list) or len(target) < 2:
+        return candidates
+    selected = min(
+        candidates,
+        key=lambda candidate: math.dist(
+            candidate.target_center_xy, (float(target[0]), float(target[1]))
+        ),
+    )
+    return [
+        _RepairTarget(
+            selected.object_id,
+            "corner_distribution",
+            selected.check_id,
+            selected.target_center_xy,
+            selected.target_yaw_deg,
+        )
+    ]
+
+
 def _clear_access_repair_targets(
     context: _RepairHandlerContext,
 ) -> list[_RepairTarget]:
@@ -880,6 +906,32 @@ def _centered_edge_distribution_targets(
 def _between_repair_targets(context: _RepairHandlerContext) -> list[_RepairTarget]:
     object_id = str(context.result.get("primary_object") or "")
     center = _xy(context.diagnostics.get("target_center_xy_m"))
+    if center is None:
+        # Contract extensions can report the two selected anchors but omit the
+        # optional diagnostic repair coordinate.  The midpoint is the exact
+        # geometry target for centered-between and a valid in-segment target
+        # for between, so retain deterministic repair coverage without relying
+        # on a particular evaluator payload shape.
+        anchor_ids = [
+            str(anchor_id)
+            for anchor_id in (
+                context.result.get("selected_related_objects")
+                or context.result.get("related_objects")
+                or context.diagnostics.get("anchor_ids")
+                or []
+            )
+            if str(anchor_id)
+        ]
+        if len(anchor_ids) == 2:
+            first = context.scene.objects.get(UniqueID(anchor_ids[0]))
+            second = context.scene.objects.get(UniqueID(anchor_ids[1]))
+            first_center = _world_center_xy(first) if first is not None else None
+            second_center = _world_center_xy(second) if second is not None else None
+            if first_center is not None and second_center is not None:
+                center = (
+                    (first_center[0] + second_center[0]) / 2.0,
+                    (first_center[1] + second_center[1]) / 2.0,
+                )
     if not object_id or center is None:
         return []
     target = _RepairTarget(object_id, context.relation, context.check_id, center, None)
@@ -955,24 +1007,27 @@ def _wall_operation_repair_targets(
 
 
 def _support_repair_targets(context: _RepairHandlerContext) -> list[_RepairTarget]:
-    if not _is_required_media_on_support_result(
+    one_per_support = context.relation == "one_per_support"
+    if not one_per_support and not _is_required_media_on_support_result(
         context.payload, context.scene, context.result
     ):
         return []
-    object_id = str(context.result.get("primary_object") or "")
-    support_id = next(
-        (
-            str(item)
-            for item in (
-                context.result.get("selected_related_objects")
-                or context.diagnostics.get("selected_target_ids")
-                or context.result.get("related_objects")
-                or []
-            )
-            if str(item)
-        ),
-        "",
+    object_id = str(
+        context.diagnostics.get("repair_subject_id")
+        or context.result.get("primary_object")
+        or ""
     )
+    support_candidates = (
+        context.diagnostics.get("missing_target_ids")
+        if one_per_support
+        else (
+            context.result.get("selected_related_objects")
+            or context.diagnostics.get("selected_target_ids")
+            or context.result.get("related_objects")
+            or []
+        )
+    )
+    support_id = next((str(item) for item in support_candidates or [] if str(item)), "")
     subject = context.scene.objects.get(UniqueID(object_id))
     support = context.scene.objects.get(UniqueID(support_id))
     subject_bounds = subject.compute_world_bounds() if subject is not None else None
@@ -1407,6 +1462,7 @@ _REPAIR_TARGET_HANDLERS = {
     _PAIRED_SURFACE_RELATION: _paired_surface_targets,
     "generic_near_relation": _generic_near_repair_targets,
     "corner_of_room": _corner_repair_targets,
+    "corner_distribution": _corner_distribution_repair_targets,
     "clear_access": _clear_access_repair_targets,
     "edge_distribution": _table_seat_repair_targets,
     "workstation_focal_alignment": _workstation_focal_repair_targets,
@@ -1421,6 +1477,7 @@ _REPAIR_TARGET_HANDLERS = {
     "operation_zone_at_wall": _wall_operation_repair_targets,
     "instructional_surface_alignment": _wall_operation_repair_targets,
     "object_on_support": _support_repair_targets,
+    "one_per_support": _support_repair_targets,
     "wall_backed_storage_alignment": _wall_backed_storage_repair_targets,
     "back_against_wall": _back_against_wall_repair_targets,
 }
@@ -1471,6 +1528,13 @@ def _repair_targets(scene: RoomScene, payload: dict[str, Any]) -> list[_RepairTa
         targets.extend(handler(context))
     targets.sort(
         key=lambda target: (
+            # A hard prompt-authorized support pair that currently intersects
+            # is both a contract failure and a physical failure.  Repair it
+            # before unrelated relation candidates, whose strict physics gate
+            # would otherwise reject every pose against the pre-existing
+            # collision.  This is geometry- and contract-driven, rather than
+            # tied to a particular media or room category.
+            0 if _is_hard_support_collision_target(scene, payload, target) else 1,
             (
                 0
                 if (_result_by_id(payload, target.check_id) or {}).get("label")
@@ -1486,6 +1550,43 @@ def _repair_targets(scene: RoomScene, payload: dict[str, Any]) -> list[_RepairTa
         _prioritize_coordinated_seating_targets(targets),
     )
     return [*centered_edge_targets, *ordered_targets]
+
+
+def _is_hard_support_collision_target(
+    scene: RoomScene,
+    payload: dict[str, Any],
+    target: _RepairTarget,
+) -> bool:
+    """Return whether a target directly clears a hard support-pair collision."""
+    if target.relation_type not in {"object_on_support", "one_per_support"}:
+        return False
+    result = _result_by_id(payload, target.check_id)
+    constraint = ((result or {}).get("evidence") or {}).get("intent_constraint") or {}
+    if str(constraint.get("strength") or "").lower() != "hard":
+        return False
+    subject = scene.objects.get(UniqueID(target.object_id))
+    subject_bounds = subject.compute_world_bounds() if subject is not None else None
+    if subject_bounds is None:
+        return False
+    diagnostics = (result or {}).get("diagnostics") or {}
+    support_ids = (
+        (result or {}).get("selected_related_objects")
+        or diagnostics.get("selected_target_ids")
+        or diagnostics.get("missing_target_ids")
+        or (result or {}).get("related_objects")
+        or []
+    )
+    for support_id in support_ids:
+        support = scene.objects.get(UniqueID(str(support_id)))
+        support_bounds = support.compute_world_bounds() if support is not None else None
+        if support_bounds is None:
+            continue
+        if bool(
+            np.all(subject_bounds[0] < support_bounds[1])
+            and np.all(subject_bounds[1] > support_bounds[0])
+        ):
+            return True
+    return False
 
 
 def _order_targets_by_position_dependency(

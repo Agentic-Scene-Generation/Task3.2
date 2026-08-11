@@ -39,6 +39,9 @@ from scenesmith.scenebenchmark_critic.metrics.functional_dependency.relations im
     evaluate_functional_dependency,
     _relation_target_is_valid,
 )
+from scenesmith.scenebenchmark_critic.metrics.spatial_accessibility.companions import (
+    attach_expected_access_companions,
+)
 from scenesmith.scenebenchmark_critic.core.geometry import load_geometry
 from scenesmith.scene_expert import hooks
 from scenesmith.scene_expert.schemas import SceneTaskSpec
@@ -273,6 +276,7 @@ def test_schema_canonicalizes_instructional_surface_aliases_to_wall_stage() -> N
         ("teacher's desk", "teacher_desk"),
         ("office_chairs", "office_chair"),
         ("whiteboard", "instructional_surface"),
+        ("entrance_route", "entrance"),
         ("batteries", "battery"),
     ],
 )
@@ -675,6 +679,43 @@ def test_collective_subject_does_not_fail_contract_binding() -> None:
     )
 
 
+def test_relation_local_secondary_role_falls_back_to_unique_anchor_category() -> None:
+    constraint = {
+        "constraint_id": "coffee_table_between_media",
+        "relation": "centered_between",
+        "stage": "furniture",
+        "strength": "hard",
+        "subjects": {"category": "coffee_table", "count": 1},
+        "targets": {
+            "category": "sofa",
+            "count": 1,
+            "secondary_category": "tv_stand",
+            "secondary_count": 1,
+            # This labels the endpoint's relation purpose rather than an
+            # attribute emitted by the retrieved TV-stand asset.
+            "secondary_role": "anchor",
+        },
+        "source": "explicit_prompt",
+        "evidence_span": "Center one coffee table between the sofa and TV stand",
+    }
+    objects = [
+        _record("sofa_0", "sofa", (-2.0, 0.0), (2.0, 0.8, 0.8)),
+        _record("tv_stand_0", "tv_stand", (2.0, 0.0), (1.4, 0.5, 0.6)),
+        _record("coffee_table_0", "coffee_table", (0.0, 0.0), (1.0, 0.6, 0.5)),
+    ]
+    case_pack = {
+        "stage": "furniture",
+        "intent_contract": {"constraints": [constraint]},
+        "scene_geometry": {"objects": objects},
+    }
+
+    assert _binding_state_result(case_pack, constraint, objects) is None
+    result = evaluate_intent_contract_extensions(case_pack)
+    assert [(item["relation_type"], item["label"]) for item in result] == [
+        ("centered_between_alignment", "pass")
+    ]
+
+
 @pytest.mark.parametrize("target_category", ["back_wall", "adjacent_wall"])
 def test_on_wall_uses_physical_wall_for_room_relative_target(
     target_category: str,
@@ -694,6 +735,69 @@ def test_on_wall_uses_physical_wall_for_room_relative_target(
     ]
 
     assert _binding_state_result({"stage": "final"}, constraint, objects) is None
+
+
+def test_wall_mounted_object_can_be_centered_above_furniture_without_wall_centering() -> (
+    None
+):
+    constraints = [
+        {
+            "constraint_id": "mirror_on_wall",
+            "relation": "on_wall",
+            "subjects": {"category": "mirror", "count": 1},
+            "targets": {"category": "wall", "count": 1},
+            "source": "explicit_prompt",
+            "evidence_span": "mount one mirror on the wall",
+        },
+        {
+            "constraint_id": "mirror_above_dressing_table",
+            "relation": "centered_above",
+            "subjects": {"category": "mirror", "count": 1},
+            "targets": {"category": "dressing_table", "count": 1},
+            "source": "explicit_prompt",
+            "evidence_span": "mirror centered directly above the dressing table",
+        },
+    ]
+    mirror = _record("mirror_0", "mirror", (-2.0, 0.6), (0.05, 0.6, 0.9), yaw_deg=-90)
+    mirror["bbox_world"]["center"][2] = 1.35
+    mirror["bbox_world"]["min"][2] = 0.9
+    mirror["bbox_world"]["max"][2] = 1.8
+    case_pack = {
+        "stage": "wall_mounted",
+        "intent_contract": {"constraints": constraints},
+        "scene_geometry": {
+            "rooms": [{"bbox": {"min": [-2.0, -2.0], "max": [2.0, 2.0]}}],
+            "objects": [
+                _record("west_wall", "wall", (-2.0, 0.0), (0.1, 4.0, 2.8)),
+                _record(
+                    "dressing_table_0",
+                    "dressing_table",
+                    (-1.7, 0.6),
+                    (1.2, 0.5, 0.75),
+                    yaw_deg=-90,
+                ),
+                mirror,
+            ],
+        },
+    }
+
+    results = evaluate_intent_contract_extensions(case_pack)
+    by_relation = {result["relation_type"]: result for result in results}
+
+    assert by_relation["mounted_to_wall"]["label"] == "pass"
+    assert by_relation["centered_above"]["label"] == "pass"
+    assert (
+        by_relation["centered_above"]["diagnostics"]["alignment_axis"] == "wall_tangent"
+    )
+
+    mirror["bbox_world"]["center"][1] = 1.2
+    mirror["bbox_world"]["min"][1] = 0.9
+    mirror["bbox_world"]["max"][1] = 1.5
+    shifted = {
+        result["relation_type"]: result
+        for result in evaluate_intent_contract_extensions(case_pack)
+    }
+    assert shifted["centered_above"]["label"] == "fail"
 
 
 def test_furniture_relation_endpoints_supply_contract_inventory_counts() -> None:
@@ -756,6 +860,411 @@ def test_faces_room_is_evaluated_as_an_interior_direction() -> None:
     assert result["label"] == "pass"
     assert result["relation_type"] == "faces"
     assert result["diagnostics"]["facing_target_xy_m"] == [0.0, 0.0]
+
+
+def _entrance_to_room_case(*, route_blocker: dict | None = None) -> dict:
+    constraint = {
+        "constraint_id": "entrance_route",
+        "relation": "clear_access",
+        "subjects": {"category": "entrance", "count": 1},
+        "targets": {"category": "room", "count": 1},
+        "source": "explicit_prompt",
+        "strength": "hard",
+        "evidence_span": "keep the entrance route clear",
+    }
+    return {
+        "stage": "furniture",
+        "intent_contract": {"constraints": [constraint]},
+        "scene_geometry": {
+            "rooms": [{"bbox": {"min": [0.0, 0.0], "max": [8.0, 5.0]}}],
+            "scene_shell": {
+                "doors": [
+                    {
+                        "id": "door_0",
+                        "opening_type": "door",
+                        "center": [0.0, 2.5, 1.05],
+                        "width": 0.9,
+                    }
+                ]
+            },
+            "objects": [route_blocker] if route_blocker is not None else [],
+        },
+    }
+
+
+def test_clear_access_routes_entrance_to_virtual_room_interior() -> None:
+    result = evaluate_intent_contract_extensions(_entrance_to_room_case())[0]
+
+    assert result["label"] == "pass"
+    assert result["primary_object"] == "door_0"
+    assert result["related_objects"] == ["room"]
+    assert result["diagnostics"]["destination_id"] == "room"
+    assert result["diagnostics"]["destination_target_xy_m"] == [4.0, 2.5]
+    assert result["diagnostics"]["destination_walkable_xy_m"] == [4.0, 2.5]
+
+
+def test_clear_access_reports_when_entrance_cannot_reach_room_interior() -> None:
+    blocker = _record(
+        "cabinet_0",
+        "cabinet",
+        (2.0, 2.5),
+        (0.3, 5.0, 1.2),
+    )
+
+    result = evaluate_intent_contract_extensions(
+        _entrance_to_room_case(route_blocker=blocker)
+    )[0]
+
+    assert result["label"] == "fail"
+    assert result["diagnostics"]["destination_id"] == "room"
+    assert result["diagnostics"]["blocking_ids"] == ["cabinet_0"]
+
+
+def test_clear_access_allows_a_hard_front_facing_functional_occupant() -> None:
+    dressing_table = _record(
+        "dressing_table_0",
+        "dressing_table",
+        (0.0, 0.0),
+        (1.2, 0.5, 0.75),
+        yaw_deg=0.0,
+    )
+    stool = _record(
+        "stool_0",
+        "stool",
+        (0.0, 0.5),
+        (0.4, 0.4, 0.45),
+        yaw_deg=180.0,
+    )
+    access = {
+        "constraint_id": "access_dressing_table",
+        "relation": "clear_access",
+        "subjects": {"category": "dressing_table", "count": 1},
+        "targets": {"category": "room", "count": 1},
+        "source": "explicit_prompt",
+        "strength": "hard",
+        "evidence_span": "usable space in front of the dressing table",
+    }
+    front = {
+        "constraint_id": "stool_in_front_of_dressing_table",
+        "relation": "in_front_of",
+        "subjects": {"category": "stool", "count": 1},
+        "targets": {"category": "dressing_table", "count": 1},
+        "source": "explicit_prompt",
+        "strength": "hard",
+        "evidence_span": "stool centered in front of the dressing table",
+    }
+    faces = {
+        "constraint_id": "stool_faces_dressing_table",
+        "relation": "faces",
+        "subjects": {"category": "stool", "count": 1},
+        "targets": {"category": "dressing_table", "count": 1},
+        "source": "explicit_prompt",
+        "strength": "hard",
+        "evidence_span": "stool facing the dressing table",
+    }
+    case_pack = {
+        "stage": "furniture",
+        "intent_contract": {"constraints": [access, front, faces]},
+        "scene_geometry": {"objects": [dressing_table, stool]},
+    }
+
+    result = next(
+        row
+        for row in evaluate_intent_contract_extensions(case_pack)
+        if row["relation_type"] == "clear_access"
+    )
+
+    assert result["label"] == "pass"
+    assert result["diagnostics"]["authorized_occupant_ids"] == ["stool_0"]
+    assert result["diagnostics"]["blocking_ids"] == []
+
+
+def test_clear_access_allows_explicitly_paired_workstation_chairs() -> None:
+    desks = [
+        _record("desk_0", "desk", (-1.0, 0.0), (1.2, 0.7, 0.75), yaw_deg=0.0),
+        _record("desk_1", "desk", (1.0, 0.0), (1.2, 0.7, 0.75), yaw_deg=0.0),
+    ]
+    chairs = [
+        _record(
+            "office_chair_0",
+            "office_chair",
+            (-1.0, 0.5),
+            (0.5, 0.5, 1.0),
+            yaw_deg=180.0,
+        ),
+        _record(
+            "office_chair_1",
+            "office_chair",
+            (1.0, 0.5),
+            (0.5, 0.5, 1.0),
+            yaw_deg=180.0,
+        ),
+    ]
+    access = {
+        "constraint_id": "access_workstations",
+        "relation": "clear_access",
+        "subjects": {"category": "desk", "count": 2},
+        "targets": {"category": "room", "count": 1},
+        "source": "explicit_prompt",
+        "strength": "hard",
+        "evidence_span": "enough clearance to use every workstation",
+    }
+    paired = {
+        "constraint_id": "pair_workstations",
+        "relation": "paired_with",
+        "subjects": {"category": "office_chair", "count": 2},
+        "targets": {"category": "desk", "count": 2},
+        "source": "explicit_prompt",
+        "strength": "hard",
+        "evidence_span": "each desk with exactly one office chair",
+    }
+    faces = {
+        "constraint_id": "face_workstations",
+        "relation": "faces",
+        "subjects": {"category": "office_chair", "count": 2},
+        "targets": {"category": "desk", "count": 2},
+        "source": "explicit_prompt",
+        "strength": "hard",
+        "evidence_span": "every chair facing its paired desk",
+    }
+    case_pack = {
+        "stage": "furniture",
+        "checks": [
+            {
+                "metric": "functional_dependency",
+                "relation_type": "seating_to_work_surface",
+                "subject_id": "office_chair_0",
+                "target_ids": ["desk_0"],
+            },
+            {
+                "metric": "functional_dependency",
+                "relation_type": "seating_to_work_surface",
+                "subject_id": "office_chair_1",
+                "target_ids": ["desk_1"],
+            },
+        ],
+        "intent_contract": {"constraints": [access, paired, faces]},
+        "scene_geometry": {"objects": [*desks, *chairs]},
+    }
+
+    results = [
+        row
+        for row in evaluate_intent_contract_extensions(case_pack)
+        if row["relation_type"] == "clear_access"
+    ]
+
+    assert [row["label"] for row in results] == ["pass", "pass"]
+    assert [row["diagnostics"]["authorized_occupant_ids"] for row in results] == [
+        ["office_chair_0"],
+        ["office_chair_1"],
+    ]
+
+
+def test_in_front_of_requires_clearance_for_both_object_footprints() -> None:
+    dressing_table = _record(
+        "dressing_table_0",
+        "dressing_table",
+        (0.0, 0.0),
+        (1.2, 0.5, 0.75),
+        yaw_deg=0.0,
+    )
+    relation = {
+        "constraint_id": "stool_in_front_of_dressing_table",
+        "relation": "in_front_of",
+        "subjects": {"category": "stool", "count": 1},
+        "targets": {"category": "dressing_table", "count": 1},
+        "source": "explicit_prompt",
+        "strength": "hard",
+        "evidence_span": "stool centered in front of the dressing table",
+    }
+
+    def evaluate_stool_at(y: float) -> dict:
+        stool = _record(
+            "stool_0",
+            "stool",
+            (0.0, y),
+            (0.4, 0.4, 0.45),
+            yaw_deg=180.0,
+        )
+        return evaluate_intent_contract_extensions(
+            {
+                "stage": "furniture",
+                "intent_contract": {"constraints": [relation]},
+                "scene_geometry": {"objects": [dressing_table, stool]},
+            }
+        )[0]
+
+    overlapping = evaluate_stool_at(0.20)
+    clear = evaluate_stool_at(0.49)
+
+    assert overlapping["label"] == "degraded"
+    assert overlapping["diagnostics"]["minimum_forward_distance_m"] == pytest.approx(
+        0.48
+    )
+    assert clear["label"] == "pass"
+
+
+def test_clear_access_keeps_unrelated_object_as_a_blocker() -> None:
+    dressing_table = _record(
+        "dressing_table_0",
+        "dressing_table",
+        (0.0, 0.0),
+        (1.2, 0.5, 0.75),
+        yaw_deg=0.0,
+    )
+    stool = _record(
+        "stool_0",
+        "stool",
+        (0.0, 0.5),
+        (0.4, 0.4, 0.45),
+        yaw_deg=180.0,
+    )
+    nightstand = _record(
+        "nightstand_0",
+        "nightstand",
+        (0.55, 0.55),
+        (0.4, 0.4, 0.6),
+    )
+    case_pack = {
+        "stage": "furniture",
+        "intent_contract": {
+            "constraints": [
+                {
+                    "constraint_id": "access_dressing_table",
+                    "relation": "clear_access",
+                    "subjects": {"category": "dressing_table", "count": 1},
+                    "targets": {"category": "room", "count": 1},
+                    "source": "explicit_prompt",
+                    "strength": "hard",
+                    "evidence_span": "usable space in front of the dressing table",
+                },
+                {
+                    "constraint_id": "stool_in_front_of_dressing_table",
+                    "relation": "in_front_of",
+                    "subjects": {"category": "stool", "count": 1},
+                    "targets": {"category": "dressing_table", "count": 1},
+                    "source": "explicit_prompt",
+                    "strength": "hard",
+                    "evidence_span": "stool centered in front of the dressing table",
+                },
+                {
+                    "constraint_id": "stool_faces_dressing_table",
+                    "relation": "faces",
+                    "subjects": {"category": "stool", "count": 1},
+                    "targets": {"category": "dressing_table", "count": 1},
+                    "source": "explicit_prompt",
+                    "strength": "hard",
+                    "evidence_span": "stool facing the dressing table",
+                },
+            ]
+        },
+        "scene_geometry": {"objects": [dressing_table, stool, nightstand]},
+    }
+
+    result = next(
+        row
+        for row in evaluate_intent_contract_extensions(case_pack)
+        if row["relation_type"] == "clear_access"
+    )
+
+    assert result["label"] == "fail"
+    assert result["diagnostics"]["authorized_occupant_ids"] == ["stool_0"]
+    assert result["diagnostics"]["blocking_ids"] == ["nightstand_0"]
+
+
+def test_spatial_accessibility_allows_hard_bound_seating_companion() -> None:
+    dressing_table = _record(
+        "dressing_table_0",
+        "dressing_table",
+        (0.0, 0.0),
+        (1.2, 0.5, 0.75),
+        yaw_deg=0.0,
+    )
+    stool = _record(
+        "stool_0",
+        "stool",
+        (0.0, 0.5),
+        (0.4, 0.4, 0.45),
+        yaw_deg=180.0,
+    )
+    case_pack = {
+        "checks": [
+            {
+                "check_id": "spatial_accessibility__dressing_table_0",
+                "metric": "spatial_accessibility",
+                "subject_id": "dressing_table_0",
+            }
+        ],
+        "intent_contract": {
+            "constraints": [
+                {
+                    "relation": "in_front_of",
+                    "subjects": {"category": "stool", "count": 1},
+                    "targets": {"category": "dressing_table", "count": 1},
+                    "source": "explicit_prompt",
+                    "strength": "hard",
+                },
+                {
+                    "relation": "faces",
+                    "subjects": {"category": "stool", "count": 1},
+                    "targets": {"category": "dressing_table", "count": 1},
+                    "source": "explicit_prompt",
+                    "strength": "hard",
+                },
+            ]
+        },
+    }
+
+    attach_expected_access_companions(
+        case_pack,
+        {"dressing_table_0": dressing_table, "stool_0": stool},
+    )
+
+    assert case_pack["checks"][0]["expected_companion_ids"] == ["stool_0"]
+
+
+def test_spatial_accessibility_requires_both_hard_seating_relations() -> None:
+    dressing_table = _record(
+        "dressing_table_0",
+        "dressing_table",
+        (0.0, 0.0),
+        (1.2, 0.5, 0.75),
+        yaw_deg=0.0,
+    )
+    stool = _record(
+        "stool_0",
+        "stool",
+        (0.0, 0.5),
+        (0.4, 0.4, 0.45),
+        yaw_deg=180.0,
+    )
+    case_pack = {
+        "checks": [
+            {
+                "check_id": "spatial_accessibility__dressing_table_0",
+                "metric": "spatial_accessibility",
+                "subject_id": "dressing_table_0",
+            }
+        ],
+        "intent_contract": {
+            "constraints": [
+                {
+                    "relation": "faces",
+                    "subjects": {"category": "stool", "count": 1},
+                    "targets": {"category": "dressing_table", "count": 1},
+                    "source": "explicit_prompt",
+                    "strength": "hard",
+                }
+            ]
+        },
+    }
+
+    attach_expected_access_companions(
+        case_pack,
+        {"dressing_table_0": dressing_table, "stool_0": stool},
+    )
+
+    assert "expected_companion_ids" not in case_pack["checks"][0]
 
 
 def test_edge_distribution_accepts_unique_generic_target_asset() -> None:
@@ -873,10 +1382,13 @@ def test_intent_schema_requires_target_for_endpoint_relations() -> None:
     assert binary_condition["then"]["properties"]["targets"]["allOf"][1] == {
         "required": ["secondary_category"]
     }
-    assert all(
-        "required_count" not in condition["if"]["properties"]["relation"]["enum"]
+    zero_arity_condition = next(
+        condition
         for condition in conditions
+        if "required_count" in condition["if"]["properties"]["relation"]["enum"]
     )
+    assert "targets" in relation_schema["required"]
+    assert zero_arity_condition["then"]["properties"]["targets"] == {"type": "null"}
 
 
 def test_intent_compiler_canonicalizes_two_object_side_wording_to_flanking() -> None:
@@ -965,6 +1477,126 @@ def test_intent_compiler_restores_missing_target_from_prompt_parser() -> None:
     ]
 
 
+def test_intent_compiler_rewrites_object_centering_mistaken_for_wall_centering() -> (
+    None
+):
+    prompt = "Mount one mirror on the wall, centered directly above the dressing table."
+    compiler = _compiler_with_responses(
+        [
+            _response(
+                '{"constraints": [{"relation": "centered_on_wall", '
+                '"subjects": {"category": "mirror", "count": 1}, '
+                '"targets": {"category": "wall", "count": 1}, '
+                '"source": "explicit_prompt", '
+                '"evidence_span": "mirror centered directly above the dressing table"}]}'
+            )
+        ]
+    )
+
+    result = compiler.compile(prompt)
+
+    alignment = next(
+        row for row in result["constraints"] if row["relation"] == "centered_above"
+    )
+    assert alignment["subjects"]["category"] == "mirror"
+    assert alignment["targets"]["category"] == "dressing_table"
+    assert not any(
+        row["relation"] == "centered_on_wall"
+        and row["subjects"]["category"] == "mirror"
+        for row in result["constraints"]
+    )
+    assert compiler.last_trace["normalized_centered_above"] == [
+        {"subject_category": "mirror", "target_category": "dressing_table"}
+    ]
+
+
+def test_intent_compiler_rewrites_vertical_centering_mistaken_for_front_axis() -> None:
+    prompt = (
+        "Place one stool centered in front of and facing the dressing table. "
+        "Mount one separate mirror on the wall, centered directly above the "
+        "dressing table."
+    )
+    compiler = _compiler_with_responses(
+        [
+            _response(
+                '{"constraints": ['
+                '{"relation": "centered_above", '
+                '"subjects": {"category": "stool", "count": 1}, '
+                '"targets": {"category": "dressing_table", "count": 1}, '
+                '"source": "explicit_prompt", '
+                '"evidence_span": "one stool centered in front of and facing '
+                'the dressing table"}, '
+                '{"relation": "faces", '
+                '"subjects": {"category": "stool", "count": 1}, '
+                '"targets": {"category": "dressing_table", "count": 1}, '
+                '"source": "explicit_prompt", '
+                '"evidence_span": "stool facing the dressing table"}, '
+                '{"relation": "centered_above", '
+                '"subjects": {"category": "mirror", "count": 1}, '
+                '"targets": {"category": "dressing_table", "count": 1}, '
+                '"source": "explicit_prompt", '
+                '"evidence_span": "mirror centered directly above the '
+                'dressing table"}]}'
+            )
+        ]
+    )
+
+    result = compiler.compile(prompt)
+
+    assert any(
+        row["relation"] == "in_front_of"
+        and row["subjects"]["category"] == "stool"
+        and row["targets"]["category"] == "dressing_table"
+        for row in result["constraints"]
+    )
+    assert any(
+        row["relation"] == "centered_above"
+        and row["subjects"]["category"] == "mirror"
+        and row["targets"]["category"] == "dressing_table"
+        for row in result["constraints"]
+    )
+    assert not any(
+        row["relation"] == "centered_above" and row["subjects"]["category"] == "stool"
+        for row in result["constraints"]
+    )
+
+
+def test_intent_compiler_restores_unique_edge_fields_omitted_by_llama() -> None:
+    prompt = (
+        "Arrange five dining chairs around one rectangular dining table: two "
+        "evenly spaced along each long side and one centered on one short side, "
+        "all facing the table."
+    )
+    compiler = _compiler_with_responses(
+        [
+            _response(
+                '{"constraints": [{"relation": "edge_distribution", '
+                '"subjects": {"category": "dining_chair", "count": 5}, '
+                '"targets": {"category": "dining_table", "count": 1}, '
+                '"evidence_span": "Arrange five dining chairs"}]}'
+            )
+        ]
+    )
+
+    result = compiler.compile(prompt)
+
+    edge = next(
+        row for row in result["constraints"] if row["relation"] == "edge_distribution"
+    )
+    assert edge["source"] == "explicit_prompt"
+    assert edge["edge_frame"] == "target_local_rectangle"
+    assert edge["orientation"] == "toward_target"
+    assert [group["counts_per_edge"] for group in edge["groups"]] == [[2, 2], [1, 0]]
+    assert compiler.last_trace["status"] == "ok"
+    assert compiler.last_trace["restored_fields"] == [
+        {
+            "relation": "edge_distribution",
+            "subject_category": "dining_chair",
+            "fields": ["source", "edge_frame", "groups", "orientation"],
+        }
+    ]
+
+
 def test_intent_compiler_retry_spells_out_unary_target_cardinality() -> None:
     compiler = _compiler_with_responses(
         [
@@ -1008,7 +1640,7 @@ def test_intent_compiler_falls_back_after_semantic_json_failures() -> None:
     assert centered[0]["targets"]["category"] == "wall"
 
 
-def test_intent_compiler_fallback_keeps_media_contract_schema_valid() -> None:
+def test_intent_compiler_restores_unique_media_target_without_fallback() -> None:
     invalid = (
         '{"constraints": [{"relation": "faces", '
         '"subjects": {"category": "sofa"}, '
@@ -1021,14 +1653,10 @@ def test_intent_compiler_fallback_keeps_media_contract_schema_valid() -> None:
         "A living room with a sofa facing a TV stand and television on the opposite wall."
     )
 
-    assert compiler.last_trace["status"] == "fallback"
-    television_relation = next(
-        row
-        for row in result["constraints"]
-        if row["relation"] == "on_top_of"
-        and row["subjects"]["category"] == "television"
-    )
-    assert television_relation["inference_reason"]
+    assert compiler.last_trace["status"] == "ok"
+    assert compiler.last_trace["restored_targets"]
+    facing = next(row for row in result["constraints"] if row["relation"] == "faces")
+    assert facing["targets"]["category"] == "tv_stand"
 
 
 def test_deterministic_contract_recognizes_floor_near_manipulands() -> None:
@@ -1169,6 +1797,61 @@ def test_intent_compiler_restores_classroom_operation_zone_ontology() -> None:
     assert {row["relation"] for row in result["constraints"]} >= {
         "operation_zone_at_wall",
         "instructional_surface_alignment",
+    }
+
+
+def test_intent_compiler_enriches_explicit_group_relations_omitted_by_llm() -> None:
+    prompt = (
+        "A practical office with four separate desks. Pair each desk with exactly "
+        "one office chair. Place exactly one computer monitor on top of each desk, "
+        "for four monitors in total. Place four large floor plants in four "
+        "distinct room corners, exactly one plant per corner."
+    )
+    compiler = _compiler_with_responses([_response('{"constraints": []}')])
+
+    result = compiler.compile(prompt)
+
+    relations = {row["relation"] for row in result["constraints"]}
+    assert {"paired_with", "one_per_support", "corner_distribution"} <= relations
+    enriched_relations = {
+        row["relation"] for row in compiler.last_trace["enriched_constraints"]
+    }
+    assert {"paired_with", "one_per_support", "corner_distribution"} <= (
+        enriched_relations
+    )
+
+
+def test_intent_compiler_enriches_explicit_wall_anchor_and_access_omitted_by_llm() -> (
+    None
+):
+    prompt = (
+        "Place one storage cabinet against a wall without blocking circulation. "
+        "Place one water dispenser against a wall and keep its front accessible."
+    )
+    compiler = _compiler_with_responses([_response('{"constraints": []}')])
+
+    result = compiler.compile(prompt)
+
+    wall_anchors = {
+        row["subjects"]["category"]
+        for row in result["constraints"]
+        if row["relation"] == "against_wall"
+    }
+    access_subjects = {
+        row["subjects"]["category"]
+        for row in result["constraints"]
+        if row["relation"] == "clear_access"
+    }
+    assert {"storage_cabinet", "water_dispenser"} <= wall_anchors
+    assert {"storage_cabinet", "water_dispenser"} <= access_subjects
+    assert all(
+        row["targets"]["category"] == "room"
+        for row in result["constraints"]
+        if row["relation"] == "clear_access"
+        and row["subjects"]["category"] in {"storage_cabinet", "water_dispenser"}
+    )
+    assert {"against_wall", "clear_access"} <= {
+        row["relation"] for row in compiler.last_trace["enriched_constraints"]
     }
 
 
@@ -1414,3 +2097,228 @@ def test_intent_compiler_cache_uses_prompt_and_spec_only(monkeypatch, tmp_path) 
     )
 
     assert calls == ["A room with a desk.", "A room with a bed."]
+
+
+def test_new_scene_prompts_compile_complete_deterministic_contracts() -> None:
+    bedroom = build_intent_contract(
+        "A bedroom with one bed centered against the back wall. Place two "
+        "nightstands, one on each side of the bed. Place one wardrobe against a "
+        "side wall. Position one dressing table against a free wall, with one "
+        "stool in front of and facing the dressing table. Mount one mirror on "
+        "the wall, centered directly above the dressing table."
+    )
+    office = build_intent_contract(
+        "An office with four desks. Pair each desk with exactly one office chair. "
+        "Place exactly one computer monitor on top of each desk, for four monitors "
+        "in total. Place one water dispenser against a wall and one wastebasket "
+        "on the floor in one corner of the room."
+    )
+    living = build_intent_contract(
+        "A long living room with one sofa facing one TV stand and one television "
+        "on top of the TV stand. Place one dining table with five complete table "
+        "settings, each including a plate, cutlery, and a drinking glass. Arrange "
+        "five dining chairs: two evenly spaced along each long side and one on one "
+        "short side, all facing the table. Place four floor plants in four distinct "
+        "room corners, exactly one plant per corner. Place one storage cabinet "
+        "against a wall without blocking circulation."
+    )
+
+    for contract in (bedroom, office, living):
+        validate_intent_contract(contract)
+
+    assert any(row["relation"] == "flanking" for row in bedroom["constraints"])
+    assert any(
+        row["relation"] == "on_wall" and row["subjects"]["category"] == "mirror"
+        for row in bedroom["constraints"]
+    )
+    mirror_alignment = next(
+        row
+        for row in bedroom["constraints"]
+        if row["relation"] == "centered_above"
+        and row["subjects"]["category"] == "mirror"
+    )
+    assert mirror_alignment["targets"]["category"] == "dressing_table"
+    assert any(
+        row["relation"] == "paired_with"
+        and row["subjects"]["count"] == row["targets"]["count"] == 4
+        for row in office["constraints"]
+    )
+    assert any(
+        row["relation"] == "one_per_support"
+        and row["subjects"]["category"] == "monitor"
+        and row["subjects"]["count"] == row["targets"]["count"] == 4
+        for row in office["constraints"]
+    )
+    edge = next(
+        row for row in living["constraints"] if row["relation"] == "edge_distribution"
+    )
+    assert edge["subjects"] == {
+        "category": "dining_chair",
+        "count": 5,
+        "quantifier": "all",
+    }
+    assert edge["targets"]["category"] == "dining_table"
+    assert [group["counts_per_edge"] for group in edge["groups"]] == [[2, 2], [1, 0]]
+    assert edge["orientation"] == "toward_target"
+    assert any(
+        row["relation"] == "corner_distribution" for row in living["constraints"]
+    )
+    assert any(
+        row["relation"] == "against_wall"
+        and row["subjects"]["category"] == "storage_cabinet"
+        for row in living["constraints"]
+    )
+    assert any(
+        row["relation"] == "clear_access"
+        and row["subjects"]["category"] == "storage_cabinet"
+        and row["targets"]["category"] == "room"
+        for row in living["constraints"]
+    )
+    component_counts = {
+        row["subjects"]["category"]: row["subjects"]["count"]
+        for row in living["constraints"]
+        if row["relation"] == "required_count"
+    }
+    assert component_counts | {"plate": 5, "cutlery": 5, "glass": 5} == component_counts
+    assert "floor" not in component_counts
+    assert component_counts.get("table") is None
+
+
+def test_schema_rejects_exclusive_relations_but_respects_roles() -> None:
+    conflicting = [
+        {
+            "relation": "centered_in_room",
+            "subjects": {"category": "bed", "count": 1},
+            "targets": {"category": "room", "count": 1},
+            "source": "explicit_prompt",
+            "evidence_span": "bed centered in the room",
+        },
+        {
+            "relation": "against_wall",
+            "subjects": {"category": "bed", "count": 1},
+            "targets": {"category": "wall", "count": 1},
+            "source": "explicit_prompt",
+            "evidence_span": "bed against the wall",
+        },
+    ]
+    with pytest.raises(ValidationError, match="conflicting hard relations"):
+        validate_intent_contract(
+            {
+                "schema_version": INTENT_CONTRACT_SCHEMA_VERSION,
+                "constraints": conflicting,
+            }
+        )
+
+    role_qualified = [dict(row) for row in conflicting]
+    role_qualified[0] = {
+        **role_qualified[0],
+        "subjects": {"category": "chair", "role": "guest", "count": 1},
+    }
+    role_qualified[1] = {
+        **role_qualified[1],
+        "subjects": {"category": "chair", "role": "teacher", "count": 1},
+    }
+    validate_intent_contract(
+        {
+            "schema_version": INTENT_CONTRACT_SCHEMA_VERSION,
+            "constraints": role_qualified,
+        }
+    )
+
+
+def test_one_per_support_requires_distinct_support_owners() -> None:
+    desks = [
+        _record("desk_0", "desk", (-1.0, 0.0), (1.2, 0.7, 0.75)),
+        _record("desk_1", "desk", (1.0, 0.0), (1.2, 0.7, 0.75)),
+    ]
+    for index, desk in enumerate(desks):
+        desk["support_regions"] = [{"region_id": f"desk_{index}_top"}]
+    monitors = [
+        _record("monitor_0", "monitor", (-1.0, 0.0), (0.4, 0.2, 0.35)),
+        _record("monitor_1", "monitor", (1.0, 0.0), (0.4, 0.2, 0.35)),
+    ]
+    monitors[0]["placement_info"] = {"parent_surface_id": "desk_0_top"}
+    monitors[1]["placement_info"] = {"parent_surface_id": "desk_1_top"}
+    relation = {
+        "relation": "one_per_support",
+        "subjects": {"category": "monitor", "count": 2},
+        "targets": {"category": "desk", "count": 2},
+        "source": "explicit_prompt",
+        "evidence_span": "one monitor on each desk",
+    }
+    case_pack = {
+        "stage": "final",
+        "scene_geometry": {"objects": [*desks, *monitors]},
+        "intent_contract": validate_intent_contract(_contract(relation)),
+    }
+
+    result = next(
+        row
+        for row in evaluate_intent_contract_extensions(case_pack)
+        if row["relation_type"] == "one_per_support"
+    )
+    assert result["label"] == "pass"
+
+    monitors[1]["placement_info"] = {"parent_surface_id": "desk_0_top"}
+    result = next(
+        row
+        for row in evaluate_intent_contract_extensions(case_pack)
+        if row["relation_type"] == "one_per_support"
+    )
+    assert result["label"] == "fail"
+    assert result["diagnostics"]["missing_target_ids"] == ["desk_1"]
+    assert result["diagnostics"]["duplicate_target_ids"] == ["desk_0"]
+
+
+def test_corner_distribution_assigns_distinct_corners() -> None:
+    floor = _record("floor_0", "floor", (0.0, 0.0), (10.0, 6.0, 0.05))
+    plants = [
+        _record("plant_0", "plant", (-4.7, -2.7), (0.4, 0.4, 1.2)),
+        _record("plant_1", "plant", (-4.7, 2.7), (0.4, 0.4, 1.2)),
+        _record("plant_2", "plant", (4.7, -2.7), (0.4, 0.4, 1.2)),
+        _record("plant_3", "plant", (4.7, 2.7), (0.4, 0.4, 1.2)),
+    ]
+    relation = {
+        "relation": "corner_distribution",
+        "subjects": {"category": "plant", "count": 4},
+        "targets": {"category": "room", "count": 1},
+        "source": "explicit_prompt",
+        "evidence_span": "four plants in four distinct room corners",
+    }
+    case_pack = {
+        "stage": "final",
+        "scene_geometry": {
+            "objects": [floor, *plants],
+            "rooms": [
+                {
+                    "bbox": {
+                        "min": [-5.0, -3.0, 0.0],
+                        "max": [5.0, 3.0, 3.0],
+                    }
+                }
+            ],
+        },
+        "intent_contract": validate_intent_contract(_contract(relation)),
+    }
+
+    results = [
+        row
+        for row in evaluate_intent_contract_extensions(case_pack)
+        if row["relation_type"] == "corner_distribution"
+    ]
+    assert len(results) == 4
+    assert all(row["label"] == "pass" for row in results)
+    assert (
+        len({row["diagnostics"]["assignment"]["corner_index"] for row in results}) == 4
+    )
+
+    for plant in plants:
+        plant["bbox_world"]["center"][:2] = [-4.7, -2.7]
+        plant["bbox_world"]["min"][:2] = [-4.9, -2.9]
+        plant["bbox_world"]["max"][:2] = [-4.5, -2.5]
+    results = [
+        row
+        for row in evaluate_intent_contract_extensions(case_pack)
+        if row["relation_type"] == "corner_distribution"
+    ]
+    assert any(row["label"] == "fail" for row in results)

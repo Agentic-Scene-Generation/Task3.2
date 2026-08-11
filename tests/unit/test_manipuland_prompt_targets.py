@@ -17,6 +17,7 @@ from scenesmith.manipuland_agents.cross_stage_inventory import (
     contract_bound_support_object_ids,
     existing_floor_covering_ids,
     redundant_floor_covering_request_indices,
+    violates_hard_one_per_support_reparenting,
 )
 from scenesmith.manipuland_agents.stateful_manipuland_agent import (
     StatefulManipulandAgent,
@@ -51,12 +52,14 @@ def test_dining_prompt_requires_table_and_sideboard_targets() -> None:
 
 
 def test_hard_support_contract_exposes_existing_cross_stage_object() -> None:
+    surface = SimpleNamespace(surface_id="S_1")
     tv_stand = SimpleNamespace(
         object_id=UniqueID("tv_stand_0"),
         name="tv_stand",
         description="Low media console TV stand",
         object_type=ObjectType.FURNITURE,
         metadata={"semantic_name": "tv_stand"},
+        support_surfaces=[surface],
     )
     television = SimpleNamespace(
         object_id=UniqueID("television_0"),
@@ -64,6 +67,8 @@ def test_hard_support_contract_exposes_existing_cross_stage_object() -> None:
         description="Slim flat-screen television display",
         object_type=ObjectType.FURNITURE,
         metadata={"semantic_name": "television"},
+        support_surfaces=[],
+        placement_info=SimpleNamespace(parent_surface_id="S_1"),
     )
     scene = SimpleNamespace(
         objects={tv_stand.object_id: tv_stand, television.object_id: television},
@@ -82,6 +87,103 @@ def test_hard_support_contract_exposes_existing_cross_stage_object() -> None:
     assert contract_bound_support_object_ids(scene, tv_stand.object_id) == [
         "television_0"
     ]
+
+
+def test_cross_stage_support_inventory_is_local_to_actual_surface() -> None:
+    desks = [
+        SimpleNamespace(
+            object_id=UniqueID(f"desk_{index}"),
+            name="desk",
+            description="office desk",
+            object_type=ObjectType.FURNITURE,
+            metadata={"semantic_name": "desk"},
+            support_surfaces=[SimpleNamespace(surface_id=f"S_{index * 2}")],
+        )
+        for index in range(4)
+    ]
+    monitor = SimpleNamespace(
+        object_id=UniqueID("computer_monitor_0"),
+        name="computer_monitor",
+        description="computer monitor",
+        object_type=ObjectType.MANIPULAND,
+        metadata={"semantic_name": "computer_monitor"},
+        support_surfaces=[],
+        placement_info=SimpleNamespace(parent_surface_id="S_0"),
+    )
+    scene = SimpleNamespace(
+        objects={
+            **{desk.object_id: desk for desk in desks},
+            monitor.object_id: monitor,
+        },
+        scenebenchmark_intent_contract={
+            "constraints": [
+                {
+                    "relation": "on_top_of",
+                    "strength": "hard",
+                    "subjects": {"category": "computer_monitor", "count": 4},
+                    "targets": {"category": "desk", "count": 4},
+                }
+            ]
+        },
+    )
+
+    assert contract_bound_support_object_ids(scene, UniqueID("desk_0")) == [
+        "computer_monitor_0"
+    ]
+    for index in range(1, 4):
+        assert contract_bound_support_object_ids(scene, UniqueID(f"desk_{index}")) == []
+
+
+def test_hard_one_per_support_rejects_cross_target_reparenting() -> None:
+    desks = [
+        SimpleNamespace(
+            object_id=UniqueID(f"desk_{index}"),
+            name="desk",
+            description="office desk",
+            object_type=ObjectType.FURNITURE,
+            metadata={"semantic_name": "desk"},
+            support_surfaces=[SimpleNamespace(surface_id=f"S_{index * 2}")],
+        )
+        for index in range(2)
+    ]
+    monitor = SimpleNamespace(
+        object_id=UniqueID("computer_monitor_0"),
+        name="computer_monitor",
+        description="computer monitor",
+        object_type=ObjectType.MANIPULAND,
+        metadata={"semantic_name": "computer_monitor"},
+        support_surfaces=[],
+        placement_info=SimpleNamespace(parent_surface_id="S_0"),
+    )
+    scene = SimpleNamespace(
+        objects={
+            **{desk.object_id: desk for desk in desks},
+            monitor.object_id: monitor,
+        },
+        scenebenchmark_intent_contract={
+            "constraints": [
+                {
+                    "relation": "one_per_support",
+                    "strength": "hard",
+                    "subjects": {"category": "computer_monitor", "count": 2},
+                    "targets": {"category": "desk", "count": 2},
+                }
+            ]
+        },
+    )
+
+    assert not violates_hard_one_per_support_reparenting(
+        scene,
+        monitor.object_id,
+        source_surface_id="S_0",
+        target_surface_id="S_0",
+    )
+    assert violates_hard_one_per_support_reparenting(
+        scene,
+        monitor.object_id,
+        source_surface_id="S_0",
+        target_surface_id="S_2",
+    )
 
 
 def test_planner_retries_when_first_turn_has_no_workflow_tool_call() -> None:

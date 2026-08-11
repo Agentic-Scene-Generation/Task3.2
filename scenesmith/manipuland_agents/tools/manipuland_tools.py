@@ -47,6 +47,7 @@ from scenesmith.manipuland_agents.cross_stage_inventory import (
     contract_bound_support_object_ids,
     existing_floor_covering_ids,
     redundant_floor_covering_request_indices,
+    violates_hard_one_per_support_reparenting,
 )
 from scenesmith.manipuland_agents.tools.arrangement_tools import create_arrangement_impl
 from scenesmith.manipuland_agents.tools.fill_tools import fill_container_tool_impl
@@ -1780,8 +1781,24 @@ class ManipulandTools:
                     error_type=ManipulandErrorType.INVALID_OPERATION,
                 ).to_json()
 
-            # Note: We allow moving objects between surfaces (no validation of current
-            # surface).
+            current_surface_id = scene_obj.placement_info.parent_surface_id
+            if violates_hard_one_per_support_reparenting(
+                self.scene,
+                object_id,
+                source_surface_id=current_surface_id,
+                target_surface_id=target_surface.surface_id,
+            ):
+                return ManipulandOperationResult(
+                    success=False,
+                    message=(
+                        "Cannot move this object between two distinct hard "
+                        "one-per-support targets. Preserve the existing slot and "
+                        "place a new instance on the current furniture instead."
+                    ),
+                    object_id=object_id,
+                    error_type=ManipulandErrorType.INVALID_OPERATION,
+                ).to_json()
+
             current_position_2d = scene_obj.placement_info.position_2d
             current_rotation_2d = scene_obj.placement_info.rotation_2d
 

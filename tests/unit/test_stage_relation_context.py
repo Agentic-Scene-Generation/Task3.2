@@ -7,7 +7,10 @@ import json
 from copy import deepcopy
 from types import SimpleNamespace
 
-from scenesmith.scene_expert.global_planner import GlobalPlanner
+from scenesmith.scene_expert.global_planner import (
+    GlobalPlanner,
+    _add_floor_plan_reservation_guidance,
+)
 from scenesmith.scene_expert.hooks import (
     _attach_stage_relation_context,
     _format_stage_relation_context,
@@ -19,6 +22,7 @@ from scenesmith.scene_expert.schemas import (
     SceneTaskSpec,
     StageBudget,
     StageRelationContext,
+    StageBrief,
 )
 from scenesmith.scene_expert.task_compiler import TaskCompiler
 from scenesmith.scenebenchmark_critic import asset_library_annotations
@@ -160,6 +164,89 @@ def test_projection_preserves_full_contract_and_exact_stage_ids(tmp_path) -> Non
     assert "furniture-1" in injected
     assert "wall-1" not in injected
     assert injected.index("Advisory HSSD") < injected.index("Hard Intent Contract")
+
+
+def test_floor_plan_projects_only_explicit_future_wall_anchors(tmp_path) -> None:
+    contract = {
+        "constraints": [
+            {
+                "constraint_id": "bed-back-wall",
+                "stage": "furniture",
+                "relation": "centered_on_wall",
+                "subjects": {"category": "bed", "count": 1},
+                "targets": {"category": "wall", "role": "back"},
+            },
+            {
+                "constraint_id": "mirror-wall",
+                "stage": "wall_mounted",
+                "relation": "on_wall",
+                "subjects": {"category": "mirror", "count": 1},
+                "targets": {"category": "wall"},
+            },
+            {
+                "constraint_id": "stool-front",
+                "stage": "furniture",
+                "relation": "in_front_of",
+                "subjects": {"category": "stool", "count": 1},
+                "targets": {"category": "dressing_table", "count": 1},
+            },
+        ]
+    }
+
+    context = StageRelationProjector(lookup_path=_write_lookup(tmp_path)).project(
+        stage="floor_plan",
+        task_spec=_task_spec(required_large_objects=["bed", "stool"]),
+        intent_contract=contract,
+    )
+
+    assert context.hard_constraints == []
+    assert [item["constraint_id"] for item in context.floor_plan_reservations] == [
+        "bed-back-wall",
+        "mirror-wall",
+    ]
+
+
+def test_floor_plan_brief_reserves_opening_free_wall_segments() -> None:
+    context = HarnessContext(
+        stage="floor_plan",
+        task_spec=_task_spec(required_large_objects=["bed", "wardrobe"]),
+        memory_pack=MemoryPack(),
+        relation_context=StageRelationContext(
+            stage="floor_plan",
+            floor_plan_reservations=[
+                {
+                    "constraint_id": "bed-back-wall",
+                    "relation": "centered_on_wall",
+                    "subjects": {"category": "bed"},
+                    "targets": {"category": "wall", "role": "back"},
+                },
+                {
+                    "constraint_id": "wardrobe-side-wall",
+                    "relation": "against_wall",
+                    "subjects": {"category": "wardrobe"},
+                    "targets": {"category": "wall", "role": "side"},
+                },
+            ],
+        ),
+    )
+
+    brief = _add_floor_plan_reservation_guidance(
+        StageBrief(
+            stage="floor_plan",
+            stage_objective="Create a bedroom layout.",
+            constraints_for_designer=["Keep the entrance accessible."],
+        ),
+        context,
+    )
+
+    text = "\n".join(brief.constraints_for_designer).lower()
+    assert "opening-free usable wall segments" in text
+    assert "bed centered on the back wall" in text
+    assert "wardrobe on a side wall" in text
+    assert "doors or windows" in text
+    assert (
+        "unobstructed by doors or windows" in "\n".join(brief.checks_for_critic).lower()
+    )
 
 
 def test_designer_gets_stage_only_json_and_critic_keeps_full_contract() -> None:

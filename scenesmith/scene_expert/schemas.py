@@ -168,6 +168,7 @@ class StageRelationContext(BaseModel):
 
     stage: str
     hard_constraints: list[dict[str, Any]] = Field(default_factory=list)
+    floor_plan_reservations: list[dict[str, Any]] = Field(default_factory=list)
     advisory_hssd_priors: list[AdvisoryRelationPrior] = Field(default_factory=list)
     suppressed_priors: list[SuppressedRelationPrior] = Field(default_factory=list)
     contract_constraint_count: int = 0

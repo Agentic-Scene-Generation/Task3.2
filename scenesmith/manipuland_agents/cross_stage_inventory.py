@@ -91,20 +91,111 @@ def redundant_floor_covering_request_indices(
 def contract_bound_support_object_ids(scene: Any, target_id: Any) -> list[str]:
     """Return hard-contract objects supported by the current furniture.
 
-    Furniture-stage objects can be physically placed on a support without a
-    manipuland ``placement_info`` record. Preserve those objects in the
-    manipuland agent's focused context so the critic does not mistake them for
-    missing surface items and generate duplicates.
+    Selector membership alone cannot identify a realized support relation.  A
+    contract may select several equivalent desks, for example, while each desk
+    still needs its own monitor.  Only expose objects whose saved placement is
+    actually on one of the current furniture's support surfaces.
     """
     objects = getattr(scene, "objects", {}) or {}
-    object_rows = []
+    object_rows = _contract_object_rows(objects)
+
+    target_id_text = str(target_id)
+    target_object = _scene_object_by_id(objects, target_id_text)
+    target_surface_ids = {
+        str(getattr(surface, "surface_id", ""))
+        for surface in getattr(target_object, "support_surfaces", []) or []
+        if str(getattr(surface, "surface_id", ""))
+    }
+    if not target_surface_ids:
+        return []
+
+    supported_ids: set[str] = set()
+    for constraint in intent_contract_constraints_for_scene(scene):
+        if str(constraint.get("relation") or "") != "on_top_of":
+            continue
+        if str(constraint.get("strength") or "hard").lower() != "hard":
+            continue
+        target_ids = selected_ids(constraint.get("targets"), object_rows)
+        if target_id_text not in target_ids:
+            continue
+        for subject_id in selected_ids(constraint.get("subjects"), object_rows):
+            subject = _scene_object_by_id(objects, subject_id)
+            placement = getattr(subject, "placement_info", None)
+            parent_surface_id = str(getattr(placement, "parent_surface_id", "") or "")
+            if parent_surface_id in target_surface_ids:
+                supported_ids.add(subject_id)
+
+    supported_ids.discard(target_id_text)
+    return sorted(supported_ids)
+
+
+def violates_hard_one_per_support_reparenting(
+    scene: Any,
+    object_id: Any,
+    *,
+    source_surface_id: Any,
+    target_surface_id: Any,
+) -> bool:
+    """Return whether moving an object would merge hard one-per-support slots."""
+    source_surface_id = str(source_surface_id or "")
+    target_surface_id = str(target_surface_id or "")
+    if not source_surface_id or source_surface_id == target_surface_id:
+        return False
+
+    objects = getattr(scene, "objects", {}) or {}
+    object_rows = _contract_object_rows(objects)
+    object_id_text = str(object_id)
+    for constraint in intent_contract_constraints_for_scene(scene):
+        if str(constraint.get("relation") or "") != "one_per_support":
+            continue
+        if str(constraint.get("strength") or "hard").lower() != "hard":
+            continue
+        subject_ids = set(selected_ids(constraint.get("subjects"), object_rows))
+        if object_id_text not in subject_ids:
+            continue
+        target_ids = selected_ids(constraint.get("targets"), object_rows)
+        target_surface_ids = {
+            target_id: {
+                str(getattr(surface, "surface_id", ""))
+                for surface in getattr(
+                    _scene_object_by_id(objects, target_id), "support_surfaces", []
+                )
+                or []
+                if str(getattr(surface, "surface_id", ""))
+            }
+            for target_id in target_ids
+        }
+        source_owner = next(
+            (
+                target_id
+                for target_id, surface_ids in target_surface_ids.items()
+                if source_surface_id in surface_ids
+            ),
+            None,
+        )
+        target_owner = next(
+            (
+                target_id
+                for target_id, surface_ids in target_surface_ids.items()
+                if target_surface_id in surface_ids
+            ),
+            None,
+        )
+        if source_owner is not None and target_owner is not None:
+            return source_owner != target_owner
+    return False
+
+
+def _contract_object_rows(objects: dict[Any, Any]) -> list[dict[str, Any]]:
+    """Build the selector rows once for cross-stage contract checks."""
+    rows = []
     for object_id, obj in objects.items():
         metadata = getattr(obj, "metadata", None) or {}
         object_type = getattr(obj, "object_type", "")
         semantic_name = (
             metadata.get("semantic_name", "") if isinstance(metadata, dict) else ""
         )
-        object_rows.append(
+        rows.append(
             {
                 "id": str(object_id),
                 "name": getattr(obj, "name", ""),
@@ -115,18 +206,13 @@ def contract_bound_support_object_ids(scene: Any, target_id: Any) -> list[str]:
                 "metadata": metadata if isinstance(metadata, dict) else {},
             }
         )
+    return rows
 
-    target_id_text = str(target_id)
-    supported_ids: set[str] = set()
-    for constraint in intent_contract_constraints_for_scene(scene):
-        if str(constraint.get("relation") or "") != "on_top_of":
-            continue
-        if str(constraint.get("strength") or "hard").lower() != "hard":
-            continue
-        target_ids = selected_ids(constraint.get("targets"), object_rows)
-        if target_id_text not in target_ids:
-            continue
-        supported_ids.update(selected_ids(constraint.get("subjects"), object_rows))
 
-    supported_ids.discard(target_id_text)
-    return sorted(supported_ids)
+def _scene_object_by_id(objects: dict[Any, Any], object_id: Any) -> Any | None:
+    """Look up an object without assuming the scene's ID key subtype."""
+    object_id_text = str(object_id)
+    for candidate_id, obj in objects.items():
+        if str(candidate_id) == object_id_text:
+            return obj
+    return None

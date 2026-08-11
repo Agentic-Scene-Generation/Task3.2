@@ -25,7 +25,10 @@ from scenesmith.scenebenchmark_critic.api import evaluate_room_scene
 from scenesmith.scenebenchmark_critic.config import CriticConfig
 from scenesmith.scenebenchmark_critic.furniture_relation_repair import (
     _RepairTarget,
+    _RepairHandlerContext,
+    _between_repair_targets,
     _candidate_improves,
+    _is_hard_support_collision_target,
     _prioritize_coordinated_seating_targets,
     _score_payload,
     improve_furniture_relations,
@@ -1289,11 +1292,32 @@ def test_freestanding_television_repair_restores_media_support(tmp_path: Path) -
         for item in unresolved_furniture_relation_failures(scene, config=config)
     ] == [("television_0", "object_on_support")]
 
-    fixes = improve_furniture_relations(scene, config=config)
+    validator_calls = 0
+
+    def candidate_validator(candidate: RoomScene) -> bool:
+        nonlocal validator_calls
+        validator_calls += 1
+        candidate_tv_bounds = candidate.objects[
+            UniqueID("television_0")
+        ].compute_world_bounds()
+        candidate_stand_bounds = candidate.objects[
+            UniqueID("tv_stand_0")
+        ].compute_world_bounds()
+        assert candidate_tv_bounds is not None and candidate_stand_bounds is not None
+        # The support repair must clear the physical support volume rather than
+        # only satisfying the evaluator's XY overlap criterion.
+        return bool(candidate_tv_bounds[0][2] > candidate_stand_bounds[1][2])
+
+    fixes = improve_furniture_relations(
+        scene,
+        config=config,
+        candidate_validator=candidate_validator,
+    )
 
     assert [(fix.object_id, fix.relation_type) for fix in fixes] == [
         ("television_0", "object_on_support")
     ]
+    assert validator_calls == 1
     tv_bounds = television.compute_world_bounds()
     stand_bounds = tv_stand.compute_world_bounds()
     assert tv_bounds is not None and stand_bounds is not None
@@ -1313,6 +1337,63 @@ def test_freestanding_television_repair_restores_media_support(tmp_path: Path) -
         and item.get("primary_object") == "television_0"
     )
     assert after["label"] == "pass"
+
+
+def test_hard_support_collision_is_prioritized_before_unrelated_repairs(
+    tmp_path: Path,
+) -> None:
+    tv_stand = _object("tv_stand_0", "tv_stand", (0.0, 0.0, 0.3), (1.4, 0.5, 0.6))
+    # Its volume currently intersects the stand.  A normal on-top-of repair
+    # lifts it above the support before any independent relation is evaluated.
+    television = _object(
+        "television_0", "television", (0.0, 0.0, 0.31), (0.9, 0.18, 0.6)
+    )
+    dining_chair = _object(
+        "dining_chair_0", "dining_chair", (1.7, 1.4, 0.45), (0.5, 0.5, 0.9)
+    )
+    scene = _scene(tmp_path, tv_stand, television, dining_chair)
+    support_target = _RepairTarget(
+        "television_0",
+        "object_on_support",
+        "support_check",
+        (0.0, 0.0),
+        None,
+        target_center_z=0.91,
+    )
+    unrelated_target = _RepairTarget(
+        "dining_chair_0",
+        "edge_distribution",
+        "seat_check",
+        (1.0, 1.0),
+        0.0,
+    )
+    payload = {
+        "results": [
+            {
+                "check_id": "support_check",
+                "relation_type": "object_on_support",
+                "label": "fail",
+                "selected_related_objects": ["tv_stand_0"],
+                "evidence": {"intent_constraint": {"strength": "hard"}},
+            },
+            {
+                "check_id": "seat_check",
+                "relation_type": "edge_distribution",
+                "label": "fail",
+                "evidence": {"intent_constraint": {"strength": "hard"}},
+            },
+        ]
+    }
+
+    assert _is_hard_support_collision_target(scene, payload, support_target)
+    assert not _is_hard_support_collision_target(scene, payload, unrelated_target)
+    assert sorted(
+        [unrelated_target, support_target],
+        key=lambda target: (
+            0 if _is_hard_support_collision_target(scene, payload, target) else 1,
+            target.check_id,
+        ),
+    ) == [support_target, unrelated_target]
 
 
 def test_media_support_repair_moves_pair_clear_of_window(tmp_path: Path) -> None:
@@ -2871,6 +2952,40 @@ def test_repairs_two_anchor_living_room_group(tmp_path: Path) -> None:
         "between_alignment": "pass",
         "flanking": "pass",
     }
+
+
+def test_between_repair_derives_midpoint_when_diagnostics_omit_target(
+    tmp_path: Path,
+) -> None:
+    sofa = _object("sofa_0", "sofa", (-2.0, -1.0, 0.4), (2.0, 0.8, 0.8))
+    tv_stand = _object("tv_stand_0", "tv_stand", (2.0, 1.0, 0.3), (1.4, 0.5, 0.6))
+    coffee_table = _object(
+        "coffee_table_0", "coffee_table", (0.5, 0.0, 0.25), (1.0, 0.6, 0.5)
+    )
+    scene = _scene(tmp_path, sofa, tv_stand, coffee_table)
+    result = {
+        "check_id": "centered_between_check",
+        "relation_type": "centered_between_alignment",
+        "primary_object": "coffee_table_0",
+        "selected_related_objects": ["sofa_0", "tv_stand_0"],
+        "diagnostics": {},
+    }
+    context = _RepairHandlerContext(
+        scene=scene,
+        payload={"results": [result]},
+        result=result,
+        check_id="centered_between_check",
+        relation="centered_between_alignment",
+        diagnostics={},
+        coordinated_front_checks=set(),
+        claimed_near_checks=set(),
+    )
+
+    targets = _between_repair_targets(context)
+
+    assert len(targets) == 1
+    assert targets[0].object_id == "coffee_table_0"
+    assert targets[0].target_center_xy == (0.0, 0.0)
 
 
 def test_centered_anchor_repair_preserves_passing_flanking_clearance(

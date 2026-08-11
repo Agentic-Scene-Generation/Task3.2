@@ -91,23 +91,111 @@ def _normalize_side_distribution(payload: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def _normalize_centered_above_relations(
+    payload: dict[str, Any], prompt: str
+) -> tuple[dict[str, Any], list[dict[str, str]]]:
+    """Correct centered relations only when deterministic prompt grounding agrees.
+
+    ``centered_on_wall`` is only valid when the wall itself is the alignment
+    anchor. Language such as "a mirror on the wall, centered above the dressing
+    table" is instead a local object-to-object relation. Use the deterministic
+    parser only when it found one unambiguous ``centered_above`` counterpart.
+
+    LLMs can also confuse the word "centered" in a horizontal placement phrase
+    such as "centered in front of the desk" with vertical ``centered_above``.
+    Correct that mistake only when the same evidence explicitly names a front or
+    rear axis and the deterministic parser found one matching relation for the
+    same endpoints. This preserves legitimate vertical alignment constraints.
+    """
+    constraints = payload.get("constraints")
+    if not isinstance(constraints, list):
+        return payload, []
+
+    deterministic = build_intent_contract(prompt).get("constraints") or []
+    normalized_constraints = list(constraints)
+    normalized: list[dict[str, str]] = []
+    for index, constraint in enumerate(normalized_constraints):
+        if not isinstance(constraint, dict):
+            continue
+        relation = str(constraint.get("relation") or "")
+        evidence = str(constraint.get("evidence_span") or "").lower()
+        replacement_relation: str | None = None
+        require_target_overlap = False
+        if relation == "centered_on_wall" and "above" in evidence:
+            replacement_relation = "centered_above"
+        elif relation == "centered_above":
+            if re.search(r"\bin\s+front\s+of\b", evidence):
+                replacement_relation = "in_front_of"
+            elif re.search(r"\bbehind\b", evidence):
+                replacement_relation = "behind"
+            require_target_overlap = replacement_relation is not None
+        if replacement_relation is None:
+            continue
+
+        matches = []
+        for candidate in deterministic:
+            if (
+                not isinstance(candidate, dict)
+                or str(candidate.get("relation") or "") != replacement_relation
+                or not _selectors_semantically_overlap(
+                    constraint.get("subjects"), candidate.get("subjects")
+                )
+            ):
+                continue
+            if require_target_overlap and not _selectors_semantically_overlap(
+                constraint.get("targets"), candidate.get("targets")
+            ):
+                continue
+            matches.append(candidate)
+        if len(matches) != 1:
+            continue
+        candidate = matches[0]
+        replacement = dict(constraint)
+        replacement["relation"] = replacement_relation
+        replacement["targets"] = dict(candidate.get("targets") or {})
+        if not replacement.get("evidence_span"):
+            replacement["evidence_span"] = str(candidate.get("evidence_span") or "")
+        normalized_constraints[index] = replacement
+        normalized.append(
+            {
+                "subject_category": canonical_selector_category(
+                    (replacement.get("subjects") or {}).get("category")
+                ),
+                "target_category": canonical_selector_category(
+                    (replacement.get("targets") or {}).get("category")
+                ),
+            }
+        )
+
+    if not normalized:
+        return payload, normalized
+    result = dict(payload)
+    result["constraints"] = normalized_constraints
+    warnings = list(result.get("warnings") or [])
+    warnings.append(
+        "Wall-center relation corrected to prompt-grounded centered_above relation"
+    )
+    result["warnings"] = warnings
+    return result, normalized
+
+
 _DETERMINISTIC_ENRICHMENT_SOURCES = frozenset({"explicit_prompt", "room_ontology"})
 _HIGH_CONFIDENCE_EXPLICIT_RELATIONS = frozenset(
     {
         "required_count",
-        "on_top_of",
-        "mounted_to_wall",
-        "mounted_to_ceiling",
-    }
-)
-_RECOVERABLE_MISSING_TARGET_RELATIONS = frozenset(
-    {
-        "centered_in_room",
-        "corner_of_room",
         "flanking",
+        "paired_with",
+        "one_per_support",
+        "edge_distribution",
+        "corner_distribution",
+        "on_top_of",
+        "against_wall",
+        "centered_above",
+        "on_wall",
+        "mounted_to_ceiling",
+        "clear_access",
     }
 )
-
 _FLANKING_GROUNDING_PATTERNS = (
     re.compile(r"\bflank(?:s|ed|ing)?\b", re.IGNORECASE),
     re.compile(
@@ -188,9 +276,9 @@ def _restore_missing_target_selectors(
     therefore correctly identify a relation such as ``flanking`` while omit
     its target selector.  Reuse a target only when the deterministic parser
     extracted the same relation for the same subject from the original prompt.
-    Recovery is deliberately limited to room anchors and flanking: for other
-    relations, an incomplete LLM contract must still fall back so it cannot
-    silently discard unrelated semantic relations from the prompt.
+    Recovery is relation-agnostic but remains conservative: an endpoint is
+    restored only when the deterministic parser produced exactly one relation
+    with the same name and overlapping subject selector.
     """
 
     constraints = payload.get("constraints")
@@ -209,11 +297,7 @@ def _restore_missing_target_selectors(
             continue
         target = constraint.get("targets")
         has_target = isinstance(target, dict) and bool(target.get("category"))
-        if (
-            spec.target_arity == 0
-            or spec.name not in _RECOVERABLE_MISSING_TARGET_RELATIONS
-            or has_target
-        ):
+        if spec.target_arity == 0 or has_target:
             continue
 
         matches = [
@@ -249,6 +333,80 @@ def _restore_missing_target_selectors(
     warnings = list(normalized.get("warnings") or [])
     warnings.append(
         "Missing relation targets restored from the deterministic prompt parser"
+    )
+    normalized["warnings"] = warnings
+    return normalized, restored
+
+
+def _restore_missing_relation_fields(
+    payload: dict[str, Any], prompt: str
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Restore omitted schema fields only from one deterministic relation match.
+
+    Some llama.cpp builds enforce the outer JSON shape but do not consistently
+    apply required fields below a ``$ref`` or relation-dependent ``if/then``.
+    Treat that as a transport limitation, not permission to guess: metadata
+    and edge-distribution fields are restored only when the prompt parser found
+    exactly one relation with the same type and overlapping subject selector.
+    """
+
+    constraints = payload.get("constraints")
+    if not isinstance(constraints, list):
+        return payload, []
+
+    deterministic_constraints = build_intent_contract(prompt).get("constraints") or []
+    restored: list[dict[str, Any]] = []
+    normalized_constraints = list(constraints)
+    for index, constraint in enumerate(normalized_constraints):
+        if not isinstance(constraint, dict):
+            continue
+        relation = str(constraint.get("relation") or "")
+        matches = [
+            candidate
+            for candidate in deterministic_constraints
+            if isinstance(candidate, dict)
+            and str(candidate.get("relation") or "") == relation
+            and _selectors_semantically_overlap(
+                constraint.get("subjects"), candidate.get("subjects")
+            )
+        ]
+        if len(matches) != 1:
+            continue
+
+        repaired = dict(constraint)
+        restored_fields: list[str] = []
+        candidate = matches[0]
+        for field in ("source", "evidence_span"):
+            if repaired.get(field) or not candidate.get(field):
+                continue
+            repaired[field] = candidate[field]
+            restored_fields.append(field)
+        if relation == "edge_distribution":
+            for field in ("edge_frame", "groups", "orientation"):
+                if repaired.get(field) or not candidate.get(field):
+                    continue
+                repaired[field] = candidate[field]
+                restored_fields.append(field)
+        if not restored_fields:
+            continue
+        normalized_constraints[index] = repaired
+        restored.append(
+            {
+                "relation": relation,
+                "subject_category": canonical_selector_category(
+                    (repaired.get("subjects") or {}).get("category")
+                ),
+                "fields": restored_fields,
+            }
+        )
+
+    if not restored:
+        return payload, restored
+    normalized = dict(payload)
+    normalized["constraints"] = normalized_constraints
+    warnings = list(normalized.get("warnings") or [])
+    warnings.append(
+        "Missing relation fields restored from the deterministic prompt parser"
     )
     normalized["warnings"] = warnings
     return normalized, restored
@@ -343,12 +501,15 @@ Registered relations:
 
 Target rule is mandatory.  Relations with target arity 1 ({unary_relations})
 MUST include a non-null ``targets`` selector with the target category from the
-prompt.  ``corner_of_room`` and ``centered_in_room`` use
+prompt. Target arity is the number of selector endpoints, not the number of
+physical target objects: group relations such as paired_with and
+one_per_support may use targets.count greater than one. ``corner_of_room``,
+``corner_distribution``, and ``centered_in_room`` use
 ``{{"category": "room", "count": 1}}`` as that selector.  For example:
 ``{{"relation": "flanking", "subjects": {{"category": "nightstand", "count": 2}}, "targets": {{"category": "bed", "count": 1}}, "source": "explicit_prompt", "evidence_span": "..."}}``.
 Relations with target arity 2 ({binary_relations}) must use a target selector
 whose ``secondary_category`` identifies the second target.  Only target arity
-0 relations, such as ``required_count``, may omit ``targets``.
+0 relations, such as ``required_count``, MUST return ``"targets": null``.
 
 For a rectangular target with edge-specific distribution, emit exactly one
 edge_distribution relation. It must contain subjects.count, a target selector
@@ -365,12 +526,23 @@ edge is explicitly named, emit the reusable flanking relation instead of
 edge_distribution. Reserve edge_distribution for explicit finite rectangular
 edge layouts or unambiguous long/short edge wording.
 
-Target cardinality is strict: a relation with registered target arity 1 must
-have exactly one targets selector with count 1 and must leave
+Target shape is strict: a relation with registered target arity 1 must have
+exactly one targets selector and must leave
 secondary_category, secondary_count, and secondary_role empty. Only a relation
 whose registered target arity is 2 may use secondary_category and
 secondary_role. Never combine two target nouns into one unary relation; emit
 separate relation rows when the prompt states separate relations.
+
+Use centered_on_wall only when the prompt says the subject is centered on the
+wall itself. For "X on the wall, centered directly above Y", emit
+centered_above(X, Y) plus on_wall(X, wall); the centerline belongs to Y, not to
+the full wall.
+
+Use one_per_support for explicit "one X on/at each Y" requirements. Give both
+selectors the same explicit count and quantifier="all". Use corner_distribution
+only when the prompt explicitly assigns multiple subjects to distinct room
+corners or says one subject per corner; ordinary singular corner wording uses
+corner_of_room.
 
 For a unary relation that says an object is on/near one, another, or the other
 member of a target category that the prompt explicitly repeats, keep one target
@@ -466,6 +638,14 @@ class IntentCompiler:
                     "secondary_category, secondary_count, and secondary_role; "
                     "keep exactly one primary target selector."
                 )
+            if "requires 1 target(s), got 0" in validation_error or (
+                "requires 2 target(s), got 0" in validation_error
+            ):
+                user += (
+                    "\nEvery non-count relation must include its prompt-grounded "
+                    "targets object. Do not explain the target in inference_reason; "
+                    "put the endpoint category in targets."
+                )
             if "wall-relative directional relation" in validation_error:
                 user += (
                     "\nDo not convert 'X against the wall behind/in front of Y' "
@@ -522,7 +702,13 @@ class IntentCompiler:
                 payload["intent_compiler_spec_version"] = self.SPEC_VERSION
                 payload["retry_count"] = attempt
                 payload = _normalize_side_distribution(payload)
+                payload, normalized_centered_above = (
+                    _normalize_centered_above_relations(payload, normalized_prompt)
+                )
                 payload, restored_targets = _restore_missing_target_selectors(
+                    payload, normalized_prompt
+                )
+                payload, restored_fields = _restore_missing_relation_fields(
                     payload, normalized_prompt
                 )
                 payload = _validate_prompt_grounded_relations(
@@ -538,7 +724,9 @@ class IntentCompiler:
                     "prompt_sha256": prompt_hash,
                     "constraints": result.get("constraints", []),
                     "enriched_constraints": enriched_constraints,
+                    "normalized_centered_above": normalized_centered_above,
                     "restored_targets": restored_targets,
+                    "restored_fields": restored_fields,
                     "retry_count": attempt,
                     "failure_reason": "",
                 }
@@ -565,7 +753,9 @@ class IntentCompiler:
                         "status": "ok",
                         "attempt": attempt,
                         "enriched_constraints": enriched_constraints,
+                        "normalized_centered_above": normalized_centered_above,
                         "restored_targets": restored_targets,
+                        "restored_fields": restored_fields,
                     }
                 )
                 return result

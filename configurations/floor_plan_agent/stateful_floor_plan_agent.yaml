@@ -12,7 +12,10 @@ agents:
 
   designer_agent:
     name: "floor_plan_designer"
-    max_turns: 120
+    # A valid plan is normally complete after one bounded edit pass.  This
+    # prevents a designer from endlessly revisiting windows after the required
+    # room geometry and wall reservations are already valid.
+    max_turns: 32
     prompt: DESIGNER_AGENT
 
   critic_agent:

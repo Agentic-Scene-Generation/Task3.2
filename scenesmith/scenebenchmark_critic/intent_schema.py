@@ -22,6 +22,7 @@ from scenesmith.scenebenchmark_critic.relation_registry import (
     STAGE_ORDER,
     WALL_MOUNTED_CATEGORIES,
     relation_spec,
+    relations_are_exclusive,
 )
 
 
@@ -34,6 +35,7 @@ _GENERIC_SELECTOR_FAMILIES = {
             "student_chair",
             "dining_chair",
             "armchair",
+            "stool",
         }
     ),
     "table": frozenset(
@@ -44,6 +46,7 @@ _GENERIC_SELECTOR_FAMILIES = {
             "coffee_table",
             "side_table",
             "desk",
+            "dressing_table",
         }
     ),
     "desk": frozenset({"desk", "student_desk", "teacher_desk", "reception_desk"}),
@@ -53,6 +56,18 @@ _GENERIC_SELECTOR_FAMILIES = {
 
 
 _SELECTOR_CATEGORY_ALIASES = {
+    "entrance_route": "entrance",
+    "entrance_path": "entrance",
+    "entry_route": "entrance",
+    "entry_path": "entrance",
+    "vanity": "dressing_table",
+    "vanity_table": "dressing_table",
+    "makeup_table": "dressing_table",
+    "computer_display": "monitor",
+    "computer_monitor": "monitor",
+    "water_cooler": "water_dispenser",
+    "drinking_water_dispenser": "water_dispenser",
+    "storage_cupboard": "storage_cabinet",
     "dining_chairs": "dining_chair",
     "large_plants": "large_plant",
     "two_seater_sofas": "two_seater_sofa",
@@ -134,7 +149,7 @@ _selector_categories_overlap = selector_categories_overlap
 
 
 INTENT_CONTRACT_SCHEMA_VERSION = "scenesmith.intent_contract.v4"
-INTENT_COMPILER_SPEC_VERSION = "scenesmith.intent_compiler.v5"
+INTENT_COMPILER_SPEC_VERSION = "scenesmith.intent_compiler.v6"
 
 _WALL_QUALIFIED_DIRECTION_PATTERN = re.compile(
     r"(?P<subject>[^,.;!?]{1,100}?)\s+against\s+"
@@ -402,6 +417,48 @@ class IntentContract(BaseModel):
                     f"for {relation.subjects.category!r}"
                 )
 
+        for relation in self.constraints:
+            if relation.relation == "one_per_support":
+                if relation.targets is None:
+                    continue
+                subject_count = relation.subjects.count
+                target_count = relation.targets.count
+                if (
+                    subject_count is None
+                    or target_count is None
+                    or subject_count != target_count
+                ):
+                    raise ValueError(
+                        "one_per_support requires equal explicit subject and target counts"
+                    )
+            elif relation.relation == "corner_distribution":
+                if (
+                    relation.targets is None
+                    or relation.targets.category != "room"
+                    or (relation.subjects.count or 0) < 2
+                ):
+                    raise ValueError(
+                        "corner_distribution requires at least two subjects and a room target"
+                    )
+
+        for index, first in enumerate(self.constraints):
+            for second in self.constraints[index + 1 :]:
+                if not relations_are_exclusive(first.relation, second.relation):
+                    continue
+                if not _selector_categories_overlap(
+                    first.subjects.category, second.subjects.category
+                ):
+                    continue
+                first_role = first.subjects.role
+                second_role = second.subjects.role
+                if first_role and second_role and first_role != second_role:
+                    continue
+                raise ValueError(
+                    "conflicting hard relations for overlapping subject selector "
+                    f"{first.subjects.category!r}: {first.relation!r} and "
+                    f"{second.relation!r}"
+                )
+
         edge_pairs = {
             (
                 relation.subjects.category,
@@ -515,8 +572,23 @@ def intent_contract_json_schema() -> dict[str, Any]:
         for arity in (0, 1, 2)
     }
     relation_properties["relation"] = {"enum": sorted(RELATION_REGISTRY)}
+    # llama.cpp's grammar converter ignores JSON Schema if/then branches, but
+    # it does honor a top-level required list. Requiring the key for every row
+    # prevents the local model from silently omitting relation endpoints;
+    # zero-arity relations use an explicit null value.
+    relation_schema.setdefault("required", [])
+    if "targets" not in relation_schema["required"]:
+        relation_schema["required"].append("targets")
 
-    endpoint_conditions: list[dict[str, Any]] = []
+    endpoint_conditions: list[dict[str, Any]] = [
+        {
+            "if": {
+                "properties": {"relation": {"enum": relation_names_by_arity[0]}},
+                "required": ["relation"],
+            },
+            "then": {"properties": {"targets": {"type": "null"}}},
+        }
+    ]
     for arity in (1, 2):
         relation_names = relation_names_by_arity[arity]
         target_schema: dict[str, Any] = {"$ref": "#/$defs/IntentSelector"}

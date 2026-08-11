@@ -151,6 +151,21 @@ _OBJECT_ALIASES: dict[str, tuple[str, list[str], str]] = {
         ],
         "conference_table",
     ),
+    "dining table": (
+        "large",
+        ["dining table", "dining tables"],
+        "dining_table",
+    ),
+    "coffee table": (
+        "large",
+        ["coffee table", "coffee tables"],
+        "coffee_table",
+    ),
+    "dressing table": (
+        "large",
+        ["dressing table", "dressing tables", "vanity table", "makeup table"],
+        "dressing_table",
+    ),
     "filing cabinet": (
         "large",
         ["filing cabinet", "filing cabinets", "file cabinet"],
@@ -161,6 +176,28 @@ _OBJECT_ALIASES: dict[str, tuple[str, list[str], str]] = {
         ["office chair", "office chairs", "desk chair", "desk chairs"],
         "office_chair",
     ),
+    "dining chair": (
+        "large",
+        ["dining chair", "dining chairs"],
+        "dining_chair",
+    ),
+    "stool": ("large", ["stool", "stools", "vanity stool"], "stool"),
+    "water dispenser": (
+        "large",
+        ["water dispenser", "water dispensers", "water cooler"],
+        "water_dispenser",
+    ),
+    "storage cabinet": (
+        "large",
+        ["storage cabinet", "storage cabinets", "storage cupboard"],
+        "storage_cabinet",
+    ),
+    "tv stand": (
+        "large",
+        ["tv stand", "tv stands", "television stand", "media console"],
+        "tv_stand",
+    ),
+    "television": ("large", ["television", "televisions"], "television"),
     "rocking chair": (
         "large",
         ["rocking chair", "rocking chairs"],
@@ -207,13 +244,25 @@ _OBJECT_ALIASES: dict[str, tuple[str, list[str], str]] = {
         "ceiling light",
     ),
     "book": ("small", ["book", "books"], "book"),
-    "plant": ("small", ["plant", "plants"], "plant"),
+    "plant": ("large", ["plant", "plants", "floor plant", "floor plants"], "plant"),
     "monitor": (
         "small",
         ["computer monitor", "computer monitors", "monitor", "monitors"],
         "monitor",
     ),
     "printer": ("small", ["printer", "printers"], "printer"),
+    "wastebasket": (
+        "small",
+        ["wastebasket", "wastebaskets", "trash can", "trash bin"],
+        "wastebasket",
+    ),
+    "plate": ("small", ["plate", "plates"], "plate"),
+    "cutlery": ("small", ["cutlery", "flatware", "silverware"], "cutlery"),
+    "drinking glass": (
+        "small",
+        ["drinking glass", "drinking glasses", "glass", "glasses"],
+        "glass",
+    ),
     "brochure holder": (
         "small",
         ["brochure holder", "brochure holders", "leaflet holder"],
@@ -229,6 +278,7 @@ _SPECIFIC_INVENTORY_FAMILIES = {
     "coffee_table": "table",
     "dining_table": "table",
     "conference_table": "table",
+    "dressing_table": "table",
     "office_chair": "chair",
     "guest_chair": "chair",
     "student_chair": "chair",
@@ -239,6 +289,11 @@ _SPECIFIC_INVENTORY_FAMILIES = {
 _INVENTORY_CATEGORY_ALIASES = {
     "computer_monitor": "monitor",
     "computer_display": "monitor",
+    "vanity": "dressing_table",
+    "vanity_table": "dressing_table",
+    "makeup_table": "dressing_table",
+    "water_cooler": "water_dispenser",
+    "storage_cupboard": "storage_cabinet",
     "chalkboard": "instructional_surface",
     "blackboard": "instructional_surface",
     "whiteboard": "instructional_surface",
@@ -270,6 +325,22 @@ _WALL_STAGE_CATEGORIES = {
     "wall_light",
 }
 
+_FURNITURE_STAGE_CATEGORIES = {
+    "dressing_table",
+    "plant",
+    "stool",
+    "storage_cabinet",
+    "water_dispenser",
+}
+
+_MANIPULAND_STAGE_CATEGORIES = {
+    "cutlery",
+    "glass",
+    "monitor",
+    "plate",
+    "wastebasket",
+}
+
 # Media supports are furniture even when an LLM mistakes a phrase such as
 # "TV stand on the opposite wall" for a wall-mounted placement.
 _FLOOR_STANDING_MEDIA_SUPPORT_CATEGORIES = frozenset(
@@ -286,21 +357,24 @@ _FLOOR_STANDING_MEDIA_SUPPORT_CATEGORIES = frozenset(
 def _extract_count_before_alias(text: str, alias: str) -> int:
     """Return a conservative count for an object mention in fallback parsing."""
     alias_pattern = re.escape(alias.lower()).replace(r"\ ", r"\s+")
+    if alias.lower() == "table":
+        alias_pattern += r"(?!\s+(?:setting|settings)\b)"
     number_pattern = "|".join([r"\d+", *map(re.escape, _NUMBER_WORDS)])
-    pattern = (
-        rf"(?:(?P<count>{number_pattern})\s+)?" rf"(?:\w+\s+){{0,2}}{alias_pattern}\b"
-    )
     best = 0
-    for match in re.finditer(pattern, text):
-        count_text = match.groupdict().get("count")
-        if not count_text:
-            count = 1
-        elif count_text.isdigit():
+    counted_pattern = (
+        rf"(?<![a-z0-9])(?P<count>{number_pattern})\s+"
+        rf"(?:[a-z][a-z0-9-]*\s+){{0,2}}?{alias_pattern}\b"
+    )
+    for match in re.finditer(counted_pattern, text):
+        count_text = match.group("count")
+        if count_text.isdigit():
             count = int(count_text)
         else:
             count = _NUMBER_WORDS.get(count_text, 1)
         best = max(best, count)
-    return best
+    if best:
+        return best
+    return int(re.search(rf"(?<![a-z0-9]){alias_pattern}\b", text) is not None)
 
 
 def _extract_required_objects_from_prompt(prompt_lower: str) -> dict[str, list[str]]:
@@ -461,11 +535,21 @@ def _normalize_stage_ownership(
     for category in _WALL_STAGE_CATEGORIES:
         if category in category_stages:
             category_stages[category] = "wall"
+    for category in _FURNITURE_STAGE_CATEGORIES:
+        if category in category_stages:
+            category_stages[category] = "large"
+    for category in _MANIPULAND_STAGE_CATEGORIES:
+        if category in category_stages:
+            category_stages[category] = "small"
     for category in _FLOOR_STANDING_MEDIA_SUPPORT_CATEGORIES:
         if category in category_stages:
             category_stages[category] = "large"
     desired_counts: dict[str, int] = {}
-    for category in _WALL_STAGE_CATEGORIES:
+    for category in (
+        _WALL_STAGE_CATEGORIES
+        | _FURNITURE_STAGE_CATEGORIES
+        | _MANIPULAND_STAGE_CATEGORIES
+    ):
         inventory_count = sum(
             inventory_key(value) == category
             for values in inventories.values()

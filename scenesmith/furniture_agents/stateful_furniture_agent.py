@@ -122,9 +122,21 @@ REPAIR_ASSET_SPECS: dict[str, tuple[str, list[float]]] = {
     "dining_chair": ("Simple upright dining chair", [0.50, 0.55, 0.90]),
     "chair": ("Simple upright task chair", [0.50, 0.50, 0.90]),
     "student_chair": ("Simple upright student classroom chair", [0.50, 0.50, 0.90]),
+    "stool": ("Compact low upholstered stool", [0.40, 0.40, 0.45]),
     "sofa": ("Compact upholstered two-seat sofa", [1.70, 0.85, 0.90]),
     "table": ("Practical rectangular table", [1.20, 0.80, 0.75]),
+    "coffee_table": ("Low rectangular coffee table", [1.10, 0.60, 0.45]),
+    "dining_table": (
+        "Rectangular dining table for five place settings",
+        [1.80, 0.85, 0.75],
+    ),
+    "conference_table": ("Rectangular conference table", [2.40, 1.10, 0.75]),
+    "dressing_table": (
+        "Low freestanding dressing table with drawers and no integrated mirror",
+        [1.20, 0.50, 0.75],
+    ),
     "cabinet": ("Compact freestanding storage cabinet", [0.90, 0.45, 1.10]),
+    "storage_cabinet": ("Compact freestanding storage cabinet", [0.90, 0.45, 1.10]),
     "bookshelf": ("Compact freestanding bookshelf", [0.90, 0.35, 1.80]),
     "plant": ("Large indoor potted floor plant", [0.60, 0.60, 1.20]),
     "rug": ("Square low-pile area rug", [1.80, 1.80, 0.03]),
@@ -133,6 +145,7 @@ REPAIR_ASSET_SPECS: dict[str, tuple[str, list[float]]] = {
     "tv_stand": ("Low media console TV stand", [1.60, 0.45, 0.65]),
     "television": ("Slim flat-screen television display", [1.10, 0.18, 0.65]),
     "sideboard": ("Compact dining room sideboard", [1.40, 0.45, 0.80]),
+    "water_dispenser": ("Freestanding bottled water dispenser", [0.35, 0.40, 1.10]),
 }
 
 _WALL_BACKED_STORAGE_CATEGORIES = {
@@ -385,7 +398,12 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         console_logger.info(f"Context image saved to: {image_path}")
         return image_path
 
-    async def add_furniture(self, scene: RoomScene) -> None:
+    async def add_furniture(
+        self,
+        scene: RoomScene,
+        *,
+        resume_from_initial_render: bool = False,
+    ) -> None:
         """Add furniture to a scene.
 
         Args:
@@ -400,20 +418,22 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         )
         self._configure_furniture_safety_for_scene(safety_description)
         self._synchronize_task_required_counts()
-        self._placement_order_reference = build_furniture_placement_order_reference(
-            cfg=self.cfg,
-            scene_prompt=safety_description,
-            scene_dir=scene.scene_dir,
-            vlm_service=self.vlm_service,
-            model=self.cfg.openai.model,
-            room_dimensions={
-                "length_m": scene.room_geometry.length,
-                "width_m": scene.room_geometry.width,
-            },
-        )
+        self._placement_order_reference = ""
+        if not resume_from_initial_render:
+            self._placement_order_reference = build_furniture_placement_order_reference(
+                cfg=self.cfg,
+                scene_prompt=safety_description,
+                scene_dir=scene.scene_dir,
+                vlm_service=self.vlm_service,
+                model=self.cfg.openai.model,
+                room_dimensions={
+                    "length_m": scene.room_geometry.length,
+                    "width_m": scene.room_geometry.width,
+                },
+            )
 
         # Generate context image if configured. If generation fails, continue without it.
-        if self.cfg.context_image_generation.enabled:
+        if self.cfg.context_image_generation.enabled and not resume_from_initial_render:
             try:
                 self.context_image_path = self._generate_and_save_context_image(scene)
             except Exception as e:
@@ -422,18 +442,49 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 )
                 self.context_image_path = None
 
+        if resume_from_initial_render:
+            # A restored render can already contain a complete but physically
+            # invalid support pair plus unrelated clearance violations. First use
+            # the normal deterministic hard-state repair so a relation candidate
+            # is not rejected solely because of an independent old violation.
+            restored_hard_state = self._evaluate_current_hard_state()
+            _, _, restored_repair_actions = (
+                self._try_deterministic_repair_for_hard_state(
+                    restored_hard_state,
+                    source="restored_furniture_render_pre_first_critique",
+                )
+            )
+            if restored_repair_actions:
+                console_logger.info(
+                    "Deterministic repair for restored furniture render before "
+                    "first critique: %s",
+                    "; ".join(restored_repair_actions),
+                )
+            # Resolve remaining prompt-authorized geometry before the planner has
+            # a chance to spend its bounded tool budget on it.
+            self._repair_contract_layout_before_first_critique()
+
         # Create designer, critic, and planner with tools once for this scene.
         designer_tools = self._create_designer_tools()
         self.designer = self._create_designer_agent(tools=designer_tools)
         critic_tools = self._create_critic_tools()
         self.critic = self._create_critic_agent(scene=scene, tools=critic_tools)
+        self._planner_skip_initial_design = resume_from_initial_render
         planner_tools = self._create_planner_tools()
+        self._planner_skip_initial_design = False
         self.planner = self._create_planner_agent(scene=scene, tools=planner_tools)
 
         # Get runner instruction from prompt registry.
         runner_instruction = self.prompt_registry.get_prompt(
             prompt_enum=FurnitureAgentPrompts.STATEFUL_PLANNER_RUNNER_INSTRUCTION,
         )
+        if resume_from_initial_render:
+            runner_instruction += (
+                "\n\nRESUME MODE: this scene already contains a restored furniture "
+                "render. Do not create another "
+                "initial design. Start by calling request_critique(), then use "
+                "request_design_change() only to address concrete feedback."
+            )
 
         # Run the furniture placement workflow.
         result: RunResult | None = None
@@ -441,6 +492,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             result = await self._run_planner_workflow(
                 runner_input=runner_instruction,
                 max_turns=self.cfg.agents.planner_agent.max_turns,
+                require_initial_design=not resume_from_initial_render,
             )
         except MaxTurnsExceeded as error:
             self._recover_from_planner_turn_limit(error)
@@ -510,6 +562,14 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         # requested inventory once more so a checkpoint with an unpenalized
         # duplicate cannot become the persisted furniture-stage scene.
         self._converge_prompt_required_inventory(source="after finalization")
+
+    async def resume_from_initial_render(self, scene: RoomScene) -> None:
+        """Compatibility entry point for a saved initial furniture render."""
+        await self.resume_from_furniture_render(scene)
+
+    async def resume_from_furniture_render(self, scene: RoomScene) -> None:
+        """Continue furniture critique/repair from any saved furniture render."""
+        await self.add_furniture(scene, resume_from_initial_render=True)
 
     def _recover_from_planner_turn_limit(self, error: MaxTurnsExceeded) -> list[str]:
         """Continue only when bounded deterministic repair restores hard validity.
@@ -608,7 +668,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         hard_state = self._evaluate_current_furniture_hard_state()
         return hard_state is None or hard_state.hard_valid
 
-    def _repair_initial_contract_layout(self) -> list[str]:
+    def _repair_contract_layout_before_first_critique(self) -> list[str]:
         """Repair contract-authorized furniture relations before first critique.
 
         Both repair mechanisms are geometry-only and retain their own
@@ -674,7 +734,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         working_memory = getattr(self, "stage_working_memory", None)
         if working_memory is not None:
             working_memory.record_repair_event(
-                source="initial_design",
+                source="pre_first_critique",
                 strategy="prompt_contract_furniture_relations",
                 status="accepted",
                 trigger_reasons=[
@@ -689,10 +749,14 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 },
             )
         console_logger.info(
-            "Initial prompt-contract furniture repair before first critique: %s",
+            "Prompt-contract furniture repair before first critique: %s",
             "; ".join(actions),
         )
         return actions
+
+    def _repair_initial_contract_layout(self) -> list[str]:
+        """Preserve the initial-design repair hook used by planner integrations."""
+        return self._repair_contract_layout_before_first_critique()
 
     def _get_context_image_path(self) -> Path | None:
         """Get the AI-generated context image for initial design.
@@ -831,6 +895,18 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             if self._repair_forbidden_zone_conflicts(include_windows=False):
                 actions.append("cleared deterministic door/opening forbidden zones")
             actions.extend(self._repair_relations_after_inventory_change())
+            # A free-wall relation is an explicit request to reserve a separate
+            # wall for its subject.  Once relation repair has anchored that
+            # subject, re-evaluate storage anchors so a wardrobe does not keep
+            # the same wall merely because it was placed before the relation.
+            if (
+                self._free_wall_anchor_objects(excluding_object_id="wardrobe_0")
+                and self._repair_wardrobe_wall_anchor()
+            ):
+                actions.append(
+                    "moved wardrobe away from a prompt-reserved free-wall anchor"
+                )
+                actions.extend(self._repair_relations_after_inventory_change())
         elif "unresolved prompt-core furniture relation" in reasons:
             actions.extend(self._repair_unresolved_prompt_contract_relations())
 
@@ -1538,7 +1614,11 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         if not counts:
             return
         controller.required_counts = counts
-        controller.required_terms.update(counts)
+        # ``counts`` already merges the immutable contract with TaskCompiler
+        # inventory. Replacing terms prevents an obsolete generic label (such
+        # as ``table`` after a ``dressing_table`` contract) from remaining a
+        # required-object guard beside its specialized replacement.
+        controller.required_terms = set(counts)
         try:
             self.stage_working_memory.set_required_counts(counts)
         except Exception as exc:
@@ -2251,6 +2331,14 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         if room_bounds is None:
             return False
         candidates = self._wardrobe_candidate_transforms(wardrobe)
+        reserved_free_wall_objects = self._free_wall_anchor_objects(
+            excluding_object_id=str(wardrobe.object_id)
+        )
+        reserved_free_walls = {
+            wall
+            for obj in reserved_free_wall_objects
+            if (wall := self._nearest_room_wall(obj)) is not None
+        }
         forbidden_zones = self._opening_forbidden_zones(include_windows=False)
         # A wardrobe anchor must not trade a wall/window violation for an
         # overlap with a dresser, desk, or any other existing furniture.
@@ -2298,7 +2386,23 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 else np.zeros(3)
             )
             distance_score = float(np.linalg.norm(center[:2] - bed_center[:2]))
-            score = distance_score - overlap_penalty - wall_opening_penalty
+            candidate_wall = self._nearest_room_wall(wardrobe, transform=transform)
+            # "Free wall" is a role-qualified, prompt-authored constraint. A
+            # large storage anchor should not occupy that same physical wall
+            # when another object was explicitly assigned to it. This remains
+            # a soft candidate preference: it never forces an invalid wall when
+            # every distinct-wall option is blocked by an opening or collision.
+            reserved_wall_penalty = (
+                6.0
+                if candidate_wall is not None and candidate_wall in reserved_free_walls
+                else 0.0
+            )
+            score = (
+                distance_score
+                - overlap_penalty
+                - wall_opening_penalty
+                - reserved_wall_penalty
+            )
             # Hard collisions must never win merely because the candidate is
             # farther from the bed. If no fully valid wall candidate exists,
             # retain the current pose for a later generic repair instead of
@@ -2315,6 +2419,61 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             return False
         self.scene.move_object(wardrobe.object_id, best_transform)
         return True
+
+    def _free_wall_anchor_objects(
+        self, *, excluding_object_id: str
+    ) -> list[SceneObject]:
+        """Return furniture assigned to an explicitly free wall by the contract."""
+        if self.scene is None:
+            return []
+        contract = getattr(self.scene, "scenebenchmark_intent_contract", {}) or {}
+        categories: set[str] = set()
+        for constraint in contract.get("constraints") or []:
+            if str(constraint.get("relation") or "") != "against_wall":
+                continue
+            if str(constraint.get("strength") or "hard").lower() != "hard":
+                continue
+            target = constraint.get("targets") or {}
+            if str(target.get("role") or "").strip().lower() != "free":
+                continue
+            category = str((constraint.get("subjects") or {}).get("category") or "")
+            if category:
+                categories.add(category)
+        anchors: list[SceneObject] = []
+        for category in sorted(categories):
+            anchors.extend(
+                obj
+                for obj in self._furniture_by_category(category)
+                if str(obj.object_id) != excluding_object_id
+            )
+        return anchors
+
+    def _nearest_room_wall(
+        self,
+        obj: SceneObject,
+        *,
+        transform: RigidTransform | None = None,
+    ) -> str | None:
+        """Identify the closest physical room wall for an object's AABB."""
+        room_bounds = self._room_bounds_xy()
+        bounds = (
+            self._bounds_for_transform(obj, transform)
+            if transform is not None
+            else obj.compute_world_bounds()
+        )
+        if room_bounds is None or bounds is None:
+            return None
+        min_x, min_y, max_x, max_y = room_bounds
+        lower, upper = bounds
+        return min(
+            (
+                ("west", abs(float(lower[0]) - min_x)),
+                ("east", abs(max_x - float(upper[0]))),
+                ("south", abs(float(lower[1]) - min_y)),
+                ("north", abs(max_y - float(upper[1]))),
+            ),
+            key=lambda item: (item[1], item[0]),
+        )[0]
 
     def _repair_dresser_opposite_bed_wall_anchor(self) -> bool:
         """Back the dresser against the wall faced by the foot of the bed."""

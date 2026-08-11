@@ -77,21 +77,113 @@ fi
 MODEL_NAME="${MODEL_NAME:-${SCENEEXPERT_MODEL_ID:-Qwen3.6-27B-Q8_0}}"
 RUN_ID="${RUN_ID:-critic_on_$(date +%Y-%m-%d_%H-%M-%S)}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-$PROJECT_ROOT/outputs/critic_probe/$RUN_ID}"
+SCENE_SELECTION="${SCENE_SELECTION:-all}"
+SCENE_SELECTION_EXPLICIT="false"
+REPLAY_FROM_PATH="${REPLAY_FROM_PATH:-}"
+REPLAY_MODE="${REPLAY_MODE:-floor_plan}"
+RESUME_FURNITURE_RENDER_MODE=""
 
-if [ "${1:-}" = "--output-root" ] || [ "${1:-}" = "--output-dir" ]; then
-    if [ "$#" -lt 2 ] || [ -z "${2:-}" ]; then
-        echo "ERROR: $1 requires a directory" >&2
-        exit 2
-    fi
-    OUTPUT_ROOT="$2"
-    shift 2
-elif [[ "${1:-}" == --output-root=* || "${1:-}" == --output-dir=* ]]; then
-    OUTPUT_ROOT="${1#*=}"
-    if [ -z "$OUTPUT_ROOT" ]; then
-        echo "ERROR: --output-root/--output-dir requires a directory" >&2
-        exit 2
-    fi
-    shift
+usage() {
+    cat <<'EOF'
+Usage: bash scripts/run_parallel_critic_on.sh [options]
+
+Options:
+  --scenes <selection>     all, or a comma-separated list chosen from:
+                           bedroom,office,long_living_room
+  --output-root <dir>      write probe output below <dir>
+  --output-dir <dir>       alias for --output-root
+  --resume-from <dir>      reuse prior critic batch outputs below <dir>
+  --resume-mode <mode>     floor_plan (default), furniture_initial_render, or
+                           furniture_latest_render
+  -h, --help               show this help
+
+CASE_FILTER remains available for legacy substring filtering when --scenes is
+not supplied. An explicit --scenes selection takes precedence.
+EOF
+}
+
+# Internal children receive positional batch payloads and must bypass the
+# public option parser. The top-level parser accepts options in any order.
+if [ "${1:-}" != "--internal-run-batch" ]; then
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --output-root|--output-dir)
+                if [ "$#" -lt 2 ] || [ -z "${2:-}" ]; then
+                    echo "ERROR: $1 requires a directory" >&2
+                    exit 2
+                fi
+                OUTPUT_ROOT="$2"
+                shift 2
+                ;;
+            --output-root=*|--output-dir=*)
+                OUTPUT_ROOT="${1#*=}"
+                if [ -z "$OUTPUT_ROOT" ]; then
+                    echo "ERROR: --output-root/--output-dir requires a directory" >&2
+                    exit 2
+                fi
+                shift
+                ;;
+            --scenes)
+                if [ "$#" -lt 2 ] || [ -z "${2:-}" ]; then
+                    echo "ERROR: --scenes requires all or a comma-separated scene list" >&2
+                    exit 2
+                fi
+                SCENE_SELECTION="$2"
+                SCENE_SELECTION_EXPLICIT="true"
+                shift 2
+                ;;
+            --scenes=*)
+                SCENE_SELECTION="${1#*=}"
+                if [ -z "$SCENE_SELECTION" ]; then
+                    echo "ERROR: --scenes requires all or a comma-separated scene list" >&2
+                    exit 2
+                fi
+                SCENE_SELECTION_EXPLICIT="true"
+                shift
+                ;;
+            --resume-from)
+                if [ "$#" -lt 2 ] || [ -z "${2:-}" ]; then
+                    echo "ERROR: --resume-from requires a directory" >&2
+                    exit 2
+                fi
+                REPLAY_FROM_PATH="$2"
+                shift 2
+                ;;
+            --resume-from=*)
+                REPLAY_FROM_PATH="${1#*=}"
+                if [ -z "$REPLAY_FROM_PATH" ]; then
+                    echo "ERROR: --resume-from requires a directory" >&2
+                    exit 2
+                fi
+                shift
+                ;;
+            --resume-mode)
+                if [ "$#" -lt 2 ] || [ -z "${2:-}" ]; then
+                    echo "ERROR: --resume-mode requires floor_plan, furniture_initial_render, or furniture_latest_render" >&2
+                    exit 2
+                fi
+                REPLAY_MODE="$2"
+                shift 2
+                ;;
+            --resume-mode=*)
+                REPLAY_MODE="${1#*=}"
+                if [ -z "$REPLAY_MODE" ]; then
+                    echo "ERROR: --resume-mode requires floor_plan, furniture_initial_render, or furniture_latest_render" >&2
+                    exit 2
+                fi
+                shift
+                ;;
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            *)
+                echo "ERROR: unknown argument: $1" >&2
+                usage >&2
+                exit 2
+                ;;
+        esac
+    done
 fi
 
 SCENE_BATCH_SIZE="${SCENE_BATCH_SIZE:-1}"
@@ -233,6 +325,37 @@ csv_quote() {
     printf '"%s"' "$value"
 }
 
+normalize_replay_source_root() {
+    local requested_root="$1"
+    local candidate
+
+    if [ ! -d "$requested_root" ]; then
+        echo "ERROR: --resume-from directory does not exist: $requested_root" >&2
+        return 1
+    fi
+
+    # Normal runs write batches below <output>/critic_on, while a shared base
+    # uses <output>/shared_base. Accept those output roots and either already
+    # normalized batch root.
+    for candidate in "$requested_root" "$requested_root/critic_on" "$requested_root/shared_base"; do
+        if find "$candidate" -mindepth 1 -maxdepth 1 -type d \
+            -name 'batch_[0-9][0-9][0-9]' -print -quit 2>/dev/null | grep -q .; then
+            printf '%s' "$candidate"
+            return 0
+        fi
+    done
+
+    # Permit targeting one failed batch; its parent is the batch root used by
+    # run_batch below.
+    if [[ "$(basename "$requested_root")" =~ ^batch_[0-9]{3}$ ]]; then
+        printf '%s' "$(dirname "$requested_root")"
+        return 0
+    fi
+
+    echo "ERROR: --resume-from must be an output root, critic_on/shared_base root, or batch_XXX directory containing reusable batches: $requested_root" >&2
+    return 1
+}
+
 require_positive_integer SCENE_BATCH_SIZE "$SCENE_BATCH_SIZE"
 require_positive_integer SCENE_WORKERS_PER_PROCESS "$SCENE_WORKERS_PER_PROCESS"
 if [[ ! "$SCENE_RETRY_ATTEMPTS" =~ ^[0-9]+$ ]]; then
@@ -270,6 +393,37 @@ fi
 if ! GENERATE_SHARED_BASE="$(normalize_bool "$GENERATE_SHARED_BASE")"; then
     echo "ERROR: GENERATE_SHARED_BASE must be true or false" >&2
     exit 1
+fi
+if [ -n "$REPLAY_FROM_PATH" ]; then
+    if [ "$GENERATE_SHARED_BASE" != "false" ]; then
+        echo "ERROR: --resume-from cannot be combined with GENERATE_SHARED_BASE=true" >&2
+        exit 2
+    fi
+    case "$REPLAY_MODE" in
+        floor_plan)
+            RESUME_FURNITURE_RENDER_MODE=""
+            ;;
+        furniture_initial_render)
+            RESUME_FURNITURE_RENDER_MODE="initial"
+            ;;
+        furniture_latest_render)
+            RESUME_FURNITURE_RENDER_MODE="latest"
+            ;;
+        *)
+            echo "ERROR: --resume-mode must be floor_plan, furniture_initial_render, or furniture_latest_render" >&2
+            exit 2
+            ;;
+    esac
+    BRANCH_FROM_SHARED_BASE="true"
+    if ! SHARED_BASE_ROOT="$(normalize_replay_source_root "$REPLAY_FROM_PATH")"; then
+        exit 2
+    fi
+    # Both furniture-render modes add a saved furniture snapshot before the
+    # furniture stage; floor-plan resume starts from the persisted geometry.
+    SHARED_BASE_STOP_STAGE="floor_plan"
+elif [ "$REPLAY_MODE" != "floor_plan" ]; then
+    echo "ERROR: --resume-mode requires --resume-from" >&2
+    exit 2
 fi
 if ! DRY_RUN="$(normalize_bool "$DRY_RUN")"; then
     echo "ERROR: DRY_RUN must be true or false" >&2
@@ -393,6 +547,52 @@ if [ "$BRANCH_FROM_SHARED_BASE" = "true" ] || [ "$GENERATE_SHARED_BASE" = "true"
     fi
 fi
 
+validate_scene_selection() {
+    local scene_id seen="," selection_count=0
+    if [ "$SCENE_SELECTION" = "all" ]; then
+        return 0
+    fi
+    # Bash's ``read -a`` drops a trailing empty field, so reject malformed CSV
+    # before splitting rather than relying only on the per-item empty check.
+    if [[ "$SCENE_SELECTION" == ,* \
+        || "$SCENE_SELECTION" == *, \
+        || "$SCENE_SELECTION" == *,,* ]]; then
+        echo "ERROR: --scenes contains an empty scene ID" >&2
+        exit 2
+    fi
+    IFS=',' read -r -a selected_scene_ids <<< "$SCENE_SELECTION"
+    for scene_id in "${selected_scene_ids[@]}"; do
+        if [ -z "$scene_id" ]; then
+            echo "ERROR: --scenes contains an empty scene ID" >&2
+            exit 2
+        fi
+        case "$scene_id" in
+            bedroom|office|long_living_room) ;;
+            all)
+                echo "ERROR: --scenes all cannot be combined with individual scene IDs" >&2
+                exit 2
+                ;;
+            *)
+                echo "ERROR: unknown scene ID '$scene_id'; choose bedroom, office, long_living_room, or all" >&2
+                exit 2
+                ;;
+        esac
+        if [[ "$seen" == *",$scene_id,"* ]]; then
+            echo "ERROR: duplicate scene ID in --scenes: $scene_id" >&2
+            exit 2
+        fi
+        seen+="$scene_id,"
+        selection_count=$((selection_count + 1))
+    done
+    if [ "$selection_count" -eq 0 ]; then
+        echo "ERROR: --scenes did not select any scenes" >&2
+        exit 2
+    fi
+}
+
+# Reject invalid selections before creating an output directory or lock file.
+validate_scene_selection
+
 # Parallel batches re-enter this script in a new session. Export every value
 # that may have been normalized or defaulted above so the child uses exactly
 # the same run configuration as the parent.
@@ -409,7 +609,8 @@ export CRITIC_PROBE_FINAL_VIEW_PARALLELISM
 export FINAL_VIEW_PYTHON_BIN
 export PIPELINE_STOP_STAGE BRANCH_FROM_SHARED_BASE SHARED_BASE_STOP_STAGE
 export SHARED_BASE_ROOT GENERATE_SHARED_BASE MAX_CASES CASE_FILTER
-export INCLUDE_HOLDOUT_CASES DRY_RUN
+export INCLUDE_HOLDOUT_CASES DRY_RUN SCENE_SELECTION SCENE_SELECTION_EXPLICIT
+export REPLAY_FROM_PATH REPLAY_MODE RESUME_FURNITURE_RENDER_MODE
 export SCENEEXPERT_DISABLE_ARTICULATED="$DISABLE_ARTICULATED"
 export SCENEEXPERT_DISABLE_MATERIALS="$DISABLE_MATERIALS"
 export SCENEEXPERT_DISABLE_BWRAP="$DISABLE_BWRAP"
@@ -454,10 +655,10 @@ read_cgroup_memory_current() {
 }
 
 if [ "$INTERNAL_RUN_BATCH" = "false" ]; then
-    # Prevent two top-level probes from sharing one llama-server/cgroup.  The
-    # descriptor stays locked until this script exits, while internal batch
-    # children inherit the lock owner and do not try to acquire it again.
-    LOCK_FILE="${CRITIC_PROBE_LOCK_FILE:-${TMPDIR:-/tmp}/scenesmith_critic_probe.lock}"
+    # Serialize only re-entry into the same output root.  Independent replay
+    # roots have non-overlapping service-port blocks and can safely share a
+    # llama server configured for concurrent requests.
+    LOCK_FILE="${CRITIC_PROBE_LOCK_FILE:-${OUTPUT_ROOT}.lock}"
     mkdir -p "$(dirname "$LOCK_FILE")"
     if ! command -v flock >/dev/null 2>&1; then
         echo "ERROR: flock is required to prevent overlapping critic probes" >&2
@@ -465,7 +666,7 @@ if [ "$INTERNAL_RUN_BATCH" = "false" ]; then
     fi
     exec 9>"$LOCK_FILE"
     if ! flock -n 9; then
-        echo "ERROR: another critic probe already owns $LOCK_FILE" >&2
+        echo "ERROR: another critic probe already owns output lock $LOCK_FILE" >&2
         echo "       Wait for it to finish or inspect its process/log before retrying." >&2
         exit 1
     fi
@@ -514,35 +715,36 @@ if [ "$INTERNAL_RUN_BATCH" = "false" ] \
 fi
 echo "thinking profile: floor_plan=${FLOOR_PLAN_DESIGNER_THINKING}/${FLOOR_PLAN_CRITIC_THINKING}, furniture=${FURNITURE_DESIGNER_THINKING}/${FURNITURE_CRITIC_THINKING}, wall=${WALL_DESIGNER_THINKING}/${WALL_CRITIC_THINKING}, ceiling=${CEILING_DESIGNER_THINKING}/${CEILING_CRITIC_THINKING}, manipuland=${MANIPULAND_DESIGNER_THINKING}/${MANIPULAND_CRITIC_THINKING}"
 echo "shared base: $BRANCH_FROM_SHARED_BASE (generate=$GENERATE_SHARED_BASE)"
+echo "replay source: ${REPLAY_FROM_PATH:-none} (mode=$REPLAY_MODE)"
 echo "holdout cases: $INCLUDE_HOLDOUT_CASES"
+echo "scene selection: $SCENE_SELECTION"
 echo "==============================================="
 
 # case_id|critic goal|prompt. Override only selection/count with CASE_FILTER
 # and MAX_CASES; this keeps batch indices stable for reusable shared bases.
+# An explicit --scenes list uses exact IDs and takes precedence over CASE_FILTER.
 # CASE_FILTER accepts one substring or a comma-separated list of substrings.
 CASES=(
-    "default_bedroom|ACP default scene 0|A bedroom with a bed, two nightstands, and a wardrobe in the corner of the room."
-    "default_living_room|ACP default scene 1|A living room with a two-seater sofa against the wall, a square rug in the middle in front of the sofa, and two large plants on the floor near the sofa."
-    "default_classroom|ACP default scene 2|A classroom with six student desks, each with a chair. A teacher's desk sits at the front near the chalkboard, which hangs on the wall."
-    "default_rustic_bedroom|ACP default scene 3|A bedroom featuring rustic farmhouse decor with exposed wooden beams."
-    "living_room_media_bottleneck|sofa-coffee-table-TV functional relation and living-room circulation bottleneck|A living room with a sofa against the back wall facing a TV stand and television on the opposite wall, a coffee table centered between the sofa and TV stand, two armchairs flanking the coffee table near each end of the sofa, and a floor lamp beside one armchair. A remote control and a few magazines lie on the coffee table, and a small rug lies between the coffee table and TV stand."
-    "study_desk_access_crunch|desk-chair-monitor functional relation and study access|A study with a desk centered against the back wall, an office chair tucked under the desk, a computer monitor on the desk, two guest chairs against the side wall with their usable fronts perpendicular to the wall and facing into the room, and a bookshelf on the adjacent wall with its usable front perpendicular to the wall and facing into the room. A desk lamp and a notebook sit on the desk, a pen holder next to the monitor, and a small trash can beside the desk."
-    "meeting_room_mixed_edge_seating|conference-table mixed long-and-short-side equal chair distribution|A meeting room with one rectangular conference table centered in the room and seven office chairs. Arrange six office chairs in two equal groups of three, evenly spaced along the table's two long sides, with all chairs facing the table. Place one remaining office chair centered along one short side, facing the table. Keep the opposite short side free of chairs. Keep clear circulation around the table."
-    "dining_room_service_squeeze|dining table-chair-place-setting relation and dining/sideboard accessibility|A dining room with a dining table in the center, four dining chairs arranged around it with one on each side, a sideboard against the wall behind the chairs on one side, and table settings for four including plates, cutlery, and glasses. A centerpiece vase with flowers sits in the middle of the table, and a set of coasters sits on the sideboard."
+    "bedroom|bed-nightstand flanking, dressing station alignment, storage access, and wall mirror|A functional bedroom with one bed centered against the back wall. Place two nightstands, one on each side of the bed. Place one wardrobe against a side wall. Position one low freestanding dressing table against a free wall, with one stool centered in front of and facing the dressing table. Mount one separate mirror on the wall, centered directly above the dressing table; the mirror must not be integrated into the table. Keep the entrance route clear and leave enough usable space in front of the wardrobe and dressing table."
+    "office|four one-to-one desk-chair-monitor workstations, shared circulation, and corner wastebasket|A practical office with four separate desks forming four workstations. Pair each desk with exactly one office chair positioned at its usable side and facing the desk. Place exactly one computer monitor on top of each desk, for four monitors in total, with every monitor facing its paired chair. Place one freestanding water dispenser against a wall and keep its front accessible. Place one wastebasket on the floor in one corner of the room. Maintain a clear central aisle and enough clearance to use every workstation."
+    "long_living_room|living-media alignment, five-seat dining edge distribution, wall storage, and distinct-corner plants|A long rectangular living room with separate living and dining areas. In the living area, place one sofa against a wall facing one TV stand on the opposite side, with one television supported on top of the TV stand. Center one coffee table between the sofa and the TV stand. In the dining area, place one rectangular dining table with five complete table settings, each including a plate, cutlery, and a drinking glass. Arrange five dining chairs around the table: two evenly spaced along each long side and one centered on one short side, all facing the table; keep the opposite short side free of chairs. Place one storage cabinet against a wall without blocking circulation. Place four large floor plants in four distinct room corners, exactly one plant per corner. Keep a clear route between the entrance, living area, dining area, and storage cabinet."
 )
-
-if [ "$INCLUDE_HOLDOUT_CASES" = "true" ]; then
-    CASES+=(
-        "holdout_office|office workstation pairing and shared central circulation|A collaborative office with two desks facing each other across the center, an office chair and computer monitor at each desk, a filing cabinet against one wall, and a clear walking path between the workstations. A keyboard and desk lamp sit on each desk."
-        "holdout_reception|reception workflow, guest seating, and brochure access|A reception room with a reception desk against the back wall, an office chair behind it, two guest chairs facing the desk, a side table between the guest chairs, a filing cabinet in a corner, and a brochure holder on top of the reception desk. Keep an open route from the entrance to the desk and chairs."
-        "holdout_workshop|workbench tool access and safe circulation|A workshop with a workbench against the back wall, two stools paired with the workbench, a tool cabinet against a side wall, a freestanding assembly table in the center, and storage shelves on the opposite wall. A toolbox and task lamp sit on the workbench, with a clear path around the assembly table."
-        "holdout_nursery|crib access, paired bedside storage, and reading corner|A nursery with a crib centered against the back wall, a changing table against a side wall, a dresser on the opposite wall, and a rocking chair near a small side table in one corner. A table lamp and two books sit on the side table, while the route to the crib remains clear."
-    )
-fi
 
 case_selected() {
     local case_id="$1"
     local filter
+    if [ "$SCENE_SELECTION_EXPLICIT" = "true" ] || [ "$SCENE_SELECTION" != "all" ]; then
+        if [ "$SCENE_SELECTION" = "all" ]; then
+            return 0
+        fi
+        IFS=',' read -r -a selected_scene_ids <<< "$SCENE_SELECTION"
+        for filter in "${selected_scene_ids[@]}"; do
+            if [ "$case_id" = "$filter" ]; then
+                return 0
+            fi
+        done
+        return 1
+    fi
     if [ -z "$CASE_FILTER" ]; then
         return 0
     fi
@@ -715,6 +917,9 @@ run_batch() {
     )
     if [ -n "$start_stage" ]; then
         cmd+=("experiment.pipeline.start_stage=${start_stage}" "experiment.pipeline.resume_from_path=${resume_from}")
+        if [ -n "$RESUME_FURNITURE_RENDER_MODE" ]; then
+            cmd+=("experiment.pipeline.resume_furniture_from_render=${RESUME_FURNITURE_RENDER_MODE}")
+        fi
     fi
 
     echo "[$run_kind/$batch_label] ${cmd[*]}"

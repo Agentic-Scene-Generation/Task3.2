@@ -21,6 +21,10 @@ from scenesmith.scenebenchmark_critic.intent_schema import (
     canonical_selector_category,
     selector_categories_overlap,
 )
+from scenesmith.scenebenchmark_critic.relation_registry import (
+    ROOM_RELATIVE_WALL_CATEGORIES,
+    relations_are_exclusive,
+)
 
 
 DEFAULT_HSSD_LOOKUP = (
@@ -49,10 +53,12 @@ _RELATION_FAMILIES = {
     "around": "position",
     "beside": "position",
     "between": "position",
+    "centered_above": "position",
     "centered_between": "position",
     "centered_in_room": "position",
     "centered_on_wall": "position",
     "corner_of_room": "position",
+    "corner_distribution": "position",
     "edge_distribution": "position",
     "flanking": "position",
     "in_front_of": "position",
@@ -66,6 +72,7 @@ _RELATION_FAMILIES = {
     "supports": "support",
     "placed_on": "support",
     "on_top_of": "support",
+    "one_per_support": "support",
     "attached_to": "attachment",
     "mounted_on": "attachment",
     "on_wall": "attachment",
@@ -77,6 +84,10 @@ _HARD_ORIENTATION_OWNERS = {
     "centered_on_wall",
     "operation_zone_at_wall",
 }
+_FLOOR_PLAN_RESERVATION_RELATIONS = frozenset(
+    {"against_wall", "centered_on_wall", "on_wall"}
+)
+_WALL_TARGET_CATEGORIES = frozenset({"wall", *ROOM_RELATIVE_WALL_CATEGORIES})
 _GENERIC_CATEGORY_FALLBACKS = {
     "armchair": "chair",
     "dining_chair": "chair",
@@ -305,14 +316,48 @@ def _hard_conflicts(
 
 def _position_relations_are_exclusive(first: str, second: str) -> bool:
     """Recognize only position pairs that cannot both hold for one subject."""
-    pair = frozenset((first, second))
-    return pair in {
-        frozenset(("centered_in_room", "against")),
-        frozenset(("centered_in_room", "against_wall")),
-        frozenset(("centered_in_room", "centered_on_wall")),
-        frozenset(("centered_in_room", "corner_of_room")),
-        frozenset(("centered_on_wall", "corner_of_room")),
-    }
+    return relations_are_exclusive(first, second)
+
+
+def _floor_plan_reservations(constraints: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Project future wall anchors into opening-reservation requirements.
+
+    Furniture and wall-mounted stages need physical wall area which is decided
+    earlier by the floor plan. This projection deliberately contains only
+    explicit wall relations: proximity and seating constraints must not affect
+    doors or windows.
+    """
+    reservations: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for constraint in constraints:
+        if str(constraint.get("stage") or "") == "floor_plan":
+            continue
+        relation = str(constraint.get("relation") or "")
+        if relation not in _FLOOR_PLAN_RESERVATION_RELATIONS:
+            continue
+        target = constraint.get("targets") or {}
+        target_category = canonical_selector_category(target.get("category"))
+        if target_category not in _WALL_TARGET_CATEGORIES:
+            continue
+        subject = constraint.get("subjects") or {}
+        subject_category = canonical_selector_category(subject.get("category"))
+        if not subject_category:
+            continue
+        wall_role = str(target.get("role") or "").strip().lower()
+        key = (subject_category, relation, wall_role)
+        if key in seen:
+            continue
+        seen.add(key)
+        reservations.append(
+            {
+                "constraint_id": str(constraint.get("constraint_id") or ""),
+                "source_stage": str(constraint.get("stage") or ""),
+                "relation": relation,
+                "subjects": dict(subject),
+                "targets": dict(target),
+            }
+        )
+    return reservations
 
 
 class StageRelationProjector:
@@ -351,6 +396,11 @@ class StageRelationProjector:
             return StageRelationContext(
                 stage=stage,
                 hard_constraints=hard_constraints,
+                floor_plan_reservations=(
+                    _floor_plan_reservations(constraints)
+                    if stage == "floor_plan"
+                    else []
+                ),
                 contract_constraint_count=len(constraints),
                 projected_constraint_count=len(hard_constraints),
                 projection_coverage=1.0,

@@ -1578,7 +1578,11 @@ class BaseStatefulAgent(ABC):
         return designer_session, critic_session
 
     async def _run_planner_workflow(
-        self, *, runner_input: Any, max_turns: int
+        self,
+        *,
+        runner_input: Any,
+        max_turns: int,
+        require_initial_design: bool = True,
     ) -> RunResult:
         """Run and audit the stage Planner, including its persisted tool history."""
         planner_start = time.time()
@@ -1634,10 +1638,10 @@ class BaseStatefulAgent(ABC):
 
         # A planner can return a natural-language acknowledgement without ever
         # invoking a workflow tool.  Letting that response pass makes the stage
-        # look successful while leaving required surfaces empty.  The initial
-        # design call is mandatory for every stateful stage, so give the planner
-        # one explicit recovery turn before failing deterministically.
-        if self._planner_initial_design_tool_calls == 0:
+        # look successful while leaving required surfaces empty.  A fresh stage
+        # must create its initial design; a replay from an existing candidate
+        # intentionally starts with critique and repair instead.
+        if require_initial_design and self._planner_initial_design_tool_calls == 0:
             recovery_input = (
                 "MANDATORY WORKFLOW RECOVERY: your previous turn returned without "
                 "calling a workflow tool, so no design work has been completed. "
@@ -2440,7 +2444,9 @@ class BaseStatefulAgent(ABC):
                 + (f"\nSummary: {compact_summary}" if compact_summary else "")
             )
 
-        tools: list[FunctionTool] = [request_initial_design]
+        tools: list[FunctionTool] = []
+        if not getattr(self, "_planner_skip_initial_design", False):
+            tools.append(request_initial_design)
 
         # Only add critique-related tools if critique rounds are enabled.
         # This prevents the planner from accidentally calling critique tools

@@ -239,6 +239,24 @@ class FurnitureSafetyControllerTest(unittest.TestCase):
         self.assertEqual(controller.required_counts["armchair"], 2)
         self.assertEqual(controller.required_counts["floor_lamp"], 1)
 
+    def test_dressing_table_is_not_a_second_generic_table_requirement(self) -> None:
+        controller = FurnitureSafetyController({"enabled": True})
+        controller.reset_for_scene(
+            "A bedroom with one low dressing table and one stool."
+        )
+
+        self.assertEqual(controller.required_counts["dressing_table"], 1)
+        self.assertNotIn("table", controller.required_counts)
+
+    def test_dressing_table_does_not_hide_an_explicit_generic_table(self) -> None:
+        controller = FurnitureSafetyController({"enabled": True})
+        controller.reset_for_scene(
+            "A bedroom with one dressing table and one utility table."
+        )
+
+        self.assertEqual(controller.required_counts["dressing_table"], 1)
+        self.assertEqual(controller.required_counts["table"], 1)
+
     def test_tv_console_satisfies_tv_stand_inventory_role(self) -> None:
         self.assertTrue(
             furniture_object_category_matches(
@@ -832,6 +850,41 @@ class FurnitureSafetyControllerTest(unittest.TestCase):
 
         self.assertFalse(allowed)
         self.assertIn("requires 2 nightstand", message)
+
+    def test_coffee_and_dining_tables_have_distinct_inventory_limits(self) -> None:
+        controller = FurnitureSafetyController({"enabled": True})
+        controller.reset_for_scene(
+            "A living room with one coffee table and one rectangular dining table."
+        )
+        scene = SimpleNamespace(
+            objects={
+                "coffee_table_0": SimpleNamespace(
+                    name="coffee_table",
+                    description="low coffee table",
+                    immutable=False,
+                )
+            }
+        )
+
+        self.assertEqual(controller.required_counts["coffee_table"], 1)
+        self.assertEqual(controller.required_counts["dining_table"], 1)
+        allowed, message = controller.record_add(
+            scene=scene,
+            asset_text="rectangular dining table",
+        )
+        self.assertTrue(allowed, message)
+
+        scene.objects["dining_table_0"] = SimpleNamespace(
+            name="dining_table",
+            description="rectangular dining table",
+            immutable=False,
+        )
+        allowed, message = controller.record_add(
+            scene=scene,
+            asset_text="another dining table",
+        )
+        self.assertFalse(allowed)
+        self.assertIn("requires 1 dining_table", message)
 
     def test_extra_required_object_can_be_removed_but_last_required_is_blocked(
         self,

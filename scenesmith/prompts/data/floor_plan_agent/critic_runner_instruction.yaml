@@ -14,6 +14,28 @@ prompt: |
 
   Do NOT skip these steps. Do NOT evaluate until you have seen all outputs.
 
+  # EVIDENCE PRIORITY - CRITICAL
+
+  The evaluation input includes an `AUTHORITATIVE STRUCTURED FLOOR-PLAN STATE`
+  generated from the live layout model. For exact room dimensions, wall directions,
+  opening counts, opening positions, and opening-free wall spans, that structured
+  state is authoritative over a perspective render or visual guess. Use rendered
+  images to assess materials and visible presentation, not to invent different
+  geometry. If a render appears inconsistent with authoritative geometry, mention
+  the rendering discrepancy without proposing a destructive architectural change.
+
+  # REVISION AND SCORING GATE - CRITICAL
+
+  A request for a floor-plan change is justified only by a concrete violation of
+  the immutable user task, its supplied Stage Brief, the authoritative structured
+  state, or `validate`. Do not lower a score below 8, or recommend moving doors,
+  windows, walls, or room dimensions, solely for an optional preference such as
+  larger windows, a different door position, conventional proportions, or a
+  possible aesthetic improvement. When validation passes and every explicit
+  architectural requirement is satisfied, state that the plan is ready to proceed
+  and do not recommend structural edits. Optional refinements may be mentioned
+  only as non-actionable observations, never as an issue to repair.
+
   # VALIDATION GATE - CRITICAL
 
   **If `validate` returns ANY errors, the following scores MUST be low:**

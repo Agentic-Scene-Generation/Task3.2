@@ -79,6 +79,25 @@ DEFAULT_ALIASES = {
     "desk": ["desk", "desks"],
     "chair": ["chair", "chairs"],
     "sofa": ["sofa", "sofas", "couch", "couches"],
+    "side_table": ["side table", "side tables", "end table", "end tables"],
+    "coffee_table": ["coffee table", "coffee tables"],
+    "dining_table": ["dining table", "dining tables"],
+    "conference_table": [
+        "conference table",
+        "conference tables",
+        "meeting table",
+        "meeting tables",
+        "boardroom table",
+        "boardroom tables",
+    ],
+    "dressing_table": [
+        "dressing table",
+        "dressing tables",
+        "vanity table",
+        "vanity tables",
+        "makeup table",
+        "makeup tables",
+    ],
     "table": ["table", "tables"],
     "cabinet": ["cabinet", "cabinets"],
     "bookshelf": ["bookshelf", "bookshelves", "bookcase", "bookcases"],
@@ -116,7 +135,74 @@ FURNITURE_CATEGORY_PARENTS: dict[str, frozenset[str]] = {
     "dining_chair": frozenset({"chair"}),
     "student_chair": frozenset({"chair"}),
     "armchair": frozenset({"chair"}),
+    "side_table": frozenset({"table"}),
+    "coffee_table": frozenset({"table"}),
+    "dining_table": frozenset({"table"}),
+    "conference_table": frozenset({"table"}),
+    "dressing_table": frozenset({"table"}),
 }
+
+
+def _prompt_mentions_standalone_generic_furniture(prompt: str, *, generic: str) -> bool:
+    """Whether a prompt names a generic item beyond its typed subcategories.
+
+    Matching ``table`` inside ``dressing table`` or ``dining table`` must not
+    create a second generic inventory requirement.  Remove every recognized
+    subtype of the requested generic role before looking for an independent
+    occurrence; definite references such as "the table" are treated as a
+    reference to an already introduced subtype.
+    """
+    remainder = str(prompt or "").lower().replace("_", " ")
+    for specific, parents in FURNITURE_CATEGORY_PARENTS.items():
+        if generic not in parents:
+            continue
+        aliases = [specific.replace("_", " "), *DEFAULT_ALIASES.get(specific, [])]
+        for alias in aliases:
+            alias_pattern = re.escape(alias.lower()).replace(r"\ ", r"\s+")
+            remainder = re.sub(
+                rf"(?<![a-z0-9]){alias_pattern}(?:s|es)?(?![a-z0-9])",
+                " ",
+                remainder,
+            )
+
+    for alias in [generic.replace("_", " "), *DEFAULT_ALIASES.get(generic, [])]:
+        alias_pattern = re.escape(alias.lower()).replace(r"\ ", r"\s+")
+        for match in re.finditer(
+            rf"(?<![a-z0-9]){alias_pattern}(?:s|es)?(?![a-z0-9])",
+            remainder,
+        ):
+            before = remainder[: match.start()].rstrip()
+            if re.search(
+                r"\b(?:the|this|that|these|those|its|their)(?:\s+[a-z]+){0,2}$",
+                before,
+            ):
+                continue
+            return True
+    return False
+
+
+def _remove_redundant_generic_furniture_requirements(
+    requirements: set[str] | dict[str, int], prompt: str
+) -> None:
+    """Drop a broad role only when typed members fully explain its mention."""
+    generic_roles = {
+        parent
+        for specific, parents in FURNITURE_CATEGORY_PARENTS.items()
+        if specific in requirements
+        for parent in parents
+    } & {"table"}
+    for generic in generic_roles:
+        if (
+            generic in requirements
+            and not _prompt_mentions_standalone_generic_furniture(
+                prompt, generic=generic
+            )
+        ):
+            if isinstance(requirements, dict):
+                requirements.pop(generic, None)
+            else:
+                requirements.discard(generic)
+
 
 NUMBER_WORDS = {
     "a": 1,
@@ -531,6 +617,7 @@ class FurnitureSafetyController:
                 terms.add(canonical)
         if "twin_bed" in terms:
             terms.discard("bed")
+        _remove_redundant_generic_furniture_requirements(terms, text)
         return terms
 
     def _infer_required_counts(self, prompt: str) -> dict[str, int]:
@@ -564,6 +651,7 @@ class FurnitureSafetyController:
                 counts[canonical] = best_count
         if "twin_bed" in counts:
             counts.pop("bed", None)
+        _remove_redundant_generic_furniture_requirements(counts, text)
         self._infer_bilateral_bedside_counts(text, counts)
         self._propagate_each_relation_counts(text, counts)
         self._combine_distinct_role_counts(text, counts)

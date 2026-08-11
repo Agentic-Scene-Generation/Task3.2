@@ -55,6 +55,14 @@ prompt: |
   **Rule:** If it's part of the building structure, evaluate it.
   If it goes INSIDE a room and can be moved, ignore it.
 
+  **Functional-zone boundary:** A living, dining, work, or storage zone described
+  through later furniture is not a missing architectural element. Evaluate whether
+  the room dimensions, circulation, and opening-free wall length can support it;
+  do not require a partition, labelled zone, or other structural marker unless
+  the immutable user task explicitly requests structural separation. A later
+  wall-anchor reservation is satisfied by a sufficiently long wall segment with
+  no intersecting door or window.
+
   When evaluating prompt following, IGNORE any prompt mentions of furniture or objects.
   Only evaluate ARCHITECTURAL elements as defined above.
 

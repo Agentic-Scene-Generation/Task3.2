@@ -40,6 +40,7 @@ from scenesmith.scene_expert.hooks import (
 from scenesmith.scene_expert.global_planner import (
     GlobalPlanner,
     _SYSTEM_PROMPT,
+    _reconcile_floor_plan_zone_guidance,
     _reconcile_stage_brief,
 )
 from scenesmith.scene_expert.repair_taxonomy import (
@@ -182,6 +183,53 @@ class SceneExpertMemoryTest(unittest.TestCase):
         self.assertIn("structural ceiling spans", text)
         self.assertIn("absent lighting as a ceiling-stage failure", text)
 
+    def test_floor_plan_brief_keeps_furniture_zones_nonstructural(self) -> None:
+        brief = StageBrief(
+            stage="floor_plan",
+            stage_objective="Create a long rectangular room.",
+            constraints_for_designer=[
+                "Physically separate the living and dining zones."
+            ],
+            checks_for_critic=[
+                "Verify that the living and dining zones are spatially distinct."
+            ],
+        )
+
+        reconciled = _reconcile_floor_plan_zone_guidance(
+            brief,
+            original_task=(
+                "A long living room with separate living and dining areas and "
+                "furniture in each area."
+            ),
+            functional_zones=["living_zone", "dining_zone"],
+        )
+        text = reconciled.to_injection_text().lower()
+
+        self.assertNotIn("physically separate", text)
+        self.assertNotIn("spatially distinct", text)
+        self.assertIn("later furniture zones", text)
+        self.assertIn("opening-free wall length", text)
+
+    def test_floor_plan_brief_preserves_explicit_structural_zoning(self) -> None:
+        brief = StageBrief(
+            stage="floor_plan",
+            stage_objective="Create a divided room.",
+            constraints_for_designer=[
+                "Physically separate the living and dining zones."
+            ],
+        )
+
+        reconciled = _reconcile_floor_plan_zone_guidance(
+            brief,
+            original_task=(
+                "Divide the room with an interior wall to create separate living "
+                "and dining rooms."
+            ),
+            functional_zones=["living_zone", "dining_zone"],
+        )
+
+        self.assertEqual(brief, reconciled)
+
     def test_empty_stage_inventory_uses_noop_brief(self) -> None:
         context = HarnessContext(
             stage="wall_mounted",
@@ -246,6 +294,22 @@ class SceneExpertMemoryTest(unittest.TestCase):
             spec.required_large_objects,
         )
         self.assertIn("sleeping_zone", spec.functional_zones)
+
+    def test_task_compiler_fallback_owns_new_scene_categories_by_stage(self) -> None:
+        spec = _fallback_spec_from_prompt(
+            "A bedroom with one dressing table, one stool, one wall-mounted mirror, "
+            "and four floor plants. An office area has four desks, four computer "
+            "monitors, one water dispenser, and one wastebasket."
+        )
+
+        self.assertIn("dressing_table", spec.required_large_objects)
+        self.assertIn("stool", spec.required_large_objects)
+        self.assertEqual(4, spec.required_large_objects.count("plant"))
+        self.assertIn("water_dispenser", spec.required_large_objects)
+        self.assertNotIn("table", spec.required_large_objects)
+        self.assertEqual(["mirror"], spec.required_wall_objects)
+        self.assertEqual(4, spec.required_small_objects.count("monitor"))
+        self.assertIn("wastebasket", spec.required_small_objects)
 
     def test_repair_taxonomy_classifies_core_hard_failures(self) -> None:
         failures = classify_hard_reasons(

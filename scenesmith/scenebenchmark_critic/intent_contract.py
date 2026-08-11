@@ -88,7 +88,16 @@ _CATEGORY_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ),
     ("coffee_table", ("coffee table",)),
     ("side_table", ("side table", "end table", "accent table")),
+    (
+        "dressing_table",
+        ("dressing table", "vanity table", "makeup table", "vanity"),
+    ),
     ("filing_cabinet", ("filing cabinet", "file cabinet")),
+    ("storage_cabinet", ("storage cabinet", "storage cupboard")),
+    (
+        "water_dispenser",
+        ("water dispenser", "water cooler", "drinking water dispenser"),
+    ),
     ("tv_stand", ("tv stand", "television stand", "media console")),
     ("television", ("television", "tv")),
     (
@@ -98,6 +107,7 @@ _CATEGORY_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("brochure_holder", ("brochure holder", "leaflet holder", "brochure stand")),
     ("printer", ("printer",)),
     ("nightstand", ("nightstand", "bedside table")),
+    ("stool", ("stool", "vanity stool", "dressing stool")),
     ("bookshelf", ("bookshelf", "bookcase", "shelving unit")),
     ("sideboard", ("sideboard", "buffet")),
     ("wardrobe", ("wardrobe", "closet", "armoire")),
@@ -121,13 +131,15 @@ _CATEGORY_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("laptop", ("laptop",)),
     ("remote", ("remote", "remote control")),
     ("rug", ("rug", "carpet", "area rug")),
-    ("floor", ("floor",)),
+    ("mirror", ("mirror",)),
+    ("table_setting", ("table setting", "place setting")),
     ("plant", ("plant",)),
     ("bed", ("bed",)),
     ("sofa", ("sofa", "couch", "settee")),
     ("desk", ("desk",)),
     ("chair", ("chair", "seat")),
     ("table", ("table",)),
+    ("floor", ("floor",)),
 )
 
 _NUMBER_WORDS = {
@@ -297,6 +309,7 @@ def build_intent_contract(
     constraints.extend(
         _room_ontology_constraints(normalized_room, lowered, task_spec=task_spec)
     )
+    constraints = _normalize_group_required_counts(constraints)
     constraints = _remove_redundant_edge_facing_constraints(constraints)
     constraints = _deduplicate_constraints(constraints)
     constraints = _apply_task_spec_contract_metadata(constraints, task_spec)
@@ -311,6 +324,59 @@ def build_intent_contract(
         "warnings": [],
         "constraints": constraints,
     }
+
+
+def _normalize_group_required_counts(
+    constraints: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Drop generic sub-counts that only describe a typed group layout."""
+    group_rows = [
+        row
+        for row in constraints
+        if str(row.get("relation") or "")
+        in {"edge_distribution", "one_per_support", "corner_distribution"}
+    ]
+    normalized: list[dict[str, Any]] = []
+    for row in constraints:
+        relation = str(row.get("relation") or "")
+        if relation == "on_top_of" and any(
+            str(group.get("relation") or "") == "one_per_support"
+            and _selectors_can_overlap(
+                row.get("subjects") or {}, group.get("subjects") or {}
+            )
+            and _selectors_can_overlap(
+                row.get("targets") or {}, group.get("targets") or {}
+            )
+            for group in group_rows
+        ):
+            continue
+        if relation == "faces" and any(
+            str(group.get("relation") or "") == "paired_with"
+            and _selectors_can_overlap(
+                row.get("subjects") or {}, group.get("subjects") or {}
+            )
+            and _selectors_can_overlap(
+                row.get("targets") or {}, group.get("targets") or {}
+            )
+            for group in constraints
+        ):
+            continue
+        if relation != "required_count":
+            normalized.append(row)
+            continue
+        selector = row.get("subjects") or {}
+        category = str(selector.get("category") or "")
+        evidence = str(row.get("evidence_span") or "").lower()
+        redundant = any(
+            category != str((group.get("subjects") or {}).get("category") or "")
+            and _selectors_can_overlap(selector, group.get("subjects") or {})
+            and evidence
+            and evidence in str(group.get("evidence_span") or "").lower()
+            for group in group_rows
+        )
+        if not redundant:
+            normalized.append(row)
+    return normalized
 
 
 def _remove_redundant_edge_facing_constraints(
@@ -546,6 +612,30 @@ def bound_ids(
     ids = selected_ids(selector, object_rows)
     if not isinstance(selector, dict):
         return ids
+    role = str(selector.get("role") or "").strip()
+    if not ids and role:
+        # A compiler can use a relation-local label such as "anchor" as a
+        # selector role.  Generated assets normally do not expose that label
+        # as metadata.  Fall back only when the category-only endpoint is
+        # itself cardinality-safe, so a missing descriptive role cannot bind
+        # an arbitrary member of a repeated object category.
+        fallback_selector = dict(selector)
+        fallback_selector.pop("role", None)
+        fallback_ids = selected_ids(fallback_selector, object_rows)
+        try:
+            fallback_count = selector_match_count(fallback_selector, object_rows)
+            requested_count = int(selector.get("count"))
+        except (TypeError, ValueError):
+            fallback_count = 0
+            requested_count = 0
+        quantifier = str(selector.get("quantifier") or "all").lower()
+        if requested_count > 0 and quantifier not in {"at_least", "minimum"}:
+            fallback_is_safe = fallback_count == requested_count
+        else:
+            fallback_is_safe = len(fallback_ids) == 1
+        if fallback_is_safe:
+            selector = fallback_selector
+            ids = fallback_ids
     try:
         count = int(selector.get("count"))
     except (TypeError, ValueError):
@@ -608,6 +698,22 @@ def selector_for_phrase(
     if inferred_count is not None and inferred_count > 0:
         selector["count"] = int(inferred_count)
     return selector
+
+
+def _wall_anchor_subject_selector(value: str) -> dict[str, Any] | None:
+    """Resolve the item immediately before a wall-anchor phrase.
+
+    A sentence can introduce inventory before describing its final item, as in
+    ``four chairs and a sideboard against the wall``. The generic selector
+    intentionally recognises the first known category in a phrase, so use the
+    last coordination segment for this syntactically local wall relation.
+    """
+    segments = re.split(r"\s*,\s*|\s+and\s+", str(value or ""))
+    for segment in reversed(segments):
+        selector = selector_for_phrase(segment)
+        if selector is not None:
+            return selector
+    return selector_for_phrase(value)
 
 
 def augment_contract_checks(case_pack: dict[str, Any]) -> bool:
@@ -1174,10 +1280,19 @@ def _explicit_prompt_constraints(prompt: str, lowered: str) -> list[dict[str, An
             r"(?:against|on)\s+(?:the\s+)?(?P<wall>(?:[a-z]+\s+){0,2})?wall\b",
             normalized,
         ):
-            subject = selector_for_phrase(match.group("subject"))
+            subject = _wall_anchor_subject_selector(match.group("subject"))
             if subject is None:
                 continue
-            relation = "centered_on_wall" if match.group("centered") else "against_wall"
+            mounted_subject = subject.get(
+                "category"
+            ) in WALL_MOUNTED_CATEGORIES and bool(
+                re.search(r"\b(?:mount|mounted|hang|hung|hanging)\b", normalized)
+            )
+            relation = (
+                "on_wall"
+                if mounted_subject
+                else ("centered_on_wall" if match.group("centered") else "against_wall")
+            )
             wall_role = (match.group("wall") or "").strip()
             if wall_role in {"a", "an", "one", "the"}:
                 wall_role = ""
@@ -1190,6 +1305,52 @@ def _explicit_prompt_constraints(prompt: str, lowered: str) -> list[dict[str, An
                     evidence_span=clause,
                 )
             )
+
+        # ``centered above`` is an object-to-object alignment. A mirror above
+        # a dressing table is usually off-center on the wall, so it must not
+        # become ``centered_on_wall``.
+        for match in re.finditer(
+            r"(?P<subject>[a-z0-9_\- ,']{1,100}?)\s*,?\s*"
+            r"(?:is |sits |stands |placed |positioned )?"
+            r"(?:centered|centred)(?:\s+(?:directly|horizontally))?\s+above\s+"
+            r"(?:the\s+|a\s+|an\s+)?"
+            r"(?P<target>[a-z0-9_\- ,']{1,70}?)(?:[,.;]|$)",
+            normalized,
+        ):
+            subject = selector_for_phrase(match.group("subject"))
+            target = selector_for_phrase(match.group("target"))
+            if subject is not None and target is not None:
+                constraints.append(
+                    _constraint(
+                        "centered_above",
+                        subject,
+                        target,
+                        source="explicit_prompt",
+                        evidence_span=clause,
+                    )
+                )
+
+        # Commas split "X on the wall, centered above Y" into two clauses.
+        # Preserve the subject of the immediately preceding clause for this
+        # compact anaphoric form.
+        for match in re.finditer(
+            r"^(?:it\s+)?(?:is |sits |stands |placed |positioned )?"
+            r"(?:centered|centred)(?:\s+(?:directly|horizontally))?\s+above\s+"
+            r"(?:the\s+|a\s+|an\s+)?"
+            r"(?P<target>[a-z0-9_\- ,']{1,70}?)(?:[,.;]|$)",
+            normalized,
+        ):
+            target = selector_for_phrase(match.group("target"))
+            if previous_selector is not None and target is not None:
+                constraints.append(
+                    _constraint(
+                        "centered_above",
+                        dict(previous_selector),
+                        target,
+                        source="explicit_prompt",
+                        evidence_span=clause,
+                    )
+                )
 
         # A center/middle phrase with a concrete object target is local to that
         # support, not a room-center or wall-center instruction.  Keep this
@@ -1299,7 +1460,12 @@ def _explicit_prompt_constraints(prompt: str, lowered: str) -> list[dict[str, An
                 targets["secondary_count"] = second["count"]
             constraints.append(
                 _constraint(
-                    "centered_between" if match.group("centered") else "between",
+                    (
+                        "centered_between"
+                        if match.group("centered")
+                        or re.match(r"\s*cent(?:er|re)\b", normalized)
+                        else "between"
+                    ),
                     subject,
                     targets,
                     source="explicit_prompt",
@@ -1406,7 +1572,12 @@ def _explicit_prompt_constraints(prompt: str, lowered: str) -> list[dict[str, An
                 targets["secondary_role"] = anchors["role"]
             constraints.append(
                 _constraint(
-                    "centered_between" if match.group("centered") else "between",
+                    (
+                        "centered_between"
+                        if match.group("centered")
+                        or re.match(r"\s*cent(?:er|re)\b", normalized)
+                        else "between"
+                    ),
                     subject,
                     targets,
                     source="explicit_prompt",
@@ -1434,7 +1605,12 @@ def _explicit_prompt_constraints(prompt: str, lowered: str) -> list[dict[str, An
                 targets["secondary_role"] = anchors["role"]
             constraints.append(
                 _constraint(
-                    "centered_between" if match.group("centered") else "between",
+                    (
+                        "centered_between"
+                        if match.group("centered")
+                        or re.match(r"\s*cent(?:er|re)\b", normalized)
+                        else "between"
+                    ),
                     subject,
                     targets,
                     source="explicit_prompt",
@@ -1511,13 +1687,17 @@ def _explicit_prompt_constraints(prompt: str, lowered: str) -> list[dict[str, An
         for match in re.finditer(
             r"(?P<subject>[a-z0-9_\- ,']{1,70}?)\s+"
             r"(?:on|sits\s+on|resting\s+on|placed\s+on)\s+(?:the\s+|a\s+|an\s+)?"
-            r"(?P<target>[a-z0-9_\- ,']{1,70}?)(?:[,.;]|$)",
+            r"(?P<target>[a-z0-9_\- ,']{1,70}?)(?=\s+near\b|[,.;]|$)",
             normalized,
         ):
             # "a nightstand with a lamp on each side of the bed" describes
             # a lateral placement, not a support relation.  Do not turn it
             # into the nonsensical `nightstand on_top_of bed` contract.
             if re.search(r"\bon\s+(?:each|either|both)\s+side", match.group(0)):
+                continue
+            if re.search(r"\bwall\b", match.group("target")) or re.search(
+                r"\b(?:mount|mounted|hang|hung|hanging)\b", match.group("subject")
+            ):
                 continue
             subject_phrase = re.split(r"\band\b", match.group("subject"))[-1]
             subject = selector_for_phrase(subject_phrase)
@@ -1544,6 +1724,26 @@ def _explicit_prompt_constraints(prompt: str, lowered: str) -> list[dict[str, An
         ):
             subject = selector_for_phrase(match.group("subject"), count=2)
             target = selector_for_phrase(match.group("target"))
+            if subject is not None and target is not None:
+                constraints.append(
+                    _constraint(
+                        "flanking",
+                        subject,
+                        target,
+                        source="explicit_prompt",
+                        evidence_span=clause,
+                    )
+                )
+
+        appositive_flank = re.search(
+            r"(?P<subject>(?:two|2)\s+[a-z0-9_\- ']{1,50}?),\s*"
+            r"(?:one\s+)?(?:on|at)\s+each\s+side\s+of\s+"
+            r"(?:the\s+|a\s+|an\s+)?(?P<target>[a-z0-9_\- ']{1,50}?)(?:[,.;]|$)",
+            normalized,
+        )
+        if appositive_flank:
+            subject = selector_for_phrase(appositive_flank.group("subject"), count=2)
+            target = selector_for_phrase(appositive_flank.group("target"))
             if subject is not None and target is not None:
                 constraints.append(
                     _constraint(
@@ -1600,6 +1800,25 @@ def _explicit_prompt_constraints(prompt: str, lowered: str) -> list[dict[str, An
             )
         )
 
+    for match in re.finditer(
+        r"(?P<subject>(?:two|2)\s+[a-z0-9_\- ']{1,50}?),\s*"
+        r"(?:one\s+)?(?:on|at)\s+each\s+side\s+of\s+"
+        r"(?:the\s+|a\s+|an\s+)?(?P<target>[a-z0-9_\- ']{1,50}?)(?:[,.;]|$)",
+        lowered,
+    ):
+        subject = selector_for_phrase(match.group("subject"), count=2)
+        target = selector_for_phrase(match.group("target"))
+        if subject is not None and target is not None:
+            constraints.append(
+                _constraint(
+                    "flanking",
+                    subject,
+                    target,
+                    source="explicit_prompt",
+                    evidence_span=match.group(0),
+                )
+            )
+
     required_counts: dict[str, int] = {}
     for row in _explicit_required_count_constraints(prompt):
         category = str((row.get("subjects") or {}).get("category") or "")
@@ -1639,6 +1858,39 @@ def _explicit_prompt_constraints(prompt: str, lowered: str) -> list[dict[str, An
                     evidence_span=route.group("evidence"),
                 )
             )
+
+    # These phrases reserve the usable zone immediately in front of a named
+    # item.  They are deliberately limited to explicit local-access wording:
+    # a generic statement that a room feels open must not invent a hard check.
+    local_access_patterns = (
+        re.compile(
+            r"\b(?:keep|leave|ensure)\s+(?:its\s+|the\s+)?"
+            r"(?:front|front\s+side|access\s+area)\s+"
+            r"(?:clear|accessible)\b",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\b(?:without\s+blocking|while\s+(?:keeping|leaving))\s+"
+            r"(?:the\s+)?(?:clear\s+)?"
+            r"(?:circulation|traffic(?:\s+flow)?|walkway|access)\b",
+            re.IGNORECASE,
+        ),
+    )
+    for clause in clauses:
+        if not any(pattern.search(clause) for pattern in local_access_patterns):
+            continue
+        subject = selector_for_phrase(clause)
+        if subject is None:
+            continue
+        constraints.append(
+            _constraint(
+                "clear_access",
+                subject,
+                {"category": "room", "count": 1, "quantifier": "all"},
+                source="explicit_prompt",
+                evidence_span=clause,
+            )
+        )
     for match in re.finditer(
         r"(?P<items>[^,.;]{1,100}?)\s+at\s+each\s+"
         r"(?P<target>[a-z][a-z0-9' -]{0,40}?)(?=[,.;]|$)",
@@ -1662,6 +1914,9 @@ def _explicit_prompt_constraints(prompt: str, lowered: str) -> list[dict[str, An
                     evidence_span=match.group(0),
                 )
             )
+
+    constraints.extend(_explicit_per_target_constraints(lowered, required_counts))
+    constraints.extend(_explicit_corner_distribution_constraints(lowered))
 
     # Group constraints often span a full sentence and are easier to recognise
     # independently from individual relation clauses.
@@ -1706,6 +1961,127 @@ def _explicit_prompt_constraints(prompt: str, lowered: str) -> list[dict[str, An
     return constraints
 
 
+def _explicit_per_target_constraints(
+    prompt: str, required_counts: dict[str, int]
+) -> list[dict[str, Any]]:
+    """Compile one-to-one pair/support wording without room-specific rules."""
+    constraints: list[dict[str, Any]] = []
+    pair_pattern = re.compile(
+        r"(?:pair\s+)?each\s+(?P<target>[a-z][a-z0-9' -]{0,40}?)\s+"
+        r"(?:with|to)\s+(?:exactly\s+)?(?:one|a|an)\s+"
+        r"(?P<subject>[a-z][a-z0-9' -]{0,40}?)(?=\s+(?:positioned|placed|"
+        r"facing|at|beside|near|on|for)\b|[,.;]|$)",
+        re.IGNORECASE,
+    )
+    for match in pair_pattern.finditer(prompt):
+        target = selector_for_phrase(match.group("target"))
+        subject = selector_for_phrase(match.group("subject"))
+        target_category = str((target or {}).get("category") or "")
+        count = required_counts.get(target_category, 0)
+        if target is None or subject is None or count <= 1:
+            continue
+        subject = dict(subject, count=count, quantifier="all")
+        target = dict(target, count=count, quantifier="all")
+        evidence = match.group(0)
+        constraints.extend(
+            [
+                _constraint(
+                    "required_count",
+                    dict(subject, quantifier="at_least"),
+                    None,
+                    source="explicit_prompt",
+                    evidence_span=evidence,
+                ),
+                _constraint(
+                    "paired_with",
+                    subject,
+                    target,
+                    source="explicit_prompt",
+                    evidence_span=evidence,
+                ),
+            ]
+        )
+
+    support_pattern = re.compile(
+        r"(?:exactly\s+)?(?:one|a|an)\s+"
+        r"(?P<subject>[a-z][a-z0-9' -]{0,50}?)\s+"
+        r"(?:placed\s+|supported\s+)?(?:on\s+top\s+of|on|at)\s+each\s+"
+        r"(?P<target>[a-z][a-z0-9' -]{0,40}?)(?=[,.;]|$)",
+        re.IGNORECASE,
+    )
+    for match in support_pattern.finditer(prompt):
+        target = selector_for_phrase(match.group("target"))
+        subject = selector_for_phrase(match.group("subject"))
+        target_category = str((target or {}).get("category") or "")
+        count = required_counts.get(target_category, 0)
+        if target is None or subject is None or count <= 1:
+            continue
+        subject = dict(subject, count=count, quantifier="all")
+        target = dict(target, count=count, quantifier="all")
+        evidence = match.group(0)
+        constraints.extend(
+            [
+                _constraint(
+                    "required_count",
+                    dict(subject, quantifier="at_least"),
+                    None,
+                    source="explicit_prompt",
+                    evidence_span=evidence,
+                ),
+                _constraint(
+                    "one_per_support",
+                    subject,
+                    target,
+                    source="explicit_prompt",
+                    evidence_span=evidence,
+                ),
+            ]
+        )
+    return constraints
+
+
+def _explicit_corner_distribution_constraints(prompt: str) -> list[dict[str, Any]]:
+    """Compile explicit multi-object, distinct-corner assignments."""
+    number_pattern = r"\d+|" + "|".join(
+        re.escape(value) for value in _NUMBER_WORDS if value not in {"a", "an"}
+    )
+    pattern = re.compile(
+        rf"(?P<count>{number_pattern})\s+"
+        r"(?P<subject>[a-z][a-z0-9' -]{0,60}?)\s+in\s+"
+        rf"(?:(?:the\s+)?room['’]?s?\s+)?(?P<corners>{number_pattern})\s+"
+        r"(?:distinct\s+)?(?:room\s+)?corners\b",
+        re.IGNORECASE,
+    )
+    constraints: list[dict[str, Any]] = []
+    for match in pattern.finditer(prompt):
+        count = _leading_count(match.group("count")) or 0
+        corner_count = _leading_count(match.group("corners")) or 0
+        subject = selector_for_phrase(match.group("subject"), count=count)
+        if subject is None or count < 2 or corner_count != count:
+            continue
+        subject = dict(subject, count=count, quantifier="all")
+        evidence = match.group(0)
+        constraints.extend(
+            [
+                _constraint(
+                    "required_count",
+                    dict(subject, quantifier="at_least"),
+                    None,
+                    source="explicit_prompt",
+                    evidence_span=evidence,
+                ),
+                _constraint(
+                    "corner_distribution",
+                    subject,
+                    {"category": "room", "count": 1, "quantifier": "all"},
+                    source="explicit_prompt",
+                    evidence_span=evidence,
+                ),
+            ]
+        )
+    return constraints
+
+
 def _long_side_layout_table_selector(prompt: str) -> dict[str, Any]:
     """Resolve the named table type without broadening to incidental tables.
 
@@ -1730,7 +2106,16 @@ def _long_side_layout_table_selector(prompt: str) -> dict[str, Any]:
             if match is not None:
                 matches.append((match.start(), category))
     if matches:
-        _, category = min(matches)
+        edge_reference = min(
+            (
+                position
+                for token in ("long side", "long edge", "short side", "short edge")
+                if (position := prompt.find(token)) >= 0
+            ),
+            default=len(prompt),
+        )
+        preceding = [match for match in matches if match[0] < edge_reference]
+        _, category = max(preceding or matches)
         return {"category": category, "quantifier": "all"}
     return {"category": "table", "quantifier": "all"}
 
@@ -1792,7 +2177,8 @@ def _explicit_edge_distribution_constraint(
     long_each = re.search(
         r"\b(?P<count>\d+|"
         + "|".join(_NUMBER_WORDS)
-        + r")\s+on\s+(?:each|both)\b[^.]{0,40}\b"
+        + r")\s+(?:(?:chairs?|seats?)\s+)?(?:evenly\s+spaced\s+)?"
+        r"(?:on|along)\s+(?:each|both)\b[^.]{0,40}\b"
         r"(?:two\s+)?long\s+(?:side|edge)s?\b",
         prompt,
     )
@@ -1873,6 +2259,10 @@ def _explicit_edge_distribution_constraint(
             r"[^.]{0,60}\bface(?:s|ing)?\s+(?:the\s+)?(?:table|target)\b",
             prompt,
         )
+        or re.search(
+            r"\ball\s+facing\s+(?:the\s+)?(?:table|target)\b",
+            prompt,
+        )
         or re.search(r"\b(?:all|every)\s+the\s+way\s+facing\b", prompt)
         or re.search(r"\bface\s+inward\b", prompt)
     )
@@ -1885,7 +2275,7 @@ def _explicit_edge_distribution_constraint(
         },
         target,
         source="explicit_prompt",
-        evidence_span=_first_sentence_with(prompt, "side"),
+        evidence_span=_first_sentence_with(prompt, "long side"),
         edge_frame="target_local_rectangle",
         groups=groups,
         orientation="toward_target" if all_subjects_face_target else "unconstrained",
@@ -1925,6 +2315,8 @@ def _explicit_required_count_constraints(prompt: str) -> list[dict[str, Any]]:
     generic_categories = {"desk", "chair", "table"}
 
     for category, aliases in _CATEGORY_PATTERNS:
+        if category in {"floor", "room", "wall", "ceiling"}:
+            continue
         for alias in aliases:
             alias_pattern = re.escape(alias).replace(r"\ ", r"\s+")
             pattern = re.compile(
@@ -1951,7 +2343,20 @@ def _explicit_required_count_constraints(prompt: str) -> list[dict[str, Any]]:
                     candidates[key] = (category, count, match.group(0))
 
     constraints: list[dict[str, Any]] = []
-    for category, count, evidence in candidates.values():
+    filtered_candidates = []
+    for span, candidate in candidates.items():
+        category, _count, _evidence = candidate
+        if category in generic_categories and any(
+            other_span != span
+            and other_span[0] <= span[0]
+            and other_span[1] >= span[1]
+            and other_candidate[0] not in generic_categories
+            for other_span, other_candidate in candidates.items()
+        ):
+            continue
+        filtered_candidates.append(candidate)
+
+    for category, count, evidence in filtered_candidates:
         constraints.append(
             _constraint(
                 "required_count",
@@ -2036,6 +2441,31 @@ def _explicit_required_count_constraints(prompt: str) -> list[dict[str, Any]]:
                 )
             )
             explicit_counts[category] = count
+
+    setting_pattern = re.compile(
+        rf"(?P<count>{number_pattern})\s+(?:complete\s+)?"
+        r"(?:table|place)\s+settings?\b[^.]{0,120}?"
+        r"(?:including|with|contains?)\s+(?P<items>[^.;]+)",
+        re.IGNORECASE,
+    )
+    for match in setting_pattern.finditer(prompt):
+        count = _leading_count(match.group("count")) or 0
+        if count <= 0:
+            continue
+        for item_phrase in re.split(r"\s*,\s*|\s+and\s+", match.group("items")):
+            item = selector_for_phrase(item_phrase, count=count)
+            category = str((item or {}).get("category") or "")
+            if item is None or category not in {"plate", "cutlery", "glass"}:
+                continue
+            constraints.append(
+                _constraint(
+                    "required_count",
+                    dict(item, count=count, quantifier="at_least"),
+                    None,
+                    source="explicit_prompt",
+                    evidence_span=match.group(0),
+                )
+            )
     return constraints
 
 
@@ -2725,7 +3155,7 @@ def _clauses(prompt: str) -> list[str]:
     return [
         item.strip()
         for sentence in re.split(r"(?<=[.!?])\s+", prompt)
-        for item in re.split(r"\s*,\s*(?:and\s+)?", sentence)
+        for item in re.split(r"\s*,\s*(?:and\s+)?|\s*;\s*", sentence)
         if item.strip()
     ]
 

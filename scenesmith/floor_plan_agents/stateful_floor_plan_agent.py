@@ -51,6 +51,9 @@ from scenesmith.agent_utils.scoring import (
 )
 from scenesmith.agent_utils.workflow_tools import WorkflowTools
 from scenesmith.floor_plan_agents.base_floor_plan_agent import BaseFloorPlanAgent
+from scenesmith.floor_plan_agents.critic_context import (
+    format_floor_plan_critic_context,
+)
 from scenesmith.floor_plan_agents.tools.floor_plan_tools import FloorPlanTools
 from scenesmith.floor_plan_agents.tools.geometry_cache import (
     GeometryCache,
@@ -348,6 +351,9 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
         # Get critique instruction.
         critique_instruction = self.prompt_registry.get_prompt(
             prompt_enum=FloorPlanAgentPrompts.CRITIC_RUNNER_INSTRUCTION,
+        )
+        critique_instruction = (
+            f"{critique_instruction}\n\n{format_floor_plan_critic_context(self.layout)}"
         )
 
         # Run critic.

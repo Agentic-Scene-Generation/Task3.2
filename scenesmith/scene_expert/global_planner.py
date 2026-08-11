@@ -74,6 +74,16 @@ Guidelines:
 - The Authoritative Stage Intent section contains the exact hard contract rows
   for this stage. Cover every constraint_id and never rewrite, weaken, or
   replace one with a convention. HSSD priors are advisory only.
+- At floor_plan, Architectural Surface Reservations are hard prerequisites for
+  later-stage wall anchors. Reserve a continuous wall segment for every listed
+  object; doors and windows must not intersect a reserved segment. Do not move
+  a later object away from its explicit required wall merely to keep an opening.
+- Functional zones named only through later furniture (for example, living,
+  dining, work, or storage areas) are not architectural partitions. At
+  floor_plan, make those later arrangements feasible through dimensions,
+  circulation, and opening-free wall length. Do not invent rooms, partitions,
+  or other structural markers unless the Immutable User Task explicitly asks
+  for structural separation.
 - Prioritize failure patterns from memory — they encode hard-won lessons.
 - When an Immutable User Task is supplied, its explicit object, topology, and
   facing relations are authoritative. Memory and current-scene observations may
@@ -189,6 +199,23 @@ _LIGHTING_TERMS = frozenset(
     }
 )
 
+_STRUCTURAL_ZONE_PATTERNS = (
+    re.compile(r"\b(?:separate|distinct)\s+(?:rooms?|enclosed\s+areas?)\b", re.I),
+    re.compile(r"\b(?:interior\s+)?(?:wall|partition)s?\b", re.I),
+    re.compile(r"\b(?:divide|split)\s+(?:the\s+)?room\b", re.I),
+)
+
+_FURNITURE_ZONE_WORDING = re.compile(
+    r"\b(?:physically|architecturally)\s+(?:separate|define)|"
+    r"\b(?:spatially\s+)?distinct\s+(?:living|dining|sleeping|working|storage|"
+    r"seating|media|functional)\s+zones?\b|"
+    r"\b(?:living|dining|sleeping|working|storage|seating|media|functional)\s+"
+    r"zones?\s+(?:are|should\s+be|remain)\s+(?:spatially\s+)?distinct\b|"
+    r"\b(?:define|create)\s+(?:the\s+)?(?:living|dining|sleeping|working|"
+    r"storage|seating|media|functional)\s+zones?\b",
+    re.I,
+)
+
 
 def _text_mentions_lighting(text: str) -> bool:
     """Return whether a brief statement introduces a lighting fixture."""
@@ -207,6 +234,69 @@ def _is_structural_only_ceiling_task(original_task: str) -> bool:
     """
     terms = set(re.findall(r"[a-z0-9]+", str(original_task or "").lower()))
     return bool(terms & _STRUCTURAL_CEILING_TERMS) and not bool(terms & _LIGHTING_TERMS)
+
+
+def _task_requests_structural_zoning(original_task: str) -> bool:
+    """Return whether the user explicitly asks for a structural room division."""
+    normalized = " ".join(str(original_task or "").split())
+    return any(pattern.search(normalized) for pattern in _STRUCTURAL_ZONE_PATTERNS)
+
+
+def _reconcile_floor_plan_zone_guidance(
+    brief: StageBrief,
+    *,
+    original_task: str,
+    functional_zones: list[str],
+) -> StageBrief:
+    """Keep later furniture zones from becoming imaginary floor-plan work.
+
+    Functional zones such as living, dining, or work areas normally describe the
+    later furniture arrangement.  A floor-plan agent can make them feasible by
+    providing adequate room proportions, circulation, and usable wall segments,
+    but it cannot represent them as labelled architectural state.  Requiring a
+    partition where the user did not request one makes the critic repeatedly
+    mutate doors and windows without improving the downstream scene.
+    """
+    if (
+        brief.stage != "floor_plan"
+        or not functional_zones
+        or _task_requests_structural_zoning(original_task)
+    ):
+        return brief
+
+    capacity_guidance = (
+        "Treat the named functional zones as later furniture zones: provide room "
+        "capacity, unobstructed circulation, and usable wall segments for them, "
+        "but do not add rooms, partitions, or architectural markers unless the "
+        "immutable user task explicitly requests structural separation."
+    )
+    capacity_check = (
+        "Evaluate functional zones through room capacity, circulation, and usable "
+        "opening-free wall length; do not score absent furniture-zone markers or "
+        "partitions as a floor-plan failure."
+    )
+
+    def reconcile_values(values: list[str], replacement: str) -> list[str]:
+        reconciled = [
+            replacement if _FURNITURE_ZONE_WORDING.search(value) else value
+            for value in values
+        ]
+        return list(dict.fromkeys(reconciled))
+
+    constraints = reconcile_values(
+        list(brief.constraints_for_designer), capacity_guidance
+    )
+    checks = reconcile_values(list(brief.checks_for_critic), capacity_check)
+    if capacity_guidance not in constraints:
+        constraints.append(capacity_guidance)
+    if capacity_check not in checks:
+        checks.append(capacity_check)
+    return brief.model_copy(
+        update={
+            "constraints_for_designer": constraints[:6],
+            "checks_for_critic": checks,
+        }
+    )
 
 
 def _text_closes_stage_inventory(text: str) -> bool:
@@ -321,6 +411,60 @@ def _reconcile_stage_brief(
         brief.stage,
     )
     return brief.model_copy(update=updates)
+
+
+def _add_floor_plan_reservation_guidance(
+    brief: StageBrief,
+    context: HarnessContext,
+) -> StageBrief:
+    """Make later explicit wall anchors actionable before openings are created."""
+    if context.stage != "floor_plan" or context.relation_context is None:
+        return brief
+    reservations = context.relation_context.floor_plan_reservations
+    if not reservations:
+        return brief
+
+    anchors: list[str] = []
+    for reservation in reservations:
+        subject = reservation.get("subjects") or {}
+        target = reservation.get("targets") or {}
+        category = str(subject.get("category") or "object").replace("_", " ")
+        role = str(target.get("role") or "").strip().lower()
+        relation = str(reservation.get("relation") or "")
+        if relation == "centered_on_wall" and role:
+            anchors.append(f"{category} centered on the {role} wall")
+        elif role:
+            anchors.append(f"{category} on a {role} wall")
+        else:
+            anchors.append(f"{category} on a wall")
+
+    if not anchors:
+        return brief
+    guidance = (
+        "Before adding doors or windows, reserve continuous opening-free usable "
+        "wall segments for these later hard anchors: "
+        + "; ".join(anchors)
+        + ". Size each segment for the named object and its required alignment; "
+        "never place an opening through a reserved segment. A reservation is "
+        "satisfied by usable opening-free wall length; do not create a partition "
+        "or other architectural marker solely to represent a later furniture zone."
+    )
+    check = (
+        "Verify every reserved wall-anchor segment remains large enough and "
+        "unobstructed by doors or windows before handing the room to furniture."
+    )
+    constraints = list(brief.constraints_for_designer)
+    if guidance not in constraints:
+        constraints = [*constraints[:5], guidance]
+    checks = list(brief.checks_for_critic)
+    if check not in checks:
+        checks.append(check)
+    return brief.model_copy(
+        update={
+            "constraints_for_designer": constraints,
+            "checks_for_critic": checks,
+        }
+    )
 
 
 def _format_memory_for_prompt(memory_pack: MemoryPack) -> str:
@@ -465,7 +609,9 @@ class GlobalPlanner:
                 "hard_constraint_ids": [],
                 "hard_constraint_coverage": 1.0,
             }
-            return self._fallback_brief(context)
+            return _add_floor_plan_reservation_guidance(
+                self._fallback_brief(context), context
+            )
 
         user_message = self._build_user_message(
             context,
@@ -530,6 +676,12 @@ class GlobalPlanner:
                     room_type=context.task_spec.room_type,
                     required_objects=_stage_required_objects(context.task_spec, stage),
                 )
+                brief = _reconcile_floor_plan_zone_guidance(
+                    brief,
+                    original_task=original_task,
+                    functional_zones=context.task_spec.functional_zones,
+                )
+                brief = _add_floor_plan_reservation_guidance(brief, context)
                 attempts.append(
                     {
                         "attempt": attempt,
@@ -603,7 +755,9 @@ class GlobalPlanner:
             stage,
             validation_error,
         )
-        return self._fallback_brief(context)
+        return _add_floor_plan_reservation_guidance(
+            self._fallback_brief(context), context
+        )
 
     def _build_user_message(
         self,
@@ -662,6 +816,19 @@ class GlobalPlanner:
                     sort_keys=True,
                 ),
             ]
+            if (
+                context.stage == "floor_plan"
+                and context.relation_context.floor_plan_reservations
+            ):
+                parts += [
+                    "",
+                    "## Architectural Surface Reservations (hard)",
+                    json.dumps(
+                        context.relation_context.floor_plan_reservations,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ),
+                ]
 
         parts += [
             "",

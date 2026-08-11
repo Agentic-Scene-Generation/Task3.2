@@ -4,6 +4,7 @@ import faulthandler
 import json
 import logging
 import os
+import re
 import shutil
 import time
 import uuid
@@ -14,7 +15,7 @@ from threading import Lock
 
 # SceneExpert hook runner (imported lazily to avoid circular imports at module level)
 # TYPE_CHECKING block keeps the type hint available without a hard import.
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from agents import custom_span, trace
 from omegaconf import DictConfig, OmegaConf
@@ -94,6 +95,62 @@ STAGE_ASSET_DIRS = {
 
 _SCENE_STATUS_FILENAME = "scene_status.json"
 _SCENE_SUCCESS_MARKER = "_SUCCESS"
+_FURNITURE_RENDER_RESUME_MODES = frozenset({"initial", "latest"})
+
+
+def _resolve_furniture_render_resume_mode(
+    value: object,
+    *,
+    legacy_initial_render: bool = False,
+) -> str | None:
+    """Normalize the furniture-render replay selector and retain legacy config."""
+    if value is None or value is False or value == "":
+        mode = None
+    elif isinstance(value, str):
+        mode = value.strip().lower()
+        if mode not in _FURNITURE_RENDER_RESUME_MODES:
+            allowed = ", ".join(sorted(_FURNITURE_RENDER_RESUME_MODES))
+            raise ValueError(
+                "resume_furniture_from_render must be one of "
+                f"{allowed}; got {value!r}"
+            )
+    else:
+        raise ValueError(
+            "resume_furniture_from_render must be null, 'initial', or 'latest'"
+        )
+    if legacy_initial_render and mode not in {None, "initial"}:
+        raise ValueError(
+            "resume_furniture_from_initial_render cannot be combined with "
+            "resume_furniture_from_render='latest'"
+        )
+    return mode or ("initial" if legacy_initial_render else None)
+
+
+def _furniture_render_state_path(room_dir: Path, mode: str) -> Path:
+    """Return the requested complete furniture state, selecting latest numerically."""
+    render_root = room_dir / "scene_renders" / "furniture"
+    if mode == "initial":
+        state_path = render_root / "renders_001" / "scene_state.json"
+        if state_path.exists():
+            return state_path
+        raise FileNotFoundError(
+            "Cannot resume furniture from the initial render: missing "
+            f"{state_path}. Run furniture until renders_001 exists first."
+        )
+
+    candidates: list[tuple[int, Path]] = []
+    if render_root.is_dir():
+        for render_dir in render_root.iterdir():
+            match = re.fullmatch(r"renders_(\d+)", render_dir.name)
+            state_path = render_dir / "scene_state.json"
+            if match is not None and state_path.is_file():
+                candidates.append((int(match.group(1)), state_path))
+    if candidates:
+        return max(candidates, key=lambda item: item[0])[1]
+    raise FileNotFoundError(
+        "Cannot resume furniture from the latest render: no complete "
+        f"renders_NNN/scene_state.json under {render_root}."
+    )
 
 
 def _write_final_critic_report(
@@ -825,7 +882,12 @@ def _fix_paths_in_yaml_file(
 
 
 def _copy_checkpoint_for_stage(
-    source_scene_dir: Path, target_scene_dir: Path, start_stage: str
+    source_scene_dir: Path,
+    target_scene_dir: Path,
+    start_stage: str,
+    *,
+    resume_furniture_from_initial_render: bool = False,
+    resume_furniture_from_render: str | None = None,
 ) -> None:
     """Copy only the checkpoint state needed to resume from start_stage.
 
@@ -843,7 +905,17 @@ def _copy_checkpoint_for_stage(
         source_scene_dir: Path to source scene directory.
         target_scene_dir: Path to target scene directory.
         start_stage: Stage to resume from (determines what to copy).
+        resume_furniture_from_initial_render: Legacy alias that restores the first
+            furniture render candidate and its assets.
+        resume_furniture_from_render: "initial" restores renders_001; "latest"
+            restores the highest-numbered complete furniture render.
     """
+    furniture_render_resume_mode = _resolve_furniture_render_resume_mode(
+        resume_furniture_from_render,
+        legacy_initial_render=resume_furniture_from_initial_render,
+    )
+    if furniture_render_resume_mode and start_stage != "furniture":
+        raise ValueError("furniture-render resume requires start_stage='furniture'")
     if not source_scene_dir.exists():
         raise FileNotFoundError(
             f"Source scene directory not found: {source_scene_dir}. "
@@ -878,18 +950,47 @@ def _copy_checkpoint_for_stage(
 
     checkpoint_name = STAGE_CHECKPOINTS[start_stage]
     asset_dirs = STAGE_ASSET_DIRS[start_stage]
+    if furniture_render_resume_mode:
+        asset_dirs = ["furniture"]
 
     # Copy room-level checkpoint state and assets.
     for room_dir in source_scene_dir.iterdir():
-        if not room_dir.is_dir() or not room_dir.name.startswith("room_"):
+        # ``room_geometry`` is a scene-level directory and shares the
+        # ``room_`` prefix with actual room directories. It must never be
+        # interpreted as a room checkpoint, regardless of filesystem order.
+        if (
+            not room_dir.is_dir()
+            or not room_dir.name.startswith("room_")
+            or room_dir.name == "room_geometry"
+        ):
             continue
 
         target_room = target_scene_dir / room_dir.name
         target_room.mkdir(parents=True, exist_ok=True)
 
+        # A furniture render is a complete scene state but not a stage-completion
+        # checkpoint. Preserve it under scene_states so the resumed agent can
+        # critique and repair it without regenerating furniture.
+        if furniture_render_resume_mode:
+            source_state = _furniture_render_state_path(
+                room_dir, furniture_render_resume_mode
+            )
+            target_state = (
+                target_room
+                / "scene_states"
+                / f"scene_from_furniture_{furniture_render_resume_mode}_render"
+                / "scene_state.json"
+            )
+            target_state.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source_state, target_state)
+            _fix_paths_in_json_file(
+                json_path=target_state,
+                new_room_dir=target_room,
+                new_scene_dir=target_scene_dir,
+            )
         # Copy entire checkpoint directory for self-containment.
         # Includes scene_state.json, scene.dmd.yaml, and scene.blend.
-        if checkpoint_name:
+        elif checkpoint_name:
             source_state = room_dir / "scene_states" / checkpoint_name
             if source_state.exists():
                 target_state = target_room / "scene_states" / checkpoint_name
@@ -927,7 +1028,8 @@ def _copy_checkpoint_for_stage(
 
     console_logger.info(
         f"Copied checkpoint for {start_stage}: "
-        f"checkpoint={checkpoint_name}, assets={asset_dirs}"
+        f"checkpoint={checkpoint_name}, assets={asset_dirs}, "
+        f"resume_furniture_from_render={furniture_render_resume_mode}"
     )
 
 
@@ -974,6 +1076,26 @@ def _add_manipulands_with_cleanup(
         asyncio.run(manipuland_agent.add_manipulands(scene=scene))
     finally:
         manipuland_agent.cleanup()
+
+
+def _restore_furniture_render_checkpoint(
+    *,
+    scene: RoomScene,
+    render_state_path: Path,
+    room_prompt: str,
+    intent_contract: dict[str, Any] | None,
+) -> None:
+    """Restore geometry while preserving the current replay's task contract."""
+    with open(render_state_path) as f:
+        scene.restore_from_state_dict(json.load(f))
+
+    # A checkpoint is reusable geometry, not the authority for this replay's
+    # task text.  Restoring its stale prompt/metadata would make a freshly
+    # compiled contract fail its prompt-hash provenance check.
+    scene.text_description = room_prompt
+    if intent_contract:
+        setattr(scene, "scenebenchmark_intent_contract", intent_contract)
+        scene.metadata["scenebenchmark_intent_contract"] = intent_contract
 
 
 def _generate_room(
@@ -1052,6 +1174,40 @@ def _generate_room(
     # ["furniture", "wall_mounted", "ceiling_mounted", "manipuland"]
     room_stages = PIPELINE_STAGES[1:]
     start_idx = room_stages.index(start_stage) if start_stage in room_stages else 0
+    pipeline_cfg = cfg_dict.get("experiment", {}).get("pipeline", {})
+    furniture_render_resume_mode = _resolve_furniture_render_resume_mode(
+        pipeline_cfg.get("resume_furniture_from_render"),
+        legacy_initial_render=bool(
+            pipeline_cfg.get("resume_furniture_from_initial_render", False)
+        ),
+    )
+    if furniture_render_resume_mode and start_stage != "furniture":
+        raise ValueError("furniture-render resume requires start_stage='furniture'")
+    if furniture_render_resume_mode:
+        render_state_path = (
+            room_dir
+            / "scene_states"
+            / f"scene_from_furniture_{furniture_render_resume_mode}_render"
+            / "scene_state.json"
+        )
+        if not render_state_path.exists():
+            raise FileNotFoundError(
+                "Cannot resume furniture from the selected render: missing "
+                f"{render_state_path}"
+            )
+        _restore_furniture_render_checkpoint(
+            scene=scene,
+            render_state_path=render_state_path,
+            room_prompt=room_prompt,
+            intent_contract=(
+                intent_contract if isinstance(intent_contract, dict) else None
+            ),
+        )
+        console_logger.info(
+            "Loaded %d objects from the %s furniture render checkpoint",
+            len(scene.objects),
+            furniture_render_resume_mode,
+        )
 
     # Load projection config (needed for furniture and final post-processing).
     projection_cfg = cfg_dict["experiment"]["projection"]
@@ -1059,7 +1215,13 @@ def _generate_room(
     # Furniture stage.
     if start_idx <= 0:  # Run furniture if starting from furniture or earlier.
         with custom_span("furniture_placement"):
-            console_logger.info("Adding furniture to scene")
+            action = (
+                "Resuming furniture critique/repair from saved render "
+                f"({furniture_render_resume_mode})"
+                if furniture_render_resume_mode
+                else "Adding furniture to scene"
+            )
+            console_logger.info(action)
             start_time = time.time()
             if scene_expert_hooks:
                 scene_expert_hooks.pre_stage("furniture", scene)
@@ -1072,7 +1234,12 @@ def _generate_room(
                 render_gpu_id=render_gpu_id,
             )
             try:
-                asyncio.run(furniture_agent.add_furniture(scene=scene))
+                if furniture_render_resume_mode:
+                    asyncio.run(
+                        furniture_agent.resume_from_furniture_render(scene=scene)
+                    )
+                else:
+                    asyncio.run(furniture_agent.add_furniture(scene=scene))
                 end_time = time.time()
                 console_logger.info(
                     f"Furniture added to room {room_id} in "
@@ -2268,6 +2435,16 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
 
         # Handle resume from checkpoint if resume_from_path is specified.
         resume_from_path = pipeline_cfg.get("resume_from_path")
+        furniture_render_resume_mode = _resolve_furniture_render_resume_mode(
+            pipeline_cfg.get("resume_furniture_from_render"),
+            legacy_initial_render=bool(
+                pipeline_cfg.get("resume_furniture_from_initial_render", False)
+            ),
+        )
+        if furniture_render_resume_mode and start_stage != "furniture":
+            raise ValueError("furniture-render resume requires start_stage='furniture'")
+        if furniture_render_resume_mode and not resume_from_path:
+            raise ValueError("furniture-render resume requires resume_from_path")
         if resume_from_path and start_stage != "floor_plan":
             source_experiment_dir = Path(resume_from_path)
             if not source_experiment_dir.exists():
@@ -2278,6 +2455,7 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                 source_scene_dir=source_experiment_dir / f"scene_{scene_id:03d}",
                 target_scene_dir=scene_dir,
                 start_stage=start_stage,
+                resume_furniture_from_render=furniture_render_resume_mode,
             )
 
         with FileLoggingContext(log_file_path=log_path, suppress_stdout=capture_logs):
