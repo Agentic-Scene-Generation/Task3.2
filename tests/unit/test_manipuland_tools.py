@@ -201,6 +201,42 @@ class TestManipulandTools(unittest.TestCase):
             2 * self.manipuland_tools._dining_footprint_radius(candidate),
         )
 
+    @patch.object(ManipulandTools, "_select_dining_surface_position")
+    def test_dining_target_preserves_current_setting_offsets(self, mock_select):
+        surface = SupportSurface(
+            surface_id=UniqueID("S_table"),
+            bounding_box_min=np.array([-1.0, -1.0, 0.0]),
+            bounding_box_max=np.array([1.0, 1.0, 0.5]),
+            transform=RigidTransform(),
+        )
+        candidate = Mock()
+        candidate.object_id = "cutlery_0"
+        candidate.bbox_min = np.array([-0.1, -0.1, 0.0])
+        candidate.bbox_max = np.array([0.1, 0.1, 0.03])
+        candidate.scale_factor = 1.0
+        anchor = Mock()
+        anchor.object_id = "dinner_plate_0"
+        anchor.bbox_min = np.array([-0.1, -0.1, 0.0])
+        anchor.bbox_max = np.array([0.1, 0.1, 0.03])
+        anchor.scale_factor = 1.0
+        anchor.transform = RigidTransform(p=[0.0, 0.0, 0.8])
+        mock_select.side_effect = lambda **kwargs: (
+            surface,
+            np.asarray(kwargs["target_xy"], dtype=float),
+        )
+
+        selected = self.manipuland_tools._select_clear_dining_surface_position(
+            surface_map={"S_table": surface},
+            scene_object=candidate,
+            target_xy=(0.0, 0.0),
+            occupied_objects=[anchor],
+            ignored_object_ids={"dinner_plate_0", "cutlery_0"},
+        )
+
+        self.assertIsNotNone(selected)
+        _surface, position = selected
+        np.testing.assert_allclose(position, np.zeros(2))
+
     def test_move_manipuland_out_of_bounds_fails(self):
         """Test that move_manipuland fails when position is out of bounds."""
         # Create a mock object.

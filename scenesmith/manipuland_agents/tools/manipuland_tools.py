@@ -2074,19 +2074,28 @@ class ManipulandTools:
             for row in assignments:
                 anchor_id = str(row.get("anchor_id") or "")
                 anchor = objects_by_id.get(anchor_id)
+                setting_object_ids = {
+                    anchor_id,
+                    *(
+                        str(companion_id)
+                        for companion_id in row.get("companion_ids") or []
+                    ),
+                }
                 target = row.get("recommended_anchor_center_xy_m") or []
                 if anchor is None or len(target) < 2:
                     failures.append(f"Incomplete assignment for anchor `{anchor_id}`.")
                     continue
                 target_xy = (float(target[0]), float(target[1]))
-                selected = self._select_clear_dining_surface_position(
+                # Anchor plates/bowls define the critic's seat mapping.  Keep
+                # that target exact; only their companions may take a local
+                # detour around already-settled place settings.
+                selected = self._select_dining_surface_position(
                     surface_map=surface_map,
                     scene_object=anchor,
                     target_xy=target_xy,
                     preferred_surface_id=str(
                         row.get("recommended_support_surface_id") or ""
                     ),
-                    occupied_objects=occupied_dining_objects,
                 )
                 if selected is None:
                     failures.append(
@@ -2121,6 +2130,7 @@ class ManipulandTools:
                         target_xy=companion_target,
                         preferred_surface_id=str(surface.surface_id),
                         occupied_objects=occupied_dining_objects,
+                        ignored_object_ids=setting_object_ids,
                     )
                     if companion_selected is None:
                         failures.append(
@@ -2208,6 +2218,7 @@ class ManipulandTools:
         target_xy: tuple[float, float],
         occupied_objects: list[SceneObject],
         preferred_surface_id: str = "",
+        ignored_object_ids: set[str] | None = None,
     ) -> tuple[SupportSurface, np.ndarray] | None:
         """Keep a dining placement clear of the settings already reflowed.
 
@@ -2217,9 +2228,15 @@ class ManipulandTools:
         target first, then search nearby support-valid positions using a
         conservative horizontal footprint radius.
         """
+        ignored_object_ids = ignored_object_ids or set()
+        relevant_occupied_objects = [
+            item
+            for item in occupied_objects
+            if str(item.object_id) not in ignored_object_ids
+        ]
         object_radius = self._dining_footprint_radius(scene_object)
         occupied_radius = max(
-            (self._dining_footprint_radius(item) for item in occupied_objects),
+            (self._dining_footprint_radius(item) for item in relevant_occupied_objects),
             default=0.0,
         )
         step = max(0.04, object_radius + occupied_radius)
@@ -2255,7 +2272,7 @@ class ManipulandTools:
                 surface, position = selected
                 world_xy = surface.to_world_pose(position, 0.0).translation()[:2]
                 if self._dining_position_is_clear(
-                    world_xy, object_radius, occupied_objects
+                    world_xy, object_radius, relevant_occupied_objects
                 ):
                     return surface, position
         return None
