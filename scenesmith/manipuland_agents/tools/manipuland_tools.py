@@ -70,6 +70,10 @@ from scenesmith.manipuland_agents.tools.response_dataclasses import (
 )
 from scenesmith.manipuland_agents.tools.stack_tools import create_stack_tool_impl
 from scenesmith.scenebenchmark_critic import room_scene_to_case_pack
+from scenesmith.scenebenchmark_critic.intent_contract import (
+    intent_contract_constraints_for_scene,
+    selected_ids,
+)
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.dining_place_setting import (
     evaluate_dining_place_setting_alignment,
 )
@@ -2034,6 +2038,7 @@ class ManipulandTools:
         table_center = self._object_world_xy(table)
         moves: list[dict[str, Any]] = []
         failures: list[str] = []
+        occupied_dining_objects: list[SceneObject] = []
 
         previous_noise_profile = self.active_noise_profile
         self.active_noise_profile = self.placement_noise_config.perfect_profile
@@ -2046,10 +2051,11 @@ class ManipulandTools:
                 if table_center is None:
                     failures.append("Dining table has no usable world-space center.")
                     break
-                selected = self._select_dining_surface_position(
+                selected = self._select_clear_dining_surface_position(
                     surface_map=surface_map,
                     scene_object=scene_object,
                     target_xy=table_center,
+                    occupied_objects=occupied_dining_objects,
                 )
                 if selected is None:
                     failures.append(
@@ -2062,6 +2068,8 @@ class ManipulandTools:
                 moves.append(move)
                 if not move["success"]:
                     failures.append(move["message"])
+                else:
+                    occupied_dining_objects.append(scene_object)
 
             for row in assignments:
                 anchor_id = str(row.get("anchor_id") or "")
@@ -2071,13 +2079,14 @@ class ManipulandTools:
                     failures.append(f"Incomplete assignment for anchor `{anchor_id}`.")
                     continue
                 target_xy = (float(target[0]), float(target[1]))
-                selected = self._select_dining_surface_position(
+                selected = self._select_clear_dining_surface_position(
                     surface_map=surface_map,
                     scene_object=anchor,
                     target_xy=target_xy,
                     preferred_surface_id=str(
                         row.get("recommended_support_surface_id") or ""
                     ),
+                    occupied_objects=occupied_dining_objects,
                 )
                 if selected is None:
                     failures.append(
@@ -2092,6 +2101,7 @@ class ManipulandTools:
                 if not move["success"]:
                     failures.append(move["message"])
                     continue
+                occupied_dining_objects.append(anchor)
 
                 anchor_after = self._object_world_xy(anchor)
                 if anchor_before is None or anchor_after is None:
@@ -2105,11 +2115,12 @@ class ManipulandTools:
                         anchor_after[0] + companion_before[0] - anchor_before[0],
                         anchor_after[1] + companion_before[1] - anchor_before[1],
                     )
-                    companion_selected = self._select_dining_surface_position(
+                    companion_selected = self._select_clear_dining_surface_position(
                         surface_map=surface_map,
                         scene_object=companion,
                         target_xy=companion_target,
                         preferred_surface_id=str(surface.surface_id),
+                        occupied_objects=occupied_dining_objects,
                     )
                     if companion_selected is None:
                         failures.append(
@@ -2125,6 +2136,8 @@ class ManipulandTools:
                     moves.append(companion_move)
                     if not companion_move["success"]:
                         failures.append(companion_move["message"])
+                    else:
+                        occupied_dining_objects.append(companion)
         finally:
             self.active_noise_profile = previous_noise_profile
 
@@ -2186,6 +2199,90 @@ class ManipulandTools:
             ):
                 return surface, position
         return None
+
+    def _select_clear_dining_surface_position(
+        self,
+        *,
+        surface_map: dict[str, SupportSurface],
+        scene_object: SceneObject,
+        target_xy: tuple[float, float],
+        occupied_objects: list[SceneObject],
+        preferred_surface_id: str = "",
+    ) -> tuple[SupportSurface, np.ndarray] | None:
+        """Keep a dining placement clear of the settings already reflowed.
+
+        The critic supplies the seat-facing anchor positions.  Companions retain
+        their original relative offsets when possible, but those offsets can
+        carry a small pre-existing overlap into the new setting.  Test the exact
+        target first, then search nearby support-valid positions using a
+        conservative horizontal footprint radius.
+        """
+        object_radius = self._dining_footprint_radius(scene_object)
+        occupied_radius = max(
+            (self._dining_footprint_radius(item) for item in occupied_objects),
+            default=0.0,
+        )
+        step = max(0.04, object_radius + occupied_radius)
+        directions = (
+            (0.0, 0.0),
+            (1.0, 0.0),
+            (-1.0, 0.0),
+            (0.0, 1.0),
+            (0.0, -1.0),
+            (1.0, 1.0),
+            (1.0, -1.0),
+            (-1.0, 1.0),
+            (-1.0, -1.0),
+        )
+        for ring in range(3):
+            distance = ring * step
+            for direction_x, direction_y in directions:
+                if ring == 0 and (direction_x != 0.0 or direction_y != 0.0):
+                    continue
+                direction_length = math.hypot(direction_x, direction_y)
+                candidate_xy = (
+                    target_xy[0] + distance * direction_x / max(direction_length, 1.0),
+                    target_xy[1] + distance * direction_y / max(direction_length, 1.0),
+                )
+                selected = self._select_dining_surface_position(
+                    surface_map=surface_map,
+                    scene_object=scene_object,
+                    target_xy=candidate_xy,
+                    preferred_surface_id=preferred_surface_id,
+                )
+                if selected is None:
+                    continue
+                surface, position = selected
+                world_xy = surface.to_world_pose(position, 0.0).translation()[:2]
+                if self._dining_position_is_clear(
+                    world_xy, object_radius, occupied_objects
+                ):
+                    return surface, position
+        return None
+
+    @staticmethod
+    def _dining_footprint_radius(scene_object: SceneObject) -> float:
+        """Return a conservative XY radius for local dining collision checks."""
+        dimensions = np.asarray(scene_object.bbox_max[:2], dtype=float) - np.asarray(
+            scene_object.bbox_min[:2], dtype=float
+        )
+        scale_factor = float(getattr(scene_object, "scale_factor", 1.0) or 1.0)
+        return 0.5 * float(np.linalg.norm(dimensions * scale_factor)) + 0.01
+
+    def _dining_position_is_clear(
+        self,
+        world_xy: np.ndarray,
+        object_radius: float,
+        occupied_objects: list[SceneObject],
+    ) -> bool:
+        for occupied in occupied_objects:
+            occupied_xy = self._object_world_xy(occupied)
+            if occupied_xy is None:
+                continue
+            minimum_distance = object_radius + self._dining_footprint_radius(occupied)
+            if math.dist(world_xy, occupied_xy) < minimum_distance:
+                return False
+        return True
 
     def _surface_local_target(
         self,
@@ -2320,6 +2417,21 @@ class ManipulandTools:
                     object_id=object_id,
                 ).to_json()
 
+            required_constraint = self._required_inventory_constraint_for_removal(
+                str(unique_id)
+            )
+            if required_constraint is not None:
+                return ManipulandOperationResult(
+                    success=False,
+                    message=(
+                        f"Cannot remove required manipuland '{object_id}': "
+                        f"it is needed by hard required_count "
+                        f"for {required_constraint}."
+                    ),
+                    error_type=ManipulandErrorType.INVALID_OPERATION,
+                    object_id=object_id,
+                ).to_json()
+
             # Remove from scene.
             success = self.scene.remove_object(unique_id)
 
@@ -2345,6 +2457,26 @@ class ManipulandTools:
                 message=f"Unexpected error: {str(e)}",
                 object_id=object_id,
             ).to_json()
+
+    def _required_inventory_constraint_for_removal(self, object_id: str) -> str | None:
+        """Return the hard inventory category that would be underfilled."""
+        case_pack = room_scene_to_case_pack(self.scene, stage="removal_guard")
+        objects = (case_pack.get("scene_geometry") or {}).get("objects") or []
+        for constraint in intent_contract_constraints_for_scene(self.scene):
+            if (
+                str(constraint.get("relation") or "") != "required_count"
+                or str(constraint.get("strength") or "hard").lower() != "hard"
+            ):
+                continue
+            selector = constraint.get("subjects") or {}
+            try:
+                required_count = int(selector.get("count") or 0)
+            except (AttributeError, TypeError, ValueError):
+                continue
+            selected = selected_ids(selector, objects)
+            if object_id in selected and len(selected) <= required_count:
+                return str(selector.get("category") or "object")
+        return None
 
     @log_scene_action
     def _rescale_manipuland_impl(

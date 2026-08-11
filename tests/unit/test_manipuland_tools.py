@@ -164,6 +164,43 @@ class TestManipulandTools(unittest.TestCase):
         self.assertEqual(str(selected_surface.surface_id), "S_north")
         self.assertLess(abs(float(selected_position[1])), 0.1)
 
+    @patch.object(ManipulandTools, "_select_dining_surface_position")
+    def test_dining_target_shifts_clear_of_settled_setting(self, mock_select):
+        surface = SupportSurface(
+            surface_id=UniqueID("S_table"),
+            bounding_box_min=np.array([-1.0, -1.0, 0.0]),
+            bounding_box_max=np.array([1.0, 1.0, 0.5]),
+            transform=RigidTransform(),
+        )
+        candidate = Mock()
+        candidate.bbox_min = np.array([-0.1, -0.1, 0.0])
+        candidate.bbox_max = np.array([0.1, 0.1, 0.03])
+        candidate.scale_factor = 1.0
+        occupied = Mock()
+        occupied.bbox_min = np.array([-0.1, -0.1, 0.0])
+        occupied.bbox_max = np.array([0.1, 0.1, 0.03])
+        occupied.scale_factor = 1.0
+        occupied.transform = RigidTransform(p=[0.0, 0.0, 0.8])
+
+        def select_position(**kwargs):
+            return surface, np.asarray(kwargs["target_xy"], dtype=float)
+
+        mock_select.side_effect = select_position
+        selected = self.manipuland_tools._select_clear_dining_surface_position(
+            surface_map={"S_table": surface},
+            scene_object=candidate,
+            target_xy=(0.0, 0.0),
+            occupied_objects=[occupied],
+        )
+
+        self.assertIsNotNone(selected)
+        _surface, position = selected
+        self.assertGreater(np.linalg.norm(position), 0.0)
+        self.assertGreaterEqual(
+            np.linalg.norm(position),
+            2 * self.manipuland_tools._dining_footprint_radius(candidate),
+        )
+
     def test_move_manipuland_out_of_bounds_fails(self):
         """Test that move_manipuland fails when position is out of bounds."""
         # Create a mock object.
@@ -209,6 +246,36 @@ class TestManipulandTools(unittest.TestCase):
         result_dict = json.loads(result_json)
         self.assertFalse(result_dict["success"])
         self.assertEqual(result_dict["error_type"], "object_not_found")
+
+    @patch(
+        "scenesmith.manipuland_agents.tools.manipuland_tools.intent_contract_constraints_for_scene"
+    )
+    @patch(
+        "scenesmith.manipuland_agents.tools.manipuland_tools.room_scene_to_case_pack"
+    )
+    def test_remove_required_manipuland_is_rejected(
+        self, mock_case_pack, mock_constraints
+    ):
+        required = Mock()
+        required.object_type = ObjectType.MANIPULAND
+        required.name = "plate"
+        self.mock_scene.get_object.return_value = required
+        mock_case_pack.return_value = {
+            "scene_geometry": {"objects": [{"id": "plate_0", "category": "plate"}]}
+        }
+        mock_constraints.return_value = [
+            {
+                "relation": "required_count",
+                "strength": "hard",
+                "subjects": {"category": "plate", "count": 1},
+            }
+        ]
+
+        result = json.loads(self.manipuland_tools._remove_manipuland_impl("plate_0"))
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["error_type"], "invalid_operation")
+        self.mock_scene.remove_object.assert_not_called()
 
     @patch.object(
         ManipulandTools, "_validate_convex_hull_footprint", return_value=(True, None)
