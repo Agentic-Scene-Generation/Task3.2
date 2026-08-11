@@ -740,6 +740,33 @@ class SceneExpertMemoryTest(unittest.TestCase):
         self.assertTrue(report.pass_stage)
         self.assertEqual([], report.issues)
 
+    def test_manipuland_verifier_accepts_decomposed_table_settings(self) -> None:
+        required = [
+            *("plate" for _ in range(5)),
+            *("cutlery" for _ in range(5)),
+            *("drinking glass" for _ in range(5)),
+            *("table setting" for _ in range(5)),
+        ]
+        present = [
+            *(f"dinner_plate_{index}" for index in range(5)),
+            *(f"cutlery_{index}" for index in range(5)),
+            *(f"glass_{index}" for index in range(5)),
+        ]
+
+        report = StageVerifier(pass_threshold=0.6).verify(
+            stage="manipuland",
+            stage_output_dir="/path/that/does/not/exist",
+            task_spec=SceneTaskSpec(
+                room_type="dining room",
+                style="standard",
+                required_small_objects=required,
+            ),
+            scene_state_info={"object_names": present},
+        )
+
+        self.assertTrue(report.pass_stage)
+        self.assertEqual([], report.issues)
+
     def test_live_composite_metadata_exposes_component_names_to_verifier(self) -> None:
         scene = SimpleNamespace(
             objects={

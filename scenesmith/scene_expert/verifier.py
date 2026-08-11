@@ -320,6 +320,12 @@ def _check_required_objects(
 
     for required in stage_required:
         required_label = _normalize_object_label(required)
+        # A table/place setting describes a collection of manipulands rather
+        # than a mesh that an asset manager can create.  Its component counts
+        # and seating relation are checked by the intent contract; requiring a
+        # literal object here would reject every valid decomposed setting.
+        if stage == "manipuland" and required_label in _VIRTUAL_MANIPULAND_GROUPS:
+            continue
         consumed_indices = consumed_by_required_label.setdefault(required_label, set())
         match_index = next(
             (
@@ -365,7 +371,14 @@ _OBJECT_LABEL_ALIASES = {
     "tv": "television",
     "tv display": "television",
     "television display": "television",
+    "drinking glass": "glass",
+    "water glass": "glass",
 }
+
+# These are prompt-level aggregate concepts, not independently instantiated
+# scene assets. Their concrete components remain required and are consumed
+# above, while SceneBenchmark validates their cardinality and relationship.
+_VIRTUAL_MANIPULAND_GROUPS = {"table setting", "place setting"}
 
 
 def _normalize_object_label(label: str) -> str:
