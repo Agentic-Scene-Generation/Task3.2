@@ -1779,6 +1779,35 @@ def test_manipuland_support_contract_is_deferred_from_furniture_gate(
     assert unresolved_furniture_relation_failures(scene, config=config) == []
 
 
+def test_wall_owned_inventory_contract_is_deferred_from_furniture_gate(
+    tmp_path: Path, monkeypatch
+) -> None:
+    scene = _scene(tmp_path, text="A classroom with a chalkboard on the wall.")
+    config = CriticConfig(enabled=True, metrics=("functional_dependency",))
+    failure = {
+        "check_id": "intent_required_instructional_surface",
+        "label": "fail",
+        "contract_state": "failed",
+        "scoring_tier": "core",
+        "relation_type": "required_count",
+        "primary_object": "instructional_surface",
+        "evidence": {
+            "intent_constraint": {
+                "relation": "required_count",
+                "stage": "wall_mounted",
+                "strength": "hard",
+            }
+        },
+    }
+    monkeypatch.setattr(
+        furniture_relation_repair,
+        "_evaluate",
+        lambda *_args, **_kwargs: {"case_pack": {}, "results": [failure]},
+    )
+
+    assert unresolved_furniture_relation_failures(scene, config=config) == []
+
+
 def test_repairs_work_seat_to_in_room_side_when_other_side_is_outside(
     tmp_path: Path,
 ) -> None:

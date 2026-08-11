@@ -244,6 +244,27 @@ def test_schema_canonicalizes_dining_aliases_and_derives_manipuland_stage() -> N
     assert constraints[3]["stage"] == "manipuland"
 
 
+def test_schema_canonicalizes_instructional_surface_aliases_to_wall_stage() -> None:
+    result = validate_intent_contract(
+        {
+            "schema_version": INTENT_CONTRACT_SCHEMA_VERSION,
+            "prompt": "A classroom with a chalkboard on the wall.",
+            "constraints": [
+                {
+                    "relation": "required_count",
+                    "subjects": {"category": "chalkboard", "count": 1},
+                    "source": "explicit_prompt",
+                    "evidence_span": "a chalkboard",
+                }
+            ],
+        }
+    )
+
+    constraint = result["constraints"][0]
+    assert constraint["subjects"]["category"] == "instructional_surface"
+    assert constraint["stage"] == "wall_mounted"
+
+
 @pytest.mark.parametrize(
     ("raw_category", "canonical_category"),
     [
@@ -251,6 +272,7 @@ def test_schema_canonicalizes_dining_aliases_and_derives_manipuland_stage() -> N
         ("two_seater_sofas", "two_seater_sofa"),
         ("teacher's desk", "teacher_desk"),
         ("office_chairs", "office_chair"),
+        ("whiteboard", "instructional_surface"),
         ("batteries", "battery"),
     ],
 )

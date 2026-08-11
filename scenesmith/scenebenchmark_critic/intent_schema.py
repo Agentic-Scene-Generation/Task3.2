@@ -80,6 +80,16 @@ _SELECTOR_CATEGORY_ALIASES = {
     "place_settings": "table_setting",
     "place_setting": "table_setting",
     "flowers": "flower",
+    # Keep the independent critic aligned with the task compiler's wall-stage
+    # inventory normalization.  These are alternate prompt names for the same
+    # mounted instructional surface, not floor furniture.
+    "chalkboard": "instructional_surface",
+    "blackboard": "instructional_surface",
+    "whiteboard": "instructional_surface",
+    "projection_screen": "instructional_surface",
+    "projector_screen": "instructional_surface",
+    "teaching_screen": "instructional_surface",
+    "presentation_screen": "instructional_surface",
 }
 
 
