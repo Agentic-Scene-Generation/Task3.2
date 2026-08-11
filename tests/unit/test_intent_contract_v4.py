@@ -883,6 +883,35 @@ def test_intent_compiler_canonicalizes_two_object_side_wording_to_flanking() -> 
     assert relation.get("orientation") is None
 
 
+def test_intent_compiler_does_not_upgrade_inventory_to_flanking() -> None:
+    invented = (
+        '{"constraints": [{"relation": "flanking", '
+        '"subjects": {"category": "nightstand", "count": 2}, '
+        '"targets": {"category": "bed", "count": 1}, '
+        '"source": "explicit_prompt", '
+        '"evidence_span": "two nightstands"}]}'
+    )
+    compiler = _compiler_with_responses([_response(invented), _response(invented)])
+
+    result = compiler.compile(
+        "A bedroom with a bed, two nightstands, and a wardrobe in the corner."
+    )
+
+    assert compiler.last_trace["status"] == "fallback"
+    assert [item["status"] for item in compiler.last_trace["attempts"]] == [
+        "error",
+        "error",
+        "deterministic_fallback",
+    ]
+    assert all(row["relation"] != "flanking" for row in result["constraints"])
+    assert any(
+        row["relation"] == "required_count"
+        and row["subjects"]["category"] == "nightstand"
+        and row["subjects"]["count"] == 2
+        for row in result["constraints"]
+    )
+
+
 def test_intent_compiler_restores_missing_target_from_prompt_parser() -> None:
     compiler = _compiler_with_responses(
         [

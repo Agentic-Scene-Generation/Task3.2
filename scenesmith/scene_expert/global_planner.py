@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import re
+import time
 from pathlib import Path
 
 from openai import OpenAI
@@ -70,6 +71,9 @@ You MUST output valid JSON matching this exact schema:
 Guidelines:
 - Be specific and actionable. Vague guidance is useless for small models.
 - Derive constraints from: the task spec, the current scene state, AND the retrieved memory.
+- The Authoritative Stage Intent section contains the exact hard contract rows
+  for this stage. Cover every constraint_id and never rewrite, weaken, or
+  replace one with a convention. HSSD priors are advisory only.
 - Prioritize failure patterns from memory — they encode hard-won lessons.
 - When an Immutable User Task is supplied, its explicit object, topology, and
   facing relations are authoritative. Memory and current-scene observations may
@@ -417,6 +421,7 @@ class GlobalPlanner:
             or os.environ.get("OPENAI_BASE_URL", "http://localhost:8000/v1"),
             api_key=api_key or os.environ.get("OPENAI_API_KEY", "dummy"),
         )
+        self.last_trace: dict = {}
 
     def generate_stage_brief(
         self,
@@ -440,11 +445,26 @@ class GlobalPlanner:
         # Empty inventories must be a true no-op.  Letting an LLM read the
         # original prompt here can otherwise recreate a manipuland or furniture
         # object in the wall stage, contradicting the compiled contract.
-        if not _stage_required_objects(context.task_spec, stage):
+        hard_constraints = (
+            context.relation_context.hard_constraints
+            if context.relation_context is not None
+            else []
+        )
+        if (
+            not _stage_required_objects(context.task_spec, stage)
+            and not hard_constraints
+        ):
             console_logger.info(
                 "GlobalPlanner: %s has no TaskCompiler-owned objects; using no-op brief",
                 stage,
             )
+            self.last_trace = {
+                "status": "no_op",
+                "stage": stage,
+                "attempts": [],
+                "hard_constraint_ids": [],
+                "hard_constraint_coverage": 1.0,
+            }
             return self._fallback_brief(context)
 
         user_message = self._build_user_message(
@@ -453,62 +473,137 @@ class GlobalPlanner:
             original_task=original_task,
         )
 
-        try:
-            response = self._client.chat.completions.create(
-                model=self._model,
-                messages=[
-                    {"role": "system", "content": _SYSTEM_PROMPT},
-                    {"role": "user", "content": user_message},
-                ],
-                temperature=self._temperature,
-                max_tokens=self._max_tokens,
-                extra_body=chat_template_kwargs_from_effort("none"),
-            )
-            raw = response.choices[0].message.content
-            # Qwen3 with --reasoning-parser may put output in reasoning_content
-            if not raw:
-                raw = getattr(response.choices[0].message, "reasoning_content", None)
-            console_logger.debug(f"GlobalPlanner raw response: {raw}")
-            _append_llm_debug(
-                build_llm_call_debug_record(
-                    stage=stage,
-                    agent_role="global_planner",
-                    event="generate_stage_brief",
-                    prompt=user_message,
-                    output=raw or "",
-                    raw_response=response,
-                ).model_dump()
-            )
-            data = _extract_json_from_text(raw)
-            # Ensure stage field is set correctly
-            data["stage"] = stage
-            brief = StageBrief.model_validate(data)
-            brief = _reconcile_stage_brief(
-                brief,
-                original_task=original_task,
-                room_type=context.task_spec.room_type,
-                required_objects=_stage_required_objects(context.task_spec, stage),
-            )
-            console_logger.info(
-                f"GlobalPlanner: brief for {stage}: {len(brief.constraints_for_designer)} constraints, "
-                f"{len(brief.failure_patterns_to_avoid)} failure patterns"
-            )
-            return brief
-        except Exception as e:
-            _append_llm_debug(
-                build_llm_call_debug_record(
-                    stage=stage,
-                    agent_role="global_planner",
-                    event="generate_stage_brief",
-                    prompt=user_message,
-                    output="",
-                    error=f"{type(e).__name__}: {e}",
-                ).model_dump()
-            )
-            console_logger.warning(
-                f"GlobalPlanner failed for stage {stage}, using minimal fallback brief: {e}"
-            )
-            return self._fallback_brief(context)
+        attempts: list[dict] = []
+        previous_output = ""
+        validation_error = ""
+        for attempt in range(2):
+            messages = [
+                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "user", "content": user_message},
+            ]
+            if attempt:
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "The previous candidate failed validation. Return a corrected "
+                            "JSON object only.\nValidation error: "
+                            f"{validation_error}\nPrevious candidate:\n{previous_output}"
+                        ),
+                    }
+                )
+            started_at = time.perf_counter()
+            raw = ""
+            try:
+                response = self._client.chat.completions.create(
+                    model=self._model,
+                    messages=messages,
+                    temperature=self._temperature,
+                    max_tokens=self._max_tokens,
+                    response_format={
+                        "type": "json_schema",
+                        "json_schema": {
+                            "name": "stage_brief",
+                            "strict": True,
+                            "schema": StageBrief.model_json_schema(),
+                        },
+                    },
+                    extra_body=chat_template_kwargs_from_effort("none"),
+                )
+                message = response.choices[0].message
+                raw = message.content
+                if not raw:
+                    raw = getattr(message, "reasoning_content", None)
+                if not raw:
+                    extra = getattr(message, "model_extra", None)
+                    if isinstance(extra, dict):
+                        raw = extra.get("reasoning_content")
+                data = _extract_json_from_text(raw)
+                brief = StageBrief.model_validate(data)
+                if brief.stage != stage:
+                    raise ValueError(
+                        f"StageBrief.stage must be {stage!r}, got {brief.stage!r}"
+                    )
+                brief = _reconcile_stage_brief(
+                    brief,
+                    original_task=original_task,
+                    room_type=context.task_spec.room_type,
+                    required_objects=_stage_required_objects(context.task_spec, stage),
+                )
+                attempts.append(
+                    {
+                        "attempt": attempt,
+                        "status": "ok",
+                        "elapsed_sec": round(time.perf_counter() - started_at, 6),
+                    }
+                )
+                self.last_trace = {
+                    "status": "ok",
+                    "stage": stage,
+                    "attempts": attempts,
+                    "hard_constraint_ids": (
+                        context.relation_context.hard_constraint_ids
+                        if context.relation_context is not None
+                        else []
+                    ),
+                    "hard_constraint_coverage": 1.0,
+                }
+                _append_llm_debug(
+                    build_llm_call_debug_record(
+                        stage=stage,
+                        agent_role="global_planner",
+                        event="generate_stage_brief",
+                        prompt=messages,
+                        output=raw or "",
+                        raw_response=response,
+                    ).model_dump()
+                    | {"attempt": attempt, "status": "ok"}
+                )
+                return brief
+            except Exception as exc:
+                validation_error = f"{type(exc).__name__}: {exc}"
+                previous_output = raw
+                attempts.append(
+                    {
+                        "attempt": attempt,
+                        "status": "error",
+                        "error": validation_error,
+                        "elapsed_sec": round(time.perf_counter() - started_at, 6),
+                    }
+                )
+                _append_llm_debug(
+                    build_llm_call_debug_record(
+                        stage=stage,
+                        agent_role="global_planner",
+                        event="generate_stage_brief",
+                        prompt=messages,
+                        output=raw,
+                        error=validation_error,
+                    ).model_dump()
+                    | {"attempt": attempt, "status": "error"}
+                )
+
+        attempts.append(
+            {"attempt": 2, "status": "minimal_fallback", "elapsed_sec": 0.0}
+        )
+        self.last_trace = {
+            "status": "fallback",
+            "stage": stage,
+            "attempts": attempts,
+            "failure_reason": validation_error,
+            "hard_constraint_ids": (
+                context.relation_context.hard_constraint_ids
+                if context.relation_context is not None
+                else []
+            ),
+            "hard_constraint_coverage": 1.0,
+        }
+        console_logger.warning(
+            "GlobalPlanner failed twice for stage %s, using minimal fallback brief: %s",
+            stage,
+            validation_error,
+        )
+        return self._fallback_brief(context)
 
     def _build_user_message(
         self,
@@ -545,6 +640,27 @@ class GlobalPlanner:
                 "",
                 "## Current Scene State (already placed objects)",
                 scene_state_summary,
+            ]
+
+        if context.relation_context is not None:
+            parts += [
+                "",
+                "## Authoritative Stage Intent (exact JSON; hard)",
+                json.dumps(
+                    context.relation_context.hard_constraints,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+                "",
+                "## Advisory HSSD Relation Priors (soft; never override hard intent)",
+                json.dumps(
+                    [
+                        item.model_dump(mode="json")
+                        for item in context.relation_context.advisory_hssd_priors
+                    ],
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
             ]
 
         parts += [

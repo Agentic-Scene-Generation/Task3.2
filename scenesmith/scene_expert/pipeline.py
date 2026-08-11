@@ -26,6 +26,7 @@ additional context appended to the original room prompt.
 from __future__ import annotations
 
 import copy
+import json
 import logging
 import os
 import time
@@ -39,11 +40,13 @@ from scenesmith.scene_expert.memory.retriever import MemoryRetriever
 from scenesmith.scene_expert.memory.store import FastMemoryStore
 from scenesmith.scene_expert.memory.writer import MemoryWriter
 from scenesmith.scene_expert.repair_controller import RepairController
+from scenesmith.scene_expert.relation_context import StageRelationProjector
 from scenesmith.scene_expert.schemas import (
     FullVerifyReport,
     MemoryPack,
     RepairResult,
     StageBrief,
+    StageRelationContext,
     StageVerifyReport,
 )
 from scenesmith.scene_expert.task_compiler import TaskCompiler
@@ -128,6 +131,29 @@ def _build_enhanced_prompt(original_prompt: str, stage_brief: StageBrief) -> str
     return f"{original_prompt}\n\n{brief_text}"
 
 
+def _append_relation_context(
+    prompt: str, relation_context: StageRelationContext
+) -> str:
+    """Keep the legacy path aligned with production stage-only injection."""
+    advisory = [
+        item.model_dump(mode="json") for item in relation_context.advisory_hssd_priors
+    ]
+    return (
+        prompt
+        + "\n\n=== SceneExpert Advisory HSSD Relations (soft) ===\n"
+        + json.dumps(advisory, ensure_ascii=False, sort_keys=True)
+        + "\n=== End SceneExpert Advisory HSSD Relations ===\n\n"
+        + f"=== SceneExpert Hard Intent Contract: {relation_context.stage} "
+        + "(authoritative) ===\n"
+        + json.dumps(
+            relation_context.hard_constraints,
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        + "\n=== End SceneExpert Hard Intent Contract ==="
+    )
+
+
 class SceneExpertPipeline:
     """SceneExpert MVP online closed-loop pipeline.
 
@@ -182,6 +208,7 @@ class SceneExpertPipeline:
         self._global_planner = GlobalPlanner(
             model=model, api_base_url=api_base, api_key=api_key
         )
+        self._relation_projector = StageRelationProjector()
         self._memory_writer = MemoryWriter(
             model=model, api_base_url=api_base, api_key=api_key
         )
@@ -261,7 +288,9 @@ class SceneExpertPipeline:
             from scenesmith.scene_expert.schemas import SceneTaskSpec
 
             task_spec = SceneTaskSpec(room_type="room", style="standard")
-        trace_logger.record_task_compiler(task_spec)
+        trace_logger.record_task_compiler(
+            task_spec, dict(getattr(self._task_compiler, "last_trace", {}) or {})
+        )
 
         # Hard relations are compiled independently of TaskCompiler.  The
         # helper is a no-op when the embedded critic is disabled, preserving
@@ -298,12 +327,18 @@ class SceneExpertPipeline:
 
             # 2a. Memory retrieval
             memory_pack: MemoryPack = self._retriever.retrieve(task_spec, stage)
+            relation_context = self._relation_projector.project(
+                stage=stage,
+                task_spec=task_spec,
+                intent_contract=_intent_contract,
+            )
 
             # 2b. Build harness context
             context = self._harness.build_context(
                 stage=stage,
                 task_spec=task_spec,
                 memory_pack=memory_pack,
+                relation_context=relation_context,
             )
 
             # 2c. Generate StageBrief in this legacy path.
@@ -315,7 +350,10 @@ class SceneExpertPipeline:
             if stage != "floor_plan":
                 try:
                     context = self._harness.build_context(
-                        stage=stage, task_spec=task_spec, memory_pack=memory_pack
+                        stage=stage,
+                        task_spec=task_spec,
+                        memory_pack=memory_pack,
+                        relation_context=relation_context,
                     )
                     stage_brief = self._global_planner.generate_stage_brief(
                         context=context,
@@ -327,6 +365,7 @@ class SceneExpertPipeline:
                         stage=stage,
                         task_spec=task_spec,
                         memory_pack=memory_pack,
+                        relation_context=relation_context,
                         stage_brief=stage_brief,
                     )
                 except Exception as e:
@@ -340,6 +379,9 @@ class SceneExpertPipeline:
                     f"[SceneExpert] Injected StageBrief for {stage}: "
                     f"{len(stage_brief.constraints_for_designer)} constraints"
                 )
+            enhanced_prompt = _append_relation_context(
+                enhanced_prompt, relation_context
+            )
 
             # 2e. Execute SceneSmith for this stage only
             stage_cfg_dict = self._build_stage_cfg_dict(
@@ -363,6 +405,10 @@ class SceneExpertPipeline:
                 trace_logger.log_stage(
                     stage=stage,
                     memory_pack=memory_pack,
+                    relation_context=relation_context,
+                    planner_trace=dict(
+                        getattr(self._global_planner, "last_trace", {}) or {}
+                    ),
                     stage_brief=stage_brief,
                     scene_state_path=_get_stage_output_dir(scene_dir, stage),
                     verify_report=None,
@@ -498,6 +544,10 @@ class SceneExpertPipeline:
             trace_logger.log_stage(
                 stage=stage,
                 memory_pack=memory_pack,
+                relation_context=relation_context,
+                planner_trace=dict(
+                    getattr(self._global_planner, "last_trace", {}) or {}
+                ),
                 stage_brief=stage_brief,
                 scene_state_path=stage_output_dir,
                 verify_report=verify_report if stage_reports else None,

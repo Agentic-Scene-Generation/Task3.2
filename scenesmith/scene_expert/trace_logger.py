@@ -19,6 +19,7 @@ from scenesmith.scene_expert.schemas import (
     RepairResult,
     StageBrief,
     StageCost,
+    StageRelationContext,
     StageTraceEntry,
     StageVerifyReport,
     SceneTaskSpec,
@@ -33,7 +34,7 @@ class TraceLogger:
     One TraceLogger instance per scene generation run.
     """
 
-    SCHEMA_VERSION = "1.2"
+    SCHEMA_VERSION = "1.3"
 
     def __init__(
         self,
@@ -72,13 +73,16 @@ class TraceLogger:
         self._task_compiler: dict = {}
         self._intent_compiler: dict = {}
 
-    def record_task_compiler(self, task_spec: SceneTaskSpec) -> Path:
+    def record_task_compiler(
+        self, task_spec: SceneTaskSpec, compiler_trace: dict | None = None
+    ) -> Path:
         """Persist the inventory-only TaskCompiler result."""
         self._task_compiler = {
             "compiler_status": task_spec.compiler_status,
             "failure_reason": task_spec.compiler_failure_reason,
             "compiler_spec_version": task_spec.compiler_spec_version,
             "task_spec": task_spec.model_dump(mode="json", exclude_none=True),
+            "structured_output": dict(compiler_trace or {}),
         }
         path = self._trace_debug_dir / "task_compiler.json"
         self._write_json(path, self._task_compiler)
@@ -97,6 +101,8 @@ class TraceLogger:
         self,
         stage: str,
         memory_pack: MemoryPack,
+        relation_context: StageRelationContext | None,
+        planner_trace: dict | None,
         stage_brief: StageBrief | None,
         scene_state_path: str,
         verify_report: StageVerifyReport | None,
@@ -111,6 +117,8 @@ class TraceLogger:
         entry = StageTraceEntry(
             stage=stage,
             memory_pack=memory_pack,
+            relation_context=relation_context,
+            planner_trace=dict(planner_trace or {}),
             stage_brief=stage_brief,
             scene_state_path=scene_state_path,
             verify_report=verify_report,
@@ -126,6 +134,7 @@ class TraceLogger:
         self,
         stage: str,
         memory_pack: MemoryPack,
+        relation_context: StageRelationContext | None,
         stage_brief: StageBrief | None,
         phase: str = "pre",
     ) -> Path:
@@ -138,6 +147,11 @@ class TraceLogger:
             "phase": phase,
             "time_sec": round(time.time() - self._start_time, 1),
             "memory_pack": memory_pack.model_dump(),
+            "relation_context": (
+                relation_context.model_dump(mode="json")
+                if relation_context is not None
+                else None
+            ),
             "stage_brief": stage_brief.model_dump() if stage_brief else None,
         }
         path = (

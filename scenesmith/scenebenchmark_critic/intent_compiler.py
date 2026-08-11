@@ -108,6 +108,47 @@ _RECOVERABLE_MISSING_TARGET_RELATIONS = frozenset(
     }
 )
 
+_FLANKING_GROUNDING_PATTERNS = (
+    re.compile(r"\bflank(?:s|ed|ing)?\b", re.IGNORECASE),
+    re.compile(
+        r"\b(?:on|at)\s+(?:each|either|both|opposite)\s+sides?\s+of\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:one|a|an)\b[^.;]{0,80}\b(?:left|one)\s+side\b"
+        r"[^.;]{0,120}\b(?:one|a|an)\b[^.;]{0,80}\b(?:right|other)\s+side\b",
+        re.IGNORECASE,
+    ),
+)
+
+
+def _validate_prompt_grounded_relations(
+    payload: dict[str, Any], prompt: str
+) -> dict[str, Any]:
+    """Reject relation-specific conventions that the prompt never states.
+
+    An inventory such as ``bed, two nightstands`` establishes counts, not a
+    bilateral layout.  TaskCompiler or HSSD may recommend that layout as soft
+    guidance, but the independent hard contract may emit ``flanking`` only
+    when the original prompt contains an explicit bilateral cue.
+    """
+    for constraint in payload.get("constraints") or []:
+        if not isinstance(constraint, dict):
+            continue
+        if str(constraint.get("relation") or "") != "flanking":
+            continue
+        evidence = " ".join(
+            str(value or "") for value in (constraint.get("evidence_span"), prompt)
+        )
+        if any(pattern.search(evidence) for pattern in _FLANKING_GROUNDING_PATTERNS):
+            continue
+        subject = str((constraint.get("subjects") or {}).get("category") or "object")
+        raise ValueError(
+            "flanking hard intent requires explicit bilateral wording in the "
+            f"original prompt for subject {subject!r}"
+        )
+    return payload
+
 
 def _selectors_semantically_overlap(
     first: dict[str, Any] | None, second: dict[str, Any] | None
@@ -482,6 +523,9 @@ class IntentCompiler:
                 payload["retry_count"] = attempt
                 payload = _normalize_side_distribution(payload)
                 payload, restored_targets = _restore_missing_target_selectors(
+                    payload, normalized_prompt
+                )
+                payload = _validate_prompt_grounded_relations(
                     payload, normalized_prompt
                 )
                 result = validate_intent_contract(payload)

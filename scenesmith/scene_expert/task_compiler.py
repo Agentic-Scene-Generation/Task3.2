@@ -611,6 +611,7 @@ class TaskCompiler:
             or os.environ.get("OPENAI_BASE_URL", "http://localhost:8000/v1"),
             api_key=api_key or os.environ.get("OPENAI_API_KEY", "dummy"),
         )
+        self.last_trace: dict = {}
 
     def compile(self, prompt: str) -> SceneTaskSpec:
         """Parse a raw text prompt into a SceneTaskSpec.
@@ -626,105 +627,148 @@ class TaskCompiler:
         """
         console_logger.info(f"TaskCompiler: compiling prompt: {prompt[:100]}...")
         user_message = f"Extract scene requirements from: {prompt}"
-        messages = [
-            {"role": "system", "content": _SYSTEM_PROMPT},
-            {"role": "user", "content": user_message},
-        ]
-        started_at = time.perf_counter()
-
-        try:
-            response = self._client.chat.completions.create(
-                model=self._model,
-                messages=messages,
-                temperature=self._temperature,
-                max_tokens=self._max_tokens,
-                extra_body=chat_template_kwargs_from_effort("none"),
-            )
-        except Exception as exc:
-            record = build_llm_call_debug_record(
-                stage="task_compiler",
-                agent_role="task_compiler",
-                event="compile",
-                prompt=messages,
-                error=f"{type(exc).__name__}: {exc}",
-            ).model_dump()
-            record.update(
-                {
-                    "input": messages,
-                    "output": "",
-                    "elapsed_sec": round(time.perf_counter() - started_at, 6),
-                    "status": "error",
+        attempts: list[dict] = []
+        previous_output = ""
+        validation_error = ""
+        for attempt in range(2):
+            messages = [
+                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "user", "content": user_message},
+            ]
+            if attempt:
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "The previous candidate failed validation. Return a corrected "
+                            "JSON object only.\nValidation error: "
+                            f"{validation_error}\nPrevious candidate:\n{previous_output}"
+                        ),
+                    }
+                )
+            started_at = time.perf_counter()
+            raw = ""
+            response = None
+            try:
+                response = self._client.chat.completions.create(
+                    model=self._model,
+                    messages=messages,
+                    temperature=self._temperature,
+                    max_tokens=self._max_tokens,
+                    response_format={
+                        "type": "json_schema",
+                        "json_schema": {
+                            "name": "scene_task_spec",
+                            "strict": True,
+                            "schema": SceneTaskSpec.model_json_schema(),
+                        },
+                    },
+                    extra_body=chat_template_kwargs_from_effort("none"),
+                )
+                message = response.choices[0].message
+                raw = message.content
+                if not raw:
+                    raw = getattr(message, "reasoning_content", None)
+                if not raw:
+                    extra = getattr(message, "model_extra", None)
+                    if isinstance(extra, dict):
+                        raw = extra.get("reasoning_content")
+                data = _extract_json_from_text(raw)
+                task_spec = _normalize_stage_ownership(
+                    SceneTaskSpec.model_validate(data), prompt=prompt
+                ).model_copy(
+                    update={"compiler_status": "ok", "compiler_failure_reason": ""}
+                )
+                attempts.append(
+                    {
+                        "attempt": attempt,
+                        "status": "ok",
+                        "elapsed_sec": round(time.perf_counter() - started_at, 6),
+                    }
+                )
+                self.last_trace = {
+                    "status": "ok",
+                    "attempts": attempts,
+                    "retry_count": attempt,
+                    "failure_reason": "",
                 }
-            )
-            _append_llm_debug(record)
-            fallback = _fallback_spec_from_prompt(prompt).model_copy(
-                update={"compiler_failure_reason": f"{type(exc).__name__}: {exc}"}
-            )
-            console_logger.warning(
-                "TaskCompiler model call failed; using deterministic contract: %s", exc
-            )
-            return fallback
+                record = build_llm_call_debug_record(
+                    stage="task_compiler",
+                    agent_role="task_compiler",
+                    event="compile",
+                    prompt=messages,
+                    output=raw or "",
+                    raw_response=response,
+                ).model_dump()
+                record.update(
+                    {
+                        "input": messages,
+                        "output": raw or "",
+                        "elapsed_sec": attempts[-1]["elapsed_sec"],
+                        "status": "ok",
+                        "attempt": attempt,
+                    }
+                )
+                usage = getattr(response, "usage", None)
+                if usage is not None:
+                    usage_payload = (
+                        usage.model_dump()
+                        if hasattr(usage, "model_dump")
+                        else vars(usage)
+                    )
+                    record["token_usage"] = {
+                        str(key): int(value)
+                        for key, value in usage_payload.items()
+                        if isinstance(value, int)
+                    }
+                _append_llm_debug(record)
+                return task_spec
+            except Exception as exc:
+                validation_error = f"{type(exc).__name__}: {exc}"
+                previous_output = raw
+                elapsed = round(time.perf_counter() - started_at, 6)
+                attempts.append(
+                    {
+                        "attempt": attempt,
+                        "status": "error",
+                        "error": validation_error,
+                        "elapsed_sec": elapsed,
+                    }
+                )
+                record = build_llm_call_debug_record(
+                    stage="task_compiler",
+                    agent_role="task_compiler",
+                    event="compile",
+                    prompt=messages,
+                    output=raw,
+                    raw_response=response,
+                    error=validation_error,
+                ).model_dump()
+                record.update(
+                    {
+                        "input": messages,
+                        "output": raw,
+                        "elapsed_sec": elapsed,
+                        "status": "error",
+                        "attempt": attempt,
+                    }
+                )
+                _append_llm_debug(record)
 
-        message = response.choices[0].message
-        raw = message.content
-        # Qwen3 with --reasoning-parser may put output in reasoning_content.
-        if not raw:
-            raw = getattr(message, "reasoning_content", None)
-        if not raw:
-            extra = getattr(message, "model_extra", None)
-            if isinstance(extra, dict):
-                raw = extra.get("reasoning_content")
-        console_logger.debug(f"TaskCompiler raw response: {raw}")
-        record = build_llm_call_debug_record(
-            stage="task_compiler",
-            agent_role="task_compiler",
-            event="compile",
-            prompt=messages,
-            output=raw or "",
-            raw_response=response,
-        ).model_dump()
-        record.update(
-            {
-                "input": messages,
-                "output": raw or "",
-                "elapsed_sec": round(time.perf_counter() - started_at, 6),
-                "status": "ok",
-            }
+        attempts.append(
+            {"attempt": 2, "status": "deterministic_fallback", "elapsed_sec": 0.0}
         )
-        usage = getattr(response, "usage", None)
-        if usage is not None:
-            usage_payload = (
-                usage.model_dump() if hasattr(usage, "model_dump") else vars(usage)
-            )
-            record["token_usage"] = {
-                str(key): int(value)
-                for key, value in usage_payload.items()
-                if isinstance(value, int)
-            }
-
-        try:
-            data = _extract_json_from_text(raw)
-            task_spec = _normalize_stage_ownership(
-                SceneTaskSpec.model_validate(data), prompt=prompt
-            ).model_copy(
-                update={"compiler_status": "ok", "compiler_failure_reason": ""}
-            )
-            _append_llm_debug(record)
-            console_logger.info(
-                f"TaskCompiler: room_type={task_spec.room_type}, style={task_spec.style}, "
-                f"large_objects={task_spec.required_large_objects}"
-            )
-            return task_spec
-        except Exception as e:
-            record["status"] = "error"
-            record["error"] = f"{type(e).__name__}: {e}"
-            _append_llm_debug(record)
-            fallback = _fallback_spec_from_prompt(prompt).model_copy(
-                update={"compiler_failure_reason": f"{type(e).__name__}: {e}"}
-            )
-            console_logger.warning(
-                "TaskCompiler output failed v3 validation; using deterministic "
-                "contract: %s",
-                e,
-            )
-            return fallback
+        self.last_trace = {
+            "status": "fallback",
+            "attempts": attempts,
+            "retry_count": 1,
+            "failure_reason": validation_error,
+        }
+        fallback = _fallback_spec_from_prompt(prompt).model_copy(
+            update={"compiler_failure_reason": validation_error}
+        )
+        console_logger.warning(
+            "TaskCompiler failed twice; using deterministic contract: %s",
+            validation_error,
+        )
+        return fallback

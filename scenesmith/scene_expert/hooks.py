@@ -36,12 +36,14 @@ from scenesmith.scene_expert.memory.schemas import FailureCase, SuccessCase
 from scenesmith.scene_expert.memory.text_builder import build_embedding_text
 from scenesmith.scene_expert.repair_controller import RepairController
 from scenesmith.scene_expert.repair_taxonomy import classify_hard_reasons
+from scenesmith.scene_expert.relation_context import StageRelationProjector
 from scenesmith.scene_expert.schemas import (
     FullVerifyReport,
     MemoryPack,
     RepairResult,
     SceneTaskSpec,
     StageBrief,
+    StageRelationContext,
     StageVerifyReport,
 )
 from scenesmith.scene_expert.task_compiler import TaskCompiler
@@ -206,13 +208,45 @@ def _format_memory_directives(memory_pack: MemoryPack) -> str:
     )
 
 
-def _format_intent_contract(contract: dict[str, Any]) -> str:
-    """Render the hard contract as a separate prompt block."""
+def _format_stage_relation_context(context: StageRelationContext) -> str:
+    """Render advisory priors first and the exact stage hard contract last."""
+    advisory = [item.model_dump(mode="json") for item in context.advisory_hssd_priors]
     return (
-        "=== SceneExpert Hard Intent Contract (authoritative) ===\n"
-        + json.dumps(contract, ensure_ascii=False, sort_keys=True)
+        "=== SceneExpert Advisory HSSD Relations (soft) ===\n"
+        + json.dumps(advisory, ensure_ascii=False, sort_keys=True)
+        + "\nThese priors must never override the authoritative intent below.\n"
+        + "=== End SceneExpert Advisory HSSD Relations ===\n\n"
+        + f"=== SceneExpert Hard Intent Contract: {context.stage} (authoritative) ===\n"
+        + json.dumps(context.hard_constraints, ensure_ascii=False, sort_keys=True)
         + "\n=== End SceneExpert Hard Intent Contract ==="
     )
+
+
+def _attach_stage_relation_context(
+    scene: Any,
+    *,
+    relation_context: StageRelationContext | None,
+    intent_contract: dict[str, Any] | None,
+    task_spec: SceneTaskSpec,
+) -> None:
+    """Inject only stage hard rows while retaining the full critic contract."""
+    if relation_context is not None:
+        relation_text = _format_stage_relation_context(relation_context)
+        scene.text_description = scene.text_description + "\n\n" + relation_text
+        setattr(
+            scene,
+            "scene_expert_relation_context",
+            relation_context.model_dump(mode="json"),
+        )
+    if intent_contract:
+        setattr(scene, "scene_expert_intent_contract", intent_contract)
+        setattr(scene, "scenebenchmark_intent_contract", intent_contract)
+        metadata = getattr(scene, "metadata", None)
+        if not isinstance(metadata, dict):
+            metadata = {}
+            setattr(scene, "metadata", metadata)
+        metadata["scenebenchmark_intent_contract"] = intent_contract
+    setattr(scene, "scene_expert_task_spec", task_spec.model_dump())
 
 
 def _build_hybrid_retriever(
@@ -561,6 +595,7 @@ class SceneExpertHookRunner:
         task_spec: SceneTaskSpec,
         harness: Harness,
         global_planner: GlobalPlanner,
+        relation_projector: StageRelationProjector,
         retriever: Any | None,
         stage_verifier: StageVerifier,
         full_verifier: FullVerifier,
@@ -573,6 +608,7 @@ class SceneExpertHookRunner:
         start_stage: str = "floor_plan",
         intent_contract: dict[str, Any] | None = None,
         intent_trace: dict[str, Any] | None = None,
+        task_compiler_trace: dict[str, Any] | None = None,
     ) -> None:
         self._prompt = prompt
         self._scene_id = scene_id
@@ -587,6 +623,7 @@ class SceneExpertHookRunner:
         self._task_spec = task_spec
         self._harness = harness
         self._global_planner = global_planner
+        self._relation_projector = relation_projector
         self._retriever = retriever
         self._stage_verifier = stage_verifier
         self._full_verifier = full_verifier
@@ -614,7 +651,7 @@ class SceneExpertHookRunner:
             experiment_name=experiment_name,
             config_hash=config_hash,
         )
-        self._trace_logger.record_task_compiler(task_spec)
+        self._trace_logger.record_task_compiler(task_spec, task_compiler_trace)
         if self._intent_trace:
             self._trace_logger.record_intent_compiler(self._intent_trace)
         self._stage_reports: list[StageVerifyReport] = []
@@ -625,6 +662,8 @@ class SceneExpertHookRunner:
         self._current_stage: str = ""
         self._current_memory_pack: MemoryPack = _empty_memory_pack()
         self._current_stage_brief: StageBrief | None = None
+        self._current_relation_context: StageRelationContext | None = None
+        self._current_planner_trace: dict[str, Any] = {}
         self._stage_start_time: float = 0.0
         # Original text_description per stage (so we can restore if needed)
         self._original_text_descriptions: dict[str, str] = {}
@@ -647,6 +686,7 @@ class SceneExpertHookRunner:
                 agent_role=agent_role,
                 event=event,
                 task_spec=self._task_spec,
+                relation_context=self._current_relation_context,
                 stage_brief=self._current_stage_brief,
                 scene=scene,
                 memory_pack=self._current_memory_pack,
@@ -916,7 +956,13 @@ class SceneExpertHookRunner:
         else:
             self._current_memory_pack = _empty_memory_pack()
 
+        self._current_relation_context = self._relation_projector.project(
+            stage=stage,
+            task_spec=self._task_spec,
+            intent_contract=self._intent_contract,
+        )
         self._current_stage_brief = None
+        self._current_planner_trace = {}
         if self._mode in ("harness_only", "harness_memory", "full"):
             try:
                 planner_start = time.time()
@@ -924,6 +970,7 @@ class SceneExpertHookRunner:
                     stage=stage,
                     task_spec=self._task_spec,
                     memory_pack=self._current_memory_pack,
+                    relation_context=self._current_relation_context,
                 )
                 self._current_stage_brief = self._global_planner.generate_stage_brief(
                     context=context,
@@ -934,7 +981,16 @@ class SceneExpertHookRunner:
                     self._current_stage_brief,
                     self._current_memory_pack,
                 )
-                self._qwen_calls += 1
+                self._current_planner_trace = dict(
+                    getattr(self._global_planner, "last_trace", {}) or {}
+                )
+                self._qwen_calls += len(
+                    [
+                        item
+                        for item in self._current_planner_trace.get("attempts", [])
+                        if int(item.get("attempt", 99)) < 2
+                    ]
+                )
                 console_logger.info(
                     f"[SceneExpert] StageBrief generated for {stage}: "
                     f"{len(self._current_stage_brief.constraints_for_designer)} constraints "
@@ -953,6 +1009,10 @@ class SceneExpertHookRunner:
             enhanced += "\n\n" + memory_directives
         if self._current_memory_pack.placement_reference:
             enhanced += "\n\n" + self._current_memory_pack.placement_reference
+        if self._current_relation_context is not None:
+            enhanced += "\n\n" + _format_stage_relation_context(
+                self._current_relation_context
+            )
         self._last_injected_floor_plan_prompt = enhanced
         self._save_context_bundle(
             stage=stage,
@@ -963,6 +1023,7 @@ class SceneExpertHookRunner:
         self._trace_logger.save_stage_context(
             stage=stage,
             memory_pack=self._current_memory_pack,
+            relation_context=self._current_relation_context,
             stage_brief=self._current_stage_brief,
             phase="pre",
         )
@@ -1032,6 +1093,8 @@ class SceneExpertHookRunner:
         self._trace_logger.log_stage(
             stage=stage,
             memory_pack=self._current_memory_pack,
+            relation_context=self._current_relation_context,
+            planner_trace=self._current_planner_trace,
             stage_brief=self._current_stage_brief,
             scene_state_path=str(scene_dir),
             verify_report=verify_report,
@@ -1042,6 +1105,7 @@ class SceneExpertHookRunner:
         self._trace_logger.save_stage_context(
             stage=stage,
             memory_pack=self._current_memory_pack,
+            relation_context=self._current_relation_context,
             stage_brief=self._current_stage_brief,
             phase="post",
         )
@@ -1114,7 +1178,14 @@ class SceneExpertHookRunner:
             self._current_memory_pack = _empty_memory_pack()
 
         # --- Step 2: Global Planner -> StageBrief ---
+        self._current_relation_context = self._relation_projector.project(
+            stage=stage,
+            task_spec=self._task_spec,
+            intent_contract=self._intent_contract,
+            scene=scene,
+        )
         self._current_stage_brief = None
+        self._current_planner_trace = {}
         if self._mode in ("harness_only", "harness_memory", "full"):
             try:
                 planner_start = time.time()
@@ -1123,6 +1194,7 @@ class SceneExpertHookRunner:
                     stage=stage,
                     task_spec=self._task_spec,
                     memory_pack=self._current_memory_pack,
+                    relation_context=self._current_relation_context,
                 )
                 self._current_stage_brief = self._global_planner.generate_stage_brief(
                     context=context,
@@ -1136,7 +1208,16 @@ class SceneExpertHookRunner:
                     self._current_stage_brief,
                     self._current_memory_pack,
                 )
-                self._qwen_calls += 1
+                self._current_planner_trace = dict(
+                    getattr(self._global_planner, "last_trace", {}) or {}
+                )
+                self._qwen_calls += len(
+                    [
+                        item
+                        for item in self._current_planner_trace.get("attempts", [])
+                        if int(item.get("attempt", 99)) < 2
+                    ]
+                )
                 console_logger.info(
                     f"[SceneExpert] StageBrief generated for {stage}: "
                     f"{len(self._current_stage_brief.constraints_for_designer)} constraints "
@@ -1181,18 +1262,12 @@ class SceneExpertHookRunner:
                 f"[SceneExpert] Injected placement reference for {stage} "
                 f"({placement_ref.count(chr(10))+1} lines)"
             )
-        if self._intent_contract:
-            intent_text = _format_intent_contract(self._intent_contract)
-            scene.text_description = scene.text_description + "\n\n" + intent_text
-            setattr(scene, "scene_expert_intent_contract", self._intent_contract)
-        setattr(scene, "scene_expert_task_spec", self._task_spec.model_dump())
-        if self._intent_contract:
-            setattr(scene, "scenebenchmark_intent_contract", self._intent_contract)
-            metadata = getattr(scene, "metadata", None)
-            if not isinstance(metadata, dict):
-                metadata = {}
-                setattr(scene, "metadata", metadata)
-            metadata["scenebenchmark_intent_contract"] = self._intent_contract
+        _attach_stage_relation_context(
+            scene,
+            relation_context=self._current_relation_context,
+            intent_contract=self._intent_contract,
+            task_spec=self._task_spec,
+        )
         setattr(scene, "scene_expert_stage", stage)
         self._save_context_bundle(
             stage=stage,
@@ -1204,6 +1279,7 @@ class SceneExpertHookRunner:
         self._trace_logger.save_stage_context(
             stage=stage,
             memory_pack=self._current_memory_pack,
+            relation_context=self._current_relation_context,
             stage_brief=self._current_stage_brief,
             phase="pre",
         )
@@ -1297,6 +1373,8 @@ class SceneExpertHookRunner:
         self._trace_logger.log_stage(
             stage=stage,
             memory_pack=self._current_memory_pack,
+            relation_context=self._current_relation_context,
+            planner_trace=self._current_planner_trace,
             stage_brief=self._current_stage_brief,
             scene_state_path=str(room_dir),
             verify_report=verify_report,
@@ -1307,6 +1385,7 @@ class SceneExpertHookRunner:
         self._trace_logger.save_stage_context(
             stage=stage,
             memory_pack=self._current_memory_pack,
+            relation_context=self._current_relation_context,
             stage_brief=self._current_stage_brief,
             phase="post",
         )
@@ -1726,6 +1805,26 @@ def build_hook_runner(
     harness.reset()
 
     global_planner = GlobalPlanner(model=model, api_base_url=api_base, api_key=api_key)
+    relation_cfg = _deep_merge_dicts(
+        root_se_cfg.get("hssd_relations", {}),
+        se_cfg.get("hssd_relations", {}),
+    )
+    relation_projector = StageRelationProjector(
+        lookup_path=relation_cfg.get(
+            "lookup_path",
+            str(
+                Path(__file__).resolve().parents[1]
+                / "scenebenchmark_critic"
+                / "asset_annotation_data"
+                / "hssd_annotation_lookup.json.gz"
+            ),
+        ),
+        confidence_threshold=_cfg_float(relation_cfg.get("confidence_threshold"), 0.80),
+        category_support_threshold=_cfg_float(
+            relation_cfg.get("category_support_threshold"), 0.80
+        ),
+        max_priors_per_stage=_cfg_int(relation_cfg.get("max_priors_per_stage"), 4),
+    )
     repair_controller = RepairController(memory_store=memory_store)
     start_stage = (
         cfg_dict.get("experiment", {})
@@ -1741,6 +1840,7 @@ def build_hook_runner(
         task_spec=task_spec,
         harness=harness,
         global_planner=global_planner,
+        relation_projector=relation_projector,
         retriever=retriever,
         stage_verifier=stage_verifier,
         full_verifier=full_verifier,
@@ -1753,4 +1853,5 @@ def build_hook_runner(
         start_stage=start_stage,
         intent_contract=intent_contract,
         intent_trace=intent_trace,
+        task_compiler_trace=dict(getattr(task_compiler, "last_trace", {}) or {}),
     )

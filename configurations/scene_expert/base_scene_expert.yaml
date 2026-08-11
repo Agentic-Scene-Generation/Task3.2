@@ -26,6 +26,12 @@ behavior:
   # assets explicitly found in the prompt are merged into SceneTaskSpec.
   inferred_assets_are_required: true
 
+# HSSD relation priors are soft planning hints and auxiliary critic evidence.
+hssd_relations:
+  confidence_threshold: 0.80
+  category_support_threshold: 0.80
+  max_priors_per_stage: 4
+
 # Memory system
 memory:
   # Directory for persistent memory storage (relative to project root)
