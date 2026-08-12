@@ -920,6 +920,56 @@ def test_clear_access_reports_when_entrance_cannot_reach_room_interior() -> None
     assert result["diagnostics"]["blocking_ids"] == ["cabinet_0"]
 
 
+def test_clear_access_normalizes_compiler_virtual_route_to_entrance_route() -> None:
+    case_pack = _entrance_to_room_case()
+    constraint = case_pack["intent_contract"]["constraints"][0]
+    constraint["subjects"] = {
+        "category": "route",
+        "count": 1,
+        "quantifier": "exactly",
+        "role": "circulation_path",
+    }
+    constraint["targets"] = {
+        "category": "entrance",
+        "count": 1,
+        "quantifier": "exactly",
+    }
+
+    result = evaluate_intent_contract_extensions(case_pack)[0]
+
+    assert result["label"] == "pass"
+    assert result["primary_object"] == "door_0"
+    assert result["related_objects"] == ["room"]
+    assert result["diagnostics"]["evaluation_mode"] == "entrance_route"
+
+
+def test_clear_access_virtual_route_still_reports_a_real_blocker() -> None:
+    blocker = _record(
+        "cabinet_0",
+        "cabinet",
+        (2.0, 2.5),
+        (0.3, 5.0, 1.2),
+    )
+    case_pack = _entrance_to_room_case(route_blocker=blocker)
+    constraint = case_pack["intent_contract"]["constraints"][0]
+    constraint["subjects"] = {
+        "category": "route",
+        "count": 1,
+        "quantifier": "exactly",
+        "role": "circulation_path",
+    }
+    constraint["targets"] = {
+        "category": "entrance",
+        "count": 1,
+        "quantifier": "exactly",
+    }
+
+    result = evaluate_intent_contract_extensions(case_pack)[0]
+
+    assert result["label"] == "fail"
+    assert result["diagnostics"]["blocking_ids"] == ["cabinet_0"]
+
+
 def test_clear_access_allows_a_hard_front_facing_functional_occupant() -> None:
     dressing_table = _record(
         "dressing_table_0",
@@ -1102,6 +1152,93 @@ def test_in_front_of_requires_clearance_for_both_object_footprints() -> None:
         0.48
     )
     assert clear["label"] == "pass"
+
+
+def _paired_workstation_axial_case(*, misplaced_chair: bool = False) -> dict:
+    desks = []
+    chairs = []
+    for index, x in enumerate((-3.0, -1.0, 1.0, 3.0)):
+        desks.append(
+            _record(
+                f"desk_{index}",
+                "desk",
+                (x, 0.0),
+                (1.2, 0.7, 0.75),
+                yaw_deg=0.0,
+            )
+        )
+        chair_x = x + (0.8 if misplaced_chair and index == 2 else 0.0)
+        chairs.append(
+            _record(
+                f"office_chair_{index}",
+                "office_chair",
+                (chair_x, 0.65),
+                (0.5, 0.5, 1.0),
+                yaw_deg=180.0,
+            )
+        )
+    selector_chairs = {
+        "category": "office_chair",
+        "count": 4,
+        "quantifier": "all",
+    }
+    selector_desks = {"category": "desk", "count": 4, "quantifier": "all"}
+    paired = {
+        "constraint_id": "paired_workstations",
+        "relation": "paired_with",
+        "subjects": selector_chairs,
+        "targets": selector_desks,
+        "source": "explicit_prompt",
+        "strength": "hard",
+        "evidence_span": "pair each desk with exactly one office chair",
+    }
+    in_front = {
+        "constraint_id": "chairs_in_front_of_desks",
+        "relation": "in_front_of",
+        "subjects": selector_chairs,
+        "targets": selector_desks,
+        "source": "explicit_prompt",
+        "strength": "hard",
+        "evidence_span": "each chair is in front of its paired desk",
+    }
+    return {
+        "stage": "furniture",
+        "room_type": "office",
+        "task_instruction": (
+            "An office with four desks. Pair each desk with exactly one office chair."
+        ),
+        "intent_contract": {"constraints": [paired, in_front]},
+        "scene_geometry": {
+            "rooms": [{"bbox": {"min": [-5.0, -2.0], "max": [5.0, 2.0]}}],
+            "objects": [*desks, *chairs],
+        },
+    }
+
+
+def test_in_front_of_evaluates_equal_workstation_groups_one_to_one() -> None:
+    results = evaluate_intent_contract_extensions(_paired_workstation_axial_case())
+    axial = [row for row in results if row["relation_type"] == "front_axis_alignment"]
+
+    assert len(axial) == 4
+    assert [row["label"] for row in axial] == ["pass"] * 4
+    assert {row["primary_object"] for row in axial} == {
+        f"office_chair_{index}" for index in range(4)
+    }
+    assert {row["diagnostics"]["group_pairing"] for row in axial} == {
+        "global_minimum_cost_one_to_one"
+    }
+
+
+def test_in_front_of_equal_workstation_group_keeps_strict_axis_failure() -> None:
+    results = evaluate_intent_contract_extensions(
+        _paired_workstation_axial_case(misplaced_chair=True)
+    )
+    axial = [row for row in results if row["relation_type"] == "front_axis_alignment"]
+    failed = [row for row in axial if row["label"] == "fail"]
+
+    assert len(axial) == 4
+    assert [row["primary_object"] for row in failed] == ["office_chair_2"]
+    assert failed[0]["diagnostics"]["lateral_offset_m"] == pytest.approx(0.8)
 
 
 def test_clear_access_keeps_unrelated_object_as_a_blocker() -> None:
@@ -1837,19 +1974,14 @@ def test_intent_compiler_enriches_explicit_wall_anchor_and_access_omitted_by_llm
         for row in result["constraints"]
         if row["relation"] == "against_wall"
     }
-    access_subjects = {
-        row["subjects"]["category"]
+    access_pairs = {
+        (row["subjects"]["category"], row["targets"]["category"])
         for row in result["constraints"]
         if row["relation"] == "clear_access"
     }
     assert {"storage_cabinet", "water_dispenser"} <= wall_anchors
-    assert {"storage_cabinet", "water_dispenser"} <= access_subjects
-    assert all(
-        row["targets"]["category"] == "room"
-        for row in result["constraints"]
-        if row["relation"] == "clear_access"
-        and row["subjects"]["category"] in {"storage_cabinet", "water_dispenser"}
-    )
+    assert ("entrance", "storage_cabinet") in access_pairs
+    assert ("water_dispenser", "room") in access_pairs
     assert {"against_wall", "clear_access"} <= {
         row["relation"] for row in compiler.last_trace["enriched_constraints"]
     }
@@ -2170,8 +2302,8 @@ def test_new_scene_prompts_compile_complete_deterministic_contracts() -> None:
     )
     assert any(
         row["relation"] == "clear_access"
-        and row["subjects"]["category"] == "storage_cabinet"
-        and row["targets"]["category"] == "room"
+        and row["subjects"]["category"] == "entrance"
+        and row["targets"]["category"] == "storage_cabinet"
         for row in living["constraints"]
     )
     component_counts = {

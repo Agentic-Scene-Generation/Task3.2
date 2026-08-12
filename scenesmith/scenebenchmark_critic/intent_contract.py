@@ -1869,12 +1869,6 @@ def _explicit_prompt_constraints(prompt: str, lowered: str) -> list[dict[str, An
             r"(?:clear|accessible)\b",
             re.IGNORECASE,
         ),
-        re.compile(
-            r"\b(?:without\s+blocking|while\s+(?:keeping|leaving))\s+"
-            r"(?:the\s+)?(?:clear\s+)?"
-            r"(?:circulation|traffic(?:\s+flow)?|walkway|access)\b",
-            re.IGNORECASE,
-        ),
     )
     for clause in clauses:
         if not any(pattern.search(clause) for pattern in local_access_patterns):
@@ -1887,6 +1881,26 @@ def _explicit_prompt_constraints(prompt: str, lowered: str) -> list[dict[str, An
                 "clear_access",
                 subject,
                 {"category": "room", "count": 1, "quantifier": "all"},
+                source="explicit_prompt",
+                evidence_span=clause,
+            )
+        )
+    global_circulation_pattern = re.compile(
+        r"\b(?:without\s+(?:blocking|obstructing)|while\s+(?:preserving|maintaining))\s+"
+        r"(?:the\s+)?(?:circulation|traffic(?:\s+flow)?|walkway|walking\s+path)\b",
+        re.IGNORECASE,
+    )
+    for clause in clauses:
+        if not global_circulation_pattern.search(clause):
+            continue
+        destination = selector_for_phrase(clause)
+        if destination is None:
+            continue
+        constraints.append(
+            _constraint(
+                "clear_access",
+                {"category": "entrance", "count": 1, "quantifier": "all"},
+                destination,
                 source="explicit_prompt",
                 evidence_span=clause,
             )

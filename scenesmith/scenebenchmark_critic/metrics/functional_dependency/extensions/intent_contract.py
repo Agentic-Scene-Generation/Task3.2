@@ -36,6 +36,27 @@ from scenesmith.scenebenchmark_critic.metrics.functional_dependency.semantics im
     _is_seating_subject,
     _is_work_surface_target,
 )
+from scenesmith.scenebenchmark_critic.metrics.functional_dependency.seat_surface_assignment import (
+    assign_work_seats_to_surfaces,
+    room_bounds_from_case_pack,
+)
+
+
+_ENTRANCE_CATEGORIES = frozenset({"door", "entrance", "entry"})
+_VIRTUAL_ROUTE_CATEGORIES = frozenset(
+    {
+        "access_route",
+        "circulation",
+        "circulation_path",
+        "entry_route",
+        "entrance_route",
+        "path",
+        "route",
+        "walking_path",
+        "walking_route",
+        "walkway",
+    }
+)
 
 
 def evaluate_intent_contract_extensions(
@@ -819,13 +840,27 @@ def _evaluate_axial_relation(
     target_is_existential = str(
         (constraint.get("targets") or {}).get("quantifier") or ""
     ) in {"at_least", "minimum"}
+    paired_targets: dict[str, str] = {}
+    if len(target_ids) > 1 and not target_is_existential:
+        paired_targets = _hard_paired_axial_targets(
+            case_pack,
+            constraint,
+            objects,
+            subject_ids,
+            target_ids,
+        )
     # Multiple universal targets remain ambiguous without explicit pairing.
     # For an existential target, geometry can select the best satisfying
-    # candidate without inventing a semantic identity.
+    # candidate without inventing a semantic identity. Equal work-seat groups
+    # reuse the globally resolved prompt-authorized one-to-one assignment.
     if (
         not subject_ids
         or not target_ids
-        or (len(target_ids) != 1 and not target_is_existential)
+        or (
+            len(target_ids) != 1
+            and not target_is_existential
+            and len(paired_targets) != len(subject_ids)
+        )
     ):
         return []
     by_id = {str(obj["id"]): obj for obj in objects}
@@ -837,9 +872,12 @@ def _evaluate_axial_relation(
         subject_center = bbox_center_xy(subject)
         if subject is None or subject_center is None:
             continue
+        candidate_target_ids = (
+            [paired_targets[subject_id]] if subject_id in paired_targets else target_ids
+        )
         candidates = [
             candidate
-            for target_id in target_ids
+            for target_id in candidate_target_ids
             if (
                 candidate := _axial_candidate(
                     subject,
@@ -896,7 +934,10 @@ def _evaluate_axial_relation(
             "lateral_offset_m": round(lateral_error, 6),
             "lateral_tolerance_m": round(lateral_tolerance, 6),
         }
-        if len(target_ids) > 1:
+        if paired_targets:
+            diagnostics["group_pairing"] = "global_minimum_cost_one_to_one"
+            diagnostics["paired_target_id"] = target_id
+        elif len(target_ids) > 1:
             diagnostics["candidate_target_ids"] = list(target_ids)
             diagnostics["existential_target_selection"] = True
         if repair_object_id is not None and repair_center is not None:
@@ -927,6 +968,62 @@ def _evaluate_axial_relation(
             )
         )
     return results
+
+
+def _hard_paired_axial_targets(
+    case_pack: dict[str, Any],
+    constraint: dict[str, Any],
+    objects: list[dict[str, Any]],
+    subject_ids: list[str],
+    target_ids: list[str],
+) -> dict[str, str]:
+    """Resolve an equal work-seat group only when the prompt authorizes pairing."""
+    if len(subject_ids) <= 1 or len(subject_ids) != len(target_ids):
+        return {}
+    by_id = {str(obj.get("id") or ""): obj for obj in objects}
+    if not all(_is_seating_subject(by_id.get(item) or {}) for item in subject_ids):
+        return {}
+    if not all(_is_work_surface_target(by_id.get(item)) for item in target_ids):
+        return {}
+
+    subject_set = set(subject_ids)
+    target_set = set(target_ids)
+    pairing_authorized = False
+    for pairing in contract_constraints(
+        case_pack,
+        relations=("paired_with",),
+        include_auxiliary=False,
+    ):
+        if str(pairing.get("strength") or "hard").lower() != "hard":
+            continue
+        pairing_subjects = set(bound_ids(pairing.get("subjects"), objects))
+        pairing_targets = set(bound_ids(pairing.get("targets"), objects))
+        if (pairing_subjects == subject_set and pairing_targets == target_set) or (
+            pairing_subjects == target_set and pairing_targets == subject_set
+        ):
+            pairing_authorized = True
+            break
+    if not pairing_authorized:
+        return {}
+
+    assignments = assign_work_seats_to_surfaces(
+        objects,
+        task_instruction=str(
+            case_pack.get("task_instruction")
+            or case_pack.get("original_task_instruction")
+            or ""
+        ),
+        room_type=str(case_pack.get("room_type") or ""),
+        room_bounds=room_bounds_from_case_pack(case_pack),
+    )
+    resolved = {
+        assignment.seat_id: assignment.surface_id
+        for assignment in assignments
+        if assignment.seat_id in subject_set and assignment.surface_id in target_set
+    }
+    if set(resolved) != subject_set or set(resolved.values()) != target_set:
+        return {}
+    return resolved
 
 
 def _axial_candidate(
@@ -1164,9 +1261,10 @@ def _binding_state_result(
     expected_stage = _constraint_stage(constraint)
     before_expected = STAGE_ORDER.index(stage) < STAGE_ORDER.index(expected_stage)
     subject_selector = constraint.get("subjects") or {}
-    entrance_route = relation == "clear_access" and str(
-        subject_selector.get("category") or ""
-    ) in {"door", "entrance", "entry"}
+    entrance_route = relation == "clear_access" and (
+        _is_entrance_selector(subject_selector)
+        or _is_virtual_route_selector(subject_selector)
+    )
     if entrance_route:
         subject_matches = [
             str(item.get("id") or item.get("opening_id") or "")
@@ -1192,7 +1290,15 @@ def _binding_state_result(
         "centered_on_wall",
         "on_wall",
     } and target_category in {"wall", *ROOM_RELATIVE_WALL_CATEGORIES}
-    if target_category in virtual_targets:
+    if (
+        _is_virtual_route_selector(subject_selector)
+        and _normalize_selector_category(target_category) in _ENTRANCE_CATEGORIES
+    ):
+        # Compiler-shaped ``route -> entrance`` describes connectivity from
+        # the entrance into the room. Neither endpoint is a generated object.
+        target_matches = ["room"]
+        target_ids = target_matches
+    elif target_category in virtual_targets:
         target_matches = [target_category]
         target_ids = target_matches
     elif positional_wall_target:
@@ -1762,13 +1868,47 @@ def _evaluate_clear_access(
     *,
     case_pack: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    if str((constraint.get("subjects") or {}).get("category") or "") in {
-        "door",
-        "entrance",
-        "entry",
-    }:
+    subject_selector = constraint.get("subjects") or {}
+    if _is_entrance_selector(subject_selector):
         return _evaluate_entrance_routes(
             constraint,
+            objects,
+            tier,
+            geometry=geometry or {},
+        )
+    if _is_virtual_route_selector(subject_selector):
+        normalized = dict(constraint)
+        normalized["subjects"] = {
+            "category": "entrance",
+            "count": 1,
+            "quantifier": "all",
+        }
+        target_selector = constraint.get("targets") or {}
+        if (
+            _normalize_selector_category(target_selector.get("category"))
+            in _ENTRANCE_CATEGORIES
+        ):
+            normalized["targets"] = {
+                "category": "room",
+                "count": 1,
+                "quantifier": "all",
+            }
+        return _evaluate_entrance_routes(
+            normalized,
+            objects,
+            tier,
+            geometry=geometry or {},
+        )
+    if _requests_global_circulation(constraint):
+        normalized = dict(constraint)
+        normalized["subjects"] = {
+            "category": "entrance",
+            "count": 1,
+            "quantifier": "all",
+        }
+        normalized["targets"] = dict(subject_selector)
+        return _evaluate_entrance_routes(
+            normalized,
             objects,
             tier,
             geometry=geometry or {},
@@ -1855,6 +1995,33 @@ def _evaluate_clear_access(
             )
         )
     return results
+
+
+def _is_entrance_selector(selector: dict[str, Any]) -> bool:
+    return (
+        _normalize_selector_category(selector.get("category")) in _ENTRANCE_CATEGORIES
+    )
+
+
+def _is_virtual_route_selector(selector: dict[str, Any]) -> bool:
+    category = _normalize_selector_category(selector.get("category"))
+    role = str(selector.get("role") or "").strip().lower().replace("-", "_")
+    return category in _VIRTUAL_ROUTE_CATEGORIES or role in {
+        "access_route",
+        "circulation_path",
+        "walking_route",
+    }
+
+
+def _requests_global_circulation(constraint: dict[str, Any]) -> bool:
+    evidence = str(constraint.get("evidence_span") or "").lower()
+    return bool(
+        re.search(
+            r"\b(?:without\s+(?:blocking|obstructing)|while\s+(?:preserving|maintaining))\s+"
+            r"(?:the\s+)?(?:circulation|traffic(?:\s+flow)?|walkway|walking\s+path)\b",
+            evidence,
+        )
+    )
 
 
 def _authorized_clear_access_occupants(
