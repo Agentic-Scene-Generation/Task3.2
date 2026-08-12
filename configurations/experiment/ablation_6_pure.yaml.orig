@@ -19,15 +19,4 @@ scene_expert:
       max_repair_steps: 2
   verifier:
     stage_pass_threshold: 0.6
-
-# Pure baseline: no external rule critic or post-generation scene repair.
-scenebenchmark_critic:
-  enabled: false
-  inject_into_llm_critic: false
-
-projection:
-  enabled: false
-
-furniture_final_guards:
-  enabled: false
     full_pass_threshold: 0.7
