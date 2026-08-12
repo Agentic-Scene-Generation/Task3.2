@@ -567,20 +567,25 @@ def _pair_assignment(
         if room_bounds is None
         or _slot_fits_room(seat, option[1], option[2], room_bounds)
     ]
-    if valid_options:
+    if room_bounds is not None:
+        # A desk's intended usable side can be close to a room boundary.  The
+        # nominal clearance slot may then fall just outside the room although
+        # a chair already fits on that same side.  Keep a clamped variant of
+        # every rejected side so assignment does not flip the chair across the
+        # desk merely because the opposite side has more free space.
+        clamped_options: list[tuple[float, tuple[float, float], float, str]] = []
+        for cost, slot, yaw, side in options:
+            if _slot_fits_room(seat, slot, yaw, room_bounds):
+                continue
+            clamped_slot = _clamp_slot_to_room(seat, slot, yaw, room_bounds)
+            clamped_cost = math.hypot(
+                clamped_slot[0] - seat_center[0],
+                clamped_slot[1] - seat_center[1],
+            ) + 0.0025 * _yaw_distance_deg(float(seat.get("yaw_deg") or 0.0), yaw)
+            clamped_options.append((clamped_cost, clamped_slot, yaw, side))
+        options = [*valid_options, *clamped_options]
+    elif valid_options:
         options = valid_options
-    elif room_bounds is not None:
-        # Keep an assignment available for malformed/tiny rooms, but never
-        # expose a target center outside the usable room rectangle.
-        options = [
-            (
-                cost,
-                _clamp_slot_to_room(seat, slot, yaw, room_bounds),
-                yaw,
-                side,
-            )
-            for cost, slot, yaw, side in options
-        ]
     cost, slot, yaw, side = min(options, key=lambda item: (item[0], item[3]))
 
     subject_role = _indexed_role(seat)
@@ -740,7 +745,10 @@ def _extent_along(obj: dict[str, Any], axis: tuple[float, float]) -> float:
 
 
 def _yaw_for_front(vector: tuple[float, float]) -> float:
-    return math.degrees(math.atan2(-vector[0], vector[1])) % 360.0
+    yaw = math.degrees(math.atan2(-vector[0], vector[1]))
+    # atan2 can return a tiny negative value for an axis-aligned vector. Keep
+    # target poses canonical so semantic 0° is not emitted as 360°.
+    return (yaw + 180.0) % 360.0 - 180.0
 
 
 def _yaw_distance_deg(first: float, second: float) -> float:
