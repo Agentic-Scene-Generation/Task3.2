@@ -1,0 +1,10 @@
+--- scenesmith/utils/openai.py
++++ scenesmith/utils/openai.py
+@@ -620,6 +620,7 @@ async def _persist_response_async(
+     except Exception as exc:
+         console_logger.warning("Reasoning persistence hook failed: %s", exc)
+ 
+ 
++
+ _TRANSIENT_OPENAI_STATUS_CODES = frozenset({502, 503, 524})
+ _TRANSIENT_RETRY_DELAYS_ENV = "SCENEEXPERT_OPENAI_TRANSIENT_RETRY_DELAYS"
