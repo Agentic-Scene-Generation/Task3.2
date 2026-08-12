@@ -27,6 +27,15 @@ class TestSceneTaskIsolation(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary_directory.cleanup()
 
+    def test_gateway_failures_are_retryable(self) -> None:
+        for status_code in (502, 503, 524):
+            with self.subTest(status_code=status_code):
+                self.assertTrue(
+                    scene_generation._is_retryable_scene_failure(
+                        f"Error code: {status_code} - upstream failure"
+                    )
+                )
+
     def test_native_crash_is_archived_and_retried(self) -> None:
         call_count = 0
 
@@ -164,9 +173,7 @@ class TestWorkerReasoningPersistenceBootstrap(unittest.TestCase):
                 {"OPENAI_BASE_URL": "http://127.0.0.1:8002/v1"},
             ),
         ):
-            scene_generation._configure_reasoning_persistence_for_worker(
-                self.cfg_dict
-            )
+            scene_generation._configure_reasoning_persistence_for_worker(self.cfg_dict)
 
         configure.assert_called_once_with(
             enabled=True,
