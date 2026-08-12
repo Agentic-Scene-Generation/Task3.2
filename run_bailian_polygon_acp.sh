@@ -1,30 +1,37 @@
 #!/usr/bin/env bash
-# Batch ACP test for Qwen furniture context images in single-room polygon mode.
+# Batch ACP test for Bailian furniture context images in single-room polygon mode.
 #
-# GPU allocation:
-#   GPU 0: Qwen llama-server, embedding service, SceneSmith rendering/collision
-#   GPU 1: one persistent Qwen-Image-Edit sidecar
+# GPU allocation (single H100 80GB):
+#   GPU 0: Qwen llama-server, embedding service, SceneSmith rendering/collision, GroundingDINO
 #
-# Default usage inside a two-GPU ACP task:
+# Default usage inside a single-GPU ACP task:
 #   cd /mnt/afs/visitor33/Task3.2
-#   bash run_parallel_furniture_context_polygon_acp.sh
+#   bash run_bailian_polygon_acp.sh
+#
+# Useful overrides:
+#   MAX_CASES=5 bash run_bailian_polygon_acp.sh
+#   PIPELINE_STOP_STAGE=furniture bash run_bailian_polygon_acp.sh
 
 set -Eeuo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PARALLEL_LAUNCHER="$PROJECT_ROOT/run_parallel_rooms_no_shared_base.sh"
-QWEN_IMAGE_LAUNCHER="$PROJECT_ROOT/scripts/start_qwen_image_edit_server.sh"
+GROUNDING_LAUNCHER="$PROJECT_ROOT/scripts/start_grounding_dino_server.sh"
 
 SCENESMITH_GPU="${SCENESMITH_GPU:-0}"
-QWEN_IMAGE_EDIT_GPU="${QWEN_IMAGE_EDIT_GPU:-1}"
-SCENE_CONCURRENCY="${SCENE_CONCURRENCY:-1}"
-PIPELINE_STOP_STAGE="${PIPELINE_STOP_STAGE:-furniture}"
+GROUNDING_DINO_GPU="${GROUNDING_DINO_GPU:-0}"
+SCENE_CONCURRENCY="${SCENE_CONCURRENCY:-2}"
+PIPELINE_STOP_STAGE="${PIPELINE_STOP_STAGE:-manipuland}"
 FURNITURE_DESIGNER_THINKING="${FURNITURE_DESIGNER_THINKING:-high}"
 FURNITURE_CRITIC_THINKING="${FURNITURE_CRITIC_THINKING:-low}"
-STOP_QWEN_IMAGE_EDIT_ON_EXIT="${STOP_QWEN_IMAGE_EDIT_ON_EXIT:-true}"
-RUN_ID="${RUN_ID:-furniture_context_polygon_$(date +%Y%m%d_%H%M%S)}"
-CASES_DIR="${CASES_DIR:-$PROJECT_ROOT/tmp/acp_furniture_context_polygon/$RUN_ID}"
+STOP_GROUNDING_DINO_ON_EXIT="${STOP_GROUNDING_DINO_ON_EXIT:-true}"
+RUN_ID="${RUN_ID:-bailian_polygon_acp_$(date +%Y%m%d_%H%M%S)}"
+CASES_DIR="${CASES_DIR:-$PROJECT_ROOT/tmp/acp_bailian_polygon/$RUN_ID}"
 CASES_FILE="$CASES_DIR/polygon_furniture_cases.tsv"
+GROUNDING_DINO_PORT="${GROUNDING_DINO_PORT:-18030}"
+GROUNDING_BASE_URL="http://127.0.0.1:${GROUNDING_DINO_PORT}"
+BAILIAN_IMAGE_MODEL="${BAILIAN_IMAGE_MODEL:-wan2.7-image-pro}"
+BAILIAN_CREDENTIALS_FILE="${BAILIAN_CREDENTIALS_FILE:-/mnt/afs/visitor33/bailian.json}"
 
 # Each prompt specifies one simple polygon in counter-clockwise boundary order.
 # The explicit outside regions make it easier to audit whether floor-plan,
@@ -39,11 +46,9 @@ POLYGON_CASES=(
     $'polygon_cross_maker_hub\tCross-shaped maker hub: test four wings, concave corners, and a shared circulation core\tCreate exactly one cross-shaped maker hub using these ordered floor-boundary vertices in meters: [[3,0],[9,0],[9,3],[12,3],[12,8],[9,8],[9,11],[3,11],[3,8],[0,8],[0,3],[3,3]]. Preserve the exact cross footprint and all eight concave/convex transitions; do not fill the four missing corner rectangles of the 12 m by 11 m bounding box. Add a main door and windows only on actual polygon boundary edges. Put two project tables with eight stools in the center, two worktables with six stools and two tool cabinets in the south wing, a review table with six chairs and two display cabinets in the north wing, three shelving units and three storage cabinets in the west wing, and two desks with office chairs, one sofa, four lounge chairs, two coffee tables, three drawer cabinets, and four plants in the east wing. Keep the central crossing and all four wing approaches clear, with every complete furniture footprint inside the polygon.'
 )
 
-if [ -z "${MAX_CASES:-}" ]; then
-    MAX_CASES="${#POLYGON_CASES[@]}"
-fi
+MAX_CASES="${MAX_CASES:-3}"
 
-QWEN_STARTED_BY_THIS_SCRIPT=false
+GROUNDING_STARTED_BY_THIS_SCRIPT=false
 cleanup_started=false
 
 normalize_bool() {
@@ -54,6 +59,26 @@ normalize_bool() {
     esac
 }
 
+load_bailian_api_key() {
+    # An explicitly supplied environment variable takes precedence; otherwise
+    # read the credential once from the local JSON file without printing it.
+    if [ -n "${BAILIAN_API_KEY:-}" ]; then
+        return
+    fi
+    if [ ! -r "$BAILIAN_CREDENTIALS_FILE" ]; then
+        echo "[ERROR] Bailian credentials file is not readable: $BAILIAN_CREDENTIALS_FILE" >&2
+        exit 1
+    fi
+    if ! command -v jq >/dev/null 2>&1; then
+        echo "[ERROR] jq is required to read BAILIAN_CREDENTIALS_FILE" >&2
+        exit 1
+    fi
+    if ! BAILIAN_API_KEY="$(jq -er '.OPENAI_API_KEY | select(type == "string" and length > 0)' "$BAILIAN_CREDENTIALS_FILE")"; then
+        echo "[ERROR] BAILIAN_CREDENTIALS_FILE must contain a non-empty OPENAI_API_KEY" >&2
+        exit 1
+    fi
+}
+
 cleanup() {
     local exit_code=$?
     if [ "$cleanup_started" = "true" ]; then
@@ -61,10 +86,10 @@ cleanup() {
     fi
     cleanup_started=true
     trap - EXIT INT TERM HUP
-    if [ "$QWEN_STARTED_BY_THIS_SCRIPT" = "true" ] \
-        && [ "$STOP_QWEN_IMAGE_EDIT_ON_EXIT" = "true" ]; then
-        echo "[CLEANUP] stopping Qwen-Image-Edit started by this ACP job"
-        bash "$QWEN_IMAGE_LAUNCHER" --stop || true
+    if [ "$GROUNDING_STARTED_BY_THIS_SCRIPT" = "true" ] \
+        && [ "$STOP_GROUNDING_DINO_ON_EXIT" = "true" ]; then
+        echo "[CLEANUP] stopping GroundingDINO started by this ACP job"
+        bash "$GROUNDING_LAUNCHER" --stop || true
     fi
     exit "$exit_code"
 }
@@ -74,8 +99,8 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 129' HUP
 
-if ! STOP_QWEN_IMAGE_EDIT_ON_EXIT="$(normalize_bool "$STOP_QWEN_IMAGE_EDIT_ON_EXIT")"; then
-    echo "[ERROR] STOP_QWEN_IMAGE_EDIT_ON_EXIT must be true or false" >&2
+if ! STOP_GROUNDING_DINO_ON_EXIT="$(normalize_bool "$STOP_GROUNDING_DINO_ON_EXIT")"; then
+    echo "[ERROR] STOP_GROUNDING_DINO_ON_EXIT must be true or false" >&2
     exit 2
 fi
 for integer_setting in SCENE_CONCURRENCY MAX_CASES; do
@@ -96,55 +121,75 @@ case "$PIPELINE_STOP_STAGE" in
         exit 2
         ;;
 esac
-for required_file in "$PARALLEL_LAUNCHER" "$QWEN_IMAGE_LAUNCHER"; do
+for required_file in "$PARALLEL_LAUNCHER" "$GROUNDING_LAUNCHER"; do
     if [ ! -f "$required_file" ]; then
         echo "[ERROR] required launcher not found: $required_file" >&2
         exit 1
     fi
 done
 if ! command -v nvidia-smi >/dev/null 2>&1; then
-    echo "[ERROR] nvidia-smi is unavailable; run inside a two-GPU ACP task" >&2
+    echo "[ERROR] nvidia-smi is unavailable; run inside an ACP task with GPU" >&2
     exit 1
 fi
 VISIBLE_GPU_COUNT="$(nvidia-smi -L | wc -l | tr -d '[:space:]')"
-if [ "$VISIBLE_GPU_COUNT" -lt 2 ]; then
-    echo "[ERROR] this test requires at least two visible GPUs; found $VISIBLE_GPU_COUNT" >&2
+if [ "$VISIBLE_GPU_COUNT" -lt 1 ]; then
+    echo "[ERROR] this test requires at least one visible GPU; found $VISIBLE_GPU_COUNT" >&2
     exit 1
 fi
 
+load_bailian_api_key
+# Validate Bailian API key
+if [ -z "${BAILIAN_API_KEY:-}" ]; then
+    echo "[ERROR] BAILIAN_API_KEY environment variable is required" >&2
+    exit 1
+fi
+export BAILIAN_API_KEY BAILIAN_IMAGE_MODEL
+
+# Dummy OKCODEX_API_KEY for config parsing compatibility
+export OKCODEX_API_KEY="${OKCODEX_API_KEY:-dummy}"
+
 mkdir -p "$CASES_DIR"
 : > "$CASES_FILE"
-for case_row in "${POLYGON_CASES[@]}"; do
+for case_row in "${POLYGON_CASES[@]:0:$MAX_CASES}"; do
     printf '%s\n' "$case_row" >> "$CASES_FILE"
 done
 
-echo "========== ACP POLYGON FURNITURE CONTEXT TEST =========="
+echo "========== ACP BAILIAN POLYGON FURNITURE CONTEXT TEST =========="
 echo "run id:                     $RUN_ID"
 echo "visible GPUs:                $VISIBLE_GPU_COUNT"
 echo "SceneSmith/LLM GPU:          $SCENESMITH_GPU"
-echo "Qwen-Image-Edit GPU:         $QWEN_IMAGE_EDIT_GPU"
+echo "GroundingDINO GPU:           $GROUNDING_DINO_GPU"
 echo "scene concurrency:           $SCENE_CONCURRENCY"
 echo "selected polygon cases:      $MAX_CASES / ${#POLYGON_CASES[@]}"
 echo "pipeline stop stage:         $PIPELINE_STOP_STAGE"
 echo "floor plan mode:             polygon"
 echo "placement-order reference:   disabled"
-echo "context image backend:       qwen_local"
+echo "context image backend:       bailian"
+echo "bailian model:               ${BAILIAN_IMAGE_MODEL:-wan2.7-image-pro}"
+echo "grounded layout:             ${FURNITURE_GROUNDED_LAYOUT_ENABLED:-true}"
 echo "cases file:                  $CASES_FILE"
 echo "output:                      $PROJECT_ROOT/outputs/critic_probe/$RUN_ID"
-echo "========================================================="
+echo "================================================================="
+echo "selected prompts:"
+while IFS=$'\t' read -r selected_case_id selected_goal _; do
+    printf '  - %s: %s\n' "$selected_case_id" "$selected_goal"
+done < "$CASES_FILE"
 
-if curl -fsS --max-time 2 "http://127.0.0.1:18020/ready" \
+# Start GroundingDINO service if not already running
+if curl -fsS --max-time 2 "$GROUNDING_BASE_URL/health" 2>/dev/null \
     | grep -Fq '"ready":true'; then
-    echo "[QWEN IMAGE] reusing ready service on port 18020"
+    echo "[GROUNDING] reusing ready service: $GROUNDING_BASE_URL"
 else
-    echo "[QWEN IMAGE] starting one persistent worker on GPU $QWEN_IMAGE_EDIT_GPU"
-    QWEN_IMAGE_EDIT_CUDA_VISIBLE_DEVICES="$QWEN_IMAGE_EDIT_GPU" \
-        QWEN_IMAGE_EDIT_STARTUP_TIMEOUT_SECONDS="${QWEN_IMAGE_EDIT_STARTUP_TIMEOUT_SECONDS:-900}" \
-        bash "$QWEN_IMAGE_LAUNCHER" --background
-    QWEN_STARTED_BY_THIS_SCRIPT=true
+    echo "[GROUNDING] starting on GPU $GROUNDING_DINO_GPU"
+    GROUNDING_DINO_GPU_ID="$GROUNDING_DINO_GPU" \
+    GROUNDING_DINO_PORT="$GROUNDING_DINO_PORT" \
+        bash "$GROUNDING_LAUNCHER" --background
+    GROUNDING_STARTED_BY_THIS_SCRIPT=true
 fi
 
-echo "[SCENES] starting polygon furniture batch"
+echo "[BAILIAN] Using Bailian API backend, skipping Qwen-Image-Edit service"
+echo "[SCENES] starting polygon furniture batch with Bailian image generation"
+
 CUDA_VISIBLE_DEVICES="$SCENESMITH_GPU" \
 LLAMA_CUDA_VISIBLE_DEVICES="$SCENESMITH_GPU" \
 SCENE_CONCURRENCY="$SCENE_CONCURRENCY" \
@@ -154,15 +199,14 @@ CRITIC_PROBE_CASES_FILE="$CASES_FILE" \
 FLOOR_PLAN_MODE=polygon \
 FURNITURE_PLACEMENT_ORDER_ENABLED=false \
 FURNITURE_CONTEXT_IMAGE_GENERATION_ENABLED=true \
-FURNITURE_CONTEXT_IMAGE_GENERATION_BACKEND=qwen_local \
+FURNITURE_CONTEXT_IMAGE_GENERATION_BACKEND=bailian \
 FURNITURE_GROUNDED_LAYOUT_ENABLED="${FURNITURE_GROUNDED_LAYOUT_ENABLED:-true}" \
-FURNITURE_GROUNDED_LAYOUT_BASE_URL="${FURNITURE_GROUNDED_LAYOUT_BASE_URL:-http://127.0.0.1:18030}" \
-QWEN_IMAGE_EDIT_BASE_URL="${QWEN_IMAGE_EDIT_BASE_URL:-http://127.0.0.1:18020/v1}" \
+FURNITURE_GROUNDED_LAYOUT_BASE_URL="$GROUNDING_BASE_URL" \
 PIPELINE_STOP_STAGE="$PIPELINE_STOP_STAGE" \
 FURNITURE_DESIGNER_THINKING="$FURNITURE_DESIGNER_THINKING" \
 FURNITURE_CRITIC_THINKING="$FURNITURE_CRITIC_THINKING" \
 FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS="${FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS:-false}" \
 bash "$PARALLEL_LAUNCHER"
 
-echo "[OK] polygon furniture ACP batch completed"
+echo "[OK] Bailian polygon ACP batch completed"
 echo "[OK] output: $PROJECT_ROOT/outputs/critic_probe/$RUN_ID"

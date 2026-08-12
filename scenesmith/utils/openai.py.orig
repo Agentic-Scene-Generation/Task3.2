@@ -3,11 +3,9 @@ import base64
 import contextvars
 import json
 import logging
-import os
 import re
 import sqlite3
 import threading
-import time
 
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -620,85 +618,6 @@ async def _persist_response_async(
     except Exception as exc:
         console_logger.warning("Reasoning persistence hook failed: %s", exc)
 
-_TRANSIENT_OPENAI_STATUS_CODES = frozenset({502, 503, 524})
-_TRANSIENT_RETRY_DELAYS_ENV = "SCENEEXPERT_OPENAI_TRANSIENT_RETRY_DELAYS"
-
-
-def _configured_transient_retry_delays() -> tuple[float, ...]:
-    """Read opt-in retry delays for transient OpenAI-compatible API failures."""
-    raw = os.environ.get(_TRANSIENT_RETRY_DELAYS_ENV, "").strip()
-    if not raw:
-        return ()
-
-    try:
-        delays = tuple(float(value.strip()) for value in raw.split(","))
-        if not delays or any(delay < 0 for delay in delays):
-            raise ValueError
-    except ValueError:
-        console_logger.warning(
-            "Ignoring invalid %s=%r; expected comma-separated non-negative seconds",
-            _TRANSIENT_RETRY_DELAYS_ENV,
-            raw,
-        )
-        return ()
-    return delays
-
-
-def _exception_status_code(exc: Exception) -> int | None:
-    status_code = getattr(exc, "status_code", None)
-    if status_code is None:
-        status_code = getattr(getattr(exc, "response", None), "status_code", None)
-    try:
-        return int(status_code) if status_code is not None else None
-    except (TypeError, ValueError):
-        return None
-
-
-def _call_with_transient_retries(operation: Any) -> Any:
-    delays = _configured_transient_retry_delays()
-    for attempt in range(len(delays) + 1):
-        try:
-            return operation()
-        except Exception as exc:
-            status_code = _exception_status_code(exc)
-            if status_code not in _TRANSIENT_OPENAI_STATUS_CODES or attempt >= len(
-                delays
-            ):
-                raise
-            delay = delays[attempt]
-            console_logger.warning(
-                "OpenAI request returned HTTP %s; retrying in %g seconds (%d/%d)",
-                status_code,
-                delay,
-                attempt + 1,
-                len(delays),
-            )
-            time.sleep(delay)
-    raise AssertionError("unreachable")
-
-
-async def _call_with_transient_retries_async(operation: Any) -> Any:
-    delays = _configured_transient_retry_delays()
-    for attempt in range(len(delays) + 1):
-        try:
-            return await operation()
-        except Exception as exc:
-            status_code = _exception_status_code(exc)
-            if status_code not in _TRANSIENT_OPENAI_STATUS_CODES or attempt >= len(
-                delays
-            ):
-                raise
-            delay = delays[attempt]
-            console_logger.warning(
-                "OpenAI request returned HTTP %s; retrying in %g seconds (%d/%d)",
-                status_code,
-                delay,
-                attempt + 1,
-                len(delays),
-            )
-            await asyncio.sleep(delay)
-    raise AssertionError("unreachable")
-
 
 class _SyncCompletionsWrapper:
     def __init__(
@@ -713,9 +632,7 @@ class _SyncCompletionsWrapper:
         self._capture_online = capture_online
 
     def create(self, *args: Any, **kwargs: Any) -> Any:
-        response = _call_with_transient_retries(
-            lambda: self._completions.create(*args, **kwargs)
-        )
+        response = self._completions.create(*args, **kwargs)
         _persist_response_sync(
             response,
             api_kind="chat",
@@ -741,9 +658,7 @@ class _AsyncCompletionsWrapper:
         self._capture_online = capture_online
 
     async def create(self, *args: Any, **kwargs: Any) -> Any:
-        response = await _call_with_transient_retries_async(
-            lambda: self._completions.create(*args, **kwargs)
-        )
+        response = await self._completions.create(*args, **kwargs)
         await _persist_response_async(
             response,
             api_kind="chat",
@@ -792,9 +707,7 @@ class _SyncResponsesWrapper:
         self._capture_online = capture_online
 
     def create(self, *args: Any, **kwargs: Any) -> Any:
-        response = _call_with_transient_retries(
-            lambda: self._responses.create(*args, **kwargs)
-        )
+        response = self._responses.create(*args, **kwargs)
         _persist_response_sync(
             response,
             api_kind="responses",
@@ -820,9 +733,7 @@ class _AsyncResponsesWrapper:
         self._capture_online = capture_online
 
     async def create(self, *args: Any, **kwargs: Any) -> Any:
-        response = await _call_with_transient_retries_async(
-            lambda: self._responses.create(*args, **kwargs)
-        )
+        response = await self._responses.create(*args, **kwargs)
         await _persist_response_async(
             response,
             api_kind="responses",

@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+# Pure dense room ACP run: OKCodex GPT-5.5, SceneBenchmark critic on, SceneExpert and repair passes off.
+# Local Qwen3.6-27B is disabled; local Qwen3-VL embedding remains enabled.
+#
+# Usage:
+#   cd /mnt/afs/visitor33/Task3.2
+#   MAX_CASES=3 PIPELINE_STOP_STAGE=furniture bash ./run_aijws_gpt55_pure_room_dense_acp.sh
+set -Eeuo pipefail
+
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DENSE_RUNNER="$PROJECT_ROOT/run_openrouter_room_dense_acp.sh"
+PROXY_STARTER="$PROJECT_ROOT/start_openrouter_proxy.sh"
+OKCODEX_KEY_FILE="${OKCODEX_KEY_FILE:-/mnt/afs/visitor33/apikeys/okcodex2.json}"
+OKCODEX_BASE_URL="${OKCODEX_BASE_URL:-https://api.okcodex.cn}"
+OKCODEX_MODEL="${OKCODEX_MODEL:-gpt-5.5}"
+
+if [ ! -f "$DENSE_RUNNER" ]; then
+    echo "[ERROR] dense room runner is missing: $DENSE_RUNNER" >&2
+    exit 1
+fi
+if [ ! -f "$PROXY_STARTER" ]; then
+    echo "[ERROR] OpenRouter proxy starter is missing: $PROXY_STARTER" >&2
+    exit 1
+fi
+if [ ! -r "$OKCODEX_KEY_FILE" ]; then
+    echo "[ERROR] OKCodex key file is unreadable: $OKCODEX_KEY_FILE" >&2
+    exit 1
+fi
+
+# Image editing still calls OpenRouter, so configure its local proxy first.
+# shellcheck source=/dev/null
+source "$PROXY_STARTER"
+
+OKCODEX_API_KEY="$(python3 - "$OKCODEX_KEY_FILE" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    value = json.load(handle).get("OPENAI_API_KEY", "")
+if not isinstance(value, str) or not value.strip():
+    raise SystemExit("OKCodex key file requires a non-empty OPENAI_API_KEY")
+print(value)
+PY
+)"
+
+# Designer, critic, VLM, TaskCompiler, and GlobalPlanner use OKCodex GPT-5.5.
+export REMOTE_LLM=true
+export REMOTE_LLM_MODEL_CHECK=false
+export EXPECTED_MODEL="$OKCODEX_MODEL"
+export OPENAI_API_KEY="$OKCODEX_API_KEY"
+export OPENAI_BASE_URL="$OKCODEX_BASE_URL"
+export OPENAI_USE_RESPONSES=true
+export SCENEEXPERT_FORCE_REASONING_EFFORT="${SCENEEXPERT_FORCE_REASONING_EFFORT:-xhigh}"
+export SCENEEXPERT_OPENAI_DEFAULT_HEADERS_JSON='{}'
+# Retry final 502/503/524 failures after the SDK's short built-in retries.
+export SCENEEXPERT_OPENAI_TRANSIENT_RETRY_DELAYS="${SCENEEXPERT_OPENAI_TRANSIENT_RETRY_DELAYS:-30,60,120}"
+
+# Pure experiment: retain SceneBenchmark critic feedback while disabling SceneExpert
+# and all deterministic/physical furniture repair passes.
+export SCENEEXPERT_EXPERIMENT="ablation_6_pure"
+export FURNITURE_SAFETY_CONTROLLER_ENABLED=false
+export FURNITURE_DETERMINISTIC_REPAIR_ENABLED=false
+# Furniture context-image editing remains independent on OpenRouter.
+export OPENROUTER_IMAGE_MODEL="${OPENROUTER_IMAGE_MODEL:-openai/gpt-image-2}"
+export RUN_ID="${RUN_ID:-okcodex_gpt55_pure_room_dense_acp_$(date +%Y%m%d_%H%M%S)}"
+
+cat <<SUMMARY
+============= ACP OKCodex GPT-5.5 PURE DENSE ROOM =============
+run id:                   $RUN_ID
+reasoning/VLM model:       $EXPECTED_MODEL
+reasoning/VLM endpoint:    $OPENAI_BASE_URL (Responses API)
+reasoning effort:          $SCENEEXPERT_FORCE_REASONING_EFFORT
+API retry delays:          $SCENEEXPERT_OPENAI_TRANSIENT_RETRY_DELAYS seconds
+scene retry attempts:      ${SCENE_RETRY_ATTEMPTS:-3}
+context image model:       $OPENROUTER_IMAGE_MODEL (OpenRouter)
+local generative LLM:      disabled
+local embedding model:     Qwen3-VL-Embedding-2B-Q8_0
+==========================================================
+SUMMARY
+
+exec bash "$DENSE_RUNNER"

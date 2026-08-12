@@ -1749,3 +1749,37 @@ furniture_agent.context_image_generation.enabled=false
 ```text
 furniture_agent.context_image_generation.backend=inherit
 ```
+
+## 14. 基于 GroundingDINO 的家具参考图布局提取
+
+该能力只分析质量门控后最终选定的 `context_edited.png`，不会分析被拒绝的候选图，
+也不会启用旧的文本 placement-order 实验。它默认关闭；开启后会生成稳定区域 ID、
+标注图和仅含自然语言关系的 Designer contract。像素框只保留在审计 JSON 中。
+
+先在显式选定的 GPU 上启动常驻 sidecar：
+
+```bash
+GROUNDING_DINO_GPU_ID=0 bash scripts/start_grounding_dino_server.sh --background
+bash scripts/start_grounding_dino_server.sh --status
+```
+
+随后启用 Hydra override：
+
+```text
+furniture_agent.context_image_generation.grounded_layout.enabled=true
+```
+
+GroundingDINO 使用仓库内版本化的 115-phrase HSSD 词表，并按模型 tokenizer 的实际
+长度稳定分批。VLM 同时读取原参考图、标注图和 region JSON，负责实例消歧、阶段过滤、
+摆放顺序与相对关系；任何像素、归一化、米制距离或角度字段都会在代码层被拒绝。
+
+成功分析后，`empty_room_context/` 中会增加：
+
+```text
+context_grounding_raw.json
+context_grounding_annotated.png
+context_furniture_layout.json
+```
+
+sidecar、标注写入或 VLM 分析失败时，Furniture stage 会保留原 `context_edited.png`
+并继续运行，只是不追加 layout contract。关闭 override 即可完全恢复原行为。

@@ -24,6 +24,7 @@ OUTPUT_ROOT="${OUTPUT_ROOT:-$PROJECT_ROOT/outputs/critic_probe/$RUN_ID}"
 
 SCENE_BATCH_SIZE="${SCENE_BATCH_SIZE:-1}"
 SCENE_WORKERS_PER_PROCESS="${SCENE_WORKERS_PER_PROCESS:-1}"
+SCENE_RETRY_ATTEMPTS="${SCENE_RETRY_ATTEMPTS:-3}"
 CRITIC_PROBE_PARALLEL="${CRITIC_PROBE_PARALLEL:-true}"
 # A Qwen llama-server already reserves tens of GiB in the ACP cgroup.  Keep
 # one Python scene process by default; callers can opt into more concurrency
@@ -70,8 +71,13 @@ HSSD_ZVEC_COLLECTION_PATH="${HSSD_ZVEC_COLLECTION_PATH:-}"
 HSSD_EMBEDDING_BASE_URL="${HSSD_EMBEDDING_BASE_URL:-}"
 FURNITURE_CONTEXT_IMAGE_GENERATION_ENABLED="${FURNITURE_CONTEXT_IMAGE_GENERATION_ENABLED:-}"
 FURNITURE_CONTEXT_IMAGE_GENERATION_BACKEND="${FURNITURE_CONTEXT_IMAGE_GENERATION_BACKEND:-}"
+echo "[DEBUG] FURNITURE_CONTEXT_IMAGE_GENERATION_BACKEND=$FURNITURE_CONTEXT_IMAGE_GENERATION_BACKEND" >&2
+FURNITURE_GROUNDED_LAYOUT_ENABLED="${FURNITURE_GROUNDED_LAYOUT_ENABLED:-}"
+FURNITURE_GROUNDED_LAYOUT_BASE_URL="${FURNITURE_GROUNDED_LAYOUT_BASE_URL:-}"
 FLOOR_PLAN_MODE="${FLOOR_PLAN_MODE:-room}"
 FURNITURE_PLACEMENT_ORDER_ENABLED="${FURNITURE_PLACEMENT_ORDER_ENABLED:-}"
+FURNITURE_SAFETY_CONTROLLER_ENABLED="${FURNITURE_SAFETY_CONTROLLER_ENABLED:-false}"
+FURNITURE_DETERMINISTIC_REPAIR_ENABLED="${FURNITURE_DETERMINISTIC_REPAIR_ENABLED:-true}"
 # os.cpu_count() sees the host's 192 logical CPUs in the CCI container.  A
 # critic replay should never inherit the 32-thread YAML default implicitly:
 # each isolated decomposition server gets a small explicit cap.
@@ -99,7 +105,7 @@ MANIPULAND_CRITIC_THINKING="${MANIPULAND_CRITIC_THINKING:-none}"
 
 export OPENAI_API_KEY="${OPENAI_API_KEY:-sk-123}"
 export OPENAI_BASE_URL="${OPENAI_BASE_URL:-http://127.0.0.1:8002/v1}"
-export OPENAI_USE_RESPONSES="false"
+export OPENAI_USE_RESPONSES="${OPENAI_USE_RESPONSES:-false}"
 export SCENEEXPERT_MODEL_ID="$MODEL_NAME"
 
 # Match the ACP hybrid-memory job environment while keeping one worker per
@@ -155,6 +161,7 @@ csv_quote() {
 
 require_positive_integer SCENE_BATCH_SIZE "$SCENE_BATCH_SIZE"
 require_positive_integer SCENE_WORKERS_PER_PROCESS "$SCENE_WORKERS_PER_PROCESS"
+require_positive_integer SCENE_RETRY_ATTEMPTS "$SCENE_RETRY_ATTEMPTS"
 require_positive_integer CRITIC_PROBE_INNER_PARALLELISM "$CRITIC_PROBE_INNER_PARALLELISM"
 require_positive_integer CRITIC_PROBE_MAX_SAFE_INNER_PARALLELISM "$CRITIC_PROBE_MAX_SAFE_INNER_PARALLELISM"
 require_positive_integer CRITIC_PROBE_PORT_BASE "$CRITIC_PROBE_PORT_BASE"
@@ -225,6 +232,14 @@ if ! CRITIC_PROBE_RENDER_FINAL_VIEWS="$(normalize_bool "$CRITIC_PROBE_RENDER_FIN
     echo "ERROR: CRITIC_PROBE_RENDER_FINAL_VIEWS must be true or false" >&2
     exit 1
 fi
+if ! FURNITURE_SAFETY_CONTROLLER_ENABLED="$(normalize_bool "$FURNITURE_SAFETY_CONTROLLER_ENABLED")"; then
+    echo "ERROR: FURNITURE_SAFETY_CONTROLLER_ENABLED must be true or false" >&2
+    exit 1
+fi
+if ! FURNITURE_DETERMINISTIC_REPAIR_ENABLED="$(normalize_bool "$FURNITURE_DETERMINISTIC_REPAIR_ENABLED")"; then
+    echo "ERROR: FURNITURE_DETERMINISTIC_REPAIR_ENABLED must be true or false" >&2
+    exit 1
+fi
 if [ -n "$FURNITURE_CONTEXT_IMAGE_GENERATION_ENABLED" ]; then
     if ! FURNITURE_CONTEXT_IMAGE_GENERATION_ENABLED="$(
         normalize_bool "$FURNITURE_CONTEXT_IMAGE_GENERATION_ENABLED"
@@ -235,12 +250,20 @@ if [ -n "$FURNITURE_CONTEXT_IMAGE_GENERATION_ENABLED" ]; then
 fi
 if [ -n "$FURNITURE_CONTEXT_IMAGE_GENERATION_BACKEND" ]; then
     case "$FURNITURE_CONTEXT_IMAGE_GENERATION_BACKEND" in
-        inherit|qwen_local) ;;
+        inherit|qwen_local|okcodex|bailian|openrouter) ;;
         *)
-            echo "ERROR: FURNITURE_CONTEXT_IMAGE_GENERATION_BACKEND must be inherit or qwen_local" >&2
+            echo "ERROR: FURNITURE_CONTEXT_IMAGE_GENERATION_BACKEND must be inherit, qwen_local, okcodex, bailian, or openrouter" >&2
             exit 1
             ;;
     esac
+fi
+if [ -n "$FURNITURE_GROUNDED_LAYOUT_ENABLED" ]; then
+    if ! FURNITURE_GROUNDED_LAYOUT_ENABLED="$(
+        normalize_bool "$FURNITURE_GROUNDED_LAYOUT_ENABLED"
+    )"; then
+        echo "ERROR: FURNITURE_GROUNDED_LAYOUT_ENABLED must be true or false" >&2
+        exit 1
+    fi
 fi
 case "$FLOOR_PLAN_MODE" in
     room|house|polygon) ;;
@@ -342,6 +365,8 @@ export SCENEEXPERT_DISABLE_MATERIALS="$DISABLE_MATERIALS"
 export SCENEEXPERT_DISABLE_BWRAP="$DISABLE_BWRAP"
 export FURNITURE_CONTEXT_IMAGE_GENERATION_ENABLED
 export FURNITURE_CONTEXT_IMAGE_GENERATION_BACKEND
+export FURNITURE_GROUNDED_LAYOUT_ENABLED
+export FURNITURE_GROUNDED_LAYOUT_BASE_URL
 export FLOOR_PLAN_MODE FURNITURE_PLACEMENT_ORDER_ENABLED
 export FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS
 export HSSD_RETRIEVAL_BACKEND HSSD_RENDERED_ASSET_CHOICE
@@ -488,12 +513,14 @@ fi
 COMMON_ARGS=(
     "floor_plan_agent.mode=${FLOOR_PLAN_MODE}"
     "experiment.num_workers=${SCENE_WORKERS_PER_PROCESS}"
-    "experiment.scene_retry_attempts=1"
+    "experiment.scene_retry_attempts=${SCENE_RETRY_ATTEMPTS}"
     "furniture_agent.fail_stage_on_unresolved_hard_constraints=${FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS}"
     "experiment.pipeline.parallel_rooms=false"
     "experiment.pipeline.max_parallel_rooms=1"
     "experiment.scenebenchmark_critic.enabled=true"
     "experiment.scenebenchmark_critic.inject_into_llm_critic=true"
+    "furniture_agent.furniture_safety_controller.enabled=${FURNITURE_SAFETY_CONTROLLER_ENABLED}"
+    "furniture_agent.furniture_safety_controller.deterministic_repair.enabled=${FURNITURE_DETERMINISTIC_REPAIR_ENABLED}"
     "experiment.scenebenchmark_critic.fd_relation_proposer_mode=template"
     "experiment.scenebenchmark_critic.max_fd_relation_proposals=8"
     "experiment.scenebenchmark_critic.constraint_mode=${CRITIC_CONSTRAINT_MODE}"
@@ -525,6 +552,16 @@ fi
 if [ -n "$FURNITURE_CONTEXT_IMAGE_GENERATION_BACKEND" ]; then
     COMMON_ARGS+=(
         "furniture_agent.context_image_generation.backend=${FURNITURE_CONTEXT_IMAGE_GENERATION_BACKEND}"
+    )
+fi
+if [ -n "$FURNITURE_GROUNDED_LAYOUT_ENABLED" ]; then
+    COMMON_ARGS+=(
+        "furniture_agent.context_image_generation.grounded_layout.enabled=${FURNITURE_GROUNDED_LAYOUT_ENABLED}"
+    )
+fi
+if [ -n "$FURNITURE_GROUNDED_LAYOUT_BASE_URL" ]; then
+    COMMON_ARGS+=(
+        "furniture_agent.context_image_generation.grounded_layout.base_url=${FURNITURE_GROUNDED_LAYOUT_BASE_URL}"
     )
 fi
 if [ -n "$FURNITURE_PLACEMENT_ORDER_ENABLED" ]; then

@@ -3,7 +3,7 @@
 # different scenes concurrently without generating or loading a shared base.
 #
 # Default:
-#   - 6 concurrent scene processes
+#   - 2 concurrent scene processes
 #   - 8 different cases from scripts/run_parallel_critic_on.sh
 #   - each scene runs independently from floor_plan through manipuland
 #
@@ -11,7 +11,7 @@
 #   bash run_parallel_rooms_no_shared_base.sh
 #
 # Common overrides:
-#   SCENE_CONCURRENCY=4 MAX_CASES=8 bash run_parallel_rooms_no_shared_base.sh
+#   SCENE_CONCURRENCY=2 MAX_CASES=8 bash run_parallel_rooms_no_shared_base.sh
 #   APT_UBUNTU_MIRROR=https://mirrors.aliyun.com/ubuntu bash run_parallel_rooms_no_shared_base.sh
 #   APT_UBUNTU_MIRROR= bash run_parallel_rooms_no_shared_base.sh  # use system sources
 
@@ -21,7 +21,7 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 USER_ROOT="${USER_ROOT:-$(dirname "$PROJECT_ROOT")}"
 SHARED_ROOT="/mnt/afs-p3/task3_2"
 
-SCENE_CONCURRENCY="${SCENE_CONCURRENCY:-6}"
+SCENE_CONCURRENCY="${SCENE_CONCURRENCY:-2}"
 MAX_CASES="${MAX_CASES:-8}"
 FLOOR_PLAN_MODE="${FLOOR_PLAN_MODE:-room}"
 EMBEDDING_PORT="${EMBEDDING_PORT:-8014}"
@@ -32,7 +32,12 @@ APT_INSTALL_TIMEOUT="${APT_INSTALL_TIMEOUT:-900}"
 # Use "-" rather than ":-" so an explicitly empty value disables the mirror.
 APT_UBUNTU_MIRROR="${APT_UBUNTU_MIRROR-https://mirrors.tuna.tsinghua.edu.cn/ubuntu}"
 EXPECTED_MODEL="${EXPECTED_MODEL:-unsloth/Qwen3.6-27B-GGUF}"
+REMOTE_LLM="${REMOTE_LLM:-false}"
+REMOTE_LLM_MODEL_CHECK="${REMOTE_LLM_MODEL_CHECK:-true}"
 RUN_ID="${RUN_ID:-parallel_rooms_no_shared_base_$(date +%Y%m%d_%H%M%S)}"
+RUN_LOG_DIR="${RUN_LOG_DIR:-$PROJECT_ROOT/logs/$RUN_ID}"
+LLM_HEALTHCHECK_INTERVAL_SECONDS="${LLM_HEALTHCHECK_INTERVAL_SECONDS:-15}"
+LLM_HEALTHCHECK_FAILURE_THRESHOLD="${LLM_HEALTHCHECK_FAILURE_THRESHOLD:-3}"
 
 if [ -z "${PYTHON_BIN:-}" ]; then
     if [ -x "$PROJECT_ROOT/.venv/bin/python" ]; then
@@ -63,10 +68,11 @@ HSSD_ZVEC_SOURCE_PATH="${HSSD_ZVEC_SOURCE_PATH:-$SHARED_ROOT/share_data/scenesmi
 # /mnt/afs-p3 is mounted read-only, so use a persistent writable local copy.
 HSSD_ZVEC_COLLECTION_PATH="${HSSD_ZVEC_COLLECTION_PATH:-$USER_ROOT/.cache/scenesmith/hssd_zvec_collection}"
 
-EMBEDDING_LOG="${EMBEDDING_LOG:-$PROJECT_ROOT/logs/llama_embedding.log}"
-LLM_LOG="${LLM_LOG:-$PROJECT_ROOT/logs/llama_qwen36_27b_mtp.log}"
-LLM_LAUNCH_LOG="${LLM_LAUNCH_LOG:-$PROJECT_ROOT/logs/llama_qwen36_27b_launcher.log}"
-SYSTEM_DEPS_LOG="${SYSTEM_DEPS_LOG:-$PROJECT_ROOT/logs/system_deps_parallel_rooms.log}"
+EMBEDDING_LOG="${EMBEDDING_LOG:-$RUN_LOG_DIR/llama_embedding.log}"
+LLM_LOG="${LLM_LOG:-$RUN_LOG_DIR/llama_qwen36_27b_mtp.log}"
+LLM_LAUNCH_LOG="${LLM_LAUNCH_LOG:-$RUN_LOG_DIR/llama_qwen36_27b_launcher.log}"
+SYSTEM_DEPS_LOG="${SYSTEM_DEPS_LOG:-$RUN_LOG_DIR/system_deps.log}"
+SERVICE_WATCHDOG_LOG="${SERVICE_WATCHDOG_LOG:-$RUN_LOG_DIR/service_watchdog.log}"
 
 SYSTEM_PACKAGES=(
     libgl1
@@ -234,6 +240,14 @@ require_positive_integer LLM_PORT "$LLM_PORT"
 require_positive_integer WAIT_TIMEOUT "$WAIT_TIMEOUT"
 require_positive_integer APT_UPDATE_TIMEOUT "$APT_UPDATE_TIMEOUT"
 require_positive_integer APT_INSTALL_TIMEOUT "$APT_INSTALL_TIMEOUT"
+require_positive_integer LLM_HEALTHCHECK_INTERVAL_SECONDS "$LLM_HEALTHCHECK_INTERVAL_SECONDS"
+require_positive_integer LLM_HEALTHCHECK_FAILURE_THRESHOLD "$LLM_HEALTHCHECK_FAILURE_THRESHOLD"
+case "${REMOTE_LLM,,}" in
+    1|true|yes|y|on) REMOTE_LLM=true ;;
+    0|false|no|n|off|'') REMOTE_LLM=false ;;
+    *) echo "[ERROR] REMOTE_LLM must be true or false, got: $REMOTE_LLM" >&2; exit 2 ;;
+esac
+
 case "$FLOOR_PLAN_MODE" in
     room|house|polygon) ;;
     *)
@@ -245,11 +259,22 @@ esac
 require_file "embedding llama-server" "$EMBEDDING_SERVER"
 require_file "embedding model" "$EMBEDDING_MODEL"
 require_file "embedding vision projector" "$EMBEDDING_MMPROJ"
-require_file "Task3.2 llama launcher" "$LLAMA_LAUNCHER"
-require_file "llama.cpp readiness checker" "$LLM_CHECKER"
 require_file "parallel scene runner" "$CRITIC_RUNNER"
-require_file "Qwen MTP model" "$MTP_MODEL"
-require_file "Qwen vision projector" "$MMPROJ"
+if [ "$REMOTE_LLM" = false ]; then
+    require_file "Task3.2 llama launcher" "$LLAMA_LAUNCHER"
+    require_file "llama.cpp readiness checker" "$LLM_CHECKER"
+    require_file "Qwen MTP model" "$MTP_MODEL"
+    require_file "Qwen vision projector" "$MMPROJ"
+else
+    if [ -z "${OPENAI_BASE_URL:-}" ]; then
+        echo "[ERROR] OPENAI_BASE_URL is required when REMOTE_LLM=true" >&2
+        exit 1
+    fi
+    if [ -z "${OPENAI_API_KEY:-}" ]; then
+        echo "[ERROR] OPENAI_API_KEY is required when REMOTE_LLM=true" >&2
+        exit 1
+    fi
+fi
 require_directory "HSSD model directory" "$HSSD_DATA_PATH"
 require_directory "HSSD preprocessed directory" "$HSSD_PREPROCESSED_PATH"
 require_directory "HSSD rendered-assets directory" "$HSSD_RENDERED_ASSETS_DIR"
@@ -270,7 +295,8 @@ if ! command -v curl >/dev/null 2>&1; then
 fi
 
 mkdir -p "$(dirname "$EMBEDDING_LOG")" "$(dirname "$LLM_LOG")" \
-    "$(dirname "$LLM_LAUNCH_LOG")" "$(dirname "$SYSTEM_DEPS_LOG")"
+    "$(dirname "$LLM_LAUNCH_LOG")" "$(dirname "$SYSTEM_DEPS_LOG")" \
+    "$(dirname "$SERVICE_WATCHDOG_LOG")"
 
 ensure_system_deps
 
@@ -300,6 +326,7 @@ echo "[OK] Task3.2 native import preflight passed"
 
 EMBEDDING_PID=""
 LLM_PID=""
+WATCHDOG_PID=""
 cleanup_started=false
 
 cleanup() {
@@ -310,12 +337,12 @@ cleanup() {
     cleanup_started=true
     trap - EXIT INT TERM HUP
 
-    for pid in "$LLM_PID" "$EMBEDDING_PID"; do
+    for pid in "$WATCHDOG_PID" "$LLM_PID" "$EMBEDDING_PID"; do
         if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
             kill -TERM "$pid" 2>/dev/null || true
         fi
     done
-    for pid in "$LLM_PID" "$EMBEDDING_PID"; do
+    for pid in "$WATCHDOG_PID" "$LLM_PID" "$EMBEDDING_PID"; do
         if [ -n "$pid" ]; then
             wait "$pid" 2>/dev/null || true
         fi
@@ -351,6 +378,44 @@ wait_for_health() {
     return 1
 }
 
+# A startup-only readiness check cannot detect the failure mode observed in the
+# polygon run: llama-server becoming unreachable while scene workers continue.
+# After consecutive failures, terminate this launcher so its EXIT trap stops
+# the child batch groups and leaves a run-specific diagnostic log.
+watch_services() {
+    local llm_failures=0 embedding_failures=0
+    while true; do
+        sleep "$LLM_HEALTHCHECK_INTERVAL_SECONDS"
+
+        if [ "$REMOTE_LLM" = false ]; then
+            if ! kill -0 "$LLM_PID" 2>/dev/null \
+            || ! curl -fsS --max-time 5 "http://127.0.0.1:${LLM_PORT}/v1/models" \
+                | grep -Fq "$EXPECTED_MODEL"; then
+            llm_failures=$((llm_failures + 1))
+            echo "[WATCHDOG] Qwen health check failed (${llm_failures}/${LLM_HEALTHCHECK_FAILURE_THRESHOLD})" >&2
+        else
+            llm_failures=0
+            fi
+        fi
+
+        if ! kill -0 "$EMBEDDING_PID" 2>/dev/null \
+            || ! curl -fsS --max-time 5 "http://127.0.0.1:${EMBEDDING_PORT}/health" >/dev/null; then
+            embedding_failures=$((embedding_failures + 1))
+            echo "[WATCHDOG] embedding health check failed (${embedding_failures}/${LLM_HEALTHCHECK_FAILURE_THRESHOLD})" >&2
+        else
+            embedding_failures=0
+        fi
+
+        if [ "$embedding_failures" -ge "$LLM_HEALTHCHECK_FAILURE_THRESHOLD" ] \
+            || { [ "$REMOTE_LLM" = false ] \
+                && [ "$llm_failures" -ge "$LLM_HEALTHCHECK_FAILURE_THRESHOLD" ]; }; then
+            echo "[WATCHDOG] service unavailable; terminating run for clean batch cleanup" >&2
+            kill -TERM "$$" 2>/dev/null || exit 1
+            return
+        fi
+    done
+}
+
 cd "$PROJECT_ROOT"
 
 echo "[1/3] Starting embedding service"
@@ -376,7 +441,8 @@ nohup env \
     > "$EMBEDDING_LOG" 2>&1 &
 EMBEDDING_PID=$!
 
-echo "[2/3] Starting Qwen3.6-27B through Task3.2/start_llama.sh"
+if [ "$REMOTE_LLM" = false ]; then
+    echo "[2/3] Starting Qwen3.6-27B through Task3.2/start_llama.sh"
 nohup env \
     LLAMA_RUN_MODE=foreground \
     LLAMA_WRAPPER_DIR="$SHARED_ROOT/share_scripts/llama.cpp" \
@@ -409,9 +475,9 @@ nohup env \
     MMPROJ="$MMPROJ" \
     bash "$LLAMA_LAUNCHER" \
     > "$LLM_LAUNCH_LOG" 2>&1 &
-LLM_PID=$!
+    LLM_PID=$!
 
-wait_for_health "embedding service" "$EMBEDDING_PORT" "$EMBEDDING_PID"
+    wait_for_health "embedding service" "$EMBEDDING_PORT" "$EMBEDDING_PID"
 
 HOST=127.0.0.1 \
 PORT="$LLM_PORT" \
@@ -423,7 +489,30 @@ if ! kill -0 "$LLM_PID" 2>/dev/null; then
     echo "[ERROR] Qwen llama-server exited after its readiness check" >&2
     tail -n 80 "$LLM_LOG" >&2 || true
     exit 1
+    fi
+else
+    echo "[2/3] Using remote LLM: $EXPECTED_MODEL"
+    wait_for_health "embedding service" "$EMBEDDING_PORT" "$EMBEDDING_PID"
+    echo "[INFO] remote OpenAI-compatible endpoint: $OPENAI_BASE_URL"
+    if [ "$REMOTE_LLM_MODEL_CHECK" != false ] && ! curl -fsS --max-time 30 \
+        -H "Authorization: Bearer $OPENAI_API_KEY" \
+        "${OPENAI_BASE_URL%/}/models" \
+        | "$PYTHON_BIN" -c \
+            'import json, sys; expected=sys.argv[1]; data=json.load(sys.stdin).get("data", []); raise SystemExit(0 if any(x.get("id") == expected for x in data) else 1)' \
+            "$EXPECTED_MODEL"; then
+        echo "[ERROR] remote endpoint did not report model: $EXPECTED_MODEL" >&2
+        exit 1
+    fi
+    if [ "$REMOTE_LLM_MODEL_CHECK" = false ]; then
+        echo "[INFO] remote model-list check disabled by REMOTE_LLM_MODEL_CHECK=false"
+    else
+        echo "[OK] remote LLM is available: $EXPECTED_MODEL"
+    fi
 fi
+
+watch_services > "$SERVICE_WATCHDOG_LOG" 2>&1 &
+WATCHDOG_PID=$!
+echo "[INFO] service watchdog: $SERVICE_WATCHDOG_LOG"
 
 echo "[3/3] Generating $MAX_CASES independent scenes with concurrency=$SCENE_CONCURRENCY"
 echo "[INFO] run id: $RUN_ID"
@@ -438,7 +527,7 @@ env \
     MODEL_NAME="$EXPECTED_MODEL" \
     OPENAI_API_KEY="${OPENAI_API_KEY:-sk-123}" \
     OPENAI_BASE_URL="${OPENAI_BASE_URL:-http://127.0.0.1:${LLM_PORT}/v1}" \
-    OPENAI_USE_RESPONSES=false \
+    OPENAI_USE_RESPONSES="${OPENAI_USE_RESPONSES:-false}" \
     HF_HOME="${HF_HOME:-$USER_ROOT/checkpoints/hf_cache}" \
     HSSD_RETRIEVAL_BACKEND=embedding \
     HSSD_DATA_PATH="$HSSD_DATA_PATH" \
@@ -454,7 +543,7 @@ env \
     CRITIC_PROBE_PARALLEL=true \
     CRITIC_PROBE_INNER_PARALLELISM="$SCENE_CONCURRENCY" \
     CRITIC_PROBE_MAX_SAFE_INNER_PARALLELISM="${CRITIC_PROBE_MAX_SAFE_INNER_PARALLELISM:-4}" \
-    CRITIC_PROBE_ALLOW_UNSAFE_PARALLELISM=true \
+    CRITIC_PROBE_ALLOW_UNSAFE_PARALLELISM="${CRITIC_PROBE_ALLOW_UNSAFE_PARALLELISM:-false}" \
     SCENEEXPERT_CONVEX_MAX_OMP_THREADS="${SCENEEXPERT_CONVEX_MAX_OMP_THREADS:-2}" \
     CRITIC_PROBE_PORT_BASE="${CRITIC_PROBE_PORT_BASE:-13000}" \
     CRITIC_PROBE_PORT_BLOCK_SIZE="${CRITIC_PROBE_PORT_BLOCK_SIZE:-400}" \
@@ -465,6 +554,10 @@ env \
     MAX_CASES="$MAX_CASES" \
     FLOOR_PLAN_MODE="$FLOOR_PLAN_MODE" \
     FURNITURE_PLACEMENT_ORDER_ENABLED="${FURNITURE_PLACEMENT_ORDER_ENABLED:-}" \
+    FURNITURE_CONTEXT_IMAGE_GENERATION_ENABLED="${FURNITURE_CONTEXT_IMAGE_GENERATION_ENABLED:-}" \
+    FURNITURE_CONTEXT_IMAGE_GENERATION_BACKEND="${FURNITURE_CONTEXT_IMAGE_GENERATION_BACKEND:-}" \
+    FURNITURE_GROUNDED_LAYOUT_ENABLED="${FURNITURE_GROUNDED_LAYOUT_ENABLED:-}" \
+    FURNITURE_GROUNDED_LAYOUT_BASE_URL="${FURNITURE_GROUNDED_LAYOUT_BASE_URL:-}" \
     CASE_FILTER="${CASE_FILTER:-}" \
     FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS="${FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS:-true}" \
     PIPELINE_STOP_STAGE="${PIPELINE_STOP_STAGE:-manipuland}" \
