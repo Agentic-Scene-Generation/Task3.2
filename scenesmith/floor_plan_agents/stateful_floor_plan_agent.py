@@ -55,6 +55,10 @@ from scenesmith.floor_plan_agents.critic_context import (
     format_floor_plan_critic_context,
 )
 from scenesmith.floor_plan_agents.tools.floor_plan_tools import FloorPlanTools
+from scenesmith.floor_plan_agents.reservation_validator import (
+    validate_floor_plan_reservations,
+)
+from scenesmith.scene_expert.schemas import FloorPlanReservationManifest
 from scenesmith.floor_plan_agents.tools.geometry_cache import (
     GeometryCache,
     floor_cache_key,
@@ -109,6 +113,7 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
         cfg: DictConfig,
         logger: BaseLogger,
         render_gpu_id: int | None = None,
+        reservation_manifest: FloorPlanReservationManifest | dict | None = None,
     ):
         """Initialize the floor plan agent.
 
@@ -140,6 +145,7 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
         # Prompt and layout state.
         self.house_prompt: str = ""
         self.layout: HouseLayout = HouseLayout()
+        self.reservation_manifest = reservation_manifest
 
         # Create persistent agent sessions.
         self.designer_session, self.critic_session = self._create_sessions()
@@ -190,6 +196,7 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
             wall_height_max=self.cfg.wall_height.max,
             room_dim_min=self.cfg.min_floor_plan_dim_m,
             room_dim_max=self.cfg.max_floor_plan_dim_m,
+            reservation_manifest=self.reservation_manifest,
         )
 
         vision_tools = self._get_vision_tools()
@@ -228,6 +235,7 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
             wall_height_max=self.cfg.wall_height.max,
             room_dim_min=self.cfg.min_floor_plan_dim_m,
             room_dim_max=self.cfg.max_floor_plan_dim_m,
+            reservation_manifest=self.reservation_manifest,
         )
 
         return list(vision_tools.tools.values()) + [floor_plan_tools.tools["validate"]]
@@ -715,6 +723,19 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
 
         # Validate final scene against thresholds and potentially reset.
         await self._finalize_scene_and_scores()
+
+        reservation_validation = validate_floor_plan_reservations(
+            self.layout, self.reservation_manifest
+        )
+        if not reservation_validation.passed:
+            issue_types = [
+                str(issue.get("issue_type") or "reservation_failure")
+                for issue in reservation_validation.issues
+            ]
+            raise RuntimeError(
+                "Floor plan failed deterministic reservation validation: "
+                + ", ".join(issue_types)
+            )
 
         # Generate geometry for all rooms.
         console_logger.info("Generating geometry for all rooms")

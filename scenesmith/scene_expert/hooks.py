@@ -669,6 +669,13 @@ class SceneExpertHookRunner:
         self._original_text_descriptions: dict[str, str] = {}
         self._last_injected_floor_plan_prompt: str = prompt
 
+    @property
+    def floor_plan_reservation_manifest(self) -> dict[str, Any] | None:
+        context = self._current_relation_context
+        if context is None or context.floor_plan_manifest is None:
+            return None
+        return context.floor_plan_manifest.model_dump(mode="json")
+
     def _save_context_bundle(
         self,
         *,
@@ -1033,6 +1040,27 @@ class SceneExpertHookRunner:
         """Verify and log the house-level floor_plan stage."""
         stage = "floor_plan"
         console_logger.info(f"[SceneExpert/{self._mode}] post_stage: {stage}")
+
+        manifest = self.floor_plan_reservation_manifest
+        if manifest and manifest.get("enabled"):
+            from scenesmith.agent_utils.house import HouseLayout
+            from scenesmith.floor_plan_agents.reservation_validator import (
+                validate_floor_plan_reservations,
+            )
+
+            layout_path = scene_dir / "house_layout.json"
+            with layout_path.open(encoding="utf-8") as stream:
+                layout = HouseLayout.from_dict(json.load(stream), house_dir=scene_dir)
+            deterministic = validate_floor_plan_reservations(layout, manifest)
+            if not deterministic.passed:
+                issue_types = [
+                    str(issue.get("issue_type") or "reservation_failure")
+                    for issue in deterministic.issues
+                ]
+                raise RuntimeError(
+                    "Floor plan failed post-stage reservation validation: "
+                    + ", ".join(issue_types)
+                )
 
         scene_state_info = self._extract_floor_plan_state_info(scene_dir)
         verify_report: StageVerifyReport | None = None
@@ -1824,6 +1852,12 @@ def build_hook_runner(
             relation_cfg.get("category_support_threshold"), 0.80
         ),
         max_priors_per_stage=_cfg_int(relation_cfg.get("max_priors_per_stage"), 4),
+        floor_plan_reservation_gate_enabled=bool(
+            _deep_merge_dicts(
+                root_se_cfg.get("floor_plan_reservations", {}),
+                se_cfg.get("floor_plan_reservations", {}),
+            ).get("enabled", False)
+        ),
     )
     repair_controller = RepairController(memory_store=memory_store)
     start_stage = (

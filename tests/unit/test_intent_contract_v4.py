@@ -24,6 +24,7 @@ from scenesmith.scenebenchmark_critic.intent_contract import (
     bound_ids,
     build_intent_contract,
     intent_contract_required_counts,
+    _nearest_wall_ids,
     selected_ids,
     selector_match_count,
 )
@@ -43,8 +44,29 @@ from scenesmith.scenebenchmark_critic.metrics.spatial_accessibility.companions i
     attach_expected_access_companions,
 )
 from scenesmith.scenebenchmark_critic.core.geometry import load_geometry
+from scenesmith.scenebenchmark_critic.adapter import _category_for_object
 from scenesmith.scene_expert import hooks
 from scenesmith.scene_expert.schemas import SceneTaskSpec
+
+
+def test_repair_placeholder_uses_stable_compound_name_as_category() -> None:
+    placeholder = SimpleNamespace(
+        object_id="water_dispenser_repair_placeholder_0",
+        object_type=SimpleNamespace(value="furniture"),
+        name="water_dispenser",
+        description="deterministic placeholder water_dispenser",
+        metadata={"repair_placeholder": True},
+    )
+
+    assert _category_for_object(placeholder) == "water_dispenser"
+
+
+def test_wall_anchor_binds_to_nearest_boundary_not_wall_center() -> None:
+    sofa = _record("sofa_0", "sofa", (-1.73, 3.01), (0.88, 2.12, 0.85))
+    west_wall = _record("west_wall", "wall", (-2.225, 0.0), (0.05, 10.0, 2.8))
+    north_wall = _record("north_wall", "wall", (0.0, 4.975), (4.5, 0.05, 2.8))
+
+    assert _nearest_wall_ids(["sofa_0"], [sofa, west_wall, north_wall]) == ["west_wall"]
 
 
 def _edge_relation(

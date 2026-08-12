@@ -1782,6 +1782,9 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 bbox_min=np.asarray([-width / 2.0, -depth / 2.0, 0.0], dtype=float),
                 bbox_max=np.asarray([width / 2.0, depth / 2.0, height], dtype=float),
                 metadata={
+                    "semantic_name": category,
+                    "semantic_name_source": "deterministic_repair",
+                    "category_norm": category,
                     "asset_source": (
                         "thin_covering"
                         if category == "rug"

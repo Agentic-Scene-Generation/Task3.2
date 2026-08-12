@@ -33,8 +33,13 @@ from scenesmith.scenebenchmark_critic.relation_registry import (
     relation_spec,
 )
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.semantics import (
+    _is_media_target,
     _is_seating_subject,
     _is_work_surface_target,
+)
+from scenesmith.scenebenchmark_critic.metrics.functional_dependency.relations import (
+    _eval_facing_relation,
+    _media_lateral_axis_diagnostics,
 )
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.seat_surface_assignment import (
     assign_work_seats_to_surfaces,
@@ -1837,8 +1842,32 @@ def _evaluate_across_from(
     results = []
     for subject_id in subjects:
         subject = by_id.get(subject_id)
+        target = by_id.get(target_id)
         center = bbox_center_xy(subject)
-        if subject is None or center is None:
+        if subject is None or target is None or center is None:
+            continue
+        if _is_seating_subject(subject) and _is_media_target(target):
+            label, _confidence, reason = _eval_facing_relation(
+                subject, target, "seating_to_media"
+            )
+            axis = _media_lateral_axis_diagnostics(subject, target)
+            diagnostics = axis[3] if axis is not None else {}
+            diagnostics["distance_m"] = math.hypot(
+                target_center[0] - center[0], target_center[1] - center[1]
+            )
+            results.append(
+                _result(
+                    constraint,
+                    suffix=f"{subject_id}__{target_id}",
+                    label=label,
+                    primary=subject_id,
+                    related=[target_id],
+                    relation_type="seating_to_media",
+                    tier=tier,
+                    reason=reason,
+                    diagnostics=diagnostics,
+                )
+            )
             continue
         direction = (target_center[0] - center[0], target_center[1] - center[1])
         distance = math.hypot(*direction)

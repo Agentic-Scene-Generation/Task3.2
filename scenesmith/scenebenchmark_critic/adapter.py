@@ -957,6 +957,14 @@ def _category_for_object(obj: SceneObject) -> str:
         # original semantic name remains available in metadata for visual and
         # orientation checks.
         return _canonical_category(str(semantic_name))
+    if obj.metadata.get("repair_placeholder"):
+        # Repair placeholders are generated from a canonical inventory
+        # category.  Their free-form description repeats that name and can
+        # otherwise confuse compound categories (for example, interpreting
+        # ``water_dispenser`` as ``water_dispenser_water``).
+        placeholder_category = _canonical_category(str(obj.name or obj.object_id))
+        if placeholder_category != "unknown":
+            return placeholder_category
     for key in ("category_norm", "category", "asset_category"):
         raw = obj.metadata.get(key)
         if raw:

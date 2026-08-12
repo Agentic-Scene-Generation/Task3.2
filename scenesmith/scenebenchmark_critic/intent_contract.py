@@ -23,6 +23,7 @@ from typing import Any, Iterable
 
 from scenesmith.scenebenchmark_critic.core.geometry import (
     bbox_center_xy,
+    bbox_gap_xy,
     object_category,
 )
 from scenesmith.scenebenchmark_critic.relation_registry import (
@@ -3661,10 +3662,21 @@ def _nearest_wall_ids(
             continue
         wall = min(
             walls,
-            key=lambda item: _center_distance_sq(center, bbox_center_xy(item)),
+            key=lambda item: (
+                # A long wall's center can be farther than the subject even
+                # when it is the wall the object physically touches.
+                _wall_gap_or_infinity(subject, item),
+                _center_distance_sq(center, bbox_center_xy(item)),
+                str(item.get("id") or ""),
+            ),
         )
         selected.append(str(wall.get("id") or ""))
     return selected
+
+
+def _wall_gap_or_infinity(subject: dict[str, Any], wall: dict[str, Any]) -> float:
+    gap = bbox_gap_xy(subject, wall)
+    return float(gap) if gap is not None else math.inf
 
 
 def _center_distance_sq(

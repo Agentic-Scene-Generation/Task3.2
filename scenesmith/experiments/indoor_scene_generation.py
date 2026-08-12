@@ -1690,6 +1690,7 @@ def _generate_floor_plan_worker(
     cfg_dict: dict,
     experiment_run_id: str | None,
     render_gpu_id: int | None = None,
+    reservation_manifest: dict | None = None,
 ) -> None:
     """Run floor plan generation in isolated subprocess.
 
@@ -1733,6 +1734,7 @@ def _generate_floor_plan_worker(
                     ),
                     logger=logger,
                     render_gpu_id=render_gpu_id,
+                    reservation_manifest=reservation_manifest,
                 )
                 try:
                     house_layout = asyncio.run(
@@ -1748,6 +1750,10 @@ def _generate_floor_plan_worker(
                 house_layout_path = scene_path / "house_layout.json"
                 with open(house_layout_path, "w") as f:
                     json.dump(house_layout.to_dict(scene_dir=scene_path), f, indent=2)
+                if reservation_manifest is not None:
+                    manifest_path = scene_path / "floor_plan_reservation_manifest.json"
+                    with manifest_path.open("w", encoding="utf-8") as stream:
+                        json.dump(reservation_manifest, stream, indent=2)
                 console_logger.info(f"Saved house layout to {house_layout_path}")
 
 
@@ -2490,6 +2496,11 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                     floor_plan_prompt = prompt
                     if scene_expert_hooks and start_stage == "floor_plan":
                         floor_plan_prompt = scene_expert_hooks.pre_floor_plan()
+                    floor_plan_manifest = (
+                        scene_expert_hooks.floor_plan_reservation_manifest
+                        if scene_expert_hooks
+                        else None
+                    )
 
                     # Stage 1: Floor plan generation (or load from saved state).
                     if start_stage == "floor_plan":
@@ -2514,6 +2525,7 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                                         "cfg_dict": cfg_dict,
                                         "experiment_run_id": experiment_run_id,
                                         "render_gpu_id": render_gpu_id,
+                                        "reservation_manifest": floor_plan_manifest,
                                     },
                                 )
                             ],

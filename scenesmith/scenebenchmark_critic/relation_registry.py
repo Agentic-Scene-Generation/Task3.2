@@ -249,6 +249,7 @@ _RELATIONS = (
             "faces",
             "furniture_faces_furniture",
             "front_axis_alignment",
+            "seating_to_media",
             "seating_to_work_surface",
             "workstation_focal_alignment",
         ),
@@ -288,6 +289,8 @@ _RELATIONS = (
         "furniture",
         "across_from",
         "subject across from and facing target",
+        repair_strategy="furniture_relation",
+        repair_relation_types=("seating_to_media",),
     ),
     _relation(
         "aligned_with",

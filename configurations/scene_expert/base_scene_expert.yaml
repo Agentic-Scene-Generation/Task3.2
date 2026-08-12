@@ -32,6 +32,11 @@ hssd_relations:
   category_support_threshold: 0.80
   max_priors_per_stage: 4
 
+# Deterministic capacity/opening gate for future furniture and wall stages.
+# Kept off in the compatible base config; ablation 3 enables it explicitly.
+floor_plan_reservations:
+  enabled: false
+
 # Memory system
 memory:
   # Directory for persistent memory storage (relative to project root)

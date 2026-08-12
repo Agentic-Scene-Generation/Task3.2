@@ -8,7 +8,7 @@ import json
 import logging
 
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal
 
 from agents import function_tool
 
@@ -35,6 +35,10 @@ from scenesmith.floor_plan_agents.tools.room_placement import (
     place_rooms,
     validate_connectivity,
 )
+from scenesmith.floor_plan_agents.reservation_validator import (
+    validate_floor_plan_reservations,
+)
+from scenesmith.scene_expert.schemas import FloorPlanReservationManifest
 
 console_logger = logging.getLogger(__name__)
 
@@ -111,6 +115,9 @@ class ValidationResult:
 
     layout: str  # "ok" or error message.
     connectivity: str  # "ok" or error message.
+    future_capacity: str = "ok"
+    opening_budget: str = "ok"
+    reservation_issues: list[dict[str, Any]] = field(default_factory=list)
 
 
 class FloorPlanTools(DoorWindowMixin, OpenPlanMixin):
@@ -139,6 +146,9 @@ class FloorPlanTools(DoorWindowMixin, OpenPlanMixin):
         wall_height_max: float = 4.5,
         room_dim_min: float = 1.5,
         room_dim_max: float = 20.0,
+        reservation_manifest: (
+            FloorPlanReservationManifest | dict[str, Any] | None
+        ) = None,
     ):
         """Initialize floor plan tools.
 
@@ -170,6 +180,7 @@ class FloorPlanTools(DoorWindowMixin, OpenPlanMixin):
         self.wall_height_max = wall_height_max
         self.room_dim_min = room_dim_min
         self.room_dim_max = room_dim_max
+        self.reservation_manifest = reservation_manifest
 
         # Build tools dictionary using closure pattern.
         # This avoids including 'self' in OpenAI function schemas.
@@ -1272,16 +1283,34 @@ class FloorPlanTools(DoorWindowMixin, OpenPlanMixin):
             connectivity_status = "error: no rooms to validate"
 
         # Log validation result.
-        is_valid = layout_status == "ok" and connectivity_status == "ok"
+        reservation_validation = validate_floor_plan_reservations(
+            self.layout, self.reservation_manifest
+        )
+        is_valid = (
+            layout_status == "ok"
+            and connectivity_status == "ok"
+            and reservation_validation.passed
+        )
         if is_valid:
-            console_logger.info("Validation passed: layout=ok, connectivity=ok")
+            console_logger.info(
+                "Validation passed: layout=ok, connectivity=ok, "
+                "future_capacity=ok, opening_budget=ok"
+            )
         else:
             console_logger.info(
                 f"Validation failed: layout={layout_status}, "
-                f"connectivity={connectivity_status}"
+                f"connectivity={connectivity_status}, "
+                f"future_capacity={reservation_validation.future_capacity}, "
+                f"opening_budget={reservation_validation.opening_budget}"
             )
 
-        return ValidationResult(layout=layout_status, connectivity=connectivity_status)
+        return ValidationResult(
+            layout=layout_status,
+            connectivity=connectivity_status,
+            future_capacity=reservation_validation.future_capacity,
+            opening_budget=reservation_validation.opening_budget,
+            reservation_issues=reservation_validation.issues,
+        )
 
     def _render_ascii_impl(self) -> str:
         """Generate text representation of floor plan.

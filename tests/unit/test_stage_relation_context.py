@@ -204,6 +204,57 @@ def test_floor_plan_projects_only_explicit_future_wall_anchors(tmp_path) -> None
         "bed-back-wall",
         "mirror-wall",
     ]
+    assert context.floor_plan_manifest is not None
+    assert context.floor_plan_manifest.enabled is False
+
+
+def test_floor_plan_manifest_projects_media_zones_and_explicit_windows(
+    tmp_path,
+) -> None:
+    contract = {
+        "constraints": [
+            {
+                "constraint_id": "living-media",
+                "stage": "furniture",
+                "relation": "across_from",
+                "subjects": {"category": "sofa", "count": 1},
+                "targets": {"category": "tv_stand", "count": 1},
+            },
+            {
+                "constraint_id": "windows-required",
+                "stage": "floor_plan",
+                "relation": "required_count",
+                "subjects": {"category": "window", "count": 2},
+            },
+        ]
+    }
+    context = StageRelationProjector(
+        lookup_path=_write_lookup(tmp_path),
+        floor_plan_reservation_gate_enabled=True,
+    ).project(
+        stage="floor_plan",
+        task_spec=_task_spec(
+            required_large_objects=["sofa", "tv_stand"],
+            functional_zones=["living_zone", "dining_zone"],
+        ),
+        intent_contract=contract,
+    )
+
+    manifest = context.floor_plan_manifest
+    assert manifest is not None and manifest.enabled
+    assert manifest.explicit_window_required
+    assert manifest.explicit_window_count == 2
+    assert [item.kind for item in manifest.reservations].count(
+        "opposed_anchor_pair"
+    ) == 1
+    assert (
+        sum(
+            item.min_zone_area_m2
+            for item in manifest.reservations
+            if item.kind == "functional_zone"
+        )
+        == 12.0
+    )
 
 
 def test_floor_plan_brief_reserves_opening_free_wall_segments() -> None:

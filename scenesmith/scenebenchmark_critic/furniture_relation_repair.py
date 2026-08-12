@@ -48,9 +48,8 @@ _FURNITURE_GATE_STRATEGIES = (
     "furniture_relation",
     "edge_distribution",
 )
-_WINDOW_CLEARANCE_RELATION = "window_clearance"
-_WINDOW_CLEARANCE_MARGIN_M = 0.03
 _PAIRED_SURFACE_RELATION = "furniture_faces_furniture"
+_OPENING_CLEARANCE_MARGIN_M = 0.03
 _WALL_BACKED_CONTACT_GAP_M = 0.03
 # ``back_against_wall`` accepts a 0.25 m gap by default.  Retain a small
 # numerical margin when a rotation-only repair needs the less disruptive
@@ -264,7 +263,10 @@ def improve_furniture_relations(
             if current_center is None:
                 continue
             translation_limit = max_translation_m
-            if target.relation_type == "seating_to_work_surface":
+            if target.relation_type in {
+                "seating_to_media",
+                "seating_to_work_surface",
+            }:
                 translation_limit *= 3.0
             elif target.relation_type == "front_axis_alignment" and target.member_poses:
                 # A wall-side anchor can need to traverse the room to align with
@@ -272,12 +274,12 @@ def improve_furniture_relations(
                 # with it, and their valid final slots may be farther than the
                 # single-object repair budget.
                 translation_limit *= 1.5
-            elif target.relation_type == "object_on_support" and target.member_poses:
+            elif target.relation_type == "object_on_support":
                 # A hard media/support contract can be discovered only after a
                 # display was placed on a distant wall or outside the room. The
-                # coordinated candidate preserves the support relation and is
-                # still subject to the whole-scene no-regression gate, so it may
-                # traverse the room but never farther than its diagonal.
+                # candidate is still subject to the whole-scene no-regression
+                # gate, so it may traverse the room but never farther than its
+                # diagonal. This budget must not depend on window-clearance moves.
                 geometry = scene.room_geometry
                 if geometry is not None:
                     translation_limit = max(
@@ -594,6 +596,12 @@ def _result_severity(result: dict[str, Any]) -> tuple[int, float]:
             float(diagnostics.get("offset_m") or 0.0)
             - float(diagnostics.get("allowed_offset_m") or 0.0),
         )
+    elif relation == "seating_to_media":
+        magnitude = max(
+            0.0,
+            float(diagnostics.get("lateral_offset_m") or 0.0)
+            - float(diagnostics.get("media_axis_pass_offset_m") or 0.0),
+        )
     elif relation in {"between_alignment", "centered_between_alignment"}:
         if relation == "centered_between_alignment":
             magnitude = max(
@@ -872,6 +880,267 @@ def _seating_surface_repair_targets(
     return [_RepairTarget(object_id, context.relation, context.check_id, center, yaw)]
 
 
+def _seating_media_repair_targets(
+    context: _RepairHandlerContext,
+) -> list[_RepairTarget]:
+    subject_id = str(context.result.get("primary_object") or "")
+    media_id = next(
+        (
+            str(item)
+            for item in (
+                context.result.get("selected_related_objects")
+                or context.diagnostics.get("selected_target_ids")
+                or context.result.get("related_objects")
+                or []
+            )
+            if str(item)
+        ),
+        "",
+    )
+    subject = context.scene.objects.get(UniqueID(subject_id))
+    media = context.scene.objects.get(UniqueID(media_id))
+    subject_center = _world_center_xy(subject) if subject is not None else None
+    media_center = _world_center_xy(media) if media is not None else None
+    lateral_axis = _xy(context.diagnostics.get("lateral_axis_xy"))
+    signed_offset = _float_or_none(context.diagnostics.get("signed_lateral_offset_m"))
+    if (
+        subject is None
+        or media is None
+        or subject.object_type != ObjectType.FURNITURE
+        or media.object_type != ObjectType.FURNITURE
+        or subject_center is None
+        or media_center is None
+        or lateral_axis is None
+        or signed_offset is None
+        or abs(signed_offset) <= 1e-6
+    ):
+        return []
+
+    norm = math.hypot(*lateral_axis)
+    if norm <= 1e-6:
+        return []
+    side = (lateral_axis[0] / norm, lateral_axis[1] / norm)
+    correction = (side[0] * signed_offset, side[1] * signed_offset)
+    # Retain the viewing distance while permitting a modest shared motion along
+    # the viewing axis.  A lateral-only correction can remain blocked by an
+    # unrelated object that sits in the middle of the existing media group.
+    # The zero-offset variants remain first so ordinary layouts take the least
+    # disruptive repair.
+    along_axis = (-side[1], side[0])
+    along_offset_m = min(0.6, max(0.25, 0.12 * math.dist(subject_center, media_center)))
+    lateral_candidates = (
+        (
+            (correction[0] * 0.5, correction[1] * 0.5),
+            (-correction[0] * 0.5, -correction[1] * 0.5),
+        ),
+        (correction, (0.0, 0.0)),
+        ((0.0, 0.0), (-correction[0], -correction[1])),
+    )
+
+    targets: list[_RepairTarget] = []
+    for shared_along_delta in (
+        (0.0, 0.0),
+        (along_axis[0] * along_offset_m, along_axis[1] * along_offset_m),
+        (-along_axis[0] * along_offset_m, -along_axis[1] * along_offset_m),
+    ):
+        for seating_delta, media_delta in lateral_candidates:
+            seating_target = (
+                subject_center[0] + seating_delta[0] + shared_along_delta[0],
+                subject_center[1] + seating_delta[1] + shared_along_delta[1],
+            )
+            media_target = (
+                media_center[0] + media_delta[0] + shared_along_delta[0],
+                media_center[1] + media_delta[1] + shared_along_delta[1],
+            )
+            poses = _living_media_member_poses(
+                context,
+                subject_id=subject_id,
+                media_id=media_id,
+                seating_target=seating_target,
+                media_target=media_target,
+            )
+            if len(poses) < 2:
+                continue
+            targets.append(
+                _RepairTarget(
+                    subject_id,
+                    context.relation,
+                    context.check_id,
+                    seating_target,
+                    None,
+                    member_poses=poses,
+                )
+            )
+    return targets
+
+
+def _living_media_member_poses(
+    context: _RepairHandlerContext,
+    *,
+    subject_id: str,
+    media_id: str,
+    seating_target: tuple[float, float],
+    media_target: tuple[float, float],
+) -> tuple[_RepairPose, ...]:
+    subject = context.scene.objects.get(UniqueID(subject_id))
+    media = context.scene.objects.get(UniqueID(media_id))
+    subject_center = _world_center_xy(subject) if subject is not None else None
+    media_center = _world_center_xy(media) if media is not None else None
+    if subject_center is None or media_center is None:
+        return ()
+
+    # A failed hard support contract is exactly the dependency that must move
+    # with the media anchor.  Restricting this graph to passing checks leaves a
+    # television embedded in its old console and makes the atomic candidate
+    # fail the furniture stage's physical validator before it can be scored.
+    media_group = _hard_media_support_component(context, seed_id=media_id)
+    media_delta = (
+        media_target[0] - media_center[0],
+        media_target[1] - media_center[1],
+    )
+    poses: dict[str, _RepairPose] = {
+        subject_id: _RepairPose(
+            subject_id,
+            seating_target,
+            compute_optimal_facing_yaw(
+                np.array([*seating_target, 0.0], dtype=float),
+                np.array([*media_target, 0.0], dtype=float),
+            ),
+        )
+    }
+    planned_centers = {subject_id: seating_target}
+    for object_id in sorted(media_group):
+        obj = context.scene.objects.get(UniqueID(object_id))
+        center = _world_center_xy(obj) if obj is not None else None
+        if obj is None or obj.object_type != ObjectType.FURNITURE or center is None:
+            continue
+        target_center = (
+            center[0] + media_delta[0],
+            center[1] + media_delta[1],
+        )
+        poses[object_id] = _RepairPose(object_id, target_center, None)
+        planned_centers[object_id] = target_center
+
+    # Restore each explicitly required support pose after translating the
+    # component.  XY is centered on the moved support; Z is placed on its top
+    # surface so a previously intersecting display and console are repaired in
+    # the same reversible candidate.
+    for subject_id_on_support, support_id in _hard_support_edges(context):
+        if (
+            subject_id_on_support not in media_group
+            or support_id not in media_group
+            or support_id not in planned_centers
+        ):
+            continue
+        subject_on_support = context.scene.objects.get(UniqueID(subject_id_on_support))
+        support = context.scene.objects.get(UniqueID(support_id))
+        subject_bounds = (
+            subject_on_support.compute_world_bounds()
+            if subject_on_support is not None
+            else None
+        )
+        support_bounds = support.compute_world_bounds() if support is not None else None
+        if (
+            subject_on_support is None
+            or subject_on_support.object_type != ObjectType.FURNITURE
+            or support is None
+            or support.object_type != ObjectType.FURNITURE
+            or subject_bounds is None
+            or support_bounds is None
+        ):
+            continue
+        subject_height = float(subject_bounds[1][2] - subject_bounds[0][2])
+        target_center_z = float(support_bounds[1][2]) + 0.01 + subject_height / 2.0
+        poses[subject_id_on_support] = _RepairPose(
+            subject_id_on_support,
+            planned_centers[support_id],
+            _media_display_yaw_for_support(support),
+            target_center_z=target_center_z,
+        )
+
+    for result in context.payload.get("results") or []:
+        relation = str(result.get("relation_type") or "")
+        if relation not in {
+            "between_alignment",
+            "centered_between_alignment",
+        } or not _is_hard_furniture_contract_result(result):
+            continue
+        anchor_ids = [
+            str(item)
+            for item in (
+                result.get("selected_related_objects")
+                or result.get("related_objects")
+                or (result.get("diagnostics") or {}).get("anchor_ids")
+                or []
+            )
+            if str(item)
+        ]
+        if len(anchor_ids) != 2 or subject_id not in anchor_ids:
+            continue
+        other_id = next((item for item in anchor_ids if item != subject_id), "")
+        if other_id not in media_group:
+            continue
+        dependent_id = str(result.get("primary_object") or "")
+        dependent = context.scene.objects.get(UniqueID(dependent_id))
+        other = context.scene.objects.get(UniqueID(other_id))
+        if dependent is None or dependent.object_type != ObjectType.FURNITURE:
+            continue
+        # The midpoint is always a valid, deterministic member of an explicit
+        # between relation.  It repairs a failing coffee-table relationship
+        # instead of merely preserving an already-correct relative offset.
+        target_center = (
+            (seating_target[0] + planned_centers[other_id][0]) / 2.0,
+            (seating_target[1] + planned_centers[other_id][1]) / 2.0,
+        )
+        poses[dependent_id] = _RepairPose(dependent_id, target_center, None)
+    return tuple(poses.values())
+
+
+def _hard_support_edges(context: _RepairHandlerContext) -> list[tuple[str, str]]:
+    """Return hard furniture-to-furniture support edges regardless of status."""
+    edges: list[tuple[str, str]] = []
+    for result in context.payload.get("results") or []:
+        if str(
+            result.get("relation_type") or ""
+        ) != "object_on_support" or not _is_hard_furniture_contract_result(result):
+            continue
+        subject_id = str(result.get("primary_object") or "")
+        subject = context.scene.objects.get(UniqueID(subject_id))
+        if subject is None or subject.object_type != ObjectType.FURNITURE:
+            continue
+        support_ids = [
+            str(item)
+            for item in (
+                result.get("selected_related_objects")
+                or (result.get("diagnostics") or {}).get("selected_target_ids")
+                or result.get("related_objects")
+                or []
+            )
+            if str(item)
+        ]
+        for support_id in support_ids:
+            support = context.scene.objects.get(UniqueID(support_id))
+            if support is not None and support.object_type == ObjectType.FURNITURE:
+                edges.append((subject_id, support_id))
+    return edges
+
+
+def _hard_media_support_component(
+    context: _RepairHandlerContext, *, seed_id: str
+) -> set[str]:
+    component = {seed_id}
+    edges = _hard_support_edges(context)
+    changed = True
+    while changed:
+        changed = False
+        for first, second in edges:
+            if first in component or second in component:
+                before = len(component)
+                component.update((first, second))
+                changed = changed or len(component) > before
+    return component
+
+
 def _room_center_repair_targets(
     context: _RepairHandlerContext,
 ) -> list[_RepairTarget]:
@@ -1098,319 +1367,20 @@ def _support_repair_targets(context: _RepairHandlerContext) -> list[_RepairTarge
         return []
     subject_height = float(subject_bounds[1][2] - subject_bounds[0][2])
     target_center_z = float(support_bounds[1][2]) + 0.01 + subject_height / 2.0
+    target_yaw_deg = (
+        _media_display_yaw_for_support(support)
+        if _is_media_on_support_result(context.scene, context.result)
+        else None
+    )
     direct_target = _RepairTarget(
         object_id,
         context.relation,
         context.check_id,
         support_center,
-        None,
+        target_yaw_deg,
         target_center_z=target_center_z,
     )
-    return [
-        direct_target,
-        *_support_window_clearance_targets(
-            context,
-            subject=subject,
-            support=support,
-            direct_target=direct_target,
-        ),
-    ]
-
-
-def _support_window_clearance_targets(
-    context: _RepairHandlerContext,
-    *,
-    subject: SceneObject,
-    support: SceneObject,
-    direct_target: _RepairTarget,
-) -> list[_RepairTarget]:
-    """Generate a lateral media-pair move when raising a display blocks a window."""
-    subject_transform = _transform_for_target(subject, direct_target)
-    support_bounds = support.compute_world_bounds()
-    if subject_transform is None or support_bounds is None:
-        return []
-
-    old_subject_transform = subject.transform
-    try:
-        subject.transform = subject_transform
-        subject_bounds = subject.compute_world_bounds()
-    finally:
-        subject.transform = old_subject_transform
-    if subject_bounds is None:
-        return []
-
-    geometry = context.scene.room_geometry
-    support_center = _world_center_xy(support)
-    if geometry is None or support_center is None:
-        return []
-
-    targets: list[_RepairTarget] = []
-    for opening in getattr(geometry, "openings", ()) or ():
-        opening_type = getattr(opening, "opening_type", "")
-        if hasattr(opening_type, "value"):
-            opening_type = opening_type.value
-        if str(opening_type).lower() != "window":
-            continue
-        if not _bounds_block_opening(subject_bounds, opening):
-            continue
-
-        wall = _window_wall(context.scene, opening, support)
-        wall_bounds = wall.compute_world_bounds() if wall is not None else None
-        if wall_bounds is None or _xy_aabb_gap(support_bounds, wall_bounds) > 0.25:
-            continue
-        targets.extend(
-            _paired_support_window_targets(
-                context=context,
-                subject=subject,
-                support=support,
-                opening=opening,
-                support_center=support_center,
-                support_bounds=support_bounds,
-                subject_bounds=subject_bounds,
-                wall_bounds=wall_bounds,
-                target_center_z=direct_target.target_center_z,
-            )
-        )
-    return targets
-
-
-def _bounds_block_opening(bounds: tuple[np.ndarray, np.ndarray], opening: Any) -> bool:
-    zone_min = getattr(opening, "clearance_bbox_min", None)
-    zone_max = getattr(opening, "clearance_bbox_max", None)
-    try:
-        lower = np.asarray(bounds[0], dtype=float)
-        upper = np.asarray(bounds[1], dtype=float)
-        clearance_min = np.asarray(zone_min, dtype=float)
-        clearance_max = np.asarray(zone_max, dtype=float)
-        sill_height = float(getattr(opening, "sill_height", 0.0) or 0.0)
-    except (TypeError, ValueError):
-        return False
-    return bool(
-        upper[2] > sill_height
-        and lower[2] < clearance_max[2]
-        and lower[0] < clearance_max[0]
-        and upper[0] > clearance_min[0]
-        and lower[1] < clearance_max[1]
-        and upper[1] > clearance_min[1]
-    )
-
-
-def _paired_support_window_targets(
-    *,
-    context: _RepairHandlerContext,
-    subject: SceneObject,
-    support: SceneObject,
-    opening: Any,
-    support_center: tuple[float, float],
-    support_bounds: tuple[np.ndarray, np.ndarray],
-    subject_bounds: tuple[np.ndarray, np.ndarray],
-    wall_bounds: tuple[np.ndarray, np.ndarray],
-    target_center_z: float | None,
-) -> list[_RepairTarget]:
-    """Return window-safe slots for the support and its raised subject."""
-    zone_min = getattr(opening, "clearance_bbox_min", None)
-    zone_max = getattr(opening, "clearance_bbox_max", None)
-    try:
-        clearance_min = np.asarray(zone_min, dtype=float)
-        clearance_max = np.asarray(zone_max, dtype=float)
-        wall_min = np.asarray(wall_bounds[0], dtype=float)
-        wall_max = np.asarray(wall_bounds[1], dtype=float)
-    except (TypeError, ValueError):
-        return []
-
-    wall_span = wall_max - wall_min
-    normal_axis = 0 if float(wall_span[0]) < float(wall_span[1]) else 1
-    tangent_axis = 1 - normal_axis
-    support_half_span = (
-        float(support_bounds[1][tangent_axis] - support_bounds[0][tangent_axis]) / 2.0
-    )
-    subject_half_span = (
-        float(subject_bounds[1][tangent_axis] - subject_bounds[0][tangent_axis]) / 2.0
-    )
-    half_span = max(support_half_span, subject_half_span)
-    tangent_min = float(wall_min[tangent_axis]) + half_span + _WINDOW_CLEARANCE_MARGIN_M
-    tangent_max = float(wall_max[tangent_axis]) - half_span - _WINDOW_CLEARANCE_MARGIN_M
-    if tangent_min > tangent_max:
-        return []
-
-    current_tangent = float(support_center[tangent_axis])
-    candidate_values = (
-        float(clearance_min[tangent_axis]) - half_span - _WINDOW_CLEARANCE_MARGIN_M,
-        float(clearance_max[tangent_axis]) + half_span + _WINDOW_CLEARANCE_MARGIN_M,
-    )
-    targets: list[_RepairTarget] = []
-    for tangent_value in sorted(
-        candidate_values,
-        key=lambda value: (abs(value - current_tangent), value),
-    ):
-        if tangent_value < tangent_min or tangent_value > tangent_max:
-            continue
-        center = list(support_center)
-        center[tangent_axis] = tangent_value
-        pair_center = (float(center[0]), float(center[1]))
-        member_poses = (
-            _RepairPose(str(support.object_id), pair_center, None),
-            _RepairPose(
-                str(subject.object_id),
-                pair_center,
-                None,
-                target_center_z,
-            ),
-            *_support_pair_between_dependents(
-                context,
-                support=support,
-                target_support_center=pair_center,
-            ),
-        )
-        targets.append(
-            _RepairTarget(
-                str(subject.object_id),
-                "object_on_support",
-                context.check_id,
-                pair_center,
-                None,
-                member_poses=member_poses,
-                target_center_z=target_center_z,
-            )
-        )
-    return targets
-
-
-def _support_pair_between_dependents(
-    context: _RepairHandlerContext,
-    *,
-    support: SceneObject,
-    target_support_center: tuple[float, float],
-) -> tuple[_RepairPose, ...]:
-    """Keep valid hard between-contract dependency chains valid as media moves."""
-    support_id = str(support.object_id)
-    current_support_center = _world_center_xy(support)
-    if current_support_center is None:
-        return ()
-
-    dependent_rows: list[
-        tuple[
-            dict[str, Any],
-            str,
-            str,
-            SceneObject,
-            tuple[float, float],
-            tuple[float, float],
-        ]
-    ] = []
-    for result in context.payload.get("results") or []:
-        relation = str(result.get("relation_type") or "")
-        if relation not in {"between_alignment", "centered_between_alignment"}:
-            continue
-        if str(result.get("label") or "").lower() != "pass":
-            continue
-        constraint = (result.get("evidence") or {}).get("intent_constraint") or {}
-        if (
-            str(constraint.get("stage") or "").lower() != "furniture"
-            or str(constraint.get("strength") or "").lower() != "hard"
-        ):
-            continue
-
-        subject_id = str(result.get("primary_object") or "")
-        anchor_ids = [
-            str(object_id)
-            for object_id in (
-                result.get("selected_related_objects")
-                or result.get("related_objects")
-                or (result.get("diagnostics") or {}).get("anchor_ids")
-                or []
-            )
-            if str(object_id)
-        ]
-        if not subject_id or support_id not in anchor_ids or len(anchor_ids) != 2:
-            continue
-        other_id = next(
-            (object_id for object_id in anchor_ids if object_id != support_id), ""
-        )
-        subject_obj = context.scene.objects.get(UniqueID(subject_id))
-        other_obj = context.scene.objects.get(UniqueID(other_id))
-        if (
-            subject_obj is None
-            or other_obj is None
-            or subject_obj.object_type != ObjectType.FURNITURE
-            or other_obj.object_type != ObjectType.FURNITURE
-        ):
-            continue
-        subject_center = _world_center_xy(subject_obj)
-        other_center = _world_center_xy(other_obj)
-        if subject_center is None or other_center is None:
-            continue
-        dependent_rows.append(
-            (
-                result,
-                subject_id,
-                other_id,
-                subject_obj,
-                subject_center,
-                other_center,
-            )
-        )
-
-    poses: list[_RepairPose] = []
-    claimed_ids: set[str] = {
-        support_id,
-        str(context.result.get("primary_object") or ""),
-    }
-    planned_centers = {support_id: target_support_center}
-    dependent_subject_ids = {row[1] for row in dependent_rows}
-    remaining_rows = list(dependent_rows)
-    while remaining_rows:
-        row_index = next(
-            (
-                index
-                for index, row in enumerate(remaining_rows)
-                if row[2] not in dependent_subject_ids or row[2] in planned_centers
-            ),
-            0,
-        )
-        (
-            result,
-            subject_id,
-            other_id,
-            _subject_obj,
-            subject_center,
-            other_center,
-        ) = remaining_rows.pop(row_index)
-        if subject_id in claimed_ids:
-            continue
-        relation = str(result.get("relation_type") or "")
-        target_center = _preserved_between_center(
-            subject_center=subject_center,
-            other_center=other_center,
-            target_other_center=planned_centers.get(other_id, other_center),
-            support_center=current_support_center,
-            target_support_center=target_support_center,
-            centered=relation == "centered_between_alignment",
-        )
-        if target_center is None:
-            continue
-        planned_centers[subject_id] = target_center
-        dependent_target = _preserve_passing_flanking_group(
-            context.scene,
-            context.payload,
-            _RepairTarget(
-                subject_id,
-                relation,
-                str(result.get("check_id") or ""),
-                target_center,
-                None,
-            ),
-            require_hard_furniture_contract=True,
-        )
-        dependent_poses = dependent_target.member_poses or (
-            _RepairPose(subject_id, target_center, None),
-        )
-        for pose in dependent_poses:
-            if not pose.object_id or pose.object_id in claimed_ids:
-                continue
-            poses.append(pose)
-            claimed_ids.add(pose.object_id)
-    return tuple(poses)
+    return [direct_target]
 
 
 def _preserved_between_center(
@@ -1522,6 +1492,7 @@ _REPAIR_TARGET_HANDLERS = {
     "clear_access": _clear_access_repair_targets,
     "edge_distribution": _table_seat_repair_targets,
     "workstation_focal_alignment": _workstation_focal_repair_targets,
+    "seating_to_media": _seating_media_repair_targets,
     "seating_to_work_surface": _seating_surface_repair_targets,
     "room_center_alignment": _room_center_repair_targets,
     "between_alignment": _between_repair_targets,
@@ -1550,11 +1521,6 @@ def _repair_targets(scene: RoomScene, payload: dict[str, Any]) -> list[_RepairTa
         if str(result.get("scoring_tier") or "").lower() in {"ignored", "auxiliary"}:
             continue
         check_id = str(result.get("check_id") or "")
-        window_targets = _window_clearance_targets(scene, result, check_id)
-        if window_targets:
-            targets.extend(window_targets)
-            continue
-
         relation = str(result.get("relation_type") or "")
         intent_constraint = (result.get("evidence") or {}).get(
             "intent_constraint"
@@ -1582,30 +1548,43 @@ def _repair_targets(scene: RoomScene, payload: dict[str, Any]) -> list[_RepairTa
             claimed_near_checks=claimed_near_checks,
         )
         targets.extend(handler(context))
-    targets.sort(
-        key=lambda target: (
-            # A hard prompt-authorized support pair that currently intersects
-            # is both a contract failure and a physical failure.  Repair it
-            # before unrelated relation candidates, whose strict physics gate
-            # would otherwise reject every pose against the pre-existing
-            # collision.  This is geometry- and contract-driven, rather than
-            # tied to a particular media or room category.
-            0 if _is_hard_support_collision_target(scene, payload, target) else 1,
-            (
-                0
-                if (_result_by_id(payload, target.check_id) or {}).get("label")
-                == "fail"
-                else 1
-            ),
-            target.check_id,
-            target.object_id,
-        )
-    )
+    targets.sort(key=lambda target: _repair_target_priority(scene, payload, target))
     ordered_targets = _order_targets_by_position_dependency(
+        scene,
         payload,
         _prioritize_coordinated_seating_targets(targets),
     )
     return [*centered_edge_targets, *ordered_targets]
+
+
+def _is_coordinated_media_target(target: _RepairTarget) -> bool:
+    return bool(
+        target.relation_type == "seating_to_media"
+        and len({pose.object_id for pose in target.member_poses}) >= 2
+    )
+
+
+def _repair_target_priority(
+    scene: RoomScene, payload: dict[str, Any], target: _RepairTarget
+) -> tuple[int, int, int, str, str]:
+    """Give atomic repairs precedence in every candidate ordering path."""
+    return (
+        # This target restores the viewing axis plus explicit support and
+        # between dependents in one physically valid state. Try it before
+        # independent wall adjustments that might move a shared anchor.
+        0 if _is_coordinated_media_target(target) else 1,
+        # A hard prompt-authorized support pair that currently intersects is
+        # both a contract and physical failure. It must precede single-object
+        # candidates whose strict physics gate would reject the current state.
+        0 if _is_hard_support_collision_target(scene, payload, target) else 1,
+        (
+            0
+            if (_result_by_id(payload, target.check_id) or {}).get("label") == "fail"
+            else 1
+        ),
+        target.check_id,
+        target.object_id,
+    )
 
 
 def _is_hard_support_collision_target(
@@ -1646,7 +1625,9 @@ def _is_hard_support_collision_target(
 
 
 def _order_targets_by_position_dependency(
-    payload: dict[str, Any], targets: list[_RepairTarget]
+    scene: RoomScene,
+    payload: dict[str, Any],
+    targets: list[_RepairTarget],
 ) -> list[_RepairTarget]:
     """Move positional anchors before repairs whose target pose uses them.
 
@@ -1661,17 +1642,7 @@ def _order_targets_by_position_dependency(
         return targets
 
     base_keys = [
-        (
-            (
-                0
-                if (_result_by_id(payload, target.check_id) or {}).get("label")
-                == "fail"
-                else 1
-            ),
-            target.check_id,
-            target.object_id,
-            index,
-        )
+        (*_repair_target_priority(scene, payload, target), index)
         for index, target in enumerate(targets)
     ]
     moved_ids = [_target_moved_ids(target) for target in targets]
@@ -2284,6 +2255,11 @@ def _is_required_media_on_support_result(
             and str(constraint.get("strength") or "") == "hard"
         )
     return False
+
+
+def _media_display_yaw_for_support(support: SceneObject) -> float:
+    """Orient a freestanding display with its media console's viewing face."""
+    return math.degrees(RollPitchYaw(support.transform.rotation()).yaw_angle())
 
 
 def _object_semantic_names(obj: SceneObject) -> set[str]:
@@ -3063,10 +3039,10 @@ def _wall_backed_targets(
                 (
                     float(clearance_min[tangent_axis])
                     - tangent_half
-                    - _WINDOW_CLEARANCE_MARGIN_M,
+                    - _OPENING_CLEARANCE_MARGIN_M,
                     float(clearance_max[tangent_axis])
                     + tangent_half
-                    + _WINDOW_CLEARANCE_MARGIN_M,
+                    + _OPENING_CLEARANCE_MARGIN_M,
                 )
             )
         except (TypeError, ValueError, IndexError):
@@ -3200,195 +3176,6 @@ def _wall_backed_pose_blocks_door(
         ):
             return True
     return False
-
-
-def _window_clearance_targets(
-    scene: RoomScene,
-    result: dict[str, Any],
-    check_id: str,
-) -> list[_RepairTarget]:
-    """Return same-wall lateral moves that clear a blocked window opening.
-
-    Furniture staging already has a deterministic post-agent repair pass.  A
-    wall-backed bookshelf can satisfy its orientation contract while still
-    hiding a window, so include window clearance failures in that pass rather
-    than relying on a later LLM critique to notice and repair the conflict.
-    """
-    if str(
-        result.get("metric") or ""
-    ) != "interaction_clearance" or not check_id.startswith("window_clearance__"):
-        return []
-
-    opening_id = check_id.removeprefix("window_clearance__")
-    opening = _window_opening(scene, opening_id)
-    if opening is None:
-        return []
-
-    targets: list[_RepairTarget] = []
-    for object_id in _window_clearance_blocker_ids(result):
-        obj = scene.objects.get(UniqueID(object_id))
-        if obj is None or obj.object_type != ObjectType.FURNITURE:
-            continue
-        targets.extend(
-            _same_wall_window_clearance_targets(
-                scene=scene,
-                obj=obj,
-                opening=opening,
-                check_id=check_id,
-            )
-        )
-    return targets
-
-
-def _window_opening(scene: RoomScene, opening_id: str) -> Any | None:
-    geometry = scene.room_geometry
-    if geometry is None or not opening_id:
-        return None
-    for opening in getattr(geometry, "openings", ()) or ():
-        if str(getattr(opening, "opening_id", "")) != opening_id:
-            continue
-        opening_type = getattr(opening, "opening_type", "")
-        if hasattr(opening_type, "value"):
-            opening_type = opening_type.value
-        if str(opening_type).lower() == "window":
-            return opening
-    return None
-
-
-def _window_clearance_blocker_ids(result: dict[str, Any]) -> list[str]:
-    diagnostics = result.get("diagnostics") or {}
-    candidates = (
-        result.get("related_objects") or [],
-        result.get("blocking_objects") or [],
-        diagnostics.get("blocking_objects") or [],
-    )
-    seen: set[str] = set()
-    blocker_ids: list[str] = []
-    for values in candidates:
-        for value in values:
-            object_id = str(value or "")
-            if object_id and object_id not in seen:
-                seen.add(object_id)
-                blocker_ids.append(object_id)
-    return blocker_ids
-
-
-def _same_wall_window_clearance_targets(
-    *,
-    scene: RoomScene,
-    obj: SceneObject,
-    opening: Any,
-    check_id: str,
-) -> list[_RepairTarget]:
-    bounds = obj.compute_world_bounds()
-    zone_min = getattr(opening, "clearance_bbox_min", None)
-    zone_max = getattr(opening, "clearance_bbox_max", None)
-    if bounds is None or zone_min is None or zone_max is None:
-        return []
-    try:
-        obj_min = np.asarray(bounds[0], dtype=float)
-        obj_max = np.asarray(bounds[1], dtype=float)
-        clearance_min = np.asarray(zone_min, dtype=float)
-        clearance_max = np.asarray(zone_max, dtype=float)
-        sill_height = float(getattr(opening, "sill_height", 0.0) or 0.0)
-    except (TypeError, ValueError):
-        return []
-    if (
-        obj_max[2] <= sill_height
-        or obj_min[0] >= clearance_max[0]
-        or obj_max[0] <= clearance_min[0]
-        or obj_min[1] >= clearance_max[1]
-        or obj_max[1] <= clearance_min[1]
-    ):
-        return []
-
-    wall = _window_wall(scene, opening, obj)
-    wall_bounds = wall.compute_world_bounds() if wall is not None else None
-    if wall_bounds is None:
-        return []
-    wall_min = np.asarray(wall_bounds[0], dtype=float)
-    wall_max = np.asarray(wall_bounds[1], dtype=float)
-    wall_span = wall_max - wall_min
-    normal_axis = 0 if float(wall_span[0]) < float(wall_span[1]) else 1
-    tangent_axis = 1 - normal_axis
-    center = (obj_min + obj_max) / 2.0
-    tangent_half = float(obj_max[tangent_axis] - obj_min[tangent_axis]) / 2.0
-    tangent_min = (
-        float(wall_min[tangent_axis]) + tangent_half + _WINDOW_CLEARANCE_MARGIN_M
-    )
-    tangent_max = (
-        float(wall_max[tangent_axis]) - tangent_half - _WINDOW_CLEARANCE_MARGIN_M
-    )
-
-    candidate_values = (
-        float(clearance_min[tangent_axis]) - tangent_half - _WINDOW_CLEARANCE_MARGIN_M,
-        float(clearance_max[tangent_axis]) + tangent_half + _WINDOW_CLEARANCE_MARGIN_M,
-    )
-    targets: list[_RepairTarget] = []
-    for tangent_value in sorted(
-        candidate_values,
-        key=lambda value: (abs(value - float(center[tangent_axis])), value),
-    ):
-        if tangent_value < tangent_min or tangent_value > tangent_max:
-            continue
-        target_center = center[:2].copy()
-        target_center[tangent_axis] = tangent_value
-        targets.append(
-            _RepairTarget(
-                str(obj.object_id),
-                _WINDOW_CLEARANCE_RELATION,
-                check_id,
-                (float(target_center[0]), float(target_center[1])),
-                None,
-            )
-        )
-    return targets
-
-
-def _window_wall(
-    scene: RoomScene, opening: Any, obj: SceneObject
-) -> SceneObject | None:
-    geometry = scene.room_geometry
-    if geometry is None:
-        return None
-    walls: dict[str, SceneObject] = {}
-    for candidate in [*scene.objects.values(), *(geometry.walls or [])]:
-        if _is_wall(candidate):
-            walls.setdefault(str(candidate.object_id), candidate)
-    if not walls:
-        return None
-
-    direction = str(getattr(opening, "wall_direction", "") or "").lower()
-    directional = [
-        wall
-        for wall_id, wall in walls.items()
-        if direction and direction in wall_id.lower()
-    ]
-    candidates = directional or list(walls.values())
-    obj_bounds = obj.compute_world_bounds()
-    if obj_bounds is None:
-        return None
-    return min(
-        candidates,
-        key=lambda wall: _xy_aabb_gap(obj_bounds, wall.compute_world_bounds()),
-    )
-
-
-def _xy_aabb_gap(
-    first: tuple[np.ndarray, np.ndarray],
-    second: tuple[np.ndarray, np.ndarray] | None,
-) -> float:
-    if second is None:
-        return float("inf")
-    first_min, first_max = first
-    second_min, second_max = second
-    dx = max(
-        float(first_min[0] - second_max[0]), float(second_min[0] - first_max[0]), 0.0
-    )
-    dy = max(
-        float(first_min[1] - second_max[1]), float(second_min[1] - first_max[1]), 0.0
-    )
-    return math.hypot(dx, dy)
 
 
 def _world_center_xy(obj: SceneObject) -> tuple[float, float] | None:

@@ -421,7 +421,8 @@ def _add_floor_plan_reservation_guidance(
     if context.stage != "floor_plan" or context.relation_context is None:
         return brief
     reservations = context.relation_context.floor_plan_reservations
-    if not reservations:
+    manifest = context.relation_context.floor_plan_manifest
+    if not reservations and not (manifest and manifest.enabled):
         return brief
 
     anchors: list[str] = []
@@ -438,16 +439,44 @@ def _add_floor_plan_reservation_guidance(
         else:
             anchors.append(f"{category} on a wall")
 
-    if not anchors:
-        return brief
+    details: list[str] = []
+    if anchors:
+        details.append("later hard anchors: " + "; ".join(anchors))
+    if manifest and manifest.enabled:
+        pair_count = sum(
+            item.kind == "opposed_anchor_pair" for item in manifest.reservations
+        )
+        zone_area = sum(
+            item.min_zone_area_m2
+            for item in manifest.reservations
+            if item.kind == "functional_zone"
+        )
+        if pair_count:
+            details.append(
+                "aligned opening-free spans on opposed walls for each media-viewing pair"
+            )
+        if zone_area:
+            details.append(
+                f"at least {zone_area:g} m2 total usable area for later functional zones"
+            )
+        details.append(
+            "an adaptive implicit-window budget of 1 for rooms up to 25 m2, "
+            "2 for rooms up to 50 m2, and 3 above 50 m2, normally no more "
+            "than one implicit window per wall"
+        )
+        if manifest.explicit_window_required:
+            details.append(
+                f"all {manifest.explicit_window_count} explicitly required window(s)"
+            )
     guidance = (
         "Before adding doors or windows, reserve continuous opening-free usable "
-        "wall segments for these later hard anchors: "
-        + "; ".join(anchors)
+        "wall segments and capacity for "
+        + "; ".join(details)
         + ". Size each segment for the named object and its required alignment; "
-        "never place an opening through a reserved segment. A reservation is "
-        "satisfied by usable opening-free wall length; do not create a partition "
-        "or other architectural marker solely to represent a later furniture zone."
+        "never place an implicit opening through a reserved segment. Keep an "
+        "exterior entrance and its route available. A reservation is satisfied "
+        "by usable capacity; do not create a partition solely to represent a "
+        "later furniture zone."
     )
     check = (
         "Verify every reserved wall-anchor segment remains large enough and "

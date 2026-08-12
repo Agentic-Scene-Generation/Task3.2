@@ -468,7 +468,8 @@ def _format_wall_media_window_context(
                     'then `align_wall_object_over_support(object_id="'
                     f'{media_id}", support_object_id="{support_id}")`. '
                     "If the resized opening still blocks the alignment, use "
-                    "`move_window` on the same wall, and only then `remove_window`. "
+                    "`move_window` on the same wall. Remove only an implicit window "
+                    "when the floor-plan contract permits it. "
                     "Never leave the TV shifted sideways merely to avoid the window."
                 )
             continue
@@ -490,8 +491,9 @@ def _format_wall_media_window_context(
                     f"- `{target_id}` has a seating-to-media issue and shares the "
                     f"{direction} wall with window `{window.get('id')}`. If that "
                     "opening prevents a centered, direct media view, repair the "
-                    "window first in this order: shrink it, move it, then remove "
-                    "it; afterward center/rotate the media."
+                    "window first in this order: shrink it, then move it. Remove "
+                    "only an implicit window when the floor-plan contract permits; "
+                    "afterward center/rotate the media."
                 )
     if not rows:
         return ""
@@ -553,7 +555,11 @@ def filter_prompt_results_for_agent(
 
     selected: list[dict[str, Any]] = []
     for result in payload.get("results") or []:
-        if not _is_prompt_issue(result):
+        wall_window_conflict = (
+            agent == AgentType.WALL_MOUNTED.value
+            and _is_wall_window_conflict(result, scope)
+        )
+        if not wall_window_conflict and not _is_prompt_issue(result):
             continue
         if _is_self_relation(result):
             continue
@@ -568,6 +574,8 @@ def filter_prompt_results_for_agent(
                 continue
         else:
             continue
+        if wall_window_conflict:
+            result = {**result, "prompt_actionable_auxiliary": True}
         selected.append(result)
 
     return _dedupe_and_sort(selected)
@@ -723,10 +731,29 @@ def _wall_mounted_issue_is_relevant(
     # window-clearance failure is therefore relevant when one of its related
     # blockers is a current wall-mounted object.
     if str(result.get("check_id") or "").startswith("window_clearance__"):
-        return bool(involved & scope["object_ids"])
+        return _is_wall_window_conflict(result, scope)
     if result.get("metric") == "interaction_clearance":
         return bool(involved & scope["object_ids"])
     return bool(involved & scope["object_ids"])
+
+
+def _is_wall_window_conflict(
+    result: dict[str, Any], scope: dict[str, set[str]]
+) -> bool:
+    if (
+        not str(result.get("check_id") or "").startswith("window_clearance__")
+        or str(result.get("label") or "") != "fail"
+    ):
+        return False
+    blockers = {
+        str(item)
+        for item in (result.get("diagnostics") or {}).get(
+            "wall_mounted_blocking_objects"
+        )
+        or []
+        if str(item)
+    }
+    return bool(blockers & scope["object_ids"])
 
 
 def _dedupe_and_sort(results: list[dict[str, Any]]) -> list[dict[str, Any]]:

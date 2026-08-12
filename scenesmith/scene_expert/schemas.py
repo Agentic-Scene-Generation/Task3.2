@@ -161,6 +161,39 @@ class SuppressedRelationPrior(BaseModel):
     conflicting_constraint_ids: list[str] = Field(default_factory=list)
 
 
+class FloorPlanReservation(BaseModel):
+    """One deterministic capacity requirement owned by the floor-plan stage."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    reservation_id: str
+    kind: Literal["wall_anchor", "opposed_anchor_pair", "functional_zone"]
+    source_constraint_ids: list[str] = Field(default_factory=list)
+    room_type: str = ""
+    subject_categories: list[str] = Field(default_factory=list)
+    target_categories: list[str] = Field(default_factory=list)
+    wall_role: str = ""
+    min_wall_width_m: float = Field(default=0.0, ge=0.0)
+    min_zone_area_m2: float = Field(default=0.0, ge=0.0)
+    count: int = Field(default=1, ge=1)
+    hard: bool = True
+
+
+class FloorPlanReservationManifest(BaseModel):
+    """Serializable future-capacity contract shared by floor-plan validators."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: str = "scenesmith.floor_plan_reservations.v1"
+    enabled: bool = False
+    reservations: list[FloorPlanReservation] = Field(default_factory=list)
+    explicit_window_count: int = Field(default=0, ge=0)
+    explicit_window_required: bool = False
+    preserve_entrance_route: bool = True
+    adaptive_window_budget: bool = True
+    max_implicit_windows_per_wall: int = Field(default=1, ge=0)
+
+
 class StageRelationContext(BaseModel):
     """Exact hard-intent projection plus explicitly advisory asset priors."""
 
@@ -169,6 +202,7 @@ class StageRelationContext(BaseModel):
     stage: str
     hard_constraints: list[dict[str, Any]] = Field(default_factory=list)
     floor_plan_reservations: list[dict[str, Any]] = Field(default_factory=list)
+    floor_plan_manifest: FloorPlanReservationManifest | None = None
     advisory_hssd_priors: list[AdvisoryRelationPrior] = Field(default_factory=list)
     suppressed_priors: list[SuppressedRelationPrior] = Field(default_factory=list)
     contract_constraint_count: int = 0

@@ -3,6 +3,7 @@ from __future__ import annotations
 from scenesmith.scenebenchmark_critic.metrics.interaction_clearance.evaluator import (
     build_clearance_checks,
     build_door_clearance_checks,
+    build_window_clearance_checks,
 )
 
 
@@ -149,3 +150,43 @@ def test_door_sweep_ignores_floor_coverings_and_clear_furniture() -> None:
 
     assert check["clearance_result"]["label"] == "pass"
     assert check["clearance_result"]["blocking_objects"] == []
+
+
+def test_door_clearance_stays_core_while_window_clearance_is_auxiliary() -> None:
+    geometry = {
+        "scene_shell": {
+            "doors": [
+                {
+                    "id": "door_0",
+                    "center": (0.0, -2.0, 1.05),
+                    "width": 0.9,
+                    "height": 2.1,
+                    "wall_direction": "south",
+                }
+            ],
+            "windows": [
+                {
+                    "id": "window_0",
+                    "sill_height": 0.9,
+                    "wall_direction": "north",
+                    "bbox": {
+                        "min": (-0.75, 1.9, 0.9),
+                        "max": (0.75, 2.1, 2.1),
+                    },
+                }
+            ],
+        }
+    }
+    cabinet = _object(
+        "cabinet_0",
+        category="cabinet",
+        object_type="furniture",
+        bbox_min=(-0.4, 1.8, 0.0),
+        bbox_max=(0.4, 2.0, 1.8),
+    )
+
+    door_check = build_door_clearance_checks(geometry, {"cabinet_0": cabinet})[0]
+    window_check = build_window_clearance_checks(geometry, {"cabinet_0": cabinet})[0]
+
+    assert door_check["scoring_tier"] == "core"
+    assert window_check["scoring_tier"] == "auxiliary"
