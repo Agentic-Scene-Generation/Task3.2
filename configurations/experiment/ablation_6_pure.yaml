@@ -1,0 +1,22 @@
+defaults:
+  - base_experiment # inherits from configurations/experiment/base_experiment.yaml
+
+scene_expert:
+  enabled: false
+  mode: "full"   # harness + memory + LoRA (same as harness_memory at runtime; model is the difference)
+  memory:
+    dir: "${paths.memory_dir}/ablation_5"
+    retrieval:
+      max_success_cases: 3
+      max_failure_cases: 3
+      max_skills: 2
+  stage_budget:
+    default:
+      max_designer_iterations: 2
+      max_repair_steps: 1
+    manipuland:
+      max_designer_iterations: 2
+      max_repair_steps: 2
+  verifier:
+    stage_pass_threshold: 0.6
+    full_pass_threshold: 0.7

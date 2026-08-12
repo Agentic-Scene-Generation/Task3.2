@@ -1,0 +1,45 @@
+# @package _global_
+
+# Test configuration for OKCodex image editing
+# Based on ablation_3_qwen3_harness but with okcodex backend
+
+defaults:
+  - ablation_3_qwen3_harness
+  - _self_
+
+# Override furniture agent to use okcodex
+furniture_agent:
+  context_image_generation:
+    enabled: true
+    backend: okcodex  # Switch from qwen_local to okcodex
+    quality_gate:
+      enabled: true
+      max_regenerations: 2
+      min_score: 60
+    grounded_layout:
+      enabled: true
+      base_url: ${oc.env:GROUNDING_DINO_BASE_URL,http://127.0.0.1:18030}
+
+  # Use simple settings for faster testing
+  max_critique_rounds: 1
+  openai:
+    reasoning_effort:
+      designer: low
+      critic: low
+
+# Simple test pipeline
+experiment:
+  pipeline:
+    stop_stage: furniture  # Stop after furniture stage
+    parallel_rooms: false
+    max_parallel_rooms: 1
+
+  num_workers: 1
+  scene_retry_attempts: 1
+
+floor_plan_agent:
+  mode: polygon
+  openai:
+    reasoning_effort:
+      designer: low
+      critic: low

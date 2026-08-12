@@ -96,7 +96,7 @@ pipeline:
 # relevant geometry-rule feedback to the existing furniture/manipuland LLM
 # critic prompts; it does not change generation, retrieval, or VLM filtering.
 scenebenchmark_critic:
-  enabled: false
+  enabled: true
   metrics: ["functional_dependency", "spatial_accessibility", "interaction_clearance", "visual_clearance"]
   inject_into_llm_critic: true
   agent_prompt_context_filter_enabled: true
@@ -131,14 +131,14 @@ stage_placement_order:
     cache: true
     fallback_enabled: true
     max_items: 20
-    enable_thinking: false
+    enable_thinking: true
 
   manipuland:
     enabled: null
     cache: true
     fallback_enabled: true
     max_items_per_surface: 8
-    enable_thinking: false
+    enable_thinking: true
 
 # Geometry generation server settings
 geometry_generation_server:

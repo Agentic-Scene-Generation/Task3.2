@@ -22,6 +22,9 @@ from scenesmith.agent_utils.furniture_layout_planning import (
     is_bedroom_scene,
 )
 from scenesmith.agent_utils.scoring import CritiqueWithScores
+from scenesmith.floor_plan_agents.tools.polygon_geometry import (
+    room_geometry_covers_object,
+)
 
 console_logger = logging.getLogger(__name__)
 
@@ -1069,8 +1072,22 @@ class FurnitureSafetyController:
                         f"found {observed_counts.get(term, 0)}"
                     )
 
+        room_geometry = getattr(scene, "room_geometry", None)
+        polygon_room = isinstance(
+            getattr(room_geometry, "footprint_vertices", None), (list, tuple)
+        )
         room_bounds = self._room_bounds_xy(scene)
-        if room_bounds is not None:
+        if polygon_room:
+            for object_id, obj in getattr(scene, "objects", {}).items():
+                if getattr(obj, "immutable", False):
+                    continue
+                if not self._is_furniture_object(obj):
+                    continue
+                if not room_geometry_covers_object(room_geometry, obj):
+                    hard_reasons.append(
+                        f"{object_id} full footprint exceeds exact polygon room boundary"
+                    )
+        elif room_bounds is not None:
             min_x, min_y, max_x, max_y = room_bounds
             tol = self.room_bounds_tolerance_m
             for object_id, obj in getattr(scene, "objects", {}).items():

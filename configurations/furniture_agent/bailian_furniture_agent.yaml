@@ -1,0 +1,30 @@
+# Furniture agent with Bailian context image generation
+defaults:
+  - base_furniture_agent
+
+# Override context image generation to use Bailian
+context_image_generation:
+  enabled: true
+  backend: "bailian"
+  quality_gate:
+    enabled: true
+    max_regenerations: 2
+    min_score: 60
+  grounded_layout:
+    enabled: true
+    cache: true
+    vocabulary_path: "scenesmith/agent_utils/data/hssd_furniture_grounding_vocabulary.yaml"
+    base_url: ${oc.env:GROUNDING_DINO_BASE_URL,http://127.0.0.1:18030}
+    # Grounded-layout analysis sends two images to the local VLM; keep this
+    # independent from the Bailian image-generation request timeout below.
+    timeout_seconds: 150
+    connect_timeout_seconds: 3
+    max_retries: 1
+    box_threshold: 0.25
+    text_threshold: 0.20
+    token_budget: 240
+    same_region_iou_threshold: 0.80
+    max_category_batches: 8
+    max_coverage_regrounds: 1
+    vision_detail: "high"
+    reasoning_effort: "low"

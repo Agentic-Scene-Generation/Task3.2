@@ -1,5 +1,5 @@
 name: "furniture_context_image_quality"
-version: "1.1"
+version: "2.0"
 description: "Compare an edited furniture context image with its original room render"
 template_variables: ["scene_description", "min_score"]
 prompt: |
@@ -15,15 +15,19 @@ prompt: |
 
   Structural eligibility requirements:
   - Preserve the original floor footprint, wall topology, and recognizable room
-    shape. Changes in materials, lighting, shadows, or rendering style alone are
-    not geometry failures.
+    shape. Minor changes in materials, lighting, or shadows alone are not
+    geometry failures.
   - Preserve every original door and window with the same count and location.
     Minor redrawing or appearance differences are acceptable when the opening
     remains clearly recognizable in the same place; missing, added, covered, or
     materially moved openings are failures.
   - Preserve an overhead layout view of the same room. Small changes in framing,
-    wall perspective, or visual style are acceptable; an eye-level, isometric,
-    or unrelated room view is a failure.
+    or wall perspective are acceptable; an eye-level, isometric, or unrelated
+    room view is a failure.
+  - Preserve the input's Blender-rendered visual style and edge treatment. The
+    added furniture must belong to the same rendered scene. A cartoon, anime,
+    cel-shaded, line-art, sketch, vector, icon-like, diagrammatic, or heavily
+    outlined candidate is a failure even if its room geometry is preserved.
   - Keep added furniture inside the original floor boundary.
   - The candidate must contain recognizable furniture without people, captions,
     logos, watermarks, severe distortions, broken fragments, or unrelated content.
@@ -39,6 +43,11 @@ prompt: |
     than force rejection.
   - Do not reject solely because materials, lighting, floor color, wall texture,
     or rendering realism differ from the original.
+  - Check functional evidence explicitly: bed headboard versus windows/openings,
+    door and open-connection clearance, tall storage versus windows, chair/table
+    facing, sofa/focal grouping, and service-counter working space. Treat clear
+    opening or containment violations as structural; treat ordinary aesthetic
+    preferences as score reductions.
 
   Score the candidate's usefulness as a layout reference from 0 to 100:
   - 80-100: strong, coherent reference with main anchors and good circulation.
@@ -51,17 +60,24 @@ prompt: |
 
   The configured normal-pass threshold is {{ min_score }}.
   Set passed=true only when doors_windows_preserved, room_geometry_preserved,
-  view_preserved, furniture_inside_room, and furniture_quality_ok are all true
-  and quality_score is at least the threshold. openings_clear affects the score
-  but is not independently required for normal passage.
+  view_preserved, rendering_style_preserved, and furniture_inside_room are all
+  true and quality_score is at least the threshold. furniture_quality_ok is a
+  utility signal and is not itself a structural rejection condition.
+  openings_clear affects the score but is not independently required for normal
+  passage.
 
   Return exactly one JSON object using this schema:
   {
     "passed": true,
     "quality_score": 75,
+    "architecture_score": 90,
+    "style_score": 85,
+    "layout_utility_score": 75,
+    "grounding_utility_score": 80,
     "doors_windows_preserved": true,
     "room_geometry_preserved": true,
     "view_preserved": true,
+    "rendering_style_preserved": true,
     "furniture_inside_room": true,
     "openings_clear": true,
     "furniture_quality_ok": true,
@@ -70,6 +86,8 @@ prompt: |
 
   Rules for the JSON response:
   - quality_score must be a number between 0 and 100.
+  - architecture_score, style_score, layout_utility_score, and
+    grounding_utility_score must each be numbers between 0 and 100.
   - reasons must contain short, image-specific issues; use an empty list only
     when there are no material issues.
   - Do not provide correction instructions for another generation attempt.

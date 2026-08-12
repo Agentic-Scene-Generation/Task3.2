@@ -62,8 +62,10 @@ from scenesmith.agent_utils.stage_working_memory import StageWorkingMemory
 from scenesmith.scene_expert.context_bundle import build_stage_context_bundle
 from scenesmith.agent_utils.thinking import (
     chat_template_kwargs_from_effort,
+    openai_default_headers,
     prepend_text_thinking_directive,
     thinking_directive_from_effort,
+    use_responses_api,
 )
 from scenesmith.agent_utils.turn_trimming_session import TurnTrimmingSession
 from scenesmith.prompts import prompt_registry
@@ -1393,10 +1395,11 @@ class BaseStatefulAgent(ABC):
         openai_client = ReasoningPersistenceAsyncOpenAIClient(
             base_url=os.environ.get("OPENAI_BASE_URL", "http://localhost:8000/v1"),
             api_key=os.environ.get("OPENAI_API_KEY", "dummy"),
+            default_headers=openai_default_headers(),
         )
         provider = OpenAIProvider(
             openai_client=openai_client,
-            use_responses=False,
+            use_responses=use_responses_api(),
         )
         intra_cfg = self.cfg.session_memory.intra_turn_observation_stripping
         if intra_cfg.enabled:

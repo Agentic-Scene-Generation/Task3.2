@@ -97,6 +97,9 @@ class FurnitureAgentPrompts(PromptEnum):
     DESIGNER_INITIAL_INSTRUCTION = "designer_initial_instruction"
     DESIGNER_CRITIQUE_INSTRUCTION_STATEFUL = "designer_critique_instruction_stateful"
 
+    # Image-grounded reference analysis.
+    IMAGE_GROUNDED_LAYOUT_ANALYSIS = "image_grounded_layout_analysis"
+
     # Critic prompts.
     STATEFUL_CRITIC_AGENT = "stateful_critic_agent"
     STATEFUL_CRITIC_RUNNER_INSTRUCTION = "stateful_critic_runner_instruction"

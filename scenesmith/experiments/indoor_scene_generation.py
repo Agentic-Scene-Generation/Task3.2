@@ -25,6 +25,11 @@ from scenesmith.agent_utils.articulated_retrieval_server import (
 from scenesmith.agent_utils.furniture_accessibility_guard import (
     improve_storage_front_access,
 )
+from scenesmith.agent_utils.furniture_postprocessing_gate import (
+    repair_invalid_postprocessed_furniture,
+    snapshot_furniture_transforms,
+    validate_render_directory,
+)
 from scenesmith.agent_utils.geometry_generation_server import GeometryGenerationServer
 from scenesmith.agent_utils.house import HouseLayout, HouseScene, RoomGeometry
 from scenesmith.agent_utils.hssd_retrieval_server import HssdRetrievalServer
@@ -50,8 +55,8 @@ from scenesmith.furniture_agents.stateful_furniture_agent import StatefulFurnitu
 from scenesmith.manipuland_agents.stateful_manipuland_agent import (
     StatefulManipulandAgent,
 )
-from scenesmith.scenebenchmark_critic.config import critic_config_from_any
 from scenesmith.scenebenchmark_critic.api import seating_orientation_targets
+from scenesmith.scenebenchmark_critic.config import critic_config_from_any
 from scenesmith.scenebenchmark_critic.furniture_relation_repair import (
     improve_furniture_relations,
     unresolved_furniture_relation_failures,
@@ -442,6 +447,7 @@ async def _rescore_furniture_after_postprocessing(
         )
     if canonical_render_dir is None:
         raise RuntimeError("Canonical furniture render returned no output directory")
+    validate_render_directory(canonical_render_dir)
 
     await furniture_agent._request_critique_impl(update_checkpoint=False)
     await furniture_agent._finalize_scene_and_scores()
@@ -955,6 +961,7 @@ def _generate_room(
 
                     # Get fallen furniture config from physics_validation.
                     physics_val_cfg = cfg_dict["furniture_agent"]["physics_validation"]
+                    pre_simulation_transforms = snapshot_furniture_transforms(scene)
                     scene, projection_success, removed_ids = (
                         apply_physical_feasibility_postprocessing(
                             scene=scene,
@@ -973,14 +980,27 @@ def _generate_room(
                             simulation_time_step_s=sim_cfg["time_step_s"],
                             simulation_timeout_s=sim_cfg["timeout_s"],
                             simulation_html_path=furniture_sim_html_path,
-                            remove_fallen_furniture=physics_val_cfg[
-                                "remove_fallen_furniture"
-                            ],
+                            # Preserve fallen candidates until the richer post-physics
+                            # gate can first attempt an exact pre-simulation rollback.
+                            remove_fallen_furniture=False,
                             fallen_tilt_threshold_degrees=physics_val_cfg[
                                 "fallen_tilt_threshold_degrees"
                             ],
                         )
                     )
+                    postphysics_audit = repair_invalid_postprocessed_furniture(
+                        scene,
+                        pre_simulation_transforms,
+                        floor_penetration_tolerance_m=float(
+                            physics_val_cfg.get("floor_penetration_tolerance_m", 0.10)
+                        ),
+                    )
+                    if postphysics_audit:
+                        console_logger.warning(
+                            "Post-physics furniture gate repaired %d unsafe pose(s): %s",
+                            len(postphysics_audit),
+                            postphysics_audit,
+                        )
                     postprocess_end_time = time.time()
                     if removed_ids:
                         console_logger.info(

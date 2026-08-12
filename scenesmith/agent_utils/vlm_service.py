@@ -5,6 +5,7 @@ from typing import Any
 from openai import OpenAI
 
 from scenesmith.agent_utils.thinking import (
+    openai_default_headers,
     chat_template_kwargs_from_effort,
     prepend_text_thinking_directive,
     responses_api_reasoning_effort,
@@ -33,14 +34,14 @@ class VLMService:
                 project default.
         """
         self.client = ReasoningPersistenceOpenAIClient(
-            client=OpenAI(),
+            client=OpenAI(default_headers=openai_default_headers()),
             session_id_override="vlm",
             # Keep online tool/VLM artifacts out of the main Agent dataset.
             # Qwen VLM thinking is still captured when an Agent context is active.
             capture_online=False,
         )
         # Cache for model type detection.
-        self._reasoning_models = {"gpt-5", "gpt-5.2", "o3", "o4"}
+        self._reasoning_models = {"gpt-5", "gpt-5.2", "gpt-5.5", "o3", "o4"}
         self.service_tier = service_tier
 
     def create_completion(
@@ -155,9 +156,9 @@ class VLMService:
                 kwargs["service_tier"] = self.service_tier
 
             if enable_thinking is not None:
-                kwargs["extra_body"] = {
-                    "chat_template_kwargs": {"enable_thinking": enable_thinking}
-                }
+                kwargs["extra_body"] = chat_template_kwargs_from_effort(
+                    "low" if enable_thinking else "none"
+                )
 
             response = client.chat.completions.create(**kwargs)
             content = response.choices[0].message.content

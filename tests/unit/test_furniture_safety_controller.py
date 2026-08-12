@@ -3,6 +3,10 @@ import unittest
 from dataclasses import dataclass
 from types import SimpleNamespace
 
+import numpy as np
+
+from pydrake.all import RigidTransform
+
 from scenesmith.agent_utils.furniture_safety import (
     FurnitureSafetyController,
     furniture_object_category_matches,
@@ -94,7 +98,47 @@ class BoundedFurniture:
         return self._world_min, self._world_max
 
 
+class PolygonFurniture:
+    def __init__(self, translation: tuple[float, float, float]) -> None:
+        self.name = "chair"
+        self.description = "chair"
+        self.object_type = SimpleNamespace(value="furniture")
+        self.immutable = False
+        self.bbox_min = np.array([-0.2, -0.2, 0.0])
+        self.bbox_max = np.array([0.2, 0.2, 1.0])
+        self.transform = RigidTransform(p=translation)
+
+    def compute_world_bounds(self):
+        translation = self.transform.translation()
+        return self.bbox_min + translation, self.bbox_max + translation
+
+
 class FurnitureSafetyControllerTest(unittest.TestCase):
+    def test_polygon_hard_check_rejects_aabb_cutout(self) -> None:
+        controller = FurnitureSafetyController({"enabled": True})
+        scene = SimpleNamespace(
+            room_type="studio",
+            text_description="A studio.",
+            objects={"chair_0": PolygonFurniture((1.0, 1.0, 0.0))},
+            room_geometry=SimpleNamespace(
+                length=4.0,
+                width=4.0,
+                footprint_vertices=[
+                    (-2.0, -2.0),
+                    (2.0, -2.0),
+                    (2.0, 0.0),
+                    (0.0, 0.0),
+                    (0.0, 2.0),
+                    (-2.0, 2.0),
+                ],
+            ),
+        )
+
+        evaluation = controller.evaluate_scene_state(scene)
+
+        self.assertFalse(evaluation.hard_valid)
+        self.assertIn("exact polygon", " ".join(evaluation.hard_reasons))
+
     def test_window_only_issue_is_soft(self) -> None:
         controller = FurnitureSafetyController({"enabled": True})
         evaluation = controller.evaluate_scores(make_scores())

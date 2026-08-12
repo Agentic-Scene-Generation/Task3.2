@@ -18,7 +18,7 @@ from pathlib import Path
 from openai import OpenAI
 
 from scenesmith.scene_expert.context_bundle import build_llm_call_debug_record
-from scenesmith.agent_utils.thinking import chat_template_kwargs_from_effort
+from scenesmith.agent_utils.thinking import chat_template_kwargs_from_effort, openai_default_headers, responses_api_reasoning_effort, use_responses_api
 from scenesmith.scene_expert.schemas import (
     HarnessContext,
     MemoryPack,
@@ -169,6 +169,7 @@ class GlobalPlanner:
             base_url=api_base_url
             or os.environ.get("OPENAI_BASE_URL", "http://localhost:8000/v1"),
             api_key=api_key or os.environ.get("OPENAI_API_KEY", "dummy"),
+        default_headers=openai_default_headers(),
         )
 
     def generate_stage_brief(
@@ -197,20 +198,31 @@ class GlobalPlanner:
         )
 
         try:
-            response = self._client.chat.completions.create(
-                model=self._model,
-                messages=[
-                    {"role": "system", "content": _SYSTEM_PROMPT},
-                    {"role": "user", "content": user_message},
-                ],
-                temperature=self._temperature,
-                max_tokens=self._max_tokens,
-                extra_body=chat_template_kwargs_from_effort("none"),
-            )
-            raw = response.choices[0].message.content
+            if use_responses_api():
+                response = self._client.responses.create(
+                    model=self._model,
+                    instructions=_SYSTEM_PROMPT,
+                    input=user_message,
+                    reasoning={"effort": responses_api_reasoning_effort("none")},
+                )
+                raw = response.output_text
+                message = None
+            else:
+                response = self._client.chat.completions.create(
+                    model=self._model,
+                    messages=[
+                        {"role": "system", "content": _SYSTEM_PROMPT},
+                        {"role": "user", "content": user_message},
+                    ],
+                    temperature=self._temperature,
+                    max_tokens=self._max_tokens,
+                    extra_body=chat_template_kwargs_from_effort("none"),
+                )
+                message = response.choices[0].message
+                raw = message.content
             # Qwen3 with --reasoning-parser may put output in reasoning_content
-            if not raw:
-                raw = getattr(response.choices[0].message, "reasoning_content", None)
+            if not raw and message is not None:
+                raw = getattr(message, "reasoning_content", None)
             console_logger.debug(f"GlobalPlanner raw response: {raw}")
             _append_llm_debug(
                 build_llm_call_debug_record(

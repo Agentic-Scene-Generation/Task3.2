@@ -41,7 +41,7 @@ rendering:
 
   # Side views configuration (only used when layout includes sides).
   # Set side_view_count to 0 to disable side views.
-  side_view_count: 2
+  side_view_count: 4
   side_view_width: 384
   side_view_height: 384
 
@@ -316,7 +316,7 @@ fail_stage_on_unresolved_hard_constraints: false
 # are detected, a synthetic low score and repair hint are saved instead of
 # spending a full VLM score_scene call on a known-invalid candidate.
 critic_fast_path:
-  hard_check_first: true
+  hard_check_first: false
   skip_vlm_on_hard_fail: true
   render_hard_fail_candidate: true
   direct_scene_state_cache: true
@@ -336,7 +336,7 @@ planner_context_limits:
 # prompting: even if the LLM asks for more changes, these limits are enforced in
 # tools and checkpoint handling.
 furniture_safety_controller:
-  enabled: true
+  enabled: false
   max_critique_design_cycles: 2
   max_move_calls: 36
   max_moves_initial_design: 18
@@ -563,6 +563,8 @@ context_image_generation:
   enabled: true
   # "inherit" preserves the existing OpenAI/Gemini image-generator path.
   # "qwen_local" uses the separately started local Qwen-Image-Edit service.
+  # "okcodex" uses the OKCodex cloud image editing service.
+  # "openrouter" uses OpenRouter's dedicated image-to-image API.
   backend: "inherit"
   # Optional VLM comparison of the original room render and edited candidate.
   # When disabled, context-image behavior remains a single edit with no judge call.
@@ -574,6 +576,26 @@ context_image_generation:
     # Normal-pass threshold. Structurally eligible lower-scoring candidates may
     # still be selected as the best-effort fallback after all attempts.
     min_score: 60
+  # Optional GroundingDINO + VLM analysis of the final selected edited image.
+  # This is independent from experiment.stage_placement_order.furniture.
+  grounded_layout:
+    enabled: false
+    cache: true
+    vocabulary_path: "scenesmith/agent_utils/data/hssd_furniture_grounding_vocabulary.yaml"
+    base_url: ${oc.env:GROUNDING_DINO_BASE_URL,http://127.0.0.1:18030}
+    # The VLM receives both the edited reference image and its GroundingDINO
+    # annotation.  Allow for GPU queueing/inference under parallel scene runs.
+    timeout_seconds: 150
+    connect_timeout_seconds: 3
+    max_retries: 1
+    box_threshold: 0.25
+    text_threshold: 0.20
+    token_budget: 240
+    same_region_iou_threshold: 0.80
+    max_category_batches: 8
+    max_coverage_regrounds: 1
+    vision_detail: "high"
+    reasoning_effort: "low"
   qwen_local:
     base_url: ${oc.env:QWEN_IMAGE_EDIT_BASE_URL,http://127.0.0.1:18020/v1}
     api_key: ${oc.env:QWEN_IMAGE_EDIT_API_KEY,not-needed}
@@ -585,6 +607,40 @@ context_image_generation:
     negative_prompt: " "
     seed: 0
     timeout_seconds: 120
+    connect_timeout_seconds: 5
+    max_retries: 0
+    write_metadata: true
+  okcodex:
+    base_url: ${oc.env:OKCODEX_BASE_URL,https://api.okcodex.cn}
+    api_key: ${oc.env:OKCODEX_API_KEY}
+    model: ${oc.env:OKCODEX_IMAGE_MODEL,gpt-image-1.5}
+    actor_auth: "local-image-extension"
+    num_inference_steps: 50
+    true_cfg_scale: 4.0
+    negative_prompt: " "
+    seed: 0
+    timeout_seconds: 120
+    connect_timeout_seconds: 5
+    max_retries: 0
+    write_metadata: true
+  openrouter:
+    base_url: ${oc.env:OPENROUTER_BASE_URL,https://openrouter.ai/api/v1}
+    api_key: "${oc.env:OPENROUTER_API_KEY,''}"
+    model: ${oc.env:OPENROUTER_IMAGE_MODEL,openai/gpt-image-2}
+    quality: ${oc.env:OPENROUTER_IMAGE_QUALITY,medium}
+    aspect_ratio: "${oc.env:OPENROUTER_IMAGE_ASPECT_RATIO,1:1}"
+    background: ${oc.env:OPENROUTER_IMAGE_BACKGROUND,opaque}
+    normalize_to_reference_size: true
+    timeout_seconds: 300
+    connect_timeout_seconds: 5
+    max_retries: 0
+    write_metadata: true
+  bailian:
+    api_key: ${oc.env:BAILIAN_API_KEY}
+    model: ${oc.env:BAILIAN_IMAGE_MODEL,wan2.7-image-pro}
+    size: "${oc.env:BAILIAN_IMAGE_SIZE,768*768}"
+    normalize_to_reference_size: true
+    timeout_seconds: 180
     connect_timeout_seconds: 5
     max_retries: 0
     write_metadata: true
