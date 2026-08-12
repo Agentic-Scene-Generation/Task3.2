@@ -77,6 +77,7 @@ fi
 MODEL_NAME="${MODEL_NAME:-${SCENEEXPERT_MODEL_ID:-Qwen3.6-27B-Q8_0}}"
 RUN_ID="${RUN_ID:-critic_on_$(date +%Y-%m-%d_%H-%M-%S)}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-$PROJECT_ROOT/outputs/critic_probe/$RUN_ID}"
+CASE_SET="${CASE_SET:-new3}"
 SCENE_SELECTION="${SCENE_SELECTION:-all}"
 SCENE_SELECTION_EXPLICIT="false"
 REPLAY_FROM_PATH="${REPLAY_FROM_PATH:-}"
@@ -88,8 +89,9 @@ usage() {
 Usage: bash scripts/run_parallel_critic_on.sh [options]
 
 Options:
+  --case-set <set>         case registry: new3 (default) or legacy8 (old8 alias)
   --scenes <selection>     all, or a comma-separated list chosen from:
-                           bedroom,office,long_living_room
+                           the selected case registry
   --output-root <dir>      write probe output below <dir>
   --output-dir <dir>       alias for --output-root
   --resume-from <dir>      reuse prior critic batch outputs below <dir>
@@ -97,8 +99,16 @@ Options:
                            furniture_latest_render
   -h, --help               show this help
 
+Case registries:
+  new3      bedroom, office, long_living_room
+  legacy8   default_bedroom, default_living_room, default_classroom,
+            default_rustic_bedroom, meeting_room_mixed_edge_seating,
+            study_desk_access_crunch, bedroom_bedside_blockage,
+            dining_room_service_squeeze
+
 CASE_FILTER remains available for legacy substring filtering when --scenes is
-not supplied. An explicit --scenes selection takes precedence.
+not supplied. An explicit --scenes selection takes precedence. A reusable
+shared base must use the same case registry and fixed scene ordering.
 EOF
 }
 
@@ -139,6 +149,22 @@ if [ "${1:-}" != "--internal-run-batch" ]; then
                     exit 2
                 fi
                 SCENE_SELECTION_EXPLICIT="true"
+                shift
+                ;;
+            --case-set)
+                if [ "$#" -lt 2 ] || [ -z "${2:-}" ]; then
+                    echo "ERROR: --case-set requires new3 or legacy8" >&2
+                    exit 2
+                fi
+                CASE_SET="$2"
+                shift 2
+                ;;
+            --case-set=*)
+                CASE_SET="${1#*=}"
+                if [ -z "$CASE_SET" ]; then
+                    echo "ERROR: --case-set requires new3 or legacy8" >&2
+                    exit 2
+                fi
                 shift
                 ;;
             --resume-from)
@@ -185,6 +211,15 @@ if [ "${1:-}" != "--internal-run-batch" ]; then
         esac
     done
 fi
+
+case "$CASE_SET" in
+    old8) CASE_SET="legacy8" ;;
+    new3|legacy8) ;;
+    *)
+        echo "ERROR: CASE_SET must be new3 or legacy8, got '$CASE_SET'" >&2
+        exit 2
+        ;;
+esac
 
 SCENE_BATCH_SIZE="${SCENE_BATCH_SIZE:-1}"
 SCENE_WORKERS_PER_PROCESS="${SCENE_WORKERS_PER_PROCESS:-1}"
@@ -567,16 +602,16 @@ validate_scene_selection() {
             exit 2
         fi
         case "$scene_id" in
-            bedroom|office|long_living_room) ;;
             all)
                 echo "ERROR: --scenes all cannot be combined with individual scene IDs" >&2
                 exit 2
                 ;;
-            *)
-                echo "ERROR: unknown scene ID '$scene_id'; choose bedroom, office, long_living_room, or all" >&2
-                exit 2
-                ;;
         esac
+        if ! case_registry_contains "$scene_id"; then
+            echo "ERROR: unknown scene ID '$scene_id' for case set '$CASE_SET'; choose an ID from: $CASE_SET_IDS" >&2
+            echo "       Or use --scenes all." >&2
+            exit 2
+        fi
         if [[ "$seen" == *",$scene_id,"* ]]; then
             echo "ERROR: duplicate scene ID in --scenes: $scene_id" >&2
             exit 2
@@ -590,14 +625,89 @@ validate_scene_selection() {
     fi
 }
 
-# Reject invalid selections before creating an output directory or lock file.
+case_registry_contains() {
+    local requested_id="$1"
+    local case_entry case_id
+    for case_entry in "${CASES[@]}"; do
+        IFS='|' read -r case_id _ <<< "$case_entry"
+        if [ "$case_id" = "$requested_id" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+select_case_registry() {
+    case "$CASE_SET" in
+        legacy8)
+            # Preserved verbatim from commit 1c45466. Both ID order and
+            # prompts define the persisted shared-base batch/scene mapping.
+            CASES=(
+                "default_bedroom|ACP default scene 0|A bedroom with a bed, two nightstands, and a wardrobe in the corner of the room."
+                "default_living_room|ACP default scene 1|A living room with a two-seater sofa against the wall, a square rug in the middle in front of the sofa, and two large plants on the floor near the sofa."
+                "default_classroom|ACP default scene 2|A classroom with six student desks, each with a chair. A teacher's desk sits at the front near the chalkboard, which hangs on the wall."
+                "default_rustic_bedroom|ACP default scene 3|A bedroom featuring rustic farmhouse decor with exposed wooden beams."
+                "meeting_room_mixed_edge_seating|conference-table mixed long-and-short-side equal chair distribution|A meeting room with one rectangular conference table centered in the room and seven office chairs. Arrange six office chairs in two equal groups of three, evenly spaced along the table's two long sides, with all chairs facing the table. Place one remaining office chair centered along one short side, facing the table. Keep the opposite short side free of chairs. Keep clear circulation around the table."
+                "study_desk_access_crunch|desk-chair-monitor functional relation and study access|A study with a desk centered against the back wall, an office chair tucked under the desk, a computer monitor on the desk, two guest chairs against the side wall with their usable fronts perpendicular to the wall and facing into the room, and a bookshelf on the adjacent wall with its usable front perpendicular to the wall and facing into the room. A desk lamp and a notebook sit on the desk, a pen holder next to the monitor, and a small trash can beside the desk."
+                "bedroom_bedside_blockage|bed-nightstand-lamp functional relation and bed-side/wardrobe accessibility|A bedroom with a bed centered on the main wall, a nightstand with a table lamp on each side of the bed, a dresser against the opposite wall directly facing the bed, and a wardrobe placed next to the dresser. An alarm clock sits on one nightstand, a book on the other, and a small wastebasket near the dresser."
+                "dining_room_service_squeeze|dining table-chair-place-setting relation and dining/sideboard accessibility|A dining room with a dining table in the center, four dining chairs arranged around it with one on each side, a sideboard against the wall behind the chairs on one side, and table settings for four including plates, cutlery, and glasses. A centerpiece vase with flowers sits in the middle of the table, and a set of coasters sits on the sideboard."
+            )
+            ;;
+        new3)
+            CASES=(
+                "bedroom|bed-nightstand flanking, dressing station alignment, storage access, and wall mirror|A functional bedroom with one bed centered against the back wall. Place two nightstands, one on each side of the bed. Place one wardrobe against a side wall. Position one low freestanding dressing table against a free wall, with one stool centered in front of and facing the dressing table. Mount one separate mirror on the wall, centered directly above the dressing table; the mirror must not be integrated into the table. Keep the entrance route clear and leave enough usable space in front of the wardrobe and dressing table."
+                "office|four one-to-one desk-chair-monitor workstations, shared circulation, and corner wastebasket|A practical office with four separate desks forming four workstations. Pair each desk with exactly one office chair positioned at its usable side and facing the desk. Place exactly one computer monitor on top of each desk, for four monitors in total, with every monitor facing its paired chair. Place one freestanding water dispenser against a wall and keep its front accessible. Place one wastebasket on the floor in one corner of the room. Maintain a clear central aisle and enough clearance to use every workstation."
+                "long_living_room|living-media alignment, five-seat dining edge distribution, wall storage, and distinct-corner plants|A long rectangular living room with separate living and dining areas. In the living area, place one sofa against a wall facing one TV stand on the opposite side, with one television supported on top of the TV stand. Center one coffee table between the sofa and the TV stand. In the dining area, place one rectangular dining table with five complete table settings, each including a plate, cutlery, and a drinking glass. Arrange five dining chairs around the table: two evenly spaced along each long side and one centered on one short side, all facing the table; keep the opposite short side free of chairs. Place one storage cabinet against a wall without blocking circulation. Place four large floor plants in four distinct room corners, exactly one plant per corner. Keep a clear route between the entrance, living area, dining area, and storage cabinet."
+            )
+            ;;
+        *)
+            echo "ERROR: CASE_SET must be new3 or legacy8, got '$CASE_SET'" >&2
+            exit 2
+            ;;
+    esac
+
+    local case_entry case_id
+    CASE_SET_IDS=""
+    for case_entry in "${CASES[@]}"; do
+        IFS='|' read -r case_id _ <<< "$case_entry"
+        if [ -n "$CASE_SET_IDS" ]; then
+            CASE_SET_IDS+=", "
+        fi
+        CASE_SET_IDS+="$case_id"
+    done
+}
+
+select_case_registry
+
+# Reject invalid selections before creating shared-base metadata, an output
+# directory, or a lock file.
 validate_scene_selection
+
+SHARED_BASE_CASE_SET_FILE=""
+if [ "$BRANCH_FROM_SHARED_BASE" = "true" ]; then
+    SHARED_BASE_CASE_SET_FILE="$SHARED_BASE_ROOT/.critic_on_case_set"
+    if [ "$GENERATE_SHARED_BASE" = "true" ]; then
+        if [ "$DRY_RUN" = "false" ]; then
+            mkdir -p "$SHARED_BASE_ROOT"
+            printf '%s\n' "$CASE_SET" > "$SHARED_BASE_CASE_SET_FILE"
+        fi
+    elif [ -f "$SHARED_BASE_CASE_SET_FILE" ]; then
+        shared_base_case_set="$(tr -d '[:space:]' < "$SHARED_BASE_CASE_SET_FILE")"
+        if [ "$shared_base_case_set" != "$CASE_SET" ]; then
+            echo "ERROR: shared base case set is '$shared_base_case_set', but this run requested '$CASE_SET'" >&2
+            echo "       Reuse only a shared base generated for the same case registry." >&2
+            exit 2
+        fi
+    else
+        echo "WARNING: reusable shared base has no .critic_on_case_set metadata; compatibility is inferred from batch files." >&2
+    fi
+fi
 
 # Parallel batches re-enter this script in a new session. Export every value
 # that may have been normalized or defaulted above so the child uses exactly
 # the same run configuration as the parent.
 export SCENEEXPERT_EXPERIMENT="$EXPERIMENT"
-export PYTHON_BIN MODEL_NAME RUN_ID OUTPUT_ROOT
+export PYTHON_BIN MODEL_NAME RUN_ID OUTPUT_ROOT CASE_SET CASE_SET_IDS
 export SCENE_BATCH_SIZE SCENE_WORKERS_PER_PROCESS SCENE_RETRY_ATTEMPTS
 export CRITIC_PROBE_PARALLEL CRITIC_PROBE_INNER_PARALLELISM
 export CRITIC_PROBE_MAX_SAFE_INNER_PARALLELISM CRITIC_PROBE_ALLOW_UNSAFE_PARALLELISM
@@ -690,6 +800,7 @@ echo "project: $PROJECT_ROOT"
 echo "experiment: $EXPERIMENT"
 echo "run id: $RUN_ID"
 echo "output root: $OUTPUT_ROOT"
+echo "case set: $CASE_SET"
 echo "model: $MODEL_NAME"
 echo "OpenAI base URL: $OPENAI_BASE_URL"
 if [ -n "${SCENEEXPERT_MEMORY_EMBEDDING_MODEL_DIR:-}" ]; then
@@ -720,16 +831,6 @@ echo "holdout cases: $INCLUDE_HOLDOUT_CASES"
 echo "scene selection: $SCENE_SELECTION"
 echo "==============================================="
 
-# case_id|critic goal|prompt. Override only selection/count with CASE_FILTER
-# and MAX_CASES; this keeps batch indices stable for reusable shared bases.
-# An explicit --scenes list uses exact IDs and takes precedence over CASE_FILTER.
-# CASE_FILTER accepts one substring or a comma-separated list of substrings.
-CASES=(
-    "bedroom|bed-nightstand flanking, dressing station alignment, storage access, and wall mirror|A functional bedroom with one bed centered against the back wall. Place two nightstands, one on each side of the bed. Place one wardrobe against a side wall. Position one low freestanding dressing table against a free wall, with one stool centered in front of and facing the dressing table. Mount one separate mirror on the wall, centered directly above the dressing table; the mirror must not be integrated into the table. Keep the entrance route clear and leave enough usable space in front of the wardrobe and dressing table."
-    "office|four one-to-one desk-chair-monitor workstations, shared circulation, and corner wastebasket|A practical office with four separate desks forming four workstations. Pair each desk with exactly one office chair positioned at its usable side and facing the desk. Place exactly one computer monitor on top of each desk, for four monitors in total, with every monitor facing its paired chair. Place one freestanding water dispenser against a wall and keep its front accessible. Place one wastebasket on the floor in one corner of the room. Maintain a clear central aisle and enough clearance to use every workstation."
-    "long_living_room|living-media alignment, five-seat dining edge distribution, wall storage, and distinct-corner plants|A long rectangular living room with separate living and dining areas. In the living area, place one sofa against a wall facing one TV stand on the opposite side, with one television supported on top of the TV stand. Center one coffee table between the sofa and the TV stand. In the dining area, place one rectangular dining table with five complete table settings, each including a plate, cutlery, and a drinking glass. Arrange five dining chairs around the table: two evenly spaced along each long side and one centered on one short side, all facing the table; keep the opposite short side free of chairs. Place one storage cabinet against a wall without blocking circulation. Place four large floor plants in four distinct room corners, exactly one plant per corner. Keep a clear route between the entrance, living area, dining area, and storage cabinet."
-)
-
 case_selected() {
     local case_id="$1"
     local filter
@@ -756,6 +857,43 @@ case_selected() {
     done
     return 1
 }
+
+validate_shared_base_case_mapping() {
+    local index entry case_id _critic_goal _prompt batch_index batch_csv selected=0
+
+    if [ "$BRANCH_FROM_SHARED_BASE" != "true" ] \
+        || [ "$GENERATE_SHARED_BASE" = "true" ]; then
+        return 0
+    fi
+
+    for index in "${!CASES[@]}"; do
+        entry="${CASES[$index]}"
+        IFS='|' read -r case_id _critic_goal _prompt <<< "$entry"
+        if ! case_selected "$case_id"; then
+            continue
+        fi
+        if [ "$MAX_CASES" -gt 0 ] && [ "$selected" -ge "$MAX_CASES" ]; then
+            break
+        fi
+        batch_index=$((index / SCENE_BATCH_SIZE + 1))
+        batch_csv="$SHARED_BASE_ROOT/$(printf 'batch_%03d' "$batch_index")/batch_cases.csv"
+        if [ ! -f "$batch_csv" ]; then
+            echo "ERROR: reusable shared base has no batch manifest: $batch_csv" >&2
+            echo "       Expected case '$case_id' at scene index $index for case set '$CASE_SET'." >&2
+            exit 2
+        fi
+        if ! awk -F',' -v expected_index="$index" -v expected_id="$case_id" \
+            '$1 == expected_index && index($0, "\"" expected_id "\"") { found = 1 } END { exit !found }' \
+            "$batch_csv"; then
+            echo "ERROR: reusable shared base batch mapping does not contain case '$case_id' at scene index $index: $batch_csv" >&2
+            echo "       The base belongs to another case registry or was generated with a different ordering." >&2
+            exit 2
+        fi
+        selected=$((selected + 1))
+    done
+}
+
+validate_shared_base_case_mapping
 
 COMMON_ARGS=(
     "experiment.num_workers=${SCENE_WORKERS_PER_PROCESS}"
@@ -891,18 +1029,20 @@ run_batch() {
         else
             resume_from="$shared_base_batch_root"
         fi
-        if [ ! -d "$resume_from" ]; then
+        if [ "$DRY_RUN" = "false" ] && [ ! -d "$resume_from" ]; then
             echo "ERROR: missing reusable shared-base batch: $resume_from" >&2
             exit 1
         fi
-        for entry in "${batch_entries[@]}"; do
-            IFS='|' read -r scene_index _case_id _critic_goal _prompt <<< "$entry"
-            if [ ! -d "$resume_from/scene_$(printf '%03d' "$scene_index")" ]; then
-                echo "ERROR: shared-base scene directory not found: $resume_from/scene_$(printf '%03d' "$scene_index")" >&2
-                echo "       Expected the shared base under $shared_base_batch_root/hydra or $shared_base_batch_root." >&2
-                exit 1
-            fi
-        done
+        if [ "$DRY_RUN" = "false" ]; then
+            for entry in "${batch_entries[@]}"; do
+                IFS='|' read -r scene_index _case_id _critic_goal _prompt <<< "$entry"
+                if [ ! -d "$resume_from/scene_$(printf '%03d' "$scene_index")" ]; then
+                    echo "ERROR: shared-base scene directory not found: $resume_from/scene_$(printf '%03d' "$scene_index")" >&2
+                    echo "       Expected the shared base under $shared_base_batch_root/hydra or $shared_base_batch_root." >&2
+                    exit 1
+                fi
+            done
+        fi
     fi
 
     local cmd=(
