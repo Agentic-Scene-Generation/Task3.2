@@ -267,6 +267,26 @@ class FurnitureSafetyControllerTest(unittest.TestCase):
             )
         )
 
+    def test_generic_cabinet_satisfies_storage_cabinet_inventory_role(self) -> None:
+        self.assertTrue(
+            furniture_object_category_matches(
+                "cabinet_0",
+                "cabinet",
+                "Compact freestanding storage cabinet",
+                "storage_cabinet",
+            )
+        )
+
+    def test_named_filing_cabinet_does_not_satisfy_storage_cabinet_role(self) -> None:
+        self.assertFalse(
+            furniture_object_category_matches(
+                "filing_cabinet_0",
+                "filing_cabinet",
+                "Steel filing cabinet with drawers",
+                "storage_cabinet",
+            )
+        )
+
     def test_role_specific_desks_satisfy_generic_desk_inventory(self) -> None:
         for object_id, name in (
             ("student_desk_0", "student_desk"),

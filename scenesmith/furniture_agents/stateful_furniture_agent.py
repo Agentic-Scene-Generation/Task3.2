@@ -1648,6 +1648,25 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             if parent != category and furniture_category_satisfies(category, parent)
         )
 
+    def _repair_request_semantic_name(self, category: str) -> str:
+        """Use an unambiguous hard-contract label for repair retrieval."""
+        compatible_contract_categories: list[str] = []
+        for contract_category in intent_contract_required_counts(self.scene):
+            canonical = self._repair_category_for_task_label(contract_category)
+            if not canonical or canonical in compatible_contract_categories:
+                continue
+            if (
+                canonical == category
+                or furniture_category_satisfies(category, canonical)
+                or furniture_category_satisfies(canonical, category)
+            ):
+                compatible_contract_categories.append(canonical)
+        if category in compatible_contract_categories:
+            return category
+        if len(compatible_contract_categories) == 1:
+            return compatible_contract_categories[0]
+        return category
+
     def _ensure_required_furniture_asset(self, category: str) -> int:
         required = self._required_count(category)
         if required <= 0:
@@ -1694,16 +1713,18 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         if spec is None:
             return None
         description, dimensions = spec
+        semantic_name = self._repair_request_semantic_name(category)
 
         request = AssetGenerationRequest(
             object_descriptions=[description],
-            short_names=[category],
+            short_names=[semantic_name],
             object_type=ObjectType.FURNITURE,
             desired_dimensions=[dimensions],
             style_context="deterministic repair asset",
             scene_id=(
                 self.scene.scene_dir.name if self.scene else "deterministic_repair"
             ),
+            semantic_name_candidates=[[semantic_name]],
         )
         result = self.asset_manager.generate_assets(request)
         for asset in result.successful_assets:

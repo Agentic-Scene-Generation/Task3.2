@@ -99,6 +99,12 @@ DEFAULT_ALIASES = {
         "makeup tables",
     ],
     "table": ["table", "tables"],
+    "storage_cabinet": [
+        "storage cabinet",
+        "storage cabinets",
+        "storage cupboard",
+        "storage cupboards",
+    ],
     "cabinet": ["cabinet", "cabinets"],
     "bookshelf": ["bookshelf", "bookshelves", "bookcase", "bookcases"],
     "plant": ["plant", "plants", "potted plant", "potted plants"],
@@ -149,6 +155,25 @@ FURNITURE_CATEGORY_PARENTS: dict[str, frozenset[str]] = {
     "conference_table": frozenset({"table"}),
     "dressing_table": frozenset({"table"}),
 }
+
+# Retrieval uses ``cabinet`` as the stable semantic name for the freestanding
+# storage-cabinet assets selected for an explicit ``storage cabinet`` prompt.
+# Treat only this pair as interchangeable for inventory counting.  Other
+# cabinet variants keep their own semantics and must not satisfy the request.
+_RETRIEVED_ASSET_CATEGORY_COMPATIBILITIES: dict[str, frozenset[str]] = {
+    "cabinet": frozenset({"storage_cabinet"}),
+    "storage_cabinet": frozenset({"cabinet"}),
+}
+
+_NON_STORAGE_CABINET_PATTERN = re.compile(
+    r"\b(?:file|filing|wall|mounted)\s+cabinet\b", re.IGNORECASE
+)
+
+
+def _is_explicit_non_storage_cabinet(text: object) -> bool:
+    """Keep named filing/wall cabinet variants out of storage-cabinet fallback."""
+    normalized = str(text or "").lower().replace("_", " ")
+    return _NON_STORAGE_CABINET_PATTERN.search(normalized) is not None
 
 
 def _prompt_mentions_standalone_generic_furniture(prompt: str, *, generic: str) -> bool:
@@ -319,10 +344,14 @@ def infer_furniture_category(text: str) -> str | None:
 
 def furniture_category_matches(text: str, required_category: str) -> bool:
     """Return whether object text satisfies a canonical inventory category."""
+    required_category = str(required_category).lower()
+    if required_category == "storage_cabinet" and _is_explicit_non_storage_cabinet(
+        text
+    ):
+        return False
     object_category = infer_furniture_category(text)
     if object_category is not None:
         return furniture_category_satisfies(object_category, required_category)
-    required_category = str(required_category).lower()
     if required_category not in DEFAULT_ALIASES:
         return _contains_alias(
             text, required_category.replace("_", " "), category=required_category
@@ -338,6 +367,8 @@ def furniture_category_satisfies(
     required = str(required_category or "").lower()
     if not observed or not required:
         return False
+    if required in _RETRIEVED_ASSET_CATEGORY_COMPATIBILITIES.get(observed, ()):
+        return True
     pending = [observed]
     visited: set[str] = set()
     while pending:
@@ -375,6 +406,12 @@ def furniture_object_category_matches(
     required_category: str,
 ) -> bool:
     """Return whether a structured scene object satisfies an inventory category."""
+    if str(
+        required_category
+    ).lower() == "storage_cabinet" and _is_explicit_non_storage_cabinet(
+        f"{object_id} {name}"
+    ):
+        return False
     object_category = infer_furniture_object_category(object_id, name, description)
     if object_category is not None:
         return furniture_category_satisfies(object_category, required_category)

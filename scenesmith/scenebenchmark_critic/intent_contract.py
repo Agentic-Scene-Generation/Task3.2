@@ -3261,6 +3261,11 @@ _GENERIC_SELECTOR_PARENTS = {
     "student_desk": "desk",
     "teacher_desk": "desk",
     "reception_desk": "desk",
+    # HSSD retrieval commonly keeps the stable asset label ``cabinet`` for a
+    # prompt's more descriptive ``storage_cabinet`` request.  This fallback is
+    # deliberately one-way and runs only after exact selector matching, so a
+    # retrieved storage-cabinet asset still wins whenever it is available.
+    "storage_cabinet": "cabinet",
 }
 
 _GENERIC_SELECTOR_SUFFIX_PARENTS = frozenset(

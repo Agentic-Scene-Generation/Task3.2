@@ -1,6 +1,7 @@
 import asyncio
 import unittest
 
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -1615,6 +1616,65 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         )
 
         self.assertEqual(3, len(agent._furniture_by_category("chair")))
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
+    def test_storage_cabinet_repair_count_includes_retrieved_cabinet(self) -> None:
+        agent = object.__new__(StatefulFurnitureAgent)
+        furniture_type = SimpleNamespace(value="furniture")
+        cabinet = SimpleNamespace(
+            object_id="cabinet_0",
+            name="cabinet",
+            description="Compact freestanding storage cabinet",
+            object_type=furniture_type,
+            immutable=False,
+            metadata={"semantic_name": "cabinet"},
+        )
+        agent.scene = SimpleNamespace(objects={cabinet.object_id: cabinet})
+        agent.furniture_safety_controller = SimpleNamespace(
+            infer_object_category=lambda _text: "cabinet"
+        )
+
+        self.assertEqual([cabinet], agent._furniture_by_category("storage_cabinet"))
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
+    def test_repair_asset_request_uses_compatible_contract_category(self) -> None:
+        agent = object.__new__(StatefulFurnitureAgent)
+        agent.scene = SimpleNamespace(
+            scene_dir=Path("test_room"),
+            scenebenchmark_intent_contract={
+                "constraints": [
+                    {
+                        "relation": "required_count",
+                        "stage": "furniture",
+                        "strength": "hard",
+                        "subjects": {"category": "storage_cabinet", "count": 1},
+                    }
+                ]
+            },
+        )
+        asset_manager = MagicMock()
+        asset_manager.list_available_assets.return_value = []
+        asset_manager.generate_assets.return_value = SimpleNamespace(
+            successful_assets=[
+                SimpleNamespace(object_id="storage_cabinet_0", metadata={})
+            ]
+        )
+        agent.asset_manager = asset_manager
+
+        self.assertEqual(
+            agent._repair_request_semantic_name("cabinet"),
+            "storage_cabinet",
+        )
+        self.assertIsNotNone(agent._get_or_generate_repair_asset("cabinet"))
+        request = asset_manager.generate_assets.call_args.args[0]
+        self.assertEqual(request.short_names, ["storage_cabinet"])
+        self.assertEqual(request.semantic_name_candidates, [["storage_cabinet"]])
 
     @unittest.skipIf(
         StatefulFurnitureAgent is None,

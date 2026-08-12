@@ -548,6 +548,79 @@ def test_unique_generic_table_is_a_fallback_for_specialized_selector() -> None:
     assert selector_match_count(selector, [generic_table]) == 1
 
 
+def test_storage_cabinet_selector_binds_retrieved_generic_cabinet() -> None:
+    cabinet = _record("cabinet_0", "cabinet", (0.0, -1.725), (0.9, 0.45, 1.1))
+    cabinet["metadata"] = {"semantic_name": "cabinet"}
+    selector = {"category": "storage_cabinet", "count": 1, "quantifier": "all"}
+
+    assert selected_ids(selector, [cabinet]) == ["cabinet_0"]
+    assert selector_match_count(selector, [cabinet]) == 1
+    assert (
+        _evaluate_required_count(
+            {
+                "constraint_id": "storage_cabinet_count",
+                "relation": "required_count",
+                "subjects": selector,
+            },
+            [cabinet],
+            "core",
+        )["label"]
+        == "pass"
+    )
+
+
+def test_storage_cabinet_fallback_excludes_other_cabinet_variants() -> None:
+    filing_cabinet = _record(
+        "filing_cabinet_0", "filing_cabinet", (0.0, 0.0), (0.9, 0.45, 1.1)
+    )
+    wall_cabinet = _record(
+        "wall_cabinet_0", "wall_cabinet", (1.0, 0.0), (0.9, 0.35, 0.7)
+    )
+    for obj in (filing_cabinet, wall_cabinet):
+        obj["metadata"] = {"semantic_name": obj["category"]}
+
+    assert (
+        selected_ids(
+            {"category": "storage_cabinet", "count": 1},
+            [filing_cabinet, wall_cabinet],
+        )
+        == []
+    )
+
+
+def test_storage_cabinet_against_wall_uses_retrieved_generic_cabinet() -> None:
+    cabinet = _record("cabinet_0", "cabinet", (0.0, -1.725), (0.9, 0.45, 1.1))
+    cabinet["metadata"] = {"semantic_name": "cabinet"}
+    south_wall = _record("south_wall", "wall", (0.0, -2.0), (4.0, 0.1, 2.8))
+    constraint = {
+        "constraint_id": "storage_cabinet_against_wall",
+        "relation": "against_wall",
+        "stage": "furniture",
+        "strength": "hard",
+        "subjects": {
+            "category": "storage_cabinet",
+            "count": 1,
+            "quantifier": "all",
+        },
+        "targets": {"category": "wall", "count": 1, "quantifier": "all"},
+        "source": "explicit_prompt",
+        "evidence_span": "place one storage cabinet against a wall",
+    }
+    case_pack = {
+        "stage": "furniture",
+        "intent_contract": {"constraints": [constraint]},
+        "scene_geometry": {"objects": [cabinet, south_wall]},
+    }
+
+    assert augment_contract_checks(case_pack)
+    result = evaluate_functional_dependency(
+        load_geometry(case_pack), case_pack["checks"][0]
+    )
+
+    assert result["relation_type"] == "back_against_wall"
+    assert result["label"] == "pass"
+
+
 def test_exact_specialized_candidate_precedes_generic_fallback() -> None:
     generic_table = _record("table_0", "table", (0.0, 0.0), (3.2, 1.0, 0.75))
     specialized_table = _record(
