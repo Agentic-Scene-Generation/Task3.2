@@ -335,7 +335,7 @@ def _compile_intent_contract_if_enabled(
     cfg_dict: dict,
     task_spec: SceneTaskSpec | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Compile v4 exactly once when the embedded critic is enabled.
+    """Compile v5 exactly once when the embedded critic is enabled.
 
     The private config entries are consumed by ``_generate_room`` so the
     contract survives the floor-plan boundary even when SceneExpert itself is
@@ -347,30 +347,21 @@ def _compile_intent_contract_if_enabled(
         return {}, {}
     normalized_prompt = " ".join(str(prompt or "").split())
     prompt_hash = hashlib.sha256(normalized_prompt.encode("utf-8")).hexdigest()
-    interaction_constraints = tuple(
-        " ".join(str(value or "").split())
-        for value in (task_spec.interaction_constraints if task_spec else [])
-        if str(value or "").strip()
+    task_spec_payload = (
+        task_spec.model_dump(mode="json", exclude_none=True) if task_spec else {}
     )
-    aesthetic_constraints = tuple(
-        " ".join(str(value or "").split())
-        for value in (task_spec.aesthetic_constraints if task_spec else [])
-        if str(value or "").strip()
-    )
-    task_constraints_hash = hashlib.sha256(
+    task_spec_hash = hashlib.sha256(
         json.dumps(
-            {
-                "interaction_constraints": interaction_constraints,
-                "aesthetic_constraints": aesthetic_constraints,
-            },
+            task_spec_payload,
             ensure_ascii=False,
             sort_keys=True,
         ).encode("utf-8")
     ).hexdigest()
     cache_key = {
         "prompt_sha256": prompt_hash,
-        "task_constraints_sha256": task_constraints_hash,
+        "task_spec_sha256": task_spec_hash,
         "spec_version": IntentCompiler.SPEC_VERSION,
+        "schema_version": IntentCompiler.SCHEMA_VERSION,
     }
     cached_contract = cfg_dict.get("_scenebenchmark_intent_contract")
     cached_trace = cfg_dict.get("_scenebenchmark_intent_trace")
@@ -386,18 +377,11 @@ def _compile_intent_contract_if_enabled(
         model=_intent_compiler_model(cfg_dict),
         api_base_url=os.environ.get("OPENAI_BASE_URL", "http://localhost:8000/v1"),
         api_key=os.environ.get("OPENAI_API_KEY", "dummy"),
-        max_tokens=_cfg_int(compiler_cfg.get("max_tokens"), 2048),
+        max_tokens=_cfg_int(compiler_cfg.get("max_tokens"), 8192),
         temperature=0.0,
     )
     try:
-        if interaction_constraints or aesthetic_constraints:
-            contract = compiler.compile(
-                prompt,
-                interaction_constraints=interaction_constraints,
-                aesthetic_constraints=aesthetic_constraints,
-            )
-        else:
-            contract = compiler.compile(prompt)
+        contract = compiler.compile(prompt, task_spec=task_spec)
     except Exception:
         trace = getattr(compiler, "last_trace", {})
         trace_path = (

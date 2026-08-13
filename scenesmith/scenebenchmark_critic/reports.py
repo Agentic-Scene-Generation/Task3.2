@@ -205,6 +205,7 @@ def _is_prompt_issue(result: dict[str, Any]) -> bool:
         and str(constraint.get("source") or "")
         in {
             "explicit_prompt",
+            "task_compiler_inventory",
             "model_inferred",
             "room_ontology",
             "deterministic_fallback",

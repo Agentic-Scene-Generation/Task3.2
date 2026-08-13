@@ -1,4 +1,4 @@
-"""Typed v4 schema for the independent SceneBenchmark intent contract.
+"""Typed v5 schema for the independent SceneBenchmark intent contract.
 
 The contract is deliberately separate from :class:`SceneTaskSpec`.  The task
 compiler describes inventory and stage ownership; this module describes hard
@@ -70,6 +70,10 @@ _SELECTOR_CATEGORY_ALIASES = {
     "storage_cupboard": "storage_cabinet",
     "dining_chairs": "dining_chair",
     "large_plants": "large_plant",
+    "floor_plant": "plant",
+    "floor_plants": "plant",
+    "large_floor_plant": "plant",
+    "large_floor_plants": "plant",
     "two_seater_sofas": "two_seater_sofa",
     "centerpiece_vase": "vase",
     "centerpiece_vases": "vase",
@@ -148,8 +152,8 @@ def selector_categories_overlap(first: str, second: str) -> bool:
 _selector_categories_overlap = selector_categories_overlap
 
 
-INTENT_CONTRACT_SCHEMA_VERSION = "scenesmith.intent_contract.v4"
-INTENT_COMPILER_SPEC_VERSION = "scenesmith.intent_compiler.v7"
+INTENT_CONTRACT_SCHEMA_VERSION = "scenesmith.intent_contract.v5"
+INTENT_COMPILER_SPEC_VERSION = "scenesmith.intent_compiler.v8"
 
 _WALL_QUALIFIED_DIRECTION_PATTERN = re.compile(
     r"(?P<subject>[^,.;!?]{1,100}?)\s+against\s+"
@@ -261,6 +265,7 @@ class IntentRelation(BaseModel):
     ) = None
     source: Literal[
         "explicit_prompt",
+        "task_compiler_inventory",
         "model_inferred",
         "room_ontology",
         "deterministic_fallback",
@@ -284,6 +289,13 @@ class IntentRelation(BaseModel):
             raise ValueError("explicit_prompt relations require evidence_span")
         if self.source == "model_inferred" and not self.inference_reason.strip():
             raise ValueError("model_inferred relations require inference_reason")
+        if (
+            self.source == "task_compiler_inventory"
+            and not self.inference_reason.strip()
+        ):
+            raise ValueError(
+                "task_compiler_inventory relations require inventory provenance"
+            )
         if self.stage and self.stage not in STAGE_ORDER:
             raise ValueError(f"Unknown intent contract stage: {self.stage!r}")
 

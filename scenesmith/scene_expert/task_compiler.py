@@ -301,6 +301,13 @@ _INVENTORY_CATEGORY_ALIASES = {
     "projector_screen": "instructional_surface",
     "teaching_screen": "instructional_surface",
     "presentation_screen": "instructional_surface",
+    "floor_plant": "plant",
+    "large_floor_plant": "plant",
+    "large_plant": "plant",
+    "potted_plant": "plant",
+    "table_settings": "table_setting",
+    "place_setting": "table_setting",
+    "place_settings": "table_setting",
 }
 
 _VIRTUAL_CATEGORIES = {
@@ -338,8 +345,16 @@ _MANIPULAND_STAGE_CATEGORIES = {
     "glass",
     "monitor",
     "plate",
-    "wastebasket",
 }
+
+_TABLE_SETTING_COMPONENTS = frozenset({"plate", "cutlery", "glass"})
+_FLOOR_WASTEBASKET_PATTERN = re.compile(
+    r"\b(?:wastebasket|waste basket|trash can|trash bin)\b[^.;]{0,50}"
+    r"\b(?:on|supported by|standing on)\s+(?:the\s+)?floor\b|"
+    r"\b(?:floor[- ]standing|freestanding)\s+"
+    r"(?:wastebasket|waste basket|trash can|trash bin)\b",
+    re.IGNORECASE,
+)
 
 # Media supports are furniture even when an LLM mistakes a phrase such as
 # "TV stand on the opposite wall" for a wall-mounted placement.
@@ -521,6 +536,53 @@ def _normalize_stage_ownership(
         values[:] = [
             value for value in values if inventory_key(value) not in _VIRTUAL_CATEGORIES
         ]
+
+    # The model may emit aliases as separate inventories (for example four
+    # ``floor plant`` rows plus four ``plant`` rows). Repeated identical names
+    # are real cardinality, while alias-equivalent groups describe the same set.
+    alias_counts: dict[str, dict[str, int]] = {}
+    for values in inventories.values():
+        for value in values:
+            raw_key = "_".join(str(value or "").strip().lower().split())
+            category = inventory_key(value)
+            aliases = alias_counts.setdefault(category, {})
+            aliases[raw_key] = aliases.get(raw_key, 0) + 1
+    for category, counts in alias_counts.items():
+        if len(counts) <= 1:
+            continue
+        desired_count = max(counts.values())
+        owning_stage = next(
+            stage
+            for stage, values in inventories.items()
+            if any(inventory_key(value) == category for value in values)
+        )
+        for stage, values in inventories.items():
+            inventories[stage] = [
+                value for value in values if inventory_key(value) != category
+            ]
+        inventories[owning_stage].extend([category] * desired_count)
+
+    for values in inventories.values():
+        values[:] = [
+            (
+                inventory_key(value)
+                if "_".join(str(value or "").strip().lower().split())
+                in _INVENTORY_CATEGORY_ALIASES
+                else value
+            )
+            for value in values
+        ]
+
+    physical_categories = {
+        inventory_key(value) for values in inventories.values() for value in values
+    }
+    if "table_setting" in physical_categories and (
+        physical_categories & _TABLE_SETTING_COMPONENTS
+    ):
+        for stage, values in inventories.items():
+            inventories[stage] = [
+                value for value in values if inventory_key(value) != "table_setting"
+            ]
     existing_stage: dict[str, str] = {}
     for stage, values in inventories.items():
         for value in values:
@@ -541,6 +603,8 @@ def _normalize_stage_ownership(
     for category in _MANIPULAND_STAGE_CATEGORIES:
         if category in category_stages:
             category_stages[category] = "small"
+    if "wastebasket" in category_stages and _FLOOR_WASTEBASKET_PATTERN.search(prompt):
+        category_stages["wastebasket"] = "large"
     for category in _FLOOR_STANDING_MEDIA_SUPPORT_CATEGORIES:
         if category in category_stages:
             category_stages[category] = "large"
@@ -549,6 +613,7 @@ def _normalize_stage_ownership(
         _WALL_STAGE_CATEGORIES
         | _FURNITURE_STAGE_CATEGORIES
         | _MANIPULAND_STAGE_CATEGORIES
+        | {"wastebasket"}
     ):
         inventory_count = sum(
             inventory_key(value) == category
@@ -613,6 +678,23 @@ def _normalize_stage_ownership(
             "required_small_objects": inventories["small"],
         }
     )
+
+
+def _task_spec_normalization_warnings(
+    raw_spec: SceneTaskSpec, normalized_spec: SceneTaskSpec
+) -> list[str]:
+    warnings: list[str] = []
+    for field in (
+        "required_large_objects",
+        "required_wall_objects",
+        "required_ceiling_objects",
+        "required_small_objects",
+    ):
+        before = list(getattr(raw_spec, field))
+        after = list(getattr(normalized_spec, field))
+        if before != after:
+            warnings.append(f"Normalized {field}: {before!r} -> {after!r}")
+    return warnings
 
 
 def _fallback_spec_from_prompt(prompt: str) -> SceneTaskSpec:
@@ -758,10 +840,14 @@ class TaskCompiler:
                     if isinstance(extra, dict):
                         raw = extra.get("reasoning_content")
                 data = _extract_json_from_text(raw)
+                raw_task_spec = SceneTaskSpec.model_validate(data)
                 task_spec = _normalize_stage_ownership(
-                    SceneTaskSpec.model_validate(data), prompt=prompt
+                    raw_task_spec, prompt=prompt
                 ).model_copy(
                     update={"compiler_status": "ok", "compiler_failure_reason": ""}
+                )
+                normalization_warnings = _task_spec_normalization_warnings(
+                    raw_task_spec, task_spec
                 )
                 attempts.append(
                     {
@@ -775,6 +861,13 @@ class TaskCompiler:
                     "attempts": attempts,
                     "retry_count": attempt,
                     "failure_reason": "",
+                    "raw_task_spec": raw_task_spec.model_dump(
+                        mode="json", exclude_none=True
+                    ),
+                    "normalized_task_spec": task_spec.model_dump(
+                        mode="json", exclude_none=True
+                    ),
+                    "normalization_warnings": normalization_warnings,
                 }
                 record = build_llm_call_debug_record(
                     stage="task_compiler",
@@ -791,6 +884,13 @@ class TaskCompiler:
                         "elapsed_sec": attempts[-1]["elapsed_sec"],
                         "status": "ok",
                         "attempt": attempt,
+                        "raw_task_spec": raw_task_spec.model_dump(
+                            mode="json", exclude_none=True
+                        ),
+                        "normalized_task_spec": task_spec.model_dump(
+                            mode="json", exclude_none=True
+                        ),
+                        "normalization_warnings": normalization_warnings,
                     }
                 )
                 usage = getattr(response, "usage", None)

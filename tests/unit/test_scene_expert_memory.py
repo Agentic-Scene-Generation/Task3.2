@@ -58,7 +58,10 @@ from scenesmith.scene_expert.schemas import (
 )
 from scenesmith.agent_utils.scoring import CategoryScore, FurnitureCritiqueWithScores
 from scenesmith.agent_utils.stage_working_memory import StageWorkingMemory
-from scenesmith.scene_expert.task_compiler import _fallback_spec_from_prompt
+from scenesmith.scene_expert.task_compiler import (
+    _fallback_spec_from_prompt,
+    _normalize_stage_ownership,
+)
 from scenesmith.scene_expert.verifier import (
     FullVerifier,
     StageVerifier,
@@ -310,6 +313,32 @@ class SceneExpertMemoryTest(unittest.TestCase):
         self.assertEqual(["mirror"], spec.required_wall_objects)
         self.assertEqual(4, spec.required_small_objects.count("monitor"))
         self.assertIn("wastebasket", spec.required_small_objects)
+
+    def test_task_compiler_normalizes_alias_inventory_without_double_counting(
+        self,
+    ) -> None:
+        spec = _normalize_stage_ownership(
+            SceneTaskSpec(
+                room_type="living room",
+                style="functional",
+                required_large_objects=["large floor plant"] * 4 + ["plant"] * 4,
+                required_small_objects=(
+                    ["plate"] * 5
+                    + ["cutlery"] * 5
+                    + ["glass"] * 5
+                    + ["table setting"] * 5
+                    + ["wastebasket"]
+                ),
+            ),
+            prompt="Put the wastebasket on the floor.",
+        )
+
+        self.assertEqual(4, spec.required_large_objects.count("plant"))
+        self.assertIn("wastebasket", spec.required_large_objects)
+        self.assertNotIn("wastebasket", spec.required_small_objects)
+        self.assertFalse(
+            any("setting" in value for value in spec.required_small_objects)
+        )
 
     def test_repair_taxonomy_classifies_core_hard_failures(self) -> None:
         failures = classify_hard_reasons(

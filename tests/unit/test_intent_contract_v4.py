@@ -1,4 +1,4 @@
-"""Focused coverage for the independent v4 intent contract and edge geometry."""
+"""Focused coverage for the independent intent contract and edge geometry."""
 
 from __future__ import annotations
 
@@ -1518,9 +1518,24 @@ def test_edge_distribution_accepts_unique_generic_target_asset() -> None:
     assert result["primary_object"] == "table_0"
 
 
-def _response(content: str) -> SimpleNamespace:
+def _response(
+    content: str,
+    *,
+    finish_reason: str = "stop",
+    completion_tokens: int = 32,
+) -> SimpleNamespace:
     return SimpleNamespace(
-        choices=[SimpleNamespace(message=SimpleNamespace(content=content))]
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(content=content),
+                finish_reason=finish_reason,
+            )
+        ],
+        usage=SimpleNamespace(
+            prompt_tokens=64,
+            completion_tokens=completion_tokens,
+            total_tokens=64 + completion_tokens,
+        ),
     )
 
 
@@ -1574,7 +1589,7 @@ def test_intent_compiler_retries_once_without_task_spec_input() -> None:
     assert compiler.last_trace["retry_count"] == 1
     assert [item["status"] for item in compiler.last_trace["attempts"]] == [
         "error",
-        "ok",
+        "retry_ok",
     ]
     first_user_message = compiler._test_calls[0]["messages"][1]["content"]
     assert "Original scene prompt:" in first_user_message
@@ -1635,8 +1650,123 @@ def test_intent_compiler_injects_both_task_compiler_constraint_channels() -> Non
         assert "use a modern material palette" in user_message
     assert compiler.last_trace["unmapped_task_compiler_constraints"] == {
         "interaction_constraints": [],
-        "aesthetic_constraints": ["use a modern material palette"],
+        "aesthetic_constraints": [],
     }
+    assert {
+        row["text"]: row["disposition"]
+        for row in compiler.last_trace["task_compiler_constraint_dispositions"]
+    }["use a modern material palette"] == "unsupported-soft"
+
+
+def test_intent_compiler_injects_complete_task_spec_and_owns_inventory() -> None:
+    task_spec = SceneTaskSpec(
+        room_type="bedroom",
+        style="functional",
+        required_large_objects=["bed", "nightstand", "nightstand"],
+        required_wall_objects=["mirror"],
+        required_ceiling_objects=["ceiling light"],
+        required_small_objects=["book"],
+        functional_zones=["sleeping_zone"],
+        interaction_constraints=["nightstands should be reachable from the bed"],
+        aesthetic_constraints=["functional layout with clear circulation paths"],
+    )
+    compiler = _compiler_with_responses([_response('{"constraints": []}')])
+
+    result = compiler.compile(
+        "A functional bedroom with one bed and one nightstand.", task_spec=task_spec
+    )
+
+    user_message = compiler._test_calls[0]["messages"][1]["content"]
+    for value in (
+        "bedroom",
+        "functional",
+        "required_large_objects",
+        "required_wall_objects",
+        "required_ceiling_objects",
+        "required_small_objects",
+        "functional_zones",
+        "interaction_constraints",
+        "aesthetic_constraints",
+        "sleeping_zone",
+    ):
+        assert value in user_message
+    required = {
+        row["subjects"]["category"]: row
+        for row in result["constraints"]
+        if row["relation"] == "required_count"
+    }
+    assert required["nightstand"]["subjects"]["count"] == 2
+    assert required["nightstand"]["source"] == "task_compiler_inventory"
+    assert required["mirror"]["stage"] == "wall_mounted"
+    assert required["ceiling_light"]["stage"] == "ceiling_mounted"
+    assert required["book"]["stage"] == "manipuland"
+    assert any("Inventory count conflict" in warning for warning in result["warnings"])
+
+
+def test_intent_compiler_retries_parseable_length_response() -> None:
+    compiler = _compiler_with_responses(
+        [
+            _response('{"constraints": []}', finish_reason="length"),
+            _response('{"constraints": []}'),
+        ]
+    )
+
+    result = compiler.compile("A room with a desk.")
+
+    assert result["retry_count"] == 1
+    assert compiler.last_trace["status"] == "retry_ok"
+    assert [row["finish_reason"] for row in compiler.last_trace["attempts"]] == [
+        "length",
+        "stop",
+    ]
+
+
+def test_intent_compiler_length_fallback_keeps_complete_task_inventory() -> None:
+    compiler = _compiler_with_responses(
+        [
+            _response('{"constraints": []}', finish_reason="length"),
+            _response('{"constraints": []}', finish_reason="length"),
+        ]
+    )
+    task_spec = SceneTaskSpec(
+        room_type="office",
+        style="functional",
+        required_large_objects=["desk", "desk", "wastebasket"],
+        required_wall_objects=["clock"],
+        required_small_objects=["monitor", "monitor"],
+    )
+
+    result = compiler.compile("An office.", task_spec=task_spec)
+
+    assert compiler.last_trace["status"] == "deterministic_fallback"
+    required = {
+        row["subjects"]["category"]: row["subjects"]["count"]
+        for row in result["constraints"]
+        if row["relation"] == "required_count"
+    }
+    assert required == {"clock": 1, "desk": 2, "monitor": 2, "wastebasket": 1}
+
+
+def test_task_spec_components_replace_composite_table_setting_count() -> None:
+    contract = build_intent_contract(
+        "A dining table with five complete table settings, each including a plate, "
+        "cutlery, and a drinking glass.",
+        task_spec={
+            "required_large_objects": ["dining table"],
+            "required_small_objects": [
+                *(["plate"] * 5),
+                *(["cutlery"] * 5),
+                *(["glass"] * 5),
+            ],
+        },
+    )
+
+    counts = {
+        row["subjects"]["category"]: row["subjects"]["count"]
+        for row in contract["constraints"]
+        if row["relation"] == "required_count"
+    }
+    assert counts == {"cutlery": 5, "dining_table": 1, "glass": 5, "plate": 5}
 
 
 def test_intent_compiler_maps_reachability_to_near_not_flanking() -> None:
@@ -1784,7 +1914,7 @@ def test_intent_compiler_does_not_upgrade_inventory_to_flanking() -> None:
         "A bedroom with a bed, two nightstands, and a wardrobe in the corner."
     )
 
-    assert compiler.last_trace["status"] == "fallback"
+    assert compiler.last_trace["status"] == "deterministic_fallback"
     assert [item["status"] for item in compiler.last_trace["attempts"]] == [
         "error",
         "error",
@@ -1940,7 +2070,7 @@ def test_intent_compiler_restores_unique_edge_fields_omitted_by_llama() -> None:
     assert edge["edge_frame"] == "target_local_rectangle"
     assert edge["orientation"] == "toward_target"
     assert [group["counts_per_edge"] for group in edge["groups"]] == [[2, 2], [1, 0]]
-    assert compiler.last_trace["status"] == "ok"
+    assert compiler.last_trace["status"] == "ok_enriched"
     assert compiler.last_trace["restored_fields"] == [
         {
             "relation": "edge_distribution",
@@ -1985,7 +2115,7 @@ def test_intent_compiler_falls_back_after_semantic_json_failures() -> None:
 
     assert result["retry_count"] == 1
     assert result["warnings"]
-    assert compiler.last_trace["status"] == "fallback"
+    assert compiler.last_trace["status"] == "deterministic_fallback"
     centered = [
         row for row in result["constraints"] if row["relation"] == "centered_on_wall"
     ]
@@ -2006,7 +2136,7 @@ def test_intent_compiler_restores_unique_media_target_without_fallback() -> None
         "A living room with a sofa facing a TV stand and television on the opposite wall."
     )
 
-    assert compiler.last_trace["status"] == "ok"
+    assert compiler.last_trace["status"] == "ok_enriched"
     assert compiler.last_trace["restored_targets"]
     facing = next(row for row in result["constraints"] if row["relation"] == "faces")
     assert facing["targets"]["category"] == "tv_stand"
@@ -2356,7 +2486,7 @@ def test_intent_compiler_falls_back_after_unparseable_responses() -> None:
     result = compiler.compile("A room with a desk.")
 
     assert result["warnings"]
-    assert compiler.last_trace["status"] == "fallback"
+    assert compiler.last_trace["status"] == "deterministic_fallback"
     assert compiler.last_trace["retry_count"] == 1
     assert [item["status"] for item in compiler.last_trace["attempts"]] == [
         "error",
@@ -2374,7 +2504,7 @@ def test_intent_compiler_falls_back_after_transport_errors() -> None:
         "A living room with a sofa facing a TV stand and television on the opposite wall."
     )
 
-    assert compiler.last_trace["status"] == "fallback"
+    assert compiler.last_trace["status"] == "deterministic_fallback"
     assert compiler.last_trace["failure_reason"] == "ConnectionError: temporary outage"
     assert [item["status"] for item in compiler.last_trace["attempts"]] == [
         "error",
@@ -2411,10 +2541,11 @@ def test_intent_compiler_is_disabled_without_critic_request(
 def test_intent_compiler_cache_uses_prompt_task_constraints_and_spec(
     monkeypatch, tmp_path
 ) -> None:
-    calls: list[tuple[str, tuple[str, ...], tuple[str, ...]]] = []
+    calls: list[tuple[str, SceneTaskSpec | None]] = []
 
     class FakeCompiler:
         SPEC_VERSION = INTENT_COMPILER_SPEC_VERSION
+        SCHEMA_VERSION = INTENT_CONTRACT_SCHEMA_VERSION
 
         def __init__(self, **_kwargs):
             self.last_trace = {}
@@ -2422,16 +2553,9 @@ def test_intent_compiler_cache_uses_prompt_task_constraints_and_spec(
         def compile(
             self,
             prompt: str,
-            interaction_constraints=(),
-            aesthetic_constraints=(),
+            task_spec: SceneTaskSpec | None = None,
         ) -> dict:
-            calls.append(
-                (
-                    prompt,
-                    tuple(interaction_constraints),
-                    tuple(aesthetic_constraints),
-                )
-            )
+            calls.append((prompt, task_spec))
             return {
                 "schema_version": INTENT_CONTRACT_SCHEMA_VERSION,
                 "prompt": prompt,
@@ -2475,12 +2599,8 @@ def test_intent_compiler_cache_uses_prompt_task_constraints_and_spec(
     )
 
     assert calls == [
-        ("A room with a desk.", ("keep the desk reachable",), ()),
-        (
-            "A room with a desk.",
-            ("keep the desk reachable",),
-            ("center the desk in the room",),
-        ),
+        ("A room with a desk.", first_spec),
+        ("A room with a desk.", second_spec),
     ]
 
 

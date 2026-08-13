@@ -286,9 +286,8 @@ class SceneExpertPipeline:
             task_spec, dict(getattr(self._task_compiler, "last_trace", {}) or {})
         )
 
-        # Compile hard relations from the original prompt plus the two
-        # TaskCompiler constraint channels. The helper is a no-op when the
-        # embedded critic is disabled.
+        # Compile hard relations from the original prompt plus the normalized
+        # SceneTaskSpec. The helper is a no-op when the embedded critic is disabled.
         from scenesmith.scene_expert.hooks import (
             _compile_intent_contract_if_enabled,
         )

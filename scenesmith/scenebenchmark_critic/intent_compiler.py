@@ -180,7 +180,9 @@ def _normalize_centered_above_relations(
     return result, normalized
 
 
-_DETERMINISTIC_ENRICHMENT_SOURCES = frozenset({"explicit_prompt", "room_ontology"})
+_DETERMINISTIC_ENRICHMENT_SOURCES = frozenset(
+    {"explicit_prompt", "task_compiler_inventory", "room_ontology"}
+)
 _HIGH_CONFIDENCE_EXPLICIT_RELATIONS = frozenset(
     {
         "required_count",
@@ -341,6 +343,26 @@ def _prefer_explicit_prompt_constraints(
     return filtered, rejected
 
 
+def _normalize_provenance_fields(payload: dict[str, Any]) -> dict[str, Any]:
+    """Prevent explanatory model text from contaminating prompt provenance."""
+
+    constraints = payload.get("constraints")
+    if not isinstance(constraints, list):
+        return payload
+    normalized_rows: list[Any] = []
+    for row in constraints:
+        if not isinstance(row, dict):
+            normalized_rows.append(row)
+            continue
+        normalized = dict(row)
+        if str(normalized.get("source") or "") == "explicit_prompt":
+            normalized["inference_reason"] = ""
+        normalized_rows.append(normalized)
+    result = dict(payload)
+    result["constraints"] = normalized_rows
+    return result
+
+
 def _selectors_semantically_overlap(
     first: dict[str, Any] | None, second: dict[str, Any] | None
 ) -> bool:
@@ -442,7 +464,7 @@ def _restore_missing_target_selectors(
 
 
 def _restore_missing_relation_fields(
-    payload: dict[str, Any], prompt: str
+    payload: dict[str, Any], prompt: str, task_spec: dict[str, Any] | None = None
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Restore omitted schema fields only from one deterministic relation match.
 
@@ -457,7 +479,14 @@ def _restore_missing_relation_fields(
     if not isinstance(constraints, list):
         return payload, []
 
-    deterministic_constraints = build_intent_contract(prompt).get("constraints") or []
+    deterministic_constraints = (
+        build_intent_contract(
+            prompt,
+            room_type=str((task_spec or {}).get("room_type") or ""),
+            task_spec=task_spec,
+        ).get("constraints")
+        or []
+    )
     restored: list[dict[str, Any]] = []
     normalized_constraints = list(constraints)
     for index, constraint in enumerate(normalized_constraints):
@@ -518,7 +547,7 @@ def _restore_missing_relation_fields(
 def _is_high_confidence_deterministic_constraint(candidate: dict[str, Any]) -> bool:
     """Limit enrichment to deterministic facts whose parser has no direction ambiguity."""
     source = str(candidate.get("source") or "")
-    if source == "room_ontology":
+    if source in {"task_compiler_inventory", "room_ontology"}:
         return True
     return (
         source == "explicit_prompt"
@@ -530,6 +559,7 @@ def _enrich_with_deterministic_constraints(
     llm_contract: dict[str, Any],
     prompt: str,
     allowed_inference_reasons: tuple[str, ...],
+    task_spec: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, str]], list[dict[str, str]]]:
     """Restore explicit and ontology constraints omitted by a valid LLM response.
 
@@ -537,7 +567,11 @@ def _enrich_with_deterministic_constraints(
     the deterministic parser owns a small set of high-confidence facts.  A valid
     LLM response must therefore supplement rather than replace those facts.
     """
-    deterministic = build_intent_contract(prompt)
+    deterministic = build_intent_contract(
+        prompt,
+        room_type=str((task_spec or {}).get("room_type") or ""),
+        task_spec=task_spec,
+    )
     constraints = list(llm_contract.get("constraints") or [])
     added: list[dict[str, str]] = []
     for candidate in deterministic.get("constraints") or []:
@@ -549,7 +583,23 @@ def _enrich_with_deterministic_constraints(
             or not _is_high_confidence_deterministic_constraint(candidate)
         ):
             continue
-        if any(
+        if source == "task_compiler_inventory":
+            category = canonical_selector_category(
+                (candidate.get("subjects") or {}).get("category")
+            )
+            constraints = [
+                existing
+                for existing in constraints
+                if not (
+                    isinstance(existing, dict)
+                    and str(existing.get("relation") or "") == "required_count"
+                    and canonical_selector_category(
+                        (existing.get("subjects") or {}).get("category")
+                    )
+                    == category
+                )
+            ]
+        elif any(
             isinstance(existing, dict)
             and str(existing.get("source") or "") != "model_inferred"
             and _constraints_semantically_overlap(existing, candidate)
@@ -570,6 +620,11 @@ def _enrich_with_deterministic_constraints(
     enriched = dict(llm_contract)
     enriched["constraints"] = constraints
     warnings = list(enriched.get("warnings") or [])
+    warnings.extend(
+        warning
+        for warning in deterministic.get("warnings") or []
+        if warning not in warnings
+    )
     warnings.append(
         "LLM contract enriched with deterministic explicit/room-ontology constraints"
     )
@@ -603,13 +658,19 @@ def _system_prompt() -> str:
 /no_think
 You are the intent_compiler for a 3D indoor scene critic. Extract hard,
 geometry-verifiable relations from the original scene prompt and the optional
-TaskCompiler constraints supplied below. Do not use inventory object positions,
+normalized SceneTaskSpec supplied below. Do not use inventory object positions,
 memory, StageBrief, current scene state, or knowledge not present in these inputs.
 
-The original scene prompt is authoritative. Relations grounded in it use
-source="explicit_prompt" and copy a verbatim evidence_span. Supplemental
-TaskCompiler interaction_constraints and aesthetic_constraints are expert
-inferences with lower priority. A supplemental constraint may become a hard
+The normalized SceneTaskSpec required_* arrays are authoritative hard inventory:
+emit one required_count row per physical category using
+source="task_compiler_inventory", an empty evidence_span, and inference_reason
+"SceneTaskSpec <required_* field>". If their counts conflict with the prompt,
+use SceneTaskSpec. The original prompt remains authoritative for spatial
+relations and verbatim evidence. Relations grounded in it use
+source="explicit_prompt", copy a verbatim evidence_span, and leave
+inference_reason empty. SceneTaskSpec interaction_constraints and geometrically
+verifiable aesthetic_constraints are expert inferences with lower priority.
+A supplemental constraint may become a hard
 relation only when it maps precisely to one of the registered relations and
 can be checked by that relation's existing geometry evaluator. Such a relation
 must use source="model_inferred", leave evidence_span empty, and set
@@ -619,6 +680,8 @@ visual harmony, density, and other advice with no exact registered geometric
 relation remain context only and MUST NOT produce a relation. Never invent a
 new relation name. If a supplemental constraint duplicates or conflicts with
 an explicit prompt relation, emit only the explicit prompt relation.
+SceneTaskSpec room_type, style, and functional_zones are context only and do
+not independently authorize hard relations.
 
 Map accessibility language according to what the geometry evaluator can
 actually measure. "X reachable/accessible from Y" may emit near(X, Y); it does
@@ -702,7 +765,7 @@ derive those deterministically after validation.
 
 
 class IntentCompiler:
-    """Compile a prompt into a validated v4 contract with one corrective retry."""
+    """Compile a prompt into a validated v5 contract with one corrective retry."""
 
     SPEC_VERSION = INTENT_COMPILER_SPEC_VERSION
     SCHEMA_VERSION = INTENT_CONTRACT_SCHEMA_VERSION
@@ -712,7 +775,7 @@ class IntentCompiler:
         model: str,
         api_base_url: str | None = None,
         api_key: str | None = None,
-        max_tokens: int = 2048,
+        max_tokens: int = 8192,
         temperature: float = 0.0,
     ) -> None:
         from openai import OpenAI
@@ -745,6 +808,73 @@ class IntentCompiler:
                 seen.add(text)
         return tuple(normalized)
 
+    @classmethod
+    def _normalize_task_spec(
+        cls,
+        task_spec: Any | None,
+        *,
+        interaction_constraints: Any = None,
+        aesthetic_constraints: Any = None,
+    ) -> dict[str, Any]:
+        if (
+            task_spec is None
+            and interaction_constraints is None
+            and aesthetic_constraints is None
+        ):
+            return {}
+        if isinstance(task_spec, dict):
+            payload = dict(task_spec)
+        elif hasattr(task_spec, "model_dump"):
+            payload = task_spec.model_dump(mode="json", exclude_none=True)
+        else:
+            payload = {}
+        if interaction_constraints is not None:
+            payload["interaction_constraints"] = list(interaction_constraints)
+        if aesthetic_constraints is not None:
+            payload["aesthetic_constraints"] = list(aesthetic_constraints)
+        for field in (
+            "required_large_objects",
+            "required_wall_objects",
+            "required_ceiling_objects",
+            "required_small_objects",
+        ):
+            values = payload.get(field)
+            payload[field] = (
+                [
+                    text
+                    for value in values
+                    if (text := " ".join(str(value or "").split()))
+                ]
+                if isinstance(values, (list, tuple))
+                else []
+            )
+        for field in (
+            "functional_zones",
+            "interaction_constraints",
+            "aesthetic_constraints",
+        ):
+            payload[field] = list(cls._normalize_constraints(payload.get(field)))
+        for field in ("room_type", "style"):
+            payload[field] = " ".join(str(payload.get(field) or "").split())
+        return payload
+
+    @staticmethod
+    def _finish_reason(response: Any) -> str:
+        choices = getattr(response, "choices", None) or []
+        return str(getattr(choices[0], "finish_reason", "") or "") if choices else ""
+
+    @staticmethod
+    def _token_usage(response: Any) -> dict[str, int]:
+        usage = getattr(response, "usage", None)
+        if usage is None:
+            return {}
+        payload = usage.model_dump() if hasattr(usage, "model_dump") else vars(usage)
+        return {
+            str(key): int(value)
+            for key, value in payload.items()
+            if isinstance(value, int)
+        }
+
     @staticmethod
     def _task_compiler_trace_fields(
         constraints: list[dict[str, Any]],
@@ -769,14 +899,53 @@ class IntentCompiler:
             if isinstance(row, dict)
             and str(row.get("source") or "") == "model_inferred"
         ]
-        referenced = "\n".join(
-            [
-                *(str(row.get("inference_reason") or "") for row in constraints),
-                *(str(row.get("inference_reason") or "") for row in (rejected or [])),
-            ]
-        ).lower()
+        accepted_reasons = {
+            " ".join(str(row.get("inference_reason") or "").split()).casefold()
+            for row in constraints
+            if isinstance(row, dict)
+            and str(row.get("source") or "") == "model_inferred"
+        }
+        rejected_by_reason = {
+            " ".join(str(row.get("inference_reason") or "").split()).casefold(): str(
+                row.get("reason") or "invalid"
+            )
+            for row in (rejected or [])
+            if isinstance(row, dict) and row.get("inference_reason")
+        }
+        dispositions: list[dict[str, str]] = []
+        soft_terms = re.compile(
+            r"\b(?:aesthetic|appearance|atmosphere|circulation|cozy|density|"
+            r"functional layout|harmony|material|overcrowd|palette|style|visual)\b",
+            re.IGNORECASE,
+        )
+        for field, values in (
+            ("interaction_constraints", interaction_constraints),
+            ("aesthetic_constraints", aesthetic_constraints),
+        ):
+            for value in values:
+                reason = f"TaskCompiler {field}: {value}".casefold()
+                rejected_reason = rejected_by_reason.get(reason, "")
+                if reason in accepted_reasons:
+                    disposition = "accepted"
+                elif rejected_reason == "duplicate_of_explicit_prompt":
+                    disposition = "duplicate-explicit"
+                elif rejected_reason == "conflicts_with_explicit_prompt":
+                    disposition = "conflict"
+                elif rejected_reason:
+                    disposition = "invalid"
+                elif field == "aesthetic_constraints" or soft_terms.search(value):
+                    disposition = "unsupported-soft"
+                else:
+                    disposition = "invalid"
+                dispositions.append(
+                    {"field": field, "text": value, "disposition": disposition}
+                )
         unmapped = {
-            field: [text for text in values if text.lower() not in referenced]
+            field: [
+                row["text"]
+                for row in dispositions
+                if row["field"] == field and row["disposition"] == "invalid"
+            ]
             for field, values in (
                 ("interaction_constraints", interaction_constraints),
                 ("aesthetic_constraints", aesthetic_constraints),
@@ -786,6 +955,7 @@ class IntentCompiler:
             "task_compiler_constraints": injected,
             "accepted_task_compiler_constraints": accepted,
             "rejected_task_compiler_constraints": list(rejected or []),
+            "task_compiler_constraint_dispositions": dispositions,
             "unmapped_task_compiler_constraints": unmapped,
         }
 
@@ -810,28 +980,31 @@ class IntentCompiler:
         self,
         prompt: str,
         *,
-        interaction_constraints: tuple[str, ...] = (),
-        aesthetic_constraints: tuple[str, ...] = (),
+        task_spec: dict[str, Any] | None = None,
         previous_output: str = "",
         validation_error: str = "",
     ) -> list[dict[str, str]]:
         user = f"Original scene prompt:\n{prompt}"
-        if interaction_constraints or aesthetic_constraints:
-            supplemental = {
-                "interaction_constraints": list(interaction_constraints),
-                "aesthetic_constraints": list(aesthetic_constraints),
-            }
+        if task_spec:
             user += (
-                "\n\nSupplemental TaskCompiler constraints (lower priority than "
-                "the original prompt):\n"
-                + json.dumps(supplemental, ensure_ascii=False, indent=2)
+                "\n\nNormalized SceneTaskSpec. Its required_* inventory is "
+                "authoritative; its spatial constraints are lower priority than "
+                "explicit prompt relations:\n"
+                + json.dumps(task_spec, ensure_ascii=False, indent=2, sort_keys=True)
             )
         if validation_error:
             user += (
                 "\n\nThe previous candidate was invalid. Correct it and return a "
                 "complete replacement JSON object. Validation error:\n"
-                f"{validation_error}\nPrevious candidate:\n{previous_output}"
+                f"{validation_error}"
             )
+            if previous_output:
+                user += f"\nPrevious candidate:\n{previous_output}"
+            if "finish_reason=length" in validation_error:
+                user += (
+                    "\nThe previous response was truncated. Return a concise but "
+                    "complete contract; do not repeat explanations or context."
+                )
             if "requires 1 target(s), got 2" in validation_error:
                 user += (
                     "\nFor every reported unary relation, remove its "
@@ -874,10 +1047,20 @@ class IntentCompiler:
         prompt: str,
         interaction_constraints: list[str] | tuple[str, ...] | None = None,
         aesthetic_constraints: list[str] | tuple[str, ...] | None = None,
+        task_spec: Any | None = None,
     ) -> dict[str, Any]:
         normalized_prompt, prompt_hash = self._prompt_metadata(prompt)
-        normalized_interaction = self._normalize_constraints(interaction_constraints)
-        normalized_aesthetic = self._normalize_constraints(aesthetic_constraints)
+        normalized_task_spec = self._normalize_task_spec(
+            task_spec,
+            interaction_constraints=interaction_constraints,
+            aesthetic_constraints=aesthetic_constraints,
+        )
+        normalized_interaction = self._normalize_constraints(
+            normalized_task_spec.get("interaction_constraints")
+        )
+        normalized_aesthetic = self._normalize_constraints(
+            normalized_task_spec.get("aesthetic_constraints")
+        )
         allowed_inference_reasons = tuple(
             f"TaskCompiler {field}: {text}"
             for field, values in (
@@ -893,13 +1076,13 @@ class IntentCompiler:
         for attempt in range(2):
             messages = self._messages(
                 normalized_prompt,
-                interaction_constraints=normalized_interaction,
-                aesthetic_constraints=normalized_aesthetic,
+                task_spec=normalized_task_spec,
                 previous_output=previous_output,
                 validation_error=last_error,
             )
             started_at = time.perf_counter()
             raw = ""
+            response = None
             try:
                 response = self._client.chat.completions.create(
                     model=self._model,
@@ -919,6 +1102,11 @@ class IntentCompiler:
                     extra_body=chat_template_kwargs_from_effort("none"),
                 )
                 raw = self._raw_message(response)
+                finish_reason = self._finish_reason(response)
+                if finish_reason == "length":
+                    raise ValueError(
+                        "finish_reason=length: IntentCompiler output was truncated"
+                    )
                 data = parse_llm_json_object(raw)
                 payload = dict(data)
                 payload.setdefault("schema_version", self.SCHEMA_VERSION)
@@ -929,6 +1117,9 @@ class IntentCompiler:
                 payload["prompt_sha256"] = prompt_hash
                 payload["intent_compiler_spec_version"] = self.SPEC_VERSION
                 payload["retry_count"] = attempt
+                payload.setdefault(
+                    "room_type", str(normalized_task_spec.get("room_type") or "")
+                )
                 payload = _normalize_side_distribution(payload)
                 payload, normalized_centered_above = (
                     _normalize_centered_above_relations(payload, normalized_prompt)
@@ -937,8 +1128,9 @@ class IntentCompiler:
                     payload, normalized_prompt
                 )
                 payload, restored_fields = _restore_missing_relation_fields(
-                    payload, normalized_prompt
+                    payload, normalized_prompt, normalized_task_spec
                 )
+                payload = _normalize_provenance_fields(payload)
                 payload = _validate_prompt_grounded_relations(
                     payload, normalized_prompt
                 )
@@ -954,7 +1146,10 @@ class IntentCompiler:
                     enriched_constraints,
                     enrichment_rejections,
                 ) = _enrich_with_deterministic_constraints(
-                    result, normalized_prompt, allowed_inference_reasons
+                    result,
+                    normalized_prompt,
+                    allowed_inference_reasons,
+                    normalized_task_spec,
                 )
                 rejected_task_constraints.extend(enrichment_rejections)
                 task_constraint_trace = self._task_compiler_trace_fields(
@@ -963,22 +1158,46 @@ class IntentCompiler:
                     normalized_aesthetic,
                     rejected_task_constraints,
                 )
+                token_usage = self._token_usage(response)
+                completion_tokens = int(token_usage.get("completion_tokens") or 0)
+                capacity_warning = ""
+                if completion_tokens >= int(self._max_tokens * 0.9):
+                    capacity_warning = (
+                        "IntentCompiler completion used at least 90% of the "
+                        f"{self._max_tokens}-token output limit"
+                    )
+                    warnings = list(result.get("warnings") or [])
+                    if capacity_warning not in warnings:
+                        warnings.append(capacity_warning)
+                        result["warnings"] = warnings
+                status = (
+                    "retry_ok"
+                    if attempt
+                    else ("ok_enriched" if enriched_constraints else "ok")
+                )
                 self.last_trace = {
-                    "status": "ok",
+                    "status": status,
                     "spec_version": self.SPEC_VERSION,
                     "prompt_sha256": prompt_hash,
+                    "normalized_task_spec": normalized_task_spec,
                     "constraints": result.get("constraints", []),
+                    "warnings": result.get("warnings", []),
                     "enriched_constraints": enriched_constraints,
                     "normalized_centered_above": normalized_centered_above,
                     "restored_targets": restored_targets,
                     "restored_fields": restored_fields,
                     "retry_count": attempt,
                     "failure_reason": "",
+                    "finish_reason": finish_reason,
+                    "token_usage": token_usage,
+                    "capacity_warning": capacity_warning,
                 } | task_constraint_trace
                 attempts.append(
                     {
                         "attempt": attempt,
-                        "status": "ok",
+                        "status": status,
+                        "finish_reason": finish_reason,
+                        "token_usage": token_usage,
                         "elapsed_sec": round(time.perf_counter() - started_at, 6),
                     }
                 )
@@ -995,8 +1214,10 @@ class IntentCompiler:
                     | {
                         "input": messages,
                         "output": raw,
-                        "status": "ok",
+                        "status": status,
                         "attempt": attempt,
+                        "finish_reason": finish_reason,
+                        "token_usage": token_usage,
                         "enriched_constraints": enriched_constraints,
                         "normalized_centered_above": normalized_centered_above,
                         "restored_targets": restored_targets,
@@ -1007,12 +1228,16 @@ class IntentCompiler:
                 return result
             except Exception as exc:
                 last_error = f"{type(exc).__name__}: {exc}"
-                previous_output = raw
+                previous_output = (
+                    "" if self._finish_reason(response) == "length" else raw
+                )
                 attempts.append(
                     {
                         "attempt": attempt,
                         "status": "error",
                         "error": last_error,
+                        "finish_reason": self._finish_reason(response),
+                        "token_usage": self._token_usage(response),
                         "elapsed_sec": round(time.perf_counter() - started_at, 6),
                     }
                 )
@@ -1023,6 +1248,7 @@ class IntentCompiler:
                         event="compile",
                         prompt=messages,
                         output=raw,
+                        raw_response=response,
                         error=last_error,
                     ).model_dump()
                     | {
@@ -1030,15 +1256,21 @@ class IntentCompiler:
                         "output": raw,
                         "status": "error",
                         "attempt": attempt,
+                        "finish_reason": self._finish_reason(response),
+                        "token_usage": self._token_usage(response),
                     }
                 )
                 logger.warning(
                     "IntentCompiler attempt %d failed: %s", attempt + 1, last_error
                 )
 
-        fallback = build_intent_contract(normalized_prompt)
+        fallback = build_intent_contract(
+            normalized_prompt,
+            room_type=str(normalized_task_spec.get("room_type") or ""),
+            task_spec=normalized_task_spec,
+        )
         fallback["retry_count"] = 1
-        fallback["warnings"] = [
+        fallback["warnings"] = list(fallback.get("warnings") or []) + [
             "LLM contract unavailable or invalid; deterministic prompt parser used"
         ]
         try:
@@ -1059,10 +1291,12 @@ class IntentCompiler:
                 normalized_aesthetic,
             )
             self.last_trace = {
-                "status": "fallback",
+                "status": "deterministic_fallback",
                 "spec_version": self.SPEC_VERSION,
                 "prompt_sha256": prompt_hash,
+                "normalized_task_spec": normalized_task_spec,
                 "constraints": result.get("constraints", []),
+                "warnings": result.get("warnings", []),
                 "retry_count": 1,
                 "failure_reason": last_error,
                 "attempts": attempts,
@@ -1074,8 +1308,7 @@ class IntentCompiler:
                     event="deterministic_fallback",
                     prompt=self._messages(
                         normalized_prompt,
-                        interaction_constraints=normalized_interaction,
-                        aesthetic_constraints=normalized_aesthetic,
+                        task_spec=normalized_task_spec,
                     ),
                     output=json.dumps(fallback, ensure_ascii=False),
                     error=last_error,
@@ -1083,11 +1316,10 @@ class IntentCompiler:
                 | {
                     "input": self._messages(
                         normalized_prompt,
-                        interaction_constraints=normalized_interaction,
-                        aesthetic_constraints=normalized_aesthetic,
+                        task_spec=normalized_task_spec,
                     ),
                     "output": fallback,
-                    "status": "fallback",
+                    "status": "deterministic_fallback",
                     "attempt": 2,
                 }
             )
@@ -1097,6 +1329,7 @@ class IntentCompiler:
             "status": "error",
             "spec_version": self.SPEC_VERSION,
             "prompt_sha256": prompt_hash,
+            "normalized_task_spec": normalized_task_spec,
             "constraints": [],
             "retry_count": 1,
             "failure_reason": last_error,

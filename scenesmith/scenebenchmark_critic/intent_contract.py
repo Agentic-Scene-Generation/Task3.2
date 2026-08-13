@@ -46,7 +46,13 @@ from scenesmith.scenebenchmark_critic.intent_schema import (
 SCHEMA_VERSION = INTENT_CONTRACT_SCHEMA_VERSION
 VALID_RELATIONS = PUBLIC_RELATIONS
 HARD_SOURCES = frozenset(
-    {"explicit_prompt", "model_inferred", "room_ontology", "deterministic_fallback"}
+    {
+        "explicit_prompt",
+        "task_compiler_inventory",
+        "model_inferred",
+        "room_ontology",
+        "deterministic_fallback",
+    }
 )
 _WALL_TARGET_RELATIONS = frozenset({"against_wall", "centered_on_wall"})
 _WALL_TARGET_CATEGORIES = frozenset({"wall", *ROOM_RELATIVE_WALL_CATEGORIES})
@@ -305,16 +311,21 @@ def build_intent_contract(
         if normalized is not None:
             constraints.append(normalized)
 
-    constraints.extend(_explicit_required_count_constraints(normalized_prompt))
+    prompt_inventory = _explicit_required_count_constraints(normalized_prompt)
+    task_inventory = _task_spec_inventory_constraints(task_spec)
+    constraints.extend(prompt_inventory)
+    constraints.extend(task_inventory)
     constraints.extend(_explicit_prompt_constraints(normalized_prompt, lowered))
     constraints.extend(
         _room_ontology_constraints(normalized_room, lowered, task_spec=task_spec)
     )
+    constraints = _remove_expanded_table_setting_counts(constraints, task_spec)
     constraints = _normalize_group_required_counts(constraints)
     constraints = _remove_redundant_edge_facing_constraints(constraints)
     constraints = _deduplicate_constraints(constraints)
     constraints = _apply_task_spec_contract_metadata(constraints, task_spec)
     constraints = _deduplicate_constraints(constraints)
+    warnings = _task_spec_inventory_conflict_warnings(prompt_inventory, task_inventory)
     return {
         "schema_version": SCHEMA_VERSION,
         "prompt": normalized_prompt,
@@ -322,7 +333,7 @@ def build_intent_contract(
         "room_type": normalized_room,
         "intent_compiler_spec_version": INTENT_COMPILER_SPEC_VERSION,
         "retry_count": 0,
-        "warnings": [],
+        "warnings": warnings,
         "constraints": constraints,
     }
 
@@ -380,6 +391,37 @@ def _normalize_group_required_counts(
     return normalized
 
 
+def _remove_expanded_table_setting_counts(
+    constraints: list[dict[str, Any]], task_spec: Any | None
+) -> list[dict[str, Any]]:
+    """Treat table_setting as semantic when concrete components are inventory."""
+
+    payload = _task_spec_payload(task_spec)
+    physical_categories = {
+        _normalize_selector_category(value)
+        for field in (
+            "required_large_objects",
+            "required_wall_objects",
+            "required_ceiling_objects",
+            "required_small_objects",
+        )
+        for value in payload.get(field) or []
+    }
+    if not {"plate", "cutlery", "glass"}.issubset(physical_categories):
+        return constraints
+    return [
+        row
+        for row in constraints
+        if not (
+            str(row.get("relation") or "") == "required_count"
+            and _normalize_selector_category(
+                (row.get("subjects") or {}).get("category")
+            )
+            == "table_setting"
+        )
+    ]
+
+
 def _remove_redundant_edge_facing_constraints(
     constraints: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -425,7 +467,7 @@ def _remove_redundant_edge_facing_constraints(
 def attach_intent_contract_to_case_pack(
     scene: Any, case_pack: dict[str, Any]
 ) -> dict[str, Any]:
-    """Validate/copy the independent v4 contract without recompiling it."""
+    """Validate/copy the independent contract without recompiling it."""
     prompt = original_prompt_for_scene(scene)
     prompt_hash = hashlib.sha256(" ".join(prompt.split()).encode("utf-8")).hexdigest()
     cached = getattr(scene, "scenebenchmark_intent_contract", None)
@@ -441,10 +483,13 @@ def attach_intent_contract_to_case_pack(
         case_pack.pop("intent_contract", None)
         return {}
     if not isinstance(cached, dict):
-        raise ValueError("scenebenchmark_intent_contract must be a v4 object")
+        raise ValueError("scenebenchmark_intent_contract must be an object")
+    if cached.get("schema_version") == "scenesmith.intent_contract.v4":
+        cached = dict(cached)
+        cached["schema_version"] = SCHEMA_VERSION
     if cached.get("schema_version") != SCHEMA_VERSION:
         raise ValueError(
-            "furniture checkpoint requires a fresh v4 intent contract; "
+            "furniture checkpoint requires a compatible intent contract; "
             f"got {cached.get('schema_version')!r}"
         )
     if cached.get("prompt_sha256") != prompt_hash:
@@ -2271,7 +2316,7 @@ def _explicit_edge_distribution_constraint(
     all_subjects_face_target = bool(
         re.search(
             r"\b(?:all|every)\s+(?:the\s+)?(?:chairs?|seats?)\b"
-            r"[^.]{0,60}\bface(?:s|ing)?\s+(?:the\s+)?(?:table|target)\b",
+            r"[^.]{0,60}\bfac(?:e|es|ing)\s+(?:the\s+)?(?:table|target)\b",
             prompt,
         )
         or re.search(
@@ -2633,6 +2678,63 @@ def _prompt_explicitly_wall_mounts_television(prompt: str) -> bool:
 def _task_spec_constraints(task_spec: Any | None) -> list[dict[str, Any]]:
     """TaskCompiler no longer owns hard relations."""
     return []
+
+
+def _task_spec_inventory_constraints(task_spec: Any | None) -> list[dict[str, Any]]:
+    """Compile normalized SceneTaskSpec inventory into authoritative counts."""
+
+    payload = _task_spec_payload(task_spec)
+    counts: dict[str, int] = {}
+    fields_by_category: dict[str, str] = {}
+    for field in (
+        "required_large_objects",
+        "required_wall_objects",
+        "required_ceiling_objects",
+        "required_small_objects",
+    ):
+        for value in payload.get(field) or []:
+            category = _normalize_selector_category(value)
+            if not category or category in {"room", "wall", "floor", "ceiling"}:
+                continue
+            counts[category] = counts.get(category, 0) + 1
+            fields_by_category.setdefault(category, field)
+
+    return [
+        _constraint(
+            "required_count",
+            {"category": category, "count": count, "quantifier": "exactly"},
+            None,
+            source="task_compiler_inventory",
+            evidence_span="",
+            inference_reason=f"SceneTaskSpec {fields_by_category[category]}",
+        )
+        for category, count in sorted(counts.items())
+    ]
+
+
+def _task_spec_inventory_conflict_warnings(
+    prompt_inventory: list[dict[str, Any]],
+    task_inventory: list[dict[str, Any]],
+) -> list[str]:
+    prompt_counts = {
+        str((row.get("subjects") or {}).get("category") or ""): int(
+            (row.get("subjects") or {}).get("count") or 0
+        )
+        for row in prompt_inventory
+    }
+    warnings: list[str] = []
+    for row in task_inventory:
+        subjects = row.get("subjects") or {}
+        category = str(subjects.get("category") or "")
+        task_count = int(subjects.get("count") or 0)
+        prompt_count = prompt_counts.get(category)
+        if prompt_count is not None and prompt_count != task_count:
+            warnings.append(
+                "Inventory count conflict for "
+                f"{category}: prompt={prompt_count}, SceneTaskSpec={task_count}; "
+                "SceneTaskSpec is authoritative"
+            )
+    return warnings
 
 
 def _task_spec_payload(task_spec: Any | None) -> dict[str, Any]:
@@ -3102,10 +3204,11 @@ def _constraint(
 
 def _deduplicate_constraints(constraints: list[dict[str, Any]]) -> list[dict[str, Any]]:
     priority = {
-        "explicit_prompt": 0,
-        "room_ontology": 1,
-        "model_inferred": 2,
-        "vlm_observation": 3,
+        "task_compiler_inventory": 0,
+        "explicit_prompt": 1,
+        "room_ontology": 2,
+        "model_inferred": 3,
+        "vlm_observation": 4,
     }
     keyed: dict[tuple[str, str, str, str, str, str], dict[str, Any]] = {}
     required_by_category: dict[str, dict[str, Any]] = {}
@@ -3119,12 +3222,20 @@ def _deduplicate_constraints(constraints: list[dict[str, Any]]) -> list[dict[str
             if previous is None:
                 required_by_category[category] = constraint
             else:
+                previous_source = str(previous.get("source") or "")
+                current_source = str(constraint.get("source") or "")
                 previous_count = int((previous.get("subjects") or {}).get("count") or 0)
                 current_count = int(subjects.get("count") or 0)
-                if current_count > previous_count or (
-                    current_count == previous_count
-                    and priority.get(str(constraint.get("source")), 9)
-                    < priority.get(str(previous.get("source")), 9)
+                if current_source == "task_compiler_inventory" or (
+                    previous_source != "task_compiler_inventory"
+                    and (
+                        current_count > previous_count
+                        or (
+                            current_count == previous_count
+                            and priority.get(current_source, 9)
+                            < priority.get(previous_source, 9)
+                        )
+                    )
                 ):
                     required_by_category[category] = constraint
             continue
