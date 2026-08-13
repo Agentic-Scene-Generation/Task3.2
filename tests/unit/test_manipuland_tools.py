@@ -96,6 +96,53 @@ class TestManipulandTools(unittest.TestCase):
         # 文字建议，否则盘子虽齐全仍会随机散落在餐桌上。
         self.assertIn("align_dining_place_settings", self.manipuland_tools.tools)
 
+    @patch(
+        "scenesmith.manipuland_agents.tools.manipuland_tools."
+        "evaluate_dining_place_setting_alignment"
+    )
+    @patch(
+        "scenesmith.manipuland_agents.tools.manipuland_tools.room_scene_to_case_pack"
+    )
+    def test_dining_alignment_builds_object_index_before_overlap_baseline(
+        self, mock_case_pack, mock_evaluate
+    ):
+        """Assignments must reach transactional overlap checks without scope errors."""
+        table = SceneObject(
+            object_id=UniqueID("furniture_001"),
+            object_type=ObjectType.FURNITURE,
+            name="dining_table",
+            description="Test dining table",
+            transform=RigidTransform(),
+            support_surfaces=[self.mock_surface],
+        )
+        self.mock_scene.objects = {table.object_id: table}
+        self.mock_scene.get_object.return_value = table
+        self.mock_scene.to_state_dict.return_value = {}
+        alignment = {
+            "primary_object": "furniture_001",
+            "label": "fail",
+            "diagnostics": {
+                "assignments": [
+                    {
+                        "anchor_id": "missing_plate",
+                        "companion_ids": [],
+                        "recommended_anchor_center_xy_m": [0.0, 0.0],
+                    }
+                ]
+            },
+        }
+        mock_case_pack.return_value = {}
+        mock_evaluate.return_value = [alignment]
+
+        result = json.loads(
+            self.manipuland_tools._align_dining_place_settings_impl(
+                table_id="furniture_001"
+            )
+        )
+
+        self.assertIn("restored", result)
+        self.assertTrue(result["restored"])
+
     def test_adjacent_dining_table_strips_are_coalesced(self):
         # 2026-07-23 修改原因：桌面内部的 HSSD seam 不应把长边中点餐位推到
         # S8 或 S9 的一侧；相邻条带合并后仍使用真实外轮廓做边界校验。
@@ -176,6 +223,7 @@ class TestManipulandTools(unittest.TestCase):
         candidate.bbox_min = np.array([-0.1, -0.1, 0.0])
         candidate.bbox_max = np.array([0.1, 0.1, 0.03])
         candidate.scale_factor = 1.0
+        candidate.transform = RigidTransform()
         occupied = Mock()
         occupied.bbox_min = np.array([-0.1, -0.1, 0.0])
         occupied.bbox_max = np.array([0.1, 0.1, 0.03])
@@ -196,13 +244,17 @@ class TestManipulandTools(unittest.TestCase):
         self.assertIsNotNone(selected)
         _surface, position = selected
         self.assertGreater(np.linalg.norm(position), 0.0)
-        self.assertGreaterEqual(
-            np.linalg.norm(position),
-            2 * self.manipuland_tools._dining_footprint_radius(candidate),
+        self.assertFalse(
+            self.manipuland_tools._dining_oriented_footprints_overlap(
+                candidate,
+                position,
+                occupied,
+                np.asarray(occupied.transform.translation()[:2]),
+            )
         )
 
     @patch.object(ManipulandTools, "_select_dining_surface_position")
-    def test_dining_target_preserves_current_setting_offsets(self, mock_select):
+    def test_dining_target_avoids_overlap_with_current_setting(self, mock_select):
         surface = SupportSurface(
             surface_id=UniqueID("S_table"),
             bounding_box_min=np.array([-1.0, -1.0, 0.0]),
@@ -214,6 +266,7 @@ class TestManipulandTools(unittest.TestCase):
         candidate.bbox_min = np.array([-0.1, -0.1, 0.0])
         candidate.bbox_max = np.array([0.1, 0.1, 0.03])
         candidate.scale_factor = 1.0
+        candidate.transform = RigidTransform()
         anchor = Mock()
         anchor.object_id = "dinner_plate_0"
         anchor.bbox_min = np.array([-0.1, -0.1, 0.0])
@@ -230,12 +283,47 @@ class TestManipulandTools(unittest.TestCase):
             scene_object=candidate,
             target_xy=(0.0, 0.0),
             occupied_objects=[anchor],
-            ignored_object_ids={"dinner_plate_0", "cutlery_0"},
         )
 
         self.assertIsNotNone(selected)
         _surface, position = selected
-        np.testing.assert_allclose(position, np.zeros(2))
+        self.assertFalse(
+            self.manipuland_tools._dining_oriented_footprints_overlap(
+                candidate,
+                position,
+                anchor,
+                np.asarray(anchor.transform.translation()[:2]),
+            )
+        )
+
+    def test_dining_oriented_clearance_does_not_treat_cutlery_as_circle(self):
+        plate = Mock()
+        plate.bbox_min = np.array([-0.135, -0.135, 0.0])
+        plate.bbox_max = np.array([0.135, 0.135, 0.03])
+        plate.scale_factor = 1.0
+        plate.transform = RigidTransform()
+        cutlery = Mock()
+        cutlery.bbox_min = np.array([-0.015, -0.11, 0.0])
+        cutlery.bbox_max = np.array([0.015, 0.11, 0.02])
+        cutlery.scale_factor = 1.0
+        cutlery.transform = RigidTransform()
+
+        self.assertFalse(
+            self.manipuland_tools._dining_oriented_footprints_overlap(
+                cutlery,
+                np.array([0.17, 0.0]),
+                plate,
+                np.array([0.0, 0.0]),
+            )
+        )
+        self.assertTrue(
+            self.manipuland_tools._dining_oriented_footprints_overlap(
+                cutlery,
+                np.array([0.14, 0.0]),
+                plate,
+                np.array([0.0, 0.0]),
+            )
+        )
 
     def test_move_manipuland_out_of_bounds_fails(self):
         """Test that move_manipuland fails when position is out of bounds."""

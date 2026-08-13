@@ -787,6 +787,7 @@ def solve_non_penetration_ik(
     iteration_limit: int = 5000,
     time_limit_s: float = 360.0,
     xy_regions: dict[BodyIndex, HPolyhedron] | None = None,
+    fixed_z_bodies: Collection[BodyIndex] | None = None,
 ) -> tuple[Context | None, bool]:
     """Solve IK for non-penetration projection of free bodies.
 
@@ -817,6 +818,10 @@ def solve_non_penetration_ik(
             region is surface_hpoly.PontryaginDifference(object_footprint_hpoly).
             This accounts for object shape - long objects (knives) can be
             placed closer to edges when oriented parallel.
+        fixed_z_bodies: Optional bodies whose current world Z translation must
+            remain fixed even when ``fix_z`` is False. This preserves explicit
+            support assignments while allowing unsupported bodies to use full
+            3D projection.
 
     Returns:
         Tuple of (plant_context, success).
@@ -879,7 +884,7 @@ def solve_non_penetration_ik(
             prog.AddBoundingBoxConstraint(model_quat, model_quat, model_quat_vars)
 
         # Fix Z if requested.
-        if fix_z:
+        if fix_z or (fixed_z_bodies and body_idx in fixed_z_bodies):
             model_q = plant.GetPositions(plant_context, model_idx)
             model_z = model_q[6]  # Z is at index 6 (after quat + x + y).
             z_var = q_vars[q_start_idx + 6]
@@ -1071,10 +1076,12 @@ def apply_non_penetration_projection(
         f"xy_only={xy_only}, fix_rotation={fix_rotation}, objects={total_objects})"
     )
 
-    # For large scenes, use collision pre-check to reduce DOFs.
-    # Small scenes (per-furniture projection) use existing fast path.
+    # Final manipuland cleanup must never move unrelated, stable objects. Besides
+    # reducing DOFs, this preserves the support assignment already established by
+    # each per-furniture workflow. Furniture projection retains its historical
+    # threshold because all furniture may need to cooperate to resolve a layout.
     free_object_ids: list[UniqueID] | None = None
-    if total_objects > large_scene_optimization_threshold:
+    if weld_furniture or total_objects > large_scene_optimization_threshold:
         colliding_ids = _get_colliding_object_ids(
             scene, penetration_threshold=collision_penetration_threshold_m
         )
@@ -1087,7 +1094,7 @@ def apply_non_penetration_projection(
             return scene, True
 
         console_logger.info(
-            f"Large scene optimization: {len(colliding_ids)}/{total_objects} "
+            f"Collision-scoped projection: {len(colliding_ids)}/{total_objects} "
             f"objects colliding (DOF: {total_objects * 7} -> {len(colliding_ids) * 7})"
         )
         free_object_ids = list(colliding_ids)
@@ -1107,6 +1114,22 @@ def apply_non_penetration_projection(
             console_logger.warning("No free bodies for projection. Skipping.")
             return scene, True
 
+        xy_regions: dict[BodyIndex, HPolyhedron] = {}
+        fixed_z_bodies: set[BodyIndex] = set()
+        if weld_furniture:
+            for obj_id, (_, body_idx) in object_indices.items():
+                obj = scene.get_object(obj_id)
+                if obj is None or obj.object_type != ObjectType.MANIPULAND:
+                    continue
+                region = _object_support_feasible_region(scene, obj)
+                if region is not None:
+                    xy_regions[body_idx] = region
+                    # A valid support assignment is a hard vertical invariant:
+                    # resolving a lateral object-object collision by moving the
+                    # object through its support surface creates a guaranteed fall
+                    # during simulation. Keep unsupported bodies free in Z.
+                    fixed_z_bodies.add(body_idx)
+
         # Solve using shared utility.
         plant_context, success = solve_non_penetration_ik(
             builder=builder,
@@ -1118,6 +1141,8 @@ def apply_non_penetration_projection(
             solver_name=solver_name,
             iteration_limit=iteration_limit,
             time_limit_s=time_limit_s,
+            xy_regions=xy_regions or None,
+            fixed_z_bodies=fixed_z_bodies or None,
         )
 
         if success and plant_context is not None:
@@ -1326,6 +1351,76 @@ def get_object_xy_footprint(
     hull_vertices = processed_vertices[hull.vertices]
     # VPolytope expects 2xN array (dim x num_vertices).
     return VPolytope(vertices=hull_vertices.T)
+
+
+def _find_support_surface(scene: RoomScene, surface_id: UniqueID):
+    """Return the support surface with ``surface_id``, if it still exists."""
+    for owner in scene.objects.values():
+        for surface in owner.support_surfaces:
+            if str(surface.surface_id) == str(surface_id):
+                return surface
+    return None
+
+
+def _object_support_feasible_region(
+    scene: RoomScene, obj: SceneObject
+) -> HPolyhedron | None:
+    """Build the world-XY region that keeps an object on its assigned surface."""
+    placement = obj.placement_info
+    if placement is None:
+        return None
+    surface = _find_support_surface(scene, placement.parent_surface_id)
+    if surface is None:
+        console_logger.warning(
+            "Cannot constrain %s to missing support surface %s",
+            obj.object_id,
+            placement.parent_surface_id,
+        )
+        return None
+
+    surface_hpoly = HPolyhedron(vpoly=surface.get_xy_convex_hull())
+    obj_mesh = None
+    geometry_path = obj.geometry_path
+    if geometry_path is None and obj.metadata.get("composite_type") == "stack":
+        members = obj.metadata.get("member_assets", [])
+        if members:
+            geometry_path = members[0].get("geometry_path")
+    elif (
+        geometry_path is None
+        and obj.metadata.get("composite_type") == "filled_container"
+    ):
+        container = obj.metadata.get("container_asset") or {}
+        geometry_path = container.get("geometry_path")
+
+    if geometry_path is not None:
+        try:
+            obj_mesh = trimesh.load(geometry_path, force="mesh")
+        except Exception as exc:
+            console_logger.warning(
+                "Failed to load support footprint for %s: %s",
+                obj.object_id,
+                exc,
+            )
+
+    if obj_mesh is None:
+        # Constraining the body origin is less exact than the footprint, but still
+        # prevents an unsupported lateral jump during global collision cleanup.
+        return surface_hpoly
+
+    if obj.scale_factor != 1.0:
+        obj_mesh.vertices *= obj.scale_factor
+    footprint = HPolyhedron(
+        vpoly=get_object_xy_footprint(obj_mesh, obj.transform.rotation())
+    )
+    try:
+        region = surface_hpoly.PontryaginDifference(footprint)
+        if not region.IsEmpty():
+            return region
+    except Exception as exc:
+        console_logger.warning(
+            "Failed to compute support region for %s: %s", obj.object_id, exc
+        )
+    return surface_hpoly
 
 
 def apply_surface_projection(

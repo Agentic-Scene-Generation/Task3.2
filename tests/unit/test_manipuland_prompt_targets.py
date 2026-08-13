@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, Mock, call, patch
 import numpy as np
 import pytest
 
+from agents.exceptions import MaxTurnsExceeded
 from pydrake.all import RigidTransform, RollPitchYaw
 
 from scenesmith.agent_utils.room import ObjectType, UniqueID
@@ -380,6 +381,60 @@ def test_per_furniture_postprocessing_runs_before_final_critique() -> None:
         call.critique(update_checkpoint=False),
         call.finalize(),
     ]
+
+
+def test_planner_turn_limit_still_runs_deterministic_finalization() -> None:
+    furniture_id = UniqueID("dining_table_0")
+    agent = object.__new__(StatefulManipulandAgent)
+    agent.cfg = SimpleNamespace(
+        agents=SimpleNamespace(planner_agent=SimpleNamespace(max_turns=3))
+    )
+    agent.prompt_registry = Mock()
+    agent._run_planner_workflow = AsyncMock(
+        side_effect=MaxTurnsExceeded("Max turns (3) exceeded")
+    )
+    agent.scene = Mock()
+    agent.scene.content_hash.return_value = "settled-scene"
+    agent._can_skip_final_critique = Mock(return_value=False)
+
+    ordered = Mock()
+    agent._enforce_monitor_work_seat_orientation = Mock()
+    agent._enforce_dining_place_setting_alignment = Mock()
+    agent._apply_per_furniture_postprocessing = Mock()
+    agent._request_critique_impl = AsyncMock()
+    agent._finalize_scene_and_scores = AsyncMock()
+    ordered.attach_mock(
+        agent._enforce_monitor_work_seat_orientation, "monitor_alignment"
+    )
+    ordered.attach_mock(
+        agent._enforce_dining_place_setting_alignment, "dining_alignment"
+    )
+    ordered.attach_mock(agent._apply_per_furniture_postprocessing, "postprocess")
+    ordered.attach_mock(agent._request_critique_impl, "critique")
+    ordered.attach_mock(agent._finalize_scene_and_scores, "finalize")
+
+    asyncio.run(agent._run_furniture_workflow(furniture_id))
+
+    assert ordered.mock_calls == [
+        call.monitor_alignment(furniture_id),
+        call.dining_alignment(furniture_id),
+        call.postprocess(furniture_id),
+        call.critique(update_checkpoint=False),
+        call.finalize(),
+    ]
+
+
+def test_non_turn_limit_planner_error_still_propagates() -> None:
+    furniture_id = UniqueID("dining_table_0")
+    agent = object.__new__(StatefulManipulandAgent)
+    agent.cfg = SimpleNamespace(
+        agents=SimpleNamespace(planner_agent=SimpleNamespace(max_turns=3))
+    )
+    agent.prompt_registry = Mock()
+    agent._run_planner_workflow = AsyncMock(side_effect=RuntimeError("service failed"))
+
+    with pytest.raises(RuntimeError, match="service failed"):
+        asyncio.run(agent._run_furniture_workflow(furniture_id))
 
 
 def test_failed_furniture_workflow_restores_pre_target_scene() -> None:

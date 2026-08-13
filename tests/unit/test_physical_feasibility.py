@@ -385,6 +385,48 @@ class TestApplyNonPenetrationProjection(PhysicalFeasibilityTestCase):
                 )
             )
 
+    @patch("scenesmith.agent_utils.physical_feasibility.solve_non_penetration_ik")
+    @patch("scenesmith.agent_utils.physical_feasibility._get_colliding_object_ids")
+    def test_supported_manipuland_has_per_body_fixed_z_constraint(
+        self, mock_colliding_ids, mock_solve
+    ) -> None:
+        """Full-3D cleanup must not project an object through its support."""
+        from scenesmith.agent_utils.room import PlacementInfo, SupportSurface
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            scene = self._create_scene_with_manipuland(Path(tmp_dir))
+            table = scene.get_object(UniqueID("table_0"))
+            ball = scene.get_object(UniqueID("ball_0"))
+            surface = SupportSurface(
+                surface_id=UniqueID("table_top"),
+                bounding_box_min=np.array([-0.25, -0.25, 0.0]),
+                bounding_box_max=np.array([0.25, 0.25, 0.0]),
+                transform=RigidTransform(p=[0.0, 0.0, 0.5]),
+            )
+            table.support_surfaces = [surface]
+            ball.placement_info = PlacementInfo(
+                parent_surface_id=surface.surface_id,
+                position_2d=np.array([0.0, 0.0]),
+                rotation_2d=0.0,
+            )
+            mock_colliding_ids.return_value = {ball.object_id}
+            mock_solve.return_value = (None, False)
+
+            _, success = apply_non_penetration_projection(
+                scene,
+                weld_furniture=True,
+                xy_only=False,
+                solver_name="ipopt",
+            )
+
+            self.assertFalse(success)
+            kwargs = mock_solve.call_args.kwargs
+            fixed_z_bodies = kwargs["fixed_z_bodies"]
+            xy_regions = kwargs["xy_regions"]
+            self.assertIsNotNone(fixed_z_bodies)
+            self.assertEqual(fixed_z_bodies, set(xy_regions))
+            self.assertEqual(len(fixed_z_bodies), 1)
+
     def test_empty_scene_returns_success(self) -> None:
         """Test that empty scene returns success."""
         with tempfile.TemporaryDirectory() as tmp_dir:

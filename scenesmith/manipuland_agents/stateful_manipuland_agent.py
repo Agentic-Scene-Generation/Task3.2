@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from agents import Agent, FunctionTool, Runner, RunResult, custom_span
+from agents.exceptions import MaxTurnsExceeded
 from omegaconf import DictConfig, OmegaConf
 from pydrake.all import RollPitchYaw
 
@@ -755,13 +756,27 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
             prompt_enum=planner_runner_prompt,
         )
 
-        result: RunResult = await self._run_planner_workflow(
-            runner_input=runner_instruction,
-            max_turns=self.cfg.agents.planner_agent.max_turns,
-        )
-        log_agent_usage(result=result, agent_name="PLANNER (MANIPULAND)")
+        result: RunResult | None = None
+        try:
+            result = await self._run_planner_workflow(
+                runner_input=runner_instruction,
+                max_turns=self.cfg.agents.planner_agent.max_turns,
+            )
+        except MaxTurnsExceeded:
+            # Tool side effects are committed before the runner reports its turn
+            # limit. Continue through deterministic repair, physics validation,
+            # and final scoring; any unresolved hard failure still propagates and
+            # triggers the enclosing per-target transaction rollback.
+            console_logger.warning(
+                "Manipuland planner exhausted its turn budget for %s; "
+                "finalizing the committed candidate deterministically",
+                furniture_id,
+            )
 
-        if result.final_output:
+        if result is not None:
+            log_agent_usage(result=result, agent_name="PLANNER (MANIPULAND)")
+
+        if result is not None and result.final_output:
             log_agent_response(
                 response=result.final_output, agent_name="PLANNER (MANIPULAND)"
             )

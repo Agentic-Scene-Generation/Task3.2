@@ -1,3 +1,4 @@
+import copy
 import json
 import logging
 import math
@@ -2016,6 +2017,26 @@ class ManipulandTools:
                 {"success": False, "message": "No dining place settings were found."}
             )
 
+        objects_by_id = {
+            str(scene_object.object_id): scene_object
+            for scene_object in self.scene.objects.values()
+        }
+        scene_snapshot = copy.deepcopy(self.scene.to_state_dict())
+        before_failure_count = self._dining_alignment_failure_count(alignment)
+        dining_object_ids = {
+            str(row.get("anchor_id") or "")
+            for row in assignments
+            if str(row.get("anchor_id") or "")
+        }
+        dining_object_ids.update(
+            str(companion_id)
+            for row in assignments
+            for companion_id in row.get("companion_ids") or []
+        )
+        before_overlap_count = self._dining_footprint_overlap_count(
+            objects_by_id, dining_object_ids
+        )
+
         surface_map = {
             str(surface.surface_id): surface for surface in table.support_surfaces
         }
@@ -2027,10 +2048,6 @@ class ManipulandTools:
                 }
             )
 
-        objects_by_id = {
-            str(scene_object.object_id): scene_object
-            for scene_object in self.scene.objects.values()
-        }
         original_xy = {
             object_id: self._object_world_xy(scene_object)
             for object_id, scene_object in objects_by_id.items()
@@ -2074,13 +2091,6 @@ class ManipulandTools:
             for row in assignments:
                 anchor_id = str(row.get("anchor_id") or "")
                 anchor = objects_by_id.get(anchor_id)
-                setting_object_ids = {
-                    anchor_id,
-                    *(
-                        str(companion_id)
-                        for companion_id in row.get("companion_ids") or []
-                    ),
-                }
                 target = row.get("recommended_anchor_center_xy_m") or []
                 if anchor is None or len(target) < 2:
                     failures.append(f"Incomplete assignment for anchor `{anchor_id}`.")
@@ -2130,7 +2140,6 @@ class ManipulandTools:
                         target_xy=companion_target,
                         preferred_surface_id=str(surface.surface_id),
                         occupied_objects=occupied_dining_objects,
-                        ignored_object_ids=setting_object_ids,
                     )
                     if companion_selected is None:
                         failures.append(
@@ -2151,6 +2160,49 @@ class ManipulandTools:
         finally:
             self.active_noise_profile = previous_noise_profile
 
+        after_alignment = next(
+            (
+                result
+                for result in evaluate_dining_place_setting_alignment(
+                    room_scene_to_case_pack(
+                        self.scene, stage="dining_place_setting_repair_result"
+                    )
+                )
+                if str(result.get("primary_object") or "") == resolved_table_id
+            ),
+            None,
+        )
+        after_failure_count = self._dining_alignment_failure_count(after_alignment)
+        after_overlap_count = self._dining_footprint_overlap_count(
+            objects_by_id, dining_object_ids
+        )
+        if (
+            after_alignment is None
+            or (
+                after_failure_count >= before_failure_count
+                and str(after_alignment.get("label") or "") != "pass"
+            )
+            or after_overlap_count > before_overlap_count
+        ):
+            self.scene.restore_from_state_dict(scene_snapshot)
+            return json.dumps(
+                {
+                    "success": False,
+                    "message": (
+                        "Dining alignment did not improve the deterministic "
+                        "seat-lane contract; restored the pre-alignment scene."
+                    ),
+                    "table_id": resolved_table_id,
+                    "moves": moves,
+                    "failures": failures,
+                    "restored": True,
+                    "before_failure_count": before_failure_count,
+                    "after_failure_count": after_failure_count,
+                    "before_overlap_count": before_overlap_count,
+                    "after_overlap_count": after_overlap_count,
+                }
+            )
+
         return json.dumps(
             {
                 "success": not failures,
@@ -2162,8 +2214,54 @@ class ManipulandTools:
                 "table_id": resolved_table_id,
                 "moves": moves,
                 "failures": failures,
+                "restored": False,
+                "before_failure_count": before_failure_count,
+                "after_failure_count": after_failure_count,
+                "before_overlap_count": before_overlap_count,
+                "after_overlap_count": after_overlap_count,
             }
         )
+
+    @staticmethod
+    def _dining_alignment_failure_count(result: dict[str, Any] | None) -> int:
+        if not isinstance(result, dict):
+            return 1_000_000
+        assignments = (result.get("diagnostics") or {}).get("assignments") or []
+        count = 0
+        for row in assignments:
+            if not bool(row.get("aligned")):
+                count += 1
+            count += len(row.get("misaligned_companion_ids") or [])
+        return count
+
+    def _dining_footprint_overlap_count(
+        self,
+        objects_by_id: dict[str, SceneObject],
+        object_ids: set[str],
+    ) -> int:
+        objects = [
+            objects_by_id[object_id]
+            for object_id in sorted(object_ids)
+            if object_id in objects_by_id
+        ]
+        count = 0
+        for index, first in enumerate(objects):
+            first_xy = self._object_world_xy(first)
+            if first_xy is None:
+                continue
+            for second in objects[index + 1 :]:
+                second_xy = self._object_world_xy(second)
+                if second_xy is None:
+                    continue
+                if self._dining_oriented_footprints_overlap(
+                    first,
+                    np.asarray(first_xy, dtype=float),
+                    second,
+                    np.asarray(second_xy, dtype=float),
+                    margin_m=0.0,
+                ):
+                    count += 1
+        return count
 
     @staticmethod
     def _object_world_xy(scene_object: SceneObject) -> tuple[float, float] | None:
@@ -2234,12 +2332,8 @@ class ManipulandTools:
             for item in occupied_objects
             if str(item.object_id) not in ignored_object_ids
         ]
-        object_radius = self._dining_footprint_radius(scene_object)
-        occupied_radius = max(
-            (self._dining_footprint_radius(item) for item in relevant_occupied_objects),
-            default=0.0,
-        )
-        step = max(0.04, object_radius + occupied_radius)
+        dimensions = self._dining_footprint_dimensions(scene_object)
+        step = max(0.015, min(0.06, 0.5 * min(dimensions)))
         directions = (
             (0.0, 0.0),
             (1.0, 0.0),
@@ -2251,7 +2345,9 @@ class ManipulandTools:
             (-1.0, 1.0),
             (-1.0, -1.0),
         )
-        for ring in range(3):
+        max_search_distance = max(0.08, min(0.24, 2.5 * min(dimensions)))
+        ring_count = max(2, int(math.ceil(max_search_distance / step)) + 1)
+        for ring in range(ring_count):
             distance = ring * step
             for direction_x, direction_y in directions:
                 if ring == 0 and (direction_x != 0.0 or direction_y != 0.0):
@@ -2272,10 +2368,18 @@ class ManipulandTools:
                 surface, position = selected
                 world_xy = surface.to_world_pose(position, 0.0).translation()[:2]
                 if self._dining_position_is_clear(
-                    world_xy, object_radius, relevant_occupied_objects
+                    scene_object, world_xy, relevant_occupied_objects
                 ):
                     return surface, position
         return None
+
+    @staticmethod
+    def _dining_footprint_dimensions(scene_object: SceneObject) -> np.ndarray:
+        dimensions = np.asarray(scene_object.bbox_max[:2], dtype=float) - np.asarray(
+            scene_object.bbox_min[:2], dtype=float
+        )
+        scale_factor = float(getattr(scene_object, "scale_factor", 1.0) or 1.0)
+        return np.maximum(np.abs(dimensions * scale_factor), 0.001)
 
     @staticmethod
     def _dining_footprint_radius(scene_object: SceneObject) -> float:
@@ -2288,16 +2392,56 @@ class ManipulandTools:
 
     def _dining_position_is_clear(
         self,
+        scene_object: SceneObject,
         world_xy: np.ndarray,
-        object_radius: float,
         occupied_objects: list[SceneObject],
     ) -> bool:
         for occupied in occupied_objects:
             occupied_xy = self._object_world_xy(occupied)
             if occupied_xy is None:
                 continue
-            minimum_distance = object_radius + self._dining_footprint_radius(occupied)
-            if math.dist(world_xy, occupied_xy) < minimum_distance:
+            if self._dining_oriented_footprints_overlap(
+                scene_object,
+                world_xy,
+                occupied,
+                np.asarray(occupied_xy, dtype=float),
+            ):
+                return False
+        return True
+
+    def _dining_oriented_footprints_overlap(
+        self,
+        first: SceneObject,
+        first_xy: np.ndarray,
+        second: SceneObject,
+        second_xy: np.ndarray,
+        margin_m: float = 0.008,
+    ) -> bool:
+        """Conservatively test two oriented tabletop bounding rectangles."""
+
+        def axes_and_half_extents(
+            scene_object: SceneObject,
+        ) -> tuple[tuple[np.ndarray, np.ndarray], np.ndarray]:
+            yaw = float(RollPitchYaw(scene_object.transform.rotation()).yaw_angle())
+            axis_x = np.asarray([math.cos(yaw), math.sin(yaw)], dtype=float)
+            axis_y = np.asarray([-math.sin(yaw), math.cos(yaw)], dtype=float)
+            half_extents = 0.5 * self._dining_footprint_dimensions(scene_object)
+            return (axis_x, axis_y), half_extents
+
+        first_axes, first_half = axes_and_half_extents(first)
+        second_axes, second_half = axes_and_half_extents(second)
+        delta = np.asarray(second_xy, dtype=float) - np.asarray(first_xy, dtype=float)
+        for axis in (*first_axes, *second_axes):
+            center_distance = abs(float(np.dot(delta, axis)))
+            first_radius = sum(
+                first_half[index] * abs(float(np.dot(first_axes[index], axis)))
+                for index in range(2)
+            )
+            second_radius = sum(
+                second_half[index] * abs(float(np.dot(second_axes[index], axis)))
+                for index in range(2)
+            )
+            if center_distance >= first_radius + second_radius + margin_m:
                 return False
         return True
 
