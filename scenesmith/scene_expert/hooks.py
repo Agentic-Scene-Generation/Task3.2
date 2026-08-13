@@ -333,7 +333,12 @@ def _intent_compiler_model(cfg_dict: dict) -> str:
 
 
 def _compile_intent_contract_if_enabled(
-    *, prompt: str, scene_id: int, output_dir: Path, cfg_dict: dict
+    *,
+    prompt: str,
+    scene_id: int,
+    output_dir: Path,
+    cfg_dict: dict,
+    task_spec: SceneTaskSpec | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Compile v4 exactly once when the embedded critic is enabled.
 
@@ -347,8 +352,29 @@ def _compile_intent_contract_if_enabled(
         return {}, {}
     normalized_prompt = " ".join(str(prompt or "").split())
     prompt_hash = hashlib.sha256(normalized_prompt.encode("utf-8")).hexdigest()
+    interaction_constraints = tuple(
+        " ".join(str(value or "").split())
+        for value in (task_spec.interaction_constraints if task_spec else [])
+        if str(value or "").strip()
+    )
+    aesthetic_constraints = tuple(
+        " ".join(str(value or "").split())
+        for value in (task_spec.aesthetic_constraints if task_spec else [])
+        if str(value or "").strip()
+    )
+    task_constraints_hash = hashlib.sha256(
+        json.dumps(
+            {
+                "interaction_constraints": interaction_constraints,
+                "aesthetic_constraints": aesthetic_constraints,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
     cache_key = {
         "prompt_sha256": prompt_hash,
+        "task_constraints_sha256": task_constraints_hash,
         "spec_version": IntentCompiler.SPEC_VERSION,
     }
     cached_contract = cfg_dict.get("_scenebenchmark_intent_contract")
@@ -357,16 +383,7 @@ def _compile_intent_contract_if_enabled(
     if (
         isinstance(cached_contract, dict)
         and isinstance(cached_trace, dict)
-        and (
-            cached_key == cache_key
-            or (
-                cached_contract.get("prompt_sha256") == prompt_hash
-                and cached_contract.get("intent_compiler_spec_version")
-                == IntentCompiler.SPEC_VERSION
-                and cached_trace.get("prompt_sha256") == prompt_hash
-                and cached_trace.get("spec_version") == IntentCompiler.SPEC_VERSION
-            )
-        )
+        and cached_key == cache_key
     ):
         return cached_contract, cached_trace
     compiler_cfg = critic_config.intent_compiler
@@ -378,7 +395,14 @@ def _compile_intent_contract_if_enabled(
         temperature=0.0,
     )
     try:
-        contract = compiler.compile(prompt)
+        if interaction_constraints or aesthetic_constraints:
+            contract = compiler.compile(
+                prompt,
+                interaction_constraints=interaction_constraints,
+                aesthetic_constraints=aesthetic_constraints,
+            )
+        else:
+            contract = compiler.compile(prompt)
     except Exception:
         trace = getattr(compiler, "last_trace", {})
         trace_path = (
@@ -1699,13 +1723,13 @@ def build_hook_runner(
     root_se_cfg = cfg_dict.get("scene_expert", {})
     exp_se_cfg = cfg_dict.get("experiment", {}).get("scene_expert")
     se_cfg = exp_se_cfg or root_se_cfg
-    intent_contract, intent_trace = _compile_intent_contract_if_enabled(
-        prompt=prompt,
-        scene_id=scene_id,
-        output_dir=output_dir,
-        cfg_dict=cfg_dict,
-    )
     if not se_cfg:
+        _compile_intent_contract_if_enabled(
+            prompt=prompt,
+            scene_id=scene_id,
+            output_dir=output_dir,
+            cfg_dict=cfg_dict,
+        )
         return None
     memory_cfg = _deep_merge_dicts(
         root_se_cfg.get("memory", {}),
@@ -1718,9 +1742,21 @@ def build_hook_runner(
 
     mode = se_cfg.get("mode", "disabled")
     if mode == "disabled" or not se_cfg.get("enabled", False):
+        _compile_intent_contract_if_enabled(
+            prompt=prompt,
+            scene_id=scene_id,
+            output_dir=output_dir,
+            cfg_dict=cfg_dict,
+        )
         return None
 
     if mode not in ABLATION_MODES:
+        _compile_intent_contract_if_enabled(
+            prompt=prompt,
+            scene_id=scene_id,
+            output_dir=output_dir,
+            cfg_dict=cfg_dict,
+        )
         console_logger.warning(
             f"Unknown scene_expert.mode={mode!r}. "
             f"Valid: {sorted(ABLATION_MODES)}. Disabling SceneExpert."
@@ -1823,6 +1859,13 @@ def build_hook_runner(
             scene_debug_dir / "behavior_spec.json",
         )
 
+    intent_contract, intent_trace = _compile_intent_contract_if_enabled(
+        prompt=prompt,
+        scene_id=scene_id,
+        output_dir=output_dir,
+        cfg_dict=cfg_dict,
+        task_spec=task_spec,
+    )
     task_spec = _reconcile_task_spec_stage_ownership(task_spec, intent_contract)
 
     # Harness (always active when mode != "disabled")

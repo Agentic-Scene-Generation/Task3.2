@@ -1591,6 +1591,127 @@ def test_intent_compiler_retries_once_without_task_spec_input() -> None:
         }
 
 
+def test_intent_compiler_injects_both_task_compiler_constraint_channels() -> None:
+    interaction = "nightstands should flank the bed and remain reachable"
+    aesthetic = "keep the dining table centered in the room"
+    compiler = _compiler_with_responses(
+        [
+            _response('{"constraints": [{"relation": "one_per_side"}]}'),
+            _response(
+                '{"constraints": ['
+                '{"relation": "flanking", '
+                '"subjects": {"category": "nightstand", "count": 2}, '
+                '"targets": {"category": "bed", "count": 1}, '
+                '"source": "model_inferred", "evidence_span": "", '
+                '"inference_reason": "TaskCompiler interaction_constraints: '
+                f'{interaction}"}}, '
+                '{"relation": "centered_in_room", '
+                '"subjects": {"category": "dining_table", "count": 1}, '
+                '"targets": {"category": "room", "count": 1}, '
+                '"source": "model_inferred", "evidence_span": "", '
+                '"inference_reason": "TaskCompiler aesthetic_constraints: '
+                f'{aesthetic}"}}]}}'
+            ),
+        ]
+    )
+
+    result = compiler.compile(
+        "A bedroom and dining area with a bed, two nightstands, and a dining table.",
+        interaction_constraints=[interaction],
+        aesthetic_constraints=[aesthetic, "use a modern material palette"],
+    )
+
+    inferred = [
+        row for row in result["constraints"] if row["source"] == "model_inferred"
+    ]
+    assert {row["relation"] for row in inferred} == {
+        "flanking",
+        "centered_in_room",
+    }
+    for call in compiler._test_calls:
+        user_message = call["messages"][1]["content"]
+        assert interaction in user_message
+        assert aesthetic in user_message
+        assert "use a modern material palette" in user_message
+    assert compiler.last_trace["unmapped_task_compiler_constraints"] == {
+        "interaction_constraints": [],
+        "aesthetic_constraints": ["use a modern material palette"],
+    }
+
+
+def test_intent_compiler_maps_reachability_to_near_not_flanking() -> None:
+    interaction = "nightstands should be accessible from the bed"
+    compiler = _compiler_with_responses(
+        [
+            _response(
+                '{"constraints": [{"relation": "near", '
+                '"subjects": {"category": "nightstand", "count": 2}, '
+                '"targets": {"category": "bed", "count": 1}, '
+                '"source": "model_inferred", "evidence_span": "", '
+                '"inference_reason": "TaskCompiler interaction_constraints: '
+                f'{interaction}"}}]}}'
+            )
+        ]
+    )
+
+    result = compiler.compile(
+        "A bedroom with a bed and two nightstands.",
+        interaction_constraints=[interaction],
+    )
+
+    inferred = [
+        row for row in result["constraints"] if row["source"] == "model_inferred"
+    ]
+    assert [row["relation"] for row in inferred] == ["near"]
+    assert inferred[0]["subjects"]["category"] == "nightstand"
+    assert inferred[0]["targets"]["category"] == "bed"
+
+
+def test_intent_compiler_prefers_explicit_prompt_over_task_constraint() -> None:
+    inferred = "place the dining table against a wall"
+    compiler = _compiler_with_responses(
+        [
+            _response(
+                '{"constraints": ['
+                '{"relation": "centered_in_room", '
+                '"subjects": {"category": "dining_table", "count": 1}, '
+                '"targets": {"category": "room", "count": 1}, '
+                '"source": "explicit_prompt", '
+                '"evidence_span": "center the dining table in the room"}, '
+                '{"relation": "against_wall", '
+                '"subjects": {"category": "dining_table", "count": 1}, '
+                '"targets": {"category": "wall", "count": 1}, '
+                '"source": "model_inferred", "evidence_span": "", '
+                '"inference_reason": "TaskCompiler aesthetic_constraints: '
+                f'{inferred}"}}]}}'
+            )
+        ]
+    )
+
+    result = compiler.compile(
+        "Please center the dining table in the room.",
+        aesthetic_constraints=[inferred],
+    )
+
+    assert any(row["relation"] == "centered_in_room" for row in result["constraints"])
+    assert not any(row["relation"] == "against_wall" for row in result["constraints"])
+    assert compiler.last_trace["rejected_task_compiler_constraints"] == [
+        {
+            "relation": "against_wall",
+            "subject_category": "dining_table",
+            "reason": "conflicts_with_explicit_prompt",
+            "inference_reason": (
+                "TaskCompiler aesthetic_constraints: "
+                "place the dining table against a wall"
+            ),
+        }
+    ]
+    assert compiler.last_trace["unmapped_task_compiler_constraints"] == {
+        "interaction_constraints": [],
+        "aesthetic_constraints": [],
+    }
+
+
 def test_intent_schema_requires_target_for_endpoint_relations() -> None:
     relation_schema = intent_contract_json_schema()["$defs"]["IntentRelation"]
     conditions = relation_schema["allOf"]
@@ -2287,8 +2408,10 @@ def test_intent_compiler_is_disabled_without_critic_request(
     assert result == ({}, {})
 
 
-def test_intent_compiler_cache_uses_prompt_and_spec_only(monkeypatch, tmp_path) -> None:
-    calls: list[str] = []
+def test_intent_compiler_cache_uses_prompt_task_constraints_and_spec(
+    monkeypatch, tmp_path
+) -> None:
+    calls: list[tuple[str, tuple[str, ...], tuple[str, ...]]] = []
 
     class FakeCompiler:
         SPEC_VERSION = INTENT_COMPILER_SPEC_VERSION
@@ -2296,8 +2419,19 @@ def test_intent_compiler_cache_uses_prompt_and_spec_only(monkeypatch, tmp_path) 
         def __init__(self, **_kwargs):
             self.last_trace = {}
 
-        def compile(self, prompt: str) -> dict:
-            calls.append(prompt)
+        def compile(
+            self,
+            prompt: str,
+            interaction_constraints=(),
+            aesthetic_constraints=(),
+        ) -> dict:
+            calls.append(
+                (
+                    prompt,
+                    tuple(interaction_constraints),
+                    tuple(aesthetic_constraints),
+                )
+            )
             return {
                 "schema_version": INTENT_CONTRACT_SCHEMA_VERSION,
                 "prompt": prompt,
@@ -2310,20 +2444,92 @@ def test_intent_compiler_cache_uses_prompt_and_spec_only(monkeypatch, tmp_path) 
 
     monkeypatch.setattr(hooks, "IntentCompiler", FakeCompiler)
     cfg = {"scenebenchmark_critic": {"enabled": True}}
+    first_spec = SceneTaskSpec(
+        room_type="room",
+        style="standard",
+        interaction_constraints=["keep the desk reachable"],
+    )
+    second_spec = first_spec.model_copy(
+        update={"aesthetic_constraints": ["center the desk in the room"]}
+    )
     hooks._compile_intent_contract_if_enabled(
         prompt="A room with a desk.",
         scene_id=0,
         output_dir=tmp_path,
         cfg_dict=cfg,
+        task_spec=first_spec,
     )
     hooks._compile_intent_contract_if_enabled(
-        prompt="A room with a bed.",
+        prompt="A room with a desk.",
         scene_id=0,
         output_dir=tmp_path,
         cfg_dict=cfg,
+        task_spec=first_spec,
+    )
+    hooks._compile_intent_contract_if_enabled(
+        prompt="A room with a desk.",
+        scene_id=0,
+        output_dir=tmp_path,
+        cfg_dict=cfg,
+        task_spec=second_spec,
     )
 
-    assert calls == ["A room with a desk.", "A room with a bed."]
+    assert calls == [
+        ("A room with a desk.", ("keep the desk reachable",), ()),
+        (
+            "A room with a desk.",
+            ("keep the desk reachable",),
+            ("center the desk in the room",),
+        ),
+    ]
+
+
+def test_enabled_hook_runner_compiles_task_spec_before_intent(
+    monkeypatch, tmp_path
+) -> None:
+    events: list[str] = []
+    task_spec = SceneTaskSpec(
+        room_type="bedroom",
+        style="modern",
+        interaction_constraints=["nightstands should flank the bed"],
+        aesthetic_constraints=["keep the layout balanced"],
+    )
+
+    class FakeTaskCompiler:
+        def __init__(self, **_kwargs):
+            self.last_trace = {}
+
+        def compile(self, prompt: str) -> SceneTaskSpec:
+            events.append(f"task:{prompt}")
+            return task_spec
+
+    class IntentReached(RuntimeError):
+        pass
+
+    def fake_compile_intent(**kwargs):
+        events.append("intent")
+        assert kwargs["task_spec"] is task_spec
+        raise IntentReached
+
+    monkeypatch.setattr(hooks, "TaskCompiler", FakeTaskCompiler)
+    monkeypatch.setattr(
+        hooks, "_compile_intent_contract_if_enabled", fake_compile_intent
+    )
+    cfg = {
+        "experiment": {"scene_expert": {"enabled": True, "mode": "harness_only"}},
+        "furniture_agent": {"openai": {"model": "test-model"}},
+        "scenebenchmark_critic": {"enabled": True},
+    }
+
+    with pytest.raises(IntentReached):
+        hooks.build_hook_runner(
+            prompt="A bedroom with a bed.",
+            scene_id=0,
+            output_dir=tmp_path,
+            cfg_dict=cfg,
+        )
+
+    assert events == ["task:A bedroom with a bed.", "intent"]
 
 
 def test_new_scene_prompts_compile_complete_deterministic_contracts() -> None:

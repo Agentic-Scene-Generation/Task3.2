@@ -149,7 +149,7 @@ _selector_categories_overlap = selector_categories_overlap
 
 
 INTENT_CONTRACT_SCHEMA_VERSION = "scenesmith.intent_contract.v4"
-INTENT_COMPILER_SPEC_VERSION = "scenesmith.intent_compiler.v6"
+INTENT_COMPILER_SPEC_VERSION = "scenesmith.intent_compiler.v7"
 
 _WALL_QUALIFIED_DIRECTION_PATTERN = re.compile(
     r"(?P<subject>[^,.;!?]{1,100}?)\s+against\s+"
