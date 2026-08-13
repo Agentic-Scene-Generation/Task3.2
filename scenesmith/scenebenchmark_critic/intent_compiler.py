@@ -134,7 +134,10 @@ def _validate_contract_completeness(
                 continue
             for field in ("category", "secondary_category"):
                 category = canonical_selector_category(selector.get(field))
-                if category and category not in resolvable:
+                if category and not any(
+                    selector_categories_overlap(category, candidate)
+                    for candidate in resolvable
+                ):
                     raise IncompleteIntentContractError(
                         f"relation {row.get('relation')!r} endpoint {category!r} "
                         "has no required_count or legal environment anchor"

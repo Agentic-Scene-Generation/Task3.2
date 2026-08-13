@@ -1816,6 +1816,32 @@ def test_contract_completeness_rejects_unknown_relation_endpoint() -> None:
         _validate_contract_completeness(contract, {"required_large_objects": ["desk"]})
 
 
+def test_contract_completeness_accepts_specific_endpoint_for_generic_inventory() -> (
+    None
+):
+    contract = build_intent_contract(
+        "Six chairs.", task_spec={"required_large_objects": ["chair"] * 6}
+    )
+    contract["constraints"].append(
+        {
+            "relation": "paired_with",
+            "subjects": {"category": "student_chair", "count": 6},
+            "targets": {"category": "student_desk", "count": 6},
+            "source": "room_ontology",
+        }
+    )
+    contract["constraints"].append(
+        {
+            "relation": "required_count",
+            "subjects": {"category": "student_desk", "count": 6},
+            "targets": None,
+            "source": "room_ontology",
+        }
+    )
+
+    _validate_contract_completeness(contract, {"required_large_objects": ["chair"] * 6})
+
+
 @pytest.mark.parametrize(
     "anchor",
     ["room", "wall", "floor", "ceiling", "entrance", "adjacent_wall"],
