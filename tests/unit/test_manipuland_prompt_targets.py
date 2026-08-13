@@ -288,6 +288,9 @@ def test_final_dining_alignment_runs_when_planner_ignored_failed_contract() -> N
     agent = object.__new__(StatefulManipulandAgent)
     agent.scene = Mock()
     agent.manipuland_tools = Mock()
+    agent.manipuland_tools._complete_dining_place_settings_impl.return_value = (
+        '{"success": true, "changed": false, "restored": false}'
+    )
     failed = {
         "primary_object": "dining_table_0",
         "label": "fail",
@@ -364,12 +367,20 @@ def test_per_furniture_postprocessing_runs_before_final_critique() -> None:
     agent._can_skip_final_critique = Mock(return_value=False)
 
     ordered = Mock()
-    agent._apply_per_furniture_postprocessing = Mock()
+    agent._apply_per_furniture_postprocessing = Mock(return_value=True)
+    agent._repair_dining_alignment_after_physics = Mock()
     agent._request_critique_impl = AsyncMock()
     agent._finalize_scene_and_scores = AsyncMock()
+    agent._finalize_dining_joint_contract = Mock()
     ordered.attach_mock(agent._apply_per_furniture_postprocessing, "postprocess")
+    ordered.attach_mock(
+        agent._repair_dining_alignment_after_physics, "joint_dining_repair"
+    )
     ordered.attach_mock(agent._request_critique_impl, "critique")
     ordered.attach_mock(agent._finalize_scene_and_scores, "finalize")
+    ordered.attach_mock(
+        agent._finalize_dining_joint_contract, "final_joint_dining_contract"
+    )
 
     with patch(
         "scenesmith.manipuland_agents.stateful_manipuland_agent.log_agent_usage"
@@ -378,8 +389,10 @@ def test_per_furniture_postprocessing_runs_before_final_critique() -> None:
 
     assert ordered.mock_calls == [
         call.postprocess(furniture_id),
+        call.joint_dining_repair(furniture_id),
         call.critique(update_checkpoint=False),
         call.finalize(),
+        call.final_joint_dining_contract(furniture_id),
     ]
 
 
@@ -401,8 +414,10 @@ def test_planner_turn_limit_still_runs_deterministic_finalization() -> None:
     agent._enforce_monitor_work_seat_orientation = Mock()
     agent._enforce_dining_place_setting_alignment = Mock()
     agent._apply_per_furniture_postprocessing = Mock()
+    agent._repair_dining_alignment_after_physics = Mock()
     agent._request_critique_impl = AsyncMock()
     agent._finalize_scene_and_scores = AsyncMock()
+    agent._finalize_dining_joint_contract = Mock()
     ordered.attach_mock(
         agent._enforce_monitor_work_seat_orientation, "monitor_alignment"
     )
@@ -410,8 +425,14 @@ def test_planner_turn_limit_still_runs_deterministic_finalization() -> None:
         agent._enforce_dining_place_setting_alignment, "dining_alignment"
     )
     ordered.attach_mock(agent._apply_per_furniture_postprocessing, "postprocess")
+    ordered.attach_mock(
+        agent._repair_dining_alignment_after_physics, "joint_dining_repair"
+    )
     ordered.attach_mock(agent._request_critique_impl, "critique")
     ordered.attach_mock(agent._finalize_scene_and_scores, "finalize")
+    ordered.attach_mock(
+        agent._finalize_dining_joint_contract, "final_joint_dining_contract"
+    )
 
     asyncio.run(agent._run_furniture_workflow(furniture_id))
 
@@ -419,9 +440,210 @@ def test_planner_turn_limit_still_runs_deterministic_finalization() -> None:
         call.monitor_alignment(furniture_id),
         call.dining_alignment(furniture_id),
         call.postprocess(furniture_id),
+        call.joint_dining_repair(furniture_id),
         call.critique(update_checkpoint=False),
         call.finalize(),
+        call.final_joint_dining_contract(furniture_id),
     ]
+
+
+def test_final_dining_contract_repairs_score_rollback_candidate() -> None:
+    agent = _joint_repair_agent()
+    failed = {"primary_object": "dining_table_0", "label": "fail"}
+    passed = {
+        "primary_object": "dining_table_0",
+        "label": "pass",
+        "related_objects": ["plate_0", "cutlery_0"],
+    }
+    complete = {"primary_object": "dining_table_0", "label": "pass"}
+    agent._dining_contract_results = Mock(
+        side_effect=[(failed, complete), (passed, complete)]
+    )
+    agent._repair_dining_alignment_after_physics = Mock(return_value=True)
+
+    agent._finalize_dining_joint_contract(UniqueID("dining_table_0"))
+
+    agent._repair_dining_alignment_after_physics.assert_called_once_with(
+        UniqueID("dining_table_0")
+    )
+    agent._dining_support_bindings_valid.assert_called_once_with(
+        UniqueID("dining_table_0"), passed
+    )
+    agent._dining_physics_valid.assert_called_once_with(UniqueID("dining_table_0"))
+
+
+def test_final_dining_contract_rejects_unresolved_score_rollback() -> None:
+    agent = _joint_repair_agent()
+    failed = {"primary_object": "dining_table_0", "label": "fail"}
+    complete = {"primary_object": "dining_table_0", "label": "pass"}
+    agent._dining_contract_results = Mock(
+        side_effect=[(failed, complete), (failed, complete)]
+    )
+    agent._repair_dining_alignment_after_physics = Mock(return_value=False)
+
+    with pytest.raises(RuntimeError, match="unresolved dining"):
+        agent._finalize_dining_joint_contract(UniqueID("dining_table_0"))
+
+
+def test_final_dining_contract_repairs_incomplete_layout_without_alignment() -> None:
+    agent = _joint_repair_agent()
+    passed = {
+        "primary_object": "dining_table_0",
+        "label": "pass",
+        "related_objects": ["plate_0", "cutlery_0"],
+    }
+    complete = {"primary_object": "dining_table_0", "label": "pass"}
+    agent._dining_contract_results = Mock(
+        side_effect=[
+            (None, {"primary_object": "dining_table_0", "label": "fail"}),
+            (passed, complete),
+        ]
+    )
+    agent._repair_dining_alignment_after_physics = Mock(return_value=True)
+
+    agent._finalize_dining_joint_contract(UniqueID("dining_table_0"))
+
+    agent._repair_dining_alignment_after_physics.assert_called_once_with(
+        UniqueID("dining_table_0")
+    )
+
+
+def _joint_repair_agent() -> StatefulManipulandAgent:
+    agent = object.__new__(StatefulManipulandAgent)
+    agent.scene = Mock()
+    agent.scene.to_state_dict.return_value = {"objects": {"settled": True}}
+    agent.manipuland_tools = Mock()
+    agent.manipuland_tools._align_dining_place_settings_impl.return_value = (
+        '{"success": true, "restored": false}'
+    )
+    agent.manipuland_tools._complete_dining_place_settings_impl.return_value = (
+        '{"success": true, "changed": false, "restored": false}'
+    )
+    agent.rendering_manager = Mock()
+    agent._reset_critic_candidate_cache = Mock()
+    agent._apply_per_furniture_postprocessing = Mock(return_value=True)
+    agent._dining_support_bindings_valid = Mock(return_value=True)
+    agent._dining_physics_valid = Mock(return_value=True)
+    agent._resolve_dining_companion_collisions = Mock(return_value=True)
+    return agent
+
+
+def test_joint_dining_repair_skips_already_passing_five_seat_layout() -> None:
+    agent = _joint_repair_agent()
+    agent._dining_contract_results = Mock(
+        return_value=(
+            {"primary_object": "dining_table_0", "label": "pass"},
+            {"primary_object": "dining_table_0", "label": "pass"},
+        )
+    )
+
+    repaired = agent._repair_dining_alignment_after_physics(UniqueID("dining_table_0"))
+
+    assert not repaired
+    agent.manipuland_tools._align_dining_place_settings_impl.assert_not_called()
+    agent._apply_per_furniture_postprocessing.assert_not_called()
+
+
+def test_joint_dining_repair_commits_only_after_second_physics_pass() -> None:
+    agent = _joint_repair_agent()
+    failed = {"primary_object": "dining_table_0", "label": "fail"}
+    passed = {
+        "primary_object": "dining_table_0",
+        "label": "pass",
+        "related_objects": ["plate_0", "cutlery_0"],
+    }
+    complete = {"primary_object": "dining_table_0", "label": "pass"}
+    agent._dining_contract_results = Mock(
+        side_effect=[(failed, complete), (passed, complete), (passed, complete)]
+    )
+
+    repaired = agent._repair_dining_alignment_after_physics(UniqueID("dining_table_0"))
+
+    assert repaired
+    agent.manipuland_tools._align_dining_place_settings_impl.assert_called_once_with(
+        table_id="dining_table_0"
+    )
+    agent._apply_per_furniture_postprocessing.assert_called_once_with(
+        UniqueID("dining_table_0")
+    )
+    agent._resolve_dining_companion_collisions.assert_called_once_with(
+        UniqueID("dining_table_0"), passed
+    )
+    agent._dining_physics_valid.assert_called_once_with(UniqueID("dining_table_0"))
+    agent.scene.restore_from_state_dict.assert_not_called()
+
+
+def test_joint_dining_repair_restores_settled_scene_when_physics_fails() -> None:
+    agent = _joint_repair_agent()
+    failed = {"primary_object": "dining_table_0", "label": "fail"}
+    passed = {
+        "primary_object": "dining_table_0",
+        "label": "pass",
+        "related_objects": ["plate_0", "cutlery_0"],
+    }
+    complete = {"primary_object": "dining_table_0", "label": "pass"}
+    agent._dining_contract_results = Mock(
+        side_effect=[(failed, complete), (passed, complete), (passed, complete)]
+    )
+    agent._dining_physics_valid.return_value = False
+
+    repaired = agent._repair_dining_alignment_after_physics(UniqueID("dining_table_0"))
+
+    assert not repaired
+    agent.scene.restore_from_state_dict.assert_called_once_with(
+        {"objects": {"settled": True}}
+    )
+    agent.rendering_manager.clear_cache.assert_called_once_with()
+    agent._reset_critic_candidate_cache.assert_called_once_with()
+
+
+def test_joint_dining_repair_completes_incomplete_inventory_before_alignment() -> None:
+    agent = _joint_repair_agent()
+    passed = {
+        "primary_object": "dining_table_0",
+        "label": "pass",
+        "related_objects": ["plate_0", "cutlery_0"],
+    }
+    agent._dining_contract_results = Mock(
+        side_effect=[
+            (None, {"primary_object": "dining_table_0", "label": "fail"}),
+            (passed, {"primary_object": "dining_table_0", "label": "pass"}),
+            (passed, {"primary_object": "dining_table_0", "label": "pass"}),
+        ]
+    )
+
+    repaired = agent._repair_dining_alignment_after_physics(UniqueID("dining_table_0"))
+
+    assert repaired
+    agent.manipuland_tools._complete_dining_place_settings_impl.assert_called_once_with(
+        table_id="dining_table_0"
+    )
+    agent.manipuland_tools._align_dining_place_settings_impl.assert_called_once_with(
+        table_id="dining_table_0"
+    )
+
+
+def test_joint_dining_repair_rejects_failed_second_projection() -> None:
+    agent = _joint_repair_agent()
+    failed = {"primary_object": "dining_table_0", "label": "fail"}
+    passed = {
+        "primary_object": "dining_table_0",
+        "label": "pass",
+        "related_objects": ["plate_0", "cutlery_0"],
+    }
+    complete = {"primary_object": "dining_table_0", "label": "pass"}
+    agent._dining_contract_results = Mock(
+        side_effect=[(failed, complete), (passed, complete), (passed, complete)]
+    )
+    agent._apply_per_furniture_postprocessing.return_value = False
+
+    repaired = agent._repair_dining_alignment_after_physics(UniqueID("dining_table_0"))
+
+    assert not repaired
+    agent._dining_physics_valid.assert_not_called()
+    agent.scene.restore_from_state_dict.assert_called_once_with(
+        {"objects": {"settled": True}}
+    )
 
 
 def test_non_turn_limit_planner_error_still_propagates() -> None:
@@ -598,6 +820,21 @@ def test_required_manipuland_targets_can_exceed_optional_target_cap() -> None:
     )
 
     assert {selection.furniture_id for selection in selected} == set(objects)
+
+
+@pytest.mark.parametrize(
+    ("configured", "expected"),
+    [
+        (["dining_table_0", "sideboard_0"], {"dining_table_0", "sideboard_0"}),
+        ("dining_table_0, sideboard_0", {"dining_table_0", "sideboard_0"}),
+        ([], set()),
+    ],
+)
+def test_target_furniture_ids_accept_list_and_csv(configured, expected) -> None:
+    agent = object.__new__(StatefulManipulandAgent)
+    agent.cfg = SimpleNamespace(target_furniture_ids=configured)
+
+    assert agent._get_target_furniture_ids() == expected
 
 
 def test_monitor_work_seat_repair_keeps_surface_position_and_fixes_local_yaw() -> None:

@@ -98,6 +98,27 @@ _SCENE_SUCCESS_MARKER = "_SUCCESS"
 _FURNITURE_RENDER_RESUME_MODES = frozenset({"initial", "latest"})
 
 
+def _is_targeted_manipuland_replay(
+    *,
+    cfg_dict: dict[str, Any],
+    start_stage: str,
+    stop_stage: str,
+) -> bool:
+    """Return whether this run intentionally evaluates selected support surfaces."""
+    if start_stage != "manipuland" or stop_stage != "manipuland":
+        return False
+
+    manipuland_cfg = cfg_dict.get("manipuland_agent") or {}
+    if hasattr(manipuland_cfg, "get"):
+        target_ids = manipuland_cfg.get("target_furniture_ids", [])
+    else:
+        target_ids = getattr(manipuland_cfg, "target_furniture_ids", [])
+
+    if isinstance(target_ids, str):
+        target_ids = target_ids.split(",")
+    return any(str(object_id).strip() for object_id in (target_ids or []))
+
+
 def _resolve_furniture_render_resume_mode(
     value: object,
     *,
@@ -2671,10 +2692,22 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                             final_scene_path=str(scene_dir / "combined_house")
                         )
                         if not verify_report.deterministic_pass:
-                            raise RuntimeError(
-                                "SceneExpert deterministic verification failed; "
-                                "refusing to mark scene successful"
-                            )
+                            if _is_targeted_manipuland_replay(
+                                cfg_dict=cfg_dict,
+                                start_stage=start_stage,
+                                stop_stage=stop_stage,
+                            ):
+                                console_logger.warning(
+                                    "SceneExpert full-scene deterministic verification "
+                                    "reported failures during targeted manipuland replay; "
+                                    "retaining the report without failing unprocessed "
+                                    "furniture targets"
+                                )
+                            else:
+                                raise RuntimeError(
+                                    "SceneExpert deterministic verification failed; "
+                                    "refusing to mark scene successful"
+                                )
 
                     # Assemble house with intermediate snapshots filtered by object type.
                     # Each snapshot includes objects from completed stages only.

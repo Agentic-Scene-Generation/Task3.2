@@ -978,10 +978,10 @@ def cyclopean_get_model_instance_for_body(
     return body.model_instance()
 
 
-def _get_colliding_object_ids(
+def _get_colliding_object_depths(
     scene: RoomScene, penetration_threshold: float = 1e-5
-) -> set[UniqueID]:
-    """Identify objects that are currently in collision.
+) -> dict[UniqueID, float]:
+    """Return the maximum current penetration depth for each colliding object.
 
     Uses broadphase collision detection to efficiently find penetrating pairs.
     This is used to reduce DOFs in large scene projection by only making
@@ -996,7 +996,7 @@ def _get_colliding_object_ids(
         penetration_threshold: Minimum penetration depth to consider (meters).
 
     Returns:
-        Set of UniqueIDs for scene objects that are in collision.
+        Mapping from scene object ID to its maximum penetration depth.
     """
 
     def is_room_geometry_id(object_id: str) -> bool:
@@ -1015,15 +1015,58 @@ def _get_colliding_object_ids(
         current_furniture_id=None,
     )
 
-    colliding_ids: set[UniqueID] = set()
+    collision_depths: dict[UniqueID, float] = {}
     for collision in collisions:
         # Only add scene object IDs, skip room geometry.
         if not is_room_geometry_id(collision.object_a_id):
-            colliding_ids.add(UniqueID(collision.object_a_id))
+            object_id = UniqueID(collision.object_a_id)
+            collision_depths[object_id] = max(
+                collision_depths.get(object_id, 0.0), collision.penetration_depth
+            )
         if not is_room_geometry_id(collision.object_b_id):
-            colliding_ids.add(UniqueID(collision.object_b_id))
+            object_id = UniqueID(collision.object_b_id)
+            collision_depths[object_id] = max(
+                collision_depths.get(object_id, 0.0), collision.penetration_depth
+            )
 
-    return colliding_ids
+    return collision_depths
+
+
+def _get_colliding_object_ids(
+    scene: RoomScene, penetration_threshold: float = 1e-5
+) -> set[UniqueID]:
+    """Identify scene objects whose penetration exceeds the threshold."""
+    return set(
+        _get_colliding_object_depths(scene, penetration_threshold=penetration_threshold)
+    )
+
+
+def _supported_projection_displacement_limit(
+    obj: SceneObject,
+    *,
+    penetration_depth: float,
+    influence_distance: float,
+) -> float:
+    """Bound collision cleanup motion using collision severity and object scale."""
+    footprint_short_side = 0.0
+    try:
+        bounds = obj.compute_world_bounds()
+    except (TypeError, ValueError):
+        bounds = None
+    if bounds is not None:
+        dimensions = np.asarray(bounds[1], dtype=float) - np.asarray(
+            bounds[0], dtype=float
+        )
+        finite_xy = dimensions[:2][np.isfinite(dimensions[:2])]
+        if finite_xy.size:
+            footprint_short_side = max(0.0, float(np.min(np.abs(finite_xy))))
+
+    return max(
+        0.05,
+        2.0 * max(0.0, float(influence_distance)),
+        3.0 * max(0.0, float(penetration_depth)),
+        0.5 * footprint_short_side,
+    )
 
 
 def apply_non_penetration_projection(
@@ -1081,10 +1124,12 @@ def apply_non_penetration_projection(
     # each per-furniture workflow. Furniture projection retains its historical
     # threshold because all furniture may need to cooperate to resolve a layout.
     free_object_ids: list[UniqueID] | None = None
+    collision_depths: dict[UniqueID, float] = {}
     if weld_furniture or total_objects > large_scene_optimization_threshold:
-        colliding_ids = _get_colliding_object_ids(
+        collision_depths = _get_colliding_object_depths(
             scene, penetration_threshold=collision_penetration_threshold_m
         )
+        colliding_ids = set(collision_depths)
 
         if not colliding_ids:
             elapsed = time.time() - start_time
@@ -1098,6 +1143,26 @@ def apply_non_penetration_projection(
             f"objects colliding (DOF: {total_objects * 7} -> {len(colliding_ids) * 7})"
         )
         free_object_ids = list(colliding_ids)
+
+    pre_projection_transforms = {
+        object_id: RigidTransform(
+            R=obj.transform.rotation(), p=obj.transform.translation()
+        )
+        for object_id, obj in scene.objects.items()
+    }
+    supported_displacement_limits = (
+        {
+            object_id: _supported_projection_displacement_limit(
+                obj,
+                penetration_depth=collision_depths.get(object_id, 0.0),
+                influence_distance=influence_distance,
+            )
+            for object_id, obj in scene.objects.items()
+            if weld_furniture and object_id in collision_depths
+        }
+        if weld_furniture
+        else {}
+    )
 
     try:
         # Create Drake plant for IK.
@@ -1154,6 +1219,46 @@ def apply_non_penetration_projection(
                 object_indices=object_indices,
                 composite_info=composite_info,
             )
+            anomalous_moves: list[tuple[UniqueID, float, float, float]] = []
+            for object_id, displacement_limit in supported_displacement_limits.items():
+                obj = scene.get_object(object_id)
+                initial_transform = pre_projection_transforms.get(object_id)
+                if obj is None or initial_transform is None:
+                    continue
+                displacement = float(
+                    np.linalg.norm(
+                        obj.transform.translation() - initial_transform.translation()
+                    )
+                )
+                if not np.isfinite(displacement) or displacement > displacement_limit:
+                    anomalous_moves.append(
+                        (
+                            object_id,
+                            collision_depths.get(object_id, 0.0),
+                            displacement,
+                            displacement_limit,
+                        )
+                    )
+            if anomalous_moves:
+                for object_id, penetration, displacement, limit in anomalous_moves:
+                    console_logger.warning(
+                        "Rejecting supported-object projection for %s: initial "
+                        "penetration=%.4fm, displacement=%.4fm, limit=%.4fm",
+                        object_id,
+                        penetration,
+                        displacement,
+                        limit,
+                    )
+                for object_id, transform in pre_projection_transforms.items():
+                    obj = scene.get_object(object_id)
+                    if obj is not None:
+                        obj.transform = transform
+                console_logger.warning(
+                    "Rolled back supported-object projection atomically after "
+                    "%d anomalous move(s)",
+                    len(anomalous_moves),
+                )
+                return scene, False
             elapsed = time.time() - start_time
             console_logger.info(f"Projection succeeded in {elapsed:.2f}s")
         else:
@@ -2108,7 +2213,7 @@ def apply_physical_feasibility_postprocessing(
             fallen_manipuland_z_displacement=fallen_manipuland_z_displacement,
         )
 
-    return scene, True, removed_ids
+    return scene, projection_success if projection_enabled else True, removed_ids
 
 
 def apply_per_furniture_postprocessing(
@@ -2116,7 +2221,9 @@ def apply_per_furniture_postprocessing(
     furniture_id: UniqueID,
     config: DictConfig,
     simulation_html_path: Path | None = None,
-) -> RoomScene:
+    *,
+    return_success: bool = False,
+) -> RoomScene | tuple[RoomScene, bool]:
     """Run post-processing for a single furniture piece and its manipulands.
 
     Creates a subset scene containing only the target furniture, its manipulands,
@@ -2151,7 +2258,7 @@ def apply_per_furniture_postprocessing(
         console_logger.warning(
             f"Furniture {furniture_id} not found, skipping per-furniture post-processing"
         )
-        return full_scene
+        return (full_scene, True) if return_success else full_scene
 
     subset_objects[furniture.object_id] = furniture
 
@@ -2167,7 +2274,7 @@ def apply_per_furniture_postprocessing(
         console_logger.info(
             f"No manipulands on furniture {furniture_id}, skipping post-processing"
         )
-        return full_scene
+        return (full_scene, True) if return_success else full_scene
 
     console_logger.info(
         f"Running per-furniture post-processing for {furniture_id} "
@@ -2224,4 +2331,6 @@ def apply_per_furniture_postprocessing(
             # Object was removed during post-processing (e.g., fell off furniture).
             full_scene.remove_object(manip_id)
 
+    if return_success:
+        return full_scene, success
     return full_scene

@@ -140,6 +140,59 @@ class TestManipulandAgentCleanup(unittest.TestCase):
         agent.cleanup.assert_called_once_with()
 
 
+class TestTargetedManipulandReplay(unittest.TestCase):
+    """Only explicit support-surface replays may relax the full-scene gate."""
+
+    def test_explicit_target_ids_enable_targeted_replay(self) -> None:
+        cfg = {
+            "manipuland_agent": {
+                "target_furniture_ids": ["dining_table_0"],
+            }
+        }
+
+        self.assertTrue(
+            scene_generation._is_targeted_manipuland_replay(
+                cfg_dict=cfg,
+                start_stage="manipuland",
+                stop_stage="manipuland",
+            )
+        )
+
+    def test_csv_target_ids_enable_targeted_replay(self) -> None:
+        cfg = {
+            "manipuland_agent": {
+                "target_furniture_ids": "dining_table_0, sideboard_0",
+            }
+        }
+
+        self.assertTrue(
+            scene_generation._is_targeted_manipuland_replay(
+                cfg_dict=cfg,
+                start_stage="manipuland",
+                stop_stage="manipuland",
+            )
+        )
+
+    def test_stage_or_target_mismatch_keeps_full_scene_gate(self) -> None:
+        cases = (
+            ({"manipuland_agent": {"target_furniture_ids": []}}, "manipuland"),
+            (
+                {"manipuland_agent": {"target_furniture_ids": ["dining_table_0"]}},
+                "ceiling_mounted",
+            ),
+        )
+
+        for cfg, stop_stage in cases:
+            with self.subTest(cfg=cfg, stop_stage=stop_stage):
+                self.assertFalse(
+                    scene_generation._is_targeted_manipuland_replay(
+                        cfg_dict=cfg,
+                        start_stage="manipuland",
+                        stop_stage=stop_stage,
+                    )
+                )
+
+
 class TestWorkerReasoningPersistenceBootstrap(unittest.TestCase):
     """Verify every clean worker restores passive reasoning persistence."""
 
@@ -164,9 +217,7 @@ class TestWorkerReasoningPersistenceBootstrap(unittest.TestCase):
                 {"OPENAI_BASE_URL": "http://127.0.0.1:8002/v1"},
             ),
         ):
-            scene_generation._configure_reasoning_persistence_for_worker(
-                self.cfg_dict
-            )
+            scene_generation._configure_reasoning_persistence_for_worker(self.cfg_dict)
 
         configure.assert_called_once_with(
             enabled=True,

@@ -224,6 +224,7 @@ class TestManipulandTools(unittest.TestCase):
         candidate.bbox_max = np.array([0.1, 0.1, 0.03])
         candidate.scale_factor = 1.0
         candidate.transform = RigidTransform()
+        candidate.placement_info = None
         occupied = Mock()
         occupied.bbox_min = np.array([-0.1, -0.1, 0.0])
         occupied.bbox_max = np.array([0.1, 0.1, 0.03])
@@ -267,6 +268,7 @@ class TestManipulandTools(unittest.TestCase):
         candidate.bbox_max = np.array([0.1, 0.1, 0.03])
         candidate.scale_factor = 1.0
         candidate.transform = RigidTransform()
+        candidate.placement_info = None
         anchor = Mock()
         anchor.object_id = "dinner_plate_0"
         anchor.bbox_min = np.array([-0.1, -0.1, 0.0])
@@ -296,6 +298,47 @@ class TestManipulandTools(unittest.TestCase):
             )
         )
 
+    @patch.object(ManipulandTools, "_select_dining_surface_position")
+    def test_thin_dining_companion_search_uses_long_side_within_lane(self, mock_select):
+        surface = SupportSurface(
+            surface_id=UniqueID("S_table"),
+            bounding_box_min=np.array([-1.0, -1.0, 0.0]),
+            bounding_box_max=np.array([1.0, 1.0, 0.5]),
+            transform=RigidTransform(),
+        )
+        cutlery = Mock()
+        cutlery.object_id = "cutlery_0"
+        cutlery.bbox_min = np.array([-0.015, -0.075, 0.0])
+        cutlery.bbox_max = np.array([0.015, 0.075, 0.02])
+        cutlery.scale_factor = 1.0
+        cutlery.transform = RigidTransform()
+        cutlery.placement_info = None
+        plate = Mock()
+        plate.object_id = "plate_0"
+        plate.bbox_min = np.array([-0.10, -0.10, 0.0])
+        plate.bbox_max = np.array([0.10, 0.10, 0.03])
+        plate.scale_factor = 1.0
+        plate.transform = RigidTransform()
+        mock_select.side_effect = lambda **kwargs: (
+            surface,
+            np.asarray(kwargs["target_xy"], dtype=float),
+        )
+
+        selected = self.manipuland_tools._select_clear_dining_surface_position(
+            surface_map={"S_table": surface},
+            scene_object=cutlery,
+            target_xy=(0.0, 0.0),
+            occupied_objects=[plate],
+            search_axes=((1.0, 0.0), (0.0, 1.0)),
+            lane_constraint=((0.0, 0.0), (1.0, 0.0), 0.16),
+        )
+
+        self.assertIsNotNone(selected)
+        _surface, position = selected
+        self.assertGreater(abs(float(position[0])), 0.08)
+        self.assertLessEqual(abs(float(position[0])), 0.16)
+        self.assertAlmostEqual(float(position[1]), 0.0)
+
     def test_dining_oriented_clearance_does_not_treat_cutlery_as_circle(self):
         plate = Mock()
         plate.bbox_min = np.array([-0.135, -0.135, 0.0])
@@ -322,6 +365,40 @@ class TestManipulandTools(unittest.TestCase):
                 np.array([0.14, 0.0]),
                 plate,
                 np.array([0.0, 0.0]),
+            )
+        )
+
+    def test_dining_candidate_clearance_uses_final_target_rotation(self):
+        plate = Mock()
+        plate.bbox_min = np.array([-0.135, -0.135, 0.0])
+        plate.bbox_max = np.array([0.135, 0.135, 0.03])
+        plate.scale_factor = 1.0
+        plate.transform = RigidTransform()
+        cutlery = Mock()
+        cutlery.bbox_min = np.array([-0.015, -0.11, 0.0])
+        cutlery.bbox_max = np.array([0.015, 0.11, 0.02])
+        cutlery.scale_factor = 1.0
+        cutlery.transform = RigidTransform()
+
+        candidate_xy = np.array([0.17, 0.0])
+        self.assertFalse(
+            self.manipuland_tools._dining_oriented_footprints_overlap(
+                cutlery,
+                candidate_xy,
+                plate,
+                np.array([0.0, 0.0]),
+            )
+        )
+        self.assertTrue(
+            self.manipuland_tools._dining_oriented_footprints_overlap(
+                cutlery,
+                candidate_xy,
+                plate,
+                np.array([0.0, 0.0]),
+                first_transform=RigidTransform(
+                    rpy=RollPitchYaw(0.0, 0.0, math.pi / 2.0),
+                    p=[candidate_xy[0], candidate_xy[1], 0.0],
+                ),
             )
         )
 

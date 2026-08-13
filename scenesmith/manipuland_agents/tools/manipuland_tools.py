@@ -76,8 +76,20 @@ from scenesmith.scenebenchmark_critic.intent_contract import (
     selected_ids,
 )
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.dining_place_setting import (
+    _associated_discrete_seats,
+    _companion_lane_half_width,
+    _is_place_anchor,
+    _recommended_anchor_center,
+    _usable_seat_front,
     evaluate_dining_place_setting_alignment,
 )
+from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.manipuland_completeness import (
+    CUTLERY_GROUPS,
+    _matches_item_group,
+    _object_text,
+    evaluate_manipuland_completeness,
+)
+from scenesmith.scenebenchmark_critic.core.geometry import bbox_center_xy
 
 console_logger = logging.getLogger(__name__)
 
@@ -2021,6 +2033,12 @@ class ManipulandTools:
             str(scene_object.object_id): scene_object
             for scene_object in self.scene.objects.values()
         }
+        geometry_objects = [
+            item
+            for item in (case_pack.get("scene_geometry") or {}).get("objects") or []
+            if isinstance(item, dict) and item.get("id")
+        ]
+        geometry_by_id = {str(item["id"]): item for item in geometry_objects}
         scene_snapshot = copy.deepcopy(self.scene.to_state_dict())
         before_failure_count = self._dining_alignment_failure_count(alignment)
         dining_object_ids = {
@@ -2060,14 +2078,21 @@ class ManipulandTools:
         previous_noise_profile = self.active_noise_profile
         self.active_noise_profile = self.placement_noise_config.perfect_profile
         try:
-            # Keep an optional centerpiece at the table center, leaving each edge
-            # surface available for a seated diner.
+            # A centerpiece is decorative rather than part of the one-to-one
+            # place-setting contract.  Center it when a valid position exists,
+            # but keep an already supported position when the segmented tabletop
+            # has no better candidate.
             for scene_object in objects_by_id.values():
-                if not self._is_dining_centerpiece(scene_object):
+                placement = scene_object.placement_info
+                if (
+                    not self._is_dining_centerpiece(scene_object)
+                    or placement is None
+                    or str(placement.parent_surface_id) not in surface_map
+                ):
                     continue
                 if table_center is None:
-                    failures.append("Dining table has no usable world-space center.")
-                    break
+                    occupied_dining_objects.append(scene_object)
+                    continue
                 selected = self._select_clear_dining_surface_position(
                     surface_map=surface_map,
                     scene_object=scene_object,
@@ -2075,16 +2100,13 @@ class ManipulandTools:
                     occupied_objects=occupied_dining_objects,
                 )
                 if selected is None:
-                    failures.append(
-                        "Could not find a centered support position for "
-                        f"`{scene_object.object_id}`."
-                    )
+                    occupied_dining_objects.append(scene_object)
                     continue
                 surface, position = selected
                 move = self._move_dining_object(scene_object, surface, position)
                 moves.append(move)
                 if not move["success"]:
-                    failures.append(move["message"])
+                    occupied_dining_objects.append(scene_object)
                 else:
                     occupied_dining_objects.append(scene_object)
 
@@ -2125,6 +2147,17 @@ class ManipulandTools:
                 anchor_after = self._object_world_xy(anchor)
                 if anchor_before is None or anchor_after is None:
                     continue
+                seat = geometry_by_id.get(str(row.get("seat_id") or ""))
+                seat_center = bbox_center_xy(seat)
+                seat_forward = None
+                seat_lateral = None
+                if (
+                    seat is not None
+                    and seat_center is not None
+                    and table_center is not None
+                ):
+                    seat_forward = _usable_seat_front(seat, seat_center, table_center)
+                    seat_lateral = (-seat_forward[1], seat_forward[0])
                 for companion_id in row.get("companion_ids") or []:
                     companion = objects_by_id.get(str(companion_id))
                     companion_before = original_xy.get(str(companion_id))
@@ -2134,12 +2167,53 @@ class ManipulandTools:
                         anchor_after[0] + companion_before[0] - anchor_before[0],
                         anchor_after[1] + companion_before[1] - anchor_before[1],
                     )
+                    companion_geometry = geometry_by_id.get(str(companion_id))
+                    lane_constraint = None
+                    search_axes = None
+                    if (
+                        companion_geometry is not None
+                        and seat is not None
+                        and seat_center is not None
+                        and seat_forward is not None
+                        and seat_lateral is not None
+                    ):
+                        allowed_lateral = _companion_lane_half_width(
+                            seat, companion_geometry, seat_lateral
+                        )
+                        relative = (
+                            companion_target[0] - seat_center[0],
+                            companion_target[1] - seat_center[1],
+                        )
+                        signed_lateral = (
+                            relative[0] * seat_lateral[0]
+                            + relative[1] * seat_lateral[1]
+                        )
+                        clamped_lateral = float(
+                            np.clip(
+                                signed_lateral,
+                                -0.95 * allowed_lateral,
+                                0.95 * allowed_lateral,
+                            )
+                        )
+                        correction = clamped_lateral - signed_lateral
+                        companion_target = (
+                            companion_target[0] + correction * seat_lateral[0],
+                            companion_target[1] + correction * seat_lateral[1],
+                        )
+                        lane_constraint = (
+                            seat_center,
+                            seat_lateral,
+                            allowed_lateral,
+                        )
+                        search_axes = (seat_lateral, seat_forward)
                     companion_selected = self._select_clear_dining_surface_position(
                         surface_map=surface_map,
                         scene_object=companion,
                         target_xy=companion_target,
                         preferred_surface_id=str(surface.surface_id),
                         occupied_objects=occupied_dining_objects,
+                        search_axes=search_axes,
+                        lane_constraint=lane_constraint,
                     )
                     if companion_selected is None:
                         failures.append(
@@ -2219,6 +2293,313 @@ class ManipulandTools:
                 "after_failure_count": after_failure_count,
                 "before_overlap_count": before_overlap_count,
                 "after_overlap_count": after_overlap_count,
+            }
+        )
+
+    def _complete_dining_place_settings_impl(self, table_id: str = "") -> str:
+        """Complete a dining inventory from existing assets and discrete seats.
+
+        This is an internal deterministic repair used before alignment. It only
+        duplicates assets already accepted for the current table, derives counts
+        from the completeness critic, and requires one unambiguous chair per place.
+        """
+        resolved_table_id = str(table_id or self.current_furniture_id)
+        table = self.scene.get_object(UniqueID(resolved_table_id))
+        if table is None or not table.support_surfaces:
+            return json.dumps(
+                {
+                    "success": False,
+                    "message": "Dining table or its support surfaces were not found.",
+                }
+            )
+
+        case_pack = room_scene_to_case_pack(
+            self.scene, stage="dining_place_setting_completeness_repair"
+        )
+        completeness = next(
+            (
+                result
+                for result in evaluate_manipuland_completeness(case_pack)
+                if str(result.get("primary_object") or "") == resolved_table_id
+            ),
+            None,
+        )
+        if completeness is None or completeness.get("label") == "pass":
+            return json.dumps(
+                {
+                    "success": True,
+                    "changed": False,
+                    "message": "Dining place-setting inventory is already complete.",
+                }
+            )
+
+        diagnostics = completeness.get("diagnostics") or {}
+        place_count = int(diagnostics.get("place_count") or 0)
+        missing = {
+            str(group): int(count)
+            for group, count in (diagnostics.get("missing") or {}).items()
+            if int(count or 0) > 0
+        }
+        geometry_objects = [
+            obj
+            for obj in (case_pack.get("scene_geometry") or {}).get("objects") or []
+            if isinstance(obj, dict) and obj.get("id")
+        ]
+        geometry_by_id = {str(obj["id"]): obj for obj in geometry_objects}
+        table_geometry = geometry_by_id.get(resolved_table_id)
+        if table_geometry is None:
+            return json.dumps(
+                {"success": False, "message": "Dining table geometry was not found."}
+            )
+        seats = _associated_discrete_seats(table_geometry, geometry_by_id)
+        if place_count < 2 or len(seats) != place_count:
+            return json.dumps(
+                {
+                    "success": False,
+                    "message": (
+                        "Dining inventory repair requires one discrete chair per "
+                        f"place setting (places={place_count}, chairs={len(seats)})."
+                    ),
+                }
+            )
+
+        surface_ids = {surface.surface_id for surface in table.support_surfaces}
+        surface_items = [
+            obj
+            for obj in self.scene.objects.values()
+            if obj.object_type == ObjectType.MANIPULAND
+            and obj.placement_info is not None
+            and obj.placement_info.parent_surface_id in surface_ids
+        ]
+
+        def item_group(scene_object: SceneObject, group: str) -> bool:
+            geometry = geometry_by_id.get(str(scene_object.object_id))
+            if geometry is None:
+                return False
+            text = _object_text(geometry)
+            if group == "cutlery":
+                return any(_matches_item_group(name, text) for name in CUTLERY_GROUPS)
+            return _matches_item_group(group, text)
+
+        templates: dict[str, SceneObject] = {}
+        for group in missing:
+            templates[group] = next(
+                (item for item in surface_items if item_group(item, group)), None
+            )
+            if templates[group] is None:
+                return json.dumps(
+                    {
+                        "success": False,
+                        "message": (
+                            f"Cannot complete dining group '{group}' without an "
+                            "existing accepted asset template."
+                        ),
+                    }
+                )
+
+        anchor_template = next(
+            (
+                item
+                for item in surface_items
+                if (geometry := geometry_by_id.get(str(item.object_id))) is not None
+                and _is_place_anchor(geometry)
+            ),
+            None,
+        )
+        if anchor_template is None:
+            return json.dumps(
+                {
+                    "success": False,
+                    "message": "Cannot derive dining slots without a plate/bowl template.",
+                }
+            )
+        anchor_geometry = geometry_by_id[str(anchor_template.object_id)]
+        table_center = bbox_center_xy(table_geometry)
+        anchor_xy = self._object_world_xy(anchor_template)
+        if table_center is None or anchor_xy is None:
+            return json.dumps(
+                {"success": False, "message": "Dining slot geometry is incomplete."}
+            )
+
+        slots: list[dict[str, Any]] = []
+        for seat in seats:
+            seat_center = bbox_center_xy(seat)
+            if seat_center is None:
+                continue
+            forward = _usable_seat_front(seat, seat_center, table_center)
+            center, preferred_surface_id = _recommended_anchor_center(
+                table_geometry, seat, anchor_geometry, seat_center, forward
+            )
+            if center is None:
+                continue
+            slots.append(
+                {
+                    "seat_id": str(seat.get("id") or ""),
+                    "center": center,
+                    "forward": forward,
+                    "lateral": (-forward[1], forward[0]),
+                    "surface_id": str(preferred_surface_id or ""),
+                }
+            )
+        if len(slots) != place_count:
+            return json.dumps(
+                {"success": False, "message": "Could not derive every dining slot."}
+            )
+
+        snapshot = copy.deepcopy(self.scene.to_state_dict())
+        cloned_ids: list[str] = []
+        try:
+            for group, count in sorted(missing.items()):
+                template = templates[group]
+                for _ in range(count):
+                    clone = copy.deepcopy(template)
+                    clone.object_id = self.scene.generate_unique_id(template.name)
+                    clone.transform = RigidTransform(
+                        R=template.transform.rotation(),
+                        p=template.transform.translation(),
+                    )
+                    clone.placement_info = copy.deepcopy(template.placement_info)
+                    self.scene.add_object(clone)
+                    surface_items.append(clone)
+                    cloned_ids.append(str(clone.object_id))
+
+            # Rebuild geometry so cloned semantic identities participate in the
+            # same category matching used by the completeness critic.
+            repaired_case_pack = room_scene_to_case_pack(
+                self.scene, stage="dining_place_setting_completeness_distribution"
+            )
+            repaired_geometry = [
+                obj
+                for obj in (repaired_case_pack.get("scene_geometry") or {}).get(
+                    "objects"
+                )
+                or []
+                if isinstance(obj, dict) and obj.get("id")
+            ]
+            repaired_by_id = {str(obj["id"]): obj for obj in repaired_geometry}
+
+            def repaired_group(scene_object: SceneObject, group: str) -> bool:
+                geometry = repaired_by_id.get(str(scene_object.object_id))
+                if geometry is None:
+                    return False
+                text = _object_text(geometry)
+                if group == "cutlery":
+                    return any(
+                        _matches_item_group(name, text) for name in CUTLERY_GROUPS
+                    )
+                return _matches_item_group(group, text)
+
+            required_groups = [
+                str(group) for group in diagnostics.get("required_groups") or []
+            ]
+            anchor_groups = [
+                group for group in required_groups if group in {"plate", "bowl"}
+            ]
+            if len(anchor_groups) != 1:
+                raise ValueError(
+                    "Dining slot repair requires exactly one plate/bowl anchor group."
+                )
+            ordered_groups = [anchor_groups[0]] + [
+                group for group in required_groups if group not in anchor_groups
+            ]
+            surface_map = {
+                str(surface.surface_id): surface for surface in table.support_surfaces
+            }
+            occupied: list[SceneObject] = []
+            for group in ordered_groups:
+                candidates = sorted(
+                    (item for item in surface_items if repaired_group(item, group)),
+                    key=lambda item: str(item.object_id),
+                )
+                if len(candidates) < place_count:
+                    raise ValueError(
+                        f"Dining group '{group}' remains incomplete after cloning."
+                    )
+                template = candidates[0]
+                template_xy = self._object_world_xy(template)
+                if template_xy is None:
+                    raise ValueError(f"Dining group '{group}' has no world pose.")
+                source_slot = min(
+                    slots,
+                    key=lambda slot: math.hypot(
+                        template_xy[0] - slot["center"][0],
+                        template_xy[1] - slot["center"][1],
+                    ),
+                )
+                dx = template_xy[0] - source_slot["center"][0]
+                dy = template_xy[1] - source_slot["center"][1]
+                lateral_offset = (
+                    dx * source_slot["lateral"][0] + dy * source_slot["lateral"][1]
+                )
+                forward_offset = (
+                    dx * source_slot["forward"][0] + dy * source_slot["forward"][1]
+                )
+                if group in anchor_groups:
+                    lateral_offset = 0.0
+                    forward_offset = 0.0
+                max_offset = 0.35
+                lateral_offset = float(np.clip(lateral_offset, -max_offset, max_offset))
+                forward_offset = float(np.clip(forward_offset, -max_offset, max_offset))
+
+                for item, slot in zip(candidates[:place_count], slots, strict=True):
+                    target_xy = (
+                        slot["center"][0]
+                        + lateral_offset * slot["lateral"][0]
+                        + forward_offset * slot["forward"][0],
+                        slot["center"][1]
+                        + lateral_offset * slot["lateral"][1]
+                        + forward_offset * slot["forward"][1],
+                    )
+                    selected = self._select_clear_dining_surface_position(
+                        surface_map=surface_map,
+                        scene_object=item,
+                        target_xy=target_xy,
+                        preferred_surface_id=slot["surface_id"],
+                        occupied_objects=occupied,
+                    )
+                    if selected is None:
+                        raise ValueError(
+                            f"No collision-free slot for dining object '{item.object_id}'."
+                        )
+                    surface, position = selected
+                    move = self._move_dining_object(item, surface, position)
+                    if not move["success"]:
+                        raise ValueError(move["message"])
+                    occupied.append(item)
+
+            after = next(
+                (
+                    result
+                    for result in evaluate_manipuland_completeness(
+                        room_scene_to_case_pack(
+                            self.scene,
+                            stage="dining_place_setting_completeness_repair_result",
+                        )
+                    )
+                    if str(result.get("primary_object") or "") == resolved_table_id
+                ),
+                None,
+            )
+            if after is None or after.get("label") != "pass":
+                raise ValueError("Dining completeness still fails after repair.")
+        except (TypeError, ValueError) as exc:
+            self.scene.restore_from_state_dict(snapshot)
+            return json.dumps(
+                {
+                    "success": False,
+                    "restored": True,
+                    "message": str(exc),
+                    "cloned_ids": cloned_ids,
+                }
+            )
+
+        return json.dumps(
+            {
+                "success": True,
+                "changed": bool(cloned_ids),
+                "restored": False,
+                "message": "Completed and distributed dining place-setting inventory.",
+                "cloned_ids": cloned_ids,
             }
         )
 
@@ -2317,6 +2698,10 @@ class ManipulandTools:
         occupied_objects: list[SceneObject],
         preferred_surface_id: str = "",
         ignored_object_ids: set[str] | None = None,
+        search_axes: tuple[tuple[float, float], tuple[float, float]] | None = None,
+        lane_constraint: (
+            tuple[tuple[float, float], tuple[float, float], float] | None
+        ) = None,
     ) -> tuple[SupportSurface, np.ndarray] | None:
         """Keep a dining placement clear of the settings already reflowed.
 
@@ -2334,18 +2719,27 @@ class ManipulandTools:
         ]
         dimensions = self._dining_footprint_dimensions(scene_object)
         step = max(0.015, min(0.06, 0.5 * min(dimensions)))
+        if search_axes is None:
+            first_axis = (1.0, 0.0)
+            second_axis = (0.0, 1.0)
+        else:
+            first_axis, second_axis = search_axes
         directions = (
             (0.0, 0.0),
-            (1.0, 0.0),
-            (-1.0, 0.0),
-            (0.0, 1.0),
-            (0.0, -1.0),
-            (1.0, 1.0),
-            (1.0, -1.0),
-            (-1.0, 1.0),
-            (-1.0, -1.0),
+            first_axis,
+            (-first_axis[0], -first_axis[1]),
+            second_axis,
+            (-second_axis[0], -second_axis[1]),
+            (first_axis[0] + second_axis[0], first_axis[1] + second_axis[1]),
+            (first_axis[0] - second_axis[0], first_axis[1] - second_axis[1]),
+            (-first_axis[0] + second_axis[0], -first_axis[1] + second_axis[1]),
+            (-first_axis[0] - second_axis[0], -first_axis[1] - second_axis[1]),
         )
-        max_search_distance = max(0.08, min(0.24, 2.5 * min(dimensions)))
+        # Thin companions such as cutlery need enough travel to clear a plate.
+        # Use the short side for search resolution and the long side for reach;
+        # otherwise a 15cm utensil with a 3cm short side is artificially capped
+        # at an 8cm detour even when the same seat lane has ample room.
+        max_search_distance = max(0.08, min(0.24, 1.75 * max(dimensions)))
         ring_count = max(2, int(math.ceil(max_search_distance / step)) + 1)
         for ring in range(ring_count):
             distance = ring * step
@@ -2357,6 +2751,14 @@ class ManipulandTools:
                     target_xy[0] + distance * direction_x / max(direction_length, 1.0),
                     target_xy[1] + distance * direction_y / max(direction_length, 1.0),
                 )
+                if lane_constraint is not None:
+                    seat_center, lateral_axis, allowed_lateral = lane_constraint
+                    lateral_offset = abs(
+                        (candidate_xy[0] - seat_center[0]) * lateral_axis[0]
+                        + (candidate_xy[1] - seat_center[1]) * lateral_axis[1]
+                    )
+                    if lateral_offset > allowed_lateral:
+                        continue
                 selected = self._select_dining_surface_position(
                     surface_map=surface_map,
                     scene_object=scene_object,
@@ -2366,9 +2768,16 @@ class ManipulandTools:
                 if selected is None:
                     continue
                 surface, position = selected
-                world_xy = surface.to_world_pose(position, 0.0).translation()[:2]
+                candidate_transform = surface.to_world_pose(
+                    position,
+                    math.radians(self._surface_rotation_degrees(scene_object)),
+                )
+                world_xy = candidate_transform.translation()[:2]
                 if self._dining_position_is_clear(
-                    scene_object, world_xy, relevant_occupied_objects
+                    scene_object,
+                    world_xy,
+                    relevant_occupied_objects,
+                    candidate_transform=candidate_transform,
                 ):
                     return surface, position
         return None
@@ -2395,6 +2804,8 @@ class ManipulandTools:
         scene_object: SceneObject,
         world_xy: np.ndarray,
         occupied_objects: list[SceneObject],
+        *,
+        candidate_transform: RigidTransform | None = None,
     ) -> bool:
         for occupied in occupied_objects:
             occupied_xy = self._object_world_xy(occupied)
@@ -2405,6 +2816,7 @@ class ManipulandTools:
                 world_xy,
                 occupied,
                 np.asarray(occupied_xy, dtype=float),
+                first_transform=candidate_transform,
             ):
                 return False
         return True
@@ -2416,34 +2828,40 @@ class ManipulandTools:
         second: SceneObject,
         second_xy: np.ndarray,
         margin_m: float = 0.008,
+        *,
+        first_transform: RigidTransform | None = None,
+        second_transform: RigidTransform | None = None,
     ) -> bool:
-        """Conservatively test two oriented tabletop bounding rectangles."""
+        """Test projected 3D bounds at the candidate objects' final poses."""
 
-        def axes_and_half_extents(
+        def footprint(
             scene_object: SceneObject,
-        ) -> tuple[tuple[np.ndarray, np.ndarray], np.ndarray]:
-            yaw = float(RollPitchYaw(scene_object.transform.rotation()).yaw_angle())
-            axis_x = np.asarray([math.cos(yaw), math.sin(yaw)], dtype=float)
-            axis_y = np.asarray([-math.sin(yaw), math.cos(yaw)], dtype=float)
-            half_extents = 0.5 * self._dining_footprint_dimensions(scene_object)
-            return (axis_x, axis_y), half_extents
+            world_xy: np.ndarray,
+            transform: RigidTransform | None,
+        ) -> Polygon:
+            pose = transform or scene_object.transform
+            rotation = pose.rotation().matrix()
+            scale = float(getattr(scene_object, "scale_factor", 1.0) or 1.0)
+            minimum = np.asarray(scene_object.bbox_min, dtype=float) * scale
+            maximum = np.asarray(scene_object.bbox_max, dtype=float) * scale
+            corners = np.asarray(
+                [
+                    [x, y, z]
+                    for x in (minimum[0], maximum[0])
+                    for y in (minimum[1], maximum[1])
+                    for z in (minimum[2], maximum[2])
+                ],
+                dtype=float,
+            )
+            projected = (rotation @ corners.T).T[:, :2]
+            projected += np.asarray(world_xy, dtype=float)
+            return Polygon(projected).convex_hull
 
-        first_axes, first_half = axes_and_half_extents(first)
-        second_axes, second_half = axes_and_half_extents(second)
-        delta = np.asarray(second_xy, dtype=float) - np.asarray(first_xy, dtype=float)
-        for axis in (*first_axes, *second_axes):
-            center_distance = abs(float(np.dot(delta, axis)))
-            first_radius = sum(
-                first_half[index] * abs(float(np.dot(first_axes[index], axis)))
-                for index in range(2)
-            )
-            second_radius = sum(
-                second_half[index] * abs(float(np.dot(second_axes[index], axis)))
-                for index in range(2)
-            )
-            if center_distance >= first_radius + second_radius + margin_m:
-                return False
-        return True
+        first_footprint = footprint(first, first_xy, first_transform)
+        second_footprint = footprint(second, second_xy, second_transform)
+        if first_footprint.is_empty or second_footprint.is_empty:
+            return True
+        return first_footprint.distance(second_footprint) < max(margin_m, 1e-9)
 
     def _surface_local_target(
         self,
@@ -2505,7 +2923,10 @@ class ManipulandTools:
         placement = scene_object.placement_info
         if placement is None:
             return 0.0
-        return math.degrees(float(placement.rotation_2d))
+        try:
+            return math.degrees(float(placement.rotation_2d))
+        except (TypeError, ValueError):
+            return 0.0
 
     def _move_dining_object(
         self,

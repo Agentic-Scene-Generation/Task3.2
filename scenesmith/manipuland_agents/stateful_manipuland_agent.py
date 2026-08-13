@@ -6,6 +6,7 @@ per-furniture, with fresh contexts for each furniture surface to bound token usa
 """
 
 import copy
+import json
 import logging
 import math
 import re
@@ -28,6 +29,7 @@ from scenesmith.agent_utils.manipuland_placement_order import (
 from scenesmith.agent_utils.physical_feasibility import (
     apply_per_furniture_postprocessing,
 )
+from scenesmith.agent_utils.physics_validation import compute_scene_collisions
 from scenesmith.agent_utils.placement_noise import PlacementNoiseMode
 from scenesmith.agent_utils.rendering_manager import RenderingManager
 from scenesmith.agent_utils.room import (
@@ -65,7 +67,11 @@ from scenesmith.scenebenchmark_critic.manipuland_targets import (
     infer_prompt_manipuland_obligations,
 )
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.dining_place_setting import (
+    _usable_seat_front,
     evaluate_dining_place_setting_alignment,
+)
+from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.manipuland_completeness import (
+    evaluate_manipuland_completeness,
 )
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.seat_surface_assignment import (
     assign_work_seats_to_surfaces,
@@ -678,11 +684,11 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
             )
         return bool(configured)
 
-    def _apply_per_furniture_postprocessing(self, furniture_id: UniqueID) -> None:
+    def _apply_per_furniture_postprocessing(self, furniture_id: UniqueID) -> bool:
         """Settle one target's manipulands before its final scored critique."""
         postprocessing_cfg = self.cfg.per_furniture_postprocessing
         if not postprocessing_cfg.enabled:
-            return
+            return True
 
         simulation_cfg = postprocessing_cfg.simulation
         simulation_html_path = None
@@ -693,14 +699,390 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
                 / "per_furniture"
                 / f"{furniture_id}_simulation.html"
             )
-        self.scene = apply_per_furniture_postprocessing(
+        self.scene, success = apply_per_furniture_postprocessing(
             full_scene=self.scene,
             furniture_id=furniture_id,
             config=postprocessing_cfg,
             simulation_html_path=simulation_html_path,
+            return_success=True,
         )
         self.rendering_manager.clear_cache()
         self._reset_critic_candidate_cache()
+        return success
+
+    def _dining_contract_results(
+        self, furniture_id: UniqueID
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        """Return alignment and completeness results for one dining surface."""
+        table_id = str(furniture_id)
+        case_pack = room_scene_to_case_pack(
+            self.scene, stage="dining_place_setting_joint_validation"
+        )
+        alignment = next(
+            (
+                result
+                for result in evaluate_dining_place_setting_alignment(case_pack)
+                if str(result.get("primary_object") or "") == table_id
+            ),
+            None,
+        )
+        completeness = next(
+            (
+                result
+                for result in evaluate_manipuland_completeness(case_pack)
+                if str(result.get("primary_object") or "") == table_id
+            ),
+            None,
+        )
+        return alignment, completeness
+
+    def _dining_support_bindings_valid(
+        self,
+        furniture_id: UniqueID,
+        alignment: dict[str, Any],
+    ) -> bool:
+        """Check that every aligned setting object remains bound to this table."""
+        table = self.scene.get_object(furniture_id)
+        if table is None:
+            return False
+        surface_ids = {surface.surface_id for surface in table.support_surfaces}
+        if not surface_ids:
+            return False
+        related_ids = {
+            str(object_id) for object_id in alignment.get("related_objects") or []
+        }
+        for object_id in related_ids:
+            obj = self.scene.get_object(UniqueID(object_id))
+            if obj is None or obj.object_type != ObjectType.MANIPULAND:
+                continue
+            placement = obj.placement_info
+            if placement is None or placement.parent_surface_id not in surface_ids:
+                return False
+        return True
+
+    def _dining_physics_valid(self, furniture_id: UniqueID) -> bool:
+        """Run strict collision validation for this furniture's manipulands."""
+        return not self._dining_collisions(furniture_id)
+
+    def _dining_collisions(self, furniture_id: UniqueID) -> list[Any]:
+        """Return hard collisions scoped to one furniture target."""
+        physics_cfg = self.cfg.physics_validation
+        return compute_scene_collisions(
+            scene=self.scene,
+            penetration_threshold=float(physics_cfg.object_penetration_threshold_m),
+            floor_penetration_tolerance=float(
+                physics_cfg.floor_penetration_tolerance_m
+            ),
+            current_furniture_id=furniture_id,
+            manipuland_furniture_tolerance_m=float(
+                physics_cfg.manipuland_furniture_tolerance_m
+            ),
+        )
+
+    @staticmethod
+    def _dining_collision_score(collisions: list[Any]) -> tuple[int, float]:
+        """Prefer fewer contacts, then less total penetration."""
+        return len(collisions), sum(
+            max(0.0, float(collision.penetration_depth)) for collision in collisions
+        )
+
+    def _resolve_dining_companion_collisions(
+        self,
+        furniture_id: UniqueID,
+        alignment: dict[str, Any],
+    ) -> bool:
+        """Move companions within their seat lanes using Drake as the oracle."""
+        assignments = (alignment.get("diagnostics") or {}).get("assignments") or []
+        companion_rows = {
+            str(companion_id): row
+            for row in assignments
+            for companion_id in row.get("companion_ids") or []
+        }
+        if not companion_rows:
+            return self._dining_physics_valid(furniture_id)
+
+        case_pack = room_scene_to_case_pack(
+            self.scene, stage="dining_collision_resolution"
+        )
+        geometry_objects = [
+            item
+            for item in (case_pack.get("scene_geometry") or {}).get("objects") or []
+            if isinstance(item, dict) and item.get("id")
+        ]
+        geometry_by_id = {str(item["id"]): item for item in geometry_objects}
+        table_geometry = geometry_by_id.get(str(furniture_id))
+        table_center = _geometry_center_xy(table_geometry)
+        table = self.scene.get_object(furniture_id)
+        if table is None or table_center is None:
+            return False
+        surface_map = {
+            str(surface.surface_id): surface for surface in table.support_surfaces
+        }
+        seat_laterals: dict[str, tuple[float, float]] = {}
+        for row in assignments:
+            seat_id = str(row.get("seat_id") or "")
+            seat = geometry_by_id.get(seat_id)
+            seat_center = _geometry_center_xy(seat)
+            if seat is None or seat_center is None:
+                continue
+            facing = _usable_seat_front(seat, seat_center, table_center)
+            seat_laterals[seat_id] = (-facing[1], facing[0])
+
+        collisions = self._dining_collisions(furniture_id)
+        initial_score = self._dining_collision_score(collisions)
+        if not collisions:
+            return True
+        transaction_snapshot = copy.deepcopy(self.scene.to_state_dict())
+        max_iterations = max(1, min(12, 2 * len(companion_rows)))
+        moved_ids: set[str] = set()
+
+        for _ in range(max_iterations):
+            current_score = self._dining_collision_score(collisions)
+            involved_ids = {
+                object_id
+                for collision in collisions
+                for object_id in (collision.object_a_id, collision.object_b_id)
+            }
+            candidate_ids = sorted(
+                involved_ids & companion_rows.keys(),
+                key=lambda object_id: (object_id in moved_ids, object_id),
+            )
+            if not candidate_ids:
+                break
+
+            accepted = False
+            penetration_by_id = {
+                object_id: max(
+                    (
+                        float(collision.penetration_depth)
+                        for collision in collisions
+                        if object_id in (collision.object_a_id, collision.object_b_id)
+                    ),
+                    default=0.0,
+                )
+                for object_id in candidate_ids
+            }
+            for object_id in candidate_ids:
+                row = companion_rows[object_id]
+                lateral = seat_laterals.get(str(row.get("seat_id") or ""))
+                scene_object = self.scene.get_object(UniqueID(object_id))
+                anchor = self.scene.get_object(
+                    UniqueID(str(row.get("anchor_id") or ""))
+                )
+                object_xy = self.manipuland_tools._object_world_xy(scene_object)
+                anchor_xy = self.manipuland_tools._object_world_xy(anchor)
+                if (
+                    lateral is None
+                    or scene_object is None
+                    or object_xy is None
+                    or anchor_xy is None
+                    or scene_object.placement_info is None
+                ):
+                    continue
+                dimensions = self.manipuland_tools._dining_footprint_dimensions(
+                    scene_object
+                )
+                step = max(
+                    0.012,
+                    min(
+                        0.04,
+                        penetration_by_id[object_id] + 0.008,
+                        0.5 * float(min(dimensions)),
+                    ),
+                )
+                max_distance = max(0.06, min(0.18, 2.0 * float(max(dimensions))))
+                side = (
+                    1.0
+                    if (object_xy[0] - anchor_xy[0]) * lateral[0]
+                    + (object_xy[1] - anchor_xy[1]) * lateral[1]
+                    >= 0.0
+                    else -1.0
+                )
+                candidate_snapshot = copy.deepcopy(self.scene.to_state_dict())
+                distances: list[float] = []
+                distance = step
+                while distance < max_distance:
+                    distances.append(distance)
+                    distance *= 2.0
+                distances.append(max_distance)
+                for direction in (side, -side):
+                    for magnitude in distances:
+                        distance = magnitude * direction
+                        target_xy = (
+                            object_xy[0] + distance * lateral[0],
+                            object_xy[1] + distance * lateral[1],
+                        )
+                        selected = (
+                            self.manipuland_tools._select_dining_surface_position(
+                                surface_map=surface_map,
+                                scene_object=scene_object,
+                                target_xy=target_xy,
+                                preferred_surface_id=str(
+                                    scene_object.placement_info.parent_surface_id
+                                ),
+                            )
+                        )
+                        if selected is None:
+                            continue
+                        surface, position = selected
+                        move = self.manipuland_tools._move_dining_object(
+                            scene_object, surface, position
+                        )
+                        if not move.get("success"):
+                            self.scene.restore_from_state_dict(candidate_snapshot)
+                            scene_object = self.scene.get_object(UniqueID(object_id))
+                            continue
+                        candidate_alignment, candidate_completeness = (
+                            self._dining_contract_results(furniture_id)
+                        )
+                        if (
+                            candidate_alignment is None
+                            or candidate_alignment.get("label") != "pass"
+                            or candidate_completeness is None
+                            or candidate_completeness.get("label") != "pass"
+                            or not self._dining_support_bindings_valid(
+                                furniture_id, candidate_alignment
+                            )
+                        ):
+                            self.scene.restore_from_state_dict(candidate_snapshot)
+                            scene_object = self.scene.get_object(UniqueID(object_id))
+                            continue
+                        candidate_collisions = self._dining_collisions(furniture_id)
+                        if (
+                            self._dining_collision_score(candidate_collisions)
+                            < current_score
+                        ):
+                            collisions = candidate_collisions
+                            moved_ids.add(object_id)
+                            accepted = True
+                            console_logger.info(
+                                "Dining collision repair moved %s %.1fcm within "
+                                "seat %s lateral lane (%s -> %s)",
+                                object_id,
+                                abs(distance) * 100.0,
+                                row.get("seat_id"),
+                                current_score,
+                                self._dining_collision_score(collisions),
+                            )
+                            break
+                        self.scene.restore_from_state_dict(candidate_snapshot)
+                        scene_object = self.scene.get_object(UniqueID(object_id))
+                    if accepted:
+                        break
+                if accepted:
+                    break
+            if not accepted or not collisions:
+                break
+
+        if collisions:
+            self.scene.restore_from_state_dict(transaction_snapshot)
+            console_logger.warning(
+                "Dining companion collision repair could not find a lane-valid "
+                "solution for %s (%s -> %s); restored candidate",
+                furniture_id,
+                initial_score,
+                self._dining_collision_score(collisions),
+            )
+            return False
+        return True
+
+    def _repair_dining_alignment_after_physics(self, furniture_id: UniqueID) -> bool:
+        """Jointly commit post-physics dining alignment and physical validity."""
+        alignment, completeness = self._dining_contract_results(furniture_id)
+        alignment_failed = alignment is not None and alignment.get("label") == "fail"
+        completeness_failed = (
+            completeness is not None and completeness.get("label") == "fail"
+        )
+        physics_failed = (
+            alignment is not None
+            and not alignment_failed
+            and not completeness_failed
+            and not self._dining_physics_valid(furniture_id)
+        )
+        if not alignment_failed and not completeness_failed and not physics_failed:
+            return False
+
+        settled_snapshot = copy.deepcopy(self.scene.to_state_dict())
+        console_logger.info(
+            "Physical settling broke dining alignment for %s; attempting one "
+            "joint semantic/physics repair",
+            furniture_id,
+        )
+        completion_result = json.loads(
+            self.manipuland_tools._complete_dining_place_settings_impl(
+                table_id=str(furniture_id)
+            )
+        )
+        if not completion_result.get("success"):
+            return False
+        raw_result = self.manipuland_tools._align_dining_place_settings_impl(
+            table_id=str(furniture_id)
+        )
+        try:
+            repair_result = json.loads(raw_result)
+        except (TypeError, json.JSONDecodeError):
+            repair_result = {}
+        if repair_result.get("restored"):
+            self.scene.restore_from_state_dict(settled_snapshot)
+            self.rendering_manager.clear_cache()
+            self._reset_critic_candidate_cache()
+            return False
+
+        candidate_alignment, candidate_completeness = self._dining_contract_results(
+            furniture_id
+        )
+        if (
+            candidate_alignment is None
+            or candidate_alignment.get("label") != "pass"
+            or candidate_completeness is None
+            or candidate_completeness.get("label") != "pass"
+            or not self._resolve_dining_companion_collisions(
+                furniture_id, candidate_alignment
+            )
+        ):
+            self.scene.restore_from_state_dict(settled_snapshot)
+            self.rendering_manager.clear_cache()
+            self._reset_critic_candidate_cache()
+            return False
+
+        postprocessing_valid = self._apply_per_furniture_postprocessing(furniture_id)
+        repaired_alignment, repaired_completeness = self._dining_contract_results(
+            furniture_id
+        )
+        alignment_valid = bool(
+            repaired_alignment is not None and repaired_alignment.get("label") == "pass"
+        )
+        completeness_valid = bool(
+            repaired_completeness is not None
+            and repaired_completeness.get("label") == "pass"
+        )
+        support_valid = bool(
+            repaired_alignment is not None
+            and self._dining_support_bindings_valid(furniture_id, repaired_alignment)
+        )
+        physics_valid = postprocessing_valid and self._dining_physics_valid(
+            furniture_id
+        )
+        if alignment_valid and completeness_valid and support_valid and physics_valid:
+            console_logger.info(
+                "Joint dining alignment/physics repair passed for %s",
+                furniture_id,
+            )
+            return True
+
+        self.scene.restore_from_state_dict(settled_snapshot)
+        self.rendering_manager.clear_cache()
+        self._reset_critic_candidate_cache()
+        console_logger.warning(
+            "Joint dining repair rejected for %s; restored settled scene "
+            "(alignment=%s, completeness=%s, support=%s, physics=%s)",
+            furniture_id,
+            alignment_valid,
+            completeness_valid,
+            support_valid,
+            physics_valid,
+        )
+        return False
 
     def _setup_furniture_agents(
         self, furniture_id: UniqueID, furniture_description: str
@@ -791,6 +1173,7 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
         # critic observes it. Otherwise pre-repair collisions can be scored and
         # persisted as a completed furniture target.
         self._apply_per_furniture_postprocessing(furniture_id)
+        self._repair_dining_alignment_after_physics(furniture_id)
 
         # Compute final critique and scores for completed furniture.
         # Check if scene changed since last checkpoint to avoid redundant critique.
@@ -810,8 +1193,58 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
         # Validate final scene and save scores.
         await self._finalize_scene_and_scores()
 
+        # Final score rollback can restore the N-1 checkpoint after the joint
+        # dining transaction above. Re-assert the hard dining contract at the
+        # actual commit boundary so a softer VLM score cannot replace a
+        # chair-aligned, physically valid candidate with a stale layout.
+        self._finalize_dining_joint_contract(furniture_id)
+
         console_logger.info(
             f"Completed manipuland placement for furniture {furniture_id}"
+        )
+
+    def _finalize_dining_joint_contract(self, furniture_id: UniqueID) -> None:
+        """Revalidate dining semantics and physics after score-based rollback."""
+        alignment, completeness = self._dining_contract_results(furniture_id)
+        if alignment is None and completeness is None:
+            return
+
+        initially_valid = bool(
+            alignment is not None
+            and alignment.get("label") == "pass"
+            and completeness is not None
+            and completeness.get("label") == "pass"
+            and self._dining_support_bindings_valid(furniture_id, alignment)
+            and self._dining_physics_valid(furniture_id)
+        )
+        if initially_valid:
+            return
+
+        console_logger.info(
+            "Final score rollback invalidated the dining joint contract for %s; "
+            "reapplying deterministic semantic/physics repair",
+            furniture_id,
+        )
+        self._repair_dining_alignment_after_physics(furniture_id)
+
+        alignment, completeness = self._dining_contract_results(furniture_id)
+        contract_valid = bool(
+            alignment is not None
+            and alignment.get("label") == "pass"
+            and completeness is not None
+            and completeness.get("label") == "pass"
+            and self._dining_support_bindings_valid(furniture_id, alignment)
+            and self._dining_physics_valid(furniture_id)
+        )
+        if not contract_valid:
+            raise RuntimeError(
+                "Manipuland finalization left an unresolved dining semantic/physics "
+                f"contract for {furniture_id}"
+            )
+
+        console_logger.info(
+            "Final dining joint contract passed after score rollback for %s",
+            furniture_id,
         )
 
     def _enforce_dining_place_setting_alignment(self, furniture_id: UniqueID) -> bool:
@@ -1052,6 +1485,26 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
         console_logger.info(
             f"Identified {len(furniture_data)} furniture pieces to populate"
         )
+        target_furniture_ids = self._get_target_furniture_ids()
+        if target_furniture_ids:
+            original_count = len(furniture_data)
+            furniture_data = [
+                selection
+                for selection in furniture_data
+                if str(selection.furniture_id) in target_furniture_ids
+            ]
+            console_logger.info(
+                "Filtered manipuland targets from %d to %d using explicit IDs: %s",
+                original_count,
+                len(furniture_data),
+                sorted(target_furniture_ids),
+            )
+            if not furniture_data:
+                console_logger.warning(
+                    "None of the requested manipuland target IDs were selected: %s",
+                    sorted(target_furniture_ids),
+                )
+                return
         max_target_furniture = self._get_max_target_furniture()
         if max_target_furniture > 0 and len(furniture_data) > max_target_furniture:
             original_count = len(furniture_data)
@@ -1212,6 +1665,18 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
             return max(0, int(value or 0))
         except Exception:
             return 0
+
+    def _get_target_furniture_ids(self) -> set[str]:
+        """Return an optional exact-ID allowlist for checkpoint replays."""
+        try:
+            value = OmegaConf.select(self.cfg, "target_furniture_ids", default=[])
+        except Exception:
+            value = getattr(self.cfg, "target_furniture_ids", [])
+        if not value:
+            return set()
+        if isinstance(value, str):
+            value = value.split(",")
+        return {str(object_id).strip() for object_id in value if str(object_id).strip()}
 
     def _skip_realized_floor_covering_targets(
         self,
