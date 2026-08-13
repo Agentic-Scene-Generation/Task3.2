@@ -135,15 +135,9 @@ def _append_relation_context(
     prompt: str, relation_context: StageRelationContext
 ) -> str:
     """Keep the legacy path aligned with production stage-only injection."""
-    advisory = [
-        item.model_dump(mode="json") for item in relation_context.advisory_hssd_priors
-    ]
     return (
         prompt
-        + "\n\n=== SceneExpert Advisory HSSD Relations (soft) ===\n"
-        + json.dumps(advisory, ensure_ascii=False, sort_keys=True)
-        + "\n=== End SceneExpert Advisory HSSD Relations ===\n\n"
-        + f"=== SceneExpert Hard Intent Contract: {relation_context.stage} "
+        + f"\n\n=== SceneExpert Hard Intent Contract: {relation_context.stage} "
         + "(authoritative) ===\n"
         + json.dumps(
             relation_context.hard_constraints,

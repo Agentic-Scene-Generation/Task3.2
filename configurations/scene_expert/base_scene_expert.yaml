@@ -26,12 +26,6 @@ behavior:
   # assets explicitly found in the prompt are merged into SceneTaskSpec.
   inferred_assets_are_required: true
 
-# HSSD relation priors are soft planning hints and auxiliary critic evidence.
-hssd_relations:
-  confidence_threshold: 0.80
-  category_support_threshold: 0.80
-  max_priors_per_stage: 4
-
 # Deterministic capacity/opening gate for future furniture and wall stages.
 # Kept off in the compatible base config; ablation 3 enables it explicitly.
 floor_plan_reservations:

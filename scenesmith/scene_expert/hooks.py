@@ -209,14 +209,9 @@ def _format_memory_directives(memory_pack: MemoryPack) -> str:
 
 
 def _format_stage_relation_context(context: StageRelationContext) -> str:
-    """Render advisory priors first and the exact stage hard contract last."""
-    advisory = [item.model_dump(mode="json") for item in context.advisory_hssd_priors]
+    """Render the exact hard contract for the active stage."""
     return (
-        "=== SceneExpert Advisory HSSD Relations (soft) ===\n"
-        + json.dumps(advisory, ensure_ascii=False, sort_keys=True)
-        + "\nThese priors must never override the authoritative intent below.\n"
-        + "=== End SceneExpert Advisory HSSD Relations ===\n\n"
-        + f"=== SceneExpert Hard Intent Contract: {context.stage} (authoritative) ===\n"
+        f"=== SceneExpert Hard Intent Contract: {context.stage} (authoritative) ===\n"
         + json.dumps(context.hard_constraints, ensure_ascii=False, sort_keys=True)
         + "\n=== End SceneExpert Hard Intent Contract ==="
     )
@@ -1876,25 +1871,7 @@ def build_hook_runner(
     harness.reset()
 
     global_planner = GlobalPlanner(model=model, api_base_url=api_base, api_key=api_key)
-    relation_cfg = _deep_merge_dicts(
-        root_se_cfg.get("hssd_relations", {}),
-        se_cfg.get("hssd_relations", {}),
-    )
     relation_projector = StageRelationProjector(
-        lookup_path=relation_cfg.get(
-            "lookup_path",
-            str(
-                Path(__file__).resolve().parents[1]
-                / "scenebenchmark_critic"
-                / "asset_annotation_data"
-                / "hssd_annotation_lookup.json.gz"
-            ),
-        ),
-        confidence_threshold=_cfg_float(relation_cfg.get("confidence_threshold"), 0.80),
-        category_support_threshold=_cfg_float(
-            relation_cfg.get("category_support_threshold"), 0.80
-        ),
-        max_priors_per_stage=_cfg_int(relation_cfg.get("max_priors_per_stage"), 4),
         floor_plan_reservation_gate_enabled=bool(
             _deep_merge_dicts(
                 root_se_cfg.get("floor_plan_reservations", {}),

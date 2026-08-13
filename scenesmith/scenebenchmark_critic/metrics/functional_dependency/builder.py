@@ -235,7 +235,6 @@ def build_checks(
             )
         checks.extend(
             _build_explicit_target_relation_checks(
-                case_pack,
                 objects,
                 seen_check_ids,
                 excluded_work_seat_ids=work_cohort_ids,
@@ -492,24 +491,15 @@ def _metadata_relation_type(
 
 
 def _build_explicit_target_relation_checks(
-    case_pack: dict[str, Any],
     objects: dict[str, dict[str, Any]],
     seen_check_ids: set[str],
     *,
     excluded_work_seat_ids: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     checks: list[dict[str, Any]] = []
-    hard_orientation_subjects = _hard_contract_orientation_subjects(case_pack, objects)
     for subject in objects.values():
         target_relations = _explicit_target_relations(subject)
         if not target_relations:
-            continue
-        hints = subject.get("functional_hints") or {}
-        from_hssd_prior = hints.get("hssd_relation_prior_scoring_tier") == "auxiliary"
-        if (
-            from_hssd_prior
-            and str(subject.get("id") or "") in hard_orientation_subjects
-        ):
             continue
         targets = _targets_matching_relations(
             subject, objects.values(), target_relations
@@ -541,10 +531,6 @@ def _build_explicit_target_relation_checks(
                 ]
             if not compatible_targets:
                 continue
-        if from_hssd_prior and len(compatible_targets) != 1:
-            # An asset-category prior cannot choose between multiple scene
-            # instances without user or placement evidence.
-            continue
         target_ids = [
             str(target.get("id") or "")
             for target in compatible_targets
@@ -580,7 +566,7 @@ def _build_explicit_target_relation_checks(
                 "evidence": {"explicit_target_relation": target_relations},
                 "evidence_refs": ["scene_geometry", "object_metadata"],
                 "check_source": "asset_explicit_target_relation",
-                "scoring_tier": "auxiliary" if from_hssd_prior else "core",
+                "scoring_tier": "core",
             }
         )
         seen_check_ids.add(check_id)
@@ -872,17 +858,7 @@ def _hard_contract_orientation_subjects(
     subject_ids: set[str] = set()
     for constraint in contract_constraints(
         case_pack,
-        relations=(
-            "against_wall",
-            "back_against_wall",
-            "centered_on_wall",
-            "faces",
-            "across_from",
-            "aligned_with",
-            "edge_distribution",
-            "operation_zone_at_wall",
-            "instructional_surface_alignment",
-        ),
+        relations=("operation_zone_at_wall", "instructional_surface_alignment"),
         include_auxiliary=False,
     ):
         subject_ids.update(bound_ids(constraint.get("subjects"), objects.values()))

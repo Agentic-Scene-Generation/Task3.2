@@ -1,8 +1,7 @@
-"""Coverage for hard-intent projection and advisory HSSD relation policy."""
+"""Coverage for hard-intent projection and stage prompt injection."""
 
 from __future__ import annotations
 
-import gzip
 import json
 from copy import deepcopy
 from types import SimpleNamespace
@@ -25,15 +24,11 @@ from scenesmith.scene_expert.schemas import (
     StageBrief,
 )
 from scenesmith.scene_expert.task_compiler import TaskCompiler
-from scenesmith.scenebenchmark_critic import asset_library_annotations
 from scenesmith.scenebenchmark_critic.intent_contract import (
     attach_intent_contract_to_case_pack,
     build_intent_contract,
 )
 from scenesmith.scenebenchmark_critic.intent_schema import validate_intent_contract
-from scenesmith.scenebenchmark_critic.metrics.functional_dependency.builder import (
-    _build_explicit_target_relation_checks,
-)
 
 
 def _response(content: str = "", *, reasoning_content: str = "") -> SimpleNamespace:
@@ -75,61 +70,7 @@ def _task_spec(**updates) -> SceneTaskSpec:
     return SceneTaskSpec(**data)
 
 
-def _relation(
-    relation_type: str,
-    target: str,
-    *,
-    confidence: float = 0.86,
-    provenance: str = "seed_rule:test",
-) -> dict:
-    return {
-        "relation_type": relation_type,
-        "target_kind": "asset_category",
-        "target_category": target,
-        "distance_range_m": [0.0, 0.35],
-        "relative_facing": "source_front_points_to_target",
-        "relative_position": "beside",
-        "height_relation": "same_floor",
-        "confidence": confidence,
-        "provenance": provenance,
-    }
-
-
-def _write_lookup(tmp_path) -> str:
-    records = {}
-    for index in range(5):
-        priors = [
-            _relation("beside", "nightstand"),
-            _relation("beside", "mattress"),
-            _relation(
-                "funeval_used_with",
-                "nightstand",
-                confidence=0.95,
-                provenance="asset_record:funeval_functional_dependency:commonsense_llm",
-            ),
-        ]
-        if index < 3:
-            priors.append(_relation("against", "wall", confidence=0.90))
-        records[f"bed-{index}"] = {
-            "category": "bed",
-            "category_key": "bed",
-            "relation_priors": priors,
-        }
-        records[f"chair-{index}"] = {
-            "category": "chair",
-            "category_key": "chair",
-            "relation_priors": [
-                _relation("faces", "desk"),
-                _relation("faces", "table"),
-            ],
-        }
-    path = tmp_path / "hssd_lookup.json.gz"
-    with gzip.open(path, "wt", encoding="utf-8") as stream:
-        json.dump(records, stream)
-    return str(path)
-
-
-def test_projection_preserves_full_contract_and_exact_stage_ids(tmp_path) -> None:
+def test_projection_preserves_full_contract_and_exact_stage_ids() -> None:
     contract = {
         "constraints": [
             {
@@ -149,7 +90,7 @@ def test_projection_preserves_full_contract_and_exact_stage_ids(tmp_path) -> Non
         ]
     }
     original = deepcopy(contract)
-    context = StageRelationProjector(lookup_path=_write_lookup(tmp_path)).project(
+    context = StageRelationProjector().project(
         stage="furniture",
         task_spec=_task_spec(),
         intent_contract=contract,
@@ -163,10 +104,10 @@ def test_projection_preserves_full_contract_and_exact_stage_ids(tmp_path) -> Non
     injected = _format_stage_relation_context(context)
     assert "furniture-1" in injected
     assert "wall-1" not in injected
-    assert injected.index("Advisory HSSD") < injected.index("Hard Intent Contract")
+    assert "Advisory HSSD" not in injected
 
 
-def test_floor_plan_projects_only_explicit_future_wall_anchors(tmp_path) -> None:
+def test_floor_plan_projects_only_explicit_future_wall_anchors() -> None:
     contract = {
         "constraints": [
             {
@@ -193,7 +134,7 @@ def test_floor_plan_projects_only_explicit_future_wall_anchors(tmp_path) -> None
         ]
     }
 
-    context = StageRelationProjector(lookup_path=_write_lookup(tmp_path)).project(
+    context = StageRelationProjector().project(
         stage="floor_plan",
         task_spec=_task_spec(required_large_objects=["bed", "stool"]),
         intent_contract=contract,
@@ -208,9 +149,7 @@ def test_floor_plan_projects_only_explicit_future_wall_anchors(tmp_path) -> None
     assert context.floor_plan_manifest.enabled is False
 
 
-def test_floor_plan_manifest_projects_media_zones_and_explicit_windows(
-    tmp_path,
-) -> None:
+def test_floor_plan_manifest_projects_media_zones_and_explicit_windows() -> None:
     contract = {
         "constraints": [
             {
@@ -229,7 +168,6 @@ def test_floor_plan_manifest_projects_media_zones_and_explicit_windows(
         ]
     }
     context = StageRelationProjector(
-        lookup_path=_write_lookup(tmp_path),
         floor_plan_reservation_gate_enabled=True,
     ).project(
         stage="floor_plan",
@@ -346,155 +284,6 @@ def test_designer_gets_stage_only_json_and_critic_keeps_full_contract() -> None:
     assert case_pack["intent_contract"] == contract
 
 
-def test_hssd_policy_activates_seed_and_audits_suppression(tmp_path) -> None:
-    context = StageRelationProjector(lookup_path=_write_lookup(tmp_path)).project(
-        stage="furniture",
-        task_spec=_task_spec(),
-        intent_contract={"constraints": []},
-    )
-
-    active = {
-        (item.subject_selector.category, item.relation, item.target_selector.category)
-        for item in context.advisory_hssd_priors
-        if item.target_selector is not None
-    }
-    assert ("bed", "beside", "nightstand") in active
-    reasons = [
-        (item.prior.relation, item.prior.target_selector, item.reason)
-        for item in context.suppressed_priors
-    ]
-    assert any(
-        relation == "beside" and target is None and reason == "missing_target"
-        for relation, target, reason in reasons
-    )
-    assert any(
-        relation == "funeval_used_with" and reason == "low_confidence"
-        for relation, _target, reason in reasons
-    )
-    assert any(
-        relation == "against" and reason == "low_confidence"
-        for relation, _target, reason in reasons
-    )
-
-
-def test_hssd_target_ambiguity_and_hard_orientation_conflict(tmp_path) -> None:
-    contract = {
-        "constraints": [
-            {
-                "constraint_id": "guest-faces-room",
-                "stage": "furniture",
-                "relation": "faces",
-                "subjects": {"category": "guest_chair"},
-                "targets": {"category": "room"},
-            }
-        ]
-    }
-    context = StageRelationProjector(lookup_path=_write_lookup(tmp_path)).project(
-        stage="furniture",
-        task_spec=_task_spec(
-            room_type="study",
-            required_large_objects=[
-                "guest_chair",
-                "desk",
-                "coffee_table",
-                "dining_table",
-            ],
-        ),
-        intent_contract=contract,
-    )
-
-    assert any(
-        item.reason == "hard_conflict"
-        and item.prior.target_selector is not None
-        and item.prior.target_selector.category == "desk"
-        and item.conflicting_constraint_ids == ["guest-faces-room"]
-        for item in context.suppressed_priors
-    )
-    assert any(
-        item.reason == "ambiguous_target" and item.prior.relation == "faces"
-        for item in context.suppressed_priors
-    )
-    assert not context.advisory_hssd_priors
-
-
-def test_inventory_and_compatible_position_hard_constraints_do_not_suppress_prior(
-    tmp_path,
-) -> None:
-    contract = {
-        "constraints": [
-            {
-                "constraint_id": "bed-count",
-                "stage": "furniture",
-                "relation": "required_count",
-                "subjects": {"category": "bed", "count": 1},
-            },
-            {
-                "constraint_id": "nightstand-count",
-                "stage": "furniture",
-                "relation": "required_count",
-                "subjects": {"category": "nightstand", "count": 2},
-            },
-            {
-                "constraint_id": "bed-wall",
-                "stage": "furniture",
-                "relation": "against_wall",
-                "subjects": {"category": "bed"},
-                "targets": {"category": "wall"},
-            },
-        ]
-    }
-    context = StageRelationProjector(lookup_path=_write_lookup(tmp_path)).project(
-        stage="furniture",
-        task_spec=_task_spec(),
-        intent_contract=contract,
-    )
-
-    assert any(
-        item.subject_selector.category == "bed"
-        and item.relation == "beside"
-        and item.target_selector is not None
-        and item.target_selector.category == "nightstand"
-        for item in context.advisory_hssd_priors
-    )
-    assert not any(
-        item.reason == "hard_conflict"
-        and item.prior.subject_selector.category == "bed"
-        and item.prior.relation == "beside"
-        for item in context.suppressed_priors
-    )
-
-
-def test_hard_wall_pose_suppresses_hssd_orientation_prior(tmp_path) -> None:
-    context = StageRelationProjector(lookup_path=_write_lookup(tmp_path)).project(
-        stage="furniture",
-        task_spec=_task_spec(
-            room_type="study",
-            required_large_objects=["guest_chair", "desk"],
-        ),
-        intent_contract={
-            "constraints": [
-                {
-                    "constraint_id": "guest-wall-front",
-                    "stage": "furniture",
-                    "relation": "against_wall",
-                    "subjects": {"category": "guest_chair"},
-                    "targets": {"category": "wall"},
-                }
-            ]
-        },
-    )
-
-    assert any(
-        item.reason == "hard_conflict"
-        and item.prior.subject_selector.category == "guest_chair"
-        and item.prior.relation == "faces"
-        and item.prior.target_selector is not None
-        and item.prior.target_selector.category == "desk"
-        and item.conflicting_constraint_ids == ["guest-wall-front"]
-        for item in context.suppressed_priors
-    )
-
-
 def test_global_planner_sees_relations_and_retries_strict_schema() -> None:
     invalid = json.dumps(
         {
@@ -550,6 +339,7 @@ def test_global_planner_sees_relations_and_retries_strict_schema() -> None:
         "ok",
     ]
     assert "hard-1" in calls[0]["messages"][1]["content"]
+    assert "Advisory HSSD" not in calls[0]["messages"][1]["content"]
     assert "Previous candidate" in calls[1]["messages"][-1]["content"]
     assert calls[0]["response_format"]["type"] == "json_schema"
     assert calls[0]["response_format"]["json_schema"]["strict"] is True
@@ -689,63 +479,3 @@ def test_structured_output_double_failure_uses_minimal_fallbacks() -> None:
         "minimal_fallback",
     ]
     assert planner.last_trace["hard_constraint_ids"] == ["bed-wall"]
-
-
-def _object(object_id: str, category: str, x: float) -> dict:
-    return {
-        "id": object_id,
-        "name": category,
-        "category": category,
-        "category_norm": category,
-        "bbox_world": {
-            "center": [x, 0.0, 0.5],
-            "size": [0.8, 0.8, 1.0],
-            "min": [x - 0.4, -0.4, 0.0],
-            "max": [x + 0.4, 0.4, 1.0],
-        },
-    }
-
-
-def test_hssd_checks_are_auxiliary_and_manual_checks_remain_core(monkeypatch) -> None:
-    monkeypatch.setattr(
-        asset_library_annotations,
-        "_eligible_hssd_relation_prior",
-        lambda _record, relation: (
-            str(relation.get("provenance") or "").startswith("seed_rule:"),
-            1.0,
-        ),
-    )
-    record = {
-        "category": "bed",
-        "relation_priors": [
-            _relation("beside", "nightstand"),
-            _relation(
-                "funeval_used_with",
-                "nightstand",
-                confidence=0.95,
-                provenance="asset_record:funeval_functional_dependency:commonsense_llm",
-            ),
-        ],
-    }
-    annotation = asset_library_annotations.build_scenebenchmark_annotation(record)
-    dependencies = annotation["functional_hints"]["functional_dependencies"]
-    assert len(dependencies) == 1
-    assert dependencies[0]["scoring_tier"] == "auxiliary"
-    assert dependencies[0]["provenance"].startswith("seed_rule:")
-
-    bed = _object("bed-1", "bed", 0.0)
-    bed["functional_hints"] = {
-        "explicit_target_relation": ["nightstand"],
-        "hssd_relation_prior_scoring_tier": "auxiliary",
-    }
-    nightstand = _object("nightstand-1", "nightstand", 0.9)
-    checks = _build_explicit_target_relation_checks(
-        {}, {"bed-1": bed, "nightstand-1": nightstand}, set()
-    )
-    assert checks and checks[0]["scoring_tier"] == "auxiliary"
-
-    bed["functional_hints"].pop("hssd_relation_prior_scoring_tier")
-    checks = _build_explicit_target_relation_checks(
-        {}, {"bed-1": bed, "nightstand-1": nightstand}, set()
-    )
-    assert checks and checks[0]["scoring_tier"] == "core"

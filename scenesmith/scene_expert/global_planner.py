@@ -73,7 +73,7 @@ Guidelines:
 - Derive constraints from: the task spec, the current scene state, AND the retrieved memory.
 - The Authoritative Stage Intent section contains the exact hard contract rows
   for this stage. Cover every constraint_id and never rewrite, weaken, or
-  replace one with a convention. HSSD priors are advisory only.
+  replace one with a convention.
 - At floor_plan, Architectural Surface Reservations are hard prerequisites for
   later-stage wall anchors. Reserve a continuous wall segment for every listed
   object; doors and windows must not intersect a reserved segment. Do not move
@@ -831,16 +831,6 @@ class GlobalPlanner:
                 "## Authoritative Stage Intent (exact JSON; hard)",
                 json.dumps(
                     context.relation_context.hard_constraints,
-                    ensure_ascii=False,
-                    sort_keys=True,
-                ),
-                "",
-                "## Advisory HSSD Relation Priors (soft; never override hard intent)",
-                json.dumps(
-                    [
-                        item.model_dump(mode="json")
-                        for item in context.relation_context.advisory_hssd_priors
-                    ],
                     ensure_ascii=False,
                     sort_keys=True,
                 ),

@@ -461,28 +461,6 @@ def _interaction_height_m(
     return heights
 
 
-def _eligible_hssd_relation_prior(
-    record: dict[str, Any], relation: dict[str, Any]
-) -> tuple[bool, float]:
-    """Apply the shared seed/confidence/category-support advisory policy."""
-    provenance = str(relation.get("provenance") or "")
-    try:
-        confidence = float(relation.get("confidence") or 0.0)
-    except (TypeError, ValueError):
-        confidence = 0.0
-    if not provenance.startswith("seed_rule:") or confidence < 0.80:
-        return False, 0.0
-    try:
-        from scenesmith.scene_expert.relation_context import (
-            hssd_prior_category_support,
-        )
-
-        support = hssd_prior_category_support(record, relation)
-    except Exception:
-        return False, 0.0
-    return support >= 0.80, support
-
-
 def _relation_target_categories(record: dict[str, Any]) -> list[str]:
     targets: list[str] = []
     for relation in record.get("relation_priors") or []:
@@ -490,10 +468,14 @@ def _relation_target_categories(record: dict[str, Any]) -> list[str]:
             continue
         if relation.get("target_kind") != "asset_category":
             continue
-        eligible, _support = _eligible_hssd_relation_prior(record, relation)
-        if not eligible:
-            continue
         target = _normalize_category_token(relation.get("target_category"))
+        if target and target not in targets:
+            targets.append(target)
+    partners = (record.get("interaction_clearance") or {}).get(
+        "functional_partners"
+    ) or {}
+    for partner in partners.get("partners") or []:
+        target = _normalize_category_token(partner)
         if target and target not in targets:
             targets.append(target)
     return targets
@@ -506,9 +488,6 @@ def _functional_dependencies(record: dict[str, Any]) -> list[dict[str, Any]]:
             continue
         target_kind = relation.get("target_kind")
         if target_kind != "asset_category":
-            continue
-        eligible, category_support = _eligible_hssd_relation_prior(record, relation)
-        if not eligible:
             continue
         target = _normalize_category_token(relation.get("target_category"))
         if not target:
@@ -532,9 +511,6 @@ def _functional_dependencies(record: dict[str, Any]) -> list[dict[str, Any]]:
                 "reason": relation.get("reason")
                 or f"HSSD relation prior: {relation_type} -> {target}",
                 "source": "hssd_annotations:relation_priors",
-                "provenance": relation.get("provenance"),
-                "category_support": category_support,
-                "scoring_tier": "auxiliary",
             }
         )
     return dependencies
@@ -546,9 +522,6 @@ def _attachment_dependencies(record: dict[str, Any]) -> list[dict[str, Any]]:
         if not isinstance(relation, dict):
             continue
         if relation.get("target_kind") != "environment_anchor":
-            continue
-        eligible, category_support = _eligible_hssd_relation_prior(record, relation)
-        if not eligible:
             continue
         anchor = _normalize_category_token(relation.get("environment_anchor"))
         if not anchor:
@@ -562,9 +535,6 @@ def _attachment_dependencies(record: dict[str, Any]) -> list[dict[str, Any]]:
                 "relative_facing": relation.get("relative_facing"),
                 "confidence": relation.get("confidence"),
                 "source": "hssd_annotations:relation_priors",
-                "provenance": relation.get("provenance"),
-                "category_support": category_support,
-                "scoring_tier": "auxiliary",
             }
         )
     for anchor in record.get("environment_anchors") or []:
@@ -602,9 +572,6 @@ def _orientation_dependencies(record: dict[str, Any]) -> list[dict[str, Any]]:
             continue
         if relation.get("target_kind") != "asset_category":
             continue
-        eligible, category_support = _eligible_hssd_relation_prior(record, relation)
-        if not eligible:
-            continue
         facing = str(relation.get("relative_facing") or "")
         if "front" not in facing and relation.get("relation_type") not in {
             "faces",
@@ -621,9 +588,6 @@ def _orientation_dependencies(record: dict[str, Any]) -> list[dict[str, Any]]:
             "max_distance_m": (relation.get("distance_range_m") or [None, None])[-1],
             "confidence": relation.get("confidence"),
             "source": "hssd_annotations:relation_priors",
-            "provenance": relation.get("provenance"),
-            "category_support": category_support,
-            "scoring_tier": "auxiliary",
         }
         if dep not in dependencies:
             dependencies.append(dep)
@@ -689,7 +653,6 @@ def build_scenebenchmark_annotation(record: dict[str, Any]) -> dict[str, Any]:
         "access_sides": access_sides,
         "target_relation": target_relations,
         "explicit_target_relation": target_relations,
-        "hssd_relation_prior_scoring_tier": "auxiliary",
         "functional_dependencies": functional_dependencies,
         "attachment_dependencies": attachment_dependencies,
         "orientation_dependencies": orientation_dependencies,

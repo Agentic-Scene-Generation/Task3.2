@@ -124,43 +124,6 @@ class StageBudget(BaseModel):
     max_repair_steps: int = 1
 
 
-class AdvisoryRelationPrior(BaseModel):
-    """One non-authoritative HSSD relation prior selected for a stage."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    prior_id: str
-    relation: str
-    relation_family: Literal["orientation", "position", "support", "attachment"]
-    subject_selector: ObjectSelectorSpec
-    target_selector: ObjectSelectorSpec | None = None
-    environment_anchor: str = ""
-    distance_range_m: list[float] = Field(default_factory=list, max_length=2)
-    relative_facing: str = ""
-    relative_position: str = ""
-    height_relation: str = ""
-    confidence: float = Field(ge=0.0, le=1.0)
-    category_support: float = Field(ge=0.0, le=1.0)
-    provenance: str
-    scoring_tier: Literal["auxiliary"] = "auxiliary"
-
-
-class SuppressedRelationPrior(BaseModel):
-    """An HSSD prior excluded from planning, with an auditable reason."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    prior: AdvisoryRelationPrior
-    reason: Literal[
-        "low_confidence",
-        "missing_target",
-        "ambiguous_target",
-        "hard_conflict",
-        "duplicate",
-    ]
-    conflicting_constraint_ids: list[str] = Field(default_factory=list)
-
-
 class FloorPlanReservation(BaseModel):
     """One deterministic capacity requirement owned by the floor-plan stage."""
 
@@ -195,7 +158,7 @@ class FloorPlanReservationManifest(BaseModel):
 
 
 class StageRelationContext(BaseModel):
-    """Exact hard-intent projection plus explicitly advisory asset priors."""
+    """Exact hard-intent projection for one stage."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -203,8 +166,6 @@ class StageRelationContext(BaseModel):
     hard_constraints: list[dict[str, Any]] = Field(default_factory=list)
     floor_plan_reservations: list[dict[str, Any]] = Field(default_factory=list)
     floor_plan_manifest: FloorPlanReservationManifest | None = None
-    advisory_hssd_priors: list[AdvisoryRelationPrior] = Field(default_factory=list)
-    suppressed_priors: list[SuppressedRelationPrior] = Field(default_factory=list)
     contract_constraint_count: int = 0
     projected_constraint_count: int = 0
     projection_coverage: float = Field(default=1.0, ge=0.0, le=1.0)
