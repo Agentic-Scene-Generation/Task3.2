@@ -17,7 +17,7 @@ from scenesmith.scenebenchmark_critic.intent_schema import (
     INTENT_COMPILER_SPEC_VERSION,
     INTENT_CONTRACT_SCHEMA_VERSION,
     canonical_selector_category,
-    intent_contract_json_schema,
+    intent_compiler_wire_json_schema,
     selector_categories_overlap,
     validate_intent_contract,
 )
@@ -196,6 +196,45 @@ def _normalize_side_distribution(payload: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def _remove_redundant_edge_faces(payload: dict[str, Any]) -> dict[str, Any]:
+    """Drop faces rows already encoded by an inward edge distribution."""
+
+    constraints = payload.get("constraints")
+    if not isinstance(constraints, list):
+        return payload
+    inward_edges = [
+        row
+        for row in constraints
+        if isinstance(row, dict)
+        and row.get("relation") == "edge_distribution"
+        and row.get("orientation") == "toward_target"
+    ]
+    if not inward_edges:
+        return payload
+    filtered = [
+        row
+        for row in constraints
+        if not (
+            isinstance(row, dict)
+            and row.get("relation") == "faces"
+            and any(
+                _selectors_semantically_overlap(
+                    row.get("subjects"), edge.get("subjects")
+                )
+                and _selectors_semantically_overlap(
+                    row.get("targets"), edge.get("targets")
+                )
+                for edge in inward_edges
+            )
+        )
+    ]
+    if len(filtered) == len(constraints):
+        return payload
+    normalized = dict(payload)
+    normalized["constraints"] = filtered
+    return normalized
+
+
 def _normalize_centered_above_relations(
     payload: dict[str, Any], prompt: str
 ) -> tuple[dict[str, Any], list[dict[str, str]]]:
@@ -331,16 +370,32 @@ def _validate_prompt_grounded_relations(
     for constraint in payload.get("constraints") or []:
         if not isinstance(constraint, dict):
             continue
-        if str(constraint.get("relation") or "") != "flanking":
-            continue
+        relation = str(constraint.get("relation") or "")
         source = str(constraint.get("source") or "")
-        if source == "model_inferred":
-            evidence = str(constraint.get("inference_reason") or "")
-        else:
-            evidence = " ".join(
-                str(value or "") for value in (constraint.get("evidence_span"), prompt)
+        evidence = (
+            str(constraint.get("inference_reason") or "")
+            if source == "model_inferred"
+            else str(constraint.get("evidence_span") or "")
+        )
+        if relation == "centered_on_wall" and not re.search(
+            r"\bwall\b", evidence, re.IGNORECASE
+        ):
+            raise ValueError(
+                "centered_on_wall hard intent requires explicit wall wording in "
+                "its grounded prompt or TaskCompiler constraint"
             )
-        if any(pattern.search(evidence) for pattern in _FLANKING_GROUNDING_PATTERNS):
+        if relation != "flanking":
+            continue
+        if source == "model_inferred":
+            flanking_evidence = evidence
+        else:
+            flanking_evidence = " ".join(
+                str(value or "") for value in (evidence, prompt)
+            )
+        if any(
+            pattern.search(flanking_evidence)
+            for pattern in _FLANKING_GROUNDING_PATTERNS
+        ):
             continue
         subject = str((constraint.get("subjects") or {}).get("category") or "object")
         raise ValueError(
@@ -461,6 +516,77 @@ def _normalize_provenance_fields(payload: dict[str, Any]) -> dict[str, Any]:
         normalized = dict(row)
         if str(normalized.get("source") or "") == "explicit_prompt":
             normalized["inference_reason"] = ""
+        normalized_rows.append(normalized)
+    result = dict(payload)
+    result["constraints"] = normalized_rows
+    return result
+
+
+def _grounding_catalog(
+    prompt: str, task_spec: dict[str, Any]
+) -> tuple[dict[str, str], str]:
+    """Build stable short IDs for all text that may authorize a hard relation."""
+
+    catalog: dict[str, str] = {}
+    prompt_clauses = [
+        " ".join(value.split())
+        for value in re.split(r"(?<=[.!?])\s+", prompt)
+        if value.strip()
+    ]
+    for index, value in enumerate(prompt_clauses):
+        catalog[f"prompt:{index}"] = value
+    for field, prefix in (
+        ("interaction_constraints", "interaction"),
+        ("aesthetic_constraints", "aesthetic"),
+    ):
+        for index, value in enumerate(task_spec.get(field) or []):
+            text = " ".join(str(value or "").split())
+            if text:
+                catalog[f"{prefix}:{index}"] = text
+    rendered = "\n".join(
+        f"- {key}: {json.dumps(value)}" for key, value in catalog.items()
+    )
+    return catalog, rendered
+
+
+def _attach_grounding_provenance(
+    payload: dict[str, Any], catalog: dict[str, str]
+) -> dict[str, Any]:
+    """Expand model-selected grounding IDs into validated contract provenance."""
+
+    constraints = payload.get("constraints")
+    if not isinstance(constraints, list):
+        return payload
+    normalized_rows: list[Any] = []
+    for row in constraints:
+        if not isinstance(row, dict):
+            normalized_rows.append(row)
+            continue
+        normalized = dict(row)
+        grounding = str(normalized.pop("grounding", "") or "")
+        if grounding:
+            text = catalog.get(grounding)
+            if text is None:
+                raise ValueError(f"unknown grounding id {grounding!r}")
+            prefix = grounding.split(":", 1)[0]
+            if prefix == "prompt":
+                normalized.update(
+                    source="explicit_prompt",
+                    evidence_span=text,
+                    inference_reason="",
+                )
+            else:
+                field = f"{prefix}_constraints"
+                normalized.update(
+                    source="model_inferred",
+                    evidence_span="",
+                    inference_reason=f"TaskCompiler {field}: {text}",
+                )
+        elif not any(
+            normalized.get(field)
+            for field in ("source", "evidence_span", "inference_reason")
+        ):
+            raise ValueError("relation omitted required grounding id")
         normalized_rows.append(normalized)
     result = dict(payload)
     result["constraints"] = normalized_rows
@@ -618,8 +744,18 @@ def _restore_missing_relation_fields(
             repaired[field] = candidate[field]
             restored_fields.append(field)
         if relation == "edge_distribution":
+            repaired_subjects = dict(repaired.get("subjects") or {})
+            candidate_subjects = candidate.get("subjects") or {}
+            if candidate_subjects.get("count") is not None and repaired_subjects.get(
+                "count"
+            ) != candidate_subjects.get("count"):
+                repaired_subjects["count"] = candidate_subjects["count"]
+                repaired["subjects"] = repaired_subjects
+                restored_fields.append("subjects.count")
             for field in ("edge_frame", "groups", "orientation"):
-                if repaired.get(field) or not candidate.get(field):
+                if not candidate.get(field) or repaired.get(field) == candidate.get(
+                    field
+                ):
                     continue
                 repaired[field] = candidate[field]
                 restored_fields.append(field)
@@ -756,7 +892,7 @@ def _system_prompt() -> str:
         )
     )
     schema = json.dumps(
-        intent_contract_json_schema(), ensure_ascii=False, sort_keys=True
+        intent_compiler_wire_json_schema(), ensure_ascii=False, sort_keys=True
     )
     return f"""\
 /no_think
@@ -765,27 +901,28 @@ geometry-verifiable relations from the original scene prompt and the optional
 normalized SceneTaskSpec supplied below. Do not use inventory object positions,
 memory, StageBrief, current scene state, or knowledge not present in these inputs.
 
-The normalized SceneTaskSpec required_* arrays are authoritative hard inventory:
-emit one required_count row per physical category using
-source="task_compiler_inventory", an empty evidence_span, and inference_reason
-"SceneTaskSpec <required_* field>". If their counts conflict with the prompt,
-use SceneTaskSpec. The original prompt remains authoritative for spatial
-relations and verbatim evidence. Relations grounded in it use
-source="explicit_prompt", copy a verbatim evidence_span, and leave
-inference_reason empty. SceneTaskSpec interaction_constraints and geometrically
-verifiable aesthetic_constraints are expert inferences with lower priority.
+The normalized SceneTaskSpec required_* arrays are authoritative hard inventory,
+but the compiler adds their required_count rows deterministically. NEVER emit a
+required_count relation. Extract only spatial relations. The original prompt
+remains authoritative for spatial relations. SceneTaskSpec interaction_constraints
+and geometrically verifiable aesthetic_constraints are expert inferences with
+lower priority.
 A supplemental constraint may become a hard
 relation only when it maps precisely to one of the registered relations and
-can be checked by that relation's existing geometry evaluator. Such a relation
-must use source="model_inferred", leave evidence_span empty, and set
-inference_reason to "TaskCompiler <field>: <verbatim constraint>", where field
-is interaction_constraints or aesthetic_constraints. Material palette, style,
+can be checked by that relation's existing geometry evaluator. Material palette, style,
 visual harmony, density, and other advice with no exact registered geometric
 relation remain context only and MUST NOT produce a relation. Never invent a
 new relation name. If a supplemental constraint duplicates or conflicts with
 an explicit prompt relation, emit only the explicit prompt relation.
 SceneTaskSpec room_type, style, and functional_zones are context only and do
 not independently authorize hard relations.
+
+Every relation MUST contain exactly one short grounding ID from the supplied
+catalog. Use prompt:N for an original-prompt relation, interaction:N for an
+interaction constraint, or aesthetic:N for an aesthetic constraint. Return the
+ID only. NEVER copy source text and NEVER emit source, evidence_span,
+inference_reason, warnings, explanations, or other provenance text. The compiler
+expands the ID deterministically after generation.
 
 Map accessibility language according to what the geometry evaluator can
 actually measure. "X reachable/accessible from Y" may emit near(X, Y); it does
@@ -804,10 +941,9 @@ physical target objects: group relations such as paired_with and
 one_per_support may use targets.count greater than one. ``corner_of_room``,
 ``corner_distribution``, and ``centered_in_room`` use
 ``{{"category": "room", "count": 1}}`` as that selector.  For example:
-``{{"relation": "flanking", "subjects": {{"category": "nightstand", "count": 2}}, "targets": {{"category": "bed", "count": 1}}, "source": "explicit_prompt", "evidence_span": "..."}}``.
+``{{"relation": "flanking", "subjects": {{"category": "nightstand", "count": 2}}, "targets": {{"category": "bed", "count": 1}}, "grounding": "prompt:0"}}``.
 Relations with target arity 2 ({binary_relations}) must use a target selector
-whose ``secondary_category`` identifies the second target.  Only target arity
-0 relations, such as ``required_count``, MUST return ``"targets": null``.
+whose ``secondary_category`` identifies the second target.
 
 For a rectangular target with edge-specific distribution, emit exactly one
 edge_distribution relation. It must contain subjects.count, a target selector
@@ -816,9 +952,7 @@ has one counts_per_edge pair, sorted descending. The sum of all counts must
 equal subjects.count. Use [3, 3] for three objects on each long edge and [1, 0]
 for one object on either short edge. Use toward_target only when the prompt
 requires all subjects to face inward; do not also emit a duplicate faces row.
-Use required_count for every explicitly counted object category used by an
-edge_distribution relation. Do not emit one_per_side; that relation was
-removed. Evidence spans must be copied from the original prompt verbatim.
+Do not emit one_per_side; that relation was removed.
 For wording such as "two objects on each side of a target", when no long/short
 edge is explicitly named, emit the reusable flanking relation instead of
 edge_distribution. Reserve edge_distribution for explicit finite rectangular
@@ -863,8 +997,8 @@ separate clause explicitly states the object-to-object directional relation.
 Return only one JSON object matching this schema:
 {schema}
 
-Do not fill runtime fields such as constraint_id or stage; the compiler will
-derive those deterministically after validation.
+Do not fill provenance or runtime fields; the compiler derives them
+deterministically after validation.
 """
 
 
@@ -1085,6 +1219,7 @@ class IntentCompiler:
         prompt: str,
         *,
         task_spec: dict[str, Any] | None = None,
+        grounding_catalog: str = "",
         previous_output: str = "",
         validation_error: str = "",
     ) -> list[dict[str, str]]:
@@ -1095,6 +1230,11 @@ class IntentCompiler:
                 "authoritative; its spatial constraints are lower priority than "
                 "explicit prompt relations:\n"
                 + json.dumps(task_spec, ensure_ascii=False, indent=2, sort_keys=True)
+            )
+        if grounding_catalog:
+            user += (
+                "\n\nGrounding catalog. Every output relation must reference "
+                "exactly one ID from this list:\n" + grounding_catalog
             )
         if validation_error:
             user += (
@@ -1135,6 +1275,15 @@ class IntentCompiler:
                     "into a directional X-to-Y relation. Keep only the wall "
                     "relation unless a separate clause explicitly gives that "
                     "object-to-object direction."
+                )
+            if (
+                "centered_on_wall hard intent requires explicit wall wording"
+                in validation_error
+            ):
+                user += (
+                    "\nUse centered_on_wall only when the selected grounding text "
+                    "explicitly says wall. Centering on a table side or edge belongs "
+                    "in edge_distribution, not centered_on_wall."
                 )
             if (
                 "flanking hard intent requires explicit bilateral wording"
@@ -1179,6 +1328,9 @@ class IntentCompiler:
             )
             for text in values
         )
+        grounding_catalog, rendered_grounding_catalog = _grounding_catalog(
+            normalized_prompt, normalized_task_spec
+        )
         previous_output = ""
         last_error = ""
         attempts: list[dict[str, Any]] = []
@@ -1188,6 +1340,7 @@ class IntentCompiler:
             messages = self._messages(
                 normalized_prompt,
                 task_spec=normalized_task_spec,
+                grounding_catalog=rendered_grounding_catalog,
                 previous_output=previous_output,
                 validation_error=last_error,
             )
@@ -1208,7 +1361,7 @@ class IntentCompiler:
                         "json_schema": {
                             "name": "intent_contract",
                             "strict": True,
-                            "schema": intent_contract_json_schema(),
+                            "schema": intent_compiler_wire_json_schema(),
                         },
                     },
                     extra_body=chat_template_kwargs_from_effort("none"),
@@ -1250,6 +1403,7 @@ class IntentCompiler:
                 payload.setdefault(
                     "room_type", str(normalized_task_spec.get("room_type") or "")
                 )
+                payload = _attach_grounding_provenance(payload, grounding_catalog)
                 payload = _normalize_side_distribution(payload)
                 payload, normalized_centered_above = (
                     _normalize_centered_above_relations(payload, normalized_prompt)
@@ -1260,6 +1414,7 @@ class IntentCompiler:
                 payload, restored_fields = _restore_missing_relation_fields(
                     payload, normalized_prompt, normalized_task_spec
                 )
+                payload = _remove_redundant_edge_faces(payload)
                 payload = _normalize_provenance_fields(payload)
                 payload = _validate_prompt_grounded_relations(
                     payload, normalized_prompt
@@ -1448,6 +1603,7 @@ class IntentCompiler:
                     prompt=self._messages(
                         normalized_prompt,
                         task_spec=normalized_task_spec,
+                        grounding_catalog=rendered_grounding_catalog,
                     ),
                     output=json.dumps(fallback, ensure_ascii=False),
                     error=last_error,
@@ -1456,6 +1612,7 @@ class IntentCompiler:
                     "input": self._messages(
                         normalized_prompt,
                         task_spec=normalized_task_spec,
+                        grounding_catalog=rendered_grounding_catalog,
                     ),
                     "output": fallback,
                     "status": "deterministic_fallback",

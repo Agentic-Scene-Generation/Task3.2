@@ -14,12 +14,15 @@ from scenesmith.scenebenchmark_critic.intent_schema import (
     INTENT_COMPILER_SPEC_VERSION,
     INTENT_CONTRACT_SCHEMA_VERSION,
     canonical_selector_category,
+    intent_compiler_wire_json_schema,
     intent_contract_json_schema,
     validate_intent_contract,
 )
 from scenesmith.scenebenchmark_critic.intent_compiler import (
     IncompleteIntentContractError,
     IntentCompiler,
+    _attach_grounding_provenance,
+    _grounding_catalog,
     _validate_contract_completeness,
 )
 from scenesmith.scenebenchmark_critic.intent_contract import (
@@ -1605,7 +1608,7 @@ def test_intent_compiler_retries_once_without_task_spec_input() -> None:
             "json_schema": {
                 "name": "intent_contract",
                 "strict": True,
-                "schema": intent_contract_json_schema(),
+                "schema": intent_compiler_wire_json_schema(),
             },
         }
 
@@ -2015,6 +2018,80 @@ def test_intent_schema_requires_target_for_endpoint_relations() -> None:
     assert zero_arity_condition["then"]["properties"]["targets"] == {"type": "null"}
 
 
+def test_intent_compiler_wire_schema_excludes_free_text_provenance() -> None:
+    schema = intent_compiler_wire_json_schema()
+    relation_schema = schema["$defs"]["IntentWireRelation"]
+
+    assert schema["required"] == ["constraints"]
+    assert set(relation_schema["properties"]) == {
+        "relation",
+        "subjects",
+        "targets",
+        "edge_frame",
+        "groups",
+        "orientation",
+        "grounding",
+    }
+    assert {"source", "evidence_span", "inference_reason", "required_count"}.isdisjoint(
+        relation_schema["properties"]
+    )
+    assert "required_count" not in relation_schema["properties"]["relation"]["enum"]
+
+
+def test_intent_compiler_expands_grounding_ids_deterministically() -> None:
+    prompt = "Place a desk near the wall. Keep the entrance clear."
+    task_spec = {
+        "interaction_constraints": ["desk should remain reachable"],
+        "aesthetic_constraints": ["use a modern palette"],
+    }
+    catalog, rendered = _grounding_catalog(prompt, task_spec)
+
+    assert catalog == {
+        "prompt:0": "Place a desk near the wall.",
+        "prompt:1": "Keep the entrance clear.",
+        "interaction:0": "desk should remain reachable",
+        "aesthetic:0": "use a modern palette",
+    }
+    assert "interaction:0" in rendered
+    payload = _attach_grounding_provenance(
+        {
+            "constraints": [
+                {"relation": "near", "grounding": "prompt:0"},
+                {"relation": "near", "grounding": "interaction:0"},
+            ]
+        },
+        catalog,
+    )
+    explicit, inferred = payload["constraints"]
+    assert (
+        explicit
+        | {
+            "source": "explicit_prompt",
+            "evidence_span": "Place a desk near the wall.",
+            "inference_reason": "",
+        }
+        == explicit
+    )
+    assert (
+        inferred
+        | {
+            "source": "model_inferred",
+            "evidence_span": "",
+            "inference_reason": (
+                "TaskCompiler interaction_constraints: desk should remain reachable"
+            ),
+        }
+        == inferred
+    )
+    assert "grounding" not in explicit
+
+    with pytest.raises(ValueError, match="unknown grounding id"):
+        _attach_grounding_provenance(
+            {"constraints": [{"relation": "near", "grounding": "prompt:9"}]},
+            catalog,
+        )
+
+
 def test_intent_compiler_canonicalizes_two_object_side_wording_to_flanking() -> None:
     compiler = _compiler_with_responses(
         [
@@ -2219,6 +2296,64 @@ def test_intent_compiler_restores_unique_edge_fields_omitted_by_llama() -> None:
             "fields": ["source", "edge_frame", "groups", "orientation"],
         }
     ]
+
+
+def test_intent_compiler_corrects_unique_edge_shape_and_drops_duplicate_faces() -> None:
+    prompt = (
+        "Arrange seven office chairs around one rectangular conference table: "
+        "three along each long side and one on one short side, all facing the table."
+    )
+    compiler = _compiler_with_responses(
+        [
+            _response(
+                '{"constraints": ['
+                '{"relation": "edge_distribution", '
+                '"subjects": {"category": "office_chair", "count": 6}, '
+                '"targets": {"category": "conference_table", "count": 1}, '
+                '"edge_frame": "target_local_rectangle", '
+                '"groups": [{"edge_class": "long", "counts_per_edge": [3, 3]}], '
+                '"orientation": "toward_target", '
+                '"grounding": "prompt:0"}, '
+                '{"relation": "faces", '
+                '"subjects": {"category": "office_chair", "count": 7}, '
+                '"targets": {"category": "conference_table", "count": 1}, '
+                '"grounding": "prompt:0"}]}'
+            )
+        ]
+    )
+
+    result = compiler.compile(prompt)
+
+    edge = next(
+        row for row in result["constraints"] if row["relation"] == "edge_distribution"
+    )
+    assert edge["subjects"]["count"] == 7
+    assert [group["counts_per_edge"] for group in edge["groups"]] == [[3, 3], [1, 0]]
+    assert not any(row["relation"] == "faces" for row in result["constraints"])
+    restored = compiler.last_trace["restored_fields"]
+    assert {"subjects.count", "groups"}.issubset(restored[0]["fields"])
+
+
+def test_intent_compiler_rejects_wall_center_from_table_side_grounding() -> None:
+    compiler = _compiler_with_responses(
+        [
+            _response(
+                '{"constraints": [{"relation": "centered_on_wall", '
+                '"subjects": {"category": "chair", "count": 1}, '
+                '"targets": {"category": "wall", "count": 1}, '
+                '"grounding": "prompt:0"}]}'
+            ),
+            _response('{"constraints": []}'),
+        ]
+    )
+
+    result = compiler.compile("Place one chair centered along one table side.")
+
+    assert compiler.last_trace["status"] == "retry_ok"
+    assert "centered_on_wall hard intent" in compiler.last_trace["attempts"][0]["error"]
+    assert not any(
+        row["relation"] == "centered_on_wall" for row in result["constraints"]
+    )
 
 
 def test_intent_compiler_retry_spells_out_unary_target_cardinality() -> None:
