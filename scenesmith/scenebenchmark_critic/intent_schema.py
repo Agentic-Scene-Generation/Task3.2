@@ -573,6 +573,9 @@ def intent_contract_json_schema() -> dict[str, Any]:
     """
 
     schema = deepcopy(IntentContract.model_json_schema())
+    schema.setdefault("required", [])
+    if "constraints" not in schema["required"]:
+        schema["required"].append("constraints")
     relation_schema = schema["$defs"]["IntentRelation"]
     relation_properties = relation_schema["properties"]
     relation_names_by_arity = {

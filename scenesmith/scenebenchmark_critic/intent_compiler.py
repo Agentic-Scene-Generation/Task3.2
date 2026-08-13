@@ -24,6 +24,7 @@ from scenesmith.scenebenchmark_critic.intent_schema import (
 from scenesmith.scenebenchmark_critic.intent_contract import build_intent_contract
 from scenesmith.scenebenchmark_critic.relation_registry import (
     RELATION_REGISTRY,
+    ROOM_RELATIVE_WALL_CATEGORIES,
     relation_spec,
     relations_are_exclusive,
 )
@@ -38,6 +39,106 @@ class IntentCompilationError(RuntimeError):
     def __init__(self, message: str, *, trace: dict[str, Any] | None = None) -> None:
         super().__init__(message)
         self.trace = trace or {}
+
+
+class IncompleteIntentContractError(ValueError):
+    """Raised when parseable compiler output omits required contract content."""
+
+
+_INVENTORY_FIELDS = (
+    "required_large_objects",
+    "required_wall_objects",
+    "required_ceiling_objects",
+    "required_small_objects",
+)
+_LEGAL_ENVIRONMENT_ANCHORS = frozenset(
+    {
+        "room",
+        "wall",
+        "floor",
+        "ceiling",
+        "entrance",
+        "entry",
+        *ROOM_RELATIVE_WALL_CATEGORIES,
+    }
+)
+
+
+def _merge_warnings(*groups: Any) -> list[str]:
+    """Combine warning lists without losing order or repeating text."""
+
+    merged: list[str] = []
+    seen: set[str] = set()
+    for group in groups:
+        if not isinstance(group, (list, tuple)):
+            continue
+        for value in group:
+            warning = " ".join(str(value or "").split())
+            if warning and warning not in seen:
+                merged.append(warning)
+                seen.add(warning)
+    return merged
+
+
+def _validate_contract_completeness(
+    contract: dict[str, Any], task_spec: dict[str, Any]
+) -> None:
+    """Require authoritative inventory counts and resolvable relation endpoints."""
+
+    expected_counts: dict[str, int] = {}
+    for field in _INVENTORY_FIELDS:
+        for value in task_spec.get(field) or []:
+            category = canonical_selector_category(value)
+            if category and category not in _LEGAL_ENVIRONMENT_ANCHORS:
+                expected_counts[category] = expected_counts.get(category, 0) + 1
+
+    count_rows: dict[str, dict[str, Any]] = {}
+    constraints = contract.get("constraints")
+    if not isinstance(constraints, list):
+        raise IncompleteIntentContractError("contract constraints must be a list")
+    # Legacy callers may compile a raw prompt without a TaskSpec. In that mode
+    # there is no authoritative inventory against which endpoints can resolve.
+    if not expected_counts:
+        return
+    for row in constraints:
+        if not isinstance(row, dict) or row.get("relation") != "required_count":
+            continue
+        category = canonical_selector_category(
+            (row.get("subjects") or {}).get("category")
+        )
+        count_rows[category] = row
+
+    for category, expected_count in expected_counts.items():
+        row = count_rows.get(category)
+        if row is None:
+            raise IncompleteIntentContractError(
+                f"missing authoritative required_count for {category!r}"
+            )
+        actual_count = int((row.get("subjects") or {}).get("count") or 0)
+        if actual_count != expected_count:
+            raise IncompleteIntentContractError(
+                f"required_count for {category!r} is {actual_count}, expected {expected_count}"
+            )
+        if row.get("source") != "task_compiler_inventory":
+            raise IncompleteIntentContractError(
+                f"required_count for {category!r} lacks task_compiler_inventory provenance"
+            )
+
+    resolvable = set(count_rows) | set(_LEGAL_ENVIRONMENT_ANCHORS)
+    for row in constraints:
+        if not isinstance(row, dict) or row.get("relation") == "required_count":
+            continue
+        selectors = [row.get("subjects"), row.get("targets")]
+        for selector in selectors:
+            if not isinstance(selector, dict):
+                continue
+            for field in ("category", "secondary_category"):
+                category = canonical_selector_category(selector.get(field))
+                if category and category not in resolvable:
+                    raise IncompleteIntentContractError(
+                        f"relation {row.get('relation')!r} endpoint {category!r} "
+                        "has no required_count or legal environment anchor"
+                    )
 
 
 def _append_llm_debug(record: dict[str, Any]) -> None:
@@ -1005,6 +1106,12 @@ class IntentCompiler:
                     "\nThe previous response was truncated. Return a concise but "
                     "complete contract; do not repeat explanations or context."
                 )
+            if "omitted required constraints field" in validation_error:
+                user += (
+                    "\nThe top-level constraints field is mandatory, even when it "
+                    "is an empty list. Return all hard relations in that field; "
+                    "warnings alone are not a complete contract."
+                )
             if "requires 1 target(s), got 2" in validation_error:
                 user += (
                     "\nFor every reported unary relation, remove its "
@@ -1072,6 +1179,7 @@ class IntentCompiler:
         previous_output = ""
         last_error = ""
         attempts: list[dict[str, Any]] = []
+        failed_llm_warnings: list[str] = []
 
         for attempt in range(2):
             messages = self._messages(
@@ -1083,6 +1191,7 @@ class IntentCompiler:
             started_at = time.perf_counter()
             raw = ""
             response = None
+            response_warnings: list[str] = []
             try:
                 response = self._client.chat.completions.create(
                     model=self._model,
@@ -1104,10 +1213,28 @@ class IntentCompiler:
                 raw = self._raw_message(response)
                 finish_reason = self._finish_reason(response)
                 if finish_reason == "length":
+                    try:
+                        truncated_data = parse_llm_json_object(raw)
+                        response_warnings = _merge_warnings(
+                            truncated_data.get("warnings")
+                        )
+                        failed_llm_warnings = _merge_warnings(
+                            failed_llm_warnings, response_warnings
+                        )
+                    except Exception:
+                        pass
                     raise ValueError(
                         "finish_reason=length: IntentCompiler output was truncated"
                     )
                 data = parse_llm_json_object(raw)
+                response_warnings = _merge_warnings(data.get("warnings"))
+                failed_llm_warnings = _merge_warnings(
+                    failed_llm_warnings, response_warnings
+                )
+                if "constraints" not in data:
+                    raise IncompleteIntentContractError(
+                        "response omitted required constraints field"
+                    )
                 payload = dict(data)
                 payload.setdefault("schema_version", self.SCHEMA_VERSION)
                 payload.setdefault("prompt", normalized_prompt)
@@ -1151,6 +1278,10 @@ class IntentCompiler:
                     allowed_inference_reasons,
                     normalized_task_spec,
                 )
+                result["warnings"] = _merge_warnings(
+                    failed_llm_warnings, result.get("warnings")
+                )
+                _validate_contract_completeness(result, normalized_task_spec)
                 rejected_task_constraints.extend(enrichment_rejections)
                 task_constraint_trace = self._task_compiler_trace_fields(
                     result.get("constraints", []),
@@ -1198,6 +1329,7 @@ class IntentCompiler:
                         "status": status,
                         "finish_reason": finish_reason,
                         "token_usage": token_usage,
+                        "warnings": response_warnings,
                         "elapsed_sec": round(time.perf_counter() - started_at, 6),
                     }
                 )
@@ -1238,6 +1370,7 @@ class IntentCompiler:
                         "error": last_error,
                         "finish_reason": self._finish_reason(response),
                         "token_usage": self._token_usage(response),
+                        "warnings": response_warnings,
                         "elapsed_sec": round(time.perf_counter() - started_at, 6),
                     }
                 )
@@ -1270,11 +1403,14 @@ class IntentCompiler:
             task_spec=normalized_task_spec,
         )
         fallback["retry_count"] = 1
-        fallback["warnings"] = list(fallback.get("warnings") or []) + [
-            "LLM contract unavailable or invalid; deterministic prompt parser used"
-        ]
+        fallback["warnings"] = _merge_warnings(
+            failed_llm_warnings,
+            fallback.get("warnings"),
+            ["LLM contract unavailable or invalid; deterministic prompt parser used"],
+        )
         try:
             result = validate_intent_contract(fallback)
+            _validate_contract_completeness(result, normalized_task_spec)
         except Exception:
             pass
         else:

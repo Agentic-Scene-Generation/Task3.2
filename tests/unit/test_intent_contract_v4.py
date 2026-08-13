@@ -17,7 +17,11 @@ from scenesmith.scenebenchmark_critic.intent_schema import (
     intent_contract_json_schema,
     validate_intent_contract,
 )
-from scenesmith.scenebenchmark_critic.intent_compiler import IntentCompiler
+from scenesmith.scenebenchmark_critic.intent_compiler import (
+    IncompleteIntentContractError,
+    IntentCompiler,
+    _validate_contract_completeness,
+)
 from scenesmith.scenebenchmark_critic.intent_contract import (
     augment_contract_checks,
     apply_contract_execution_states,
@@ -1719,6 +1723,117 @@ def test_intent_compiler_retries_parseable_length_response() -> None:
         "length",
         "stop",
     ]
+
+
+def test_intent_compiler_retries_warnings_only_response() -> None:
+    warning = "Small-object arrangements remain context."
+    compiler = _compiler_with_responses(
+        [
+            _response('{"room_type": "living room", "warnings": ["' + warning + '"]}'),
+            _response('{"constraints": []}'),
+        ]
+    )
+
+    result = compiler.compile("An empty living room.")
+
+    assert compiler.last_trace["status"] == "retry_ok"
+    assert [row["status"] for row in compiler.last_trace["attempts"]] == [
+        "error",
+        "retry_ok",
+    ]
+    assert (
+        "omitted required constraints field"
+        in compiler.last_trace["attempts"][0]["error"]
+    )
+    assert warning in result["warnings"]
+    retry_message = compiler._test_calls[1]["messages"][1]["content"]
+    assert "warnings alone are not a complete contract" in retry_message
+
+
+def test_intent_compiler_warnings_only_fallback_preserves_warnings_and_inventory() -> (
+    None
+):
+    first_warning = "Table settings remain context."
+    second_warning = "Circulation remains context."
+    compiler = _compiler_with_responses(
+        [
+            _response('{"warnings": ["' + first_warning + '"]}'),
+            _response('{"warnings": ["' + second_warning + '"]}'),
+        ]
+    )
+    task_spec = SceneTaskSpec(
+        room_type="living room",
+        style="functional",
+        required_large_objects=["sofa", "coffee table"],
+    )
+
+    result = compiler.compile("A living room.", task_spec=task_spec)
+
+    assert compiler.last_trace["status"] == "deterministic_fallback"
+    assert "omitted required constraints field" in compiler.last_trace["failure_reason"]
+    assert [row["status"] for row in compiler.last_trace["attempts"]] == [
+        "error",
+        "error",
+        "deterministic_fallback",
+    ]
+    assert first_warning in result["warnings"]
+    assert second_warning in result["warnings"]
+    required = {
+        row["subjects"]["category"]: row["subjects"]["count"]
+        for row in result["constraints"]
+        if row["relation"] == "required_count"
+    }
+    assert required == {"coffee_table": 1, "sofa": 1}
+
+
+def test_contract_completeness_rejects_missing_task_inventory_count() -> None:
+    with pytest.raises(
+        IncompleteIntentContractError,
+        match="missing authoritative required_count for 'desk'",
+    ):
+        _validate_contract_completeness(
+            {"constraints": []}, {"required_large_objects": ["desk"]}
+        )
+
+
+def test_contract_completeness_rejects_unknown_relation_endpoint() -> None:
+    contract = build_intent_contract(
+        "A desk near a phantom object.",
+        task_spec={"required_large_objects": ["desk"]},
+    )
+    contract["constraints"].append(
+        {
+            "relation": "near",
+            "subjects": {"category": "desk", "count": 1},
+            "targets": {"category": "phantom_object", "count": 1},
+            "source": "model_inferred",
+        }
+    )
+
+    with pytest.raises(
+        IncompleteIntentContractError, match="endpoint 'phantom_object'"
+    ):
+        _validate_contract_completeness(contract, {"required_large_objects": ["desk"]})
+
+
+@pytest.mark.parametrize(
+    "anchor",
+    ["room", "wall", "floor", "ceiling", "entrance", "adjacent_wall"],
+)
+def test_contract_completeness_accepts_environment_anchors(anchor: str) -> None:
+    contract = build_intent_contract(
+        "A desk.", task_spec={"required_large_objects": ["desk"]}
+    )
+    contract["constraints"].append(
+        {
+            "relation": "near",
+            "subjects": {"category": "desk", "count": 1},
+            "targets": {"category": anchor, "count": 1},
+            "source": "model_inferred",
+        }
+    )
+
+    _validate_contract_completeness(contract, {"required_large_objects": ["desk"]})
 
 
 def test_intent_compiler_length_fallback_keeps_complete_task_inventory() -> None:
