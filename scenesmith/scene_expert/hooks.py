@@ -47,7 +47,7 @@ from scenesmith.scene_expert.schemas import (
     StageVerifyReport,
 )
 from scenesmith.scene_expert.task_compiler import TaskCompiler
-from scenesmith.scene_expert.trace_logger import TraceLogger
+from scenesmith.scene_expert.trace_logger import TraceLogger, collect_code_provenance
 from scenesmith.scene_expert.verifier import FullVerifier, StageVerifier
 from scenesmith.scenebenchmark_critic.config import critic_config_from_any
 from scenesmith.scenebenchmark_critic.intent_compiler import IntentCompiler
@@ -653,6 +653,7 @@ class SceneExpertHookRunner:
             prompt=prompt,
             experiment_name=experiment_name,
             config_hash=config_hash,
+            code_provenance=collect_code_provenance(),
         )
         self._trace_logger.record_task_compiler(task_spec, task_compiler_trace)
         if self._intent_trace:

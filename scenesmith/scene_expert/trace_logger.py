@@ -9,8 +9,11 @@ from __future__ import annotations
 
 import json
 import logging
+import hashlib
+import subprocess
 import time
 from pathlib import Path
+from typing import Iterable
 
 from scenesmith.scene_expert.schemas import (
     FullVerifyReport,
@@ -28,13 +31,83 @@ from scenesmith.scene_expert.schemas import (
 console_logger = logging.getLogger(__name__)
 
 
+_DEFAULT_CODE_PROVENANCE_PATHS = (
+    "scenesmith/scene_expert/hooks.py",
+    "scenesmith/scene_expert/task_compiler.py",
+    "scenesmith/scene_expert/verifier.py",
+    "scenesmith/scene_expert/repair_controller.py",
+    "scenesmith/scenebenchmark_critic/intent_contract.py",
+    "scenesmith/furniture_agents/stateful_furniture_agent.py",
+    "scenesmith/manipuland_agents/stateful_manipuland_agent.py",
+    "scenesmith/agent_utils/clearance_zones.py",
+)
+
+
+def collect_code_provenance(
+    repo_root: Path | None = None,
+    source_paths: Iterable[str] = _DEFAULT_CODE_PROVENANCE_PATHS,
+) -> dict[str, object]:
+    """Capture the code identity loaded at scene-run startup.
+
+    A replay can outlive a commit or start from a dirty worktree.  Resolved
+    Hydra configuration alone therefore cannot identify the code that produced
+    a trace.  This helper intentionally records both Git state and hashes of
+    the modules that own the SceneExpert/repair behavior under investigation.
+    """
+    root = repo_root or Path(__file__).resolve().parents[2]
+    root = root.resolve()
+    provenance: dict[str, object] = {
+        "repo_root": str(root),
+        "git_revision": "",
+        "git_status": "",
+        "git_status_hash": "",
+        "dirty": None,
+        "source_hashes": {},
+    }
+
+    def git_output(*args: str) -> str:
+        try:
+            result = subprocess.run(
+                ["git", *args],
+                cwd=root,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return ""
+        return result.stdout.strip() if result.returncode == 0 else ""
+
+    revision = git_output("rev-parse", "HEAD")
+    status = git_output("status", "--porcelain=v1", "--untracked-files=normal")
+    provenance["git_revision"] = revision
+    provenance["git_status"] = status
+    provenance["git_status_hash"] = hashlib.sha256(status.encode("utf-8")).hexdigest()
+    provenance["dirty"] = bool(status) if revision else None
+
+    source_hashes: dict[str, str] = {}
+    for relative_path in source_paths:
+        path = (root / relative_path).resolve()
+        try:
+            path.relative_to(root)
+        except ValueError:
+            continue
+        if path.is_file():
+            source_hashes[str(relative_path)] = hashlib.sha256(
+                path.read_bytes()
+            ).hexdigest()
+    provenance["source_hashes"] = source_hashes
+    return provenance
+
+
 class TraceLogger:
     """Accumulates stage-level trace entries and serializes to JSON.
 
     One TraceLogger instance per scene generation run.
     """
 
-    SCHEMA_VERSION = "1.3"
+    SCHEMA_VERSION = "1.4"
 
     def __init__(
         self,
@@ -43,6 +116,7 @@ class TraceLogger:
         prompt: str,
         experiment_name: str = "",
         config_hash: str = "",
+        code_provenance: dict[str, object] | None = None,
     ) -> None:
         self._output_dir = Path(output_dir)
         self._traces_dir = self._output_dir / "traces"
@@ -66,6 +140,7 @@ class TraceLogger:
         self._prompt = prompt
         self._experiment_name = experiment_name
         self._config_hash = config_hash
+        self._code_provenance = dict(code_provenance or {})
         self._stage_entries: list[StageTraceEntry] = []
         self._start_time = time.time()
         self._full_report: FullVerifyReport | None = None
@@ -230,6 +305,7 @@ class TraceLogger:
             "status": "completed",
             "experiment_name": self._experiment_name,
             "config_hash": self._config_hash,
+            "code_provenance": self._code_provenance,
             "prompt": self._prompt,
             "task_compiler": self._task_compiler,
             "intent_compiler": self._intent_compiler,
@@ -251,6 +327,7 @@ class TraceLogger:
             "error": error,
             "experiment_name": self._experiment_name,
             "config_hash": self._config_hash,
+            "code_provenance": self._code_provenance,
             "prompt": self._prompt,
             "task_compiler": self._task_compiler,
             "intent_compiler": self._intent_compiler,
@@ -272,6 +349,7 @@ class TraceLogger:
                 "status": "partial",
                 "experiment_name": self._experiment_name,
                 "config_hash": self._config_hash,
+                "code_provenance": self._code_provenance,
                 "prompt": self._prompt,
                 "task_compiler": self._task_compiler,
                 "intent_compiler": self._intent_compiler,
