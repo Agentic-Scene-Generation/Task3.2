@@ -454,6 +454,91 @@ def test_table_setting_count_uses_minimum_component_count() -> None:
     assert result["diagnostics"]["observed_count"] == 3
 
 
+def test_required_count_rejects_excess_for_exact_quantifier() -> None:
+    constraint = {
+        "constraint_id": "intent_exact_coasters",
+        "relation": "required_count",
+        "subjects": {"category": "coaster", "count": 4, "quantifier": "exactly"},
+    }
+    objects = [
+        _record(f"coaster_{index}", "coaster", (0.0, 0.0), (0.1, 0.1, 0.01))
+        for index in range(8)
+    ]
+
+    result = _evaluate_required_count(constraint, objects, "core")
+
+    assert result["label"] == "fail"
+    assert result["diagnostics"]["observed_count"] == 8
+    assert "exactly 4" in result["reason"]
+
+
+def test_composite_flower_arrangement_binds_flower_and_its_vase() -> None:
+    arrangement = _record(
+        "flower_arrangement_0",
+        "flower_arrangement",
+        (0.0, 0.0),
+        (0.3, 0.3, 0.6),
+    )
+    arrangement["metadata"] = {"semantic_name": "flower_arrangement"}
+    arrangement["description"] = (
+        "Tall elegant glass vase with floral arrangement of red roses and greenery"
+    )
+    objects = [arrangement]
+    flower_selector = {"category": "flower", "count": 1}
+    vase_selector = {"category": "vase", "count": 1}
+    flower_count = {
+        "constraint_id": "intent_flower_count",
+        "relation": "required_count",
+        "subjects": {**flower_selector, "quantifier": "exactly"},
+    }
+    arrangement_on_vase = {
+        "constraint_id": "intent_flower_on_vase",
+        "relation": "on_top_of",
+        "stage": "manipuland",
+        "subjects": flower_selector,
+        "targets": vase_selector,
+    }
+
+    assert selected_ids(flower_selector, objects) == ["flower_arrangement_0"]
+    assert selected_ids(vase_selector, objects) == ["flower_arrangement_0"]
+    assert _evaluate_required_count(flower_count, objects, "core")["label"] == "pass"
+    assert (
+        _binding_state_result({"stage": "final"}, arrangement_on_vase, objects) is None
+    )
+    assert (
+        evaluate_intent_contract_extensions(
+            {
+                "stage": "final",
+                "intent_contract": {"constraints": [arrangement_on_vase]},
+                "scene_geometry": {"objects": objects},
+            }
+        )
+        == []
+    )
+
+
+def test_filled_vase_composite_binds_flower_and_its_vase() -> None:
+    filled_vase = _record(
+        "filled_container_0",
+        "filled_vase",
+        (0.0, 0.0),
+        (0.3, 0.3, 0.6),
+    )
+    filled_vase["name"] = "filled_vase"
+    filled_vase["description"] = "vase filled with flowers"
+    filled_vase["metadata"] = {
+        "composite_type": "filled_container",
+        "container_asset": {"name": "vase"},
+        "fill_assets": [{"name": "flowers"}],
+    }
+    objects = [filled_vase]
+    flower_selector = {"category": "flower", "count": 1}
+    vase_selector = {"category": "vase", "count": 1}
+
+    assert selected_ids(flower_selector, objects) == ["filled_container_0"]
+    assert selected_ids(vase_selector, objects) == ["filled_container_0"]
+
+
 @pytest.mark.parametrize(
     "relation",
     [
@@ -837,6 +922,68 @@ def test_on_wall_uses_physical_wall_for_room_relative_target(
     ]
 
     assert _binding_state_result({"stage": "final"}, constraint, objects) is None
+
+
+def test_directional_furniture_can_face_wall_mounted_instructional_surface() -> None:
+    from scenesmith.scenebenchmark_critic.metrics.functional_dependency.relations import (
+        _relation_target_is_valid,
+    )
+
+    desk = _record("student_desk_0", "student_desk", (0.0, 0.0), (1.2, 0.6, 0.7))
+    desk["object_type"] = "furniture"
+    desk["metadata"] = {"semantic_name": "student_desk"}
+    chalkboard = _record("chalkboard_0", "chalkboard", (0.0, 2.0), (2.0, 0.1, 1.0))
+    chalkboard["functional_hints"] = {"scene_object_type": "wall_mounted"}
+
+    assert _relation_target_is_valid(desk, chalkboard, "furniture_faces_furniture")
+
+
+def test_prompt_desk_facing_uses_view_direction_without_near_distance() -> None:
+    desk = _record(
+        "student_desk_0",
+        "student_desk",
+        (0.0, 0.0),
+        (1.2, 0.6, 0.7),
+        yaw_deg=180.0,
+    )
+    desk["object_type"] = "furniture"
+    desk["metadata"] = {"semantic_name": "student_desk"}
+    chalkboard = _record("chalkboard_0", "chalkboard", (0.0, 5.0), (2.0, 0.1, 1.0))
+    chalkboard["functional_hints"] = {"scene_object_type": "wall_mounted"}
+    constraint = {
+        "constraint_id": "student_desks_face_board",
+        "relation": "faces",
+        "stage": "wall_mounted",
+        "strength": "hard",
+        "subjects": {"category": "student_desk", "count": 1},
+        "targets": {"category": "instructional_surface", "count": 1},
+        "source": "explicit_prompt",
+        "evidence_span": "student desks face the chalkboard",
+    }
+    case_pack = {
+        "stage": "wall_mounted",
+        "intent_contract": {"constraints": [constraint]},
+        "scene_geometry": {"objects": [desk, chalkboard]},
+    }
+
+    assert augment_contract_checks(case_pack)
+    check = next(
+        row
+        for row in case_pack["checks"]
+        if row["relation_type"] == "furniture_faces_furniture"
+    )
+    assert (
+        check["evidence"]["dependency"]
+        | {
+            "subject_face": "back",
+            "distance_required": False,
+        }
+        == check["evidence"]["dependency"]
+    )
+    result = evaluate_functional_dependency(load_geometry(case_pack), check)
+
+    assert result["label"] == "pass"
+    assert "gap" not in result["reason"]
 
 
 def test_wall_mounted_object_can_be_centered_above_furniture_without_wall_centering() -> (
@@ -1906,11 +2053,19 @@ def test_task_spec_components_replace_composite_table_setting_count() -> None:
     )
 
     counts = {
-        row["subjects"]["category"]: row["subjects"]["count"]
+        row["subjects"]["category"]: row["subjects"]
         for row in contract["constraints"]
         if row["relation"] == "required_count"
     }
-    assert counts == {"cutlery": 5, "dining_table": 1, "glass": 5, "plate": 5}
+    assert {category: selector["count"] for category, selector in counts.items()} == {
+        "cutlery": 5,
+        "dining_table": 1,
+        "glass": 5,
+        "plate": 5,
+    }
+    assert counts["cutlery"]["quantifier"] == "at_least"
+    assert counts["plate"]["quantifier"] == "exactly"
+    assert counts["glass"]["quantifier"] == "exactly"
 
 
 def test_intent_compiler_maps_reachability_to_near_not_flanking() -> None:
@@ -1939,6 +2094,49 @@ def test_intent_compiler_maps_reachability_to_near_not_flanking() -> None:
     assert [row["relation"] for row in inferred] == ["near"]
     assert inferred[0]["subjects"]["category"] == "nightstand"
     assert inferred[0]["targets"]["category"] == "bed"
+
+
+def test_intent_compiler_uses_minimum_for_place_setting_cutlery_support() -> None:
+    prompt = (
+        "A dining room has table settings for four including plates, cutlery, and "
+        "glasses on the dining table."
+    )
+    compiler = _compiler_with_responses(
+        [
+            _response(
+                '{"constraints": [{"relation": "on_top_of", '
+                '"subjects": {"category": "cutlery", "count": 4}, '
+                '"targets": {"category": "dining_table", "count": 1}, '
+                '"grounding": "prompt:0"}]}'
+            )
+        ]
+    )
+    task_spec = SceneTaskSpec(
+        room_type="dining_room",
+        style="functional",
+        required_large_objects=["dining_table"],
+        required_small_objects=[
+            *(["plate"] * 4),
+            *(["cutlery"] * 4),
+            *(["glass"] * 4),
+        ],
+    )
+
+    contract = compiler.compile(prompt, task_spec=task_spec)
+    cutlery_support = next(
+        row
+        for row in contract["constraints"]
+        if row["relation"] == "on_top_of" and row["subjects"]["category"] == "cutlery"
+    )
+    required_cutlery = next(
+        row
+        for row in contract["constraints"]
+        if row["relation"] == "required_count"
+        and row["subjects"]["category"] == "cutlery"
+    )
+
+    assert cutlery_support["subjects"]["quantifier"] == "minimum"
+    assert required_cutlery["subjects"]["quantifier"] == "at_least"
 
 
 def test_intent_compiler_prefers_explicit_prompt_over_task_constraint() -> None:
@@ -2557,6 +2755,57 @@ def test_intent_compiler_restores_classroom_operation_zone_ontology() -> None:
         "operation_zone_at_wall",
         "instructional_surface_alignment",
     }
+
+
+def test_classroom_chair_cardinality_binds_generic_chair_assets() -> None:
+    prompt = (
+        "A classroom with six student desks, each with a chair. A teacher's "
+        "desk sits at the front near the chalkboard."
+    )
+    contract = build_intent_contract(prompt)
+    paired = next(
+        row
+        for row in contract["constraints"]
+        if row["relation"] == "paired_with"
+        and row["subjects"]["category"] == "student_chair"
+    )
+    objects = [
+        _record(f"chair_{index}", "chair", (float(index), 0.0), (0.5, 0.5, 0.9))
+        for index in range(6)
+    ]
+
+    assert paired["subjects"]["count"] == 6
+    assert bound_ids(paired["subjects"], objects) == [
+        f"chair_{index}" for index in range(6)
+    ]
+
+
+def test_intent_compiler_normalizes_chair_one_per_support_to_pairing() -> None:
+    prompt = "A classroom with six student desks, each with a chair."
+    compiler = _compiler_with_responses(
+        [
+            _response(
+                '{"constraints": [{"relation": "one_per_support", '
+                '"subjects": {"category": "chair", "count": 6}, '
+                '"targets": {"category": "student_desk", "count": 6}, '
+                '"source": "explicit_prompt", '
+                '"evidence_span": "six student desks, each with a chair"}]}'
+            )
+        ]
+    )
+
+    result = compiler.compile(prompt)
+
+    assert not any(
+        row["relation"] == "one_per_support"
+        and row["subjects"]["category"] in {"chair", "student_chair"}
+        for row in result["constraints"]
+    )
+    assert any(
+        row["relation"] == "paired_with"
+        and row["subjects"]["category"] in {"chair", "student_chair"}
+        for row in result["constraints"]
+    )
 
 
 def test_intent_compiler_enriches_explicit_group_relations_omitted_by_llm() -> None:

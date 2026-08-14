@@ -707,7 +707,10 @@ def _apply_final_wall_functional_guards(*, scene: RoomScene, cfg_dict: dict) -> 
     fixes = improve_furniture_relations(
         scene,
         config=cfg_dict,
-        allowed_relation_types={"instructional_surface_alignment"},
+        allowed_relation_types={
+            "instructional_surface_alignment",
+            "furniture_faces_furniture",
+        },
     )
     if fixes:
         console_logger.info(

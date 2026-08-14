@@ -121,7 +121,10 @@ class TestFinalFurnitureRescore(unittest.TestCase):
         improve.assert_called_once_with(
             scene,
             config=cfg_dict,
-            allowed_relation_types={"instructional_surface_alignment"},
+            allowed_relation_types={
+                "instructional_surface_alignment",
+                "furniture_faces_furniture",
+            },
         )
         validate.assert_called_once_with(scene=scene, cfg_dict=cfg_dict)
 

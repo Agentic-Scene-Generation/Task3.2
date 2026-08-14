@@ -42,6 +42,8 @@ class FurnitureSelection:
     """Style guidance (density, aesthetic) for this surface."""
     context_furniture_ids: list[UniqueID] = field(default_factory=list)
     """IDs of nearby furniture for context (e.g., chairs around a table)."""
+    is_prompt_required: bool = False
+    """Whether deterministic prompt obligations require this target to succeed."""
 
 
 def _compute_aabb_edge_distance(

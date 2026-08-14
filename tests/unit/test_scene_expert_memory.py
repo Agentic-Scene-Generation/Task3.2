@@ -703,6 +703,41 @@ class SceneExpertMemoryTest(unittest.TestCase):
         self.assertTrue(report.pass_stage)
         self.assertEqual([], report.issues)
 
+    def test_wall_inventory_verifier_uses_canonical_instructional_aliases(
+        self,
+    ) -> None:
+        task_spec = SceneTaskSpec(
+            room_type="classroom",
+            style="standard",
+            required_wall_objects=["instructional_surface"],
+        )
+
+        for present_name in (
+            "chalkboard_0",
+            "blackboard_0",
+            "whiteboard_0",
+            "projection_screen_0",
+        ):
+            report = StageVerifier(pass_threshold=0.6).verify(
+                stage="wall_mounted",
+                stage_output_dir="/path/that/does/not/exist",
+                task_spec=task_spec,
+                scene_state_info={"object_names": [present_name]},
+            )
+            self.assertTrue(report.pass_stage, present_name)
+            self.assertEqual([], report.issues)
+
+        unrelated = StageVerifier(pass_threshold=0.6).verify(
+            stage="wall_mounted",
+            stage_output_dir="/path/that/does/not/exist",
+            task_spec=task_spec,
+            scene_state_info={"object_names": ["painting_0"]},
+        )
+        self.assertFalse(unrelated.pass_stage)
+        self.assertEqual(
+            ["instructional_surface"], [issue.object_name for issue in unrelated.issues]
+        )
+
     def test_manipuland_verifier_normalizes_names_and_enforces_counts(self) -> None:
         task_spec = SceneTaskSpec(
             room_type="bedroom",

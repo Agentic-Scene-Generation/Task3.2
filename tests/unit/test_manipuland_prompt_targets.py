@@ -282,11 +282,83 @@ def test_recovery_adds_missing_dining_table_without_duplicate_sideboard() -> Non
         sideboard.object_id,
         table.object_id,
     ]
+    assert all(selection.is_prompt_required for selection in recovered)
+
+
+def test_current_target_cardinality_rejects_excess_exact_objects() -> None:
+    agent = object.__new__(StatefulManipulandAgent)
+    agent.current_furniture_id = UniqueID("sideboard_0")
+    agent.scene = SimpleNamespace()
+    constraint = {
+        "relation": "on_top_of",
+        "stage": "manipuland",
+        "source": "explicit_prompt",
+        "strength": "hard",
+        "subjects": {"category": "coaster", "count": 4, "quantifier": "exactly"},
+        "targets": {"category": "sideboard", "count": 1, "quantifier": "all"},
+    }
+    objects = [
+        {"id": "sideboard_0", "name": "sideboard", "category": "sideboard"},
+        *[
+            {"id": f"coaster_{index}", "name": "coaster", "category": "coaster"}
+            for index in range(8)
+        ],
+    ]
+
+    with (
+        patch(
+            "scenesmith.manipuland_agents.stateful_manipuland_agent.room_scene_to_case_pack",
+            return_value={"scene_geometry": {"objects": objects}},
+        ),
+        patch(
+            "scenesmith.manipuland_agents.stateful_manipuland_agent.intent_contract_constraints_for_scene",
+            return_value=[constraint],
+        ),
+    ):
+        failures = agent._current_target_cardinality_failures()
+
+    assert failures == [
+        "prompt-required exact count for coaster on sideboard_0: expected 4, found 8"
+    ]
+
+
+def test_current_target_cardinality_defers_multi_support_contract() -> None:
+    agent = object.__new__(StatefulManipulandAgent)
+    agent.current_furniture_id = UniqueID("desk_0")
+    agent.scene = SimpleNamespace()
+    constraint = {
+        "relation": "one_per_support",
+        "stage": "manipuland",
+        "source": "explicit_prompt",
+        "strength": "hard",
+        "subjects": {"category": "monitor", "count": 2, "quantifier": "exactly"},
+        "targets": {"category": "desk", "count": 2, "quantifier": "all"},
+    }
+    objects = [
+        {"id": "desk_0", "name": "desk", "category": "desk"},
+        {"id": "desk_1", "name": "desk", "category": "desk"},
+        {"id": "monitor_0", "name": "monitor", "category": "monitor"},
+    ]
+
+    with (
+        patch(
+            "scenesmith.manipuland_agents.stateful_manipuland_agent.room_scene_to_case_pack",
+            return_value={"scene_geometry": {"objects": objects}},
+        ),
+        patch(
+            "scenesmith.manipuland_agents.stateful_manipuland_agent.intent_contract_constraints_for_scene",
+            return_value=[constraint],
+        ),
+    ):
+        failures = agent._current_target_cardinality_failures()
+
+    assert failures == []
 
 
 def test_final_dining_alignment_runs_when_planner_ignored_failed_contract() -> None:
     agent = object.__new__(StatefulManipulandAgent)
     agent.scene = Mock()
+    agent._remove_duplicate_composite_members = Mock(return_value=[])
     agent.manipuland_tools = Mock()
     agent.manipuland_tools._complete_dining_place_settings_impl.return_value = (
         '{"success": true, "changed": false, "restored": false}'
@@ -325,6 +397,7 @@ def test_final_dining_alignment_runs_when_planner_ignored_failed_contract() -> N
 def test_final_dining_alignment_leaves_passing_contract_unchanged() -> None:
     agent = object.__new__(StatefulManipulandAgent)
     agent.scene = Mock()
+    agent._remove_duplicate_composite_members = Mock(return_value=[])
     agent.manipuland_tools = Mock()
     passed = {
         "primary_object": "dining_table_0",
@@ -348,6 +421,66 @@ def test_final_dining_alignment_leaves_passing_contract_unchanged() -> None:
 
     assert not repaired
     agent.manipuland_tools._align_dining_place_settings_impl.assert_not_called()
+
+
+def test_dining_cleanup_removes_only_coincident_composite_member_copy() -> None:
+    surface = SimpleNamespace(surface_id="S_5")
+    table = SimpleNamespace(
+        object_id=UniqueID("dining_table_0"),
+        object_type=ObjectType.FURNITURE,
+        support_surfaces=[surface],
+    )
+
+    def manipuland(object_id: str, x: float):
+        return SimpleNamespace(
+            object_id=UniqueID(object_id),
+            object_type=ObjectType.MANIPULAND,
+            metadata={},
+            sdf_path="/tmp/shared_vase.sdf",
+            transform=RigidTransform(p=[x, 0.0, 0.75]),
+            placement_info=SimpleNamespace(parent_surface_id="S_5"),
+            immutable=False,
+        )
+
+    duplicate = manipuland("vase_0", 0.0)
+    separate_setting = manipuland("vase_1", 0.4)
+    composite = SimpleNamespace(
+        object_id=UniqueID("filled_container_0"),
+        object_type=ObjectType.MANIPULAND,
+        metadata={
+            "composite_type": "filled_container",
+            "container_asset": {
+                "sdf_path": "/tmp/shared_vase.sdf",
+                "transform": {"translation": [0.005, 0.0, 0.75]},
+            },
+            "fill_assets": [],
+        },
+        sdf_path=None,
+        transform=RigidTransform(p=[0.005, 0.0, 0.75]),
+        placement_info=SimpleNamespace(parent_surface_id="S_5"),
+        immutable=False,
+    )
+    objects = {
+        obj.object_id: obj for obj in (table, duplicate, separate_setting, composite)
+    }
+    scene = SimpleNamespace(objects=objects)
+    scene.get_object = lambda object_id: scene.objects.get(object_id)
+
+    def remove_object(object_id):
+        return scene.objects.pop(object_id, None) is not None
+
+    scene.remove_object = remove_object
+    agent = object.__new__(StatefulManipulandAgent)
+    agent.scene = scene
+    agent.rendering_manager = Mock()
+    agent._reset_critic_candidate_cache = Mock()
+
+    removed = agent._remove_duplicate_composite_members(table.object_id)
+
+    assert removed == ["vase_0"]
+    assert duplicate.object_id not in scene.objects
+    assert separate_setting.object_id in scene.objects
+    agent.rendering_manager.clear_cache.assert_called_once_with()
 
 
 def test_per_furniture_postprocessing_runs_before_final_critique() -> None:
@@ -726,6 +859,79 @@ def test_failed_furniture_workflow_restores_pre_target_scene() -> None:
     scene.restore_from_state_dict.assert_called_once_with(snapshot)
     assert agent.rendering_manager.clear_cache.call_count == 2
     assert agent._critic_candidate_cache == {"scene_hash": "restored-scene"}
+
+
+def test_required_furniture_workflow_retries_once_then_raises_root_failure() -> None:
+    furniture_id = UniqueID("dining_table_0")
+    furniture = _object(str(furniture_id), "dining table")
+    selection = FurnitureSelection(
+        furniture_id=furniture_id,
+        suggested_items="REQUIRED: table settings",
+        prompt_constraints="four complete settings",
+        style_notes="",
+        is_prompt_required=True,
+    )
+    snapshot = {
+        "room_geometry": None,
+        "objects": {"dining_table_0": {"name": "dining table"}},
+        "text_description": "dining room",
+    }
+    scene = Mock()
+    scene.get_object.return_value = furniture
+    scene.to_state_dict.return_value = snapshot
+    scene.content_hash.return_value = "restored-scene"
+    scene.text_description = "dining room"
+
+    agent = object.__new__(StatefulManipulandAgent)
+    agent.cfg = SimpleNamespace(
+        context_furniture=SimpleNamespace(enabled=False),
+        support_surface_extraction={},
+        openai=SimpleNamespace(model="test-model"),
+        required_target_retry_attempts=1,
+    )
+    agent.rendering_manager = Mock()
+    agent.vlm_service = Mock()
+    agent._analyze_furniture_for_placement = AsyncMock(return_value=[selection])
+    agent._recover_prompt_required_manipuland_targets = Mock(return_value=[selection])
+    agent._route_explicit_floor_selections = Mock(return_value=[selection])
+    agent._skip_realized_floor_covering_targets = Mock(return_value=[selection])
+    agent._get_max_target_furniture = Mock(return_value=0)
+    agent._setup_furniture_context = Mock()
+    agent._generate_manipuland_context_image = Mock(return_value=None)
+    agent._initialize_checkpoint_state = Mock()
+    agent._setup_furniture_agents = Mock()
+    agent._run_furniture_workflow = AsyncMock(
+        side_effect=RuntimeError("unresolved hard constraints")
+    )
+    agent._target_failure_diagnostic = Mock(return_value="7 collisions remain")
+    agent._final_hard_validation_enabled = Mock(return_value=True)
+
+    with (
+        patch(
+            "scenesmith.manipuland_agents.stateful_manipuland_agent.custom_span",
+            return_value=nullcontext(),
+        ),
+        patch(
+            "scenesmith.manipuland_agents.stateful_manipuland_agent."
+            "SupportSurfaceExtractionConfig.from_config",
+            return_value=Mock(),
+        ),
+        patch(
+            "scenesmith.manipuland_agents.stateful_manipuland_agent."
+            "extract_and_propagate_support_surfaces",
+            return_value=[Mock(surface_id=UniqueID("table_surface"))],
+        ),
+        patch(
+            "scenesmith.manipuland_agents.stateful_manipuland_agent."
+            "build_manipuland_placement_order_reference",
+            return_value="",
+        ),
+        pytest.raises(RuntimeError, match="failed after 2 attempt"),
+    ):
+        asyncio.run(agent.add_manipulands(scene))
+
+    assert agent._run_furniture_workflow.await_count == 2
+    assert scene.restore_from_state_dict.call_count >= 2
 
 
 def test_bilateral_bedside_prompt_recovers_both_nightstands() -> None:

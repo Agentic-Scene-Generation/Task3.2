@@ -1417,6 +1417,7 @@ def _eval_face_to_target(
         return "unknown", 0.0, "missing distance geometry."
     max_distance = _dependency_float(dependency, "max_distance_m", 1.8)
     max_angle = _dependency_float(dependency, "max_angle_deg", 60.0)
+    distance_required = dependency.get("distance_required", True) is not False
     subject_face = str(dependency.get("subject_face") or "front").strip().lower()
     target_face = str(dependency.get("target_face") or "any").strip().lower()
     subject_angle = _face_angle_to_target_deg(subject, target, subject_face)
@@ -1433,22 +1434,25 @@ def _eval_face_to_target(
         target_ok = target_angle <= max_angle
         target_clause = f", target {target_face} angle {target_angle:.0f}deg"
 
-    if gap <= max_distance and subject_angle <= max_angle and target_ok:
+    distance_ok = not distance_required or gap <= max_distance
+    weak_distance_ok = not distance_required or gap <= max_distance * 1.25
+    distance_clause = f"gap {gap:.2f}m, " if distance_required else ""
+    if distance_ok and subject_angle <= max_angle and target_ok:
         return (
             "pass",
             0.88,
-            f"`{relation_type}` holds: gap {gap:.2f}m, subject {subject_face} angle {subject_angle:.0f}deg{target_clause}.",
+            f"`{relation_type}` holds: {distance_clause}subject {subject_face} angle {subject_angle:.0f}deg{target_clause}.",
         )
-    if gap <= max_distance * 1.25 and subject_angle <= max_angle + 30.0:
+    if weak_distance_ok and subject_angle <= max_angle + 30.0:
         return (
             "degraded",
             0.72,
-            f"`{relation_type}` is weak: gap {gap:.2f}m, subject {subject_face} angle {subject_angle:.0f}deg{target_clause}.",
+            f"`{relation_type}` is weak: {distance_clause}subject {subject_face} angle {subject_angle:.0f}deg{target_clause}.",
         )
     return (
         "fail",
         0.84,
-        f"`{relation_type}` fails: gap {gap:.2f}m, subject {subject_face} angle {subject_angle:.0f}deg{target_clause}.",
+        f"`{relation_type}` fails: {distance_clause}subject {subject_face} angle {subject_angle:.0f}deg{target_clause}.",
     )
 
 
@@ -1711,9 +1715,18 @@ def _relation_target_is_valid(
     if relation_type == "seat_faces_surface":
         return _is_seating_subject(subject) and _is_work_surface_target(target)
     if relation_type == "furniture_faces_furniture":
-        return _is_directional_facing_subject(subject) and _is_facing_relation_target(
-            target
+        target_category = object_category(target)
+        directional_target = _is_facing_relation_target(target) or (
+            target_category
+            in {
+                "instructional_surface",
+                "chalkboard",
+                "blackboard",
+                "whiteboard",
+                "projection_screen",
+            }
         )
+        return _is_directional_facing_subject(subject) and directional_target
     if relation_type in {
         "back_against_wall",
         "side_or_back_against_wall",

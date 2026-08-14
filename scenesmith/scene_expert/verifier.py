@@ -17,6 +17,7 @@ from pathlib import Path
 
 import yaml
 
+from scenesmith.scenebenchmark_critic.intent_schema import canonical_selector_category
 from scenesmith.scene_expert.schemas import (
     FullVerifyReport,
     SceneTaskSpec,
@@ -392,13 +393,8 @@ def _normalize_object_label(label: str) -> str:
         words.pop()
     if not words:
         return ""
-    last = words[-1]
-    if last.endswith("ies") and len(last) > 3:
-        words[-1] = f"{last[:-3]}y"
-    elif last.endswith("s") and not last.endswith("ss") and len(last) > 3:
-        words[-1] = last[:-1]
-    normalized = " ".join(words)
-    return _OBJECT_LABEL_ALIASES.get(normalized, normalized)
+    normalized = _OBJECT_LABEL_ALIASES.get(" ".join(words), " ".join(words))
+    return canonical_selector_category(normalized).replace("_", " ")
 
 
 def _object_labels_match(required: str, present: str) -> bool:

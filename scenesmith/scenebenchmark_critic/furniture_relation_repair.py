@@ -661,7 +661,10 @@ class _RepairHandlerContext:
 
 
 def _paired_surface_targets(context: _RepairHandlerContext) -> list[_RepairTarget]:
-    if not _is_paired_surface_facing_result(context.payload, context.result):
+    facing_dependency = _authorized_surface_facing_dependency(
+        context.payload, context.result
+    )
+    if facing_dependency is None:
         return []
     object_id = str(context.result.get("primary_object") or "")
     target_id = next(
@@ -686,13 +689,16 @@ def _paired_surface_targets(context: _RepairHandlerContext) -> list[_RepairTarge
     dy = target_center[1] - subject_center[1]
     if math.hypot(dx, dy) <= 1e-6:
         return []
+    target_yaw = math.degrees(math.atan2(-dx, dy))
+    if str(facing_dependency.get("subject_face") or "front") == "back":
+        target_yaw = (target_yaw + 180.0) % 360.0
     return [
         _RepairTarget(
             object_id,
             context.relation,
             context.check_id,
             subject_center,
-            math.degrees(math.atan2(-dx, dy)),
+            target_yaw,
         )
     ]
 
@@ -2148,12 +2154,12 @@ def _is_hard_furniture_contract_result(result: dict[str, Any]) -> bool:
     )
 
 
-def _is_paired_surface_facing_result(
+def _authorized_surface_facing_dependency(
     payload: dict[str, Any], result: dict[str, Any]
-) -> bool:
+) -> dict[str, Any] | None:
     """Require exact prompt-contract provenance before rotating a work surface."""
     if str(result.get("relation_type") or "") != _PAIRED_SURFACE_RELATION:
-        return False
+        return None
     check_id = str(result.get("check_id") or "")
     checks = (payload.get("case_pack") or {}).get("checks") or []
     check = next(
@@ -2165,16 +2171,33 @@ def _is_paired_surface_facing_result(
         None,
     )
     if not isinstance(check, dict) or check.get("check_source") != "intent_contract":
-        return False
+        return None
     evidence = check.get("evidence") or {}
     constraint = evidence.get("intent_constraint") or {}
-    return bool(
+    paired_surface = bool(
         evidence.get("paired_surface_facing")
         and str(constraint.get("relation") or "") == "paired_with"
         and str(constraint.get("strength") or "").lower() == "hard"
         and str(constraint.get("source") or "").lower()
         in {"explicit_prompt", "room_ontology"}
     )
+    prompt_facing = bool(
+        str(constraint.get("relation") or "") == "faces"
+        and str(constraint.get("strength") or "hard").lower() == "hard"
+        and str(constraint.get("source") or "").lower()
+        in {"explicit_prompt", "model_inferred", "room_ontology"}
+    )
+    if not (paired_surface or prompt_facing):
+        return None
+    dependency = evidence.get("dependency") or {}
+    return dict(dependency) if isinstance(dependency, dict) else {}
+
+
+def _is_paired_surface_facing_result(
+    payload: dict[str, Any], result: dict[str, Any]
+) -> bool:
+    """Return whether a hard prompt-authorized surface facing check is gated."""
+    return _authorized_surface_facing_dependency(payload, result) is not None
 
 
 _MEDIA_SUBJECT_NAMES = {

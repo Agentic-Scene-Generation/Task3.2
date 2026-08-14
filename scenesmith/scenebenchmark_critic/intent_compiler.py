@@ -21,7 +21,10 @@ from scenesmith.scenebenchmark_critic.intent_schema import (
     selector_categories_overlap,
     validate_intent_contract,
 )
-from scenesmith.scenebenchmark_critic.intent_contract import build_intent_contract
+from scenesmith.scenebenchmark_critic.intent_contract import (
+    _apply_task_spec_contract_metadata,
+    build_intent_contract,
+)
 from scenesmith.scenebenchmark_critic.relation_registry import (
     RELATION_REGISTRY,
     ROOM_RELATIVE_WALL_CATEGORIES,
@@ -194,6 +197,60 @@ def _normalize_side_distribution(payload: dict[str, Any]) -> dict[str, Any]:
             normalized.pop(field, None)
         constraints[index] = normalized
     return payload
+
+
+def _normalize_seating_support_relations(
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Interpret chair-at-desk cardinality as pairing, not top support."""
+    constraints = payload.get("constraints")
+    if not isinstance(constraints, list):
+        return payload
+    seating = {
+        "chair",
+        "office_chair",
+        "guest_chair",
+        "student_chair",
+        "teacher_chair",
+        "dining_chair",
+        "armchair",
+        "stool",
+        "bench",
+    }
+    work_surfaces = {
+        "desk",
+        "student_desk",
+        "teacher_desk",
+        "reception_desk",
+        "table",
+        "dining_table",
+        "conference_table",
+    }
+    normalized = dict(payload)
+    normalized_constraints: list[Any] = []
+    changed = False
+    for constraint in constraints:
+        if not isinstance(constraint, dict):
+            normalized_constraints.append(constraint)
+            continue
+        subject_category = canonical_selector_category(
+            (constraint.get("subjects") or {}).get("category")
+        )
+        target_category = canonical_selector_category(
+            (constraint.get("targets") or {}).get("category")
+        )
+        if (
+            str(constraint.get("relation") or "") == "one_per_support"
+            and subject_category in seating
+            and target_category in work_surfaces
+        ):
+            constraint = dict(constraint, relation="paired_with")
+            changed = True
+        normalized_constraints.append(constraint)
+    if not changed:
+        return payload
+    normalized["constraints"] = normalized_constraints
+    return normalized
 
 
 def _remove_redundant_edge_faces(payload: dict[str, Any]) -> dict[str, Any]:
@@ -1405,6 +1462,7 @@ class IntentCompiler:
                 )
                 payload = _attach_grounding_provenance(payload, grounding_catalog)
                 payload = _normalize_side_distribution(payload)
+                payload = _normalize_seating_support_relations(payload)
                 payload, normalized_centered_above = (
                     _normalize_centered_above_relations(payload, normalized_prompt)
                 )
@@ -1436,6 +1494,15 @@ class IntentCompiler:
                     allowed_inference_reasons,
                     normalized_task_spec,
                 )
+                # LLM-supplied relations and deterministic enrichment must
+                # share endpoint/count semantics derived from SceneTaskSpec.
+                # In particular, a place setting's cutlery can expand into a
+                # fork and knife, so its support constraint is a minimum
+                # coverage requirement rather than an exact physical count.
+                result["constraints"] = _apply_task_spec_contract_metadata(
+                    list(result.get("constraints") or []), normalized_task_spec
+                )
+                result = validate_intent_contract(result)
                 result["warnings"] = _merge_warnings(
                     failed_llm_warnings, result.get("warnings")
                 )

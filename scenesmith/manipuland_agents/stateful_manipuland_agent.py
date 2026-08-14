@@ -16,6 +16,7 @@ from typing import Any
 
 from agents import Agent, FunctionTool, Runner, RunResult, custom_span
 from agents.exceptions import MaxTurnsExceeded
+import numpy as np
 from omegaconf import DictConfig, OmegaConf
 from pydrake.all import RollPitchYaw
 
@@ -78,7 +79,10 @@ from scenesmith.scenebenchmark_critic.metrics.functional_dependency.seat_surface
     room_bounds_from_case_pack,
 )
 from scenesmith.scenebenchmark_critic.intent_contract import (
+    is_hard_constraint,
     intent_contract_constraints_for_scene,
+    selected_ids,
+    selector_match_count,
 )
 from scenesmith.utils.logging import BaseLogger
 
@@ -98,6 +102,25 @@ def _selector_category(selector: Any) -> str:
     else:
         value = getattr(selector, "category", "")
     return "_".join(str(value or "").strip().lower().split())
+
+
+def _normalized_asset_path(value: Any) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    return str(Path(text).resolve())
+
+
+def _serialized_translation(value: Any) -> np.ndarray | None:
+    if not isinstance(value, dict):
+        return None
+    translation = value.get("translation")
+    if not isinstance(translation, (list, tuple)) or len(translation) < 3:
+        return None
+    try:
+        return np.asarray(translation[:3], dtype=float)
+    except (TypeError, ValueError):
+        return None
 
 
 def _is_monitor_category(category: str) -> bool:
@@ -684,6 +707,65 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
             )
         return bool(configured)
 
+    def _evaluate_current_hard_state(self, physics_context: str | None = None) -> Any:
+        """Add exact prompt cardinality at the current support commit boundary."""
+        hard_state = super()._evaluate_current_hard_state(physics_context)
+        reasons = self._current_target_cardinality_failures()
+        if not reasons:
+            return hard_state
+        hard_state.hard_valid = False
+        hard_state.hard_reasons.extend(
+            reason for reason in reasons if reason not in hard_state.hard_reasons
+        )
+        return hard_state
+
+    def _current_target_cardinality_failures(self) -> list[str]:
+        """Return hard exact-count failures uniquely owned by this furniture target."""
+        furniture_id = str(getattr(self, "current_furniture_id", "") or "")
+        if not furniture_id or getattr(self, "scene", None) is None:
+            return []
+        case_pack = room_scene_to_case_pack(
+            self.scene, stage="manipuland_target_cardinality"
+        )
+        objects = [
+            item
+            for item in (case_pack.get("scene_geometry") or {}).get("objects") or []
+            if isinstance(item, dict) and item.get("id")
+        ]
+        failures: list[str] = []
+        for constraint in intent_contract_constraints_for_scene(self.scene):
+            if not isinstance(constraint, dict):
+                continue
+            subjects = constraint.get("subjects") or {}
+            targets = constraint.get("targets") or {}
+            if (
+                str(constraint.get("stage") or "") != "manipuland"
+                or not is_hard_constraint(constraint)
+                or str(subjects.get("quantifier") or "") != "exactly"
+                or not targets
+            ):
+                continue
+            target_ids = selected_ids(targets, objects)
+            # Multi-support contracts are committed only after all targets exist;
+            # enforcing them during the first target would reject valid partial work.
+            if target_ids != [furniture_id]:
+                continue
+            try:
+                expected = int(subjects.get("count") or 0)
+            except (TypeError, ValueError):
+                continue
+            if expected <= 0:
+                continue
+            observed = selector_match_count(subjects, objects)
+            if observed != expected:
+                category = _selector_category(subjects) or "object"
+                failures.append(
+                    "prompt-required exact count for "
+                    f"{category} on {furniture_id}: expected {expected}, "
+                    f"found {observed}"
+                )
+        return failures
+
     def _apply_per_furniture_postprocessing(self, furniture_id: UniqueID) -> bool:
         """Settle one target's manipulands before its final scored critique."""
         postprocessing_cfg = self.cfg.per_furniture_postprocessing
@@ -764,6 +846,95 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
         """Run strict collision validation for this furniture's manipulands."""
         return not self._dining_collisions(furniture_id)
 
+    def _remove_duplicate_composite_members(self, furniture_id: UniqueID) -> list[str]:
+        """Remove separately placed copies already represented by a composite."""
+        furniture = self.scene.get_object(furniture_id)
+        if furniture is None:
+            return []
+        surface_ids = {
+            str(surface.surface_id) for surface in furniture.support_surfaces
+        }
+        if not surface_ids:
+            return []
+
+        composites = [
+            obj
+            for obj in self.scene.objects.values()
+            if obj.object_type == ObjectType.MANIPULAND
+            and getattr(obj, "placement_info", None) is not None
+            and str(obj.placement_info.parent_surface_id) in surface_ids
+            and str((obj.metadata or {}).get("composite_type") or "")
+            in {"filled_container", "stack", "pile"}
+        ]
+        removed: list[str] = []
+        claimed_ids: set[UniqueID] = set()
+        for composite in composites:
+            metadata = composite.metadata or {}
+            members: list[dict[str, Any]] = []
+            if metadata.get("composite_type") == "filled_container":
+                container = metadata.get("container_asset")
+                if isinstance(container, dict):
+                    members.append(container)
+                members.extend(
+                    member
+                    for member in metadata.get("fill_assets") or []
+                    if isinstance(member, dict)
+                )
+            else:
+                members.extend(
+                    member
+                    for member in metadata.get("member_assets") or []
+                    if isinstance(member, dict)
+                )
+
+            for member in members:
+                member_sdf = _normalized_asset_path(member.get("sdf_path"))
+                member_translation = _serialized_translation(member.get("transform"))
+                if member_sdf is None or member_translation is None:
+                    continue
+                candidates: list[tuple[float, Any]] = []
+                for obj in self.scene.objects.values():
+                    if (
+                        obj.object_id == composite.object_id
+                        or obj.object_id in claimed_ids
+                        or obj.object_type != ObjectType.MANIPULAND
+                        or (obj.metadata or {}).get("composite_type")
+                        or getattr(obj, "immutable", False)
+                        or _normalized_asset_path(obj.sdf_path) != member_sdf
+                    ):
+                        continue
+                    placement = getattr(obj, "placement_info", None)
+                    if (
+                        placement is None
+                        or str(placement.parent_surface_id) not in surface_ids
+                    ):
+                        continue
+                    distance = float(
+                        np.linalg.norm(
+                            np.asarray(obj.transform.translation(), dtype=float)
+                            - member_translation
+                        )
+                    )
+                    if distance <= 0.03:
+                        candidates.append((distance, obj))
+                if not candidates:
+                    continue
+                _, duplicate = min(candidates, key=lambda item: item[0])
+                claimed_ids.add(duplicate.object_id)
+                if self.scene.remove_object(duplicate.object_id):
+                    removed.append(str(duplicate.object_id))
+
+        if removed:
+            console_logger.info(
+                "Removed %d duplicate composite member instance(s) from %s: %s",
+                len(removed),
+                furniture_id,
+                ", ".join(sorted(removed)),
+            )
+            self.rendering_manager.clear_cache()
+            self._reset_critic_candidate_cache()
+        return removed
+
     def _dining_collisions(self, furniture_id: UniqueID) -> list[Any]:
         """Return hard collisions scoped to one furniture target."""
         physics_cfg = self.cfg.physics_validation
@@ -797,6 +968,11 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
             str(companion_id): row
             for row in assignments
             for companion_id in row.get("companion_ids") or []
+        }
+        anchor_rows = {
+            str(row.get("anchor_id") or ""): row
+            for row in assignments
+            if row.get("anchor_id")
         }
         if not companion_rows:
             return self._dining_physics_valid(furniture_id)
@@ -843,6 +1019,106 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
                 for collision in collisions
                 for object_id in (collision.object_a_id, collision.object_b_id)
             }
+            accepted = False
+
+            # Move a complete place setting outward before disturbing its
+            # internal plate/cutlery/glass alignment. This handles centerpiece
+            # collisions that cannot be solved by moving companions alone.
+            for anchor_id, row in sorted(anchor_rows.items()):
+                group_ids = {
+                    anchor_id,
+                    *(str(item) for item in row.get("companion_ids") or []),
+                }
+                if not (group_ids & involved_ids):
+                    continue
+                anchor_geometry = geometry_by_id.get(anchor_id)
+                anchor_center = _geometry_center_xy(anchor_geometry)
+                if anchor_center is None:
+                    anchor_object = self.scene.get_object(UniqueID(anchor_id))
+                    anchor_center = self.manipuland_tools._object_world_xy(
+                        anchor_object
+                    )
+                if anchor_center is None:
+                    continue
+                radial = np.asarray(anchor_center, dtype=float) - np.asarray(
+                    table_center, dtype=float
+                )
+                norm = float(np.linalg.norm(radial))
+                if norm <= 1e-6:
+                    continue
+                radial /= norm
+                for magnitude in (0.015, 0.03, 0.06, 0.10, 0.15):
+                    candidate_snapshot = copy.deepcopy(self.scene.to_state_dict())
+                    moved = True
+                    for group_id in sorted(group_ids):
+                        scene_object = self.scene.get_object(UniqueID(group_id))
+                        object_xy = self.manipuland_tools._object_world_xy(scene_object)
+                        placement = getattr(scene_object, "placement_info", None)
+                        if (
+                            scene_object is None
+                            or object_xy is None
+                            or placement is None
+                        ):
+                            moved = False
+                            break
+                        selected = (
+                            self.manipuland_tools._select_dining_surface_position(
+                                surface_map=surface_map,
+                                scene_object=scene_object,
+                                target_xy=(
+                                    object_xy[0] + magnitude * float(radial[0]),
+                                    object_xy[1] + magnitude * float(radial[1]),
+                                ),
+                                preferred_surface_id=str(placement.parent_surface_id),
+                            )
+                        )
+                        if selected is None:
+                            moved = False
+                            break
+                        surface, position = selected
+                        if not self.manipuland_tools._move_dining_object(
+                            scene_object, surface, position
+                        ).get("success"):
+                            moved = False
+                            break
+                    candidate_alignment, candidate_completeness = (
+                        self._dining_contract_results(furniture_id)
+                    )
+                    candidate_collisions = (
+                        self._dining_collisions(furniture_id) if moved else []
+                    )
+                    valid = bool(
+                        moved
+                        and candidate_alignment is not None
+                        and candidate_alignment.get("label") == "pass"
+                        and candidate_completeness is not None
+                        and candidate_completeness.get("label") == "pass"
+                        and self._dining_support_bindings_valid(
+                            furniture_id, candidate_alignment
+                        )
+                        and self._dining_collision_score(candidate_collisions)
+                        < current_score
+                    )
+                    if valid:
+                        collisions = candidate_collisions
+                        accepted = True
+                        console_logger.info(
+                            "Dining collision repair translated setting %s "
+                            "outward %.1fcm (%s -> %s)",
+                            anchor_id,
+                            magnitude * 100.0,
+                            current_score,
+                            self._dining_collision_score(collisions),
+                        )
+                        break
+                    self.scene.restore_from_state_dict(candidate_snapshot)
+                if accepted:
+                    break
+            if accepted:
+                if not collisions:
+                    break
+                continue
+
             candidate_ids = sorted(
                 involved_ids & companion_rows.keys(),
                 key=lambda object_id: (object_id in moved_ids, object_id),
@@ -850,7 +1126,6 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
             if not candidate_ids:
                 break
 
-            accepted = False
             penetration_by_id = {
                 object_id: max(
                     (
@@ -1250,6 +1525,7 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
     def _enforce_dining_place_setting_alignment(self, furniture_id: UniqueID) -> bool:
         """Repair a failed dining place-setting contract before final scoring."""
         table_id = str(furniture_id)
+        removed_duplicates = self._remove_duplicate_composite_members(furniture_id)
 
         def current_result() -> dict[str, Any] | None:
             case_pack = room_scene_to_case_pack(
@@ -1266,7 +1542,7 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
 
         before = current_result()
         if before is None or before.get("label") != "fail":
-            return False
+            return bool(removed_duplicates)
 
         console_logger.info(
             "Applying deterministic dining place-setting alignment for %s",
@@ -1592,66 +1868,101 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
                     continue
 
                 target_scene_snapshot = copy.deepcopy(self.scene.to_state_dict())
-                try:
-                    # Set up per-furniture context.
-                    self._setup_furniture_context(furniture_selection)
+                retry_budget = (
+                    self._get_required_target_retry_attempts()
+                    if furniture_selection.is_prompt_required
+                    else 0
+                )
+                last_error: Exception | None = None
+                retry_guidance = ""
+                for target_attempt in range(1, retry_budget + 2):
+                    if target_attempt > 1:
+                        self.scene.restore_from_state_dict(target_scene_snapshot)
+                        console_logger.warning(
+                            "Retrying prompt-required manipuland target %s "
+                            "(%d/%d) from pre-target snapshot",
+                            furniture_id,
+                            target_attempt,
+                            retry_budget + 1,
+                        )
+                    attempt_selection = copy.copy(furniture_selection)
+                    if retry_guidance:
+                        attempt_selection.prompt_constraints = (
+                            f"{furniture_selection.prompt_constraints}\n"
+                            "RETRY DIAGNOSTIC: The previous candidate was rolled "
+                            f"back. {retry_guidance} Choose smaller-footprint assets "
+                            "or a different collision-free arrangement while "
+                            "preserving every required count and relation."
+                        )
+                    try:
+                        self._setup_furniture_context(attempt_selection)
+                        self.manipuland_context_image_path = (
+                            self._generate_manipuland_context_image()
+                        )
+                        self._initialize_checkpoint_state()
 
-                    # Generate context image for manipuland placement (if enabled).
-                    self.manipuland_context_image_path = (
-                        self._generate_manipuland_context_image()
-                    )
-
-                    # Initialize checkpoint state.
-                    self._initialize_checkpoint_state()
-
-                    # Get furniture description for agent prompts.
-                    furniture_obj = scene.get_object(furniture_id)
-                    furniture_description = (
-                        furniture_obj.description if furniture_obj else "furniture"
-                    )
-                    scene_prompt = getattr(
-                        self.scene,
-                        "scene_expert_original_description",
-                        self.scene.text_description,
-                    )
-                    self._placement_order_reference = (
-                        build_manipuland_placement_order_reference(
-                            cfg=self.cfg,
-                            scene_prompt=scene_prompt,
-                            scene_dir=self.scene.scene_dir,
-                            vlm_service=self.vlm_service,
-                            model=self.cfg.openai.model,
+                        furniture_obj = scene.get_object(furniture_id)
+                        furniture_description = (
+                            furniture_obj.description if furniture_obj else "furniture"
+                        )
+                        scene_prompt = getattr(
+                            self.scene,
+                            "scene_expert_original_description",
+                            self.scene.text_description,
+                        )
+                        self._placement_order_reference = (
+                            build_manipuland_placement_order_reference(
+                                cfg=self.cfg,
+                                scene_prompt=scene_prompt,
+                                scene_dir=self.scene.scene_dir,
+                                vlm_service=self.vlm_service,
+                                model=self.cfg.openai.model,
+                                furniture_id=furniture_id,
+                                furniture_description=furniture_description,
+                                suggested_items=attempt_selection.suggested_items,
+                                prompt_constraints=attempt_selection.prompt_constraints,
+                                style_notes=attempt_selection.style_notes,
+                                support_surfaces={
+                                    str(surface.surface_id): surface
+                                    for surface in surfaces
+                                },
+                            )
+                        )
+                        self._setup_furniture_agents(
                             furniture_id=furniture_id,
                             furniture_description=furniture_description,
-                            suggested_items=furniture_selection.suggested_items,
-                            prompt_constraints=furniture_selection.prompt_constraints,
-                            style_notes=furniture_selection.style_notes,
-                            support_surfaces={
-                                str(surface.surface_id): surface for surface in surfaces
-                            },
                         )
-                    )
+                        await self._run_furniture_workflow(furniture_id)
+                        last_error = None
+                        break
+                    except Exception as error:
+                        last_error = error
+                        retry_guidance = self._target_failure_diagnostic(
+                            furniture_id, error
+                        )
+                        self.scene.restore_from_state_dict(target_scene_snapshot)
+                        self.rendering_manager.clear_cache()
+                        self._reset_critic_candidate_cache()
+                        console_logger.error(
+                            "Manipuland target attempt failed for %s "
+                            "(attempt %d/%d); restored pre-target scene: %s",
+                            furniture_id,
+                            target_attempt,
+                            retry_budget + 1,
+                            retry_guidance,
+                            exc_info=True,
+                        )
 
-                    # Create agents and sessions.
-                    self._setup_furniture_agents(
-                        furniture_id=furniture_id,
-                        furniture_description=furniture_description,
-                    )
-
-                    # Run multi-agent workflow.
-                    await self._run_furniture_workflow(furniture_id)
-
-                except Exception as e:
-                    self.scene.restore_from_state_dict(target_scene_snapshot)
-                    self.rendering_manager.clear_cache()
-                    self._reset_critic_candidate_cache()
-                    console_logger.error(
-                        "Error populating furniture %s; restored pre-target scene: %s",
-                        furniture_id,
-                        e,
-                        exc_info=True,
-                    )
-                    # Continue to next furniture piece.
+                if last_error is not None:
+                    if (
+                        furniture_selection.is_prompt_required
+                        and self._final_hard_validation_enabled()
+                    ):
+                        raise RuntimeError(
+                            "Prompt-required manipuland target "
+                            f"{furniture_id} failed after {retry_budget + 1} "
+                            f"attempt(s): {retry_guidance}"
+                        ) from last_error
                     continue
 
         console_logger.info("Manipuland placement complete")
@@ -1665,6 +1976,36 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
             return max(0, int(value or 0))
         except Exception:
             return 0
+
+    def _get_required_target_retry_attempts(self) -> int:
+        try:
+            value = OmegaConf.select(
+                self.cfg, "required_target_retry_attempts", default=1
+            )
+        except Exception:
+            value = getattr(self.cfg, "required_target_retry_attempts", 1)
+        try:
+            return max(0, int(value or 0))
+        except Exception:
+            return 1
+
+    def _target_failure_diagnostic(
+        self, furniture_id: UniqueID, error: Exception
+    ) -> str:
+        """Return compact deterministic feedback for a clean target retry."""
+        details = [str(error).strip() or type(error).__name__]
+        try:
+            collisions = self._dining_collisions(furniture_id)
+        except Exception:
+            collisions = []
+        if collisions:
+            pairs = [
+                f"{item.object_a_id}<->{item.object_b_id} "
+                f"({float(item.penetration_depth):.3f}m)"
+                for item in collisions[:8]
+            ]
+            details.append("remaining collisions: " + ", ".join(pairs))
+        return "; ".join(details)
 
     def _get_target_furniture_ids(self) -> set[str]:
         """Return an optional exact-ID allowlist for checkpoint replays."""
@@ -1803,14 +2144,17 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
 
         recovered = list(furniture_data)
         for obligation in obligations:
-            selected_ids = {
-                selection.furniture_id
-                for selection in recovered
-                if classify_manipuland_furniture(
-                    scene.get_object(selection.furniture_id), selection.furniture_id
-                )
-                == obligation.category
-            }
+            selected_ids: set[UniqueID] = set()
+            for selection in recovered:
+                if (
+                    classify_manipuland_furniture(
+                        scene.get_object(selection.furniture_id),
+                        selection.furniture_id,
+                    )
+                    == obligation.category
+                ):
+                    selection.is_prompt_required = True
+                    selected_ids.add(selection.furniture_id)
             missing = max(0, obligation.target_count - len(selected_ids))
             if missing <= 0:
                 continue
@@ -1832,6 +2176,7 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
                             "explicit small-object obligations in the scene prompt."
                         ),
                         style_notes="Follow the requested quantity and distribution exactly.",
+                        is_prompt_required=True,
                     )
                 )
                 console_logger.warning(

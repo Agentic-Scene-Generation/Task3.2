@@ -360,6 +360,10 @@ target_furniture_ids: []
 # hard failures remain after its projection/simulation post-processing.
 fail_stage_on_unresolved_hard_constraints: true
 
+# Retry a prompt-required support target from its clean pre-target snapshot.
+# The retry receives the prior deterministic failure as placement guidance.
+required_target_retry_attempts: 1
+
 # Critic fast path: deterministic hard checks run before expensive VLM scoring.
 # Hard physics failures get a synthetic low score and repair hint, so the
 # planner can fix them without wasting a full VLM score_scene call.

@@ -54,6 +54,10 @@ HARD_SOURCES = frozenset(
         "deterministic_fallback",
     }
 )
+# A SceneTaskSpec records one inventory entry per required place setting, but
+# these labels can expand into several physical manipulands.  Their count is a
+# coverage minimum, not an upper bound on independently generated instances.
+_NON_ATOMIC_INVENTORY_CATEGORIES = frozenset({"cutlery", "table_setting"})
 _WALL_TARGET_RELATIONS = frozenset({"against_wall", "centered_on_wall"})
 _WALL_TARGET_CATEGORIES = frozenset({"wall", *ROOM_RELATIVE_WALL_CATEGORIES})
 _DIRECT_FD_EVALUATORS = frozenset(
@@ -1983,11 +1987,30 @@ def _explicit_prompt_constraints(prompt: str, lowered: str) -> list[dict[str, An
     if re.search(r"\b(?:student\s+desks?|desks?)\b", lowered) and re.search(
         r"\beach\s+with\s+(?:a\s+)?chair\b|\bstudent\s+chairs?\b", lowered
     ):
+        desk_count = required_counts.get("student_desk", 0)
+        chair_count = max(
+            required_counts.get("student_chair", 0),
+            required_counts.get("chair", 0),
+        )
+        paired_count = desk_count if desk_count == chair_count else 0
+        chair_selector: dict[str, Any] = {
+            "category": "student_chair",
+            "role": "student",
+            "quantifier": "all",
+        }
+        desk_selector: dict[str, Any] = {
+            "category": "student_desk",
+            "role": "student",
+            "quantifier": "all",
+        }
+        if paired_count > 0:
+            chair_selector["count"] = paired_count
+            desk_selector["count"] = paired_count
         constraints.append(
             _constraint(
                 "paired_with",
-                {"category": "student_chair", "role": "student", "quantifier": "all"},
-                {"category": "student_desk", "role": "student", "quantifier": "all"},
+                chair_selector,
+                desk_selector,
                 source="explicit_prompt",
                 evidence_span=_first_sentence_with(lowered, "student"),
             )
@@ -2702,7 +2725,15 @@ def _task_spec_inventory_constraints(task_spec: Any | None) -> list[dict[str, An
     return [
         _constraint(
             "required_count",
-            {"category": category, "count": count, "quantifier": "exactly"},
+            {
+                "category": category,
+                "count": count,
+                "quantifier": (
+                    "at_least"
+                    if category in _NON_ATOMIC_INVENTORY_CATEGORIES
+                    else "exactly"
+                ),
+            },
             None,
             source="task_compiler_inventory",
             evidence_span="",
@@ -3039,6 +3070,13 @@ def _normalize_external_constraint(raw: dict[str, Any]) -> dict[str, Any] | None
             targets = {"category": target_text, "quantifier": "all"}
     if subjects is None:
         return None
+    if relation == "one_per_support" and _is_seating_surface_pair(subjects, targets):
+        # A chair is paired *at* a desk, not supported by the desk's top
+        # surface.  Compilers occasionally map "each desk with a chair" to
+        # one_per_support, whose geometry evaluator correctly expects an
+        # actual parent support surface.  Preserve the one-to-one intent while
+        # selecting the seating/work-surface evaluator instead.
+        relation = "paired_with"
     if (
         relation in _WALL_TARGET_RELATIONS
         and _normalize_selector_category((targets or {}).get("category"))
@@ -3078,6 +3116,32 @@ def _normalize_external_constraint(raw: dict[str, Any]) -> dict[str, Any] | None
         confidence=_bounded_float(raw.get("confidence"), default=0.7),
         **edge_fields,
     )
+
+
+def _is_seating_surface_pair(
+    subjects: dict[str, Any], targets: dict[str, Any] | None
+) -> bool:
+    subject_category = _normalize_selector_category(subjects.get("category"))
+    target_category = _normalize_selector_category((targets or {}).get("category"))
+    return subject_category in {
+        "chair",
+        "office_chair",
+        "guest_chair",
+        "student_chair",
+        "teacher_chair",
+        "dining_chair",
+        "armchair",
+        "stool",
+        "bench",
+    } and target_category in {
+        "desk",
+        "student_desk",
+        "teacher_desk",
+        "reception_desk",
+        "table",
+        "dining_table",
+        "conference_table",
+    }
 
 
 def _normalize_selector(value: Any) -> dict[str, Any] | None:
@@ -3485,6 +3549,48 @@ def _selector_matches_object(category: str, role: str, obj: dict[str, Any]) -> b
         for value in (semantic_name.replace("_", " "), base_category, identity)
         if value
     )
+    # A generated floral arrangement can be a single physical manipuland that
+    # already includes its container.  Preserve that composite asset as one
+    # object, while allowing it to satisfy both prompt endpoints when the
+    # semantic identity explicitly establishes both parts.  A bare flower
+    # arrangement must never stand in for a vase.
+    is_floral_arrangement = any(
+        phrase in identity for phrase in ("flower arrangement", "floral arrangement")
+    )
+    composite_type = _normalize_selector_category(metadata.get("composite_type"))
+    container_asset = metadata.get("container_asset")
+    fill_assets = metadata.get("fill_assets")
+    container_identity = (
+        " ".join(
+            str(container_asset.get(key) or "").lower().replace("_", " ")
+            for key in ("name", "description", "semantic_name")
+        )
+        if isinstance(container_asset, dict)
+        else ""
+    )
+    fill_identity = (
+        " ".join(
+            " ".join(
+                str(fill.get(key) or "").lower().replace("_", " ")
+                for key in ("name", "description", "semantic_name")
+            )
+            for fill in fill_assets
+            if isinstance(fill, dict)
+        )
+        if isinstance(fill_assets, list)
+        else ""
+    )
+    composite_identity = " ".join(
+        value for value in (identity, container_identity, fill_identity) if value
+    )
+    is_filled_floral_vase = (
+        composite_type in {"filled_container", "filled_vase"}
+        and "vase" in composite_identity
+        and re.search(r"\b(?:flower|flowers|floral)\b", composite_identity) is not None
+    )
+    is_floral_vase_composite = (
+        is_floral_arrangement and "vase" in identity
+    ) or is_filled_floral_vase
     category_matches = {
         "instructional_surface": any(
             token in identity
@@ -3557,7 +3663,8 @@ def _selector_matches_object(category: str, role: str, obj: dict[str, Any]) -> b
         or semantic_name.endswith("_rug"),
         "vase": base_category in {"vase", "vase_flowers"}
         or semantic_name in {"vase", "vase_flowers"}
-        or semantic_name.endswith("_vase"),
+        or semantic_name.endswith("_vase")
+        or is_floral_vase_composite,
         "coaster": base_category == "coaster" or semantic_name.endswith("_coaster"),
         "plate": base_category == "plate" or semantic_name.endswith("_plate"),
         "cutlery": base_category
@@ -3567,7 +3674,8 @@ def _selector_matches_object(category: str, role: str, obj: dict[str, Any]) -> b
         "glass": base_category in {"glass", "wine_glass", "drinking_glass", "tumbler"}
         or semantic_name in {"glass", "wine_glass", "drinking_glass", "tumbler"},
         "flower": base_category in {"flower", "flowers"}
-        or semantic_name in {"flower", "flowers"},
+        or semantic_name in {"flower", "flowers"}
+        or is_floral_vase_composite,
         "table": base_category
         in {
             "table",
@@ -3674,11 +3782,29 @@ def _fd_relation_for_constraint(constraint: dict[str, Any]) -> str | None:
 def _relation_threshold_dependency(
     constraint: dict[str, Any],
 ) -> dict[str, Any]:
+    relation = str(constraint.get("relation") or "")
     thresholds = relation_spec(str(constraint.get("relation") or "")).thresholds
     max_gap = thresholds.get("max_gap_m")
-    if max_gap is None:
-        return {}
-    return {"max_distance_m": float(max_gap)}
+    dependency = {"max_distance_m": float(max_gap)} if max_gap is not None else {}
+    if relation == "faces":
+        # Prompt-level facing is directional.  Pairing/near constraints own
+        # interaction distance, while a classroom desk may legitimately face
+        # a board several metres away.
+        dependency["distance_required"] = False
+        subject_category = _normalize_selector_category(
+            (constraint.get("subjects") or {}).get("category")
+        )
+        if subject_category in {
+            "desk",
+            "student_desk",
+            "teacher_desk",
+            "reception_desk",
+        }:
+            # A desk's physical front faces its user.  "The desk faces the
+            # board" describes the seated user's viewing direction, which is
+            # the desk's back axis.
+            dependency["subject_face"] = "back"
+    return dependency
 
 
 def _paired_seating_checks(
