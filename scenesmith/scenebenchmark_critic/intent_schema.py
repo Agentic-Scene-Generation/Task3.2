@@ -15,12 +15,13 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from scenesmith.scenebenchmark_critic.object_taxonomy import (
+    canonical_object_category,
+    execution_owner,
+)
 from scenesmith.scenebenchmark_critic.relation_registry import (
-    CEILING_MOUNTED_CATEGORIES,
-    MANIPULAND_CATEGORIES,
     RELATION_REGISTRY,
     STAGE_ORDER,
-    WALL_MOUNTED_CATEGORIES,
     relation_spec,
     relations_are_exclusive,
 )
@@ -55,86 +56,9 @@ _GENERIC_SELECTOR_FAMILIES = {
 }
 
 
-_SELECTOR_CATEGORY_ALIASES = {
-    "entrance_route": "entrance",
-    "entrance_path": "entrance",
-    "entry_route": "entrance",
-    "entry_path": "entrance",
-    "vanity": "dressing_table",
-    "vanity_table": "dressing_table",
-    "makeup_table": "dressing_table",
-    "computer_display": "monitor",
-    "computer_monitor": "monitor",
-    "water_cooler": "water_dispenser",
-    "drinking_water_dispenser": "water_dispenser",
-    "storage_cupboard": "storage_cabinet",
-    "dining_chairs": "dining_chair",
-    "large_plants": "large_plant",
-    "floor_plant": "plant",
-    "floor_plants": "plant",
-    "large_floor_plant": "plant",
-    "large_floor_plants": "plant",
-    "two_seater_sofas": "two_seater_sofa",
-    "centerpiece_vase": "vase",
-    "centerpiece_vases": "vase",
-    "vases": "vase",
-    "coasters": "coaster",
-    "plates": "plate",
-    "glasses": "glass",
-    "wine_glasses": "glass",
-    "drinking_glasses": "glass",
-    "cutleries": "cutlery",
-    "flatware": "cutlery",
-    "silverware": "cutlery",
-    "fork": "cutlery",
-    "forks": "cutlery",
-    "knife": "cutlery",
-    "knives": "cutlery",
-    "spoon": "cutlery",
-    "spoons": "cutlery",
-    "wine_glass": "glass",
-    "drinking_glass": "glass",
-    "tumbler": "glass",
-    "table_settings": "table_setting",
-    "place_settings": "table_setting",
-    "place_setting": "table_setting",
-    "flowers": "flower",
-    # Keep the independent critic aligned with the task compiler's wall-stage
-    # inventory normalization.  These are alternate prompt names for the same
-    # mounted instructional surface, not floor furniture.
-    "chalkboard": "instructional_surface",
-    "blackboard": "instructional_surface",
-    "whiteboard": "instructional_surface",
-    "projection_screen": "instructional_surface",
-    "projector_screen": "instructional_surface",
-    "teaching_screen": "instructional_surface",
-    "presentation_screen": "instructional_surface",
-}
-
-
-def _singularize_selector_category(normalized: str) -> str:
-    """Apply conservative English plural normalization to the final noun."""
-    if normalized.endswith("ies") and len(normalized) > 3:
-        return f"{normalized[:-3]}y"
-    if normalized.endswith(("ches", "shes", "xes", "zes", "sses")):
-        return normalized[:-2]
-    if normalized.endswith("s") and not normalized.endswith(("ss", "us", "is")):
-        return normalized[:-1]
-    return normalized
-
-
 def canonical_selector_category(value: Any) -> str:
     """Normalize compiler selector spellings to stable semantic categories."""
-    normalized = str(value or "").strip().lower()
-    # Possessive role labels identify the same category ("teacher's desk" and
-    # "teacher desk").  Keep compiler selectors aligned with asset semantic
-    # names so a hard relation can bind the retrieved object.
-    normalized = re.sub(r"(?<=[a-z])['\u2019]s\b", "", normalized)
-    normalized = re.sub(r"[^a-z0-9]+", "_", normalized).strip("_")
-    aliased = _SELECTOR_CATEGORY_ALIASES.get(normalized)
-    if aliased is not None:
-        return aliased
-    return _singularize_selector_category(normalized)
+    return canonical_object_category(value)
 
 
 def selector_categories_overlap(first: str, second: str) -> bool:
@@ -514,27 +438,20 @@ def validate_intent_contract(payload: dict[str, Any]) -> dict[str, Any]:
         stage = (
             stage if stage in STAGE_ORDER else relation_spec(relation).earliest_stage
         )
-        categories = {
-            str((constraint.get("subjects") or {}).get("category") or ""),
-            str((constraint.get("targets") or {}).get("category") or ""),
-            str((constraint.get("targets") or {}).get("secondary_category") or ""),
-        }
+        subjects = constraint.get("subjects") or {}
+        targets = constraint.get("targets") or {}
         endpoint_stages = [
-            (
-                "wall_mounted"
-                if category in WALL_MOUNTED_CATEGORIES
-                else (
-                    "ceiling_mounted"
-                    if category in CEILING_MOUNTED_CATEGORIES
-                    else (
-                        "manipuland"
-                        if category in MANIPULAND_CATEGORIES
-                        or category == "table_setting"
-                        else ""
-                    )
-                )
-            )
-            for category in categories
+            execution_owner(
+                subjects.get("category"), relation=relation, endpoint="subject"
+            ),
+            execution_owner(
+                targets.get("category"), relation=relation, endpoint="target"
+            ),
+            execution_owner(
+                targets.get("secondary_category"),
+                relation=relation,
+                endpoint="target",
+            ),
         ]
         constraint["stage"] = max(
             [stage, *(value for value in endpoint_stages if value)],

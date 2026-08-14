@@ -17,7 +17,10 @@ from pathlib import Path
 
 import yaml
 
-from scenesmith.scenebenchmark_critic.intent_schema import canonical_selector_category
+from scenesmith.scenebenchmark_critic.object_taxonomy import (
+    canonical_object_category,
+    categories_are_equivalent,
+)
 from scenesmith.scene_expert.schemas import (
     FullVerifyReport,
     SceneTaskSpec,
@@ -365,17 +368,6 @@ def _check_required_objects(
     return issues
 
 
-_OBJECT_LABEL_ALIASES = {
-    "computer monitor": "monitor",
-    "computer display": "monitor",
-    "display monitor": "monitor",
-    "tv": "television",
-    "tv display": "television",
-    "television display": "television",
-    "drinking glass": "glass",
-    "water glass": "glass",
-}
-
 # These are prompt-level aggregate concepts, not independently instantiated
 # scene assets. Their concrete components remain required and are consumed
 # above, while SceneBenchmark validates their cardinality and relationship.
@@ -393,8 +385,7 @@ def _normalize_object_label(label: str) -> str:
         words.pop()
     if not words:
         return ""
-    normalized = _OBJECT_LABEL_ALIASES.get(" ".join(words), " ".join(words))
-    return canonical_selector_category(normalized).replace("_", " ")
+    return canonical_object_category(" ".join(words)).replace("_", " ")
 
 
 def _object_labels_match(required: str, present: str) -> bool:
@@ -402,7 +393,7 @@ def _object_labels_match(required: str, present: str) -> bool:
     present_label = _normalize_object_label(present)
     if not required_label or not present_label:
         return False
-    if required_label == present_label:
+    if categories_are_equivalent(required_label, present_label):
         return True
     return (
         f" {required_label} " in f" {present_label} "

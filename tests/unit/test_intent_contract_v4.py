@@ -394,7 +394,7 @@ def test_schema_derives_manipuland_stage_for_common_small_objects() -> None:
     assert [constraint["stage"] for constraint in result["constraints"]] == [
         "manipuland",
         "manipuland",
-        "manipuland",
+        "furniture",
         "manipuland",
     ]
 
@@ -2637,11 +2637,12 @@ def test_deterministic_contract_recognizes_floor_near_manipulands() -> None:
         for row in contract["constraints"]
     )
     validated = validate_intent_contract(contract)
-    assert all(
-        row["stage"] == "manipuland"
+    stages = {
+        row["subjects"]["category"]: row["stage"]
         for row in validated["constraints"]
         if row["subjects"]["category"] in {"alarm_clock", "wastebasket"}
-    )
+    }
+    assert stages == {"alarm_clock": "manipuland", "wastebasket": "furniture"}
 
 
 def test_deterministic_contract_recognizes_room_center_contains_wording() -> None:

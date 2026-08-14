@@ -51,12 +51,12 @@ from scenesmith.scene_expert.trace_logger import TraceLogger, collect_code_prove
 from scenesmith.scene_expert.verifier import FullVerifier, StageVerifier
 from scenesmith.scenebenchmark_critic.config import critic_config_from_any
 from scenesmith.scenebenchmark_critic.intent_compiler import IntentCompiler
-from scenesmith.scenebenchmark_critic.intent_schema import canonical_selector_category
-from scenesmith.scenebenchmark_critic.relation_registry import (
-    CEILING_MOUNTED_CATEGORIES,
-    MANIPULAND_CATEGORIES,
-    WALL_MOUNTED_CATEGORIES,
+from scenesmith.scenebenchmark_critic.object_taxonomy import (
+    canonical_object_category,
+    categories_are_equivalent,
+    execution_owner,
 )
+from scenesmith.scenebenchmark_critic.relation_registry import STAGE_ORDER
 
 console_logger = logging.getLogger(__name__)
 
@@ -441,29 +441,15 @@ _NON_OBJECT_INVENTORY_CATEGORIES = frozenset(
         "entry",
     }
 )
-_INVENTORY_CATEGORY_ALIASES = {
-    "computer_monitor": "monitor",
-    "computer_display": "monitor",
-    "display_monitor": "monitor",
-    "chalkboard": "instructional_surface",
-    "blackboard": "instructional_surface",
-    "whiteboard": "instructional_surface",
-    "projection_screen": "instructional_surface",
-    "projector_screen": "instructional_surface",
-    "teaching_screen": "instructional_surface",
-    "presentation_screen": "instructional_surface",
-    "wastebasket": "trash_can",
-}
 _GENERIC_INVENTORY_CATEGORIES = frozenset({"chair", "desk", "table"})
 
 
 def _inventory_category(value: Any) -> str:
-    category = canonical_selector_category(value)
-    return _INVENTORY_CATEGORY_ALIASES.get(category, category)
+    return canonical_object_category(value)
 
 
 def _categories_match_inventory(first: str, second: str) -> bool:
-    if first == second:
+    if categories_are_equivalent(first, second):
         return True
     if first in _GENERIC_INVENTORY_CATEGORIES:
         return second.endswith(f"_{first}")
@@ -472,18 +458,8 @@ def _categories_match_inventory(first: str, second: str) -> bool:
     return False
 
 
-def _intrinsic_contract_stage(category: str) -> str:
-    if category in MANIPULAND_CATEGORIES:
-        return "manipuland"
-    if category in WALL_MOUNTED_CATEGORIES:
-        return "wall_mounted"
-    if category in CEILING_MOUNTED_CATEGORIES:
-        return "ceiling_mounted"
-    return "furniture"
-
-
 def _contract_inventory_ownership(
-    contract: dict[str, Any],
+    contract: dict[str, Any], existing_owners: dict[str, str]
 ) -> dict[str, tuple[str, int]]:
     """Return contract-owned inventory categories and their generation stages."""
     ownership: dict[str, tuple[str, int]] = {}
@@ -503,24 +479,22 @@ def _contract_inventory_ownership(
             ownership[category] = (stage, count)
 
     constraints = contract.get("constraints") if isinstance(contract, dict) else []
-    intrinsic_categories = (
-        MANIPULAND_CATEGORIES | WALL_MOUNTED_CATEGORIES | CEILING_MOUNTED_CATEGORIES
-    )
     for constraint in constraints or []:
         if not isinstance(constraint, dict):
             continue
         if str(constraint.get("strength") or "hard").lower() != "hard":
             continue
-        constraint_stage = str(constraint.get("stage") or "furniture")
+        relation = str(constraint.get("relation") or "")
         subject = constraint.get("subjects")
         subject_category = _inventory_category(
             subject.get("category") if isinstance(subject, dict) else ""
         )
         if subject_category not in _NON_OBJECT_INVENTORY_CATEGORIES:
-            subject_stage = (
-                _intrinsic_contract_stage(subject_category)
-                if subject_category in intrinsic_categories
-                else constraint_stage
+            subject_stage = execution_owner(
+                subject_category,
+                relation=relation,
+                endpoint="subject",
+                existing_owner=existing_owners.get(subject_category, ""),
             )
             record(subject, subject_stage)
 
@@ -530,7 +504,15 @@ def _contract_inventory_ownership(
         target_category = _inventory_category(
             target.get("category") if isinstance(target, dict) else ""
         )
-        record(target, _intrinsic_contract_stage(target_category))
+        record(
+            target,
+            execution_owner(
+                target_category,
+                relation=relation,
+                endpoint="target",
+                existing_owner=existing_owners.get(target_category, ""),
+            ),
+        )
 
     return ownership
 
@@ -544,9 +526,43 @@ def _reconcile_task_spec_stage_ownership(
     the independent intent contract. Contract-covered categories, however, must
     not be generated or verified before their dependencies exist.
     """
-    ownership = _contract_inventory_ownership(contract)
+    existing_owners = {
+        _inventory_category(label): stage
+        for stage, field in _TASK_SPEC_STAGE_FIELDS.items()
+        for label in getattr(task_spec, field)
+    }
+    ownership = _contract_inventory_ownership(contract, existing_owners)
     if not ownership:
         return task_spec
+
+    # StageRelationProjector consumes the contract's ``stage`` field directly.
+    # Keep it aligned with the inventory reconciliation so an object cannot be
+    # generated by furniture and then projected only to manipuland.
+    for constraint in contract.get("constraints") or []:
+        if not isinstance(constraint, dict):
+            continue
+        relation = str(constraint.get("relation") or "")
+        subjects = constraint.get("subjects") or {}
+        targets = constraint.get("targets") or {}
+        endpoint_stages = [
+            execution_owner(
+                _inventory_category(subjects.get("category")),
+                relation=relation,
+                endpoint="subject",
+                existing_owner=existing_owners.get(
+                    _inventory_category(subjects.get("category")), ""
+                ),
+            ),
+            execution_owner(
+                _inventory_category(targets.get("category")),
+                relation=relation,
+                endpoint="target",
+                existing_owner=existing_owners.get(
+                    _inventory_category(targets.get("category")), ""
+                ),
+            ),
+        ]
+        constraint["stage"] = max(endpoint_stages, key=STAGE_ORDER.index)
 
     reconciled = {stage: [] for stage in _TASK_SPEC_STAGE_FIELDS}
     matched_counts = {category: 0 for category in ownership}

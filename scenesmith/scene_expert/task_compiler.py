@@ -15,6 +15,10 @@ from pathlib import Path
 
 from scenesmith.scene_expert.context_bundle import build_llm_call_debug_record
 from scenesmith.scene_expert.schemas import SceneTaskSpec
+from scenesmith.scenebenchmark_critic.object_taxonomy import (
+    canonical_object_category,
+    execution_owner,
+)
 from scenesmith.agent_utils.thinking import chat_template_kwargs_from_effort
 from scenesmith.utils.llm_json import parse_llm_json_object
 
@@ -348,14 +352,6 @@ _MANIPULAND_STAGE_CATEGORIES = {
 }
 
 _TABLE_SETTING_COMPONENTS = frozenset({"plate", "cutlery", "glass"})
-_FLOOR_WASTEBASKET_PATTERN = re.compile(
-    r"\b(?:wastebasket|waste basket|trash can|trash bin)\b[^.;]{0,50}"
-    r"\b(?:on|supported by|standing on)\s+(?:the\s+)?floor\b|"
-    r"\b(?:floor[- ]standing|freestanding)\s+"
-    r"(?:wastebasket|waste basket|trash can|trash bin)\b",
-    re.IGNORECASE,
-)
-
 # Media supports are furniture even when an LLM mistakes a phrase such as
 # "TV stand on the opposite wall" for a wall-mounted placement.
 _FLOOR_STANDING_MEDIA_SUPPORT_CATEGORIES = frozenset(
@@ -522,7 +518,7 @@ def _normalize_stage_ownership(
     """
 
     def inventory_key(value: str) -> str:
-        key = "_".join(str(value or "").strip().lower().split())
+        key = canonical_object_category(value)
         return _INVENTORY_CATEGORY_ALIASES.get(key, key)
 
     inventories = {
@@ -603,11 +599,23 @@ def _normalize_stage_ownership(
     for category in _MANIPULAND_STAGE_CATEGORIES:
         if category in category_stages:
             category_stages[category] = "small"
-    if "wastebasket" in category_stages and _FLOOR_WASTEBASKET_PATTERN.search(prompt):
-        category_stages["wastebasket"] = "large"
     for category in _FLOOR_STANDING_MEDIA_SUPPORT_CATEGORIES:
         if category in category_stages:
             category_stages[category] = "large"
+    task_stage_to_owner = {
+        "large": "furniture",
+        "wall": "wall_mounted",
+        "ceiling": "ceiling_mounted",
+        "small": "manipuland",
+    }
+    owner_to_task_stage = {owner: stage for stage, owner in task_stage_to_owner.items()}
+    for category, stage in list(category_stages.items()):
+        category_stages[category] = owner_to_task_stage[
+            execution_owner(
+                category,
+                existing_owner=task_stage_to_owner.get(stage, ""),
+            )
+        ]
     desired_counts: dict[str, int] = {}
     for category in (
         _WALL_STAGE_CATEGORIES

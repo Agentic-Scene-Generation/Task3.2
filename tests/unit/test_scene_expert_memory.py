@@ -309,10 +309,11 @@ class SceneExpertMemoryTest(unittest.TestCase):
         self.assertIn("stool", spec.required_large_objects)
         self.assertEqual(4, spec.required_large_objects.count("plant"))
         self.assertIn("water_dispenser", spec.required_large_objects)
+        self.assertIn("wastebasket", spec.required_large_objects)
         self.assertNotIn("table", spec.required_large_objects)
         self.assertEqual(["mirror"], spec.required_wall_objects)
         self.assertEqual(4, spec.required_small_objects.count("monitor"))
-        self.assertIn("wastebasket", spec.required_small_objects)
+        self.assertNotIn("wastebasket", spec.required_small_objects)
 
     def test_task_compiler_normalizes_alias_inventory_without_double_counting(
         self,
@@ -339,6 +340,55 @@ class SceneExpertMemoryTest(unittest.TestCase):
         self.assertFalse(
             any("setting" in value for value in spec.required_small_objects)
         )
+
+    def test_contract_ownership_respects_floor_and_surface_support(self) -> None:
+        floor_contract = {
+            "constraints": [
+                {
+                    "relation": "near",
+                    "stage": "manipuland",
+                    "strength": "hard",
+                    "subjects": {"category": "wastebasket", "count": 1},
+                    "targets": {"category": "dresser", "count": 1},
+                }
+            ]
+        }
+        floor_spec = _reconcile_task_spec_stage_ownership(
+            SceneTaskSpec(
+                room_type="bedroom",
+                style="standard",
+                required_large_objects=["dresser", "wastebasket"],
+            ),
+            floor_contract,
+        )
+
+        self.assertIn("wastebasket", floor_spec.required_large_objects)
+        self.assertNotIn("wastebasket", floor_spec.required_small_objects)
+        self.assertEqual("furniture", floor_contract["constraints"][0]["stage"])
+
+        surface_contract = {
+            "constraints": [
+                {
+                    "relation": "on_top_of",
+                    "stage": "furniture",
+                    "strength": "hard",
+                    "subjects": {"category": "wastebasket", "count": 1},
+                    "targets": {"category": "desk", "count": 1},
+                }
+            ]
+        }
+        surface_spec = _reconcile_task_spec_stage_ownership(
+            SceneTaskSpec(
+                room_type="office",
+                style="standard",
+                required_large_objects=["desk", "wastebasket"],
+            ),
+            surface_contract,
+        )
+
+        self.assertIn("wastebasket", surface_spec.required_small_objects)
+        self.assertNotIn("wastebasket", surface_spec.required_large_objects)
+        self.assertEqual("manipuland", surface_contract["constraints"][0]["stage"])
 
     def test_repair_taxonomy_classifies_core_hard_failures(self) -> None:
         failures = classify_hard_reasons(
@@ -642,16 +692,16 @@ class SceneExpertMemoryTest(unittest.TestCase):
 
         reconciled = _reconcile_task_spec_stage_ownership(task_spec, contract)
 
-        self.assertEqual(["desk"], reconciled.required_large_objects)
+        self.assertCountEqual(["desk", "trash can"], reconciled.required_large_objects)
         self.assertCountEqual(
-            ["computer monitor", "trash can", "desk lamp", "notebook", "pen holder"],
+            ["computer monitor", "desk lamp", "notebook", "pen holder"],
             reconciled.required_small_objects,
         )
         report = StageVerifier(pass_threshold=0.6).verify(
             stage="furniture",
             stage_output_dir="/path/that/does/not/exist",
             task_spec=reconciled,
-            scene_state_info={"object_names": ["desk_0"]},
+            scene_state_info={"object_names": ["desk_0", "trash_can_0"]},
         )
         self.assertEqual([], report.issues)
         manipuland_report = StageVerifier(pass_threshold=0.6).verify(
@@ -661,7 +711,6 @@ class SceneExpertMemoryTest(unittest.TestCase):
             scene_state_info={
                 "object_names": [
                     "computer_monitor_0",
-                    "trash_can_0",
                     "desk_lamp_0",
                     "notebook_0",
                     "pen_holder_0",
@@ -759,8 +808,8 @@ class SceneExpertMemoryTest(unittest.TestCase):
                 task_spec=task_spec,
                 scene_state_info={
                     "object_names": [
-                        "table_lamp",
-                        "table_lamp",
+                        "reading_lamp_0",
+                        "reading_lamp_1",
                         "alarm_clock",
                         "book",
                         "magazine",
@@ -779,7 +828,7 @@ class SceneExpertMemoryTest(unittest.TestCase):
                 stage_output_dir="/path/that/does/not/exist",
                 task_spec=task_spec,
                 scene_state_info={
-                    "object_names": ["table_lamp", "alarm_clock", "book", "magazine"]
+                    "object_names": ["reading_lamp", "alarm_clock", "book", "magazine"]
                 },
             )
             .issues
