@@ -53,6 +53,8 @@ def test_collect_code_provenance_uses_absolute_git_in_minimal_worker_path(
     assert provenance["git_revision"] == expected_revision
     assert provenance["dirty"] is not None
     assert {
+        "scenesmith/manipuland_agents/cross_stage_inventory.py",
+        "scenesmith/manipuland_agents/tools/manipuland_tools.py",
         "scenesmith/scenebenchmark_critic/asset_library_annotations.py",
         "scenesmith/scenebenchmark_critic/metrics/functional_dependency/builder.py",
         "scenesmith/scenebenchmark_critic/metrics/functional_dependency/relations.py",

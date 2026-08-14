@@ -41,6 +41,8 @@ _DEFAULT_CODE_PROVENANCE_PATHS = (
     "scenesmith/scenebenchmark_critic/intent_contract.py",
     "scenesmith/furniture_agents/stateful_furniture_agent.py",
     "scenesmith/manipuland_agents/stateful_manipuland_agent.py",
+    "scenesmith/manipuland_agents/cross_stage_inventory.py",
+    "scenesmith/manipuland_agents/tools/manipuland_tools.py",
     "scenesmith/agent_utils/clearance_zones.py",
     "scenesmith/scenebenchmark_critic/asset_library_annotations.py",
     "scenesmith/scenebenchmark_critic/metrics/functional_dependency/builder.py",
