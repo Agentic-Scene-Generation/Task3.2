@@ -215,6 +215,7 @@ def _evaluate_required_count(
 ) -> dict[str, Any] | None:
     selector = constraint.get("subjects") or {}
     required = int(selector.get("count") or 1)
+    exact = str(selector.get("quantifier") or "").lower() == "exactly"
     category = str(selector.get("category") or "required_object")
     if _normalize_selector_category(category) == "table_setting":
         component_selectors = {
@@ -257,16 +258,18 @@ def _evaluate_required_count(
 
     matched = selected_ids(selector, objects)
     match_count = selector_match_count(selector, objects)
+    count_ok = match_count == required if exact else match_count >= required
+    requirement = "exactly" if exact else "at least"
     return _result(
         constraint,
         suffix=category,
-        label="pass" if match_count >= required else "fail",
+        label="pass" if count_ok else "fail",
         primary=matched[0] if matched else category,
         related=matched,
         relation_type="required_count",
         tier=tier,
         reason=(
-            f"Prompt/room contract requires at least {required} `{category}` object(s); "
+            f"Prompt/room contract requires {requirement} {required} `{category}` object(s); "
             f"found {match_count}."
         ),
         diagnostics={
@@ -618,7 +621,7 @@ def _evaluate_operation_zone_at_wall(
     objects: list[dict[str, Any]],
     tier: str,
 ) -> list[dict[str, Any]]:
-    """Center a work surface while reserving its wall-side operator zone."""
+    """Keep a wall-backed work surface and its inward operator zone usable."""
     bounds = _room_bounds(geometry)
     subject_ids = bound_ids(constraint.get("subjects"), objects)
     walls = [obj for obj in objects if object_category(obj) == "wall"]
@@ -645,29 +648,38 @@ def _evaluate_operation_zone_at_wall(
     subject_half_depth = _projected_half_extent(subject, inward_xy)
     room_depth = bounds[2 + normal_axis] - bounds[normal_axis]
     required_clearance = min(1.0, max(0.65, 0.10 * room_depth))
+    # Asset extents and placement tools each round independently. Treat a
+    # centimeter-scale miss at an otherwise unobstructed ergonomic boundary as
+    # numerical noise, while preserving meaningful blocking failures.
+    clearance_tolerance = 0.02
+    target_wall_gap = 0.08
+    allowed_wall_gap = min(0.30, max(0.15, 0.04 * room_depth))
     target = [float(center[0]), float(center[1])]
     target[tangent_axis] = float(wall_center[tangent_axis])
-    target[normal_axis] = inner_face + inward * (
-        subject_half_depth + required_clearance
-    )
+    target[normal_axis] = inner_face + inward * (subject_half_depth + target_wall_gap)
     target_xy = (float(target[0]), float(target[1]))
     target_yaw = math.degrees(math.atan2(-inward_xy[0], inward_xy[1]))
 
     tangent_error = abs(center[tangent_axis] - target_xy[tangent_axis])
-    normal_error = abs(center[normal_axis] - target_xy[normal_axis])
-    observed_clearance = max(
+    wall_gap = max(
         0.0,
         inward * (center[normal_axis] - inner_face) - subject_half_depth,
+    )
+    observed_clearance, blocking_object_id = _front_operation_clearance(
+        subject=subject,
+        objects=objects,
+        bounds=bounds,
+        inward_xy=inward_xy,
     )
     facing_error = _front_error_deg(subject, inward_xy)
     allowed_tangent = max(
         0.18, 0.05 * min(bounds[2] - bounds[0], bounds[3] - bounds[1])
     )
-    allowed_normal = 0.15
     aligned = (
         tangent_error <= allowed_tangent
-        and normal_error <= allowed_normal
+        and wall_gap <= allowed_wall_gap
         and facing_error <= 15.0
+        and observed_clearance + clearance_tolerance >= required_clearance
     )
     return [
         _result(
@@ -680,11 +692,11 @@ def _evaluate_operation_zone_at_wall(
             tier=tier,
             reason=(
                 f"`{subject_id}` must be centered on its functional wall with its "
-                f"rear edge toward the wall, usable front facing into the room, "
-                f"and a {required_clearance:.2f}m operator zone between them; "
-                f"tangent error is {tangent_error:.2f}m, "
-                f"normal error is {normal_error:.2f}m, facing error is "
-                f"{facing_error:.0f}deg, and current clearance is "
+                f"rear edge near the wall, usable front facing into the room, "
+                f"and a {required_clearance:.2f}m clear operator zone in front; "
+                f"tangent error is {tangent_error:.2f}m, wall gap is "
+                f"{wall_gap:.2f}m, facing error is {facing_error:.0f}deg, and "
+                f"front clearance is "
                 f"{observed_clearance:.2f}m."
             ),
             diagnostics={
@@ -693,15 +705,71 @@ def _evaluate_operation_zone_at_wall(
                 "target_yaw_deg": round(target_yaw, 6),
                 "tangent_error_m": round(tangent_error, 6),
                 "allowed_tangent_error_m": round(allowed_tangent, 6),
-                "normal_error_m": round(normal_error, 6),
-                "allowed_normal_error_m": allowed_normal,
+                "wall_gap_m": round(wall_gap, 6),
+                "allowed_wall_gap_m": round(allowed_wall_gap, 6),
                 "facing_error_deg": round(facing_error, 6),
                 "allowed_facing_error_deg": 15.0,
                 "operation_clearance_m": round(observed_clearance, 6),
                 "required_operation_clearance_m": round(required_clearance, 6),
+                "operation_clearance_tolerance_m": clearance_tolerance,
+                "blocking_object_id": blocking_object_id,
             },
         )
     ]
+
+
+def _front_operation_clearance(
+    *,
+    subject: dict[str, Any],
+    objects: list[dict[str, Any]],
+    bounds: tuple[float, float, float, float],
+    inward_xy: tuple[float, float],
+) -> tuple[float, str | None]:
+    """Measure clear depth before a workstation within its usable front band."""
+    subject_id = str(subject.get("id") or "")
+    center = bbox_center_xy(subject)
+    if center is None:
+        return 0.0, None
+    normal_axis = 0 if abs(inward_xy[0]) > abs(inward_xy[1]) else 1
+    tangent_axis = 1 - normal_axis
+    tangent_xy = [0.0, 0.0]
+    tangent_xy[tangent_axis] = 1.0
+    tangent_vector = (float(tangent_xy[0]), float(tangent_xy[1]))
+    subject_normal_half = _projected_half_extent(subject, inward_xy)
+    subject_tangent_half = _projected_half_extent(subject, tangent_vector)
+    room_limit = (
+        bounds[2 + normal_axis] if inward_xy[normal_axis] > 0 else bounds[normal_axis]
+    )
+    front_edge = center[normal_axis] + inward_xy[normal_axis] * subject_normal_half
+    nearest_clearance = max(0.0, inward_xy[normal_axis] * (room_limit - front_edge))
+    blocking_object_id: str | None = None
+
+    for other in objects:
+        if str(other.get("id") or "") == subject_id:
+            continue
+        if str(other.get("object_type") or "").lower() != "furniture":
+            continue
+        other_center = bbox_center_xy(other)
+        if other_center is None:
+            continue
+        other_normal_half = _projected_half_extent(other, inward_xy)
+        other_tangent_half = _projected_half_extent(other, tangent_vector)
+        forward_distance = (other_center[0] - center[0]) * inward_xy[0] + (
+            other_center[1] - center[1]
+        ) * inward_xy[1]
+        if forward_distance + other_normal_half <= subject_normal_half:
+            continue
+        tangent_distance = abs(
+            (other_center[0] - center[0]) * tangent_vector[0]
+            + (other_center[1] - center[1]) * tangent_vector[1]
+        )
+        if tangent_distance > subject_tangent_half + other_tangent_half:
+            continue
+        clearance = max(0.0, forward_distance - subject_normal_half - other_normal_half)
+        if clearance < nearest_clearance:
+            nearest_clearance = clearance
+            blocking_object_id = str(other.get("id") or "") or None
+    return nearest_clearance, blocking_object_id
 
 
 def _evaluate_instructional_surface_alignment(

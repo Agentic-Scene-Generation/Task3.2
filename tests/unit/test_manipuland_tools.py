@@ -96,6 +96,154 @@ class TestManipulandTools(unittest.TestCase):
         # 文字建议，否则盘子虽齐全仍会随机散落在餐桌上。
         self.assertIn("align_dining_place_settings", self.manipuland_tools.tools)
 
+    def test_dining_centerpiece_budget_uses_tabletop_and_place_setting_size(self):
+        surface = SupportSurface(
+            surface_id=UniqueID("S_table"),
+            bounding_box_min=np.array([-0.75, -0.316, 0.0]),
+            bounding_box_max=np.array([0.75, 0.316, 0.48]),
+            transform=RigidTransform(),
+        )
+        table = SceneObject(
+            object_id=UniqueID("dining_table_0"),
+            object_type=ObjectType.FURNITURE,
+            name="dining_table",
+            description="Compact dining table",
+            transform=RigidTransform(),
+            support_surfaces=[surface],
+        )
+        self.mock_scene.objects = {table.object_id: table}
+        self.mock_scene.get_object.return_value = table
+        self.mock_scene.text_description = (
+            "Four place settings surround a centerpiece vase with flowers."
+        )
+        self.manipuland_tools.current_furniture_id = table.object_id
+        self.manipuland_tools.support_surfaces = {"S_table": surface}
+
+        constrained = self.manipuland_tools._budget_dining_centerpiece_dimensions(
+            object_descriptions=[
+                "Dinner plate",
+                "Dinner plate",
+                "Tall centerpiece vase",
+                "Flower bouquet for the vase",
+            ],
+            short_names=["plate_a", "plate_b", "vase", "flowers"],
+            desired_dimensions=[
+                [0.27, 0.27, 0.04],
+                [0.27, 0.27, 0.04],
+                [0.18, 0.18, 0.35],
+                [0.30, 0.30, 0.30],
+            ],
+        )
+
+        self.assertEqual(constrained[:2], [[0.27, 0.27, 0.04]] * 2)
+        self.assertLessEqual(constrained[2][0], 0.058)
+        self.assertLessEqual(constrained[2][1], 0.058)
+        self.assertLessEqual(constrained[3][0], 0.058)
+        self.assertLessEqual(constrained[3][1], 0.058)
+        self.assertLessEqual(constrained[2][2], 0.116)
+        self.assertLessEqual(constrained[3][2], 0.087)
+
+    def test_dining_centerpiece_budget_recognizes_reusable_plate_template(self):
+        surface = SupportSurface(
+            surface_id=UniqueID("S_table"),
+            bounding_box_min=np.array([-0.75, -0.316, 0.0]),
+            bounding_box_max=np.array([0.75, 0.316, 0.48]),
+            transform=RigidTransform(),
+        )
+        table = SceneObject(
+            object_id=UniqueID("dining_table_0"),
+            object_type=ObjectType.FURNITURE,
+            name="dining_table",
+            description="Compact dining table",
+            transform=RigidTransform(),
+            support_surfaces=[surface],
+        )
+        self.mock_scene.objects = {table.object_id: table}
+        self.mock_scene.get_object.return_value = table
+        self.mock_scene.text_description = (
+            "Table settings for four surround a centerpiece vase with flowers."
+        )
+        self.manipuland_tools.current_furniture_id = table.object_id
+        self.manipuland_tools.support_surfaces = {"S_table": surface}
+
+        constrained = self.manipuland_tools._budget_dining_centerpiece_dimensions(
+            object_descriptions=["Dinner plate", "Tall centerpiece vase"],
+            short_names=["plate", "vase"],
+            desired_dimensions=[[0.27, 0.27, 0.04], [0.18, 0.18, 0.35]],
+        )
+
+        self.assertEqual(constrained[0], [0.27, 0.27, 0.04])
+        self.assertLessEqual(constrained[1][0], 0.058)
+        self.assertLessEqual(constrained[1][1], 0.058)
+
+    def test_dining_centerpiece_budget_persists_across_generation_batches(self):
+        surface = SupportSurface(
+            surface_id=UniqueID("S_table"),
+            bounding_box_min=np.array([-0.75, -0.316, 0.0]),
+            bounding_box_max=np.array([0.75, 0.316, 0.48]),
+            transform=RigidTransform(),
+        )
+        table = SceneObject(
+            object_id=UniqueID("dining_table_0"),
+            object_type=ObjectType.FURNITURE,
+            name="dining_table",
+            description="Compact dining table",
+            transform=RigidTransform(),
+            support_surfaces=[surface],
+        )
+        self.mock_scene.objects = {table.object_id: table}
+        self.mock_scene.get_object.return_value = table
+        self.mock_scene.text_description = (
+            "Table settings for four surround a centerpiece vase with flowers."
+        )
+        self.manipuland_tools.current_furniture_id = table.object_id
+        self.manipuland_tools.support_surfaces = {"S_table": surface}
+
+        self.manipuland_tools._budget_dining_centerpiece_dimensions(
+            object_descriptions=["Dinner plate", "Tall centerpiece vase"],
+            short_names=["plate", "vase"],
+            desired_dimensions=[[0.27, 0.27, 0.04], [0.18, 0.18, 0.35]],
+        )
+        constrained = self.manipuland_tools._budget_dining_centerpiece_dimensions(
+            object_descriptions=["Tall centerpiece vase", "Flower bouquet"],
+            short_names=["vase", "flowers"],
+            desired_dimensions=[[0.18, 0.18, 0.35], [0.30, 0.30, 0.30]],
+        )
+
+        self.assertLessEqual(constrained[0][0], 0.058)
+        self.assertLessEqual(constrained[0][1], 0.058)
+        self.assertLessEqual(constrained[0][2], 0.116)
+        self.assertLessEqual(constrained[1][0], 0.058)
+        self.assertLessEqual(constrained[1][1], 0.058)
+        self.assertLessEqual(constrained[1][2], 0.087)
+
+    def test_dining_cutlery_rotation_follows_seat_approach_axis(self):
+        surface = SupportSurface(
+            surface_id=UniqueID("S_table"),
+            bounding_box_min=np.array([-1.0, -1.0, 0.0]),
+            bounding_box_max=np.array([1.0, 1.0, 0.5]),
+            transform=RigidTransform(),
+        )
+        cutlery = Mock()
+        cutlery.name = "dinner_fork"
+        cutlery.description = "silver cutlery"
+        cutlery.placement_info = Mock(rotation_2d=0.0)
+
+        self.assertAlmostEqual(
+            self.manipuland_tools._dining_companion_rotation_degrees(
+                cutlery, surface, (0.0, 1.0)
+            ),
+            0.0,
+        )
+        self.assertAlmostEqual(
+            abs(
+                self.manipuland_tools._dining_companion_rotation_degrees(
+                    cutlery, surface, (1.0, 0.0)
+                )
+            ),
+            90.0,
+        )
+
     @patch(
         "scenesmith.manipuland_agents.tools.manipuland_tools."
         "evaluate_dining_place_setting_alignment"

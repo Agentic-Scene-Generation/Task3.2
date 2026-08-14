@@ -495,6 +495,91 @@ class TestAssetManager(unittest.TestCase):
             bbox_max - bbox_min, [4.5, 0.2, 0.15], rtol=1e-5, atol=1e-5
         )
 
+    def test_linear_cutlery_aligns_requested_horizontal_axis_to_candidate(self):
+        canonical_path = self.temp_dir / "fork_canonical.gltf"
+        # glTF Y-up extents map to SceneSmith [width, depth, height]. The
+        # candidate's long horizontal axis is scene Y, unlike the request.
+        trimesh.creation.box(extents=[0.055, 0.013, 0.273]).export(canonical_path)
+        requested = [0.19, 0.025, 0.008]
+
+        aligned = self.asset_manager._align_linear_cutlery_requested_dimensions(
+            canonical_path=canonical_path,
+            object_type=ObjectType.MANIPULAND,
+            description="Stainless steel dinner fork",
+            short_name="fork",
+            desired_dimensions=requested,
+        )
+
+        self.assertEqual(aligned, [0.025, 0.19, 0.008])
+        with self.assertRaisesRegex(ValueError, "does not fit requested proportions"):
+            self.asset_manager._scale_and_measure_canonical_mesh(
+                canonical_path=canonical_path,
+                final_path=self.temp_dir / "unaligned_fork.gltf",
+                desired_dimensions=requested,
+            )
+        _, bbox_min, bbox_max, _ = self.asset_manager._scale_and_measure_canonical_mesh(
+            canonical_path=canonical_path,
+            final_path=self.temp_dir / "aligned_fork.gltf",
+            desired_dimensions=aligned,
+        )
+        actual_dimensions = bbox_max - bbox_min
+        validate_uniform_dimension_fit(actual_dimensions, aligned)
+
+    def test_linear_cutlery_alignment_skips_same_axis_and_non_cutlery_requests(self):
+        canonical_path = self.temp_dir / "spoon_canonical.gltf"
+        # This candidate's long horizontal axis is already scene X.
+        trimesh.creation.box(extents=[0.273, 0.013, 0.055]).export(canonical_path)
+        requested = [0.19, 0.025, 0.008]
+
+        same_axis = self.asset_manager._align_linear_cutlery_requested_dimensions(
+            canonical_path=canonical_path,
+            object_type=ObjectType.MANIPULAND,
+            description="Stainless steel dinner spoon",
+            short_name="spoon",
+            desired_dimensions=requested,
+        )
+        non_cutlery = self.asset_manager._align_linear_cutlery_requested_dimensions(
+            canonical_path=canonical_path,
+            object_type=ObjectType.MANIPULAND,
+            description="Slim decorative vase",
+            short_name="vase",
+            desired_dimensions=requested,
+        )
+        furniture = self.asset_manager._align_linear_cutlery_requested_dimensions(
+            canonical_path=canonical_path,
+            object_type=ObjectType.FURNITURE,
+            description="Long dining bench",
+            short_name="bench",
+            desired_dimensions=requested,
+        )
+
+        self.assertIs(same_axis, requested)
+        self.assertIs(non_cutlery, requested)
+        self.assertIs(furniture, requested)
+
+    def test_linear_cutlery_widens_short_axis_only_to_uniform_fit_limit(self):
+        canonical_path = self.temp_dir / "wide_fork_canonical.gltf"
+        trimesh.creation.box(extents=[0.055, 0.013, 0.273]).export(canonical_path)
+        requested = [0.24, 0.015, 0.015]
+
+        aligned = self.asset_manager._align_linear_cutlery_requested_dimensions(
+            canonical_path=canonical_path,
+            object_type=ObjectType.MANIPULAND,
+            description="Stainless steel dinner fork",
+            short_name="fork",
+            desired_dimensions=requested,
+        )
+
+        self.assertEqual(aligned[1], requested[0])
+        self.assertEqual(aligned[2], requested[2])
+        self.assertGreater(aligned[0], requested[1])
+        _, bbox_min, bbox_max, _ = self.asset_manager._scale_and_measure_canonical_mesh(
+            canonical_path=canonical_path,
+            final_path=self.temp_dir / "wide_aligned_fork.gltf",
+            desired_dimensions=aligned,
+        )
+        validate_uniform_dimension_fit(bbox_max - bbox_min, aligned)
+
     def test_linear_ceiling_fit_rejects_round_or_extreme_candidate(self):
         round_path = self.temp_dir / "round_fixture.gltf"
         extreme_path = self.temp_dir / "tiny_beam.gltf"

@@ -87,6 +87,7 @@ from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.m
     CUTLERY_GROUPS,
     _matches_item_group,
     _object_text,
+    _requested_place_count,
     evaluate_manipuland_completeness,
 )
 from scenesmith.scenebenchmark_critic.core.geometry import bbox_center_xy
@@ -149,6 +150,10 @@ class ManipulandTools:
         self.cfg = cfg
         self.current_furniture_id = current_furniture_id
         self.support_surfaces = support_surfaces
+        # Asset generation can happen in several designer turns. Keep a
+        # table-specific centerpiece clearance so a later flower or vase
+        # request inherits the constraints derived from the original plates.
+        self._dining_centerpiece_budget_by_furniture: dict[str, float] = {}
 
         # HSSD sometimes describes one continuous dining tabletop as adjacent
         # coplanar strips (for example S_8/S_9 split at the table centre).  That
@@ -249,6 +254,131 @@ class ManipulandTools:
             len(surfaces),
             len(merged_surfaces),
         )
+
+    def _budget_dining_centerpiece_dimensions(
+        self,
+        *,
+        object_descriptions: list[str],
+        short_names: list[str],
+        desired_dimensions: list[list[float]],
+    ) -> list[list[float]]:
+        """Reserve tabletop clearance for a centered floral centerpiece.
+
+        A centered vase is often generated in the same batch as several place
+        settings. Its visual asset can be much wider than the usable gap between
+        opposite plates, especially on a narrow tabletop. Constrain the vase and
+        floral fill from real support-surface and plate dimensions before assets
+        are retrieved, rather than moving either hard-constrained item afterward.
+        """
+        if not (
+            len(object_descriptions) == len(short_names) == len(desired_dimensions)
+        ):
+            return desired_dimensions
+
+        furniture = self.scene.get_object(self.current_furniture_id)
+        furniture_text = (
+            f"{getattr(furniture, 'name', '')} "
+            f"{getattr(furniture, 'description', '')}"
+        ).lower()
+        scene_text = str(getattr(self.scene, "text_description", "")).lower()
+        if (
+            "dining" not in furniture_text
+            or "table" not in furniture_text
+            or "centerpiece" not in scene_text
+        ):
+            return desired_dimensions
+
+        item_text = [
+            f"{description} {short_name}".lower()
+            for description, short_name in zip(
+                object_descriptions, short_names, strict=True
+            )
+        ]
+        anchor_dimensions = [
+            dimensions
+            for text, dimensions in zip(item_text, desired_dimensions, strict=True)
+            if any(token in text for token in ("plate", "bowl"))
+            and len(dimensions) >= 2
+        ]
+        centerpiece_indices = [
+            index
+            for index, text in enumerate(item_text)
+            if any(token in text for token in ("vase", "flower", "floral"))
+        ]
+        if not centerpiece_indices:
+            return desired_dimensions
+
+        furniture_key = str(self.current_furniture_id)
+        max_footprint = self._dining_centerpiece_budget_by_furniture.get(furniture_key)
+        if max_footprint is None:
+            # Asset generation commonly acquires one reusable plate template
+            # and expands it to every seat later. Count the requested settings
+            # from the original prompt instead of mistaking that one template
+            # for a one-person table.
+            requested_place_count = _requested_place_count(scene_text)
+            if not anchor_dimensions or (
+                len(anchor_dimensions) < 2 and requested_place_count < 2
+            ):
+                return desired_dimensions
+
+            tabletop_short_sides = []
+            for surface in self.support_surfaces.values():
+                extent = np.asarray(
+                    surface.bounding_box_max[:2], dtype=float
+                ) - np.asarray(surface.bounding_box_min[:2], dtype=float)
+                if np.all(extent > 1e-6):
+                    tabletop_short_sides.append(float(np.min(np.abs(extent))))
+            if not tabletop_short_sides:
+                return desired_dimensions
+
+            tabletop_short_side = max(tabletop_short_sides)
+            largest_anchor_span = max(
+                float(max(abs(float(value)) for value in dimensions[:2]))
+                for dimensions in anchor_dimensions
+            )
+            # Two opposite settings consume one anchor diameter each. Keep a small
+            # edge allowance, then leave most of the remaining centre gap to the
+            # composite, whose fill geometry can extend beyond its container mesh.
+            center_gap = tabletop_short_side - 2.0 * (largest_anchor_span + 0.01)
+            max_footprint = min(
+                0.20 * tabletop_short_side,
+                max(0.035, 0.80 * center_gap),
+            )
+            self._dining_centerpiece_budget_by_furniture[furniture_key] = max_footprint
+        constrained = [list(dimensions) for dimensions in desired_dimensions]
+        changed_names: list[str] = []
+        for index in centerpiece_indices:
+            dimensions = constrained[index]
+            if len(dimensions) < 3:
+                continue
+            old_width, old_depth, old_height = (
+                float(value) for value in dimensions[:3]
+            )
+            # Retrieval uniformly scales compact floral fills.  They cannot
+            # satisfy a vase-like height request without invalid distortion,
+            # whereas a vase is naturally taller than its footprint.
+            height_multiplier = (
+                1.5
+                if any(token in item_text[index] for token in ("flower", "floral"))
+                else 2.0
+            )
+            max_height = height_multiplier * max_footprint
+            new_dimensions = [
+                min(old_width, max_footprint),
+                min(old_depth, max_footprint),
+                min(old_height, max_height),
+            ]
+            if new_dimensions != dimensions[:3]:
+                constrained[index] = [*new_dimensions, *dimensions[3:]]
+                changed_names.append(short_names[index])
+        if changed_names:
+            console_logger.info(
+                "Constrained centered dining centerpiece asset(s) %s to %.3fm "
+                "footprint",
+                ", ".join(changed_names),
+                max_footprint,
+            )
+        return constrained
 
     @staticmethod
     def _coalesce_adjacent_support_surfaces(
@@ -875,6 +1005,11 @@ class ManipulandTools:
                         },
                         indent=2,
                     )
+            desired_dimensions = self._budget_dining_centerpiece_dimensions(
+                object_descriptions=object_descriptions,
+                short_names=short_names,
+                desired_dimensions=desired_dimensions,
+            )
             request = AssetGenerationRequest(
                 object_descriptions=object_descriptions,
                 short_names=short_names,
@@ -2214,6 +2349,11 @@ class ManipulandTools:
                         occupied_objects=occupied_dining_objects,
                         search_axes=search_axes,
                         lane_constraint=lane_constraint,
+                        rotation_degrees=self._dining_companion_rotation_degrees(
+                            companion,
+                            surface,
+                            seat_forward,
+                        ),
                     )
                     if companion_selected is None:
                         failures.append(
@@ -2223,7 +2363,14 @@ class ManipulandTools:
                         continue
                     companion_surface, companion_position = companion_selected
                     companion_move = self._move_dining_object(
-                        companion, companion_surface, companion_position
+                        companion,
+                        companion_surface,
+                        companion_position,
+                        rotation_degrees=self._dining_companion_rotation_degrees(
+                            companion,
+                            companion_surface,
+                            seat_forward,
+                        ),
                     )
                     companion_move["anchor_id"] = anchor_id
                     moves.append(companion_move)
@@ -2665,6 +2812,7 @@ class ManipulandTools:
         scene_object: SceneObject,
         target_xy: tuple[float, float],
         preferred_surface_id: str = "",
+        rotation_degrees: float | None = None,
     ) -> tuple[SupportSurface, np.ndarray] | None:
         """Map a world target onto a valid segmented tabletop support surface."""
         candidates = list(surface_map.values())
@@ -2678,7 +2826,11 @@ class ManipulandTools:
                 str(surface.surface_id),
             )
         )
-        rotation_degrees = self._surface_rotation_degrees(scene_object)
+        rotation_degrees = (
+            self._surface_rotation_degrees(scene_object)
+            if rotation_degrees is None
+            else rotation_degrees
+        )
         for surface in candidates:
             position = self._surface_local_target(surface, scene_object, target_xy)
             if position is None:
@@ -2702,6 +2854,7 @@ class ManipulandTools:
         lane_constraint: (
             tuple[tuple[float, float], tuple[float, float], float] | None
         ) = None,
+        rotation_degrees: float | None = None,
     ) -> tuple[SupportSurface, np.ndarray] | None:
         """Keep a dining placement clear of the settings already reflowed.
 
@@ -2764,13 +2917,18 @@ class ManipulandTools:
                     scene_object=scene_object,
                     target_xy=candidate_xy,
                     preferred_surface_id=preferred_surface_id,
+                    rotation_degrees=rotation_degrees,
                 )
                 if selected is None:
                     continue
                 surface, position = selected
                 candidate_transform = surface.to_world_pose(
                     position,
-                    math.radians(self._surface_rotation_degrees(scene_object)),
+                    math.radians(
+                        self._surface_rotation_degrees(scene_object)
+                        if rotation_degrees is None
+                        else rotation_degrees
+                    ),
                 )
                 world_xy = candidate_transform.translation()[:2]
                 if self._dining_position_is_clear(
@@ -2928,14 +3086,53 @@ class ManipulandTools:
         except (TypeError, ValueError):
             return 0.0
 
+    @staticmethod
+    def _dining_companion_rotation_degrees(
+        scene_object: SceneObject,
+        surface: SupportSurface,
+        seat_forward: tuple[float, float] | None,
+    ) -> float:
+        """Align linear cutlery with its seat's approach axis.
+
+        Glasses and napkins keep the designer-selected orientation. Forks,
+        knives, and spoons otherwise frequently inherit a quarter-turn that
+        makes their long collision hull cross the plate they accompany.
+        """
+        text = f"{scene_object.name} {scene_object.description}".lower()
+        if seat_forward is None or not any(
+            token in text for token in ("cutlery", "fork", "knife", "spoon")
+        ):
+            return ManipulandTools._surface_rotation_degrees(scene_object)
+        surface_rotation = surface.transform.rotation().matrix()
+        surface_x = np.asarray(surface_rotation @ np.array([1.0, 0.0, 0.0]))[:2]
+        surface_y = np.asarray(surface_rotation @ np.array([0.0, 1.0, 0.0]))[:2]
+        forward = np.asarray(seat_forward, dtype=float)
+        forward_norm = float(np.linalg.norm(forward))
+        if forward_norm <= 1e-9:
+            return ManipulandTools._surface_rotation_degrees(scene_object)
+        forward /= forward_norm
+        # At zero local yaw the canonical manipuland long axis is +Y. Rotate
+        # that axis into the seat-forward direction in the support frame.
+        return math.degrees(
+            math.atan2(
+                -float(np.dot(forward, surface_x)),
+                float(np.dot(forward, surface_y)),
+            )
+        )
+
     def _move_dining_object(
         self,
         scene_object: SceneObject,
         surface: SupportSurface,
         position: np.ndarray,
+        rotation_degrees: float | None = None,
     ) -> dict[str, Any]:
         object_id = str(scene_object.object_id)
-        rotation_degrees = self._surface_rotation_degrees(scene_object)
+        rotation_degrees = (
+            self._surface_rotation_degrees(scene_object)
+            if rotation_degrees is None
+            else rotation_degrees
+        )
         result = json.loads(
             self._move_manipuland_impl(
                 object_id=object_id,

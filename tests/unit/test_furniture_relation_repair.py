@@ -695,6 +695,69 @@ def test_instructional_contract_repairs_furniture_then_wall_surface(
     )
     assert pending_alignment["contract_state"] == "pending"
 
+
+def test_operation_zone_requires_clear_space_in_front_of_wall_backed_workstation(
+    tmp_path: Path,
+) -> None:
+    teacher = _object(
+        "teacher_desk_0",
+        "teacher_desk",
+        (0.0, 1.55, 0.4),
+        (1.4, 0.7, 0.8),
+        yaw_deg=180.0,
+    )
+    student = _object(
+        "student_desk_0",
+        "student_desk",
+        (0.0, 0.85, 0.4),
+        (1.2, 0.6, 0.7),
+        yaw_deg=180.0,
+    )
+    scene = _scene(
+        tmp_path,
+        teacher,
+        student,
+        text=(
+            "A classroom with a teacher desk at the front near a chalkboard and "
+            "a student desk."
+        ),
+    )
+    scene.scene_expert_task_spec = {
+        "room_type": "classroom",
+        "required_large_objects": ["teacher desk"],
+        "functional_zones": ["teaching_zone"],
+    }
+    _attach_fixture_contract(scene)
+    config = CriticConfig(enabled=True, metrics=("functional_dependency",))
+
+    blocked = next(
+        item
+        for item in evaluate_room_scene(scene, config=config, stage="furniture")[
+            "results"
+        ]
+        if item.get("relation_type") == "operation_zone_at_wall"
+    )
+    assert blocked["label"] == "fail"
+    assert (
+        blocked["diagnostics"]["wall_gap_m"]
+        <= blocked["diagnostics"]["allowed_wall_gap_m"]
+    )
+    assert blocked["diagnostics"]["blocking_object_id"] == "student_desk_0"
+
+    student.transform.set_translation(np.array([0.0, -0.1, 0.4]))
+    clear = next(
+        item
+        for item in evaluate_room_scene(scene, config=config, stage="furniture")[
+            "results"
+        ]
+        if item.get("relation_type") == "operation_zone_at_wall"
+    )
+    assert clear["label"] == "pass"
+    assert (
+        clear["diagnostics"]["operation_clearance_m"]
+        >= clear["diagnostics"]["required_operation_clearance_m"]
+    )
+
     wall_surfaces = {
         surface.wall_direction.value: surface
         for surface in extract_wall_surfaces_from_room_geometry(
@@ -767,6 +830,61 @@ def test_instructional_contract_repairs_furniture_then_wall_surface(
     assert restored_chalkboard.placement_info is not None
     assert (
         restored_chalkboard.placement_info.parent_surface_id == north_surface.surface_id
+    )
+
+
+def test_operation_zone_accepts_unobstructed_clearance_within_geometry_tolerance(
+    tmp_path: Path,
+) -> None:
+    teacher = _object(
+        "teacher_desk_0",
+        "teacher_desk",
+        (0.0, 1.52, 0.4),
+        (1.4, 0.7, 0.8),
+        yaw_deg=180.0,
+    )
+    student = _object(
+        "student_desk_0",
+        "student_desk",
+        (0.0, 0.23, 0.4),
+        (1.2, 0.6, 0.7),
+        yaw_deg=180.0,
+    )
+    scene = _scene(
+        tmp_path,
+        teacher,
+        student,
+        text=(
+            "A classroom with a teacher desk at the front near a chalkboard and "
+            "a student desk."
+        ),
+    )
+    scene.scene_expert_task_spec = {
+        "room_type": "classroom",
+        "required_large_objects": ["teacher desk"],
+        "functional_zones": ["teaching_zone"],
+    }
+    _attach_fixture_contract(scene)
+
+    operation = next(
+        item
+        for item in evaluate_room_scene(
+            scene,
+            config=CriticConfig(enabled=True, metrics=("functional_dependency",)),
+            stage="furniture",
+        )["results"]
+        if item.get("relation_type") == "operation_zone_at_wall"
+    )
+
+    assert operation["label"] == "pass"
+    assert (
+        operation["diagnostics"]["operation_clearance_m"]
+        < operation["diagnostics"]["required_operation_clearance_m"]
+    )
+    assert (
+        operation["diagnostics"]["operation_clearance_m"]
+        + operation["diagnostics"]["operation_clearance_tolerance_m"]
+        >= operation["diagnostics"]["required_operation_clearance_m"]
     )
 
 
