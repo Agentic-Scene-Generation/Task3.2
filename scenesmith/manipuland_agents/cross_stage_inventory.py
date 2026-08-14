@@ -9,6 +9,11 @@ from scenesmith.scenebenchmark_critic.intent_contract import (
     intent_contract_constraints_for_scene,
     selected_ids,
 )
+from scenesmith.scenebenchmark_critic.object_taxonomy import (
+    canonical_object_category,
+    categories_are_equivalent,
+    execution_owner,
+)
 
 
 _FLOOR_COVERING_PATTERN = re.compile(
@@ -86,6 +91,149 @@ def redundant_floor_covering_request_indices(
         )
         if is_floor_covering_text(description) or is_floor_covering_text(short_name)
     ]
+
+
+def satisfied_furniture_owned_floor_requirements(
+    scene: Any,
+    furniture_id: Any,
+    request_text: Any,
+) -> dict[str, list[str]]:
+    """Return fulfilled furniture-owned requirements mentioned by a floor target.
+
+    A floor workflow may be selected by the VLM even when an earlier furniture
+    stage already created the prompt-required floor-standing object.  The task
+    specification owns both the stage and cardinality, so only suppress a
+    request when that authoritative count is present in the global inventory.
+    This deliberately does not suppress optional decoration or objects that
+    belong on a furniture support surface.
+    """
+    if not is_floor_target(scene, furniture_id):
+        return {}
+
+    fulfilled: dict[str, list[str]] = {}
+    for category, required_count in _furniture_owned_required_categories(scene):
+        if not _text_mentions_category(request_text, category):
+            continue
+        object_ids = _scene_furniture_ids_matching_category(scene, category)
+        if len(object_ids) >= required_count:
+            fulfilled[category] = object_ids
+    return fulfilled
+
+
+def is_single_explicit_required_category_request(
+    request_text: Any,
+    categories: list[str] | set[str] | tuple[str, ...],
+) -> bool:
+    """Whether text is one explicit REQUIRED request for a fulfilled category.
+
+    Whole-target skipping is intentionally narrow.  A compound request keeps
+    its workflow so unsatisfied required or optional items can still be placed;
+    the generation-tool guard handles the satisfied item individually.
+    """
+    text = str(request_text or "").strip()
+    if not text or "\n" in text:
+        return False
+    match = re.fullmatch(r"required\s*:\s*(.+?)[.!]?", text, re.IGNORECASE)
+    if match is None:
+        return False
+    requested = match.group(1).strip()
+    if not requested or re.search(r"\b(?:and|or|with)\b|[,;/]", requested, re.I):
+        return False
+    return any(_text_mentions_category(requested, category) for category in categories)
+
+
+def redundant_furniture_owned_floor_request_indices(
+    *,
+    fulfilled_requirements: dict[str, list[str]],
+    object_descriptions: list[str],
+    short_names: list[str],
+) -> list[int]:
+    """Return generated assets that would duplicate fulfilled floor requirements."""
+    if not fulfilled_requirements:
+        return []
+    return [
+        index
+        for index, (description, short_name) in enumerate(
+            zip(object_descriptions, short_names, strict=False)
+        )
+        if any(
+            _text_mentions_category(description, category)
+            or _text_mentions_category(short_name, category)
+            for category in fulfilled_requirements
+        )
+    ]
+
+
+def _furniture_owned_required_categories(scene: Any) -> list[tuple[str, int]]:
+    """Read authoritative furniture inventory counts from the task specification."""
+    task_spec = getattr(scene, "scene_expert_task_spec", None)
+    if isinstance(task_spec, dict):
+        required_values = task_spec.get("required_large_objects", []) or []
+    else:
+        required_values = getattr(task_spec, "required_large_objects", []) or []
+
+    grouped: list[list[Any]] = []
+    for value in required_values:
+        category = canonical_object_category(value)
+        if (
+            not category
+            or execution_owner(category, existing_owner="furniture") != "furniture"
+        ):
+            continue
+        existing = next(
+            (
+                group
+                for group in grouped
+                if categories_are_equivalent(category, group[0])
+            ),
+            None,
+        )
+        if existing is None:
+            grouped.append([category, 1])
+        else:
+            existing[1] += 1
+    return [(str(category), int(count)) for category, count in grouped]
+
+
+def _scene_furniture_ids_matching_category(scene: Any, category: str) -> list[str]:
+    """Find furniture-stage objects matching a canonical inventory category."""
+    matched: list[str] = []
+    for object_id, obj in (getattr(scene, "objects", {}) or {}).items():
+        object_type = getattr(obj, "object_type", "")
+        object_type_value = str(getattr(object_type, "value", object_type)).lower()
+        if object_type_value != ObjectType.FURNITURE.value:
+            continue
+        identity = " ".join(
+            str(value or "") for value in _object_identity_values(obj, object_id)
+        )
+        if _text_mentions_category(identity, category):
+            matched.append(str(getattr(obj, "object_id", object_id)))
+    return sorted(object_id for object_id in matched if object_id)
+
+
+def _object_identity_values(obj: Any, object_id: Any) -> tuple[Any, ...]:
+    metadata = getattr(obj, "metadata", None) or {}
+    semantic_name = metadata.get("semantic_name") if isinstance(metadata, dict) else ""
+    return (
+        semantic_name,
+        getattr(obj, "name", ""),
+        getattr(obj, "description", ""),
+        getattr(obj, "object_id", object_id),
+    )
+
+
+def _text_mentions_category(value: Any, category: str) -> bool:
+    """Match a category against free text without treating descriptive text as a label."""
+    normalized = re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
+    if not normalized:
+        return False
+    words = normalized.split()
+    for start in range(len(words)):
+        for end in range(start + 1, min(len(words), start + 4) + 1):
+            candidate = canonical_object_category("_".join(words[start:end]))
+            if categories_are_equivalent(candidate, category):
+                return True
+    return False
 
 
 def contract_bound_support_object_ids(scene: Any, target_id: Any) -> list[str]:

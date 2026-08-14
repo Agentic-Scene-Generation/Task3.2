@@ -47,6 +47,7 @@ from scenesmith.agent_utils.room import (
 from scenesmith.manipuland_agents.cross_stage_inventory import (
     contract_bound_support_object_ids,
     existing_floor_covering_ids,
+    redundant_furniture_owned_floor_request_indices,
     redundant_floor_covering_request_indices,
     violates_hard_one_per_support_reparenting,
 )
@@ -134,6 +135,7 @@ class ManipulandTools:
         cfg: DictConfig,
         current_furniture_id: UniqueID,
         support_surfaces: dict[str, SupportSurface],
+        fulfilled_floor_requirements: dict[str, list[str]] | None = None,
     ):
         """Initialize manipuland tools.
 
@@ -144,12 +146,15 @@ class ManipulandTools:
             current_furniture_id: ID of furniture currently being populated.
             support_surfaces: Dictionary mapping surface_id (string) to SupportSurface.
                 All surfaces for the current furniture item.
+            fulfilled_floor_requirements: Furniture-owned floor requirements already
+                satisfied by global scene inventory for this target.
         """
         self.scene = scene
         self.asset_manager = asset_manager
         self.cfg = cfg
         self.current_furniture_id = current_furniture_id
         self.support_surfaces = support_surfaces
+        self.fulfilled_floor_requirements = fulfilled_floor_requirements or {}
         # Asset generation can happen in several designer turns. Keep a
         # table-specific centerpiece clearance so a later flower or vase
         # request inherits the constraints derived from the original plates.
@@ -1005,6 +1010,45 @@ class ManipulandTools:
                         },
                         indent=2,
                     )
+            (
+                object_descriptions,
+                short_names,
+                desired_dimensions,
+                skipped_furniture_requirements,
+            ) = self._filter_fulfilled_floor_requirement_requests(
+                object_descriptions=object_descriptions,
+                short_names=short_names,
+                desired_dimensions=desired_dimensions,
+            )
+            if skipped_furniture_requirements:
+                existing_object_ids = sorted(
+                    {
+                        object_id
+                        for category in skipped_furniture_requirements
+                        for object_id in self.fulfilled_floor_requirements[category]
+                    }
+                )
+                console_logger.info(
+                    "Skipped fulfilled furniture-owned floor requirement request(s) %s; "
+                    "already realized by %s",
+                    skipped_furniture_requirements,
+                    existing_object_ids,
+                )
+                if not short_names:
+                    return json.dumps(
+                        {
+                            "status": "already_satisfied",
+                            "message": (
+                                "The requested floor-standing requirement is already "
+                                "realized by furniture; do not generate a duplicate."
+                            ),
+                            "existing_object_ids": existing_object_ids,
+                            "skipped_categories": sorted(
+                                skipped_furniture_requirements
+                            ),
+                        },
+                        indent=2,
+                    )
             desired_dimensions = self._budget_dining_centerpiece_dimensions(
                 object_descriptions=object_descriptions,
                 short_names=short_names,
@@ -1029,6 +1073,11 @@ class ManipulandTools:
             if skipped_coverings:
                 result += "\nSkipped already-realized floor covering(s): " + ", ".join(
                     skipped_coverings
+                )
+            if skipped_furniture_requirements:
+                result += (
+                    "\nSkipped fulfilled furniture-owned floor requirement(s): "
+                    + ", ".join(sorted(skipped_furniture_requirements))
                 )
             return result
 
@@ -3274,6 +3323,33 @@ class ManipulandTools:
         )
         return result.to_json()
 
+    def _filter_fulfilled_floor_requirement_requests(
+        self,
+        *,
+        object_descriptions: list[str],
+        short_names: list[str],
+        desired_dimensions: list[list[float]],
+    ) -> tuple[list[str], list[str], list[list[float]], dict[str, list[str]]]:
+        """Remove assets that would duplicate fulfilled floor requirements."""
+        skipped_indices = redundant_furniture_owned_floor_request_indices(
+            fulfilled_requirements=self.fulfilled_floor_requirements,
+            object_descriptions=object_descriptions,
+            short_names=short_names,
+        )
+        if not skipped_indices:
+            return object_descriptions, short_names, desired_dimensions, {}
+
+        skipped_index_set = set(skipped_indices)
+        retained_indices = [
+            index for index in range(len(short_names)) if index not in skipped_index_set
+        ]
+        return (
+            [object_descriptions[index] for index in retained_indices],
+            [short_names[index] for index in retained_indices],
+            [desired_dimensions[index] for index in retained_indices],
+            dict(self.fulfilled_floor_requirements),
+        )
+
     def _generate_assets_impl(self, request: AssetGenerationRequest) -> str:
         """Implementation for generating manipuland assets."""
         console_logger.info(
@@ -3402,6 +3478,20 @@ class ManipulandTools:
             "num_surfaces": len(surface_infos),
             "total_manipuland_count": total_manipuland_count,
             "contract_bound_objects": contract_bound_objects,
+            "fulfilled_floor_requirements": [
+                {
+                    "category": category,
+                    "object_ids": object_ids,
+                    "owner": "furniture",
+                    "relationship": (
+                        "prompt-required floor-standing object already realized "
+                        "by furniture; preserve it and do not generate a duplicate"
+                    ),
+                }
+                for category, object_ids in sorted(
+                    self.fulfilled_floor_requirements.items()
+                )
+            ],
         }
 
         return json.dumps(result, indent=2)

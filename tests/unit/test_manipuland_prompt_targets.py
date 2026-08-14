@@ -18,6 +18,7 @@ from scenesmith.manipuland_agents.cross_stage_inventory import (
     contract_bound_support_object_ids,
     existing_floor_covering_ids,
     redundant_floor_covering_request_indices,
+    satisfied_furniture_owned_floor_requirements,
     violates_hard_one_per_support_reparenting,
 )
 from scenesmith.manipuland_agents.stateful_manipuland_agent import (
@@ -1246,6 +1247,111 @@ def test_existing_furniture_rug_skips_redundant_floor_target() -> None:
 
     assert filtered == []
     assert existing_floor_covering_ids(scene) == ["rug_0"]
+
+
+def test_fulfilled_furniture_owned_floor_requirement_skips_single_target() -> None:
+    floor_id = UniqueID("floor_office")
+    wastebasket_id = UniqueID("trash_can_0")
+    floor = SimpleNamespace(object_id=floor_id, object_type=ObjectType.FLOOR)
+    wastebasket = SimpleNamespace(
+        object_id=wastebasket_id,
+        object_type=ObjectType.FURNITURE,
+        name="office trash can",
+        description="dark gray freestanding wastebasket",
+        metadata={"semantic_name": "trash_can"},
+    )
+    objects = {floor_id: floor, wastebasket_id: wastebasket}
+    scene = SimpleNamespace(
+        objects=objects,
+        scene_expert_task_spec={"required_large_objects": ["wastebasket"]},
+        get_object=lambda object_id: objects.get(object_id),
+    )
+    selection = FurnitureSelection(
+        furniture_id=floor_id,
+        suggested_items="REQUIRED: wastebasket",
+        prompt_constraints="place it in a corner",
+        style_notes="",
+    )
+    agent = object.__new__(StatefulManipulandAgent)
+
+    assert satisfied_furniture_owned_floor_requirements(
+        scene, floor_id, selection.suggested_items
+    ) == {"wastebasket": ["trash_can_0"]}
+    assert (
+        agent._skip_satisfied_furniture_owned_floor_targets(
+            scene=scene, furniture_data=[selection]
+        )
+        == []
+    )
+
+
+def test_furniture_owned_floor_requirement_needs_authoritative_count() -> None:
+    floor_id = UniqueID("floor_office")
+    wastebasket_id = UniqueID("wastebasket_0")
+    floor = SimpleNamespace(object_id=floor_id, object_type=ObjectType.FLOOR)
+    wastebasket = SimpleNamespace(
+        object_id=wastebasket_id,
+        object_type=ObjectType.FURNITURE,
+        name="wastebasket",
+        description="office wastebasket",
+        metadata={"semantic_name": "wastebasket"},
+    )
+    objects = {floor_id: floor, wastebasket_id: wastebasket}
+    scene = SimpleNamespace(
+        objects=objects,
+        scene_expert_task_spec={"required_large_objects": ["wastebasket"] * 2},
+        get_object=lambda object_id: objects.get(object_id),
+    )
+    selection = FurnitureSelection(
+        furniture_id=floor_id,
+        suggested_items="REQUIRED: wastebasket",
+        prompt_constraints="",
+        style_notes="",
+    )
+    agent = object.__new__(StatefulManipulandAgent)
+
+    assert (
+        satisfied_furniture_owned_floor_requirements(
+            scene, floor_id, selection.suggested_items
+        )
+        == {}
+    )
+    assert agent._skip_satisfied_furniture_owned_floor_targets(
+        scene=scene, furniture_data=[selection]
+    ) == [selection]
+
+
+def test_mixed_floor_target_keeps_unsatisfied_work_and_exposes_inventory_note() -> None:
+    floor_id = UniqueID("floor_office")
+    wastebasket_id = UniqueID("wastebasket_0")
+    floor = SimpleNamespace(object_id=floor_id, object_type=ObjectType.FLOOR)
+    wastebasket = SimpleNamespace(
+        object_id=wastebasket_id,
+        object_type=ObjectType.FURNITURE,
+        name="wastebasket",
+        description="office wastebasket",
+        metadata={"semantic_name": "wastebasket"},
+    )
+    objects = {floor_id: floor, wastebasket_id: wastebasket}
+    scene = SimpleNamespace(
+        objects=objects,
+        scene_expert_task_spec={"required_large_objects": ["wastebasket"]},
+        get_object=lambda object_id: objects.get(object_id),
+    )
+    selection = FurnitureSelection(
+        furniture_id=floor_id,
+        suggested_items="REQUIRED: wastebasket and floor lamp",
+        prompt_constraints="place both in a corner",
+        style_notes="",
+    )
+    agent = object.__new__(StatefulManipulandAgent)
+
+    assert agent._skip_satisfied_furniture_owned_floor_targets(
+        scene=scene, furniture_data=[selection]
+    ) == [selection]
+    assert "Cross-stage inventory (do not regenerate): wastebasket" in (
+        selection.prompt_constraints
+    )
 
 
 def test_explicit_floor_item_is_rerouted_from_nearby_furniture() -> None:

@@ -91,6 +91,27 @@ class TestManipulandTools(unittest.TestCase):
             self.cfg.placement_noise.perfect_profile,
         )
 
+    def test_generation_filter_blocks_fulfilled_floor_requirement(self):
+        self.manipuland_tools.fulfilled_floor_requirements = {
+            "wastebasket": ["wastebasket_0"]
+        }
+
+        (
+            descriptions,
+            short_names,
+            dimensions,
+            skipped,
+        ) = self.manipuland_tools._filter_fulfilled_floor_requirement_requests(
+            object_descriptions=["Small office wastebasket", "Hardcover notebook"],
+            short_names=["wastebasket_floor", "notebook"],
+            desired_dimensions=[[0.25, 0.25, 0.35], [0.18, 0.03, 0.24]],
+        )
+
+        self.assertEqual(descriptions, ["Hardcover notebook"])
+        self.assertEqual(short_names, ["notebook"])
+        self.assertEqual(dimensions, [[0.18, 0.03, 0.24]])
+        self.assertEqual(skipped, {"wastebasket": ["wastebasket_0"]})
+
     def test_dining_place_setting_alignment_tool_is_available(self):
         # 2026-07-23 修改原因：餐位对齐 critic 必须能调用实际修复工具，不能只输出
         # 文字建议，否则盘子虽齐全仍会随机散落在餐桌上。

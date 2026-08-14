@@ -57,7 +57,9 @@ from scenesmith.manipuland_agents.base_manipuland_agent import BaseManipulandAge
 from scenesmith.manipuland_agents.cross_stage_inventory import (
     existing_floor_covering_ids,
     is_floor_target,
+    is_single_explicit_required_category_request,
     is_single_floor_covering_request,
+    satisfied_furniture_owned_floor_requirements,
 )
 from scenesmith.manipuland_agents.tools.manipuland_tools import ManipulandTools
 from scenesmith.manipuland_agents.tools.vision_tools import ManipulandVisionTools
@@ -408,6 +410,15 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
             cfg=self.cfg,
             current_furniture_id=current_furniture_id,
             support_surfaces=support_surfaces,
+            fulfilled_floor_requirements=(
+                satisfied_furniture_owned_floor_requirements(
+                    self.scene,
+                    current_furniture_id,
+                    self.current_furniture_selection.suggested_items,
+                )
+                if self.current_furniture_selection is not None
+                else None
+            ),
         )
         workflow_tools = WorkflowTools()
 
@@ -1810,6 +1821,10 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
             scene=scene,
             furniture_data=furniture_data,
         )
+        furniture_data = self._skip_satisfied_furniture_owned_floor_targets(
+            scene=scene,
+            furniture_data=furniture_data,
+        )
 
         if not furniture_data:
             console_logger.info("No furniture identified for manipuland placement")
@@ -2098,6 +2113,49 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
                     existing_ids,
                 )
                 continue
+            retained.append(selection)
+        return retained
+
+    def _skip_satisfied_furniture_owned_floor_targets(
+        self,
+        *,
+        scene: RoomScene,
+        furniture_data: list[FurnitureSelection],
+    ) -> list[FurnitureSelection]:
+        """Skip only single floor requirements already fulfilled by furniture."""
+        retained: list[FurnitureSelection] = []
+        for selection in furniture_data:
+            fulfilled = satisfied_furniture_owned_floor_requirements(
+                scene,
+                selection.furniture_id,
+                selection.suggested_items,
+            )
+            if not fulfilled:
+                retained.append(selection)
+                continue
+            if is_single_explicit_required_category_request(
+                selection.suggested_items,
+                tuple(fulfilled),
+            ):
+                console_logger.info(
+                    "Skipping fulfilled furniture-owned floor target %s; inventory=%s",
+                    selection.furniture_id,
+                    fulfilled,
+                )
+                continue
+
+            inventory_note = "; ".join(
+                f"{category} already realized by furniture as {', '.join(object_ids)}"
+                for category, object_ids in sorted(fulfilled.items())
+            )
+            selection.prompt_constraints = "\n".join(
+                value
+                for value in (
+                    selection.prompt_constraints,
+                    "Cross-stage inventory (do not regenerate): " + inventory_note,
+                )
+                if value
+            )
             retained.append(selection)
         return retained
 
