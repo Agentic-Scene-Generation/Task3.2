@@ -298,6 +298,29 @@ class TestClearanceZonesWallFiltering(unittest.TestCase):
             [violation.furniture_id for violation in violations], ["swing_blocker"]
         )
 
+    def test_door_clearance_ignores_numerical_boundary_contact(self):
+        """Nanometer-scale AABB overlap must not become a hard door failure."""
+        boundary_contact = self._create_furniture_object(
+            name="boundary_contact",
+            # East-door swing zone starts at x=1.1. The object's max x is only
+            # 5nm inside that boundary, well below the shared 10um tolerance.
+            position=np.array([1.000000005, 0.0, 1.0]),
+            size=np.array([0.2, 0.2, 1.0]),
+        )
+        true_blocker = self._create_furniture_object(
+            name="true_blocker",
+            position=np.array([1.02, 0.0, 1.0]),
+            size=np.array([0.2, 0.2, 1.0]),
+        )
+        self.scene.add_object(boundary_contact)
+        self.scene.add_object(true_blocker)
+
+        violations = compute_door_clearance_violations(self.scene)
+
+        self.assertEqual(
+            [violation.furniture_id for violation in violations], ["true_blocker"]
+        )
+
     def test_open_connection_ignores_structural_elements(self):
         """Test that walls and floor are not flagged as blocking open connections."""
         # Add south wall (contains the open connection) and floor.

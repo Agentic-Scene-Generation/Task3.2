@@ -1130,6 +1130,76 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         StatefulFurnitureAgent is None,
         f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
     )
+    def test_forbidden_zone_penalty_uses_clearance_epsilon(self) -> None:
+        agent = object.__new__(StatefulFurnitureAgent)
+        zones = [
+            (
+                "door_1",
+                "door",
+                np.array([0.0, 0.0, 0.0]),
+                np.array([1.0, 1.0, 2.0]),
+            )
+        ]
+        boundary_contact = (
+            np.array([-0.2 + 5e-9, 0.2, 0.0]),
+            np.array([5e-9, 0.8, 1.0]),
+        )
+        true_overlap = (
+            np.array([-0.2 + 0.02, 0.2, 0.0]),
+            np.array([0.02, 0.8, 1.0]),
+        )
+
+        self.assertEqual(agent._zone_overlap_penalty(boundary_contact, zones), 0.0)
+        self.assertGreater(agent._zone_overlap_penalty(true_overlap, zones), 0.0)
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
+    def test_hard_state_transaction_rolls_back_new_door_blocker(self) -> None:
+        state = {"pose": "baseline"}
+
+        class TransactionScene:
+            def to_state_dict(self):
+                return dict(state)
+
+            def restore_from_state_dict(self, snapshot):
+                state.clear()
+                state.update(snapshot)
+
+        agent = object.__new__(StatefulFurnitureAgent)
+        agent.scene = TransactionScene()
+        agent.rendering_manager = SimpleNamespace(clear_cache=MagicMock())
+        agent._reset_critic_candidate_cache = MagicMock()
+        fingerprints = iter(
+            [
+                {
+                    "hard:unresolved prompt-core furniture relation: seating_to_work_surface"
+                },
+                {
+                    "hard:unresolved prompt-core furniture relation: seating_to_work_surface",
+                    "door:door_1:office_chair_1",
+                },
+            ]
+        )
+        agent._hard_violation_fingerprints = lambda: next(fingerprints)
+
+        transaction = agent._begin_hard_state_transaction()
+        state["pose"] = "door_blocking_candidate"
+
+        self.assertFalse(
+            agent._commit_hard_state_transaction(
+                transaction, source="seating orientation"
+            )
+        )
+        self.assertEqual(state, {"pose": "baseline"})
+        agent.rendering_manager.clear_cache.assert_called_once_with()
+        agent._reset_critic_candidate_cache.assert_called_once_with()
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
     def test_non_bedroom_relation_failure_repairs_without_inventory_change(
         self,
     ) -> None:

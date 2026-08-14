@@ -5,6 +5,7 @@ This module implements a furniture placement workflow using persistent
 SQLiteSession agents that maintain conversation memory across interactions.
 """
 
+import copy
 import logging
 import math
 import re
@@ -28,7 +29,10 @@ from scenesmith.agent_utils.base_stateful_agent import (
     log_agent_usage,
 )
 from scenesmith.agent_utils.clearance_zones import (
+    AABB_INTERSECTION_EPSILON_M,
     WALL_HEIGHT_TOLERANCE_M,
+    aabb_overlap_depths,
+    compute_door_clearance_violations,
     door_swing_clearance_bounds,
 )
 from scenesmith.agent_utils.furniture_layout_planning import (
@@ -517,9 +521,8 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             )
         self._converge_prompt_required_inventory(source="before final critique")
 
-        seating_fixes = align_seating_to_nearest_surface(
-            scene,
-            allowed_targets_by_seat=seating_orientation_targets(scene, config=self.cfg),
+        seating_fixes = self._align_seating_with_hard_state_guard(
+            seating_orientation_targets(scene, config=self.cfg)
         )
         if seating_fixes:
             console_logger.info(
@@ -668,6 +671,84 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         hard_state = self._evaluate_current_furniture_hard_state()
         return hard_state is None or hard_state.hard_valid
 
+    def _hard_violation_fingerprints(self) -> set[str]:
+        """Return stable IDs for hard failures relevant to repair acceptance."""
+        scene = getattr(self, "scene", None)
+        if scene is None:
+            return set()
+
+        fingerprints: set[str] = set()
+        hard_state = self._evaluate_current_furniture_hard_state()
+        checkpoint_state = self._checkpoint_eligible_furniture_hard_state(hard_state)
+        for reason in getattr(checkpoint_state or hard_state, "hard_reasons", []) or []:
+            fingerprints.add(f"hard:{reason}")
+        try:
+            for violation in compute_door_clearance_violations(scene):
+                fingerprints.add(
+                    "door:" f"{violation.door_label}:{violation.furniture_id}"
+                )
+        except Exception:
+            console_logger.debug(
+                "Could not collect structured door violations for repair transaction",
+                exc_info=True,
+            )
+        return fingerprints
+
+    def _begin_hard_state_transaction(self) -> tuple[dict[str, Any], set[str]] | None:
+        """Snapshot the scene before a deterministic geometry repair."""
+        scene = getattr(self, "scene", None)
+        serialize = getattr(scene, "to_state_dict", None)
+        restore = getattr(scene, "restore_from_state_dict", None)
+        if not callable(serialize) or not callable(restore):
+            return None
+        try:
+            return copy.deepcopy(serialize()), self._hard_violation_fingerprints()
+        except Exception:
+            console_logger.debug(
+                "Could not create hard-state repair transaction snapshot", exc_info=True
+            )
+            return None
+
+    def _commit_hard_state_transaction(
+        self,
+        transaction: tuple[dict[str, Any], set[str]] | None,
+        *,
+        source: str,
+    ) -> bool:
+        """Reject a candidate that adds any hard failure to its baseline."""
+        if transaction is None:
+            return True
+        snapshot, before = transaction
+        after = self._hard_violation_fingerprints()
+        introduced = sorted(after - before)
+        if not introduced:
+            return True
+        self.scene.restore_from_state_dict(snapshot)
+        if getattr(self, "rendering_manager", None) is not None:
+            self.rendering_manager.clear_cache()
+        self._reset_critic_candidate_cache()
+        console_logger.info(
+            "Rejected deterministic %s repair because it introduced hard failures: %s",
+            source,
+            "; ".join(introduced),
+        )
+        return False
+
+    def _align_seating_with_hard_state_guard(
+        self, allowed_targets_by_seat: dict[str, set[str]]
+    ) -> list[Any]:
+        """Apply seating orientation only when it preserves all hard invariants."""
+        transaction = self._begin_hard_state_transaction()
+        fixes = align_seating_to_nearest_surface(
+            self.scene,
+            allowed_targets_by_seat=allowed_targets_by_seat,
+        )
+        if fixes and not self._commit_hard_state_transaction(
+            transaction, source="seating orientation"
+        ):
+            return []
+        return fixes
+
     def _repair_contract_layout_before_first_critique(self) -> list[str]:
         """Repair contract-authorized furniture relations before first critique.
 
@@ -682,19 +763,20 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         ):
             return []
 
+        transaction = self._begin_hard_state_transaction()
         relation_fixes = improve_furniture_relations(
             self.scene,
             config=critic_config,
             candidate_validator=self._is_furniture_relation_candidate_hard_valid,
         )
-        seating_fixes = align_seating_to_nearest_surface(
-            self.scene,
-            allowed_targets_by_seat=seating_orientation_targets(
-                self.scene,
-                config=critic_config,
-            ),
+        seating_fixes = self._align_seating_with_hard_state_guard(
+            seating_orientation_targets(self.scene, config=critic_config)
         )
         if not relation_fixes and not seating_fixes:
+            return []
+        if not self._commit_hard_state_transaction(
+            transaction, source="prompt-contract relation"
+        ):
             return []
 
         # The next automatic critic request must render and evaluate the pose
@@ -981,18 +1063,21 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         ):
             return []
 
+        transaction = self._begin_hard_state_transaction()
         relation_fixes = improve_furniture_relations(
             self.scene,
             config=critic_config,
             candidate_validator=self._is_furniture_relation_candidate_hard_valid,
         )
-        seating_fixes = align_seating_to_nearest_surface(
-            self.scene,
-            allowed_targets_by_seat=seating_orientation_targets(
-                self.scene,
-                config=critic_config,
-            ),
+        seating_fixes = self._align_seating_with_hard_state_guard(
+            seating_orientation_targets(self.scene, config=critic_config)
         )
+        if (
+            relation_fixes or seating_fixes
+        ) and not self._commit_hard_state_transaction(
+            transaction, source="prompt-contract relation"
+        ):
+            return []
         actions = [
             f"bound {fix.object_id} via {fix.relation_type} {action_context}"
             for fix in relation_fixes
@@ -2640,6 +2725,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         """Move objects out of door/opening clearance zones using generic anchors."""
         if self.scene is None:
             return False
+        transaction = self._begin_hard_state_transaction()
         zones = self._opening_forbidden_zones(include_windows=include_windows)
         if not zones:
             return False
@@ -2667,7 +2753,8 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             new_penalty = self._zone_overlap_penalty_for_transform(
                 obj, transform, zones
             )
-            if new_penalty + 1e-5 >= original_penalty:
+            minimum_improvement = 1000.0 * AABB_INTERSECTION_EPSILON_M**2
+            if new_penalty >= original_penalty - minimum_improvement:
                 continue
             self.scene.move_object(obj.object_id, transform)
             console_logger.info(
@@ -2677,6 +2764,10 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 new_penalty,
             )
             changed = True
+        if changed and not self._commit_hard_state_transaction(
+            transaction, source="forbidden-zone"
+        ):
+            return False
         return changed
 
     def _opening_forbidden_zones(
@@ -2781,7 +2872,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             if bounds is None:
                 continue
             penalty = self._zone_overlap_penalty(bounds, zones)
-            if penalty > 1e-6:
+            if penalty > 0.0:
                 blockers.append((str(object_id), obj, penalty))
         return blockers
 
@@ -2793,13 +2884,13 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         penalty = 0.0
         obj_min, obj_max = bounds
         for _, zone_type, zone_min, zone_max in zones:
-            overlap_x = min(float(obj_max[0]), float(zone_max[0])) - max(
-                float(obj_min[0]), float(zone_min[0])
+            overlap_x, overlap_y, _ = aabb_overlap_depths(
+                list(obj_min), list(obj_max), list(zone_min), list(zone_max)
             )
-            overlap_y = min(float(obj_max[1]), float(zone_max[1])) - max(
-                float(obj_min[1]), float(zone_min[1])
-            )
-            if overlap_x > 0.0 and overlap_y > 0.0:
+            if (
+                overlap_x > AABB_INTERSECTION_EPSILON_M
+                and overlap_y > AABB_INTERSECTION_EPSILON_M
+            ):
                 weight = 1000.0 if zone_type in ("door", "open") else 150.0
                 penalty += overlap_x * overlap_y * weight
         return penalty

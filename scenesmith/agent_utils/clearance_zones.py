@@ -27,6 +27,10 @@ console_logger = logging.getLogger(__name__)
 # a few nanometers above its intended contact plane. Keep the tolerance far
 # below meaningful room-geometry violations.
 WALL_HEIGHT_TOLERANCE_M = 1e-6
+# Door checks and deterministic placement must use the same tolerance.  This
+# filters floating-point boundary contact without reducing any meaningful
+# passage clearance (10 micrometers is far below asset/physics precision).
+AABB_INTERSECTION_EPSILON_M = 1e-5
 
 
 @dataclass
@@ -360,13 +364,32 @@ def compute_openings_data(
     return openings_data
 
 
-def _aabb_intersects(
+def aabb_overlap_depths(
     obj_min: list[float],
     obj_max: list[float],
     zone_min: list[float],
     zone_max: list[float],
+) -> tuple[float, float, float]:
+    """Return non-negative overlap depths for two AABBs."""
+    return tuple(
+        max(
+            0.0,
+            min(float(obj_max[axis]), float(zone_max[axis]))
+            - max(float(obj_min[axis]), float(zone_min[axis])),
+        )
+        for axis in range(3)
+    )
+
+
+def aabb_intersects(
+    obj_min: list[float],
+    obj_max: list[float],
+    zone_min: list[float],
+    zone_max: list[float],
+    *,
+    epsilon_m: float = AABB_INTERSECTION_EPSILON_M,
 ) -> bool:
-    """Check if two AABBs intersect.
+    """Check whether AABBs overlap by more than a numerical tolerance.
 
     Args:
         obj_min: Object AABB minimum [x, y, z].
@@ -377,13 +400,9 @@ def _aabb_intersects(
     Returns:
         True if AABBs overlap.
     """
-    return (
-        obj_min[0] < zone_max[0]
-        and obj_max[0] > zone_min[0]
-        and obj_min[1] < zone_max[1]
-        and obj_max[1] > zone_min[1]
-        and obj_min[2] < zone_max[2]
-        and obj_max[2] > zone_min[2]
+    return all(
+        depth > epsilon_m
+        for depth in aabb_overlap_depths(obj_min, obj_max, zone_min, zone_max)
     )
 
 
@@ -397,10 +416,7 @@ def _compute_penetration_depth(
 
     Returns the minimum penetration depth across all axes.
     """
-    penetration_x = min(obj_max[0] - zone_min[0], zone_max[0] - obj_min[0])
-    penetration_y = min(obj_max[1] - zone_min[1], zone_max[1] - obj_min[1])
-    penetration_z = min(obj_max[2] - zone_min[2], zone_max[2] - obj_min[2])
-    return min(penetration_x, penetration_y, penetration_z)
+    return min(aabb_overlap_depths(obj_min, obj_max, zone_min, zone_max))
 
 
 def door_swing_clearance_bounds(
@@ -481,7 +497,7 @@ def compute_door_clearance_violations(
             obj_min = list(world_bounds[0])
             obj_max = list(world_bounds[1])
 
-            if _aabb_intersects(
+            if aabb_intersects(
                 obj_min=obj_min,
                 obj_max=obj_max,
                 zone_min=zone_min,
