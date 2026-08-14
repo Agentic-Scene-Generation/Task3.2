@@ -708,9 +708,10 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
         return bool(configured)
 
     def _evaluate_current_hard_state(self, physics_context: str | None = None) -> Any:
-        """Add exact prompt cardinality at the current support commit boundary."""
+        """Add prompt inventory and dining contracts at a target commit boundary."""
         hard_state = super()._evaluate_current_hard_state(physics_context)
         reasons = self._current_target_cardinality_failures()
+        reasons.extend(self._current_target_dining_contract_failures())
         if not reasons:
             return hard_state
         hard_state.hard_valid = False
@@ -765,6 +766,19 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
                     f"found {observed}"
                 )
         return failures
+
+    def _current_target_dining_contract_failures(self) -> list[str]:
+        """Return failed joint dining predicates owned by the current table only."""
+        furniture_id = getattr(self, "current_furniture_id", None)
+        if not furniture_id or getattr(self, "scene", None) is None:
+            return []
+        status = self._dining_joint_contract_status(furniture_id)
+        if status is None or status["valid"]:
+            return []
+        return [
+            f"dining joint contract for {furniture_id}: {reason}"
+            for reason in status["failures"]
+        ]
 
     def _apply_per_furniture_postprocessing(self, furniture_id: UniqueID) -> bool:
         """Settle one target's manipulands before its final scored critique."""
@@ -845,6 +859,80 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
     def _dining_physics_valid(self, furniture_id: UniqueID) -> bool:
         """Run strict collision validation for this furniture's manipulands."""
         return not self._dining_collisions(furniture_id)
+
+    @staticmethod
+    def _dining_result_failure_detail(
+        predicate: str,
+        result: dict[str, Any] | None,
+    ) -> str:
+        """Format a bounded deterministic failure reason for logs and exceptions."""
+        if result is None:
+            return f"{predicate}: no result"
+        detail = " ".join(str(result.get("reason") or "failed").split())
+        if len(detail) > 320:
+            detail = f"{detail[:317]}..."
+        return f"{predicate}: {detail}"
+
+    def _dining_joint_contract_status(
+        self,
+        furniture_id: UniqueID,
+        *,
+        check_physics: bool = True,
+    ) -> dict[str, Any] | None:
+        """Evaluate one table's semantic, support, and physics commit contract.
+
+        ``None`` means this target has no dining place-setting contract.  A
+        predicate is ``None`` only when an earlier predicate makes it unsafe or
+        pointless to evaluate; it is never treated as a pass.
+        """
+        alignment, completeness = self._dining_contract_results(furniture_id)
+        if alignment is None and completeness is None:
+            return None
+
+        alignment_valid = bool(alignment and alignment.get("label") == "pass")
+        completeness_valid = bool(completeness and completeness.get("label") == "pass")
+        failures: list[str] = []
+        if not alignment_valid:
+            failures.append(self._dining_result_failure_detail("alignment", alignment))
+        if not completeness_valid:
+            failures.append(
+                self._dining_result_failure_detail("completeness", completeness)
+            )
+
+        support_valid: bool | None = None
+        if alignment_valid:
+            support_valid = self._dining_support_bindings_valid(furniture_id, alignment)
+            if not support_valid:
+                failures.append(
+                    "support: aligned place-setting objects are not all bound "
+                    f"to {furniture_id}"
+                )
+
+        physics_valid: bool | None = None
+        if check_physics and alignment_valid and completeness_valid and support_valid:
+            physics_valid = self._dining_physics_valid(furniture_id)
+            if not physics_valid:
+                failures.append(
+                    "physics: dining-target collision validation did not pass"
+                )
+
+        valid = bool(
+            alignment_valid
+            and completeness_valid
+            and support_valid
+            and (physics_valid if check_physics else True)
+        )
+        return {
+            "furniture_id": str(furniture_id),
+            "alignment": alignment_valid,
+            "completeness": completeness_valid,
+            "support": support_valid,
+            "physics": physics_valid,
+            "valid": valid,
+            "failures": failures,
+            "alignment_result": alignment,
+            "completeness_result": completeness,
+        }
 
     def _remove_duplicate_composite_members(self, furniture_id: UniqueID) -> list[str]:
         """Remove separately placed copies already represented by a composite."""
@@ -1263,18 +1351,8 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
 
     def _repair_dining_alignment_after_physics(self, furniture_id: UniqueID) -> bool:
         """Jointly commit post-physics dining alignment and physical validity."""
-        alignment, completeness = self._dining_contract_results(furniture_id)
-        alignment_failed = alignment is not None and alignment.get("label") == "fail"
-        completeness_failed = (
-            completeness is not None and completeness.get("label") == "fail"
-        )
-        physics_failed = (
-            alignment is not None
-            and not alignment_failed
-            and not completeness_failed
-            and not self._dining_physics_valid(furniture_id)
-        )
-        if not alignment_failed and not completeness_failed and not physics_failed:
+        initial_status = self._dining_joint_contract_status(furniture_id)
+        if initial_status is None or initial_status["valid"]:
             return False
 
         settled_snapshot = copy.deepcopy(self.scene.to_state_dict())
@@ -1303,16 +1381,15 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
             self._reset_critic_candidate_cache()
             return False
 
-        candidate_alignment, candidate_completeness = self._dining_contract_results(
-            furniture_id
+        candidate_status = self._dining_joint_contract_status(
+            furniture_id,
+            check_physics=False,
         )
         if (
-            candidate_alignment is None
-            or candidate_alignment.get("label") != "pass"
-            or candidate_completeness is None
-            or candidate_completeness.get("label") != "pass"
+            candidate_status is None
+            or not candidate_status["valid"]
             or not self._resolve_dining_companion_collisions(
-                furniture_id, candidate_alignment
+                furniture_id, candidate_status["alignment_result"]
             )
         ):
             self.scene.restore_from_state_dict(settled_snapshot)
@@ -1321,24 +1398,16 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
             return False
 
         postprocessing_valid = self._apply_per_furniture_postprocessing(furniture_id)
-        repaired_alignment, repaired_completeness = self._dining_contract_results(
-            furniture_id
+        repaired_status = (
+            self._dining_joint_contract_status(furniture_id)
+            if postprocessing_valid
+            else None
         )
-        alignment_valid = bool(
-            repaired_alignment is not None and repaired_alignment.get("label") == "pass"
-        )
-        completeness_valid = bool(
-            repaired_completeness is not None
-            and repaired_completeness.get("label") == "pass"
-        )
-        support_valid = bool(
-            repaired_alignment is not None
-            and self._dining_support_bindings_valid(furniture_id, repaired_alignment)
-        )
-        physics_valid = postprocessing_valid and self._dining_physics_valid(
-            furniture_id
-        )
-        if alignment_valid and completeness_valid and support_valid and physics_valid:
+        if (
+            postprocessing_valid
+            and repaired_status is not None
+            and repaired_status["valid"]
+        ):
             console_logger.info(
                 "Joint dining alignment/physics repair passed for %s",
                 furniture_id,
@@ -1352,10 +1421,10 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
             "Joint dining repair rejected for %s; restored settled scene "
             "(alignment=%s, completeness=%s, support=%s, physics=%s)",
             furniture_id,
-            alignment_valid,
-            completeness_valid,
-            support_valid,
-            physics_valid,
+            repaired_status and repaired_status["alignment"],
+            repaired_status and repaired_status["completeness"],
+            repaired_status and repaired_status["support"],
+            repaired_status and repaired_status["physics"],
         )
         return False
 
@@ -1480,19 +1549,10 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
 
     def _finalize_dining_joint_contract(self, furniture_id: UniqueID) -> None:
         """Revalidate dining semantics and physics after score-based rollback."""
-        alignment, completeness = self._dining_contract_results(furniture_id)
-        if alignment is None and completeness is None:
+        initial_status = self._dining_joint_contract_status(furniture_id)
+        if initial_status is None:
             return
-
-        initially_valid = bool(
-            alignment is not None
-            and alignment.get("label") == "pass"
-            and completeness is not None
-            and completeness.get("label") == "pass"
-            and self._dining_support_bindings_valid(furniture_id, alignment)
-            and self._dining_physics_valid(furniture_id)
-        )
-        if initially_valid:
+        if initial_status["valid"]:
             return
 
         console_logger.info(
@@ -1502,19 +1562,16 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
         )
         self._repair_dining_alignment_after_physics(furniture_id)
 
-        alignment, completeness = self._dining_contract_results(furniture_id)
-        contract_valid = bool(
-            alignment is not None
-            and alignment.get("label") == "pass"
-            and completeness is not None
-            and completeness.get("label") == "pass"
-            and self._dining_support_bindings_valid(furniture_id, alignment)
-            and self._dining_physics_valid(furniture_id)
-        )
-        if not contract_valid:
+        final_status = self._dining_joint_contract_status(furniture_id)
+        if final_status is None or not final_status["valid"]:
+            failures = (
+                "; ".join(final_status["failures"])
+                if final_status is not None
+                else "contract evaluation disappeared"
+            )
             raise RuntimeError(
                 "Manipuland finalization left an unresolved dining semantic/physics "
-                f"contract for {furniture_id}"
+                f"contract for {furniture_id}: {failures}"
             )
 
         console_logger.info(

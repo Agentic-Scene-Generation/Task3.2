@@ -12,7 +12,7 @@ from agents.exceptions import MaxTurnsExceeded
 from pydrake.all import RigidTransform, RollPitchYaw
 
 from scenesmith.agent_utils.room import ObjectType, UniqueID
-from scenesmith.agent_utils.base_stateful_agent import Runner
+from scenesmith.agent_utils.base_stateful_agent import BaseStatefulAgent, Runner
 from scenesmith.agent_utils.scene_analyzer import FurnitureSelection
 from scenesmith.manipuland_agents.cross_stage_inventory import (
     contract_bound_support_object_ids,
@@ -616,6 +616,96 @@ def test_final_dining_contract_rejects_unresolved_score_rollback() -> None:
 
     with pytest.raises(RuntimeError, match="unresolved dining"):
         agent._finalize_dining_joint_contract(UniqueID("dining_table_0"))
+
+
+def test_final_dining_contract_names_failed_predicates() -> None:
+    agent = _joint_repair_agent()
+    failed_status = {
+        "valid": False,
+        "failures": [
+            "alignment: plate_2 is outside dining_chair_2's front lane",
+            "support: aligned place-setting objects are not all bound to dining_table_0",
+        ],
+    }
+    agent._dining_joint_contract_status = Mock(
+        side_effect=[failed_status, failed_status]
+    )
+    agent._repair_dining_alignment_after_physics = Mock(return_value=False)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        agent._finalize_dining_joint_contract(UniqueID("dining_table_0"))
+
+    assert "alignment: plate_2" in str(exc_info.value)
+    assert "support: aligned place-setting" in str(exc_info.value)
+
+
+def test_dining_joint_contract_status_reports_failed_predicates() -> None:
+    agent = _joint_repair_agent()
+    failed_alignment = {
+        "primary_object": "dining_table_0",
+        "label": "fail",
+        "reason": "plate_2 is outside dining_chair_2's front lane",
+    }
+    complete = {"primary_object": "dining_table_0", "label": "pass"}
+    agent._dining_contract_results = Mock(return_value=(failed_alignment, complete))
+
+    status = agent._dining_joint_contract_status(UniqueID("dining_table_0"))
+
+    assert status == {
+        "furniture_id": "dining_table_0",
+        "alignment": False,
+        "completeness": True,
+        "support": None,
+        "physics": None,
+        "valid": False,
+        "failures": ["alignment: plate_2 is outside dining_chair_2's front lane"],
+        "alignment_result": failed_alignment,
+        "completeness_result": complete,
+    }
+    agent._dining_support_bindings_valid.assert_not_called()
+    agent._dining_physics_valid.assert_not_called()
+
+
+def test_invalid_dining_contract_cannot_become_checkpoint() -> None:
+    agent = object.__new__(StatefulManipulandAgent)
+    agent.current_furniture_id = UniqueID("dining_table_0")
+    agent.scene = SimpleNamespace()
+    agent._current_target_cardinality_failures = Mock(return_value=[])
+    agent._current_target_dining_contract_failures = Mock(
+        return_value=["dining joint contract for dining_table_0: physics: collision"]
+    )
+    base_state = SimpleNamespace(hard_valid=True, hard_reasons=[])
+
+    with patch.object(
+        BaseStatefulAgent,
+        "_evaluate_current_hard_state",
+        return_value=base_state,
+    ):
+        hard_state = agent._evaluate_current_hard_state()
+
+    assert not hard_state.hard_valid
+    assert hard_state.hard_reasons == [
+        "dining joint contract for dining_table_0: physics: collision"
+    ]
+
+
+def test_valid_dining_contract_remains_checkpoint_eligible() -> None:
+    agent = object.__new__(StatefulManipulandAgent)
+    agent.current_furniture_id = UniqueID("dining_table_0")
+    agent.scene = SimpleNamespace()
+    agent._current_target_cardinality_failures = Mock(return_value=[])
+    agent._current_target_dining_contract_failures = Mock(return_value=[])
+    base_state = SimpleNamespace(hard_valid=True, hard_reasons=[])
+
+    with patch.object(
+        BaseStatefulAgent,
+        "_evaluate_current_hard_state",
+        return_value=base_state,
+    ):
+        hard_state = agent._evaluate_current_hard_state()
+
+    assert hard_state.hard_valid
+    assert hard_state.hard_reasons == []
 
 
 def test_final_dining_contract_repairs_incomplete_layout_without_alignment() -> None:
