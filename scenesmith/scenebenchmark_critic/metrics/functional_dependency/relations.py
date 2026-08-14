@@ -1417,7 +1417,7 @@ def _eval_face_to_target(
         return "unknown", 0.0, "missing distance geometry."
     max_distance = _dependency_float(dependency, "max_distance_m", 1.8)
     max_angle = _dependency_float(dependency, "max_angle_deg", 60.0)
-    distance_required = dependency.get("distance_required", True) is not False
+    distance_required = _face_dependency_requires_distance(dependency)
     subject_face = str(dependency.get("subject_face") or "front").strip().lower()
     target_face = str(dependency.get("target_face") or "any").strip().lower()
     subject_angle = _face_angle_to_target_deg(subject, target, subject_face)
@@ -1454,6 +1454,20 @@ def _eval_face_to_target(
         0.84,
         f"`{relation_type}` fails: {distance_clause}subject {subject_face} angle {subject_angle:.0f}deg{target_clause}.",
     )
+
+
+def _face_dependency_requires_distance(dependency: dict[str, Any]) -> bool:
+    """Keep legacy HSSD orientation priors from acquiring a default 1.8m cap."""
+    if dependency.get("distance_required") is False:
+        return False
+    source = str(dependency.get("source") or "")
+    if not source.startswith("hssd_annotations:"):
+        return True
+    try:
+        distance = float(dependency.get("max_distance_m"))
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(distance) and distance >= 0.0
 
 
 def _eval_vertical_attachment(

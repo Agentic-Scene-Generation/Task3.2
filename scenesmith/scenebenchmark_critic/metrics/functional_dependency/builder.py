@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 from typing import Any
 
 from scenesmith.scenebenchmark_critic.core.geometry import (
@@ -1001,7 +1003,11 @@ def _dependency_targets(
     if not target_categories:
         return []
 
-    max_distance = _float_value(dependency.get("max_distance_m"), 2.4)
+    max_distance = (
+        math.inf
+        if _dependency_is_orientation_only(dependency)
+        else _float_value(dependency.get("max_distance_m"), 2.4)
+    )
     limit = 6 if target_kind == "architecture" else 4
     nearby_targets = _nearby_targets(
         subject,
@@ -1106,6 +1112,31 @@ def _float_value(value: Any, default: float) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _dependency_is_orientation_only(dependency: dict[str, Any]) -> bool:
+    """Whether an asset prior deliberately omits a proximity requirement."""
+    relation_type = _normalize_relation_token(
+        dependency.get("relation_type") or dependency.get("type")
+    )
+    if relation_type not in {
+        "face_to",
+        "faces",
+        "facing",
+        "front_faces",
+        "furniture_faces_furniture",
+    }:
+        return False
+    if dependency.get("distance_required") is False:
+        return True
+    source = str(dependency.get("source") or "")
+    if not source.startswith("hssd_annotations:"):
+        return False
+    try:
+        distance = float(dependency.get("max_distance_m"))
+    except (TypeError, ValueError):
+        return True
+    return not math.isfinite(distance) or distance < 0.0
 
 
 def _grouped_dining_checks(
