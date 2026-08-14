@@ -7,9 +7,11 @@ the fast memory system and offline SFT/DPO sample construction.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
-import hashlib
+import os
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -40,6 +42,9 @@ _DEFAULT_CODE_PROVENANCE_PATHS = (
     "scenesmith/furniture_agents/stateful_furniture_agent.py",
     "scenesmith/manipuland_agents/stateful_manipuland_agent.py",
     "scenesmith/agent_utils/clearance_zones.py",
+    "scenesmith/scenebenchmark_critic/asset_library_annotations.py",
+    "scenesmith/scenebenchmark_critic/metrics/functional_dependency/builder.py",
+    "scenesmith/scenebenchmark_critic/metrics/functional_dependency/relations.py",
 )
 
 
@@ -65,10 +70,14 @@ def collect_code_provenance(
         "source_hashes": {},
     }
 
+    git_executable = _git_executable()
+
     def git_output(*args: str) -> str:
+        if git_executable is None:
+            return ""
         try:
             result = subprocess.run(
-                ["git", *args],
+                [git_executable, *args],
                 cwd=root,
                 check=False,
                 capture_output=True,
@@ -99,6 +108,21 @@ def collect_code_provenance(
             ).hexdigest()
     provenance["source_hashes"] = source_hashes
     return provenance
+
+
+def _git_executable() -> str | None:
+    """Find Git even when isolated workers receive a minimal ``PATH``."""
+    configured = os.environ.get("GIT")
+    candidates = (
+        shutil.which(configured) if configured else None,
+        shutil.which("git"),
+        "/usr/bin/git",
+        "/bin/git",
+    )
+    for candidate in candidates:
+        if candidate and Path(candidate).is_file() and os.access(candidate, os.X_OK):
+            return candidate
+    return None
 
 
 class TraceLogger:
