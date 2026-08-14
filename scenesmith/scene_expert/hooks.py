@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from scenesmith.agent_utils.room import RoomScene
+from scenesmith.scene_expert.behavior import apply_behavior_template
 from scenesmith.scene_expert.context_bundle import build_stage_context_bundle
 from scenesmith.scene_expert.global_planner import GlobalPlanner
 from scenesmith.scene_expert.harness import STAGE_ORDER, Harness
@@ -1603,6 +1604,10 @@ def build_hook_runner(
         root_se_cfg.get("memory", {}),
         se_cfg.get("memory", {}),
     )
+    behavior_cfg = _deep_merge_dicts(
+        root_se_cfg.get("behavior", {}),
+        se_cfg.get("behavior", {}),
+    )
 
     mode = se_cfg.get("mode", "disabled")
     if mode == "disabled" or not se_cfg.get("enabled", False):
@@ -1695,6 +1700,21 @@ def build_hook_runner(
         from scenesmith.scene_expert.task_compiler import _fallback_spec_from_prompt
 
         task_spec = _fallback_spec_from_prompt(prompt)
+
+    task_spec, behavior_spec = apply_behavior_template(
+        prompt,
+        task_spec,
+        config=behavior_cfg,
+        output_path=scene_debug_dir / "behavior_spec.json",
+        model=model,
+        api_base_url=api_base,
+        api_key=api_key,
+    )
+    if behavior_spec is not None:
+        console_logger.info(
+            "[SceneExpert] Applied deterministic behavior template; spec=%s",
+            scene_debug_dir / "behavior_spec.json",
+        )
 
     task_spec = _reconcile_task_spec_stage_ownership(task_spec, intent_contract)
 

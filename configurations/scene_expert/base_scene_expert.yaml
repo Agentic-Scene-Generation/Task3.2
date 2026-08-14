@@ -15,6 +15,17 @@ enabled: false   # Default: off. Set true in ablation_3/4/5 experiment configs.
 #   "full"           → harness_memory + LoRA model (model ID differs, behavior same)
 mode: "disabled"
 
+# Optional deterministic AgentSense-style resident behavior planner. This is
+# intentionally separate from the SceneExpert ablation mode and is a strict
+# no-op unless enabled explicitly.
+behavior:
+  enabled: false
+  planner: "template"
+  horizon: "week"
+  # When false, the full behavior report is still written for audit, but only
+  # assets explicitly found in the prompt are merged into SceneTaskSpec.
+  inferred_assets_are_required: true
+
 # Memory system
 memory:
   # Directory for persistent memory storage (relative to project root)
