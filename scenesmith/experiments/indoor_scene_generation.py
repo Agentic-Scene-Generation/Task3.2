@@ -98,6 +98,37 @@ _SCENE_SUCCESS_MARKER = "_SUCCESS"
 _FURNITURE_RENDER_RESUME_MODES = frozenset({"initial", "latest"})
 
 
+class SceneExpertStageCommitError(RuntimeError):
+    """A stage verifier rejected its checkpoint before pipeline advancement."""
+
+    def __init__(self, stage: str, *, retryable: bool, reason: str = "") -> None:
+        self.stage = stage
+        self.retryable = retryable
+        self.reason = reason
+        detail = f": {reason}" if reason else ""
+        super().__init__(f"SceneExpert stage '{stage}' was not committed{detail}")
+
+
+def _commit_scene_expert_stage(
+    *,
+    hooks: "SceneExpertHookRunner | None",
+    stage: str,
+    scene: RoomScene,
+    room_dir: Path,
+) -> None:
+    """Advance only when the hook verifier accepts this stage checkpoint."""
+    if hooks is None:
+        return
+    result = hooks.post_stage(stage, scene, room_dir)
+    if result is None or result.passed:
+        return
+    raise SceneExpertStageCommitError(
+        stage,
+        retryable=result.retryable,
+        reason=result.reason,
+    )
+
+
 def _is_targeted_manipuland_replay(
     *,
     cfg_dict: dict[str, Any],
@@ -1102,6 +1133,21 @@ def _add_manipulands_with_cleanup(
         manipuland_agent.cleanup()
 
 
+def _restore_room_stage_checkpoint(
+    *,
+    scene: RoomScene,
+    state: dict,
+    room_prompt: str,
+    intent_contract: dict | None,
+) -> None:
+    """Restore reusable geometry without inheriting a stale stage prompt."""
+    scene.restore_from_state_dict(state)
+    scene.text_description = room_prompt
+    if intent_contract:
+        setattr(scene, "scenebenchmark_intent_contract", intent_contract)
+        scene.metadata["scenebenchmark_intent_contract"] = intent_contract
+
+
 def _restore_furniture_render_checkpoint(
     *,
     scene: RoomScene,
@@ -1111,15 +1157,13 @@ def _restore_furniture_render_checkpoint(
 ) -> None:
     """Restore geometry while preserving the current replay's task contract."""
     with open(render_state_path) as f:
-        scene.restore_from_state_dict(json.load(f))
-
-    # A checkpoint is reusable geometry, not the authority for this replay's
-    # task text.  Restoring its stale prompt/metadata would make a freshly
-    # compiled contract fail its prompt-hash provenance check.
-    scene.text_description = room_prompt
-    if intent_contract:
-        setattr(scene, "scenebenchmark_intent_contract", intent_contract)
-        scene.metadata["scenebenchmark_intent_contract"] = intent_contract
+        state = json.load(f)
+    _restore_room_stage_checkpoint(
+        scene=scene,
+        state=state,
+        room_prompt=room_prompt,
+        intent_contract=intent_contract,
+    )
 
 
 def _generate_room(
@@ -1357,8 +1401,12 @@ def _generate_room(
             name="scene_after_furniture",
         )
         console_logger.info("Saved furniture checkpoint (scene_after_furniture)")
-        if scene_expert_hooks:
-            scene_expert_hooks.post_stage("furniture", scene, room_dir)
+        _commit_scene_expert_stage(
+            hooks=scene_expert_hooks,
+            stage="furniture",
+            scene=scene,
+            room_dir=room_dir,
+        )
     elif start_idx == 1:
         # Starting from wall_objects - load scene from saved furniture state.
         console_logger.info("Loading scene from saved furniture state for wall_objects")
@@ -1372,7 +1420,14 @@ def _generate_room(
             )
         with open(furniture_state_path) as f:
             furniture_state = json.load(f)
-        scene.restore_from_state_dict(furniture_state)
+        _restore_room_stage_checkpoint(
+            scene=scene,
+            state=furniture_state,
+            room_prompt=room_prompt,
+            intent_contract=(
+                intent_contract if isinstance(intent_contract, dict) else None
+            ),
+        )
         console_logger.info(
             f"Loaded {len(scene.objects)} objects from furniture checkpoint"
         )
@@ -1439,8 +1494,12 @@ def _generate_room(
             name="scene_after_wall_objects",
         )
         console_logger.info("Saved wall_objects checkpoint (scene_after_wall_objects)")
-        if scene_expert_hooks:
-            scene_expert_hooks.post_stage("wall_mounted", scene, room_dir)
+        _commit_scene_expert_stage(
+            hooks=scene_expert_hooks,
+            stage="wall_mounted",
+            scene=scene,
+            room_dir=room_dir,
+        )
     elif start_idx == 2:
         # Starting from ceiling_mounted - load scene from saved wall_objects state.
         console_logger.info("Loading scene from saved wall_objects state for ceiling")
@@ -1455,7 +1514,14 @@ def _generate_room(
             )
         with open(wall_objects_state_path) as f:
             wall_objects_state = json.load(f)
-        scene.restore_from_state_dict(wall_objects_state)
+        _restore_room_stage_checkpoint(
+            scene=scene,
+            state=wall_objects_state,
+            room_prompt=room_prompt,
+            intent_contract=(
+                intent_contract if isinstance(intent_contract, dict) else None
+            ),
+        )
         console_logger.info(
             f"Loaded {len(scene.objects)} objects from wall_objects checkpoint"
         )
@@ -1504,8 +1570,12 @@ def _generate_room(
         console_logger.info(
             "Saved ceiling_objects checkpoint (scene_after_ceiling_objects)"
         )
-        if scene_expert_hooks:
-            scene_expert_hooks.post_stage("ceiling_mounted", scene, room_dir)
+        _commit_scene_expert_stage(
+            hooks=scene_expert_hooks,
+            stage="ceiling_mounted",
+            scene=scene,
+            room_dir=room_dir,
+        )
     else:
         # Starting from manipulands - load scene from saved ceiling_objects state.
         console_logger.info("Loading scene from saved ceiling_objects state")
@@ -1523,7 +1593,14 @@ def _generate_room(
             )
         with open(ceiling_objects_state_path) as f:
             ceiling_objects_state = json.load(f)
-        scene.restore_from_state_dict(ceiling_objects_state)
+        _restore_room_stage_checkpoint(
+            scene=scene,
+            state=ceiling_objects_state,
+            room_prompt=room_prompt,
+            intent_contract=(
+                intent_contract if isinstance(intent_contract, dict) else None
+            ),
+        )
         console_logger.info(
             f"Loaded {len(scene.objects)} objects from ceiling_objects checkpoint"
         )
@@ -1631,8 +1708,12 @@ def _generate_room(
         scene=scene, scene_dir=room_dir, cfg_dict=cfg_dict, name="final_scene"
     )
     _write_final_critic_report(scene, room_dir, cfg_dict)
-    if scene_expert_hooks:
-        scene_expert_hooks.post_stage("manipuland", scene, room_dir)
+    _commit_scene_expert_stage(
+        hooks=scene_expert_hooks,
+        stage="manipuland",
+        scene=scene,
+        room_dir=room_dir,
+    )
 
     # Export to SceneEval format if enabled.
     sceneeval_cfg = cfg_dict["experiment"]["sceneeval_export"]
@@ -1691,19 +1772,42 @@ def _run_sequential_room_generation(
         with custom_span(f"room_{room_id}_generation"):
             with logger.room_context(room_id) as room_dir:
                 console_logger.info(f"Generating room '{room_id}': {room_spec.prompt}")
-                room_scene = _generate_room(
-                    room_id=room_id,
-                    room_prompt=room_spec.prompt,
-                    room_geometry=room_geometry,
-                    room_dir=room_dir,
-                    logger=logger,
-                    cfg_dict=cfg_dict,
-                    start_stage=start_stage,
-                    stop_stage=stop_stage,
-                    house_layout=house_layout,
-                    render_gpu_id=render_gpu_id,
-                    scene_expert_hooks=scene_expert_hooks,
-                )
+                retry_start_stage = start_stage
+                retry_count = 0
+                while True:
+                    try:
+                        room_scene = _generate_room(
+                            room_id=room_id,
+                            room_prompt=room_spec.prompt,
+                            room_geometry=room_geometry,
+                            room_dir=room_dir,
+                            logger=logger,
+                            cfg_dict=cfg_dict,
+                            start_stage=retry_start_stage,
+                            stop_stage=stop_stage,
+                            house_layout=house_layout,
+                            render_gpu_id=render_gpu_id,
+                            scene_expert_hooks=scene_expert_hooks,
+                        )
+                        break
+                    except SceneExpertStageCommitError as error:
+                        if not error.retryable:
+                            raise
+                        retry_count += 1
+                        if retry_count > 8:
+                            raise RuntimeError(
+                                "SceneExpert stage retry guard exceeded for "
+                                f"{error.stage} in room '{room_id}'"
+                            ) from error
+                        retry_start_stage = error.stage
+                        console_logger.warning(
+                            "Re-running SceneExpert-rejected stage %s for room %s "
+                            "from its prior checkpoint (retry %d): %s",
+                            error.stage,
+                            room_id,
+                            retry_count,
+                            error.reason,
+                        )
                 rooms[room_id] = room_scene
     return rooms
 

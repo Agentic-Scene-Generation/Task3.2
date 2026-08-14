@@ -21,6 +21,7 @@ import os
 import time
 import hashlib
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -62,6 +63,16 @@ console_logger = logging.getLogger(__name__)
 
 # Valid ablation modes
 ABLATION_MODES = frozenset(["disabled", "harness_only", "harness_memory", "full"])
+
+
+@dataclass(frozen=True)
+class StageCommitResult:
+    """Whether a verified stage can advance the production pipeline."""
+
+    stage: str
+    passed: bool
+    retryable: bool = False
+    reason: str = ""
 
 
 def _empty_memory_pack() -> MemoryPack:
@@ -688,6 +699,11 @@ class SceneExpertHookRunner:
         # Original text_description per stage (so we can restore if needed)
         self._original_text_descriptions: dict[str, str] = {}
         self._last_injected_floor_plan_prompt: str = prompt
+        # Failed stage attempts are retried by the room pipeline. Keep the
+        # instruction and original report until a subsequent verification passes.
+        self._pending_stage_repairs: dict[
+            str, tuple[RepairResult, StageVerifyReport]
+        ] = {}
 
     @property
     def floor_plan_reservation_manifest(self) -> dict[str, Any] | None:
@@ -928,6 +944,17 @@ class SceneExpertHookRunner:
         if stage == "manipuland":
             return list(self._task_spec.required_small_objects)
         return []
+
+    def _inject_pending_stage_repair(self, stage: str, scene: RoomScene) -> bool:
+        """Append the failed stage's deterministic repair instruction once retried."""
+        pending_repair = self._pending_stage_repairs.get(stage)
+        if pending_repair is None:
+            return False
+        instruction = pending_repair[0].repair_action.strip()
+        if not instruction:
+            return False
+        scene.text_description += "\n\n[REPAIR INSTRUCTION]\n" + instruction
+        return True
 
     # ------------------------------------------------------------------
     # Pre-stage hook: called BEFORE the SceneSmith stage agent runs
@@ -1310,6 +1337,10 @@ class SceneExpertHookRunner:
                 f"[SceneExpert] Injected placement reference for {stage} "
                 f"({placement_ref.count(chr(10))+1} lines)"
             )
+        if self._inject_pending_stage_repair(stage, scene):
+            console_logger.info(
+                "[SceneExpert] Injected retry repair instruction for %s", stage
+            )
         _attach_stage_relation_context(
             scene,
             relation_context=self._current_relation_context,
@@ -1336,13 +1367,15 @@ class SceneExpertHookRunner:
     # Post-stage hook: called AFTER the SceneSmith stage agent completes
     # ------------------------------------------------------------------
 
-    def post_stage(self, stage: str, scene: RoomScene, room_dir: Path) -> None:
-        """Verify stage output, log trace entry, optionally record to memory.
+    def post_stage(
+        self, stage: str, scene: RoomScene, room_dir: Path
+    ) -> StageCommitResult:
+        """Verify a stage and return whether it may advance the pipeline.
 
         Called from _generate_room immediately after the stage's checkpoint is saved.
-        Repair is NOT executed here (would require re-running the agent, which is
-        complex within _generate_room). Instead, repair instructions are logged for
-        the MemoryWriter to learn from.
+        A failed result remains uncommitted.  The room pipeline uses the returned
+        retry request to reload the prior checkpoint, execute the same stage, and
+        invoke this hook again for deterministic re-verification.
 
         Args:
             stage: Completed stage name.
@@ -1361,6 +1394,9 @@ class SceneExpertHookRunner:
         # Verify stage
         verify_report: StageVerifyReport | None = None
         repair_actions: list[RepairResult] = []
+        passed = False
+        retryable = False
+        result_reason = ""
         try:
             verify_start = time.time()
             verify_report = self._stage_verifier.verify(
@@ -1375,15 +1411,13 @@ class SceneExpertHookRunner:
                 stage,
                 time.time() - verify_start,
             )
-            self._stage_reports.append(verify_report)
-
             if not verify_report.pass_stage:
                 console_logger.warning(
                     f"[SceneExpert] Stage {stage} FAILED verification: "
                     f"issues={[i.issue_type for i in verify_report.issues]}"
                 )
-                # Log repair decision for trace (actual re-execution not done here)
                 decision = self._harness.decide_repair(stage, verify_report)
+                result_reason = decision.reason
                 if decision.should_repair:
                     repair_result = self._repair_controller.repair(
                         repair_type=decision.strategy,
@@ -1394,18 +1428,38 @@ class SceneExpertHookRunner:
                         task_spec=self._task_spec,
                     )
                     repair_actions.append(repair_result)
-                    # Record failure to memory for future runs
+                    self._pending_stage_repairs[stage] = (
+                        repair_result,
+                        verify_report,
+                    )
+                    retryable = True
                     self._repair_controller.record_failure_to_memory(
                         stage=stage,
                         room_type=self._task_spec.room_type,
                         repair_result=repair_result,
                         verify_report=verify_report,
-                        repair_verified=False,  # can't verify without re-running
+                        repair_verified=False,
                     )
             else:
+                passed = True
+                self._stage_reports.append(verify_report)
+                prior_repair = self._pending_stage_repairs.pop(stage, None)
+                if prior_repair is not None:
+                    repair_result, failed_report = prior_repair
+                    repair_result.repair_verified = True
+                    repair_result.new_scene_state = str(room_dir)
+                    repair_actions.append(repair_result)
+                    self._repair_controller.record_failure_to_memory(
+                        stage=stage,
+                        room_type=self._task_spec.room_type,
+                        repair_result=repair_result,
+                        verify_report=failed_report,
+                        repair_verified=True,
+                    )
                 console_logger.info(f"[SceneExpert] Stage {stage} PASSED verification")
 
         except Exception as e:
+            result_reason = f"verification error: {e}"
             console_logger.warning(
                 f"[SceneExpert] Verification failed for {stage}: {e}"
             )
@@ -1438,11 +1492,18 @@ class SceneExpertHookRunner:
             phase="post",
         )
         self._trace_logger.save_stage_visual_manifest(stage, str(room_dir))
-        self._completed_stages.append(stage)
+        if passed:
+            self._completed_stages.append(stage)
         console_logger.info(
             "[SceneExpertTiming] stage=%s module=stage_total elapsed=%.2fs",
             stage,
             elapsed,
+        )
+        return StageCommitResult(
+            stage=stage,
+            passed=passed,
+            retryable=retryable,
+            reason=result_reason,
         )
 
     # ------------------------------------------------------------------
