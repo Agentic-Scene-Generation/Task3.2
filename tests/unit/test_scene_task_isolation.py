@@ -116,6 +116,42 @@ class TestSceneTaskIsolation(unittest.TestCase):
         self.assertEqual(call_count, 1)
         self.assertFalse((self.output_dir / "failed_attempts").exists())
 
+    def test_degraded_quality_policy_disables_stage_abort_gates(self) -> None:
+        cfg = {
+            "experiment": {"quality_failure_policy": "degraded"},
+            "furniture_agent": {
+                "fail_stage_on_unresolved_hard_constraints": True,
+            },
+            "manipuland_agent": {
+                "fail_stage_on_unresolved_hard_constraints": True,
+            },
+        }
+
+        policy = scene_generation._configure_stage_quality_gates(cfg)
+
+        self.assertEqual(policy, "degraded")
+        self.assertFalse(
+            cfg["furniture_agent"]["fail_stage_on_unresolved_hard_constraints"]
+        )
+        self.assertFalse(
+            cfg["manipuland_agent"]["fail_stage_on_unresolved_hard_constraints"]
+        )
+
+    def test_degraded_completion_uses_truthful_marker(self) -> None:
+        scene_generation._write_scene_completion(
+            output_dir=self.output_dir,
+            scene_id=0,
+            prompt="A bedroom",
+            attempt=1,
+            degraded=True,
+        )
+
+        scene_dir = self.output_dir / "scene_000"
+        self.assertTrue((scene_dir / "_DEGRADED").exists())
+        self.assertFalse((scene_dir / "_SUCCESS").exists())
+        status = (scene_dir / "scene_status.json").read_text(encoding="utf-8")
+        self.assertIn('"status": "completed_with_quality_issues"', status)
+
 
 class TestManipulandAgentCleanup(unittest.TestCase):
     """Manipuland services must not survive a completed or failed scene."""

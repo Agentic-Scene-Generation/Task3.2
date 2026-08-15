@@ -593,6 +593,72 @@ def test_rotated_rectangle_edge_distribution_passes_and_checks_inward_facing() -
     assert "face target inward" in failed["reason"]
 
 
+def _square_four_side_case(*, asymmetric: bool = False) -> dict:
+    table = _record("dining_table_0", "dining_table", (0.0, 0.0), (1.0, 1.0, 0.75))
+    chair_count = 3 if asymmetric else 4
+    chairs = [
+        _record("dining_chair_0", "dining_chair", (0.0, -0.8), (0.5, 0.5, 0.9)),
+        _record("dining_chair_1", "dining_chair", (0.0, 0.8), (0.5, 0.5, 0.9)),
+        _record("dining_chair_2", "dining_chair", (-0.8, 0.0), (0.5, 0.5, 0.9)),
+        _record("dining_chair_3", "dining_chair", (0.8, 0.0), (0.5, 0.5, 0.9)),
+    ][:chair_count]
+    return {
+        "intent_contract": {
+            "constraints": [
+                {
+                    "relation": "edge_distribution",
+                    "subjects": {
+                        "category": "dining_chair",
+                        "count": chair_count,
+                        "quantifier": "exactly",
+                    },
+                    "targets": {
+                        "category": "dining_table",
+                        "count": 1,
+                        "quantifier": "exactly",
+                    },
+                    "edge_frame": "target_local_rectangle",
+                    "groups": [
+                        {
+                            "edge_class": "long",
+                            "counts_per_edge": [1, 1],
+                            "spacing": "equal_segments",
+                        },
+                        {
+                            "edge_class": "short",
+                            "counts_per_edge": [1, 0] if asymmetric else [1, 1],
+                            "spacing": "equal_segments",
+                        },
+                    ],
+                    "orientation": "unconstrained",
+                    "source": "explicit_prompt",
+                    "strength": "hard",
+                }
+            ]
+        },
+        "scene_geometry": {"objects": [table, *chairs]},
+    }
+
+
+def test_symmetric_four_edge_distribution_accepts_square_target() -> None:
+    result = evaluate_edge_distribution(_square_four_side_case())[0]
+
+    assert result["label"] == "pass"
+    assert {slot["edge"] for slot in result["diagnostics"]["edge_slots"]} == {
+        "front",
+        "back",
+        "left",
+        "right",
+    }
+
+
+def test_asymmetric_edge_distribution_keeps_square_target_unresolved() -> None:
+    result = evaluate_edge_distribution(_square_four_side_case(asymmetric=True))[0]
+
+    assert result["label"] == "unresolved"
+    assert "stable long/short edge frame" in result["reason"]
+
+
 def test_table_seating_edge_distribution_rejects_unusable_table_gap() -> None:
     table = _record("dining_table_0", "dining_table", (0.0, 0.0), (2.0, 1.0, 0.75))
     chair = _record(
@@ -1543,6 +1609,81 @@ def test_clear_access_allows_explicitly_paired_workstation_chairs() -> None:
         ["office_chair_0"],
         ["office_chair_1"],
     ]
+
+
+def _table_access_with_edge_seats(*, include_unrelated_blocker: bool = False) -> dict:
+    table = _record(
+        "conference_table_0",
+        "conference_table",
+        (0.0, 0.0),
+        (3.0, 1.2, 0.75),
+        yaw_deg=0.0,
+    )
+    chairs = [
+        _record(
+            f"office_chair_{index}",
+            "office_chair",
+            (x, 0.65),
+            (0.5, 0.5, 1.0),
+            yaw_deg=180.0,
+        )
+        for index, x in enumerate((-0.8, 0.0, 0.8))
+    ]
+    objects = [table, *chairs]
+    if include_unrelated_blocker:
+        objects.append(_record("cabinet_0", "cabinet", (1.25, 0.5), (0.4, 0.4, 1.0)))
+    return {
+        "stage": "furniture",
+        "intent_contract": {
+            "constraints": [
+                {
+                    "constraint_id": "table_circulation",
+                    "relation": "clear_access",
+                    "subjects": {"category": "conference_table", "count": 1},
+                    "targets": {"category": "room", "count": 1},
+                    "source": "explicit_prompt",
+                    "strength": "hard",
+                },
+                {
+                    "constraint_id": "table_edge_seats",
+                    "relation": "edge_distribution",
+                    "subjects": {"category": "office_chair", "count": 3},
+                    "targets": {"category": "conference_table", "count": 1},
+                    "source": "explicit_prompt",
+                    "strength": "hard",
+                },
+            ]
+        },
+        "scene_geometry": {"objects": objects},
+    }
+
+
+def test_clear_access_allows_hard_edge_distribution_seats() -> None:
+    result = next(
+        row
+        for row in evaluate_intent_contract_extensions(_table_access_with_edge_seats())
+        if row["relation_type"] == "clear_access"
+    )
+
+    assert result["label"] == "pass"
+    assert result["diagnostics"]["authorized_occupant_ids"] == [
+        "office_chair_0",
+        "office_chair_1",
+        "office_chair_2",
+    ]
+
+
+def test_clear_access_keeps_non_edge_object_as_table_blocker() -> None:
+    result = next(
+        row
+        for row in evaluate_intent_contract_extensions(
+            _table_access_with_edge_seats(include_unrelated_blocker=True)
+        )
+        if row["relation_type"] == "clear_access"
+    )
+
+    assert result["label"] == "fail"
+    assert result["diagnostics"]["blocking_ids"] == ["cabinet_0"]
 
 
 def test_in_front_of_requires_clearance_for_both_object_footprints() -> None:

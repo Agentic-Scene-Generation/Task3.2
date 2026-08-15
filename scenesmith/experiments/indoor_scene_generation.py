@@ -95,7 +95,9 @@ STAGE_ASSET_DIRS = {
 
 _SCENE_STATUS_FILENAME = "scene_status.json"
 _SCENE_SUCCESS_MARKER = "_SUCCESS"
+_SCENE_DEGRADED_MARKER = "_DEGRADED"
 _FURNITURE_RENDER_RESUME_MODES = frozenset({"initial", "latest"})
+_QUALITY_FAILURE_POLICIES = frozenset({"strict", "degraded"})
 
 
 class SceneExpertStageCommitError(RuntimeError):
@@ -115,6 +117,7 @@ def _commit_scene_expert_stage(
     stage: str,
     scene: RoomScene,
     room_dir: Path,
+    allow_degraded_quality: bool = False,
 ) -> None:
     """Advance only when the hook verifier accepts this stage checkpoint."""
     if hooks is None:
@@ -122,10 +125,74 @@ def _commit_scene_expert_stage(
     result = hooks.post_stage(stage, scene, room_dir)
     if result is None or result.passed:
         return
+    if result.quality_failure and not result.retryable and allow_degraded_quality:
+        console_logger.warning(
+            "Advancing past SceneExpert-rejected stage %s with degraded quality: %s",
+            stage,
+            result.reason,
+        )
+        return
     raise SceneExpertStageCommitError(
         stage,
         retryable=result.retryable,
         reason=result.reason,
+    )
+
+
+def _quality_failure_policy(cfg_dict: dict[str, Any]) -> str:
+    """Return the configured deterministic quality-failure disposition."""
+    value = (
+        str((cfg_dict.get("experiment") or {}).get("quality_failure_policy", "strict"))
+        .strip()
+        .lower()
+    )
+    if value not in _QUALITY_FAILURE_POLICIES:
+        allowed = ", ".join(sorted(_QUALITY_FAILURE_POLICIES))
+        raise ValueError(
+            f"experiment.quality_failure_policy must be one of: {allowed}; got {value!r}"
+        )
+    return value
+
+
+def _configure_stage_quality_gates(cfg_dict: dict[str, Any]) -> str:
+    """Let SceneExpert own bounded recovery when degraded output is requested."""
+    policy = _quality_failure_policy(cfg_dict)
+    if policy != "degraded":
+        return policy
+    for agent_key in ("furniture_agent", "manipuland_agent"):
+        agent_cfg = cfg_dict.get(agent_key)
+        if isinstance(agent_cfg, dict):
+            agent_cfg["fail_stage_on_unresolved_hard_constraints"] = False
+    return policy
+
+
+def _write_scene_completion(
+    *,
+    output_dir: Path,
+    scene_id: int,
+    prompt: str,
+    attempt: int,
+    degraded: bool,
+) -> None:
+    """Persist a truthful terminal status and exactly one completion marker."""
+    scene_dir = output_dir / f"scene_{scene_id:03d}"
+    scene_dir.mkdir(parents=True, exist_ok=True)
+    success_marker = scene_dir / _SCENE_SUCCESS_MARKER
+    degraded_marker = scene_dir / _SCENE_DEGRADED_MARKER
+    success_marker.unlink(missing_ok=True)
+    degraded_marker.unlink(missing_ok=True)
+    if degraded:
+        status = "completed_with_quality_issues"
+        degraded_marker.write_text(status + "\n", encoding="utf-8")
+    else:
+        status = "completed"
+        success_marker.write_text(status + "\n", encoding="utf-8")
+    _write_scene_status(
+        output_dir=output_dir,
+        scene_id=scene_id,
+        prompt=prompt,
+        status=status,
+        attempt=attempt,
     )
 
 
@@ -1419,6 +1486,7 @@ def _generate_room(
             stage="furniture",
             scene=scene,
             room_dir=room_dir,
+            allow_degraded_quality=(_quality_failure_policy(cfg_dict) == "degraded"),
         )
     elif start_idx == 1:
         # Starting from wall_objects - load scene from saved furniture state.
@@ -1517,6 +1585,7 @@ def _generate_room(
             stage="wall_mounted",
             scene=scene,
             room_dir=room_dir,
+            allow_degraded_quality=(_quality_failure_policy(cfg_dict) == "degraded"),
         )
     elif start_idx == 2:
         # Starting from ceiling_mounted - load scene from saved wall_objects state.
@@ -1600,6 +1669,7 @@ def _generate_room(
             stage="ceiling_mounted",
             scene=scene,
             room_dir=room_dir,
+            allow_degraded_quality=(_quality_failure_policy(cfg_dict) == "degraded"),
         )
     else:
         # Starting from manipulands - load scene from saved ceiling_objects state.
@@ -1743,6 +1813,7 @@ def _generate_room(
         stage="manipuland",
         scene=scene,
         room_dir=room_dir,
+        allow_degraded_quality=(_quality_failure_policy(cfg_dict) == "degraded"),
     )
 
     # Export to SceneEval format if enabled.
@@ -2534,6 +2605,7 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
         # Reset any SDK state inherited via fork (defense in depth).
         _reset_inherited_sdk_state()
         _configure_reasoning_persistence_for_worker(cfg_dict)
+        quality_failure_policy = _configure_stage_quality_gates(cfg_dict)
 
         faulthandler.enable()
 
@@ -2543,6 +2615,7 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
         scene_dir = output_dir / f"scene_{scene_id:03d}"
         scene_dir.mkdir(parents=True, exist_ok=True)
         (scene_dir / _SCENE_SUCCESS_MARKER).unlink(missing_ok=True)
+        (scene_dir / _SCENE_DEGRADED_MARKER).unlink(missing_ok=True)
         _write_scene_status(
             output_dir=output_dir,
             scene_id=scene_id,
@@ -2568,6 +2641,7 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
         # Create a logger for this scene.
         logger = ConsoleLogger(output_dir=scene_dir)
         scene_expert_hooks = None
+        quality_degraded = False
 
         # Get pipeline stage configuration.
         pipeline_cfg = cfg_dict["experiment"]["pipeline"]
@@ -2753,23 +2827,26 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                                 final_scene_path=str(scene_dir)
                             )
                             if not verify_report.deterministic_pass:
-                                raise RuntimeError(
-                                    "SceneExpert deterministic verification failed; "
-                                    "refusing to mark scene successful"
+                                if quality_failure_policy == "strict":
+                                    raise RuntimeError(
+                                        "SceneExpert deterministic verification "
+                                        "failed; refusing to mark scene successful"
+                                    )
+                                quality_degraded = True
+                                console_logger.warning(
+                                    "SceneExpert floor-plan verification failed; "
+                                    "preserving degraded output"
                                 )
                         console_logger.info(
                             "Scene generation completed successfully in "
                             f"{timedelta(seconds=time.time() - scene_generation_start_time)}"
                         )
-                        _write_scene_status(
+                        _write_scene_completion(
                             output_dir=output_dir,
                             scene_id=scene_id,
                             prompt=prompt,
-                            status="completed",
                             attempt=attempt,
-                        )
-                        (scene_dir / _SCENE_SUCCESS_MARKER).write_text(
-                            "completed\n", encoding="utf-8"
+                            degraded=quality_degraded,
                         )
                         return
 
@@ -2823,29 +2900,6 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                     # Build HouseScene from generated rooms.
                     house_scene = HouseScene(layout=house_layout, rooms=rooms)
 
-                    # SceneExpert: finalize trace + memory update after all rooms done.
-                    if scene_expert_hooks:
-                        verify_report = scene_expert_hooks.finalize(
-                            final_scene_path=str(scene_dir / "combined_house")
-                        )
-                        if not verify_report.deterministic_pass:
-                            if _is_targeted_manipuland_replay(
-                                cfg_dict=cfg_dict,
-                                start_stage=start_stage,
-                                stop_stage=stop_stage,
-                            ):
-                                console_logger.warning(
-                                    "SceneExpert full-scene deterministic verification "
-                                    "reported failures during targeted manipuland replay; "
-                                    "retaining the report without failing unprocessed "
-                                    "furniture targets"
-                                )
-                            else:
-                                raise RuntimeError(
-                                    "SceneExpert deterministic verification failed; "
-                                    "refusing to mark scene successful"
-                                )
-
                     # Assemble house with intermediate snapshots filtered by object type.
                     # Each snapshot includes objects from completed stages only.
                     # Note: Thin coverings keep their agent's object_type (FURNITURE,
@@ -2880,6 +2934,39 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                             cfg=cfg_dict, output_name=name, include_object_types=types
                         )
 
+                    # Verify only after canonical artifacts exist. Deterministic
+                    # quality rejection must never erase the evidence needed to
+                    # diagnose or render the terminal scene.
+                    if scene_expert_hooks:
+                        verify_report = scene_expert_hooks.finalize(
+                            final_scene_path=str(scene_dir / "combined_house")
+                        )
+                        if not verify_report.deterministic_pass:
+                            targeted_replay = _is_targeted_manipuland_replay(
+                                cfg_dict=cfg_dict,
+                                start_stage=start_stage,
+                                stop_stage=stop_stage,
+                            )
+                            if (
+                                quality_failure_policy == "strict"
+                                and not targeted_replay
+                            ):
+                                raise RuntimeError(
+                                    "SceneExpert deterministic verification failed; "
+                                    "refusing to mark scene successful"
+                                )
+                            quality_degraded = True
+                            reason = (
+                                "targeted manipuland replay"
+                                if targeted_replay
+                                else "degraded quality policy"
+                            )
+                            console_logger.warning(
+                                "SceneExpert deterministic verification failed; "
+                                "preserving final artifacts under %s",
+                                reason,
+                            )
+
                     console_logger.info(
                         "Scene generation completed successfully in "
                         f"{timedelta(seconds=time.time() - scene_generation_start_time)}"
@@ -2899,14 +2986,13 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                 console_logger.error(f"Scene generation failed: {e}")
                 raise
 
-        _write_scene_status(
+        _write_scene_completion(
             output_dir=output_dir,
             scene_id=scene_id,
             prompt=prompt,
-            status="completed",
             attempt=attempt,
+            degraded=quality_degraded,
         )
-        (scene_dir / _SCENE_SUCCESS_MARKER).write_text("completed\n", encoding="utf-8")
 
     def _run_serial_generation(
         self,

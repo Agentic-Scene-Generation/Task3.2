@@ -2169,6 +2169,37 @@ def _authorized_clear_access_occupants(
     authorized.update(
         _hard_paired_workstation_occupants(case_pack, objects, access_subject_id)
     )
+    authorized.update(
+        _hard_edge_distribution_occupants(case_pack, objects, access_subject_id)
+    )
+    return authorized
+
+
+def _hard_edge_distribution_occupants(
+    case_pack: dict[str, Any],
+    objects: list[dict[str, Any]],
+    access_subject_id: str,
+) -> set[str]:
+    """Return seats explicitly assigned to the accessed table's perimeter."""
+    authorized: set[str] = set()
+    for constraint in contract_constraints(
+        case_pack, relations=("edge_distribution",), include_auxiliary=False
+    ):
+        if str(constraint.get("strength") or "hard").lower() != "hard":
+            continue
+        target_ids = bound_ids(constraint.get("targets"), objects)
+        if target_ids != [access_subject_id]:
+            continue
+        authorized.update(
+            object_id
+            for object_id in bound_ids(constraint.get("subjects"), objects)
+            if _is_seating_subject(
+                next(
+                    (obj for obj in objects if str(obj.get("id") or "") == object_id),
+                    {},
+                )
+            )
+        )
     return authorized
 
 

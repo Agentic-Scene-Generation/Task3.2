@@ -97,7 +97,10 @@ def evaluate_edge_distribution(case_pack: dict[str, Any]) -> list[dict[str, Any]
                 )
             )
             continue
-        shape = _target_rectangle(target)
+        shape = _target_rectangle(
+            target,
+            allow_near_square=_has_symmetric_four_edge_counts(constraint),
+        )
         if shape is None:
             results.append(
                 _unresolved(
@@ -149,6 +152,8 @@ def _unresolved(
 
 def _target_rectangle(
     target: dict[str, Any],
+    *,
+    allow_near_square: bool = False,
 ) -> (
     tuple[tuple[float, float], float, float, tuple[float, float], tuple[float, float]]
     | None
@@ -183,9 +188,29 @@ def _target_rectangle(
         return None
     width = _extent(polygon, tangent_x)
     depth = _extent(polygon, tangent_y)
-    if min(width, depth) <= 1e-6 or max(width, depth) / min(width, depth) < 1.1:
+    if min(width, depth) <= 1e-6:
+        return None
+    if not allow_near_square and max(width, depth) / min(width, depth) < 1.1:
         return None
     return center, width, depth, tangent_x, tangent_y
+
+
+def _has_symmetric_four_edge_counts(constraint: dict[str, Any]) -> bool:
+    """Return whether the contract assigns the same count to all four edges."""
+    counts_by_class: dict[str, list[int]] = {}
+    for group in constraint.get("groups") or []:
+        edge_class = str(group.get("edge_class") or "")
+        try:
+            counts = [int(value) for value in group.get("counts_per_edge") or []]
+        except (TypeError, ValueError):
+            return False
+        if edge_class not in {"long", "short"} or len(counts) != 2:
+            return False
+        counts_by_class[edge_class] = counts
+    if set(counts_by_class) != {"long", "short"}:
+        return False
+    all_counts = counts_by_class["long"] + counts_by_class["short"]
+    return len(set(all_counts)) == 1
 
 
 def _is_rectangle(polygon: list[tuple[float, float]]) -> bool:

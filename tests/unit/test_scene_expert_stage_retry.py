@@ -75,6 +75,7 @@ def test_failed_hook_stage_is_uncommitted_until_retry_verifies(tmp_path) -> None
         passed=False,
         retryable=True,
         reason="Attempt 1/1",
+        quality_failure=True,
     )
     assert runner._stage_reports == []
     assert runner._completed_stages == []
@@ -120,6 +121,107 @@ def test_pipeline_noop_gate_uses_hook_authority() -> None:
     assert not scene_generation._should_skip_noop_scene_expert_stage(
         None, "wall_mounted"
     )
+
+
+def test_degraded_policy_advances_after_quality_repair_budget_is_exhausted(
+    tmp_path,
+) -> None:
+    hooks = Mock()
+    hooks.post_stage.return_value = StageCommitResult(
+        stage="furniture",
+        passed=False,
+        retryable=False,
+        reason="Repair budget exhausted",
+        quality_failure=True,
+    )
+
+    scene_generation._commit_scene_expert_stage(
+        hooks=hooks,
+        stage="furniture",
+        scene=Mock(),
+        room_dir=tmp_path,
+        allow_degraded_quality=True,
+    )
+
+
+def test_exhausted_quality_failure_is_retained_for_final_verification(
+    tmp_path,
+) -> None:
+    failed_report = _failed_report("furniture")
+    runner = object.__new__(SceneExpertHookRunner)
+    runner._mode = "harness_only"
+    runner._original_text_descriptions = {"furniture": "original prompt"}
+    runner._stage_verifier = Mock(verify=Mock(return_value=failed_report))
+    runner._task_spec = SimpleNamespace(room_type="office")
+    runner._current_stage_brief = None
+    runner._harness = Mock(
+        decide_repair=Mock(
+            return_value=RepairDecision(
+                should_repair=False,
+                strategy="none",
+                reason="Repair budget exhausted",
+            )
+        )
+    )
+    runner._repair_controller = Mock()
+    runner._pending_stage_repairs = {}
+    runner._stage_reports = []
+    runner._completed_stages = []
+    runner._stage_start_time = time.time()
+    runner._current_memory_pack = SimpleNamespace()
+    runner._current_relation_context = None
+    runner._current_planner_trace = {}
+    runner._qwen_calls = 0
+    runner._commit_stage_memory = Mock()
+    runner._trace_logger = Mock()
+    scene = SimpleNamespace(text_description="brief", objects={})
+
+    result = runner.post_stage("furniture", scene, tmp_path)
+
+    assert result == StageCommitResult(
+        stage="furniture",
+        passed=False,
+        retryable=False,
+        reason="Repair budget exhausted",
+        quality_failure=True,
+    )
+    assert runner._stage_reports == [failed_report]
+    assert runner._completed_stages == []
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        StageCommitResult(
+            stage="furniture",
+            passed=False,
+            retryable=True,
+            reason="Retry requested",
+            quality_failure=True,
+        ),
+        StageCommitResult(
+            stage="furniture",
+            passed=False,
+            retryable=False,
+            reason="verification error: corrupt scores",
+            quality_failure=False,
+        ),
+    ],
+)
+def test_degraded_policy_does_not_swallow_retry_or_verifier_error(
+    tmp_path, result
+) -> None:
+    hooks = Mock()
+    hooks.post_stage.return_value = result
+
+    with pytest.raises(scene_generation.SceneExpertStageCommitError):
+        scene_generation._commit_scene_expert_stage(
+            hooks=hooks,
+            stage="furniture",
+            scene=Mock(),
+            room_dir=tmp_path,
+            allow_degraded_quality=True,
+        )
 
 
 def test_rejected_stage_restarts_from_the_failed_stage(tmp_path) -> None:

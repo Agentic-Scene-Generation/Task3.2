@@ -245,6 +245,9 @@ PIPELINE_STOP_STAGE="${PIPELINE_STOP_STAGE:-manipuland}"
 # when intentionally allowing unresolved furniture hard constraints through.
 # Example: FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS=false bash scripts/run_parallel_critic_on.sh
 FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS="${FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS:-true}"
+# Preserve failed quality trajectories and final renders by default in probes.
+# Production experiments keep their base-config default of "strict".
+QUALITY_FAILURE_POLICY="${QUALITY_FAILURE_POLICY:-degraded}"
 BRANCH_FROM_SHARED_BASE="${BRANCH_FROM_SHARED_BASE:-false}"
 SHARED_BASE_STOP_STAGE="${SHARED_BASE_STOP_STAGE:-floor_plan}"
 SHARED_BASE_ROOT="${SHARED_BASE_ROOT:-}"
@@ -502,6 +505,10 @@ if ! SCENEEXPERT_MEMORY_EMBEDDING_PREFLIGHT="$(normalize_bool "$SCENEEXPERT_MEMO
 fi
 if ! FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS="$(normalize_bool "$FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS")"; then
     echo "ERROR: FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS must be true or false" >&2
+    exit 1
+fi
+if [[ "$QUALITY_FAILURE_POLICY" != "strict" && "$QUALITY_FAILURE_POLICY" != "degraded" ]]; then
+    echo "ERROR: QUALITY_FAILURE_POLICY must be strict or degraded" >&2
     exit 1
 fi
 if ! CRITIC_PROBE_RENDER_FINAL_VIEWS="$(normalize_bool "$CRITIC_PROBE_RENDER_FINAL_VIEWS")"; then
@@ -813,6 +820,7 @@ echo "port allocation: base=$CRITIC_PROBE_PORT_BASE block=$CRITIC_PROBE_PORT_BLO
 echo "continue after batch failure: $CRITIC_PROBE_CONTINUE_ON_BATCH_FAILURE"
 echo "final-view parallelism: $CRITIC_PROBE_FINAL_VIEW_PARALLELISM"
 echo "fail unresolved furniture hard constraints: $FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS"
+echo "quality failure policy: $QUALITY_FAILURE_POLICY"
 echo "HSSD retrieval: backend=$HSSD_RETRIEVAL_BACKEND rendered_asset_choice=$HSSD_RENDERED_ASSET_CHOICE"
 echo "skip controller bpy import: $SKIP_MAIN_BPY_IMPORT"
 if [ -n "$CONVEX_MAX_OMP_THREADS" ]; then
@@ -898,6 +906,7 @@ validate_shared_base_case_mapping
 COMMON_ARGS=(
     "experiment.num_workers=${SCENE_WORKERS_PER_PROCESS}"
     "experiment.scene_retry_attempts=${SCENE_RETRY_ATTEMPTS}"
+    "experiment.quality_failure_policy=${QUALITY_FAILURE_POLICY}"
     "furniture_agent.fail_stage_on_unresolved_hard_constraints=${FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS}"
     "experiment.pipeline.parallel_rooms=false"
     "experiment.pipeline.max_parallel_rooms=1"

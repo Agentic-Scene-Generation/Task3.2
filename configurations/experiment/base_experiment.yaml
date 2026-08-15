@@ -77,6 +77,11 @@ num_workers: 1
 # validation failures are not retried. One retry is the production default.
 scene_retry_attempts: 1
 
+# Deterministic quality failures are distinct from runtime failures. Production
+# remains strict by default; critic probes may select "degraded" to preserve
+# failed checkpoints, traces, and final renders without marking them successful.
+quality_failure_policy: "strict"  # Options: "strict", "degraded"
+
 # Pipeline stage control
 # Stages run in order: floor_plan → furniture → wall_mounted → ceiling_mounted → manipuland
 # Set start_stage to resume from a specific stage (loads previous stage's state)

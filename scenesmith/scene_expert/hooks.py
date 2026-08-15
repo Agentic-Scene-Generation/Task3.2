@@ -73,6 +73,7 @@ class StageCommitResult:
     passed: bool
     retryable: bool = False
     reason: str = ""
+    quality_failure: bool = False
 
 
 def _empty_memory_pack() -> MemoryPack:
@@ -1411,6 +1412,7 @@ class SceneExpertHookRunner:
         repair_actions: list[RepairResult] = []
         passed = False
         retryable = False
+        verification_error = False
         result_reason = ""
         try:
             verify_start = time.time()
@@ -1455,6 +1457,8 @@ class SceneExpertHookRunner:
                         verify_report=verify_report,
                         repair_verified=False,
                     )
+                if not retryable:
+                    self._stage_reports.append(verify_report)
             else:
                 passed = True
                 self._stage_reports.append(verify_report)
@@ -1474,6 +1478,7 @@ class SceneExpertHookRunner:
                 console_logger.info(f"[SceneExpert] Stage {stage} PASSED verification")
 
         except Exception as e:
+            verification_error = True
             result_reason = f"verification error: {e}"
             console_logger.warning(
                 f"[SceneExpert] Verification failed for {stage}: {e}"
@@ -1519,6 +1524,9 @@ class SceneExpertHookRunner:
             passed=passed,
             retryable=retryable,
             reason=result_reason,
+            quality_failure=(
+                verify_report is not None and not passed and not verification_error
+            ),
         )
 
     # ------------------------------------------------------------------
