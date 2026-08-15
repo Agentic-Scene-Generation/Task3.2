@@ -1,4 +1,5 @@
 import json
+import os
 import shutil
 import tempfile
 import unittest
@@ -8,6 +9,7 @@ from pathlib import Path
 import numpy as np
 import trimesh
 import yaml
+from hydra import compose, initialize_config_dir
 
 from scenesmith.agent_utils.hssd_retrieval.alignment import (
     apply_hssd_alignment_transform,
@@ -85,6 +87,52 @@ class TestHssdConfig(unittest.TestCase):
                 collection_path=self.tmp_path / "missing-collection",
                 base_url="http://127.0.0.1:8014",
             )
+
+    def test_shared_hssd_env_overrides_resolve_in_hydra_config(self):
+        """The mounted shared HSSD dataset must override the stale default local path."""
+        config_dir = Path(__file__).resolve().parents[2] / "configurations"
+        env_snapshot = {
+            key: os.environ.get(key)
+            for key in (
+                "SCENEEXPERT_HSSD_DATA_DIR",
+                "HSSD_DATA_PATH",
+                "HSSD_PREPROCESSED_PATH",
+                "HSSD_RENDERED_ASSETS_DIR",
+                "HSSD_ZVEC_COLLECTION_PATH",
+            )
+        }
+        try:
+            os.environ["SCENEEXPERT_HSSD_DATA_DIR"] = "/mnt/afs/task3_2/share_data/hsm"
+            os.environ["HSSD_DATA_PATH"] = "/mnt/afs/task3_2/share_data/hsm/hssd-models"
+            os.environ["HSSD_PREPROCESSED_PATH"] = "/mnt/afs/task3_2/share_data/hsm/preprocessed"
+            os.environ["HSSD_RENDERED_ASSETS_DIR"] = "/mnt/afs/task3_2/share_data/scenesmith/hssd_rendered_assets"
+            os.environ["HSSD_ZVEC_COLLECTION_PATH"] = "/mnt/afs/task3_2/share_data/scenesmith/hssd_zvec_collection"
+
+            with initialize_config_dir(config_dir=str(config_dir), version_base=None):
+                cfg = compose(config_name="config")
+
+            self.assertEqual(
+                str(cfg.furniture_agent.asset_manager.hssd.data_path),
+                "/mnt/afs/task3_2/share_data/hsm/hssd-models",
+            )
+            self.assertEqual(
+                str(cfg.furniture_agent.asset_manager.hssd.preprocessed_path),
+                "/mnt/afs/task3_2/share_data/hsm/preprocessed",
+            )
+            self.assertEqual(
+                str(cfg.furniture_agent.asset_manager.hssd.rendered_asset_choice.rendered_assets_dir),
+                "/mnt/afs/task3_2/share_data/scenesmith/hssd_rendered_assets",
+            )
+            self.assertEqual(
+                str(cfg.furniture_agent.asset_manager.hssd.zvec.collection_path),
+                "/mnt/afs/task3_2/share_data/scenesmith/hssd_zvec_collection",
+            )
+        finally:
+            for key, value in env_snapshot.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
 
 
 class TestMeshPaths(unittest.TestCase):

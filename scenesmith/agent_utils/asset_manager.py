@@ -1938,6 +1938,10 @@ class AssetManager:
         if self._fatal_asset_error:
             return self._fatal_generation_result(request, self._fatal_asset_error)
 
+        pause = getattr(self._execution_clock, "pause_for_external_operation", None)
+        resume = getattr(self._execution_clock, "resume_from_external_operation", None)
+        pause_token = pause("asset_acquisition") if callable(pause) else None
+
         try:
             # If router is enabled, analyze and potentially modify the request.
             if self.router is not None:
@@ -1957,7 +1961,7 @@ class AssetManager:
             self._fatal_asset_error = str(e)
             result = self._fatal_generation_result(request, str(e))
         finally:
-            if callable(resume):
+            if pause_token is not None and callable(resume):
                 resume(pause_token)
 
         if gate_plan is None:

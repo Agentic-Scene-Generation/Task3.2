@@ -37,7 +37,8 @@ def convert_checkpoint(model_dir: Path, overwrite: bool = False) -> Path:
         raise ValueError(f"No tensor entries found in checkpoint: {source}")
 
     temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
-    save_file(tensors, str(temporary), metadata={"source": source.name})
+    metadata = {"format": "pt", "source": source.name}
+    save_file(tensors, str(temporary), metadata=metadata)
     temporary.replace(target)
     return target
 
