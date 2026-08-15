@@ -18,7 +18,7 @@ from agents import Agent, FunctionTool, Runner, RunResult, custom_span
 from agents.exceptions import MaxTurnsExceeded
 import numpy as np
 from omegaconf import DictConfig, OmegaConf
-from pydrake.all import RollPitchYaw
+from pydrake.all import RigidTransform, RollPitchYaw
 
 from scenesmith.agent_utils.base_stateful_agent import (
     BaseStatefulAgent,
@@ -95,6 +95,24 @@ _EXPLICIT_FLOOR_PLACEMENT_PATTERN = re.compile(
     r"\b(?:on|onto|at|placed\s+on|resting\s+on)\s+(?:the\s+)?floor\b|"
     r"\bfloor[-\s]+(?:standing|placed|item)\b",
     re.IGNORECASE,
+)
+
+# A bounding-box top is only a last resort for a deterministic, prompt-required
+# support target. These categories describe furniture whose primary function is
+# to provide a horizontal surface; accepting arbitrary furniture here would hide
+# bad asset annotations and allow unsafe placements on sofas, chairs, or plants.
+_REQUIRED_BBOX_SUPPORT_CATEGORIES = frozenset(
+    {
+        "dining_table",
+        "coffee_table",
+        "table",
+        "desk",
+        "nightstand",
+        "sideboard",
+        "bookshelf",
+        "dresser",
+        "tv_stand",
+    }
 )
 
 
@@ -1766,6 +1784,83 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
             / f"manipuland_furniture_{self.current_furniture_id}"
         )
 
+    @staticmethod
+    def _required_target_bbox_top_surfaces(
+        *,
+        scene: RoomScene,
+        furniture: Any,
+        furniture_id: UniqueID,
+        selection: FurnitureSelection,
+        config: SupportSurfaceExtractionConfig,
+    ) -> list[SupportSurface]:
+        """Build one conservative top surface for a hard support obligation.
+
+        HSSD can contain an explicit but empty support-surface annotation. The
+        normal mesh fallback is appropriate for missing metadata, but can be
+        prohibitively expensive for a high-poly asset whose semantic role is
+        unambiguous. This fallback is deliberately narrower: it requires an
+        explicit prompt obligation, a known support-furniture category, and a
+        finite usable inset inside the object bounds. Placement, physics, and
+        final contract validation remain responsible for rejecting an unsuitable
+        asset or arrangement.
+        """
+        if not selection.is_prompt_required:
+            return []
+        category = classify_manipuland_furniture(furniture, furniture_id)
+        if category not in _REQUIRED_BBOX_SUPPORT_CATEGORIES:
+            return []
+
+        bbox_min = getattr(furniture, "bbox_min", None)
+        bbox_max = getattr(furniture, "bbox_max", None)
+        transform = getattr(furniture, "transform", None)
+        if bbox_min is None or bbox_max is None or transform is None:
+            return []
+        lower = np.asarray(bbox_min, dtype=float)
+        upper = np.asarray(bbox_max, dtype=float)
+        if (
+            lower.shape != (3,)
+            or upper.shape != (3,)
+            or not np.all(np.isfinite(np.concatenate((lower, upper))))
+        ):
+            return []
+
+        dimensions = upper - lower
+        if np.any(dimensions <= 0.0):
+            return []
+        # Keep placements away from edge geometry while retaining most of a
+        # valid tabletop. The cap avoids eliminating compact nightstands.
+        inset_m = min(0.08, 0.05 * float(np.min(dimensions[:2])))
+        half_extents = dimensions[:2] / 2.0 - inset_m
+        if (
+            np.any(half_extents <= 0.0)
+            or 4.0 * float(np.prod(half_extents)) < config.min_surface_area_m2
+            or float(np.min(half_extents)) < config.min_inscribed_radius_m
+        ):
+            return []
+
+        offset_m = config.surface_offset_m
+        local_center = np.array(
+            [
+                (lower[0] + upper[0]) / 2.0,
+                (lower[1] + upper[1]) / 2.0,
+                upper[2] + offset_m,
+            ]
+        )
+        clearance_m = max(config.min_clearance_m, config.top_surface_clearance_m)
+        return [
+            SupportSurface(
+                surface_id=scene.generate_surface_id(),
+                bounding_box_min=np.array(
+                    [-half_extents[0], -half_extents[1], offset_m]
+                ),
+                bounding_box_max=np.array(
+                    [half_extents[0], half_extents[1], offset_m + clearance_m]
+                ),
+                transform=transform @ RigidTransform(p=local_center),
+                mesh=None,
+            )
+        ]
+
     async def add_manipulands(self, scene: RoomScene) -> None:
         """Add manipulands to furniture surfaces in the scene.
 
@@ -1924,9 +2019,39 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
                 hsm_config = SupportSurfaceExtractionConfig.from_config(
                     cfg=self.cfg.support_surface_extraction
                 )
-                surfaces = extract_and_propagate_support_surfaces(
-                    scene=self.scene, furniture_object=furniture, config=hsm_config
-                )
+                try:
+                    surfaces = extract_and_propagate_support_surfaces(
+                        scene=self.scene, furniture_object=furniture, config=hsm_config
+                    )
+                except (FileNotFoundError, ValueError) as error:
+                    if not furniture_selection.is_prompt_required:
+                        raise
+                    console_logger.warning(
+                        "Support-surface extraction failed for prompt-required "
+                        "%s: %s",
+                        furniture_id,
+                        error,
+                    )
+                    surfaces = []
+
+                if not surfaces:
+                    surfaces = self._required_target_bbox_top_surfaces(
+                        scene=self.scene,
+                        furniture=furniture,
+                        furniture_id=furniture_id,
+                        selection=furniture_selection,
+                        config=hsm_config,
+                    )
+                    if surfaces:
+                        furniture.support_surfaces = surfaces
+                        furniture.metadata["support_surface_source"] = (
+                            "required_bbox_top_fallback"
+                        )
+                        console_logger.warning(
+                            "Using conservative bbox-top support fallback for "
+                            "prompt-required furniture %s",
+                            furniture_id,
+                        )
 
                 console_logger.info(
                     f"Extracted {len(surfaces)} support surface(s) for {furniture_id}"
@@ -1934,6 +2059,11 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
 
                 # Skip furniture with no support surfaces (e.g., plants, unsuitable geometry).
                 if not surfaces:
+                    if furniture_selection.is_prompt_required:
+                        raise RuntimeError(
+                            "Prompt-required manipuland target "
+                            f"{furniture_id} has no verified support surface"
+                        )
                     console_logger.warning(
                         f"No support surfaces found for {furniture_id}, skipping manipuland placement"
                     )

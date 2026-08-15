@@ -11,9 +11,12 @@ import pytest
 from agents.exceptions import MaxTurnsExceeded
 from pydrake.all import RigidTransform, RollPitchYaw
 
-from scenesmith.agent_utils.room import ObjectType, UniqueID
+from scenesmith.agent_utils.room import ObjectType, SceneObject, UniqueID
 from scenesmith.agent_utils.base_stateful_agent import BaseStatefulAgent, Runner
 from scenesmith.agent_utils.scene_analyzer import FurnitureSelection
+from scenesmith.agent_utils.support_surface_extraction import (
+    SupportSurfaceExtractionConfig,
+)
 from scenesmith.manipuland_agents.cross_stage_inventory import (
     contract_bound_support_object_ids,
     existing_floor_covering_ids,
@@ -35,6 +38,72 @@ def _object(object_id: str, name: str):
         name=name,
         description=name,
         immutable=False,
+    )
+
+
+def test_required_table_can_use_conservative_bbox_top_surface() -> None:
+    table = SceneObject(
+        object_id=UniqueID("dining_table_0"),
+        object_type=ObjectType.FURNITURE,
+        name="dining_table",
+        description="Rectangular dining table",
+        transform=RigidTransform(p=[1.0, -2.0, 0.0]),
+        bbox_min=np.array([-1.0, -0.45, 0.0]),
+        bbox_max=np.array([1.0, 0.45, 0.75]),
+    )
+    scene = SimpleNamespace(generate_surface_id=lambda: UniqueID("S_bbox"))
+    selection = FurnitureSelection(
+        furniture_id=table.object_id,
+        suggested_items="REQUIRED: five table settings",
+        prompt_constraints="five complete table settings",
+        style_notes="",
+        is_prompt_required=True,
+    )
+
+    surfaces = StatefulManipulandAgent._required_target_bbox_top_surfaces(
+        scene=scene,
+        furniture=table,
+        furniture_id=table.object_id,
+        selection=selection,
+        config=SupportSurfaceExtractionConfig(),
+    )
+
+    assert len(surfaces) == 1
+    surface = surfaces[0]
+    assert surface.mesh is None
+    np.testing.assert_allclose(surface.transform.translation(), [1.0, -2.0, 0.76])
+    np.testing.assert_allclose(surface.bounding_box_min[:2], [-0.955, -0.405])
+    np.testing.assert_allclose(surface.bounding_box_max[:2], [0.955, 0.405])
+
+
+def test_required_bbox_fallback_does_not_invent_sofa_surface() -> None:
+    sofa = SceneObject(
+        object_id=UniqueID("sofa_0"),
+        object_type=ObjectType.FURNITURE,
+        name="sofa",
+        description="Three-seat sofa",
+        transform=RigidTransform(),
+        bbox_min=np.array([-1.0, -0.45, 0.0]),
+        bbox_max=np.array([1.0, 0.45, 0.85]),
+    )
+    scene = SimpleNamespace(generate_surface_id=lambda: UniqueID("S_bbox"))
+    selection = FurnitureSelection(
+        furniture_id=sofa.object_id,
+        suggested_items="REQUIRED: decoration",
+        prompt_constraints="",
+        style_notes="",
+        is_prompt_required=True,
+    )
+
+    assert (
+        StatefulManipulandAgent._required_target_bbox_top_surfaces(
+            scene=scene,
+            furniture=sofa,
+            furniture_id=sofa.object_id,
+            selection=selection,
+            config=SupportSurfaceExtractionConfig(),
+        )
+        == []
     )
 
 
