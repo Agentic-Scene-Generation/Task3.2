@@ -3,10 +3,13 @@ import unittest
 import sys
 import types
 
-sys.modules.setdefault("openai", types.SimpleNamespace(OpenAI=object))
+sys.modules.setdefault(
+    "openai", types.SimpleNamespace(OpenAI=object, AsyncOpenAI=object)
+)
 
 from scenesmith.agent_utils.thinking import (
     chat_template_kwargs_from_effort,
+    is_qwen38_model,
     prepend_text_thinking_directive,
     thinking_directive_from_effort,
 )
@@ -27,6 +30,35 @@ class ThinkingDirectivesTest(unittest.TestCase):
         self.assertEqual(
             {"chat_template_kwargs": {"enable_thinking": True}},
             chat_template_kwargs_from_effort("low"),
+        )
+
+    def test_qwen38_uses_reasoning_effort_without_text_directive(self) -> None:
+        model = "unsloth/Qwen3.8-27B-GGUF"
+        self.assertTrue(is_qwen38_model(model))
+        self.assertEqual("", thinking_directive_from_effort("medium", model))
+        self.assertEqual(
+            {"chat_template_kwargs": {"reasoning_effort": "medium"}},
+            chat_template_kwargs_from_effort("medium", model),
+        )
+        self.assertEqual(
+            "Place the bed.",
+            prepend_text_thinking_directive(
+                "/no_think\nPlace the bed.",
+                thinking_directive_from_effort("medium", model),
+            ),
+        )
+        self.assertEqual(
+            {"chat_template_kwargs": {"enable_thinking": False}},
+            chat_template_kwargs_from_effort("none", model),
+        )
+
+    def test_qwen36_keeps_enable_thinking_contract(self) -> None:
+        model = "unsloth/Qwen3.6-27B-GGUF"
+        self.assertFalse(is_qwen38_model(model))
+        self.assertEqual("/think", thinking_directive_from_effort("medium", model))
+        self.assertEqual(
+            {"chat_template_kwargs": {"enable_thinking": True}},
+            chat_template_kwargs_from_effort("medium", model),
         )
 
     def test_agent_instruction_directive_replaces_existing_prefix(self) -> None:

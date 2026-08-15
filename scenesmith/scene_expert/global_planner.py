@@ -19,7 +19,11 @@ from pathlib import Path
 from openai import OpenAI
 
 from scenesmith.scene_expert.context_bundle import build_llm_call_debug_record
-from scenesmith.agent_utils.thinking import chat_template_kwargs_from_effort
+from scenesmith.agent_utils.thinking import (
+    chat_template_kwargs_from_effort,
+    prepend_text_thinking_directive,
+    thinking_directive_from_effort,
+)
 from scenesmith.scene_expert.schemas import (
     HarnessContext,
     MemoryPack,
@@ -653,7 +657,13 @@ class GlobalPlanner:
         validation_error = ""
         for attempt in range(2):
             messages = [
-                {"role": "system", "content": _SYSTEM_PROMPT},
+                {
+                    "role": "system",
+                    "content": prepend_text_thinking_directive(
+                        _SYSTEM_PROMPT,
+                        thinking_directive_from_effort("none", model=self._model),
+                    ),
+                },
                 {"role": "user", "content": user_message},
             ]
             if attempt:
@@ -683,7 +693,9 @@ class GlobalPlanner:
                             "schema": StageBrief.model_json_schema(),
                         },
                     },
-                    extra_body=chat_template_kwargs_from_effort("none"),
+                    extra_body=chat_template_kwargs_from_effort(
+                        "none", model=self._model
+                    ),
                 )
                 message = response.choices[0].message
                 raw = message.content

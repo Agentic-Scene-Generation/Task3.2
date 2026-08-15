@@ -132,12 +132,14 @@ class VLMService:
             )
             messages = self._prepend_thinking_directive(
                 messages=messages,
-                directive=thinking_directive_from_effort(reasoning_effort),
+                directive=thinking_directive_from_effort(reasoning_effort, model=model),
             )
             kwargs = {
                 "model": model,
                 "messages": messages,
-                "extra_body": chat_template_kwargs_from_effort(reasoning_effort),
+                "extra_body": chat_template_kwargs_from_effort(
+                    reasoning_effort, model=model
+                ),
             }
 
             # Add response format if specified.

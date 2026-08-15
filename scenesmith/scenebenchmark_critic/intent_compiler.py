@@ -11,7 +11,11 @@ import time
 from pathlib import Path
 from typing import Any
 
-from scenesmith.agent_utils.thinking import chat_template_kwargs_from_effort
+from scenesmith.agent_utils.thinking import (
+    chat_template_kwargs_from_effort,
+    prepend_text_thinking_directive,
+    thinking_directive_from_effort,
+)
 from scenesmith.scene_expert.context_bundle import build_llm_call_debug_record
 from scenesmith.scenebenchmark_critic.intent_schema import (
     INTENT_COMPILER_SPEC_VERSION,
@@ -1354,7 +1358,13 @@ class IntentCompiler:
                     "geometry-verifiable."
                 )
         return [
-            {"role": "system", "content": _system_prompt()},
+            {
+                "role": "system",
+                "content": prepend_text_thinking_directive(
+                    _system_prompt(),
+                    thinking_directive_from_effort("none", model=self._model),
+                ),
+            },
             {"role": "user", "content": user},
         ]
 
@@ -1421,7 +1431,9 @@ class IntentCompiler:
                             "schema": intent_compiler_wire_json_schema(),
                         },
                     },
-                    extra_body=chat_template_kwargs_from_effort("none"),
+                    extra_body=chat_template_kwargs_from_effort(
+                        "none", model=self._model
+                    ),
                 )
                 raw = self._raw_message(response)
                 finish_reason = self._finish_reason(response)

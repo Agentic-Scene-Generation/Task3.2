@@ -1392,14 +1392,12 @@ class BaseStatefulAgent(ABC):
         if extra_args:
             kwargs["extra_args"] = extra_args
 
-        # Open-source Qwen servers do not interpret OpenAI's reasoning_effort
-        # field.  Pass the effective mode through llama.cpp's chat-template
-        # kwargs; the textual directive below is retained for readability and
-        # compatibility with other Qwen-compatible backends.
+        model = getattr(self.cfg.openai, "model", None)
         effort = None
         if settings_key and hasattr(self.cfg.openai, "reasoning_effort"):
             effort = getattr(self.cfg.openai.reasoning_effort, settings_key, None)
-        kwargs["extra_body"] = chat_template_kwargs_from_effort(effort)
+        # Qwen3.6 uses enable_thinking; Qwen3.8 uses reasoning_effort.
+        kwargs["extra_body"] = chat_template_kwargs_from_effort(effort, model=model)
 
         # Add tool_choice to force specific tool call first.
         if tool_choice:
@@ -1421,7 +1419,8 @@ class BaseStatefulAgent(ABC):
         effort = None
         if hasattr(self.cfg, "openai") and hasattr(self.cfg.openai, "reasoning_effort"):
             effort = getattr(self.cfg.openai.reasoning_effort, settings_key, None)
-        directive = thinking_directive_from_effort(effort)
+        model = getattr(self.cfg.openai, "model", None)
+        directive = thinking_directive_from_effort(effort, model=model)
         return prepend_text_thinking_directive(instructions, directive)
 
     def _create_designer_agent(
