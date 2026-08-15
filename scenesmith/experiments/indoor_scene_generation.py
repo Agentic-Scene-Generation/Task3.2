@@ -126,6 +126,7 @@ def _commit_scene_expert_stage(
     if result is None or result.passed:
         return
     if result.quality_failure and not result.retryable and allow_degraded_quality:
+        hooks.accept_degraded_stage(stage)
         console_logger.warning(
             "Advancing past SceneExpert-rejected stage %s with degraded quality: %s",
             stage,

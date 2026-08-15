@@ -814,6 +814,49 @@ class SceneExpertMemoryTest(unittest.TestCase):
             ["instructional_surface"], [issue.object_name for issue in unrelated.issues]
         )
 
+    def test_wall_inventory_verifier_uses_asset_description_for_semantic_alias(
+        self,
+    ) -> None:
+        task_spec = SceneTaskSpec(
+            room_type="classroom",
+            style="standard",
+            required_wall_objects=["instructional_surface"],
+        )
+
+        report = StageVerifier(pass_threshold=0.6).verify(
+            stage="wall_mounted",
+            stage_output_dir="/path/that/does/not/exist",
+            task_spec=task_spec,
+            scene_state_info={
+                "object_records": [
+                    {
+                        "name": "chalkboard_land",
+                        "description": "Traditional classroom chalkboard with wood frame",
+                        "aliases": [],
+                    }
+                ]
+            },
+        )
+
+        self.assertTrue(report.pass_stage)
+        self.assertEqual([], report.issues)
+
+        unrelated = StageVerifier(pass_threshold=0.6).verify(
+            stage="wall_mounted",
+            stage_output_dir="/path/that/does/not/exist",
+            task_spec=task_spec,
+            scene_state_info={
+                "object_records": [
+                    {
+                        "name": "wall_art_land",
+                        "description": "Landscape painting in a wooden frame",
+                        "aliases": [],
+                    }
+                ]
+            },
+        )
+        self.assertFalse(unrelated.pass_stage)
+
     def test_manipuland_verifier_normalizes_names_and_enforces_counts(self) -> None:
         task_spec = SceneTaskSpec(
             room_type="bedroom",

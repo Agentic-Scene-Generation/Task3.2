@@ -342,8 +342,7 @@ def _check_required_objects(
                         for present in present_aliases
                     )
                     or (
-                        stage == "manipuland"
-                        and description
+                        description
                         and _description_contains_object_label(required, description)
                     )
                 )
@@ -402,12 +401,12 @@ def _object_labels_match(required: str, present: str) -> bool:
 
 
 def _description_contains_object_label(required: str, description: str) -> bool:
-    """Match a required component mentioned in a manipuland asset description.
+    """Match a required object category mentioned in an asset description.
 
-    Some asset libraries return one mesh for a compound item such as a vase
-    with flowers, without recording composite metadata. Token-wise
-    normalization lets that description satisfy the component requirement
-    while the caller still consumes only one scene object instance.
+    Asset names can encode implementation details (for example
+    ``chalkboard_land``) while their descriptions retain the user-facing
+    category. Token-wise canonicalization lets one asset satisfy a matching
+    stage requirement while still consuming a single scene object instance.
     """
     required_tokens = _normalize_object_label(required).split()
     if not required_tokens:

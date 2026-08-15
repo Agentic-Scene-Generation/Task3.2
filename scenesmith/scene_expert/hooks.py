@@ -728,6 +728,26 @@ class SceneExpertHookRunner:
             and self._current_planner_trace.get("status") == "no_op"
         )
 
+    def accept_degraded_stage(self, stage: str) -> None:
+        """Record a terminal quality-failed stage as advanced by the pipeline.
+
+        The pipeline may deliberately retain a deterministic, non-retryable
+        quality failure for probe output.  It must still advance the harness
+        FSM; otherwise the next stage is rejected as an apparent stage skip.
+        Verification errors and retryable failures never reach this method.
+        """
+        if stage != self._current_stage:
+            raise ValueError(
+                "Cannot accept degraded stage "
+                f"{stage!r}; current stage is {self._current_stage!r}"
+            )
+        self._harness.validate_stage_order(self._completed_stages, stage)
+        self._completed_stages.append(stage)
+        self._pending_stage_repairs.pop(stage, None)
+        console_logger.warning(
+            "[SceneExpert] Accepted stage %s with degraded quality", stage
+        )
+
     def _save_context_bundle(
         self,
         *,

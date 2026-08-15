@@ -10,7 +10,7 @@ from unittest.mock import Mock, patch
 import pytest
 
 from scenesmith.experiments import indoor_scene_generation as scene_generation
-from scenesmith.scene_expert.harness import RepairDecision
+from scenesmith.scene_expert.harness import Harness, RepairDecision
 from scenesmith.scene_expert.hooks import SceneExpertHookRunner, StageCommitResult
 from scenesmith.scene_expert.schemas import RepairResult, StageVerifyReport, VerifyIssue
 
@@ -142,6 +142,30 @@ def test_degraded_policy_advances_after_quality_repair_budget_is_exhausted(
         room_dir=tmp_path,
         allow_degraded_quality=True,
     )
+    hooks.accept_degraded_stage.assert_called_once_with("furniture")
+
+
+def test_accept_degraded_stage_advances_harness_for_next_stage() -> None:
+    runner = object.__new__(SceneExpertHookRunner)
+    runner._current_stage = "wall_mounted"
+    runner._completed_stages = ["floor_plan", "furniture"]
+    runner._pending_stage_repairs = {"wall_mounted": (Mock(), Mock())}
+    runner._harness = Harness(SimpleNamespace())
+
+    runner.accept_degraded_stage("wall_mounted")
+
+    assert runner._completed_stages == [
+        "floor_plan",
+        "furniture",
+        "wall_mounted",
+    ]
+    assert runner._pending_stage_repairs == {}
+    assert runner._harness.validate_stage_order(
+        runner._completed_stages, "ceiling_mounted"
+    )
+
+    with pytest.raises(ValueError, match="current stage"):
+        runner.accept_degraded_stage("ceiling_mounted")
 
 
 def test_exhausted_quality_failure_is_retained_for_final_verification(
