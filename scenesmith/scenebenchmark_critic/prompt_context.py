@@ -73,6 +73,15 @@ WORKSTATION_CATEGORIES = (
     | COMPUTER_SCREEN_CATEGORIES
     | {"computer", "notebook_computer"}
 )
+_HARD_PASS_TOPOLOGY_RELATIONS = frozenset(
+    {
+        "corner_distribution",
+        "edge_distribution",
+        "on_top_of",
+        "one_per_support",
+        "paired_with",
+    }
+)
 
 
 def format_agent_prompt_context(
@@ -116,12 +125,83 @@ def format_agent_prompt_context(
             },
             max_issues=max_issues,
         )
-    wall_media_context = _format_wall_media_window_context(
-        payload, filtered, agent_type
+    additional_context = (
+        _format_authoritative_pass_contract_context(payload, agent_type),
+        _format_wall_media_window_context(payload, filtered, agent_type),
     )
-    if wall_media_context:
-        context = f"{context}\n\n{wall_media_context}"
+    for extra in additional_context:
+        if extra:
+            context = f"{context}\n\n{extra}"
     return context
+
+
+def _format_authoritative_pass_contract_context(
+    payload: dict[str, Any], agent_type: AgentType | str
+) -> str:
+    """Preserve hard topology that the deterministic evaluator already passed.
+
+    Failure-only prompt context is insufficient for finite layouts: an LLM can
+    reinterpret an already-satisfied long/short edge distribution from an image
+    and ask the designer to reverse it. Emit only compact, prompt-originated
+    topology passes for the stage that owns them. This keeps visual critique
+    useful while making the contract's target-local semantics authoritative.
+    """
+    agent_value = _agent_value(agent_type)
+    if agent_value not in {AgentType.FURNITURE.value, AgentType.MANIPULAND.value}:
+        return ""
+
+    rows: list[str] = []
+    seen_constraints: set[str] = set()
+    for result in payload.get("results") or []:
+        if not isinstance(result, dict) or result.get("label") != "pass":
+            continue
+        if _is_non_authoritative_scoring_tier(result):
+            continue
+        constraint = (result.get("evidence") or {}).get("intent_constraint") or {}
+        relation = str(constraint.get("relation") or "")
+        if (
+            relation not in _HARD_PASS_TOPOLOGY_RELATIONS
+            or str(constraint.get("strength") or "hard").lower() != "hard"
+            or str(constraint.get("stage") or "").lower() != agent_value
+        ):
+            continue
+        constraint_id = str(constraint.get("constraint_id") or "")
+        dedupe_key = constraint_id or f"{relation}:{result.get('check_id') or ''}"
+        if dedupe_key in seen_constraints:
+            continue
+        seen_constraints.add(dedupe_key)
+
+        primary_id = str(result.get("primary_object") or "")
+        related_ids = ", ".join(_related_ids(result)) or "none"
+        if relation == "edge_distribution":
+            groups = constraint.get("groups") or []
+            groups_text = ", ".join(
+                f"{group.get('edge_class')}={group.get('counts_per_edge')}"
+                for group in groups
+                if isinstance(group, dict)
+            )
+            rows.append(
+                f"- `edge_distribution` target=`{primary_id}` "
+                f"members=[{related_ids}] groups=[{groups_text or 'declared'}]: pass"
+            )
+        else:
+            rows.append(
+                f"- `{relation}` subject=`{primary_id}` targets=[{related_ids}]: pass"
+            )
+
+    if not rows:
+        return ""
+    return "\n".join(
+        [
+            "Authoritative deterministic hard topology already satisfied:",
+            *rows,
+            "A listed pass is a geometric invariant for this candidate. Do not "
+            "request a change that reverses or invalidates it based on visual "
+            "interpretation alone. For `edge_distribution`, long and short refer "
+            "to the physical tangent length of each target-local edge, not its "
+            "outward normal or compass direction.",
+        ]
+    )
 
 
 def _format_manipuland_completeness_context(

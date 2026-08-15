@@ -151,10 +151,13 @@ def execution_owner(
 ) -> str:
     """Return the pipeline stage that must create an object category.
 
-    Explicit support/mounting relations take precedence over category defaults.
-    An existing inventory owner is only a fallback; it must not make a normally
-    floor-standing object become a manipuland merely because an upstream model
-    emitted it in the wrong inventory list.
+    Explicit mounting relations take precedence over category defaults. Surface
+    support only promotes canonical small-object categories to ``manipuland``:
+    a television on a media console is still furniture and must be placed while
+    both furniture endpoints are available. An existing inventory owner is only
+    a fallback; it must not make a normally floor-standing object become a
+    manipuland merely because an upstream model emitted it in the wrong
+    inventory list.
     """
     normalized_category = canonical_object_category(category)
     normalized_relation = str(relation or "").strip().lower().replace("-", "_")
@@ -162,7 +165,16 @@ def execution_owner(
 
     if normalized_endpoint == "subject":
         if normalized_relation in _SURFACE_SUPPORT_RELATIONS:
-            return "manipuland"
+            # ``on_top_of`` describes both manipulands on furniture (a lamp on
+            # a desk) and structural furniture support (a television on a TV
+            # stand). The latter must remain at the furniture stage so the
+            # support-pose repair can place it in XYZ, not as a loose floor
+            # object deferred to the manipuland agent.
+            return (
+                "manipuland"
+                if normalized_category in MANIPULAND_CATEGORIES
+                else "furniture"
+            )
         if normalized_relation in _FLOOR_SUPPORT_RELATIONS:
             return "furniture"
         if normalized_relation in _WALL_MOUNT_RELATIONS:

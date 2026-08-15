@@ -390,6 +390,33 @@ class SceneExpertMemoryTest(unittest.TestCase):
         self.assertNotIn("wastebasket", surface_spec.required_large_objects)
         self.assertEqual("manipuland", surface_contract["constraints"][0]["stage"])
 
+        media_contract = {
+            "constraints": [
+                {
+                    "relation": "on_top_of",
+                    "stage": "manipuland",
+                    "strength": "hard",
+                    "subjects": {"category": "television", "count": 1},
+                    "targets": {"category": "tv_stand", "count": 1},
+                }
+            ]
+        }
+        media_spec = _reconcile_task_spec_stage_ownership(
+            SceneTaskSpec(
+                room_type="living_room",
+                style="standard",
+                required_large_objects=["tv stand"],
+                required_small_objects=["television"],
+            ),
+            media_contract,
+        )
+
+        self.assertCountEqual(
+            ["tv stand", "television"], media_spec.required_large_objects
+        )
+        self.assertNotIn("television", media_spec.required_small_objects)
+        self.assertEqual("furniture", media_contract["constraints"][0]["stage"])
+
     def test_repair_taxonomy_classifies_core_hard_failures(self) -> None:
         failures = classify_hard_reasons(
             [

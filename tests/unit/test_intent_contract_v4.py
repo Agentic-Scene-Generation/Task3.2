@@ -35,6 +35,7 @@ from scenesmith.scenebenchmark_critic.intent_contract import (
     selected_ids,
     selector_match_count,
 )
+from scenesmith.scenebenchmark_critic.config import CriticConfig
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.intent_contract import (
     _binding_state_result,
     _evaluate_required_count,
@@ -42,6 +43,11 @@ from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.i
 )
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.edge_distribution import (
     evaluate_edge_distribution,
+)
+from scenesmith.scenebenchmark_critic.metrics.functional_dependency.orientation_contracts import (
+    CONTRACT_ATTR,
+    CONTRACT_CHECK_SOURCE,
+    stabilize_orientation_contracts,
 )
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.relations import (
     evaluate_functional_dependency,
@@ -585,6 +591,186 @@ def test_rotated_rectangle_edge_distribution_passes_and_checks_inward_facing() -
     failed = evaluate_edge_distribution(wrong_orientation)[0]
     assert failed["label"] == "fail"
     assert "face target inward" in failed["reason"]
+
+
+def test_table_seating_edge_distribution_rejects_unusable_table_gap() -> None:
+    table = _record("dining_table_0", "dining_table", (0.0, 0.0), (2.0, 1.0, 0.75))
+    chair = _record(
+        "dining_chair_0",
+        "dining_chair",
+        (0.0, -1.75),
+        (0.5, 0.5, 0.9),
+        yaw_deg=180.0,
+    )
+    case_pack = {
+        "intent_contract": {
+            "constraints": [
+                {
+                    "relation": "edge_distribution",
+                    "subjects": {
+                        "category": "dining_chair",
+                        "count": 1,
+                        "quantifier": "exactly",
+                    },
+                    "targets": {
+                        "category": "dining_table",
+                        "count": 1,
+                        "quantifier": "exactly",
+                    },
+                    "edge_frame": "target_local_rectangle",
+                    "groups": [
+                        {
+                            "edge_class": "long",
+                            "counts_per_edge": [1, 0],
+                            "spacing": "equal_segments",
+                        },
+                        {
+                            "edge_class": "short",
+                            "counts_per_edge": [0, 0],
+                            "spacing": "equal_segments",
+                        },
+                    ],
+                    "orientation": "toward_target",
+                    "source": "explicit_prompt",
+                }
+            ]
+        },
+        "scene_geometry": {"objects": [table, chair]},
+    }
+
+    result = evaluate_edge_distribution(case_pack)[0]
+
+    assert result["label"] == "fail"
+    slot = result["diagnostics"]["seat_slots"][0]
+    assert slot["outside_gap_m"] > slot["max_outside_gap_m"]
+    assert "maximum usable gap" in result["reason"]
+
+
+def test_non_seating_edge_distribution_keeps_unbounded_gap_semantics() -> None:
+    bed = _record("bed_0", "bed", (0.0, 0.0), (2.0, 1.0, 0.75))
+    nightstand = _record("nightstand_0", "nightstand", (0.0, -1.75), (0.5, 0.5, 0.9))
+    case_pack = {
+        "intent_contract": {
+            "constraints": [
+                {
+                    "relation": "edge_distribution",
+                    "subjects": {
+                        "category": "nightstand",
+                        "count": 1,
+                        "quantifier": "exactly",
+                    },
+                    "targets": {
+                        "category": "bed",
+                        "count": 1,
+                        "quantifier": "exactly",
+                    },
+                    "edge_frame": "target_local_rectangle",
+                    "groups": [
+                        {
+                            "edge_class": "long",
+                            "counts_per_edge": [1, 0],
+                            "spacing": "equal_segments",
+                        },
+                        {
+                            "edge_class": "short",
+                            "counts_per_edge": [0, 0],
+                            "spacing": "equal_segments",
+                        },
+                    ],
+                    "orientation": "unconstrained",
+                    "source": "explicit_prompt",
+                }
+            ]
+        },
+        "scene_geometry": {"objects": [bed, nightstand]},
+    }
+
+    result = evaluate_edge_distribution(case_pack)[0]
+
+    assert result["label"] == "pass"
+    assert "max_outside_gap_m" not in result["diagnostics"]["seat_slots"][0]
+
+
+def test_edge_distribution_owns_runtime_seat_orientation_contract() -> None:
+    table = _record("dining_table_0", "dining_table", (0.0, 0.0), (2.0, 1.0, 0.75))
+    chair = _record(
+        "dining_chair_0",
+        "dining_chair",
+        (0.0, -0.8),
+        (0.5, 0.5, 0.9),
+        yaw_deg=180.0,
+    )
+    case_pack = {
+        "task_instruction": "Place one dining chair facing the dining table.",
+        "room_type": "dining room",
+        "checks": [
+            {
+                "check_id": "stale_orientation_contract",
+                "check_source": CONTRACT_CHECK_SOURCE,
+                "subject_id": "dining_chair_0",
+                "relation_type": "furniture_faces_furniture",
+            }
+        ],
+        "intent_contract": {
+            "constraints": [
+                {
+                    "relation": "edge_distribution",
+                    "subjects": {
+                        "category": "dining_chair",
+                        "count": 1,
+                        "quantifier": "exactly",
+                    },
+                    "targets": {
+                        "category": "dining_table",
+                        "count": 1,
+                        "quantifier": "exactly",
+                    },
+                    "edge_frame": "target_local_rectangle",
+                    "groups": [
+                        {
+                            "edge_class": "long",
+                            "counts_per_edge": [1, 0],
+                            "spacing": "equal_segments",
+                        },
+                        {
+                            "edge_class": "short",
+                            "counts_per_edge": [0, 0],
+                            "spacing": "equal_segments",
+                        },
+                    ],
+                    "orientation": "toward_target",
+                    "source": "explicit_prompt",
+                }
+            ]
+        },
+        "scene_geometry": {"objects": [table, chair]},
+    }
+    scene = SimpleNamespace(
+        **{
+            CONTRACT_ATTR: {
+                "dining_chair_0": {
+                    "subject_id": "dining_chair_0",
+                    "target_ids": ["dining_table_0"],
+                    "relation_type": "furniture_faces_furniture",
+                }
+            }
+        }
+    )
+
+    stabilize_orientation_contracts(
+        case_pack,
+        scene,
+        CriticConfig(enabled=True, metrics=("functional_dependency",)),
+        stage="furniture",
+    )
+
+    assert getattr(scene, CONTRACT_ATTR) == {}
+    assert not [
+        check
+        for check in case_pack["checks"]
+        if check.get("check_source") == CONTRACT_CHECK_SOURCE
+        and check.get("subject_id") == "dining_chair_0"
+    ]
 
 
 def test_unconstrained_spacing_does_not_require_fixed_tangent_positions() -> None:

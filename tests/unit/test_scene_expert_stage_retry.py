@@ -96,6 +96,32 @@ def test_failed_hook_stage_is_uncommitted_until_retry_verifies(tmp_path) -> None
     assert runner._repair_controller.record_failure_to_memory.call_count == 2
 
 
+def test_noop_stage_signal_is_scoped_to_current_stage() -> None:
+    runner = object.__new__(SceneExpertHookRunner)
+    runner._current_stage = "wall_mounted"
+    runner._current_planner_trace = {"status": "no_op"}
+
+    assert runner.should_skip_stage_agent("wall_mounted")
+    assert not runner.should_skip_stage_agent("ceiling_mounted")
+
+    runner._current_planner_trace = {"status": "completed"}
+    assert not runner.should_skip_stage_agent("wall_mounted")
+
+
+def test_pipeline_noop_gate_uses_hook_authority() -> None:
+    hooks = Mock()
+    hooks.should_skip_stage_agent.return_value = True
+
+    assert scene_generation._should_skip_noop_scene_expert_stage(
+        hooks, "ceiling_mounted"
+    )
+    hooks.should_skip_stage_agent.assert_called_once_with("ceiling_mounted")
+
+    assert not scene_generation._should_skip_noop_scene_expert_stage(
+        None, "wall_mounted"
+    )
+
+
 def test_rejected_stage_restarts_from_the_failed_stage(tmp_path) -> None:
     room_spec = SimpleNamespace(prompt="A practical office.")
     house_layout = SimpleNamespace(

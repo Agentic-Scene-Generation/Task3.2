@@ -12,7 +12,7 @@ import re
 import time
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 import trimesh
@@ -671,6 +671,34 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         hard_state = self._evaluate_current_furniture_hard_state()
         return hard_state is None or hard_state.hard_valid
 
+    def _relation_candidate_preserves_hard_baseline(
+        self, baseline: set[str]
+    ) -> Callable[[RoomScene], bool]:
+        """Build a no-new-hard-failure gate for one relation-repair transaction.
+
+        A furniture stage can begin relation repair with unrelated collisions or
+        other known hard failures. Requiring every intermediate candidate to be
+        globally valid would prevent that repair from making progress. Instead,
+        compare each candidate with the transaction's initial hard-state
+        fingerprint. This rejects only the target that creates a new violation
+        (for example, a storage-wall alignment that enters a door clearance),
+        while retaining independent accepted targets such as a TV support pose.
+        """
+
+        def validator(scene: RoomScene) -> bool:
+            if scene is not self.scene:
+                return True
+            introduced = self._hard_violation_fingerprints() - baseline
+            if introduced:
+                console_logger.debug(
+                    "Rejecting relation candidate that introduced hard failures: %s",
+                    "; ".join(sorted(introduced)),
+                )
+                return False
+            return True
+
+        return validator
+
     def _hard_violation_fingerprints(self) -> set[str]:
         """Return stable IDs for hard failures relevant to repair acceptance."""
         scene = getattr(self, "scene", None)
@@ -764,10 +792,17 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             return []
 
         transaction = self._begin_hard_state_transaction()
+        baseline_hard_failures = (
+            transaction[1]
+            if transaction is not None
+            else self._hard_violation_fingerprints()
+        )
         relation_fixes = improve_furniture_relations(
             self.scene,
             config=critic_config,
-            candidate_validator=self._is_furniture_relation_candidate_hard_valid,
+            candidate_validator=self._relation_candidate_preserves_hard_baseline(
+                baseline_hard_failures
+            ),
         )
         seating_fixes = self._align_seating_with_hard_state_guard(
             seating_orientation_targets(self.scene, config=critic_config)
@@ -916,17 +951,17 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                     actions.append(
                         "moved generic furniture away from room walls to the deterministic margin"
                     )
-                # A supported object is expected to overlap its support in XY,
-                # so horizontal collision separation would destroy the prompt
-                # relation.  Let the existing contract-aware repair first move
-                # it to the support's top surface; ordinary shallow collisions
-                # remain eligible for the generic fallback below.
+                # Clear independent mesh contacts before the support repair.
+                # Its whole-scene hard-state gate would otherwise reject a
+                # correct Z-axis support move because of an unrelated pair.
+                # The shallow repair itself preserves hard support pairs, so it
+                # cannot horizontally split an object from its required surface.
+                actions.extend(self._repair_shallow_furniture_collisions())
                 actions.extend(
                     self._repair_prompt_contract_relations(
                         "after physical collision repair"
                     )
                 )
-                actions.extend(self._repair_shallow_furniture_collisions())
             removed_excess = self._remove_excess_required_furniture(required_counts)
             if removed_excess:
                 actions.append(
@@ -935,6 +970,13 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             if inventory_changed:
                 if self._repair_forbidden_zone_conflicts(include_windows=False):
                     actions.append("cleared deterministic door/opening forbidden zones")
+                # Newly restored inventory is placed one object at a time. Even
+                # the low-overlap placement heuristic can leave a tiny mesh
+                # collision (for example a chair and a floor plant). Clear that
+                # bounded geometry residue before relation repair: its strict
+                # whole-scene validator otherwise rejects an otherwise valid
+                # support or seating candidate because of an unrelated pair.
+                actions.extend(self._repair_shallow_furniture_collisions())
                 actions.extend(self._repair_relations_after_inventory_change())
             elif "unresolved prompt-core furniture relation" in reasons:
                 # A later design change can break a hard prompt relation even
@@ -1064,10 +1106,17 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             return []
 
         transaction = self._begin_hard_state_transaction()
+        baseline_hard_failures = (
+            transaction[1]
+            if transaction is not None
+            else self._hard_violation_fingerprints()
+        )
         relation_fixes = improve_furniture_relations(
             self.scene,
             config=critic_config,
-            candidate_validator=self._is_furniture_relation_candidate_hard_valid,
+            candidate_validator=self._relation_candidate_preserves_hard_baseline(
+                baseline_hard_failures
+            ),
         )
         seating_fixes = self._align_seating_with_hard_state_guard(
             seating_orientation_targets(self.scene, config=critic_config)
@@ -1300,6 +1349,11 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         }
         before_pairs = self._furniture_aabb_overlap_pairs()
         for first_id, second_id, penetration in reported:
+            if self._is_hard_prompt_support_pair(first_id, second_id):
+                # The support repair owns this pair and moves the subject in Z.
+                # Separating it in XY would invalidate an explicit on_top_of
+                # contract before that repair gets a chance to run.
+                continue
             # Earlier bedroom repairs can already have resolved a collision
             # described by the cached physics context. Never move furniture
             # for an obsolete report.
@@ -1335,6 +1389,56 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                     f"{first_id}<->{second_id} by moving {moving.object_id}"
                 ]
         return []
+
+    def _is_hard_prompt_support_pair(self, first_id: str, second_id: str) -> bool:
+        """Whether a collision is the two endpoints of a hard ``on_top_of``.
+
+        Surface support normally implies XY overlap. Treating that overlap as a
+        generic furniture collision can push a TV off its console or a monitor
+        off its desk, even though the deterministic relation repair has the
+        correct Z-axis placement. The check intentionally reads only immutable
+        hard prompt contracts, not inferred functional-dependency proposals.
+        """
+        if self.scene is None:
+            return False
+        first = self.scene.objects.get(first_id)
+        second = self.scene.objects.get(second_id)
+        if first is None or second is None:
+            return False
+        first_category = self._category_for_object(first_id, first)
+        second_category = self._category_for_object(second_id, second)
+        if not first_category or not second_category:
+            return False
+
+        contract = getattr(self.scene, "scenebenchmark_intent_contract", None)
+        constraints = contract.get("constraints") if isinstance(contract, dict) else []
+        for constraint in constraints or []:
+            if not isinstance(constraint, dict):
+                continue
+            if (
+                str(constraint.get("relation") or "") != "on_top_of"
+                or str(constraint.get("strength") or "hard").lower() != "hard"
+            ):
+                continue
+            subjects = constraint.get("subjects") or {}
+            targets = constraint.get("targets") or {}
+            subject_category = self._repair_category_for_task_label(
+                str(subjects.get("category") or "")
+            )
+            target_category = self._repair_category_for_task_label(
+                str(targets.get("category") or "")
+            )
+            if not subject_category or not target_category:
+                continue
+            if (
+                furniture_category_satisfies(first_category, subject_category)
+                and furniture_category_satisfies(second_category, target_category)
+            ) or (
+                furniture_category_satisfies(second_category, subject_category)
+                and furniture_category_satisfies(first_category, target_category)
+            ):
+                return True
+        return False
 
     def _reported_shallow_furniture_collisions(
         self,

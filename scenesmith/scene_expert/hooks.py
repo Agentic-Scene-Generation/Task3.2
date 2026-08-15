@@ -712,6 +712,21 @@ class SceneExpertHookRunner:
             return None
         return context.floor_plan_manifest.model_dump(mode="json")
 
+    def should_skip_stage_agent(self, stage: str) -> bool:
+        """Whether ``stage`` has an authoritative empty-inventory plan.
+
+        ``pre_stage`` is the sole authority for this decision: the GlobalPlanner
+        marks a stage ``no_op`` only when its TaskCompiler inventory and its
+        stage-local hard constraints are both empty.  The pipeline can then
+        avoid launching an agent that would otherwise invent decorative assets
+        from the original room prompt.  Keep the signal scoped to the current
+        stage so a stale planner trace cannot skip a later stage.
+        """
+        return bool(
+            self._current_stage == stage
+            and self._current_planner_trace.get("status") == "no_op"
+        )
+
     def _save_context_bundle(
         self,
         *,

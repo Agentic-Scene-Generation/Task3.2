@@ -113,3 +113,146 @@ def test_hssd_front_faces_with_explicit_distance_still_fails_when_far():
 
     assert result["label"] == "fail"
     assert "gap" in result["reason"]
+
+
+def test_oriented_edge_distribution_owns_seat_facing_over_hssd_priors():
+    chair = _object("dining_chair_0", "dining_chair", 1.5, 180.0)
+    chair["functional_hints"] = {
+        "orientation_dependencies": [
+            {
+                "target_kind": "asset_category",
+                "target_category": "dining_table",
+                "relation_type": "front_faces",
+            },
+            {
+                "target_kind": "asset_category",
+                "target_category": "coffee_table",
+                "relation_type": "front_faces",
+                "distance_required": False,
+            },
+        ]
+    }
+    dining_table = _object("dining_table_0", "dining_table", 0.0, 0.0)
+    coffee_table = _object("coffee_table_0", "coffee_table", 4.0, 0.0)
+    case_pack = {
+        "scene_geometry": {"objects": [chair, dining_table, coffee_table]},
+        "intent_contract": {
+            "constraints": [
+                {
+                    "relation": "edge_distribution",
+                    "subjects": {
+                        "category": "dining_chair",
+                        "count": 1,
+                        "quantifier": "exactly",
+                    },
+                    "targets": {
+                        "category": "dining_table",
+                        "count": 1,
+                        "quantifier": "exactly",
+                    },
+                    "orientation": "toward_target",
+                    "source": "explicit_prompt",
+                }
+            ]
+        },
+    }
+
+    checks = build_functional_dependency_checks(case_pack)
+
+    assert not [
+        check
+        for check in checks
+        if check.get("subject_id") == "dining_chair_0"
+        and check.get("relation_type") == "furniture_faces_furniture"
+    ]
+
+
+def test_unoriented_edge_distribution_keeps_hssd_facing_priors():
+    chair = _object("dining_chair_0", "dining_chair", 1.5, 180.0)
+    chair["functional_hints"] = {
+        "orientation_dependencies": [
+            {
+                "target_kind": "asset_category",
+                "target_category": "dining_table",
+                "relation_type": "front_faces",
+            }
+        ]
+    }
+    dining_table = _object("dining_table_0", "dining_table", 0.0, 0.0)
+    case_pack = {
+        "scene_geometry": {"objects": [chair, dining_table]},
+        "intent_contract": {
+            "constraints": [
+                {
+                    "relation": "edge_distribution",
+                    "subjects": {
+                        "category": "dining_chair",
+                        "count": 1,
+                        "quantifier": "exactly",
+                    },
+                    "targets": {
+                        "category": "dining_table",
+                        "count": 1,
+                        "quantifier": "exactly",
+                    },
+                    "orientation": "unconstrained",
+                    "source": "explicit_prompt",
+                }
+            ]
+        },
+    }
+
+    checks = build_functional_dependency_checks(case_pack)
+
+    assert [
+        check
+        for check in checks
+        if check.get("subject_id") == "dining_chair_0"
+        and check.get("relation_type") == "furniture_faces_furniture"
+    ]
+
+
+def test_hard_across_and_wall_backed_contracts_own_subject_facing():
+    sofa = _object("sofa_0", "sofa", -1.5, 0.0)
+    cabinet = _object("cabinet_0", "storage_cabinet", 1.5, 0.0)
+    for subject in (sofa, cabinet):
+        subject["functional_hints"] = {
+            "orientation_dependencies": [
+                {
+                    "target_kind": "asset_category",
+                    "target_category": "coffee_table",
+                    "relation_type": "front_faces",
+                }
+            ]
+        }
+    tv_stand = _object("tv_stand_0", "tv_stand", 1.5, 180.0)
+    coffee_table = _object("coffee_table_0", "coffee_table", 0.0, 0.0)
+    wall = _object("wall_0", "wall", 3.0, 0.0)
+    case_pack = {
+        "scene_geometry": {"objects": [sofa, cabinet, tv_stand, coffee_table, wall]},
+        "intent_contract": {
+            "constraints": [
+                {
+                    "relation": "across_from",
+                    "subjects": {"category": "sofa", "count": 1},
+                    "targets": {"category": "tv_stand", "count": 1},
+                    "source": "explicit_prompt",
+                },
+                {
+                    "relation": "against_wall",
+                    "subjects": {"category": "storage_cabinet", "count": 1},
+                    "targets": {"category": "wall", "count": 1},
+                    "source": "explicit_prompt",
+                },
+            ]
+        },
+    }
+
+    checks = build_functional_dependency_checks(case_pack)
+
+    assert not [
+        check
+        for check in checks
+        if check.get("subject_id") in {"sofa_0", "cabinet_0"}
+        and check.get("relation_type") == "furniture_faces_furniture"
+    ]

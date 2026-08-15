@@ -22,6 +22,13 @@ from scenesmith.scenebenchmark_critic.intent_contract import (
 RELATION_TYPE = "edge_distribution"
 _TARGET_GAP_M = 0.05
 _FACING_TOLERANCE_DEG = 10.0
+# ``outside_gap_m`` measures the empty space between the target footprint and
+# the seat footprint, not between their centers.  A dining/work chair can be
+# pulled back a little, but a one-metre empty band means it no longer functions
+# as seating at that table.  Keep this geometry-derived rather than prompt- or
+# scene-specific so the same rule applies to dining and conference layouts.
+_TABLE_SEAT_MIN_MAX_GAP_M = 0.25
+_TABLE_SEAT_MAX_GAP_M = 0.40
 
 
 def evaluate_edge_distribution(case_pack: dict[str, Any]) -> list[dict[str, Any]]:
@@ -516,9 +523,15 @@ def _slot_diagnostics(
     sign = -1.0 if edge in {"left", "front"} else 1.0
     boundary = width / 2.0 if edge in {"left", "right"} else depth / 2.0
     outside_gap = sign * normal_value - boundary - normal_span / 2.0
+    inward = _edge_inward_vector(edge, tangent_x=tangent_x, tangent_y=tangent_y)
+    max_outside_gap = _table_seating_max_outside_gap(
+        subject,
+        target,
+        normal_axis=tangent_x if edge in {"left", "right"} else tangent_y,
+        inward=inward,
+    )
     nearest_edge = _nearest_edge(local_x, local_y, width=width, depth=depth)
     front = front_vector(subject)
-    inward = _edge_inward_vector(edge, tangent_x=tangent_x, tangent_y=tangent_y)
     facing_error = _angle_error(front, inward)
     tangent_vector = tangent_y if edge in {"left", "right"} else tangent_x
     parallel_error = min(
@@ -532,6 +545,11 @@ def _slot_diagnostics(
     failures: list[str] = []
     if outside_gap < -0.02:
         failures.append("subject overlaps target footprint")
+    if max_outside_gap is not None and outside_gap > max_outside_gap:
+        failures.append(
+            "seat is %.2fm from the table edge; maximum usable gap is %.2fm"
+            % (outside_gap, max_outside_gap)
+        )
     if (
         nearest_edge != edge
         and _edge_distance(local_x, local_y, edge, width=width, depth=depth) > 0.15
@@ -541,7 +559,7 @@ def _slot_diagnostics(
         failures.append(
             f"subject is {tangent_deviation:.2f}m from its equal-segment slot"
         )
-    return {
+    diagnostics = {
         "object_id": str(subject["id"]),
         "edge": edge,
         "nearest_edge": nearest_edge,
@@ -557,6 +575,63 @@ def _slot_diagnostics(
         "parallel_error_deg": round(parallel_error, 3),
         "failure": "; ".join(failures),
     }
+    if max_outside_gap is not None:
+        diagnostics["max_outside_gap_m"] = round(max_outside_gap, 6)
+        # The exact slot leaves ``_TARGET_GAP_M``.  Repair can offer a bounded
+        # pull-back range, but it must not invent larger, evaluator-invisible
+        # offsets when an unrelated clearance check is inconvenient.
+        diagnostics["allowed_normal_deviation_m"] = round(
+            max(0.0, max_outside_gap - _TARGET_GAP_M), 6
+        )
+    return diagnostics
+
+
+def _table_seating_max_outside_gap(
+    subject: dict[str, Any],
+    target: dict[str, Any],
+    *,
+    normal_axis: tuple[float, float],
+    inward: tuple[float, float],
+) -> float | None:
+    """Return a footprint-scaled maximum gap for seating around a table.
+
+    Other finite edge layouts, such as nightstands around a bed, retain the
+    generic edge-distribution semantics.  A seat/table pair is different: the
+    prompt's "around the table" contract implies usable reach to the tabletop.
+    """
+    if not _is_seating_object(subject) or not _is_table_object(target):
+        return None
+    span = _footprint_extent_at_facing(subject, normal_axis, inward)
+    if span is None or span <= 1e-6:
+        span = _footprint_extent(subject, normal_axis) or 0.5
+    return min(
+        _TABLE_SEAT_MAX_GAP_M,
+        max(_TABLE_SEAT_MIN_MAX_GAP_M, 0.10 + 0.50 * float(span)),
+    )
+
+
+def _is_seating_object(obj: dict[str, Any]) -> bool:
+    identity = _object_identity(obj)
+    return any(
+        token in identity for token in ("chair", "stool", "bench", "seat", "banquette")
+    )
+
+
+def _is_table_object(obj: dict[str, Any]) -> bool:
+    return "table" in _object_identity(obj)
+
+
+def _object_identity(obj: dict[str, Any]) -> str:
+    return " ".join(
+        str(value).lower()
+        for value in (
+            obj.get("id"),
+            obj.get("name"),
+            obj.get("category"),
+            obj.get("category_norm"),
+        )
+        if value
+    )
 
 
 def _annotate_pass_fail(diagnostics: list[dict[str, Any]], *, orientation: str) -> None:

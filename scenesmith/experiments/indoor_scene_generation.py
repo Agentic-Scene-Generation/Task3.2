@@ -129,6 +129,19 @@ def _commit_scene_expert_stage(
     )
 
 
+def _should_skip_noop_scene_expert_stage(
+    hooks: "SceneExpertHookRunner | None", stage: str
+) -> bool:
+    """Return whether SceneExpert compiled the current stage as a true no-op.
+
+    Check only after ``pre_stage``.  The hook has then projected the
+    stage-local hard constraints and generated the authoritative planner trace.
+    The caller still writes its regular checkpoint and invokes ``post_stage`` so
+    retries, resume, and verification retain their normal semantics.
+    """
+    return bool(hooks is not None and hooks.should_skip_stage_agent(stage))
+
+
 def _is_targeted_manipuland_replay(
     *,
     cfg_dict: dict[str, Any],
@@ -1464,21 +1477,26 @@ def _generate_room(
 
             if scene_expert_hooks:
                 scene_expert_hooks.pre_stage("wall_mounted", scene)
-            wall_agent = BaseExperiment.build_wall_agent(
-                cfg_dict=cfg_dict,
-                compatible_agents=IndoorSceneGenerationExperiment.compatible_wall_agents,
-                logger=logger,
-                house_layout=house_layout,
-                ceiling_height=scene.room_geometry.wall_height,
-                wall_thickness=scene.room_geometry.wall_thickness,
-                render_gpu_id=render_gpu_id,
-            )
-            try:
-                asyncio.run(wall_agent.add_wall_objects(scene=scene))
-                _apply_final_wall_functional_guards(scene=scene, cfg_dict=cfg_dict)
-            finally:
-                # Always cleanup server subprocesses.
-                wall_agent.cleanup()
+            if _should_skip_noop_scene_expert_stage(scene_expert_hooks, "wall_mounted"):
+                console_logger.info(
+                    "Skipping wall-mounted agent: SceneExpert compiled an empty stage"
+                )
+            else:
+                wall_agent = BaseExperiment.build_wall_agent(
+                    cfg_dict=cfg_dict,
+                    compatible_agents=IndoorSceneGenerationExperiment.compatible_wall_agents,
+                    logger=logger,
+                    house_layout=house_layout,
+                    ceiling_height=scene.room_geometry.wall_height,
+                    wall_thickness=scene.room_geometry.wall_thickness,
+                    render_gpu_id=render_gpu_id,
+                )
+                try:
+                    asyncio.run(wall_agent.add_wall_objects(scene=scene))
+                    _apply_final_wall_functional_guards(scene=scene, cfg_dict=cfg_dict)
+                finally:
+                    # Always cleanup server subprocesses.
+                    wall_agent.cleanup()
             end_time = time.time()
             console_logger.info(
                 f"Wall objects added to room {room_id} in "
@@ -1539,20 +1557,27 @@ def _generate_room(
 
             if scene_expert_hooks:
                 scene_expert_hooks.pre_stage("ceiling_mounted", scene)
-            ceiling_agent = BaseExperiment.build_ceiling_agent(
-                cfg_dict=cfg_dict,
-                compatible_agents=(
-                    IndoorSceneGenerationExperiment.compatible_ceiling_agents
-                ),
-                logger=logger,
-                ceiling_height=room_geometry.wall_height,
-                render_gpu_id=render_gpu_id,
-            )
-            try:
-                asyncio.run(ceiling_agent.add_ceiling_objects(scene=scene))
-            finally:
-                # Always cleanup server subprocesses.
-                ceiling_agent.cleanup()
+            if _should_skip_noop_scene_expert_stage(
+                scene_expert_hooks, "ceiling_mounted"
+            ):
+                console_logger.info(
+                    "Skipping ceiling-mounted agent: SceneExpert compiled an empty stage"
+                )
+            else:
+                ceiling_agent = BaseExperiment.build_ceiling_agent(
+                    cfg_dict=cfg_dict,
+                    compatible_agents=(
+                        IndoorSceneGenerationExperiment.compatible_ceiling_agents
+                    ),
+                    logger=logger,
+                    ceiling_height=room_geometry.wall_height,
+                    render_gpu_id=render_gpu_id,
+                )
+                try:
+                    asyncio.run(ceiling_agent.add_ceiling_objects(scene=scene))
+                finally:
+                    # Always cleanup server subprocesses.
+                    ceiling_agent.cleanup()
             end_time = time.time()
             console_logger.info(
                 f"Ceiling objects added to room {room_id} in "
@@ -1616,15 +1641,20 @@ def _generate_room(
         start_time = time.time()
         if scene_expert_hooks:
             scene_expert_hooks.pre_stage("manipuland", scene)
-        manipuland_agent = BaseExperiment.build_manipuland_agent(
-            cfg_dict=cfg_dict,
-            compatible_agents=(
-                IndoorSceneGenerationExperiment.compatible_manipuland_agents
-            ),
-            logger=logger,
-            render_gpu_id=render_gpu_id,
-        )
-        _add_manipulands_with_cleanup(manipuland_agent, scene)
+        if _should_skip_noop_scene_expert_stage(scene_expert_hooks, "manipuland"):
+            console_logger.info(
+                "Skipping manipuland agent: SceneExpert compiled an empty stage"
+            )
+        else:
+            manipuland_agent = BaseExperiment.build_manipuland_agent(
+                cfg_dict=cfg_dict,
+                compatible_agents=(
+                    IndoorSceneGenerationExperiment.compatible_manipuland_agents
+                ),
+                logger=logger,
+                render_gpu_id=render_gpu_id,
+            )
+            _add_manipulands_with_cleanup(manipuland_agent, scene)
         end_time = time.time()
         console_logger.info(
             f"Manipulands added to room {room_id} in "
