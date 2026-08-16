@@ -155,8 +155,8 @@ asset_manager:
 
   # HSSD retrieval configuration (only used when general_asset_source="hssd")
   hssd:
-    data_path: ${oc.env:HSSD_DATA_PATH,${paths.hssd_data_dir}/hssd-models}
-    preprocessed_path: ${oc.env:HSSD_PREPROCESSED_PATH,${paths.hssd_data_dir}/preprocessed}
+    data_path: "${paths.hssd_data_dir}/hssd-models"
+    preprocessed_path: "${paths.hssd_data_dir}/preprocessed"
     retrieval_backend: "clip" # clip or embedding
     use_top_k: 5  # Number of top CLIP candidates before size ranking
     use_lenient_validation: true  # Use lenient validation for retrieved assets
@@ -166,14 +166,14 @@ asset_manager:
     rendered_asset_choice:
       enabled: false
       top_n: 4
-      rendered_assets_dir: ${oc.env:HSSD_RENDERED_ASSETS_DIR,${paths.hssd_data_dir}/hssd_rendered_assets}
+      rendered_assets_dir: "${paths.hssd_data_dir}/hssd_rendered_assets"
     object_type_mapping:
       FURNITURE: "large_objects"
       MANIPULAND: "small_objects"
       WALL_MOUNTED: "wall_objects"
       CEILING_MOUNTED: "ceiling_objects"
     zvec:
-      collection_path: ${oc.env:HSSD_ZVEC_COLLECTION_PATH,${paths.hssd_data_dir}/hssd_zvec_collection}
+      collection_path: "${paths.hssd_data_dir}/hssd_zvec_collection"
       base_url: "http://127.0.0.1:8014"
       embedding_dimension: 2048
       embedding_field: "embedding"

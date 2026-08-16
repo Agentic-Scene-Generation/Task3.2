@@ -211,48 +211,6 @@ class TestAssetManager(unittest.TestCase):
         self.assertEqual(request.style_context, "Modern minimalist living room")
         self.assertEqual(request.operation_type, AssetOperationType.INITIAL)
 
-    def test_generate_assets_execution_clock_pause_resume(self):
-        """Pause/resume should be handled safely when asset acquisition uses a runtime clock."""
-
-        class DummyExecutionClock:
-            def __init__(self):
-                self.paused = []
-                self.resumed = []
-
-            def pause_for_external_operation(self, label):
-                self.paused.append(label)
-                return {"owner": True, "label": label}
-
-            def resume_from_external_operation(self, token):
-                self.resumed.append(token)
-
-        request = AssetGenerationRequest(
-            object_descriptions=["Modern sofa"],
-            short_names=["modern_sofa"],
-            object_type=ObjectType.FURNITURE,
-            desired_dimensions=[[2.0, 0.9, 0.8]],
-            style_context="Modern minimalist living room",
-            operation_type=AssetOperationType.INITIAL,
-        )
-        self.asset_manager._execution_clock = DummyExecutionClock()
-        self.mock_geometry_client.generate_geometries.return_value = iter(
-            [(0, GeometryGenerationServerResponse(geometry_path="/test/asset.sdf"))]
-        )
-
-        with patch("pathlib.Path.glob", return_value=[Path("/test/asset.sdf")]), patch(
-            "scenesmith.agent_utils.asset_manager.scale_mesh_uniformly_to_dimensions",
-            return_value=(Path("/test/asset.sdf"), 1.0),
-        ), patch(
-            "scenesmith.agent_utils.asset_manager.AssetManager._extract_bounds_from_visual_mesh",
-            return_value=(np.array([0.0, 0.0, 0.0]), np.array([1.0, 1.0, 1.0])),
-        ):
-            result = self.asset_manager.generate_assets(request)
-
-        self.assertIsInstance(result, AssetGenerationResult)
-        self.assertTrue(result.all_succeeded)
-        self.assertEqual(self.asset_manager._execution_clock.paused, ["asset_acquisition"])
-        self.assertEqual(len(self.asset_manager._execution_clock.resumed), 1)
-
     def test_create_scene_object(self):
         """Test creating SceneObject from asset paths."""
         config = AssetPathConfig(

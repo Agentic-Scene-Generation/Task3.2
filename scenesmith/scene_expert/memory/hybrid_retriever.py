@@ -11,9 +11,6 @@ from typing import Any
 
 import numpy as np
 
-from scenesmith.agent_utils.asset_quarantine import (
-    value_references_quarantined_hssd_asset,
-)
 from scenesmith.scene_expert.memory.embedding import SceneMemoryEmbedder
 from scenesmith.scene_expert.memory.index import NumpyMemoryIndex
 from scenesmith.scene_expert.memory.schemas import FailureCase, Skill, SuccessCase
@@ -240,8 +237,6 @@ class HybridMemoryRetriever:
         stage: str,
         memory_type: str,
     ) -> bool:
-        if value_references_quarantined_hssd_asset(record):
-            return False
         if record.stage != stage:
             return False
 

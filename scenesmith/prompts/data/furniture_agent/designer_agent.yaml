@@ -120,11 +120,7 @@ prompt: |
   **Coordinate System**: Red=x-axis, Green=y-axis, Blue=z-axis (vertical)
 
   **Default Orientation**: All furniture faces +y (green axis) at yaw=0
-  - `front` always means the functional outward direction; local +Z is up and
-    dimensions are [width, depth, height] = [local X, local Y, local Z]
   - Chairs/sofas: Seats face +y direction
-  - Beds: +y points from the headboard toward the foot/open access area
-  - Wardrobes/cabinets/nightstands: doors or drawers open toward +y
   - Desks and worktables: Working side faces +y direction
   - Dining tables, coffee tables: Symmetrical (no inherent front)
 
@@ -229,7 +225,7 @@ prompt: |
     shelving units, bookcases, washing machines, dryers, refrigerators, ovens,
     desks, worktables, workbenches, beds, nightstands
   - WHY CRITICAL: These have functional fronts (doors, drawers, user-facing
-    sides, and a bed's head-to-foot access direction). If front faces toward wall, they become completely
+    sides, headboards). If front faces toward wall, they become completely
     non-functional (drawers can't open, doors blocked, can't sit at desk,
     footboard against wall prevents bed access)
   - **TYPICAL PLACEMENT**: Sideboards, buffets, credenzas, dressers, shelves, and wardrobes

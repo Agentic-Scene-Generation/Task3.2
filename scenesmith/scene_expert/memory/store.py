@@ -18,9 +18,6 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
-from scenesmith.agent_utils.asset_quarantine import (
-    value_references_quarantined_hssd_asset,
-)
 from scenesmith.scene_expert.memory.schemas import (
     FailureCase,
     MemoryUpdateOp,
@@ -172,13 +169,6 @@ class FastMemoryStore:
     # ------------------------------------------------------------------
 
     def add_success_case(self, case: SuccessCase) -> None:
-        if value_references_quarantined_hssd_asset(case):
-            console_logger.warning(
-                "Memory: rejected success case %s because it references a "
-                "quarantined HSSD asset",
-                case.case_id,
-            )
-            return
         existing = {self._success_signature(c) for c in self.success_cases}
         if self._success_signature(case) in existing or any(
             c.case_id == case.case_id for c in self.success_cases
@@ -192,13 +182,6 @@ class FastMemoryStore:
         console_logger.debug(f"Memory: added success case {case.case_id}")
 
     def add_failure_case(self, case: FailureCase) -> None:
-        if value_references_quarantined_hssd_asset(case):
-            console_logger.warning(
-                "Memory: rejected failure case %s because it references a "
-                "quarantined HSSD asset",
-                case.failure_id,
-            )
-            return
         existing = {self._failure_signature(c) for c in self.failure_cases}
         if self._failure_signature(case) in existing or any(
             c.failure_id == case.failure_id for c in self.failure_cases
@@ -212,13 +195,6 @@ class FastMemoryStore:
         console_logger.debug(f"Memory: added failure case {case.failure_id}")
 
     def add_skill(self, skill: Skill) -> None:
-        if value_references_quarantined_hssd_asset(skill):
-            console_logger.warning(
-                "Memory: rejected skill %s because it references a quarantined "
-                "HSSD asset",
-                skill.skill_name,
-            )
-            return
         existing = {self._skill_signature(s) for s in self.skills}
         if self._skill_signature(skill) in existing:
             console_logger.info(f"Memory: skipped duplicate skill {skill.skill_name}")
@@ -234,13 +210,6 @@ class FastMemoryStore:
             payload = {**skill.model_dump(), **dict(updates)}
             payload["skill_name"] = skill.skill_name
             updated = Skill.model_validate(payload)
-            if value_references_quarantined_hssd_asset(updated):
-                console_logger.warning(
-                    "Memory: rejected update to skill %s because it references "
-                    "a quarantined HSSD asset",
-                    skill_name,
-                )
-                return
             self.skills[self.skills.index(skill)] = updated
             self._rewrite(self._skills_path, self.skills)
             console_logger.debug(f"Memory: updated skill {skill_name}")
@@ -256,13 +225,6 @@ class FastMemoryStore:
             payload = {**case.model_dump(), **dict(updates)}
             payload["case_id"] = case.case_id
             updated = SuccessCase.model_validate(payload)
-            if value_references_quarantined_hssd_asset(updated):
-                console_logger.warning(
-                    "Memory: rejected update to success case %s because it "
-                    "references a quarantined HSSD asset",
-                    case_id,
-                )
-                return
             self.success_cases[index] = updated
             self._rewrite(self._success_path, self.success_cases)
             console_logger.debug("Memory: updated success case %s", case_id)
@@ -278,13 +240,6 @@ class FastMemoryStore:
             payload = {**case.model_dump(), **dict(updates)}
             payload["failure_id"] = case.failure_id
             updated = FailureCase.model_validate(payload)
-            if value_references_quarantined_hssd_asset(updated):
-                console_logger.warning(
-                    "Memory: rejected update to failure case %s because it "
-                    "references a quarantined HSSD asset",
-                    failure_id,
-                )
-                return
             self.failure_cases[index] = updated
             self._rewrite(self._failure_path, self.failure_cases)
             console_logger.debug("Memory: updated failure case %s", failure_id)

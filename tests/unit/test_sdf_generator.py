@@ -587,40 +587,6 @@ class TestGenerateDrakeSDF(unittest.TestCase):
             all(abs(a - b) < 0.01 for a, b in zip(collision_mesh.extents, [1, 3, 2]))
         )
 
-    def test_gltf_y_up_collision_proxy_is_exported_in_drake_frame(self):
-        """Production glTF and its convex pieces cross the frame boundary once."""
-        mesh = trimesh.creation.box(extents=[1.0, 3.0, 2.0])
-        mesh.apply_translation([0.0, 1.5, 0.0])
-        visual_path = self.temp_path / "y_up_asset.gltf"
-        mesh.export(visual_path)
-        physics = MeshPhysicsAnalysis(
-            up_axis="+Y",
-            front_axis="-Z",
-            material="wood",
-            mass_kg=10.0,
-            mass_range_kg=(8.0, 12.0),
-        )
-        output_path = self.temp_path / "y_up_asset.sdf"
-
-        generate_drake_sdf(
-            visual_mesh_path=visual_path,
-            collision_pieces=[mesh.copy()],
-            physics_analysis=physics,
-            output_path=output_path,
-            mesh_frame="gltf_y_up",
-        )
-
-        collision_mesh = trimesh.load(
-            self.temp_path / "y_up_asset_collision_0.obj",
-            force="mesh",
-        )
-        self.assertTrue(
-            all(abs(a - b) < 0.01 for a, b in zip(collision_mesh.extents, [1, 2, 3]))
-        )
-        tree = ET.parse(output_path)
-        com = [float(v) for v in tree.find(".//inertial/pose").text.split()[:3]]
-        self.assertAlmostEqual(com[2], 1.5, delta=0.01)
-
     def test_collision_mesh_mismatch_fails_fast(self):
         """Broken collision proxies must fail during asset preparation."""
         visual = trimesh.creation.box(extents=[1.0, 2.0, 3.0])

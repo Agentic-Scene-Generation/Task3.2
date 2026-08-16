@@ -495,11 +495,7 @@ class SceneObject:
     """Whether this object is immutable (cannot be moved or removed)."""
 
     scale_factor: float = 1.0
-    """Cumulative runtime scale applied after canonical asset creation.
-
-    Source-to-canonical scaling is already baked into geometry and is recorded
-    separately in metadata when needed for source-frame annotations.
-    """
+    """Cumulative scale factor applied to this object's asset (1.0 = original size)."""
 
     def apply_scale(self, new_scale: float) -> None:
         """Apply scale factor to this object's bounding box and invalidate surfaces.
@@ -1776,15 +1772,7 @@ def extract_and_propagate_support_surfaces(
     # The HSM algorithm extracts surfaces in mesh-local frame (identity transform).
     # We need to transform them to world frame using furniture's transform and scale.
     world_surfaces = []
-    # Precomputed HSSD surfaces live in the unscaled source-asset frame. HSM
-    # surfaces are extracted from the already canonical, already scaled glTF.
-    # Runtime rescaling applies to either source exactly once.
-    source_surface_scale = (
-        float(furniture_object.metadata.get("source_to_canonical_scale", 1.0))
-        if source == "HSSD"
-        else 1.0
-    )
-    scale = furniture_object.scale_factor * source_surface_scale
+    scale = furniture_object.scale_factor
     for surface in surfaces:
         # Scale surface translation to match the scaled collision geometry.
         scaled_translation = surface.transform.translation() * scale
@@ -1838,12 +1826,7 @@ def extract_and_propagate_support_surfaces(
 
         # Transform each surface to this object's world frame with scaling.
         obj_surfaces = []
-        obj_source_surface_scale = (
-            float(obj.metadata.get("source_to_canonical_scale", 1.0))
-            if source == "HSSD"
-            else 1.0
-        )
-        obj_scale = obj.scale_factor * obj_source_surface_scale
+        obj_scale = obj.scale_factor
         for surface in surfaces:
             # Apply this object's scale_factor to surface translation.
             obj_scaled_translation = surface.transform.translation() * obj_scale

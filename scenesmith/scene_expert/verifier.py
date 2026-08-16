@@ -13,12 +13,10 @@ from __future__ import annotations
 
 import logging
 import re
-
 from pathlib import Path
 
 import yaml
 
-from scenesmith.agent_utils.room_size_policy import normalize_room_dimensions
 from scenesmith.scene_expert.schemas import (
     FullVerifyReport,
     SceneTaskSpec,
@@ -426,18 +424,7 @@ def _description_contains_object_label(required: str, description: str) -> bool:
     )
 
 
-def _first_not_none(mapping: dict, *keys: str) -> object | None:
-    for key in keys:
-        if key in mapping and mapping[key] is not None:
-            return mapping[key]
-    return None
-
-
-def _check_floor_plan_layout(
-    scene_state_info: dict,
-    *,
-    room_size_check_enabled: bool = False,
-) -> list[VerifyIssue]:
+def _check_floor_plan_layout(scene_state_info: dict) -> list[VerifyIssue]:
     """Check minimal structural validity of the generated floor plan."""
     issues: list[VerifyIssue] = []
     if not scene_state_info.get("layout_exists", True):
@@ -459,43 +446,17 @@ def _check_floor_plan_layout(
         )
 
     invalid_rooms: list[str] = []
-    single_room = room_count == 1
     for room in scene_state_info.get("rooms", []):
         if not isinstance(room, dict):
             continue
         room_id = str(room.get("room_id") or room.get("id") or room.get("name") or "")
-        width = _first_not_none(room, "length", "depth", "length_m", "depth_m")
-        depth = _first_not_none(room, "width", "width_m")
+        width = room.get("width") or room.get("width_m")
+        depth = room.get("depth") or room.get("depth_m")
         try:
             if width is not None and float(width) <= 0:
                 invalid_rooms.append(room_id or "<unknown>")
             if depth is not None and float(depth) <= 0:
                 invalid_rooms.append(room_id or "<unknown>")
-            if (
-                room_size_check_enabled
-                and single_room
-                and width is not None
-                and depth is not None
-            ):
-                adjustment = normalize_room_dimensions(
-                    room_type=str(room.get("type") or room.get("room_type") or "room"),
-                    width=float(width),
-                    depth=float(depth),
-                    prompt=str(room.get("prompt") or ""),
-                    mode="room",
-                )
-                if adjustment.changed:
-                    issues.append(
-                        VerifyIssue(
-                            issue_type="implausible_room_scale",
-                            object_name=room_id,
-                            description=(
-                                f"Room '{room_id or '<unknown>'}' is "
-                                f"{float(width):g}m x {float(depth):g}m, outside "
-                                "its configured professional scale envelope"
-                            ),
-                        )
-                    )
         except (TypeError, ValueError):
             invalid_rooms.append(room_id or "<unknown>")
 
@@ -527,14 +488,10 @@ class StageVerifier:
         pass_threshold: float = 0.6,
         visual_score_hard_gate: bool = False,
         critic_bridge_enabled: bool = True,
-        room_size_check_enabled: bool = False,
-        placeholder_check_enabled: bool = True,
     ) -> None:
         self._pass_threshold = pass_threshold
         self._visual_score_hard_gate = bool(visual_score_hard_gate)
         self._critic_bridge_enabled = bool(critic_bridge_enabled)
-        self._room_size_check_enabled = bool(room_size_check_enabled)
-        self._placeholder_check_enabled = bool(placeholder_check_enabled)
 
     def verify(
         self,
@@ -613,10 +570,7 @@ class StageVerifier:
         # --- 2. Rule-based checks ---
         if scene_state_info:
             if stage == "floor_plan":
-                layout_issues = _check_floor_plan_layout(
-                    scene_state_info,
-                    room_size_check_enabled=self._room_size_check_enabled,
-                )
+                layout_issues = _check_floor_plan_layout(scene_state_info)
                 issues.extend(layout_issues)
                 if layout_issues:
                     repair_suggestions.append(
@@ -629,28 +583,6 @@ class StageVerifier:
                     repair_suggestions.append(
                         f"Add missing object '{issue.object_name}' to the scene"
                     )
-            if stage == "furniture" and self._placeholder_check_enabled:
-                placeholder_names = sorted(
-                    {
-                        str(name)
-                        for name in scene_state_info.get("placeholder_names", [])
-                        if str(name).strip()
-                    }
-                )
-                if placeholder_names:
-                    issues.append(
-                        VerifyIssue(
-                            issue_type="placeholder_asset",
-                            description=(
-                                "Furniture acquisition degraded to placeholders: "
-                                + ", ".join(placeholder_names)
-                            ),
-                        )
-                    )
-                    repair_suggestions.append(
-                        "Replace placeholder furniture with admitted real assets"
-                    )
-
         # --- 2b. Optional visual-score ablation gate ---
         # Inventory is already checked from scene state above and physical
         # feasibility/geometry critic own collisions.  Do not let VLM prose or

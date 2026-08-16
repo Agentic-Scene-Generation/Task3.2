@@ -6,7 +6,6 @@ while allowing domain-specific customization through abstract methods and
 subclass-defined tools.
 """
 
-import asyncio
 import copy
 import logging
 import os
@@ -18,6 +17,8 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 import yaml
+
+import os
 
 from agents import (
     Agent,
@@ -58,6 +59,7 @@ from scenesmith.agent_utils.scoring import (
     scores_to_dict,
 )
 from scenesmith.agent_utils.stage_working_memory import StageWorkingMemory
+from scenesmith.scene_expert.context_bundle import build_stage_context_bundle
 from scenesmith.agent_utils.thinking import (
     chat_template_kwargs_from_effort,
     prepend_text_thinking_directive,
@@ -65,7 +67,6 @@ from scenesmith.agent_utils.thinking import (
 )
 from scenesmith.agent_utils.turn_trimming_session import TurnTrimmingSession
 from scenesmith.prompts import prompt_registry
-from scenesmith.scene_expert.context_bundle import build_stage_context_bundle
 from scenesmith.scenebenchmark_critic import evaluate_room_scene
 from scenesmith.scenebenchmark_critic.config import critic_config_from_any
 from scenesmith.scenebenchmark_critic.furniture_relation_repair import (
@@ -226,518 +227,6 @@ class BaseStatefulAgent(ABC):
         self._last_critique_render_profile = "final"
         self._pending_hard_repair_hint = ""
         self._hard_repair_design_change_calls = 0
-        self._stage_runtime_budget: dict[str, Any] = {}
-        self._stage_runtime_started_at: float | None = None
-        self._critic_evaluation_started_at: float | None = None
-        self._stage_runtime_configured = False
-        self._stage_runtime_exhausted = False
-        self._stage_runtime_phase = "agent"
-        self._stage_phase_started_at: float | None = None
-        self._critical_retry_budget_expanded = False
-        self._critical_retry_compact_context = False
-        self._stage_role_active_consumed: dict[str, float] = {}
-        self._stage_role_active_consumed_by_phase: dict[str, dict[str, float]] = {
-            "agent": self._stage_role_active_consumed
-        }
-        self._stage_external_paused_seconds = 0.0
-        self._external_operation_depth = 0
-        self._external_operation_started_at: float | None = None
-        self._agent_execution_stack: list[dict[str, Any]] = []
-
-    def configure_stage_runtime_budget(self, raw_budget: Any) -> None:
-        """Bind an opt-in stage budget without changing native defaults."""
-        try:
-            budget = dict(raw_budget or {})
-        except (TypeError, ValueError):
-            budget = {}
-        if not bool(budget.get("execution_control_enabled", False)):
-            budget = {}
-        self._stage_runtime_budget = budget
-        self._stage_runtime_started_at = time.monotonic() if budget else None
-        self._stage_runtime_configured = True
-        self._critic_evaluation_started_at = None
-        self._stage_runtime_exhausted = False
-        self._stage_runtime_phase = "agent"
-        self._stage_phase_started_at = self._stage_runtime_started_at
-        self._critical_retry_budget_expanded = False
-        self._stage_role_active_consumed = {}
-        self._stage_role_active_consumed_by_phase = {
-            "agent": self._stage_role_active_consumed
-        }
-        self._stage_external_paused_seconds = 0.0
-        self._external_operation_depth = 0
-        self._external_operation_started_at = None
-        self._agent_execution_stack = []
-
-        asset_manager = getattr(self, "asset_manager", None)
-        configure_asset_budget = getattr(
-            asset_manager, "configure_runtime_budget", None
-        )
-        if callable(configure_asset_budget):
-            scene = getattr(self, "scene", None)
-            configure_asset_budget(
-                stage=str(getattr(scene, "scene_expert_stage", self.agent_type.value)),
-                budget=budget,
-                required_objects=list(
-                    getattr(scene, "scene_expert_required_objects", []) or []
-                ),
-                execution_clock=self,
-            )
-
-    def _ensure_stage_runtime_configured(self) -> None:
-        """Lazily read the hook-injected budget for placement agents."""
-        if self._stage_runtime_configured:
-            return
-        scene = getattr(self, "scene", None)
-        self.configure_stage_runtime_budget(
-            getattr(scene, "scene_expert_stage_budget", {}) if scene is not None else {}
-        )
-
-    def _refresh_asset_runtime_budget(self) -> None:
-        """Reapply the current opt-in asset gate for a fresh transaction."""
-        scene = getattr(self, "scene", None)
-        if scene is None:
-            return
-        asset_manager = getattr(self, "asset_manager", None)
-        configure_asset_budget = getattr(
-            asset_manager, "configure_runtime_budget", None
-        )
-        if callable(configure_asset_budget):
-            configure_asset_budget(
-                stage=str(getattr(scene, "scene_expert_stage", self.agent_type.value)),
-                budget=self._stage_runtime_budget,
-                required_objects=list(
-                    getattr(scene, "scene_expert_required_objects", []) or []
-                ),
-                execution_clock=self,
-            )
-
-    def _stage_budget_value(self, key: str, default: Any) -> Any:
-        return dict(getattr(self, "_stage_runtime_budget", {}) or {}).get(key, default)
-
-    def _phase_budget_value(self, key: str, default: Any) -> Any:
-        phase = str(getattr(self, "_stage_runtime_phase", "agent") or "agent")
-        prefix = {
-            "repair": "repair",
-            "regeneration": "regeneration",
-            "continuation": "continuation",
-            "fallback": "fallback",
-            "critic_retry": "critic_retry",
-        }.get(phase)
-        if prefix:
-            value = self._stage_budget_value(f"{prefix}_{key}", None)
-            if value not in (None, 0, 0.0, ""):
-                return value
-        return self._stage_budget_value(key, default)
-
-    def _activate_runtime_phase(
-        self,
-        phase: str,
-        *,
-        reset_role_consumption: bool = False,
-    ) -> None:
-        phase_name = str(phase or "agent")
-        self._stage_runtime_phase = phase_name
-        buckets = getattr(self, "_stage_role_active_consumed_by_phase", None)
-        if not isinstance(buckets, dict):
-            buckets = {}
-            self._stage_role_active_consumed_by_phase = buckets
-        if reset_role_consumption:
-            buckets[phase_name] = {}
-        self._stage_role_active_consumed = buckets.setdefault(phase_name, {})
-
-    def _current_phase_role_consumption(self) -> dict[str, float]:
-        buckets = getattr(self, "_stage_role_active_consumed_by_phase", None)
-        if not isinstance(buckets, dict):
-            return self._stage_role_active_consumed
-        phase = str(getattr(self, "_stage_runtime_phase", "agent") or "agent")
-        self._stage_role_active_consumed = buckets.setdefault(phase, {})
-        return self._stage_role_active_consumed
-
-    def _expand_critical_retry_budget(self) -> None:
-        """Derive one larger retry budget without mutating normal limits."""
-        runtime_budget = getattr(self, "_stage_runtime_budget", {}) or {}
-        if not runtime_budget or getattr(
-            self, "_critical_retry_budget_expanded", False
-        ):
-            return
-        multiplier = max(
-            1.0,
-            float(
-                self._stage_budget_value("critical_retry_budget_multiplier", 1.5) or 1.5
-            ),
-        )
-        for key in (
-            "max_wall_clock_seconds",
-            "planner_active_max_seconds",
-            "designer_active_max_seconds",
-            "critic_active_max_seconds",
-            "critic_evaluation_max_seconds",
-            "max_designer_turns",
-            "max_critic_turns",
-            "max_asset_requests",
-            "max_semantic_retries_per_family",
-        ):
-            value = float(runtime_budget.get(key, 0) or 0)
-            retry_key = f"critic_retry_{key}"
-            if value <= 0 or runtime_budget.get(retry_key) not in (None, 0, 0.0, ""):
-                continue
-            expanded = value * multiplier
-            runtime_budget[retry_key] = (
-                int(round(expanded))
-                if key.startswith("max_") and not key.endswith("_seconds")
-                else expanded
-            )
-        self._critical_retry_budget_expanded = True
-
-    def _effective_critique_round_limit(self) -> int:
-        configured = max(0, int(_cfg_get(self.cfg, "max_critique_rounds", 0)))
-        self._ensure_stage_runtime_configured()
-        if not self._stage_runtime_budget:
-            return configured
-        stage_limit = max(
-            0,
-            int(
-                self._stage_budget_value(
-                    "max_designer_iterations",
-                    configured,
-                )
-            ),
-        )
-        return min(configured, stage_limit)
-
-    def _stage_output_count_contract(self) -> tuple[int, int, int]:
-        """Return required minimum, preferred target, and current stage count."""
-        scene = getattr(self, "scene", None)
-        object_type = self.agent_type.to_object_type()
-        if scene is None or object_type is None:
-            return 0, 0, 0
-        target_minimum = max(
-            0,
-            int(getattr(scene, "scene_expert_min_output_objects", 0) or 0),
-        )
-        required_value = getattr(
-            scene,
-            "scene_expert_required_min_output_objects",
-            None,
-        )
-        required_minimum = (
-            target_minimum
-            if required_value is None
-            else max(0, int(required_value or 0))
-        )
-        return (
-            required_minimum,
-            target_minimum,
-            len(scene.get_objects_by_type(object_type)),
-        )
-
-    def _planner_completion_contract(self) -> str:
-        """Describe opt-in output targets without inventing hard requirements."""
-        if not getattr(self, "_stage_runtime_budget", {}):
-            return ""
-        required_minimum, target_minimum, _ = self._stage_output_count_contract()
-        if target_minimum <= 0:
-            target_minimum = max(
-                0,
-                int(self._stage_budget_value("min_output_objects", 0) or 0),
-            )
-        maximum = int(
-            getattr(
-                getattr(self, "scene", None),
-                "scene_expert_max_output_objects",
-                0,
-            )
-            or self._stage_budget_value("max_output_objects", 0)
-            or 0
-        )
-        if target_minimum <= 0:
-            return ""
-        maximum_clause = (
-            f" and no more than {max(maximum, target_minimum)}" if maximum > 0 else ""
-        )
-        if required_minimum > 0:
-            rule = (
-                f"ensure the designer places at least {required_minimum}"
-                f"{maximum_clause} stage-native objects before finish_stage. "
-                "This is an explicit user requirement, so a result below the "
-                "required minimum is not valid."
-            )
-        else:
-            rule = (
-                f"ask the designer to place at least {target_minimum}"
-                f"{maximum_clause} coherent stage-native objects. This is a "
-                "preferred quality target, not an invented hard requirement."
-            )
-        return (
-            "\n\nRUNTIME STAGE COMPLETION CONTRACT: You must call "
-            f"request_initial_design() and {rule}"
-        )
-
-    def _begin_mandatory_repair_transaction(self) -> tuple[str, float | None]:
-        previous_phase = self._stage_runtime_phase
-        previous_started_at = self._stage_phase_started_at
-        if self._stage_runtime_budget:
-            self._activate_runtime_phase("repair", reset_role_consumption=True)
-            self._stage_phase_started_at = time.monotonic()
-        return previous_phase, previous_started_at
-
-    def _begin_critic_evaluation(self) -> None:
-        self._critic_evaluation_started_at = time.monotonic()
-        self._current_phase_role_consumption().pop("critic", None)
-
-    def _critic_score_call_timeout(
-        self,
-        provider_default_seconds: float,
-    ) -> float | None:
-        limit = float(
-            self._phase_budget_value("critic_evaluation_max_seconds", 0.0) or 0.0
-        )
-        if self._stage_runtime_budget and limit > 0:
-            return None
-        return (
-            float(provider_default_seconds)
-            if float(provider_default_seconds) > 0
-            else None
-        )
-
-    async def retry_final_critic_evaluation(self) -> None:
-        """Retry one final critic transaction and restore its parent clock."""
-        previous = (
-            self._stage_runtime_phase,
-            self._stage_runtime_started_at,
-            self._stage_phase_started_at,
-            self._stage_external_paused_seconds,
-            self._external_operation_depth,
-            self._external_operation_started_at,
-            self._critic_evaluation_started_at,
-            self._stage_runtime_exhausted,
-        )
-        self._expand_critical_retry_budget()
-        self._stage_phase_started_at = time.monotonic()
-        self._stage_external_paused_seconds = 0.0
-        self._external_operation_depth = 0
-        self._external_operation_started_at = None
-        self._critic_evaluation_started_at = None
-        self._stage_runtime_exhausted = False
-        self._activate_runtime_phase("critic_retry", reset_role_consumption=True)
-        self._critical_retry_compact_context = True
-        try:
-            await self._request_critique_impl(update_checkpoint=False)
-            await self._finalize_scene_and_scores()
-        finally:
-            self._critical_retry_compact_context = False
-            self._activate_runtime_phase(previous[0])
-            (
-                self._stage_runtime_started_at,
-                self._stage_phase_started_at,
-                self._stage_external_paused_seconds,
-                self._external_operation_depth,
-                self._external_operation_started_at,
-                self._critic_evaluation_started_at,
-                self._stage_runtime_exhausted,
-            ) = previous[1:]
-
-    def _remaining_role_active_seconds(self, role: str) -> float | None:
-        key = {
-            "planner": "planner_active_max_seconds",
-            "designer": "designer_active_max_seconds",
-            "critic": "critic_active_max_seconds",
-        }.get(role)
-        if not key:
-            return None
-        limit = float(self._phase_budget_value(key, 0.0) or 0.0)
-        if limit <= 0:
-            return None
-        return limit - float(self._current_phase_role_consumption().get(role, 0.0))
-
-    def _remaining_stage_seconds(self, role: str | None = None) -> float | None:
-        phase_budget_value = getattr(self, "_phase_budget_value", None)
-        budget_value = (
-            phase_budget_value
-            if callable(phase_budget_value)
-            else self._stage_budget_value
-        )
-        if role == "critic" and self._critic_evaluation_started_at is not None:
-            evaluation_limit = float(
-                budget_value("critic_evaluation_max_seconds", 0.0) or 0.0
-            )
-            if evaluation_limit > 0:
-                return evaluation_limit - (
-                    time.monotonic() - self._critic_evaluation_started_at
-                )
-
-        limit = float(budget_value("max_wall_clock_seconds", 0.0) or 0.0)
-        if limit <= 0 or self._stage_runtime_started_at is None:
-            return None
-        reserve_fraction = 0.0
-        critic_reserve = float(
-            self._stage_budget_value("critic_reserve_fraction", 0.25) or 0.0
-        )
-        fallback_reserve = float(
-            self._stage_budget_value("fallback_reserve_fraction", 0.10) or 0.0
-        )
-        finalization_reserve = float(
-            self._stage_budget_value("finalization_reserve_fraction", 0.05) or 0.0
-        )
-        if role == "designer":
-            reserve_fraction = critic_reserve + finalization_reserve
-            if self._stage_runtime_phase not in {"fallback", "repair"}:
-                reserve_fraction += fallback_reserve
-        elif role == "planner":
-            reserve_fraction = finalization_reserve
-        elif role == "critic":
-            reserve_fraction = finalization_reserve
-            if self._stage_runtime_phase != "fallback":
-                reserve_fraction += fallback_reserve
-        reserve_fraction = max(0.0, min(0.9, reserve_fraction))
-        runtime_phase = str(getattr(self, "_stage_runtime_phase", "agent") or "agent")
-        configured_phase_started_at = getattr(self, "_stage_phase_started_at", None)
-        phase_started_at = (
-            configured_phase_started_at
-            if runtime_phase
-            in {"repair", "regeneration", "continuation", "fallback", "critic_retry"}
-            and configured_phase_started_at is not None
-            else self._stage_runtime_started_at
-        )
-        elapsed = (
-            time.monotonic()
-            - phase_started_at
-            - float(getattr(self, "_stage_external_paused_seconds", 0.0) or 0.0)
-        )
-        return limit * (1.0 - reserve_fraction) - elapsed
-
-    def pause_for_external_operation(self, label: str) -> object:
-        """Exclude blocking asset/service time from the optional inference clock."""
-        del label
-        self._external_operation_depth += 1
-        if self._external_operation_depth > 1:
-            return {"owner": False}
-        self._pause_current_role_timer()
-        self._external_operation_started_at = time.monotonic()
-        return {"owner": True}
-
-    def resume_from_external_operation(self, token: object) -> None:
-        if self._external_operation_depth <= 0:
-            return
-        owner = bool(isinstance(token, dict) and token.get("owner", False))
-        self._external_operation_depth -= 1
-        if not owner:
-            return
-        if self._external_operation_started_at is not None:
-            self._stage_external_paused_seconds += max(
-                0.0,
-                time.monotonic() - self._external_operation_started_at,
-            )
-        self._external_operation_started_at = None
-        self._external_operation_depth = 0
-        self._resume_current_role_timer()
-
-    def _pause_current_role_timer(self) -> None:
-        stack = getattr(self, "_agent_execution_stack", [])
-        if not stack:
-            return
-        timer = stack[-1]
-        started_at = timer.get("started_at")
-        if started_at is not None:
-            timer["active_seconds"] += max(0.0, time.monotonic() - started_at)
-            timer["started_at"] = None
-
-    def _resume_current_role_timer(self) -> None:
-        stack = getattr(self, "_agent_execution_stack", [])
-        if stack and stack[-1].get("started_at") is None:
-            stack[-1]["started_at"] = time.monotonic()
-
-    def _begin_role_timer(self, role: str) -> dict[str, Any]:
-        self._pause_current_role_timer()
-        timer = {
-            "role": role,
-            "active_seconds": 0.0,
-            "started_at": time.monotonic(),
-        }
-        self._agent_execution_stack.append(timer)
-        return timer
-
-    def _finish_role_timer(self, timer: dict[str, Any]) -> float:
-        stack = self._agent_execution_stack
-        started_at = timer.get("started_at")
-        if started_at is not None:
-            timer["active_seconds"] += max(0.0, time.monotonic() - started_at)
-        if stack and stack[-1] is timer:
-            stack.pop()
-        elif timer in stack:
-            stack.remove(timer)
-        self._resume_current_role_timer()
-        return float(timer.get("active_seconds", 0.0))
-
-    async def _run_agent_with_stage_sla(
-        self,
-        *,
-        starting_agent: Agent,
-        input: Any,
-        role: str,
-        event: str,
-        configured_max_turns: int | None = None,
-        session: Session | None = None,
-        run_config: RunConfig | None = None,
-    ) -> RunResult:
-        """Run one SDK call under opt-in turn and wall-clock limits."""
-        self._ensure_stage_runtime_configured()
-        turn_key = {
-            "planner": "max_planner_turns",
-            "designer": "max_designer_turns",
-            "critic": "max_critic_turns",
-        }.get(role)
-        max_turns = configured_max_turns
-        if turn_key and self._stage_runtime_budget:
-            stage_turns = int(self._stage_runtime_budget.get(turn_key, 0) or 0)
-            if stage_turns > 0:
-                max_turns = (
-                    min(max_turns, stage_turns)
-                    if max_turns is not None
-                    else stage_turns
-                )
-
-        run_kwargs: dict[str, Any] = {
-            "starting_agent": starting_agent,
-            "input": input,
-        }
-        if max_turns is not None:
-            run_kwargs["max_turns"] = max(1, int(max_turns))
-        if session is not None:
-            run_kwargs["session"] = session
-        if run_config is not None:
-            run_kwargs["run_config"] = run_config
-
-        if role == "planner" and isinstance(input, str):
-            run_kwargs["input"] = input + self._planner_completion_contract()
-
-        limits = [
-            value
-            for value in (
-                self._remaining_stage_seconds(role),
-                self._remaining_role_active_seconds(role),
-            )
-            if value is not None
-        ]
-        remaining = min(limits) if limits else None
-        if remaining is not None and remaining <= 0:
-            self._stage_runtime_exhausted = True
-            raise TimeoutError(f"Stage budget exhausted before {role}/{event}")
-        timer = self._begin_role_timer(role)
-        try:
-            if remaining is None:
-                return await Runner.run(**run_kwargs)
-            async with asyncio.timeout(max(0.1, remaining)):
-                return await Runner.run(**run_kwargs)
-        finally:
-            if self._stage_runtime_budget:
-                consumed = self._current_phase_role_consumption()
-                consumed[role] = consumed.get(role, 0.0) + self._finish_role_timer(
-                    timer
-                )
-            else:
-                self._finish_role_timer(timer)
 
     def _record_module_timing(
         self,
@@ -1119,18 +608,12 @@ class BaseStatefulAgent(ABC):
         return bool(_cfg_get(self._critic_fast_path_cfg(), key, default))
 
     def _hard_repair_design_change_limit(self) -> int:
-        configured = int(
+        return int(
             _cfg_get(
                 self._critic_fast_path_cfg(),
                 "max_hard_repair_design_changes",
                 1,
             )
-        )
-        if not getattr(self, "_stage_runtime_budget", {}):
-            return configured
-        return max(
-            configured,
-            int(self._stage_budget_value("max_repair_steps", configured) or 0),
         )
 
     def _hard_repair_allowance_available(self) -> bool:
@@ -1918,27 +1401,6 @@ class BaseStatefulAgent(ABC):
             effort = getattr(self.cfg.openai.reasoning_effort, settings_key, None)
         kwargs["extra_body"] = chat_template_kwargs_from_effort(effort)
 
-        # Token caps are part of the same opt-in execution-control plane. Agent
-        # construction occurs after placement stages bind ``self.scene``, so the
-        # hook-injected budget can be resolved lazily here without changing the
-        # native model settings when the master switch is off.
-        if settings_key:
-            self._ensure_stage_runtime_configured()
-            runtime_limit = self._phase_budget_value(
-                f"{settings_key}_max_output_tokens",
-                0,
-            )
-            if (
-                settings_key == "critic"
-                and self._stage_runtime_phase == "critic_retry"
-            ):
-                runtime_limit = self._stage_budget_value(
-                    "critic_retry_max_output_tokens",
-                    runtime_limit,
-                )
-            if int(runtime_limit or 0) > 0:
-                kwargs["max_tokens"] = int(runtime_limit)
-
         # Add tool_choice to force specific tool call first.
         if tool_choice:
             kwargs["tool_choice"] = tool_choice
@@ -2132,13 +1594,11 @@ class BaseStatefulAgent(ABC):
                 async with self._reasoning_persistence_context_for_session(
                     self.planner_session
                 ):
-                    result = await self._run_agent_with_stage_sla(
+                    result = await Runner.run(
                         starting_agent=self.planner,
                         input=input_value,
-                        role="planner",
-                        event=event,
                         session=self.planner_session,
-                        configured_max_turns=max_turns,
+                        max_turns=max_turns,
                         run_config=self._create_run_config(),
                     )
             except Exception as exc:
@@ -2683,7 +2143,7 @@ class BaseStatefulAgent(ABC):
             controller.should_finish = True
         return (
             f"STOP: {tool_name} is blocked because the configured "
-            f"max_critique_rounds={self._effective_critique_round_limit()} budget has "
+            f"max_critique_rounds={self.cfg.max_critique_rounds} budget has "
             "been reached. Do not call request_critique(), "
             "request_design_change(), or reset_scene_to_checkpoint() again. "
             "Return your final concise workflow summary now. The framework will "
@@ -2691,7 +2151,7 @@ class BaseStatefulAgent(ABC):
         )
 
     def _planner_budget_hint_after_critique(self) -> str:
-        if self._planner_critique_tool_calls < self._effective_critique_round_limit():
+        if self._planner_critique_tool_calls < int(self.cfg.max_critique_rounds):
             return ""
         return (
             "\n\n[Planner budget] This is the last allowed planner critique. "
@@ -2701,10 +2161,7 @@ class BaseStatefulAgent(ABC):
         )
 
     def _planner_budget_hint_after_design_change(self) -> str:
-        if (
-            self._planner_design_change_tool_calls
-            < self._effective_critique_round_limit()
-        ):
+        if self._planner_design_change_tool_calls < int(self.cfg.max_critique_rounds):
             return ""
         self._planner_budget_exhausted = True
         return (
@@ -2728,9 +2185,9 @@ class BaseStatefulAgent(ABC):
         """
         if not self._auto_score_after_design_attempts_enabled():
             return ""
-        if self._effective_critique_round_limit() <= 0:
+        if self.cfg.max_critique_rounds <= 0:
             return ""
-        if self._planner_critique_tool_calls >= self._effective_critique_round_limit():
+        if self._planner_critique_tool_calls >= int(self.cfg.max_critique_rounds):
             self._planner_budget_exhausted = True
             return "\n\n" + self._planner_budget_stop_message(
                 f"auto_score_after_{attempt_label.replace(' ', '_')}"
@@ -2772,7 +2229,7 @@ class BaseStatefulAgent(ABC):
             score_start,
         )
         budget_hint = ""
-        if self._planner_critique_tool_calls >= self._effective_critique_round_limit():
+        if self._planner_critique_tool_calls >= int(self.cfg.max_critique_rounds):
             self._planner_budget_exhausted = True
             budget_hint = (
                 "\n\n[Planner budget] The configured scored-candidate budget "
@@ -2857,10 +2314,7 @@ class BaseStatefulAgent(ABC):
                     "of re-scoring an unchanged layout."
                 )
 
-            if (
-                self._planner_critique_tool_calls
-                >= self._effective_critique_round_limit()
-            ):
+            if self._planner_critique_tool_calls >= int(self.cfg.max_critique_rounds):
                 return self._planner_budget_stop_message("request_critique")
 
             self._planner_critique_tool_calls += 1
@@ -2908,7 +2362,7 @@ class BaseStatefulAgent(ABC):
             if (
                 self._auto_score_after_design_attempts_enabled()
                 and self._planner_critique_tool_calls
-                >= self._effective_critique_round_limit()
+                >= int(self.cfg.max_critique_rounds)
                 and not self._hard_repair_allowance_available()
             ):
                 return self._planner_budget_stop_message("request_design_change")
@@ -2916,7 +2370,7 @@ class BaseStatefulAgent(ABC):
             if (
                 counts_as_critique_cycle
                 and self._planner_design_change_tool_calls
-                >= self._effective_critique_round_limit()
+                >= int(self.cfg.max_critique_rounds)
                 and not self._hard_repair_allowance_available()
             ):
                 return self._planner_budget_stop_message("request_design_change")
@@ -2991,7 +2445,7 @@ class BaseStatefulAgent(ABC):
         # Only add critique-related tools if critique rounds are enabled.
         # This prevents the planner from accidentally calling critique tools
         # when max_critique_rounds is 0.
-        if self._effective_critique_round_limit() > 0:
+        if self.cfg.max_critique_rounds > 0:
             reset_scene_to_checkpoint = self._create_reset_checkpoint_tool()
             tools.extend(
                 [request_critique, request_design_change, reset_scene_to_checkpoint]
@@ -3268,13 +2722,10 @@ class BaseStatefulAgent(ABC):
         observe_start = time.time()
         async with self._reasoning_persistence_context_for_session(self.critic_session):
             with self.rendering_manager.use_render_profile(render_profile):
-                result_observe = await self._run_agent_with_stage_sla(
+                result_observe = await Runner.run(
                     starting_agent=critic_observe,
                     input=critique_instruction,
-                    role="critic",
-                    event="observe_scene",
                     session=self.critic_session,
-                    configured_max_turns=self.cfg.agents.critic_agent.max_turns,
                     run_config=run_config,
                 )
         self._record_module_timing("critic", "observe_scene", observe_start)
@@ -3312,13 +2763,10 @@ class BaseStatefulAgent(ABC):
             async with self._reasoning_persistence_context_for_session(
                 self.critic_session
             ):
-                result_scene = await self._run_agent_with_stage_sla(
+                result_scene = await Runner.run(
                     starting_agent=critic_scene_state,
                     input="Now retrieve exact object data with get_current_scene_state.",
-                    role="critic",
-                    event="get_current_scene_state",
                     session=self.critic_session,
-                    configured_max_turns=self.cfg.agents.critic_agent.max_turns,
                     run_config=run_config,
                 )
             self._record_module_timing(
@@ -3357,13 +2805,11 @@ class BaseStatefulAgent(ABC):
             async with self._reasoning_persistence_context_for_session(
                 self.critic_session
             ):
-                result = await self._run_agent_with_stage_sla(
+                result = await Runner.run(
                     starting_agent=critic_score,
                     input=score_prompt,
-                    role="critic",
-                    event="score_scene",
                     session=self.critic_session,
-                    configured_max_turns=self.cfg.agents.critic_agent.max_turns,
+                    max_turns=self.cfg.agents.critic_agent.max_turns,
                     run_config=run_config,
                 )
             self._record_module_timing("critic", "score_scene", score_start)
@@ -3576,13 +3022,11 @@ class BaseStatefulAgent(ABC):
             async with self._reasoning_persistence_context_for_session(
                 self.designer_session
             ):
-                result = await self._run_agent_with_stage_sla(
+                result = await Runner.run(
                     starting_agent=self.designer,
                     input=full_instruction,
-                    role="designer",
-                    event="request_design_change",
                     session=self.designer_session,
-                    configured_max_turns=self.cfg.agents.designer_agent.max_turns,
+                    max_turns=self.cfg.agents.designer_agent.max_turns,
                     run_config=self._create_run_config(),
                 )
         except Exception as exc:
@@ -3714,13 +3158,11 @@ class BaseStatefulAgent(ABC):
             async with self._reasoning_persistence_context_for_session(
                 self.designer_session
             ):
-                result = await self._run_agent_with_stage_sla(
+                result = await Runner.run(
                     starting_agent=self.designer,
                     input=input_message,
-                    role="designer",
-                    event="request_initial_design",
                     session=self.designer_session,
-                    configured_max_turns=self.cfg.agents.designer_agent.max_turns,
+                    max_turns=self.cfg.agents.designer_agent.max_turns,
                     run_config=self._create_run_config(),
                 )
         except Exception as exc:

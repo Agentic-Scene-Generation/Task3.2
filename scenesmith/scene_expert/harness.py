@@ -153,52 +153,27 @@ class Harness:
 
     def _get_stage_budget(self, stage: str) -> StageBudget:
         """Get per-stage budget from config."""
-        execution_control = getattr(self._cfg, "execution_control", None)
-        if execution_control is not None and not bool(
-            getattr(execution_control, "enabled", True)
-        ):
-            native_values = StageBudget().model_dump()
-            for field_name, value in list(native_values.items()):
-                if isinstance(value, bool):
-                    native_values[field_name] = False
-                elif isinstance(value, (int, float)):
-                    native_values[field_name] = 0
-            native_values["execution_control_enabled"] = False
-            native_values["execution_control_profile"] = "scenesmith_native"
-            return StageBudget(**native_values)
         stage_cfg = getattr(self._cfg, "stage_budget", None)
         if stage_cfg is None:
             return StageBudget()
 
-        def build_budget(value: object) -> StageBudget:
-            defaults = StageBudget()
-            return StageBudget(
-                **{
-                    field_name: getattr(value, field_name, default_value)
-                    for field_name, default_value in defaults.model_dump().items()
-                }
-            )
-
         # Check stage-specific override first
         stage_override = getattr(stage_cfg, stage, None)
         if stage_override is not None:
-            default = getattr(stage_cfg, "default", None)
-            if default is None:
-                return build_budget(stage_override)
-            merged = {
-                field_name: getattr(
-                    stage_override,
-                    field_name,
-                    getattr(default, field_name, default_value),
-                )
-                for field_name, default_value in StageBudget().model_dump().items()
-            }
-            return StageBudget(**merged)
+            return StageBudget(
+                max_designer_iterations=getattr(
+                    stage_override, "max_designer_iterations", 2
+                ),
+                max_repair_steps=getattr(stage_override, "max_repair_steps", 1),
+            )
 
         # Fall back to default
         default = getattr(stage_cfg, "default", None)
         if default is not None:
-            return build_budget(default)
+            return StageBudget(
+                max_designer_iterations=getattr(default, "max_designer_iterations", 2),
+                max_repair_steps=getattr(default, "max_repair_steps", 1),
+            )
 
         return StageBudget()
 

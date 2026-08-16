@@ -1,5 +1,5 @@
 name: "request_analysis_manipuland"
-version: "1.1"
+version: "1.0"
 description: "Extract and split manipuland items from requests"
 template_variables: ["description", "dimensions"]
 prompt: |
@@ -9,8 +9,7 @@ prompt: |
   </role>
 
   <definitions>
-  MANIPULANDS: Hand-scale objects placed on furniture or other support surfaces
-  that are meant
+  MANIPULANDS: Objects placed on surfaces (furniture OR floor) that are meant
   to be arranged, stacked, or grouped.
   Ask yourself: Would multiple of these typically be arranged together?
   Examples: books, mugs, plates, bowls, fruit, laptops, phones, toys,
@@ -18,17 +17,15 @@ prompt: |
   Note: Size does NOT determine category - a tire is a manipuland because
   it's typically stacked/arranged, even though it's large.
 
-  FURNITURE: Standalone floor-supported objects that define room layout. NOT
-  handled here. Examples: tables, chairs, sofas, beds, rugs, floor lamps,
-  full-size floor plants, and vehicles - these should already be placed.
+  FURNITURE: Standalone floor objects that define room layout. NOT handled here.
+  Examples: tables, chairs, sofas, beds, vehicles - these should already be placed.
   </definitions>
 
   <task>
   1. Composite manipulands: split into individual items
   2. Single manipuland: return as single item
   3. Furniture: reject with error message
-  4. A small tabletop plant or flower pot: ONE item (pot + plant together, not
-     split). Reject a tall/full-size/floor plant because furniture owns it.
+  4. "flower pot" or "potted plant": ONE item (pot + plant together, not split)
   5. Container + contents: ALWAYS split into container + individual items, even if
      described as "single object" or "combined object". Examples:
      - "crock with utensils" -> crock + utensils (split)

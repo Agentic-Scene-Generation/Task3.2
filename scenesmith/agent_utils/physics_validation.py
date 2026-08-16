@@ -253,21 +253,6 @@ def compute_scene_collisions(
             geometry_id=pair.id_B, scene=scene, query_object=query_object
         )
 
-        if _is_collision_proxy_only_wall_contact(
-            scene=scene,
-            object_a_id=str(object_a_info["id"]),
-            object_b_id=str(object_b_info["id"]),
-        ):
-            console_logger.debug(
-                "Ignoring collision-proxy wall contact between %s[%s] and "
-                "%s[%s]: visible world bounds are separated",
-                object_a_info["name"],
-                object_a_info["id"],
-                object_b_info["name"],
-                object_b_info["id"],
-            )
-            continue
-
         # Check if this is a floor collision and apply tolerance.
         is_floor_collision = (
             object_a_info["name"] == "floor" or object_b_info["name"] == "floor"
@@ -280,24 +265,6 @@ def compute_scene_collisions(
             non_floor_info = (
                 object_b_info if object_a_info["name"] == "floor" else object_a_info
             )
-            if _is_grounded_visual_floor_contact(
-                scene=scene,
-                object_id=str(non_floor_info["id"]),
-                floor_tolerance=floor_penetration_tolerance,
-            ):
-                # Convex decomposition is deliberately conservative and can extend
-                # below the visible mesh (beds and sofas are frequent examples).
-                # An XY layout repair cannot resolve that proxy-only contact.  Use
-                # the visible world bounds to distinguish a correctly grounded
-                # object from a genuinely sunken one.
-                console_logger.debug(
-                    "Ignoring collision-proxy floor contact for %s[%s]: Drake "
-                    "reported %.2fcm penetration while the visible mesh is grounded",
-                    non_floor_info["name"],
-                    non_floor_info["id"],
-                    penetration_depth * 100.0,
-                )
-                continue
             if _is_implausible_floor_penetration(
                 scene=scene,
                 object_id=str(non_floor_info["id"]),
@@ -375,104 +342,6 @@ def compute_scene_collisions(
         console_logger.info("=" * 60)
 
     return collisions
-
-
-def _is_collision_proxy_only_wall_contact(
-    scene: RoomScene,
-    object_a_id: str,
-    object_b_id: str,
-    visual_tolerance_m: float = 0.005,
-) -> bool:
-    """Return whether a wall collision exists only in conservative proxies.
-
-    HSSD convex decompositions can protrude beyond the visible mesh.  A furniture
-    placement must remain a hard failure when its visible AABB intersects a wall,
-    but moving a visibly separated object cannot repair a proxy-only contact.
-    """
-    room_geometry = getattr(scene, "room_geometry", None)
-    walls = list(getattr(room_geometry, "walls", []) or [])
-    if not walls:
-        return False
-
-    wall_by_id = {}
-    for wall in walls:
-        object_id = str(getattr(wall, "object_id", ""))
-        if not object_id:
-            continue
-        wall_by_id[object_id] = wall
-        wall_by_id[f"room_geometry::{object_id}"] = wall
-    wall_id = ""
-    furniture_id = ""
-    if object_a_id in wall_by_id:
-        wall_id, furniture_id = object_a_id, object_b_id
-    elif object_b_id in wall_by_id:
-        wall_id, furniture_id = object_b_id, object_a_id
-    else:
-        return False
-
-    furniture = next(
-        (
-            obj
-            for candidate_id, obj in scene.objects.items()
-            if str(candidate_id) == furniture_id
-        ),
-        None,
-    )
-    if furniture is None or furniture.object_type != ObjectType.FURNITURE:
-        return False
-
-    try:
-        furniture_bounds = furniture.compute_world_bounds()
-        wall_bounds = wall_by_id[wall_id].compute_world_bounds()
-    except Exception:
-        return False
-    if furniture_bounds is None or wall_bounds is None:
-        return False
-
-    furniture_min, furniture_max = furniture_bounds
-    wall_min, wall_max = wall_bounds
-    tolerance = max(float(visual_tolerance_m), 0.0)
-    return any(
-        float(furniture_max[axis]) < float(wall_min[axis]) - tolerance
-        or float(furniture_min[axis]) > float(wall_max[axis]) + tolerance
-        for axis in range(3)
-    )
-
-
-def _is_grounded_visual_floor_contact(
-    scene: RoomScene,
-    object_id: str,
-    floor_tolerance: float,
-) -> bool:
-    """Return whether a floor collision is only a conservative-proxy contact.
-
-    Furniture is placed from its visible bounding box, whereas Drake evaluates
-    convex-decomposition geometry.  Some library meshes have hulls that extend
-    well below the visible bottom.  If the visible furniture bottom is at the
-    floor, reporting that hull penetration as a layout collision creates an
-    impossible repair loop: moving the object in XY can never remove it.
-
-    Objects whose visible bounds are actually below the floor are deliberately
-    not filtered, and non-furniture contacts retain the existing strict policy.
-    """
-    scene_object = next(
-        (
-            obj
-            for candidate_id, obj in scene.objects.items()
-            if str(candidate_id) == object_id
-        ),
-        None,
-    )
-    if scene_object is None or scene_object.object_type != ObjectType.FURNITURE:
-        return False
-    try:
-        world_bounds = scene_object.compute_world_bounds()
-    except Exception:
-        return False
-    if world_bounds is None:
-        return False
-    visible_bottom_z = float(world_bounds[0][2])
-    return abs(visible_bottom_z) <= max(float(floor_tolerance), 1e-6)
 
 
 def _is_implausible_floor_penetration(
@@ -806,12 +675,8 @@ def _get_object_info_from_geometry_id(
                 # Floor or ground element.
                 return {"name": "floor", "id": "room_geometry"}
             else:
-                # Wall collision geometries are explicitly named above. The only
-                # unnamed collision element emitted by RoomGeometry is the floor
-                # slab, so treating this fallback as a wall bypasses the grounded
-                # visual-contact filter and creates impossible 10-25cm "room_geometry"
-                # collision loops for otherwise well-grounded beds and sofas.
-                return {"name": "floor", "id": "room_geometry"}
+                # Generic room geometry element (fallback).
+                return {"name": "wall", "id": "room_geometry"}
 
         # Extract object ID from frame name for regular scene objects.
         for object_id, scene_object in scene.objects.items():

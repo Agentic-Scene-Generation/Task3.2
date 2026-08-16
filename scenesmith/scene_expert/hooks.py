@@ -29,8 +29,6 @@ from scenesmith.agent_utils.room import RoomScene
 from scenesmith.scene_expert.config_utils import (
     resolve_component_flags,
     resolve_scene_expert_config,
-    resolve_scene_expert_stage_budget,
-    scene_expert_execution_control_enabled,
 )
 from scenesmith.scene_expert.context_bundle import build_stage_context_bundle
 from scenesmith.scene_expert.global_planner import GlobalPlanner
@@ -1296,36 +1294,6 @@ class SceneExpertHookRunner:
                 setattr(scene, "metadata", metadata)
             metadata["scenebenchmark_intent_contract"] = self._intent_contract
         setattr(scene, "scene_expert_stage", stage)
-        stage_budget = context.stage_budget
-        effective_budget = (
-            stage_budget.model_dump() if stage_budget.execution_control_enabled else {}
-        )
-        setattr(scene, "scene_expert_stage_budget", effective_budget)
-        required_objects = self._stage_required_objects(stage)
-        setattr(scene, "scene_expert_required_objects", required_objects)
-        setattr(
-            scene,
-            "scene_expert_required_min_output_objects",
-            len(required_objects),
-        )
-        setattr(
-            scene,
-            "scene_expert_min_output_objects",
-            (
-                max(len(required_objects), stage_budget.min_output_objects)
-                if stage_budget.execution_control_enabled
-                else 0
-            ),
-        )
-        setattr(
-            scene,
-            "scene_expert_max_output_objects",
-            (
-                stage_budget.max_output_objects
-                if stage_budget.execution_control_enabled
-                else 0
-            ),
-        )
         self._save_context_bundle(
             stage=stage,
             agent_role="designer",
@@ -1709,19 +1677,11 @@ class SceneExpertHookRunner:
                             description if isinstance(description, str) else ""
                         ),
                         "aliases": aliases,
-                        "repair_placeholder": bool(
-                            metadata.get("repair_placeholder", False)
-                        ),
                     }
                 )
             return {
                 "object_names": names,
                 "object_records": records,
-                "placeholder_names": [
-                    str(record.get("name") or record.get("description") or "")
-                    for record in records
-                    if record.get("repair_placeholder")
-                ],
             }
         except Exception:
             return {"object_names": []}
@@ -1753,7 +1713,7 @@ def build_hook_runner(
         Configured SceneExpertHookRunner, or None if disabled.
     """
     # Deep-merge root defaults with experiment overrides. A shallow ``or`` here
-    # previously discarded nested memory and execution-control defaults.
+    # would discard nested memory and component defaults.
     se_cfg = resolve_scene_expert_config(cfg_dict)
     intent_contract, intent_trace = _compile_intent_contract_if_enabled(
         prompt=prompt,
@@ -1767,10 +1727,7 @@ def build_hook_runner(
     component_flags = resolve_component_flags(cfg_dict)
 
     mode = se_cfg.get("mode", "disabled")
-    execution_control_enabled = scene_expert_execution_control_enabled(cfg_dict)
-    if not se_cfg.get("enabled", False) or not (
-        any(component_flags.values()) or execution_control_enabled
-    ):
+    if not se_cfg.get("enabled", False) or not any(component_flags.values()):
         return None
 
     if mode not in ABLATION_MODES:
@@ -1870,8 +1827,6 @@ def build_hook_runner(
         pass_threshold=ver_cfg.get("stage_pass_threshold", 0.6),
         visual_score_hard_gate=ver_cfg.get("visual_score_hard_gate", False),
         critic_bridge_enabled=component_flags["critic_bridge"],
-        room_size_check_enabled=ver_cfg.get("room_size_check_enabled", False),
-        placeholder_check_enabled=ver_cfg.get("placeholder_check_enabled", True),
     )
     full_verifier = FullVerifier(
         pass_threshold=ver_cfg.get("full_pass_threshold", 0.7),
@@ -1912,15 +1867,7 @@ def build_hook_runner(
     # Harness (always active when mode != "disabled")
     from omegaconf import OmegaConf
 
-    harness_cfg = dict(se_cfg)
-    harness_cfg["stage_budget"] = {
-        "default": resolve_scene_expert_stage_budget(cfg_dict, "__default__"),
-        **{
-            stage: resolve_scene_expert_stage_budget(cfg_dict, stage)
-            for stage in STAGE_ORDER
-        },
-    }
-    se_omega = OmegaConf.create(harness_cfg)
+    se_omega = OmegaConf.create(se_cfg)
     harness = Harness(se_omega)
     harness.reset()
 

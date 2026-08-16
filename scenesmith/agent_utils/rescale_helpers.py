@@ -8,15 +8,11 @@ from __future__ import annotations
 
 import logging
 
-from collections.abc import Callable
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
-
-import numpy as np
 
 from scenesmith.agent_utils.rescale_result import RescaleErrorType, RescaleResult
 from scenesmith.agent_utils.response_datatypes import BoundingBox3D
-from scenesmith.agent_utils.room import RoomScene, SceneObject
+from scenesmith.agent_utils.room import RoomScene
 from scenesmith.agent_utils.sdf_generator import rescale_sdf
 
 if TYPE_CHECKING:
@@ -25,40 +21,12 @@ if TYPE_CHECKING:
 console_logger = logging.getLogger(__name__)
 
 
-@dataclass
-class _ObjectScaleSnapshot:
-    obj: SceneObject
-    bbox_min: np.ndarray | None
-    bbox_max: np.ndarray | None
-    support_surfaces: list
-    scale_factor: float
-
-
-def _snapshot_object_scale(obj: SceneObject) -> _ObjectScaleSnapshot:
-    return _ObjectScaleSnapshot(
-        obj=obj,
-        bbox_min=None if obj.bbox_min is None else obj.bbox_min.copy(),
-        bbox_max=None if obj.bbox_max is None else obj.bbox_max.copy(),
-        # apply_scale replaces this list; its elements are not mutated.
-        support_surfaces=obj.support_surfaces,
-        scale_factor=float(obj.scale_factor),
-    )
-
-
-def _restore_object_scale(snapshot: _ObjectScaleSnapshot) -> None:
-    snapshot.obj.bbox_min = snapshot.bbox_min
-    snapshot.obj.bbox_max = snapshot.bbox_max
-    snapshot.obj.support_surfaces = snapshot.support_surfaces
-    snapshot.obj.scale_factor = snapshot.scale_factor
-
-
 def rescale_object_common(
     scene: RoomScene,
     object_id: str,
     scale_factor: float,
     object_type_name: str,
     asset_registry: AssetRegistry | None = None,
-    post_validate: Callable[[list[SceneObject]], tuple[bool, str]] | None = None,
 ) -> RescaleResult:
     """Shared rescale logic for all placement agents.
 
@@ -73,9 +41,6 @@ def rescale_object_common(
         object_type_name: Human-readable object type for messages (e.g., "furniture").
         asset_registry: Optional registry to update after rescaling. If provided,
             all registry entries with matching sdf_path will be updated.
-        post_validate: Optional domain validator run against every affected scene
-            instance after the tentative scale. A rejection rolls back the SDF,
-            bounding boxes, runtime scale, and support surfaces atomically.
 
     Returns:
         RescaleResult with operation outcome.
@@ -139,32 +104,6 @@ def rescale_object_common(
     # Note: scene.objects is a dict, so iterate over values not keys.
     affected_objects = [o for o in scene.objects.values() if o.sdf_path == sdf_path]
     affected_object_ids = [str(o.object_id) for o in affected_objects]
-    registry_objects = (
-        [
-            asset
-            for asset in asset_registry.list_all()
-            if asset.sdf_path == sdf_path
-        ]
-        if asset_registry is not None
-        else []
-    )
-    all_objects: list[SceneObject] = []
-    seen_object_refs: set[int] = set()
-    for affected in [*affected_objects, *registry_objects]:
-        if id(affected) in seen_object_refs:
-            continue
-        seen_object_refs.add(id(affected))
-        all_objects.append(affected)
-    snapshots = [_snapshot_object_scale(affected) for affected in all_objects]
-    try:
-        original_sdf = sdf_path.read_bytes()
-    except OSError as exc:
-        return RescaleResult(
-            success=False,
-            message=f"Could not begin rescale transaction: {exc}",
-            object_id=object_id,
-            error_type=RescaleErrorType.RESCALE_FAILED,
-        )
 
     console_logger.info(
         f"Rescaling {object_type_name} '{object_id}' by {scale_factor:.3f}x "
@@ -176,64 +115,20 @@ def rescale_object_common(
         rescale_sdf(sdf_path=sdf_path, scale_factor=scale_factor)
 
         # Update all affected objects' bounding boxes and invalidate surfaces.
-        for affected_obj in all_objects:
+        for affected_obj in affected_objects:
             affected_obj.apply_scale(scale_factor)
 
-        invalid_dimensions = [
-            str(affected.object_id)
-            for affected in affected_objects
-            if affected.bbox_min is not None
-            and affected.bbox_max is not None
-            and (
-                not np.all(np.isfinite(affected.bbox_min))
-                or not np.all(np.isfinite(affected.bbox_max))
-                or np.any(affected.bbox_max <= affected.bbox_min)
+        # Update asset registry if provided (keeps registry in sync for future placements).
+        if asset_registry is not None:
+            asset_registry.apply_scale_by_sdf_path(
+                sdf_path=sdf_path, scale_factor=scale_factor
             )
-        ]
-        if invalid_dimensions:
-            raise ValueError(
-                "Rescale produced invalid bounds for: "
-                + ", ".join(invalid_dimensions)
-            )
-
-        if post_validate is not None:
-            is_valid, validation_message = post_validate(affected_objects)
-            if not is_valid:
-                raise ValueError(validation_message or "Post-rescale validation failed")
-
-        # Persist registry only after the complete mutation has passed.
-        if asset_registry is not None and asset_registry.auto_save_path:
-            asset_registry.save_to_file(asset_registry.auto_save_path)
 
     except Exception as e:
-        rollback_errors: list[str] = []
-        try:
-            sdf_path.write_bytes(original_sdf)
-        except OSError as rollback_error:
-            rollback_errors.append(f"SDF restore failed: {rollback_error}")
-        for snapshot in snapshots:
-            try:
-                _restore_object_scale(snapshot)
-            except Exception as rollback_error:
-                rollback_errors.append(
-                    f"object {snapshot.obj.object_id} restore failed: {rollback_error}"
-                )
-        if asset_registry is not None and asset_registry.auto_save_path:
-            try:
-                asset_registry.save_to_file(asset_registry.auto_save_path)
-            except Exception as rollback_error:
-                rollback_errors.append(
-                    f"registry restore failed: {rollback_error}"
-                )
         console_logger.error(f"Failed to rescale SDF: {e}")
-        rollback_note = (
-            " Rollback diagnostics: " + "; ".join(rollback_errors)
-            if rollback_errors
-            else ""
-        )
         return RescaleResult(
             success=False,
-            message=f"Failed to rescale SDF: {e}.{rollback_note}",
+            message=f"Failed to rescale SDF: {e}",
             object_id=object_id,
             error_type=RescaleErrorType.RESCALE_FAILED,
         )

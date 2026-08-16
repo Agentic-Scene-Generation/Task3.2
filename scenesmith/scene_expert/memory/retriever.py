@@ -8,9 +8,6 @@ from __future__ import annotations
 
 import re
 
-from scenesmith.agent_utils.asset_quarantine import (
-    value_references_quarantined_hssd_asset,
-)
 from scenesmith.scene_expert.memory.schemas import FailureCase, Skill, SuccessCase
 from scenesmith.scene_expert.memory.store import FastMemoryStore
 from scenesmith.scene_expert.schemas import MemoryPack, SceneTaskSpec
@@ -174,8 +171,6 @@ class MemoryRetriever:
         scored: list[tuple[float, SuccessCase]] = []
         required_tokens = _stage_required_object_tokens(task_spec, stage)
         for case in self._store.success_cases:
-            if value_references_quarantined_hssd_asset(case):
-                continue
             if case.stage != stage or not _room_type_matches(
                 case.room_type, task_spec.room_type
             ):
@@ -214,8 +209,6 @@ class MemoryRetriever:
         scored: list[tuple[float, FailureCase]] = []
         task_object_tokens = _stage_required_object_tokens(task_spec, stage)
         for case in self._store.failure_cases:
-            if value_references_quarantined_hssd_asset(case):
-                continue
             if case.stage != stage or not _room_type_matches(
                 case.room_type, task_spec.room_type
             ):
@@ -245,8 +238,6 @@ class MemoryRetriever:
     ) -> tuple[list[str], list[str]]:
         scored: list[tuple[float, Skill]] = []
         for skill in self._store.skills:
-            if value_references_quarantined_hssd_asset(skill):
-                continue
             if skill.stage != stage:
                 continue
             skill_rooms = list(skill.room_types)

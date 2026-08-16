@@ -157,54 +157,8 @@ class MemoryPack(BaseModel):
 class StageBudget(BaseModel):
     """Per-stage execution budget."""
 
-    execution_control_enabled: bool = False
-    execution_control_profile: str = "scenesmith_native"
     max_designer_iterations: int = 2
     max_repair_steps: int = 1
-    max_planner_turns: int = 0
-    max_designer_turns: int = 0
-    max_critic_turns: int = 0
-    max_wall_clock_seconds: float = 0.0
-    planner_active_max_seconds: float = 0.0
-    designer_active_max_seconds: float = 0.0
-    critic_active_max_seconds: float = 0.0
-    planner_max_output_tokens: int = 0
-    designer_max_output_tokens: int = 0
-    critic_max_output_tokens: int = 0
-    critic_retry_max_output_tokens: int = 0
-    critic_max_attempts: int = 2
-    critic_evaluation_max_seconds: float = 0.0
-    critic_reserve_fraction: float = 0.25
-    fallback_reserve_fraction: float = 0.10
-    finalization_reserve_fraction: float = 0.05
-    critical_retry_budget_multiplier: float = 1.5
-    repair_max_wall_clock_seconds: float = 0.0
-    repair_designer_active_max_seconds: float = 0.0
-    regeneration_max_wall_clock_seconds: float = 0.0
-    regeneration_planner_active_max_seconds: float = 0.0
-    regeneration_designer_active_max_seconds: float = 0.0
-    regeneration_critic_active_max_seconds: float = 0.0
-    continuation_max_wall_clock_seconds: float = 0.0
-    continuation_planner_active_max_seconds: float = 0.0
-    continuation_designer_active_max_seconds: float = 0.0
-    continuation_critic_active_max_seconds: float = 0.0
-    fallback_critic_evaluation_max_seconds: float = 0.0
-    critic_retry_evaluation_max_seconds: float = 0.0
-    max_asset_requests: int = 0
-    asset_acquisition_timeout_seconds: int = 300
-    asset_validation_timeout_seconds: float = 90.0
-    asset_validation_total_timeout_seconds: float = 240.0
-    asset_validation_max_output_tokens: int = 512
-    asset_validation_retry_max_output_tokens: int = 1024
-    asset_validation_max_candidates: int = 4
-    asset_validation_family_retries: int = 1
-    max_optional_object_families: int = 0
-    max_assets_per_request: int = 0
-    max_semantic_retries_per_family: int = 2
-    min_output_objects: int = 0
-    max_output_objects: int = 0
-    max_stage_regenerations: int = 1
-    min_visual_score: float = 0.60
 
 
 class HarnessContext(BaseModel):

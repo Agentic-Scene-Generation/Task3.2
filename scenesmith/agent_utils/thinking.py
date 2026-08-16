@@ -8,14 +8,12 @@ from typing import Any
 NO_THINK_VALUES = ("", "none", "minimal", "off", "false", "0", "no_think", "nothink")
 
 
-def thinking_enabled_from_effort(effort: Any) -> bool:
-    """Return whether a configured effort requests model-side thinking."""
-    return str(effort or "").strip().lower() not in NO_THINK_VALUES
-
-
 def thinking_directive_from_effort(effort: Any) -> str:
     """Map config reasoning effort to a Qwen thinking directive."""
-    return "/think" if thinking_enabled_from_effort(effort) else "/no_think"
+    value = str(effort or "").strip().lower()
+    if value in NO_THINK_VALUES:
+        return "/no_think"
+    return "/think"
 
 
 def chat_template_kwargs_from_effort(effort: Any) -> dict[str, dict[str, bool]]:

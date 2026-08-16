@@ -22,9 +22,6 @@ from scenesmith.agent_utils.physics_validation import (
     ThinCoveringBoundaryViolation,
     ThinCoveringOverlap,
     _get_furniture_id_for_manipuland,
-    _get_object_info_from_geometry_id,
-    _is_collision_proxy_only_wall_contact,
-    _is_grounded_visual_floor_contact,
     _is_implausible_floor_penetration,
     compute_scene_collisions,
     compute_thin_covering_boundary_violations,
@@ -111,65 +108,6 @@ class TestCollisionPair(unittest.TestCase):
 
         expected = "chair_12345678 collides with table_87654321 (touching)"
         self.assertEqual(collision.to_description(), expected)
-
-    def test_unnamed_room_geometry_collision_is_floor(self):
-        """RoomGeometry names walls explicitly; its unnamed slab is the floor."""
-        geometry_id = object()
-        frame_id = object()
-        inspector = MagicMock()
-        inspector.GetFrameId.return_value = frame_id
-        inspector.GetName.side_effect = lambda identifier: (
-            "room_geometry::base_link"
-            if identifier is frame_id
-            else "collision_0"
-        )
-        query = MagicMock()
-        query.inspector.return_value = inspector
-
-        result = _get_object_info_from_geometry_id(
-            geometry_id=geometry_id,
-            scene=MagicMock(objects={}),
-            query_object=query,
-        )
-
-        self.assertEqual(result, {"name": "floor", "id": "room_geometry"})
-
-    def test_visibly_separated_furniture_wall_contact_is_proxy_only(self):
-        """A protruding collision hull must not force an impossible XY repair."""
-        furniture = MagicMock(object_type=ObjectType.FURNITURE)
-        furniture.compute_world_bounds.return_value = (
-            np.array([-1.72, -0.25, 0.0]),
-            np.array([-1.25, 0.25, 0.55]),
-        )
-        wall = MagicMock(object_id=UniqueID("west_wall"))
-        wall.compute_world_bounds.return_value = (
-            np.array([-2.00, -2.00, 0.0]),
-            np.array([-1.95, 2.00, 2.50]),
-        )
-        scene = MagicMock(
-            objects={UniqueID("nightstand_0"): furniture},
-            room_geometry=MagicMock(walls=[wall]),
-        )
-
-        self.assertTrue(
-            _is_collision_proxy_only_wall_contact(
-                scene,
-                "room_geometry::west_wall",
-                "nightstand_0",
-            )
-        )
-
-        furniture.compute_world_bounds.return_value = (
-            np.array([-1.97, -0.25, 0.0]),
-            np.array([-1.25, 0.25, 0.55]),
-        )
-        self.assertFalse(
-            _is_collision_proxy_only_wall_contact(
-                scene,
-                "room_geometry::west_wall",
-                "nightstand_0",
-            )
-        )
 
 
 class TestComputeSceneCollisions(unittest.TestCase):
@@ -384,39 +322,6 @@ class TestComputeSceneCollisions(unittest.TestCase):
             0,
             "Should report floor collision with penetration > tolerance",
         )
-
-    def test_grounded_visual_mesh_filters_deep_proxy_floor_contact(self):
-        """A conservative collision hull below a grounded mesh is not layout overlap."""
-        proxy_box = SceneObject(
-            object_id=UniqueID("grounded_proxy"),
-            object_type=ObjectType.FURNITURE,
-            name="Grounded Proxy Bed",
-            description="Visible bed is grounded but its convex hull extends lower",
-            transform=RigidTransform(np.array([0.0, 0.0, 0.15])),
-            sdf_path=self.box_sdf_path,
-            bbox_min=np.array([-0.25, -0.25, -0.15]),
-            bbox_max=np.array([0.25, 0.25, 0.15]),
-        )
-        self.scene.add_object(proxy_box)
-
-        self.assertTrue(
-            _is_grounded_visual_floor_contact(
-                self.scene, "grounded_proxy", floor_tolerance=0.05
-            )
-        )
-        collisions = compute_scene_collisions(
-            self.scene, floor_penetration_tolerance=0.05
-        )
-
-        proxy_floor_collisions = [
-            collision
-            for collision in collisions
-            if "grounded_proxy"
-            in (collision.object_a_id, collision.object_b_id)
-            and "room_geometry"
-            in (collision.object_a_id, collision.object_b_id)
-        ]
-        self.assertEqual(proxy_floor_collisions, [])
 
     def test_ceiling_to_ceiling_collision_detected(self):
         """Test collision detection works for CEILING_MOUNTED objects.

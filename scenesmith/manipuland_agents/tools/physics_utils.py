@@ -5,7 +5,7 @@ import logging
 import trimesh
 
 from scenesmith.agent_utils.room import SceneObject
-from scenesmith.utils.mesh_loading import load_object_collision_geometry
+from scenesmith.utils.mesh_loading import load_collision_meshes_from_sdf
 
 console_logger = logging.getLogger(__name__)
 
@@ -37,8 +37,8 @@ def load_collision_bounds_for_scene_object(
 ) -> tuple[float, float]:
     """Load collision geometry and compute z-bounds for a SceneObject.
 
-    Uses the SDF as the authoritative collision scale. Runtime rescale tools
-    update that SDF transactionally.
+    Applies both SDF scale (from mesh loading) and object's scale_factor
+    (from runtime rescale operations).
 
     Args:
         obj: SceneObject with sdf_path.
@@ -52,8 +52,14 @@ def load_collision_bounds_for_scene_object(
     if not obj.sdf_path:
         raise ValueError(f"Object {obj.name} has no SDF path")
 
-    collision_meshes = load_object_collision_geometry(obj)
+    collision_meshes = load_collision_meshes_from_sdf(obj.sdf_path)
     if not collision_meshes:
         raise ValueError(f"No collision geometry found for {obj.name}")
 
-    return compute_collision_bounds(collision_meshes)
+    z_min, z_max = compute_collision_bounds(collision_meshes)
+
+    # Apply object's scale_factor (set by rescale operations).
+    z_min *= obj.scale_factor
+    z_max *= obj.scale_factor
+
+    return z_min, z_max
