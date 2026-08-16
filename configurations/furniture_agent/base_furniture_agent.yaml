@@ -574,6 +574,26 @@ context_image_generation:
     # Normal-pass threshold. Structurally eligible lower-scoring candidates may
     # still be selected as the best-effort fallback after all attempts.
     min_score: 60
+  # Optional GroundingDINO + VLM analysis of the final selected edited image.
+  # This is independent from experiment.stage_placement_order.furniture.
+  grounded_layout:
+    enabled: false
+    cache: true
+    vocabulary_path: "scenesmith/agent_utils/data/hssd_furniture_grounding_vocabulary.yaml"
+    base_url: ${oc.env:GROUNDING_DINO_BASE_URL,http://127.0.0.1:18030}
+    # The VLM receives both the edited reference image and its GroundingDINO
+    # annotation. Allow for GPU queueing/inference under parallel scene runs.
+    timeout_seconds: 150
+    connect_timeout_seconds: 3
+    max_retries: 1
+    box_threshold: 0.25
+    text_threshold: 0.20
+    token_budget: 240
+    same_region_iou_threshold: 0.80
+    max_category_batches: 8
+    max_coverage_regrounds: 1
+    vision_detail: "high"
+    reasoning_effort: "low"
   qwen_local:
     base_url: ${oc.env:QWEN_IMAGE_EDIT_BASE_URL,http://127.0.0.1:18020/v1}
     api_key: ${oc.env:QWEN_IMAGE_EDIT_API_KEY,not-needed}

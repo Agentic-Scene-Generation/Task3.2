@@ -25,7 +25,7 @@ debug_rendering/
 debug_furniture_agent/
 
 # Data — datasets, assets, materials
-data/
+/data/
 materials/
 artvip/
 outputs/

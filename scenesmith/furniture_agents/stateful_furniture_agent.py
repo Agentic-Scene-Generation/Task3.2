@@ -5,12 +5,14 @@ This module implements a furniture placement workflow using persistent
 SQLiteSession agents that maintain conversation memory across interactions.
 """
 
+import json
 import logging
 import math
 import re
 import shutil
 import time
 
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +36,7 @@ from scenesmith.agent_utils.context_image_generation import (
 from scenesmith.agent_utils.context_image_quality import (
     ContextImageQualityEvaluator,
     ContextImageQualityGateConfig,
+    evaluate_context_image_deterministic,
     file_sha256,
     write_context_image_quality_report,
 )
@@ -41,6 +44,10 @@ from scenesmith.agent_utils.furniture_layout_planning import (
     build_bedroom_anchor_plan,
     format_bedroom_anchor_guidance,
     is_bedroom_scene,
+)
+from scenesmith.agent_utils.furniture_image_layout import (
+    LAYOUT_ARTIFACT_NAME,
+    build_grounded_furniture_layout_reference,
 )
 from scenesmith.agent_utils.furniture_placement_order import (
     build_furniture_placement_order_reference,
@@ -213,12 +220,18 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
 
         # Context image for designer initialization (furniture-specific).
         self.context_image_path: Path | None = None
+        # Grounding may consume a safely degraded candidate even when that image
+        # is not published to Designer as a visual reference.
+        self._grounding_candidate_path: Path | None = None
+        self._grounding_quality_mode: str = "none"
         # Lazily created only when context generation and qwen_local are enabled.
         self._qwen_context_image_editor: (
             OpenAICompatibleContextImageEditor | None
         ) = None
         # Populated per scene only when the optional feature is enabled.
         self._placement_order_reference: str = ""
+        # Independent image-derived contract; never aliases the legacy reference.
+        self._context_image_layout_reference: str = ""
 
     def _create_designer_agent(self, tools: list[FunctionTool]) -> Agent:
         """Create designer agent with tools.
@@ -420,12 +433,14 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             )
         image_path = image_editor.generate_furniture_context_image(
             reference_image_path=room_render,
-            scene_description=scene.text_description,
+            scene_description=self._context_scene_description(scene),
             width_m=scene.room_geometry.width,
             length_m=scene.room_geometry.length,
             output_path=output_path,
         )
 
+        self._grounding_candidate_path = Path(image_path)
+        self._grounding_quality_mode = "full_reference"
         console_logger.info(f"Context image saved to: {image_path}")
         return image_path
 
@@ -443,8 +458,10 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         output_path.unlink(missing_ok=True)
         output_path.with_suffix(".metadata.json").unlink(missing_ok=True)
         report_path = room_render_dir / "context_image_quality.json"
+        self._grounding_candidate_path = None
+        self._grounding_quality_mode = "none"
         report: dict[str, Any] = {
-            "schema_version": 2,
+            "schema_version": 3,
             "quality_gate": {
                 "enabled": quality_gate.enabled,
                 "max_regenerations": quality_gate.max_regenerations,
@@ -463,6 +480,9 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             "selection_mode": None,
             "selection_reason": None,
             "designer_reference_path": None,
+            "designer_visual_reference_path": None,
+            "grounding_candidate_path": None,
+            "grounding_quality_mode": "none",
         }
         evaluator = ContextImageQualityEvaluator(vlm_service=self.vlm_service)
         editor_config = getattr(image_editor, "config", None)
@@ -470,12 +490,26 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         best_candidate_path: Path | None = None
         best_attempt_number: int | None = None
         best_rank: tuple[float, int, int] | None = None
+        best_visual_passed = False
+        grounding_candidate_path: Path | None = None
+        grounding_attempt_number: int | None = None
+        grounding_quality_mode = "none"
+        grounding_rank: tuple[int, float, float, int] | None = None
+        grounding_mode_rank = {
+            "none": 0,
+            "inventory_only": 1,
+            "relations_only": 2,
+            "contract_only": 3,
+            "full_reference": 4,
+        }
 
         reasoning_config = getattr(self.cfg.openai, "reasoning_effort", None)
         verbosity_config = getattr(self.cfg.openai, "verbosity", None)
         reasoning_effort = str(
             getattr(reasoning_config, "asset_validation", "none")
         )
+        if reasoning_effort.strip().lower() == "none":
+            reasoning_effort = "low"
         verbosity = str(getattr(verbosity_config, "asset_validation", "low"))
 
         def publish_candidate(candidate_path: Path) -> None:
@@ -515,7 +549,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             try:
                 image_editor.generate_furniture_context_image(
                     reference_image_path=room_render,
-                    scene_description=scene.text_description,
+                    scene_description=self._context_scene_description(scene),
                     width_m=scene.room_geometry.width,
                     length_m=scene.room_geometry.length,
                     output_path=candidate_path,
@@ -543,6 +577,29 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 )
                 continue
 
+            # Any generated candidate remains usable for conservative inventory
+            # grounding even if the quality judge later fails.
+            unjudged_rank = (1, 0.0, 0.0, -attempt_number)
+            if grounding_rank is None or unjudged_rank > grounding_rank:
+                grounding_rank = unjudged_rank
+                grounding_candidate_path = candidate_path
+                grounding_attempt_number = attempt_number
+                grounding_quality_mode = "inventory_only"
+
+            try:
+                deterministic_result = evaluate_context_image_deterministic(
+                    room_render, candidate_path
+                )
+            except Exception as exc:
+                deterministic_result = {
+                    "passed": False,
+                    "content_nonempty": True,
+                    "reasons": [
+                        f"deterministic gate error: {type(exc).__name__}: {exc}"
+                    ],
+                }
+            attempt["deterministic_result"] = deterministic_result
+
             console_logger.info(
                 "Evaluating context image candidate %d/%d with VLM",
                 attempt_number,
@@ -553,7 +610,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 quality_result = evaluator.evaluate(
                     original_image_path=room_render,
                     candidate_image_path=candidate_path,
-                    scene_description=scene.text_description,
+                    scene_description=self._context_scene_description(scene),
                     model=str(self.cfg.openai.model),
                     min_score=quality_gate.min_score,
                     reasoning_effort=reasoning_effort,
@@ -586,41 +643,43 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             attempt["quality_result"] = quality_result.to_dict()
             attempt["fallback_eligible"] = quality_result.fallback_eligible
 
-            # Keep the highest-scoring evaluated image even when it fails a
-            # structural criterion. Structural checks determine normal
-            # acceptance, but must not leave Designer without a reference when
-            # every independently generated candidate is rejected.
-            candidate_rank = (
+            candidate_quality_mode = quality_result.grounding_quality_mode
+            if not deterministic_result.get("passed", False):
+                candidate_quality_mode = (
+                    "inventory_only"
+                    if not deterministic_result.get("content_nonempty", True)
+                    else "relations_only"
+                )
+            attempt["grounding_quality_mode"] = candidate_quality_mode
+            candidate_grounding_rank = (
+                grounding_mode_rank[candidate_quality_mode],
+                quality_result.grounding_utility_score,
                 quality_result.quality_score,
-                int(quality_result.openings_clear),
                 -attempt_number,
             )
-            if best_rank is None or candidate_rank > best_rank:
-                best_rank = candidate_rank
-                best_candidate_path = candidate_path
-                best_attempt_number = attempt_number
-                report["best_attempt"] = attempt_number
-                report["best_score"] = quality_result.quality_score
+            if grounding_rank is None or candidate_grounding_rank > grounding_rank:
+                grounding_rank = candidate_grounding_rank
+                grounding_candidate_path = candidate_path
+                grounding_attempt_number = attempt_number
+                grounding_quality_mode = candidate_quality_mode
 
-            if quality_result.passed:
-                publish_candidate(candidate_path)
-                report["final_status"] = "accepted"
-                report["accepted_attempt"] = attempt_number
-                report["selection_mode"] = "passed"
-                report["selection_reason"] = (
-                    f"candidate score {quality_result.quality_score:g} met "
-                    f"threshold {quality_gate.min_score:g}"
-                )
-                report["designer_reference_path"] = str(output_path)
-                write_context_image_quality_report(report_path, report)
-                console_logger.info(
-                    "Context image candidate %d/%d passed with score %.1f: %s",
-                    attempt_number,
-                    quality_gate.max_attempts,
+            # Only structurally safe candidates may become Designer visuals.
+            # Score every independent attempt before choosing the best one.
+            if quality_result.fallback_eligible and deterministic_result.get(
+                "passed", False
+            ):
+                candidate_rank = (
                     quality_result.quality_score,
-                    output_path,
+                    int(quality_result.openings_clear),
+                    -attempt_number,
                 )
-                return output_path
+                if best_rank is None or candidate_rank > best_rank:
+                    best_rank = candidate_rank
+                    best_candidate_path = candidate_path
+                    best_attempt_number = attempt_number
+                    best_visual_passed = quality_result.passed
+                    report["best_attempt"] = attempt_number
+                    report["best_score"] = quality_result.quality_score
 
             reasons = "; ".join(quality_result.reasons) or "score below threshold"
             report["final_status"] = (
@@ -641,14 +700,32 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
 
         if best_candidate_path is not None and best_attempt_number is not None:
             publish_candidate(best_candidate_path)
-            report["final_status"] = "best_candidate_fallback"
+            # Keep the language contract and Designer image tied to the same
+            # candidate whenever a visual reference is published.
+            selected_attempt = report["attempts"][best_attempt_number - 1]
+            grounding_candidate_path = best_candidate_path
+            grounding_attempt_number = best_attempt_number
+            grounding_quality_mode = selected_attempt.get(
+                "grounding_quality_mode", "inventory_only"
+            )
+            self._grounding_candidate_path = grounding_candidate_path
+            self._grounding_quality_mode = grounding_quality_mode
+            report["final_status"] = (
+                "accepted" if best_visual_passed else "best_candidate_fallback"
+            )
             report["accepted_attempt"] = best_attempt_number
-            report["selection_mode"] = "best_effort_fallback"
+            report["selection_mode"] = (
+                "best_scored_pass" if best_visual_passed else "best_effort_fallback"
+            )
             report["selection_reason"] = (
-                "no candidate met the normal acceptance criteria; selected the "
-                "highest-scoring evaluated candidate"
+                "scored all generated candidates and selected the highest-ranked "
+                "structurally eligible candidate"
             )
             report["designer_reference_path"] = str(output_path)
+            report["designer_visual_reference_path"] = str(output_path)
+            report["grounding_candidate_path"] = str(grounding_candidate_path)
+            report["grounding_attempt"] = grounding_attempt_number
+            report["grounding_quality_mode"] = grounding_quality_mode
             write_context_image_quality_report(report_path, report)
             console_logger.warning(
                 "Context image gate exhausted %d attempt(s); using best candidate "
@@ -660,12 +737,33 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             )
             return output_path
 
-        report["final_status"] = "no_scored_candidate"
+        self._grounding_candidate_path = grounding_candidate_path
+        self._grounding_quality_mode = grounding_quality_mode
+        generated_count = sum(
+            attempt.get("generation_status") == "success"
+            for attempt in report["attempts"]
+        )
+        scored_count = sum(
+            attempt.get("quality_status") in {"passed", "rejected"}
+            for attempt in report["attempts"]
+        )
+        report["final_status"] = (
+            "generation_error"
+            if generated_count == 0
+            else "judge_error" if scored_count == 0 else "no_eligible_candidate"
+        )
         report["selection_mode"] = "none"
         report["selection_reason"] = (
-            "no generated candidate completed quality scoring"
+            "no candidate was safe enough to publish as a Designer image; "
+            "the best generated candidate remains available for degraded grounding"
         )
         report["designer_reference_path"] = None
+        report["designer_visual_reference_path"] = None
+        report["grounding_candidate_path"] = (
+            str(grounding_candidate_path) if grounding_candidate_path else None
+        )
+        report["grounding_attempt"] = grounding_attempt_number
+        report["grounding_quality_mode"] = grounding_quality_mode
         write_context_image_quality_report(report_path, report)
         console_logger.warning(
             "Context image gate exhausted %d attempt(s) with no scored candidate; "
@@ -682,6 +780,10 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         """
         # Store everything as instance variables for closure access.
         self.scene = scene
+        self.context_image_path = None
+        self._grounding_candidate_path = None
+        self._grounding_quality_mode = "none"
+        self._context_image_layout_reference = ""
         safety_description = getattr(
             scene,
             "scene_expert_original_description",
@@ -719,6 +821,22 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                     f"Context image generation failed, continuing without it: {e}"
                 )
                 self.context_image_path = None
+
+        # Grounding is independent from visual publication. A rejected image is
+        # hidden from Designer but may still yield a safely degraded contract.
+        grounded_cfg = self.cfg.context_image_generation.get("grounded_layout")
+        if grounded_cfg is not None and self._grounding_candidate_path is not None:
+            self._context_image_layout_reference = (
+                build_grounded_furniture_layout_reference(
+                    image_path=self._grounding_candidate_path,
+                    scene_prompt=safety_description,
+                    cfg=grounded_cfg,
+                    vlm_service=self.vlm_service,
+                    model=str(self.cfg.openai.model),
+                    artifact_dir=self._grounding_candidate_path.parent,
+                    quality_mode=self._grounding_quality_mode,
+                )
+            )
 
         # Create designer, critic, and planner with tools once for this scene.
         designer_tools = self._create_designer_tools()
@@ -880,6 +998,10 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             instruction,
             self._placement_order_reference,
         )
+        instruction = append_placement_order_reference(
+            instruction,
+            self._context_image_layout_reference,
+        )
         safety_cfg = getattr(self.cfg, "furniture_safety_controller", None)
         bedroom_cfg = getattr(safety_cfg, "bedroom_layout", None)
         guidance = ""
@@ -900,6 +1022,17 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 f"{guidance}"
             )
         return super()._build_initial_design_input(instruction)
+
+    def _context_scene_description(self, scene: RoomScene) -> str:
+        """Return the user-facing scene request without internal stage metadata."""
+        original_description = (
+            getattr(scene, "scene_expert_original_description", None)
+            or scene.text_description
+        )
+        contract = getattr(self, "_layout_constraint_contract_text", "")
+        if not contract:
+            return original_description
+        return f"{original_description}\n\n{contract}"
 
     async def _request_initial_design_impl(self) -> str:
         """Run the initial designer, then repair only prompt-authorized relations.
@@ -2655,4 +2788,71 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         return {
             "reachability_context": reachability_context,
             "robot_width": robot_width,
+            "reference_adherence_context": self._reference_adherence_context(),
         }
+
+    def _reference_adherence_context(self) -> str:
+        """Build a structured, image-free reference report for later critiques."""
+        grounding_path = getattr(self, "_grounding_candidate_path", None)
+        if grounding_path is None or self.scene is None:
+            return ""
+        artifact_path = Path(grounding_path).parent / LAYOUT_ARTIFACT_NAME
+        try:
+            payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return ""
+        normalized = (payload.get("vlm") or {}).get("normalized") or {}
+        items = normalized.get("items") or []
+        if not items:
+            return ""
+
+        expected = Counter()
+        for item in items:
+            name = str(item.get("furniture_name", ""))
+            expected[infer_furniture_category(name) or name.strip().lower()] += 1
+        observed = Counter()
+        for obj in self.scene.objects.values():
+            if getattr(obj, "object_type", None) != ObjectType.FURNITURE:
+                continue
+            category = infer_furniture_object_category(
+                obj.object_id, obj.name, obj.description
+            )
+            if category:
+                observed[category] += 1
+
+        matched = sum(
+            min(count, observed.get(category, 0))
+            for category, count in expected.items()
+        )
+        missing = {
+            category: count - observed.get(category, 0)
+            for category, count in expected.items()
+            if observed.get(category, 0) < count
+        }
+        coverage = matched / max(1, sum(expected.values()))
+        audit = {
+            "schema_version": 1,
+            "source_quality_mode": payload.get("source_quality_mode", "unknown"),
+            "inventory_coverage": round(coverage, 4),
+            "expected_counts": dict(expected),
+            "observed_counts": dict(observed),
+            "missing_reference_items": missing,
+            "layout_contract": payload.get("layout_contract", ""),
+        }
+        try:
+            write_context_image_quality_report(
+                artifact_path.parent / "reference_adherence.json", audit
+            )
+        except OSError:
+            console_logger.debug("Could not persist reference adherence", exc_info=True)
+        missing_text = (
+            ", ".join(
+                f"{category} x{count}" for category, count in sorted(missing.items())
+            )
+            or "none"
+        )
+        return (
+            f"Reference quality mode: {audit['source_quality_mode']}. "
+            f"Detected-reference inventory coverage: {coverage:.0%}; missing: "
+            f"{missing_text}.\n{audit['layout_contract']}"
+        )

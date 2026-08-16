@@ -1,0 +1,295 @@
+version: 1
+status: review_draft
+
+source:
+  # Local HSSD annotation inventory inspected on 2026-08-04.
+  category_inventory: /mnt/afs-p3/task3_2/L202500266_hrk/code/hssd-annotations/data/affordance/functional_descriptions.jsonl
+  observed_synset_categories: 472
+  category_field: category
+  asset_count_field: n_objects
+  note: >-
+    Every detection phrase below is derived from one or more categories present in
+    this local HSSD inventory. WordNet suffixes such as .n.01 and underscores are
+    removed for GroundingDINO text prompts. Combined synsets are represented by a
+    single visual phrase where appropriate.
+
+summary:
+  grounding_phrases: 115
+  represented_source_synsets: 117
+  represented_hssd_asset_instances: 5060
+  grounding_dino_token_batches_at_240_token_limit: 2
+  batch_phrase_counts: [79, 36]
+  batch_token_counts: [239, 111]
+  groups:
+    seating: 23
+    beds: 9
+    tables_and_work_surfaces: 17
+    storage_and_organization: 32
+    floor_coverings: 5
+    floor_decor_and_large_instruments: 12
+    floor_appliances_and_large_equipment: 17
+
+# These are the exact phrases sent to GroundingDINO, split into semantic groups for
+# review. The runtime client may split them into smaller tokenizer-safe batches but
+# must not silently drop a phrase.
+grounding_phrases:
+  seating:
+    - armchair
+    - ball chair
+    - bar stool
+    - beanbag chair
+    - bench
+    - chair
+    - chaise longue
+    - club chair
+    - easy chair
+    - flat bench
+    - folding chair
+    - footstool
+    - highchair
+    - ottoman
+    - recliner
+    - rocking chair
+    - sofa
+    - straight chair
+    - stool
+    - storage bench
+    - swing bench
+    - swing chair
+    - swivel chair
+
+  beds:
+    - bed
+    - bunk bed
+    - cradle
+    - crib
+    - daybed
+    - double bed
+    - king bed
+    - pet bed
+    - round daybed
+
+  tables_and_work_surfaces:
+    - air hockey table
+    - bar
+    - coffee table
+    - conference table
+    - console table
+    - desk
+    - dining table
+    - dressing table
+    - end table
+    - foosball table
+    - game table
+    - kitchen island
+    - picnic table
+    - pool table
+    - table
+    - table tennis table
+    - workbench
+
+  storage_and_organization:
+    - armoire
+    - base cabinet
+    - blanket chest
+    - bookcase
+    - buffet
+    - cabinet
+    - chest
+    - chest of drawers
+    - china cabinet
+    - clothes tree
+    - clothing rack
+    - coatrack
+    - credenza
+    - drawer unit
+    - drying rack
+    - hall tree
+    - kitchen cabinet
+    - ladder bookcase
+    - luggage rack
+    - magazine rack
+    - nightstand
+    - plant stand
+    - safe
+    - shelving
+    - shoe rack
+    - sink cabinet
+    - toy box
+    - trunk
+    - tv stand
+    - umbrella stand
+    - wardrobe
+    - wine rack
+
+  floor_coverings:
+    - bath mat
+    - doormat
+    - mat
+    - picnic rug
+    - rug
+
+  floor_decor_and_large_instruments:
+    - aquarium
+    - birdcage
+    - christmas tree
+    - floor lamp
+    - floor mirror
+    - grandfather clock
+    - hammock
+    - piano
+    - plant
+    - planter
+    - potted plant
+    - room divider
+
+  floor_appliances_and_large_equipment:
+    - bicycle rack
+    - clothes dryer
+    - dishwasher
+    - electric fan
+    - exercise bike
+    - firepit
+    - gym equipment
+    - ironing board
+    - pinball machine
+    - punching bag
+    - refrigerator
+    - serving cart
+    - sewing machine
+    - space heater
+    - stove
+    - treadmill
+    - washer
+
+# Exact HSSD source categories for phrases whose normalized spelling is not a
+# one-to-one removal of the WordNet suffix.
+source_category_overrides:
+  bar: [bar.n.02]
+  chest: [chest.n.02]
+  christmas tree: [christmas_tree.n.05]
+  clothes dryer: ["clothes_dryer.n.01,drying_rack.n.01", dryer.n.01]
+  doormat: [doormat.n.02]
+  game table: ["game_table.n.01,chessboard.n.01"]
+  hammock: [hammock.n.02]
+  kitchen cabinet: [kitchen_cabinet.n.02]
+  luggage rack: [luggage_rack.n.02]
+  mat: [mat.n.01, mat.n.03]
+  ottoman: [ottoman.n.03]
+  plant: [plant.n.02]
+  planter: [planter.n.03]
+  punching bag: [punching_bag.n.02]
+  table: [table.n.02]
+  table tennis table: [table-tennis_table.n.01]
+  trunk: [trunk.n.02]
+  washer: [washer.n.03]
+
+# These categories are intentionally not sent to GroundingDINO for this feature.
+# The VLM prompt repeats the same stage boundary.
+excluded_groups:
+  architecture_and_openings:
+    - balcony
+    - beam
+    - bridge
+    - cabin
+    - door
+    - double door
+    - elevator
+    - fence
+    - fireplace
+    - garage door
+    - gate
+    - gazebo
+    - greenhouse
+    - hedge
+    - mantel
+    - pond
+    - railing
+    - roof
+    - sauna
+    - shed
+    - stairway
+    - swimming pool
+    - trellis
+    - window
+
+  wall_and_ceiling_objects:
+    - air conditioner
+    - blackboard
+    - bulletin board
+    - ceiling fan
+    - ceiling lamp
+    - chandelier
+    - curtain
+    - curtain rod
+    - hanging cabinet
+    - pendant lamp
+    - poster
+    - range hood
+    - smoke detector
+    - tapestry
+    - track lighting
+    - wall art
+    - wall clock
+    - wall decor
+    - wall hook
+    - wall lamp
+    - wall mirror
+    - wall mounted screen
+    - wall organizer
+    - wall panel
+    - wall shelf
+    - wall sign
+    - wall socket
+    - wall sticker
+    - wall unit
+    - whiteboard
+    - window blind
+    - window curtain
+    - window shade
+
+  supported_small_objects:
+    - alarm clock
+    - ashtray
+    - bag
+    - book
+    - bottle
+    - bowl
+    - camera
+    - candle
+    - cellular telephone
+    - clock
+    - coffee maker
+    - computer screen
+    - cup
+    - cushion
+    - desk calendar
+    - desk organizer
+    - flower in vase
+    - laptop
+    - magazine
+    - monitor
+    - notebook
+    - picture frame
+    - plate
+    - printer
+    - sculpture
+    - table lamp
+    - telephone
+    - television receiver
+    - throw pillow
+    - tray
+    - vase
+
+review_notes:
+  - >-
+    Plumbing fixtures such as bathtub, bidet, shower stall, sink, toilet, urinal,
+    and washbasin are omitted because they are fixed fixtures rather than movable
+    Furniture-stage assets.
+  - >-
+    Mattress, headboard, bedclothes, blanket, quilt, and cushions are omitted as
+    parts or supported accessories; GroundingDINO should detect the complete bed.
+  - >-
+    Generic labels are intentionally kept alongside HSSD subtypes, for example
+    chair plus armchair/club chair/swivel chair. Region-level NMS and the VLM
+    analyzer resolve duplicate boxes and final category names.

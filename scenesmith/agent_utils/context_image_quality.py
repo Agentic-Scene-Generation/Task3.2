@@ -9,6 +9,10 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
+
+from PIL import Image
+
 from scenesmith.prompts import prompt_manager
 from scenesmith.prompts.manager import PromptManager
 from scenesmith.prompts.registry import ImageGenerationPrompts
@@ -98,9 +102,15 @@ class ContextImageQualityResult:
     doors_windows_preserved: bool
     room_geometry_preserved: bool
     view_preserved: bool
+    rendering_style_preserved: bool
     furniture_inside_room: bool
     openings_clear: bool
     furniture_quality_ok: bool
+    architecture_score: float
+    style_score: float
+    layout_utility_score: float
+    grounding_utility_score: float
+    grounding_quality_mode: str
     reasons: tuple[str, ...]
     raw_response: dict[str, Any]
 
@@ -122,6 +132,7 @@ class ContextImageQualityResult:
                 "doors_windows_preserved",
                 "room_geometry_preserved",
                 "view_preserved",
+                "rendering_style_preserved",
                 "furniture_inside_room",
                 "openings_clear",
                 "furniture_quality_ok",
@@ -152,28 +163,64 @@ class ContextImageQualityResult:
             if reason.strip()
         )
 
+        # Furniture completeness/quality is deliberately a utility signal, not a
+        # structural invariant.  A sparse but geometrically faithful candidate can
+        # still be useful for grounding and must not be discarded here.
         structurally_eligible = all(
             criteria[name]
             for name in (
                 "doors_windows_preserved",
                 "room_geometry_preserved",
                 "view_preserved",
+                "rendering_style_preserved",
                 "furniture_inside_room",
-                "furniture_quality_ok",
             )
+        )
+        architecture_score = _optional_score(
+            payload,
+            "architecture_score",
+            (
+                100.0
+                if criteria["doors_windows_preserved"]
+                and criteria["room_geometry_preserved"]
+                and criteria["view_preserved"]
+                else 25.0
+            ),
+        )
+        style_score = _optional_score(
+            payload,
+            "style_score",
+            100.0 if criteria["rendering_style_preserved"] else 20.0,
+        )
+        layout_utility_score = _optional_score(
+            payload,
+            "layout_utility_score",
+            quality_score if criteria["furniture_quality_ok"] else quality_score * 0.6,
+        )
+        grounding_utility_score = _optional_score(
+            payload,
+            "grounding_utility_score",
+            layout_utility_score,
+        )
+        grounding_quality_mode = _grounding_quality_mode(
+            criteria=criteria,
+            grounding_utility_score=grounding_utility_score,
         )
         fallback_score_floor = min(40.0, float(min_score))
         fallback_eligible = (
             structurally_eligible and quality_score >= fallback_score_floor
         )
-        normalized_passed = (
-            structurally_eligible and quality_score >= float(min_score)
-        )
+        normalized_passed = structurally_eligible and quality_score >= float(min_score)
         return cls(
             passed=normalized_passed,
             model_passed=model_passed,
             fallback_eligible=fallback_eligible,
             quality_score=quality_score,
+            architecture_score=architecture_score,
+            style_score=style_score,
+            layout_utility_score=layout_utility_score,
+            grounding_utility_score=grounding_utility_score,
+            grounding_quality_mode=grounding_quality_mode,
             reasons=reasons,
             raw_response=payload,
             **criteria,
@@ -254,6 +301,53 @@ class ContextImageQualityEvaluator:
         )
 
 
+def evaluate_context_image_deterministic(
+    original_image_path: Path, candidate_image_path: Path
+) -> dict[str, Any]:
+    """Run cheap fail-closed checks before trusting a visual reference."""
+    with Image.open(original_image_path) as original_source:
+        original = np.asarray(original_source.convert("RGB"), dtype=np.uint8)
+    with Image.open(candidate_image_path) as candidate_source:
+        candidate = np.asarray(candidate_source.convert("RGB"), dtype=np.uint8)
+    canvas_size_ok = original.shape == candidate.shape
+    if not canvas_size_ok:
+        return {
+            "passed": False,
+            "canvas_size_ok": False,
+            "content_nonempty": bool(candidate.size),
+            "background_preserved": False,
+            "dynamic_range_ok": False,
+            "reasons": ["candidate canvas size differs from authoritative render"],
+        }
+    candidate_brightness = np.max(candidate, axis=2)
+    original_background = np.max(original, axis=2) <= 8
+    content_nonempty = float(np.mean(candidate_brightness > 8)) >= 0.01
+    if np.any(original_background):
+        background_preserved = (
+            float(np.mean(candidate_brightness[original_background] <= 16)) >= 0.90
+        )
+    else:
+        background_preserved = True
+    dynamic_range_ok = int(candidate.max()) - int(candidate.min()) >= 3
+    reasons = []
+    if not content_nonempty:
+        reasons.append("candidate is almost entirely black")
+    if not background_preserved:
+        reasons.append("authoritative black exterior/background was repainted")
+    if not dynamic_range_ok:
+        reasons.append("candidate is flat or solid-color")
+    return {
+        "passed": all(
+            (canvas_size_ok, content_nonempty, background_preserved, dynamic_range_ok)
+        ),
+        "canvas_size_ok": canvas_size_ok,
+        "content_nonempty": content_nonempty,
+        "background_preserved": background_preserved,
+        "dynamic_range_ok": dynamic_range_ok,
+        "reasons": reasons,
+    }
+
+
 def file_sha256(path: Path) -> str:
     """Return a stable SHA-256 hash for a local artifact."""
     digest = hashlib.sha256()
@@ -292,6 +386,47 @@ def _require_bool(payload: dict[str, Any], field: str) -> bool:
     if not isinstance(value, bool):
         raise ValueError(f"Context-image quality field {field!r} must be a boolean")
     return value
+
+
+def _optional_score(payload: dict[str, Any], field: str, fallback: float) -> float:
+    """Parse an optional 0-100 score while accepting legacy judge responses."""
+    value = payload.get(field, fallback)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"Context-image quality field {field!r} must be a number")
+    score = float(value)
+    if not 0.0 <= score <= 100.0:
+        raise ValueError(
+            f"Context-image quality field {field!r} must be between 0 and 100"
+        )
+    return score
+
+
+def _grounding_quality_mode(
+    *, criteria: dict[str, bool], grounding_utility_score: float
+) -> str:
+    """Choose the safest information level that may be extracted from a candidate."""
+    architecture_reliable = all(
+        criteria[name]
+        for name in (
+            "doors_windows_preserved",
+            "room_geometry_preserved",
+            "view_preserved",
+        )
+    )
+    if (
+        architecture_reliable
+        and criteria["rendering_style_preserved"]
+        and criteria["furniture_inside_room"]
+        and grounding_utility_score >= 40.0
+    ):
+        return "full_reference"
+    if architecture_reliable and criteria["furniture_inside_room"]:
+        return "contract_only"
+    if grounding_utility_score >= 40.0:
+        return "relations_only"
+    if grounding_utility_score >= 10.0:
+        return "inventory_only"
+    return "none"
 
 
 def _as_bool(value: Any, *, field: str) -> bool:

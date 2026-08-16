@@ -1,7 +1,7 @@
 name: "stateful_critic_runner_instruction"
-version: "1.0"
+version: "1.1"
 description: "Runner instruction for stateful critic agent evaluation"
-template_variables: ["physics_context", "placement_style", "reachability_context", "robot_width"]
+template_variables: ["physics_context", "placement_style", "reachability_context", "robot_width", "reference_adherence_context"]
 prompt: |
   Evaluate this furniture arrangement comprehensively. Provide both critical feedback on
   issues AND suggestions for enhancement opportunities.
@@ -89,6 +89,16 @@ prompt: |
   {% endif %}
 
   ## Orientation Validation:
+
+  {% if reference_adherence_context %}
+  ## Reference-Layout Adherence (structured; no reference image):
+  {{ reference_adherence_context }}
+
+  First enforce authoritative geometry, openings, collisions, accessibility, and
+  explicit prompt constraints. Then penalize missing reference inventory or an
+  unnecessary departure from the listed coarse groups, adjacency, wall relation,
+  and facing. Do not ask to view the original concept image.
+  {% endif %}
 
   You MUST use check_facing_tool to programmatically validate orientation for all
   furniture with directional facing requirements (appliances, seating, wardrobes,
