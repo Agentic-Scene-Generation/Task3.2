@@ -27,8 +27,10 @@ from typing import Any
 
 from scenesmith.agent_utils.room import RoomScene
 from scenesmith.scene_expert.config_utils import (
+    intent_contract_is_authoritative,
     resolve_component_flags,
     resolve_scene_expert_config,
+    should_run_sceneexpert_task_compiler,
 )
 from scenesmith.scene_expert.context_bundle import build_stage_context_bundle
 from scenesmith.scene_expert.global_planner import GlobalPlanner
@@ -1846,8 +1848,10 @@ def build_hook_runner(
         visual_score_hard_gate=ver_cfg.get("visual_score_hard_gate", False),
     )
 
-    # Compile exactly once. In ``auto`` mode the existing critic intent contract
-    # is reused as ownership evidence instead of starting a second LLM call.
+    # Compile exactly once. In ``auto`` mode, only a successfully model-validated
+    # critic intent contract replaces SceneExpert's compiler. A deterministic
+    # critic fallback is still reconciled below as stage-ownership evidence, but
+    # cannot silently suppress the independent structured TaskCompiler.
     from omegaconf import OmegaConf
 
     from scenesmith.scene_expert.task_compiler import _fallback_spec_from_prompt
@@ -1855,8 +1859,15 @@ def build_hook_runner(
     raw_task_cfg = (se_cfg.get("components", {}) or {}).get("task_compiler", {})
     task_cfg = raw_task_cfg if isinstance(raw_task_cfg, dict) else {}
     task_source = str(task_cfg.get("source", "auto") or "auto").lower()
-    use_model_task_compiler = component_flags["task_compiler"] and (
-        task_source == "sceneexpert" or (task_source == "auto" and not intent_contract)
+    authoritative_intent = intent_contract_is_authoritative(
+        intent_contract,
+        intent_trace,
+    )
+    use_model_task_compiler = should_run_sceneexpert_task_compiler(
+        component_enabled=component_flags["task_compiler"],
+        source=task_source,
+        intent_contract=intent_contract,
+        intent_trace=intent_trace,
     )
     if use_model_task_compiler:
         task_compiler = TaskCompiler(
@@ -1874,6 +1885,10 @@ def build_hook_runner(
             task_spec = _fallback_spec_from_prompt(prompt)
     else:
         task_spec = _fallback_spec_from_prompt(prompt)
+        if authoritative_intent and task_source in {"auto", "critic_intent"}:
+            task_spec = task_spec.model_copy(
+                update={"compiler_status": "ok", "compiler_failure_reason": ""}
+            )
 
     task_spec = _reconcile_task_spec_stage_ownership(task_spec, intent_contract)
 

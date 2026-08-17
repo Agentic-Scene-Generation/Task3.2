@@ -1,8 +1,10 @@
 import unittest
 
 from scenesmith.scene_expert.config_utils import (
+    intent_contract_is_authoritative,
     resolve_component_flags,
     resolve_scene_expert_config,
+    should_run_sceneexpert_task_compiler,
 )
 
 
@@ -54,6 +56,51 @@ class SceneExpertConfigUtilsTest(unittest.TestCase):
         self.assertFalse(flags["memory_writer"])
         self.assertTrue(flags["verifier"])
         self.assertTrue(flags["critic_bridge"])
+
+    def test_only_successful_intent_contract_is_authoritative(self) -> None:
+        contract = {"constraints": [{"relation": "on_top_of"}]}
+
+        self.assertTrue(
+            intent_contract_is_authoritative(contract, {"status": "ok"})
+        )
+        self.assertFalse(
+            intent_contract_is_authoritative(contract, {"status": "fallback"})
+        )
+        self.assertFalse(
+            intent_contract_is_authoritative(
+                contract,
+                {"status": "deterministic_fallback"},
+            )
+        )
+        self.assertFalse(intent_contract_is_authoritative({}, {"status": "ok"}))
+
+    def test_auto_task_compiler_takes_over_critic_fallback(self) -> None:
+        contract = {"constraints": [{"relation": "on_top_of"}]}
+
+        self.assertTrue(
+            should_run_sceneexpert_task_compiler(
+                component_enabled=True,
+                source="auto",
+                intent_contract=contract,
+                intent_trace={"status": "fallback"},
+            )
+        )
+        self.assertFalse(
+            should_run_sceneexpert_task_compiler(
+                component_enabled=True,
+                source="auto",
+                intent_contract=contract,
+                intent_trace={"status": "ok"},
+            )
+        )
+        self.assertFalse(
+            should_run_sceneexpert_task_compiler(
+                component_enabled=False,
+                source="sceneexpert",
+                intent_contract={},
+                intent_trace={},
+            )
+        )
 
 
 if __name__ == "__main__":

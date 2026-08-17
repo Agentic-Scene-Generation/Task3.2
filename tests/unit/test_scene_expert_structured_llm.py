@@ -110,6 +110,36 @@ class SceneExpertStructuredLLMTest(unittest.TestCase):
         self.assertTrue(call["messages"][0]["content"].startswith("/no_think\n"))
         self.assertEqual("json_schema", call["response_format"]["type"])
 
+    def test_qwen38_uses_structured_thinking_switch_without_text_directive(self):
+        fake = _FakeOpenAI([_response(content=json.dumps({"value": "ok"}))])
+        profile = StructuredLLMProfile(
+            thinking_mode="none",
+            max_tokens=128,
+            max_attempts=1,
+            response_format="json_schema",
+        )
+        client = SceneExpertStructuredLLMClient(
+            model="unsloth/Qwen3.8-27B-GGUF",
+            client=fake,
+            profiles={"test": profile},
+        )
+
+        result = client.complete(
+            role="test",
+            stage="startup",
+            event="smoke",
+            messages=[{"role": "user", "content": "Return JSON."}],
+            response_model=_Payload,
+            profile=profile,
+        )
+
+        self.assertTrue(result.success)
+        call = fake.calls[0]
+        self.assertFalse(
+            call["extra_body"]["chat_template_kwargs"]["enable_thinking"]
+        )
+        self.assertEqual("Return JSON.", call["messages"][0]["content"])
+
     def test_dataclass_response_uses_the_same_structured_contract(self):
         payload = {
             "critique": "STATUS: PASS\nSUMMARY: The floor plan is usable.",

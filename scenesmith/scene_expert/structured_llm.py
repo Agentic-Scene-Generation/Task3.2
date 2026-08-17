@@ -20,7 +20,11 @@ from typing import Any, Generic, Mapping, TypeVar
 
 from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 
-from scenesmith.agent_utils.thinking import prepend_text_thinking_directive
+from scenesmith.agent_utils.thinking import (
+    chat_template_kwargs_from_effort,
+    prepend_text_thinking_directive,
+    thinking_directive_from_effort,
+)
 from scenesmith.scene_expert.context_bundle import (
     LLMCallDebugRecord,
     compact_text,
@@ -240,10 +244,12 @@ class SceneExpertStructuredLLMClient:
                     previous_content,
                 )
 
-            thinking_mode = "think" if thinking_enabled else "none"
+            thinking_mode = (
+                active_profile.thinking_mode if thinking_enabled else "none"
+            )
             request_messages = self._apply_thinking_mode(
                 retry_messages,
-                thinking_enabled=thinking_enabled,
+                thinking_mode=thinking_mode,
             )
             prompt_text = json.dumps(
                 request_messages, ensure_ascii=False, default=str
@@ -260,7 +266,7 @@ class SceneExpertStructuredLLMClient:
                     profile=active_profile,
                     response_format=response_format,
                     max_tokens=max_tokens,
-                    thinking_enabled=thinking_enabled,
+                    thinking_mode=thinking_mode,
                 )
                 content, reasoning = self._response_text(response)
                 last_reasoning = reasoning
@@ -391,7 +397,7 @@ class SceneExpertStructuredLLMClient:
         profile: StructuredLLMProfile,
         response_format: str,
         max_tokens: int,
-        thinking_enabled: bool,
+        thinking_mode: str,
     ) -> Any:
         client = self._client
         if hasattr(client, "with_options"):
@@ -404,9 +410,10 @@ class SceneExpertStructuredLLMClient:
             "messages": messages,
             "temperature": profile.temperature,
             "max_tokens": max_tokens,
-            "extra_body": {
-                "chat_template_kwargs": {"enable_thinking": thinking_enabled}
-            },
+            "extra_body": chat_template_kwargs_from_effort(
+                thinking_mode,
+                model=self.model,
+            ),
         }
         if response_format == "json_schema":
             kwargs["response_format"] = {
@@ -421,12 +428,17 @@ class SceneExpertStructuredLLMClient:
             kwargs["response_format"] = {"type": "json_object"}
         return client.chat.completions.create(**kwargs)
 
-    @staticmethod
     def _apply_thinking_mode(
-        messages: list[dict[str, Any]], *, thinking_enabled: bool
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        thinking_mode: str,
     ) -> list[dict[str, Any]]:
         updated = copy.deepcopy(messages)
-        directive = "/think" if thinking_enabled else "/no_think"
+        directive = thinking_directive_from_effort(
+            thinking_mode,
+            model=self.model,
+        )
         for message in reversed(updated):
             if message.get("role") != "user":
                 continue

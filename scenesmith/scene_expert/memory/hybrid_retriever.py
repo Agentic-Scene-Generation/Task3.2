@@ -62,6 +62,7 @@ class HybridMemoryRetriever:
         self._weights = weights or HybridScoreWeights()
         self._index_cache: dict[tuple[str, str], NumpyMemoryIndex | None] = {}
         self._timing_path = Path(timing_path) if timing_path else None
+        self._require_indexes = require_indexes
         self._auto_build_indexes = auto_build_indexes
 
         if require_indexes:
@@ -286,23 +287,113 @@ class HybridMemoryRetriever:
 
     def _load_index(self, memory_type: str, stage: str) -> NumpyMemoryIndex | None:
         key = (memory_type, stage)
-        if key in self._index_cache:
-            return self._index_cache[key]
+        records = self._records_for_bank(memory_type, stage)
+        cached = self._index_cache.get(key)
+        if cached is not None and self._index_matches_records(cached, records):
+            return cached
+        if key in self._index_cache and cached is None and not records:
+            return None
+        self._index_cache.pop(key, None)
 
-        index = NumpyMemoryIndex.for_bank(self._index_dir, memory_type, stage)
-        if not index.vectors_path.exists() or not index.metadata_path.exists():
-            console_logger.warning(
-                "HybridMemoryRetriever: missing index for %s/%s under %s",
+        if not records:
+            # Empty banks are a normal cold-start state. They need no vector
+            # files and must not be reported as a degraded retrieval setup.
+            console_logger.debug(
+                "HybridMemoryRetriever: %s/%s bank is empty; skipping index",
                 memory_type,
                 stage,
-                self._index_dir,
             )
             self._index_cache[key] = None
             return None
 
+        index = NumpyMemoryIndex.for_bank(self._index_dir, memory_type, stage)
+        if not index.vectors_path.exists() or not index.metadata_path.exists():
+            index = self._build_runtime_index_if_enabled(memory_type, stage)
+            if index is None:
+                return self._handle_unavailable_index(
+                    memory_type,
+                    stage,
+                    reason="missing",
+                )
+
         index.load()
+        if not self._index_matches_records(index, records):
+            rebuilt = self._build_runtime_index_if_enabled(memory_type, stage)
+            if rebuilt is None:
+                return self._handle_unavailable_index(
+                    memory_type,
+                    stage,
+                    reason="stale",
+                )
+            rebuilt.load()
+            if not self._index_matches_records(rebuilt, records):
+                return self._handle_unavailable_index(
+                    memory_type,
+                    stage,
+                    reason="stale after rebuild",
+                )
+            index = rebuilt
+
         self._index_cache[key] = index
         return index
+
+    def _records_for_bank(
+        self,
+        memory_type: str,
+        stage: str,
+    ) -> list[MemoryRecord]:
+        if memory_type == "success":
+            records: list[MemoryRecord] = self._store.success_cases
+        elif memory_type == "failure":
+            records = self._store.failure_cases
+        elif memory_type == "skill":
+            records = self._store.skills
+        else:
+            raise ValueError(f"Unknown memory type: {memory_type}")
+        return [record for record in records if record.stage == stage]
+
+    @staticmethod
+    def _index_matches_records(
+        index: NumpyMemoryIndex,
+        records: list[MemoryRecord],
+    ) -> bool:
+        if index.vectors is None:
+            index.load()
+        indexed_ids = [str(item.get("memory_id", "")) for item in index.metadata]
+        record_ids = [_record_id(record) for record in records]
+        return indexed_ids == record_ids
+
+    def _build_runtime_index_if_enabled(
+        self,
+        memory_type: str,
+        stage: str,
+    ) -> NumpyMemoryIndex | None:
+        if not self._auto_build_indexes:
+            return None
+        self._auto_build_missing_indexes([(memory_type, stage)])
+        self._index_cache.pop((memory_type, stage), None)
+        index = NumpyMemoryIndex.for_bank(self._index_dir, memory_type, stage)
+        if not index.vectors_path.exists() or not index.metadata_path.exists():
+            return None
+        return index
+
+    def _handle_unavailable_index(
+        self,
+        memory_type: str,
+        stage: str,
+        *,
+        reason: str,
+    ) -> None:
+        message = (
+            f"HybridMemoryRetriever: {reason} index for {memory_type}/{stage} "
+            f"under {self._index_dir}. Run scripts/build_memory_index.py or set "
+            "scene_expert.memory.index.auto_build_missing=true."
+        )
+        if self._require_indexes:
+            raise FileNotFoundError(message)
+        console_logger.warning(message)
+        self._index_cache[(memory_type, stage)] = None
+        return None
 
     def _record_from_metadata(
         self,

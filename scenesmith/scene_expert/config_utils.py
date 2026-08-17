@@ -134,3 +134,37 @@ def scene_expert_component_enabled(cfg_dict: Mapping[str, Any], component: str) 
             f"{', '.join(_COMPONENT_NAMES)}"
         )
     return resolve_component_flags(cfg_dict)[component]
+
+
+def intent_contract_is_authoritative(
+    contract: Mapping[str, Any] | None,
+    trace: Mapping[str, Any] | None,
+) -> bool:
+    """Return whether critic intent is safe to reuse as the task source.
+
+    SceneBenchmark deliberately returns a valid deterministic contract when its
+    model compiler fails.  That contract remains useful for stage ownership,
+    but it must not suppress SceneExpert's independent TaskCompiler in ``auto``
+    mode.  Only a model-validated ``ok`` trace is authoritative for that reuse.
+    """
+    if not contract or not trace:
+        return False
+    return str(trace.get("status") or "").strip().lower() == "ok"
+
+
+def should_run_sceneexpert_task_compiler(
+    *,
+    component_enabled: bool,
+    source: str,
+    intent_contract: Mapping[str, Any] | None,
+    intent_trace: Mapping[str, Any] | None,
+) -> bool:
+    """Resolve TaskCompiler ownership without trusting critic fallbacks."""
+    normalized_source = str(source or "auto").strip().lower()
+    return bool(component_enabled) and (
+        normalized_source == "sceneexpert"
+        or (
+            normalized_source == "auto"
+            and not intent_contract_is_authoritative(intent_contract, intent_trace)
+        )
+    )
