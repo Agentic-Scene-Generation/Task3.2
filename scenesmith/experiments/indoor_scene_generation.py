@@ -2475,17 +2475,6 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                     # Build HouseScene from generated rooms.
                     house_scene = HouseScene(layout=house_layout, rooms=rooms)
 
-                    # SceneExpert: finalize trace + memory update after all rooms done.
-                    if scene_expert_hooks:
-                        verify_report = scene_expert_hooks.finalize(
-                            final_scene_path=str(scene_dir / "combined_house")
-                        )
-                        if not verify_report.deterministic_pass:
-                            raise RuntimeError(
-                                "SceneExpert deterministic verification failed; "
-                                "refusing to mark scene successful"
-                            )
-
                     # Assemble house with intermediate snapshots filtered by object type.
                     # Each snapshot includes objects from completed stages only.
                     # Note: Thin coverings keep their agent's object_type (FURNITURE,
@@ -2519,6 +2508,20 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                         house_scene.assemble(
                             cfg=cfg_dict, output_name=name, include_object_types=types
                         )
+
+                    # Match main's ownership order: persist every canonical
+                    # SceneSmith artifact before SceneExpert evaluates the final
+                    # scene. A wrapper-level quality rejection must not erase the
+                    # .blend evidence needed by the critic and render pipeline.
+                    if scene_expert_hooks:
+                        verify_report = scene_expert_hooks.finalize(
+                            final_scene_path=str(scene_dir / "combined_house")
+                        )
+                        if not verify_report.deterministic_pass:
+                            raise RuntimeError(
+                                "SceneExpert deterministic verification failed; "
+                                "refusing to mark scene successful"
+                            )
 
                     console_logger.info(
                         "Scene generation completed successfully in "
