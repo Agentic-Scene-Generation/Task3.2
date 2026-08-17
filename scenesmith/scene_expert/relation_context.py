@@ -138,6 +138,21 @@ def _zone_area_for(zone: str) -> float:
     return 4.0
 
 
+def _reservation_room_scope(room_type: str) -> str:
+    """Return a room-type scope that can be matched against generated rooms.
+
+    Task compilation uses a comma-separated label when a prompt names several
+    rooms. That label describes the whole scene, not an individual RoomSpec, so
+    using it as an exact reservation selector makes the capacity gate
+    unsatisfiable. An empty selector scopes the reservation to all placed rooms;
+    single-room tasks retain their precise room-type check.
+    """
+    value = str(room_type or "").strip()
+    if any(separator in value for separator in (",", ";", "/", "&")):
+        return ""
+    return value
+
+
 def _explicit_window_count(constraints: list[dict[str, Any]]) -> int:
     counts: list[int] = []
     for constraint in constraints:
@@ -205,6 +220,7 @@ def _floor_plan_manifest(
     enabled: bool,
 ) -> FloorPlanReservationManifest:
     reservations: list[FloorPlanReservation] = []
+    room_scope = _reservation_room_scope(task_spec.room_type)
     for index, raw in enumerate(_floor_plan_reservations(constraints)):
         subject = raw.get("subjects") or {}
         target = raw.get("targets") or {}
@@ -215,7 +231,7 @@ def _floor_plan_manifest(
                 reservation_id=source_id or f"wall_anchor__{category}__{index}",
                 kind="wall_anchor",
                 source_constraint_ids=[source_id] if source_id else [],
-                room_type=task_spec.room_type,
+                room_type=room_scope,
                 subject_categories=[category],
                 target_categories=[canonical_selector_category(target.get("category"))],
                 wall_role=str(target.get("role") or "").strip().lower(),
@@ -223,7 +239,7 @@ def _floor_plan_manifest(
                 count=_selector_count(subject),
             )
         )
-    reservations.extend(_media_pair_reservations(constraints, task_spec.room_type))
+    reservations.extend(_media_pair_reservations(constraints, room_scope))
     for index, zone in enumerate(task_spec.functional_zones):
         canonical = canonical_selector_category(zone)
         if not canonical:
@@ -232,7 +248,7 @@ def _floor_plan_manifest(
             FloorPlanReservation(
                 reservation_id=f"functional_zone__{canonical}__{index}",
                 kind="functional_zone",
-                room_type=task_spec.room_type,
+                room_type=room_scope,
                 subject_categories=[canonical],
                 min_zone_area_m2=_zone_area_for(canonical),
             )

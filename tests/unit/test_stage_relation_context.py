@@ -195,6 +195,25 @@ def test_floor_plan_manifest_projects_media_zones_and_explicit_windows() -> None
     )
 
 
+def test_floor_plan_manifest_scopes_multi_room_capacity_to_all_rooms() -> None:
+    task_spec = _task_spec(
+        room_type="living room, dining room, kitchen",
+        functional_zones=["seating_zone", "dining_zone", "kitchen_zone"],
+    )
+
+    context = StageRelationProjector(
+        floor_plan_reservation_gate_enabled=True,
+    ).project(
+        stage="floor_plan",
+        task_spec=task_spec,
+        intent_contract=None,
+    )
+
+    manifest = context.floor_plan_manifest
+    assert manifest is not None
+    assert {reservation.room_type for reservation in manifest.reservations} == {""}
+
+
 def test_floor_plan_brief_reserves_opening_free_wall_segments() -> None:
     context = HarnessContext(
         stage="floor_plan",

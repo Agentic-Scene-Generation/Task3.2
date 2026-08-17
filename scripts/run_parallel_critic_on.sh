@@ -298,6 +298,11 @@ SCENE_WORKERS_PER_PROCESS="${SCENE_WORKERS_PER_PROCESS:-1}"
 # Native Drake/solver crashes cannot be caught in-process.  Keep two clean
 # process retries by default; only failures classified as transient retry.
 SCENE_RETRY_ATTEMPTS="${SCENE_RETRY_ATTEMPTS:-2}"
+# A complete shared base is required before critic branches can start.  Native
+# rendering services occasionally disconnect near floor-plan export, so retry
+# only failed shared-base scenes once in fresh, serialized batch processes.
+SHARED_BASE_BATCH_RETRIES="${SHARED_BASE_BATCH_RETRIES:-1}"
+SHARED_BASE_RETRY_PARALLELISM="${SHARED_BASE_RETRY_PARALLELISM:-1}"
 CRITIC_PROBE_PARALLEL="${CRITIC_PROBE_PARALLEL:-true}"
 # A Qwen llama-server already reserves tens of GiB in the ACP cgroup.  Keep
 # one Python scene process by default; callers can opt into more concurrency
@@ -510,6 +515,11 @@ if [[ ! "$SCENE_RETRY_ATTEMPTS" =~ ^[0-9]+$ ]]; then
     echo "ERROR: SCENE_RETRY_ATTEMPTS must be a non-negative integer, got '$SCENE_RETRY_ATTEMPTS'" >&2
     exit 1
 fi
+if [[ ! "$SHARED_BASE_BATCH_RETRIES" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: SHARED_BASE_BATCH_RETRIES must be a non-negative integer, got '$SHARED_BASE_BATCH_RETRIES'" >&2
+    exit 1
+fi
+require_positive_integer SHARED_BASE_RETRY_PARALLELISM "$SHARED_BASE_RETRY_PARALLELISM"
 require_positive_integer CRITIC_PROBE_INNER_PARALLELISM "$CRITIC_PROBE_INNER_PARALLELISM"
 require_positive_integer CRITIC_PROBE_MAX_SAFE_INNER_PARALLELISM "$CRITIC_PROBE_MAX_SAFE_INNER_PARALLELISM"
 require_positive_integer CRITIC_PROBE_PORT_BASE "$CRITIC_PROBE_PORT_BASE"
@@ -922,6 +932,7 @@ export SCENEEXPERT_EXPERIMENT="$EXPERIMENT"
 export PYTHON_BIN MODEL_NAME RUN_ID OUTPUT_ROOT CASE_SET CASE_SET_IDS
 export SCENEEVAL_SIZE SCENEEVAL_ANNOTATIONS DIFFICULTY_SELECTION
 export SCENE_BATCH_SIZE SCENE_WORKERS_PER_PROCESS SCENE_RETRY_ATTEMPTS
+export SHARED_BASE_BATCH_RETRIES SHARED_BASE_RETRY_PARALLELISM
 export CRITIC_PROBE_PARALLEL CRITIC_PROBE_INNER_PARALLELISM
 export CRITIC_PROBE_MAX_SAFE_INNER_PARALLELISM CRITIC_PROBE_ALLOW_UNSAFE_PARALLELISM
 export CRITIC_PROBE_PORT_BASE CRITIC_PROBE_PORT_BLOCK_SIZE
@@ -1027,6 +1038,7 @@ fi
 echo "batch size: $SCENE_BATCH_SIZE"
 echo "parallel batches: $CRITIC_PROBE_PARALLEL ($CRITIC_PROBE_INNER_PARALLELISM)"
 echo "scene retries after transient/native failure: $SCENE_RETRY_ATTEMPTS"
+echo "shared-base failed-batch recovery attempts: $SHARED_BASE_BATCH_RETRIES (parallelism $SHARED_BASE_RETRY_PARALLELISM)"
 echo "port allocation: base=$CRITIC_PROBE_PORT_BASE block=$CRITIC_PROBE_PORT_BLOCK_SIZE"
 echo "continue after batch failure: $CRITIC_PROBE_CONTINUE_ON_BATCH_FAILURE"
 echo "final-view parallelism: $CRITIC_PROBE_FINAL_VIEW_PARALLELISM"
@@ -1640,6 +1652,79 @@ run_batches() {
     fi
 }
 
+shared_base_incomplete_scene_ids() {
+    local index case_id critic_goal prompt batch_index status_path status
+    local selected=0 ids=""
+
+    for index in "${!CASES[@]}"; do
+        IFS='|' read -r case_id critic_goal prompt <<< "${CASES[$index]}"
+        if ! case_selected "$case_id"; then continue; fi
+        if [ "$MAX_CASES" -gt 0 ] && [ "$selected" -ge "$MAX_CASES" ]; then break; fi
+        selected=$((selected + 1))
+        batch_index=$((index / SCENE_BATCH_SIZE + 1))
+        status_path="$OUTPUT_ROOT/shared_base/$(printf 'batch_%03d' "$batch_index")/hydra/scene_$(printf '%03d' "$index")/scene_status.json"
+        status=""
+        if [ -f "$status_path" ]; then
+            status=$(sed -n 's/^[[:space:]]*"status"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$status_path" | head -n 1)
+        fi
+        case "$status" in
+            completed|completed_with_quality_issues) ;;
+            *)
+                if [ -n "$ids" ]; then ids+=","; fi
+                ids+="$case_id"
+                ;;
+        esac
+    done
+    printf '%s' "$ids"
+}
+
+run_shared_base_with_recovery() {
+    local attempt failed_scene_ids=""
+    local saved_scene_selection="$SCENE_SELECTION"
+    local saved_scene_selection_explicit="$SCENE_SELECTION_EXPLICIT"
+    local saved_max_cases="$MAX_CASES"
+    local saved_parallelism="$CRITIC_PROBE_INNER_PARALLELISM"
+    local saved_parallel="$CRITIC_PROBE_PARALLEL"
+
+    if run_batches shared_base; then
+        return 0
+    fi
+
+    for ((attempt = 1; attempt <= SHARED_BASE_BATCH_RETRIES; attempt++)); do
+        failed_scene_ids=$(shared_base_incomplete_scene_ids)
+        if [ -z "$failed_scene_ids" ]; then
+            echo "shared-base batches reported an error but every selected scene has a completion marker; continuing"
+            return 0
+        fi
+        echo "WARNING: retrying incomplete shared-base scenes (attempt $attempt/$SHARED_BASE_BATCH_RETRIES) with parallelism $SHARED_BASE_RETRY_PARALLELISM: $failed_scene_ids" >&2
+        SCENE_SELECTION="$failed_scene_ids"
+        SCENE_SELECTION_EXPLICIT="true"
+        MAX_CASES=0
+        CRITIC_PROBE_INNER_PARALLELISM="$SHARED_BASE_RETRY_PARALLELISM"
+        CRITIC_PROBE_PARALLEL="true"
+        if run_batches shared_base; then
+            :
+        fi
+        failed_scene_ids=$(shared_base_incomplete_scene_ids)
+        if [ -z "$failed_scene_ids" ]; then
+            SCENE_SELECTION="$saved_scene_selection"
+            SCENE_SELECTION_EXPLICIT="$saved_scene_selection_explicit"
+            MAX_CASES="$saved_max_cases"
+            CRITIC_PROBE_INNER_PARALLELISM="$saved_parallelism"
+            CRITIC_PROBE_PARALLEL="$saved_parallel"
+            return 0
+        fi
+    done
+
+    SCENE_SELECTION="$saved_scene_selection"
+    SCENE_SELECTION_EXPLICIT="$saved_scene_selection_explicit"
+    MAX_CASES="$saved_max_cases"
+    CRITIC_PROBE_INNER_PARALLELISM="$saved_parallelism"
+    CRITIC_PROBE_PARALLEL="$saved_parallel"
+    echo "ERROR: shared-base recovery exhausted; incomplete scene IDs: $failed_scene_ids" >&2
+    return 1
+}
+
 if [ "${1:-}" = "--internal-run-batch" ]; then
     shift
     run_batch "$@"
@@ -1648,9 +1733,7 @@ fi
 
 run_exit_code=0
 if [ "$GENERATE_SHARED_BASE" = "true" ]; then
-    if run_batches shared_base; then
-        :
-    else
+    if ! run_shared_base_with_recovery; then
         run_exit_code=$?
     fi
 fi
@@ -1672,6 +1755,8 @@ if [ "$DRY_RUN" = "false" ]; then
         --run-id "$RUN_ID" \
         --process-exit-code "$run_exit_code"; then
         echo "WARNING: run metrics collection failed; generation artifacts are unchanged" >&2
+    fi
+fi
     fi
 fi
 if [ "$CRITIC_PROBE_RENDER_FINAL_VIEWS" = "true" ] \

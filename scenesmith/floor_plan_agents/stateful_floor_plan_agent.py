@@ -728,12 +728,17 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
             self.layout, self.reservation_manifest
         )
         if not reservation_validation.passed:
+            await self._repair_reservation_validation(reservation_validation)
+            reservation_validation = validate_floor_plan_reservations(
+                self.layout, self.reservation_manifest
+            )
+        if not reservation_validation.passed:
             issue_types = [
                 str(issue.get("issue_type") or "reservation_failure")
                 for issue in reservation_validation.issues
             ]
             raise RuntimeError(
-                "Floor plan failed deterministic reservation validation: "
+                "Floor plan failed deterministic reservation validation after repair: "
                 + ", ".join(issue_types)
             )
 
@@ -760,6 +765,41 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
             self._geometry_cache = None
 
         return self.layout
+
+    async def _repair_reservation_validation(self, validation: Any) -> None:
+        """Give the designer one bounded chance to repair hard layout constraints.
+
+        The planner normally asks the designer to validate before it completes, but
+        a final checkpoint reset can restore an otherwise attractive layout that
+        no longer satisfies a future-capacity reservation.  Surface the exact
+        deterministic failures while the designer still has the live tool state,
+        rather than discarding the entire scene at export time.
+        """
+        issue_details = json.dumps(validation.issues, sort_keys=True)
+        instruction = (
+            "A deterministic floor-plan reservation gate failed after the final "
+            "review. Repair every issue below now. These are hard requirements; "
+            "do not merely describe a fix. Use render_ascii() to identify wall "
+            "labels, resize_room() when a functional-zone area is too small, and "
+            "add_door() on an exterior wall when an exterior entrance is missing. "
+            "If an area issue reports zero available area for a required room type, "
+            "regenerate the complete room specification with generate_room_specs() "
+            "so every required canonical room type exists. Never combine explicitly "
+            "required rooms into a compound room type; use separate room specs and "
+            "open connections when an open-plan layout is needed. Then recreate its "
+            "doors and windows. "
+            "Preserve all requested rooms and their connections. You MUST call "
+            "validate() after the edits and continue until its future_capacity and "
+            "opening_budget fields are both ok.\n\n"
+            f"Exact deterministic failures: {issue_details}\n\n"
+            f"{format_floor_plan_critic_context(self.layout)}"
+        )
+        console_logger.warning(
+            "Final floor-plan reservation validation failed; requesting bounded "
+            "designer repair: %s",
+            issue_details,
+        )
+        await self._request_design_change_impl(instruction)
 
     def _generate_all_room_geometries(self, output_dir: Path) -> None:
         """Generate geometry for rooms missing from the layout cache.
@@ -817,6 +857,10 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
         save_directive_as_blend(
             directive_path=directive_path,
             output_path=blend_path,
+            blender_server_host=self.cfg.rendering.blender_server_host,
+            blender_server_port_range=tuple(
+                self.cfg.rendering.blender_server_port_range
+            ),
             scene_dir=house_dir,
         )
         console_logger.info(f"Floor plan .blend saved to: {blend_path}")

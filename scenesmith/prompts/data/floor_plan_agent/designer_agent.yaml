@@ -102,6 +102,16 @@ prompt: |
   Call `generate_room_specs()` with room specifications.
   {% if mode == "house" %}
 
+  **Distinct Named Rooms Must Stay Distinct**:
+  When the house description explicitly names multiple rooms, create one room
+  spec for each named room using its canonical type (for example,
+  `living_room`, `dining_room`, and `kitchen`). Do not collapse them into a
+  compound type such as `living_dining_kitchen`, even when the requested space
+  is open-plan. Use `add_open_connection()` after creation to make distinct
+  rooms flow together. Later furniture capacity and wall reservations match
+  canonical room types, so a compound label makes those hard requirements
+  impossible to verify.
+
   **CRITICAL - Room Prompt Requirements**:
 
   Each room's "prompt" field MUST include ALL of the following:
