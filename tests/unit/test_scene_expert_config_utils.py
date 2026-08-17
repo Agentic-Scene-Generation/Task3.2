@@ -47,9 +47,26 @@ class SceneExpertConfigUtilsTest(unittest.TestCase):
         flags = resolve_component_flags(self.cfg)
 
         self.assertTrue(flags["fast_memory_retrieval"])
+        self.assertTrue(flags["harness_budget"])
         self.assertFalse(flags["memory_writer"])
         self.assertTrue(flags["verifier"])
         self.assertTrue(flags["critic_bridge"])
+
+    def test_every_component_can_be_disabled_independently(self) -> None:
+        inherited = resolve_component_flags(self.cfg)
+        self.cfg["experiment"]["scene_expert"]["components"] = {
+            name: {"enabled": False} for name in inherited
+        }
+
+        self.assertFalse(any(resolve_component_flags(self.cfg).values()))
+
+    def test_master_switch_dominates_explicit_component_enable(self) -> None:
+        self.cfg["experiment"]["scene_expert"].update(
+            enabled=False,
+            components={"memory_writer": {"enabled": True}},
+        )
+
+        self.assertFalse(any(resolve_component_flags(self.cfg).values()))
 
 
 if __name__ == "__main__":

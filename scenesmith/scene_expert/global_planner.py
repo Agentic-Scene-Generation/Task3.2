@@ -1084,16 +1084,17 @@ class GlobalPlanner:
                     ),
                 ]
 
-        parts += [
-            "",
-            "## Retrieved Memory",
-            memory_text,
-            "",
-            f"## Budget: max_designer_iterations={context.stage_budget.max_designer_iterations}, "
-            f"max_repair_steps={context.stage_budget.max_repair_steps}",
-            "",
-            "Generate the StageBrief JSON for the designer agent.",
-        ]
+        parts += ["", "## Retrieved Memory", memory_text]
+        if (
+            context.stage_budget.max_designer_iterations > 0
+            or context.stage_budget.max_repair_steps > 0
+        ):
+            parts += [
+                "",
+                f"## Budget: max_designer_iterations={context.stage_budget.max_designer_iterations}, "
+                f"max_repair_steps={context.stage_budget.max_repair_steps}",
+            ]
+        parts += ["", "Generate the StageBrief JSON for the designer agent."]
 
         return "\n".join(parts)
 

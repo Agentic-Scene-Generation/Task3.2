@@ -947,6 +947,44 @@ COMMON_ARGS=(
     "manipuland_agent.asset_manager.hssd.rendered_asset_choice.enabled=${HSSD_RENDERED_ASSET_CHOICE}"
 )
 
+# Optional SceneExpert ablation controls. An unset variable adds no Hydra
+# override, preserving the selected experiment and main's existing defaults.
+# ``++`` supports both keys inherited from the root SceneExpert config and keys
+# absent from an experiment-specific override block.
+append_sceneexpert_component_override() {
+    local env_name="$1" component="$2" raw normalized
+    raw="${!env_name:-}"
+    if [ -z "$raw" ]; then
+        return 0
+    fi
+    case "${raw,,}" in
+        1|true|yes|on) normalized="true" ;;
+        0|false|no|off) normalized="false" ;;
+        *)
+            echo "ERROR: $env_name must be a boolean, got '$raw'" >&2
+            exit 2
+            ;;
+    esac
+    COMMON_ARGS+=(
+        "++experiment.scene_expert.components.${component}.enabled=${normalized}"
+    )
+    echo "SceneExpert component override: ${component}=${normalized}"
+}
+
+append_sceneexpert_component_override SCENEEXPERT_COMPONENT_TASK_COMPILER_ENABLED task_compiler
+append_sceneexpert_component_override SCENEEXPERT_COMPONENT_HARNESS_ENABLED harness
+append_sceneexpert_component_override SCENEEXPERT_COMPONENT_HARNESS_BUDGET_ENABLED harness_budget
+append_sceneexpert_component_override SCENEEXPERT_COMPONENT_GLOBAL_PLANNER_ENABLED global_planner
+append_sceneexpert_component_override SCENEEXPERT_COMPONENT_PROMPT_INJECTION_ENABLED prompt_injection
+append_sceneexpert_component_override SCENEEXPERT_COMPONENT_FAST_MEMORY_RETRIEVAL_ENABLED fast_memory_retrieval
+append_sceneexpert_component_override SCENEEXPERT_COMPONENT_MEMORY_WRITER_ENABLED memory_writer
+append_sceneexpert_component_override SCENEEXPERT_COMPONENT_STAGE_WORKING_MEMORY_ENABLED stage_working_memory
+append_sceneexpert_component_override SCENEEXPERT_COMPONENT_VERIFIER_ENABLED verifier
+append_sceneexpert_component_override SCENEEXPERT_COMPONENT_REPAIR_ENABLED repair
+append_sceneexpert_component_override SCENEEXPERT_COMPONENT_CRITIC_BRIDGE_ENABLED critic_bridge
+append_sceneexpert_component_override SCENEEXPERT_COMPONENT_TRACE_ENABLED trace
+append_sceneexpert_component_override SCENEEXPERT_COMPONENT_STRUCTURED_LLM_ENABLED structured_llm
+
 if [ "$HSSD_RETRIEVAL_BACKEND" = "embedding" ]; then
     # Do not rely on paths.hssd_data_dir for the zvec index: on ACP hosts it
     # resolves through the protected /mnt/afs FUSE mount. Explicitly override

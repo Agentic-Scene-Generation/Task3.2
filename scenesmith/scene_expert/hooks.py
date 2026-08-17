@@ -34,7 +34,7 @@ from scenesmith.scene_expert.config_utils import (
 )
 from scenesmith.scene_expert.context_bundle import build_stage_context_bundle
 from scenesmith.scene_expert.global_planner import GlobalPlanner
-from scenesmith.scene_expert.harness import Harness
+from scenesmith.scene_expert.harness import Harness, RepairDecision
 from scenesmith.scene_expert.memory.retriever import MemoryRetriever
 from scenesmith.scene_expert.memory.schemas import FailureCase, SuccessCase
 from scenesmith.scene_expert.memory.store import FastMemoryStore
@@ -638,6 +638,7 @@ class SceneExpertHookRunner:
         stage_verifier: StageVerifier,
         full_verifier: FullVerifier,
         repair_controller: RepairController,
+        trace_logger: TraceLogger | None,
         memory_writer: MemoryWriter | None,
         memory_store: FastMemoryStore | None,
         qwen_model: str,
@@ -667,6 +668,7 @@ class SceneExpertHookRunner:
         self._stage_verifier = stage_verifier
         self._full_verifier = full_verifier
         self._repair_controller = repair_controller
+        self._trace_logger = trace_logger
         self._memory_writer = memory_writer
         self._memory_store = memory_store
         self._qwen_model = qwen_model
@@ -683,24 +685,9 @@ class SceneExpertHookRunner:
             self._room_start_stage
         )
 
-        self._trace_logger = TraceLogger(
-            output_dir=str(output_dir),
-            scene_index=scene_id,
-            prompt=prompt,
-            experiment_name=experiment_name,
-            config_hash=config_hash,
-            task_spec=task_spec.model_dump(mode="json", exclude_none=True),
-            task_spec_status={
-                "source": (
-                    "fallback" if task_spec.compiler_status == "degraded" else "llm"
-                ),
-                "degraded": task_spec.compiler_status == "degraded",
-            },
-            code_provenance=collect_code_provenance(),
-        )
-        if self._component_enabled("trace"):
+        if self._trace_enabled():
             self._trace_logger.record_task_compiler(task_spec, task_compiler_trace)
-        if self._intent_trace and self._component_enabled("trace"):
+        if self._intent_trace and self._trace_enabled():
             self._trace_logger.record_intent_compiler(self._intent_trace)
         self._stage_reports: list[StageVerifyReport] = []
         self._completed_stages: list[str] = list(self._stage_order_baseline)
@@ -758,7 +745,8 @@ class SceneExpertHookRunner:
                 "Cannot accept degraded stage "
                 f"{stage!r}; current stage is {self._current_stage!r}"
             )
-        self._harness.validate_stage_order(self._completed_stages, stage)
+        if self._component_enabled("harness"):
+            self._harness.validate_stage_order(self._completed_stages, stage)
         self._completed_stages.append(stage)
         self._pending_stage_repairs.pop(stage, None)
         console_logger.warning(
@@ -768,6 +756,10 @@ class SceneExpertHookRunner:
     def _component_enabled(self, name: str) -> bool:
         """Return one resolved feature gate for this run."""
         return bool(self._component_flags.get(name, False))
+
+    def _trace_enabled(self) -> bool:
+        """Return whether trace output is enabled and initialized."""
+        return self._component_enabled("trace") and self._trace_logger is not None
 
     def _build_execution_evidence(self, prompt: str) -> StageExecutionEvidence:
         """Capture proof that optional context crossed the designer boundary."""
@@ -822,7 +814,7 @@ class SceneExpertHookRunner:
         last_hard_issues: list[str] | None = None,
     ) -> None:
         """Save a structured pre-LLM context snapshot for audit/debug."""
-        if not self._component_enabled("trace"):
+        if not self._trace_enabled():
             return
         try:
             bundle = build_stage_context_bundle(
@@ -876,7 +868,7 @@ class SceneExpertHookRunner:
         error: str = "",
     ) -> None:
         """Record pre-stage memory retrieval timing even for empty/fallback stores."""
-        if not self._component_enabled("trace"):
+        if not self._trace_enabled():
             return
         try:
             record = {
@@ -1200,7 +1192,7 @@ class SceneExpertHookRunner:
             event="pre_floor_plan",
             prompt=enhanced,
         )
-        if self._component_enabled("trace"):
+        if self._trace_enabled():
             self._trace_logger.save_stage_context(
                 stage=stage,
                 memory_pack=self._current_memory_pack,
@@ -1261,8 +1253,15 @@ class SceneExpertHookRunner:
                     f"[SceneExpert] Stage {stage} FAILED verification: "
                     f"issues={[i.issue_type for i in verify_report.issues]}"
                 )
-                decision = self._harness.decide_repair(stage, verify_report)
-                if decision.should_repair and self._component_enabled("repair"):
+                if self._component_enabled("repair"):
+                    decision = self._harness.decide_repair(stage, verify_report)
+                else:
+                    decision = RepairDecision(
+                        should_repair=False,
+                        strategy="skip",
+                        reason="Repair disabled by component gate",
+                    )
+                if decision.should_repair:
                     repair_result = self._repair_controller.repair(
                         repair_type=decision.strategy,
                         stage=stage,
@@ -1293,7 +1292,7 @@ class SceneExpertHookRunner:
             scene_state_path=str(scene_dir),
             repair_actions=repair_actions,
         )
-        if self._component_enabled("trace"):
+        if self._trace_enabled():
             self._trace_logger.log_stage(
                 stage=stage,
                 memory_pack=self._current_memory_pack,
@@ -1495,7 +1494,7 @@ class SceneExpertHookRunner:
         self._current_execution_evidence = self._build_execution_evidence(
             scene.text_description
         )
-        if self._component_enabled("trace"):
+        if self._trace_enabled():
             self._trace_logger.save_stage_context(
                 stage=stage,
                 memory_pack=self._current_memory_pack,
@@ -1559,9 +1558,16 @@ class SceneExpertHookRunner:
                     f"[SceneExpert] Stage {stage} FAILED verification: "
                     f"issues={[i.issue_type for i in verify_report.issues]}"
                 )
-                decision = self._harness.decide_repair(stage, verify_report)
+                if self._component_enabled("repair"):
+                    decision = self._harness.decide_repair(stage, verify_report)
+                else:
+                    decision = RepairDecision(
+                        should_repair=False,
+                        strategy="skip",
+                        reason="Repair disabled by component gate",
+                    )
                 result_reason = decision.reason
-                if decision.should_repair and self._component_enabled("repair"):
+                if decision.should_repair:
                     repair_result = self._repair_controller.repair(
                         repair_type=decision.strategy,
                         stage=stage,
@@ -1618,7 +1624,7 @@ class SceneExpertHookRunner:
             scene_state_path=str(room_dir),
             repair_actions=repair_actions,
         )
-        if self._component_enabled("trace"):
+        if self._trace_enabled():
             self._trace_logger.log_stage(
                 stage=stage,
                 memory_pack=self._current_memory_pack,
@@ -1704,7 +1710,7 @@ class SceneExpertHookRunner:
             "drake": str(combined_path / "house.dmd.yaml"),
             "blend": str(combined_path / "house.blend"),
         }
-        if self._component_enabled("trace"):
+        if self._trace_enabled():
             trace_dict = self._trace_logger.finalize(
                 full_report=full_report,
                 exports=exports,
@@ -1724,7 +1730,7 @@ class SceneExpertHookRunner:
                 memory_start = time.time()
                 trace_summary = (
                     self._trace_logger.build_trace_summary()
-                    if self._component_enabled("trace")
+                    if self._trace_enabled()
                     else json.dumps(
                         [report.model_dump() for report in self._stage_reports],
                         ensure_ascii=False,
@@ -1737,7 +1743,7 @@ class SceneExpertHookRunner:
                     full_report=full_report,
                     related_old_memory=related_old_memory,
                 )
-                if self._component_enabled("trace"):
+                if self._trace_enabled():
                     self._trace_logger.save_memory_update_ops(ops, full_report)
                 self._memory_store.apply_updates(ops)
                 console_logger.info(
@@ -1746,7 +1752,7 @@ class SceneExpertHookRunner:
                 )
             except Exception as e:
                 console_logger.warning(f"Memory update failed (non-fatal): {e}")
-                if self._component_enabled("trace"):
+                if self._trace_enabled():
                     self._trace_logger.save_memory_update_ops([], full_report)
 
         console_logger.info(
@@ -1763,7 +1769,7 @@ class SceneExpertHookRunner:
 
     def save_partial_trace(self, error: str = "") -> None:
         """Persist a partial trace from an exception path."""
-        if not self._component_enabled("trace"):
+        if not self._trace_enabled():
             return
         try:
             path = self._trace_logger.save_partial(status="failed", error=error)
@@ -2152,9 +2158,13 @@ def build_hook_runner(
     )
     task_spec = _reconcile_task_spec_stage_ownership(task_spec, intent_contract)
 
-    # Harness (always active when mode != "disabled")
+    # Harness always assembles planner context, while its FSM and budget
+    # controls are independently gated at each control boundary.
     se_omega = OmegaConf.create(se_cfg)
-    harness = Harness(se_omega)
+    harness = Harness(
+        se_omega,
+        budget_enabled=component_flags["harness_budget"],
+    )
     harness.reset()
 
     global_planner = GlobalPlanner(
@@ -2177,6 +2187,24 @@ def build_hook_runner(
         .get("pipeline", {})
         .get("start_stage", "floor_plan")
     )
+    config_hash = _stable_config_hash(cfg_dict)
+    trace_logger: TraceLogger | None = None
+    if component_flags["trace"]:
+        trace_logger = TraceLogger(
+            output_dir=str(output_dir),
+            scene_index=scene_id,
+            prompt=prompt,
+            experiment_name=cfg_dict.get("name", ""),
+            config_hash=config_hash,
+            task_spec=task_spec.model_dump(mode="json", exclude_none=True),
+            task_spec_status={
+                "source": (
+                    "fallback" if task_spec.compiler_status == "degraded" else "llm"
+                ),
+                "degraded": task_spec.compiler_status == "degraded",
+            },
+            code_provenance=collect_code_provenance(),
+        )
 
     return SceneExpertHookRunner(
         prompt=prompt,
@@ -2192,11 +2220,12 @@ def build_hook_runner(
         stage_verifier=stage_verifier,
         full_verifier=full_verifier,
         repair_controller=repair_controller,
+        trace_logger=trace_logger,
         memory_writer=memory_writer,
         memory_store=memory_store,
         qwen_model=model,
         experiment_name=cfg_dict.get("name", ""),
-        config_hash=_stable_config_hash(cfg_dict),
+        config_hash=config_hash,
         start_stage=start_stage,
         intent_contract=intent_contract,
         intent_trace=intent_trace,

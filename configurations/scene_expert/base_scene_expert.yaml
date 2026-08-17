@@ -23,6 +23,10 @@ components:
     enabled: null
   harness:
     enabled: null
+  # Limits only SceneExpert's outer planning/repair loop. It never overrides
+  # SceneSmith designer or critic iteration counts.
+  harness_budget:
+    enabled: null
   global_planner:
     enabled: null
   prompt_injection:

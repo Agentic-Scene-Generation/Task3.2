@@ -8,6 +8,7 @@ from typing import Any
 _COMPONENT_NAMES = (
     "task_compiler",
     "harness",
+    "harness_budget",
     "global_planner",
     "prompt_injection",
     "fast_memory_retrieval",
@@ -26,6 +27,7 @@ _MODE_COMPONENTS = {
         {
             "task_compiler",
             "harness",
+            "harness_budget",
             "global_planner",
             "prompt_injection",
             "critic_bridge",
@@ -38,6 +40,7 @@ _MODE_COMPONENTS = {
         {
             "task_compiler",
             "harness",
+            "harness_budget",
             "global_planner",
             "prompt_injection",
             "fast_memory_retrieval",
@@ -53,6 +56,7 @@ _MODE_COMPONENTS = {
         {
             "task_compiler",
             "harness",
+            "harness_budget",
             "global_planner",
             "prompt_injection",
             "fast_memory_retrieval",
