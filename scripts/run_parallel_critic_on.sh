@@ -137,6 +137,7 @@ DISABLE_BWRAP="${SCENEEXPERT_DISABLE_BWRAP:-false}"
 SKIP_MAIN_BPY_IMPORT="${SCENEEXPERT_SKIP_MAIN_BPY_IMPORT:-true}"
 HSSD_RETRIEVAL_BACKEND="${HSSD_RETRIEVAL_BACKEND:-clip}"
 HSSD_RENDERED_ASSET_CHOICE="${HSSD_RENDERED_ASSET_CHOICE:-false}"
+HSSD_ZVEC_COLLECTION_PATH="${HSSD_ZVEC_COLLECTION_PATH:-}"
 # A directory check alone is insufficient for BGE-M3: recent Transformers
 # releases reject pickle checkpoints when the active Torch is too old. Load it
 # once in the controller before any batch starts so an incompatible runtime
@@ -416,6 +417,7 @@ export SCENEEXPERT_DISABLE_BWRAP="$DISABLE_BWRAP"
 export SCENEEXPERT_SKIP_MAIN_BPY_IMPORT="$SKIP_MAIN_BPY_IMPORT"
 export FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS
 export HSSD_RETRIEVAL_BACKEND HSSD_RENDERED_ASSET_CHOICE
+export HSSD_ZVEC_COLLECTION_PATH
 export CONVEX_MAX_OMP_THREADS SCENEEXPERT_OMP_NUM_THREADS
 export FLOOR_PLAN_DESIGNER_THINKING FLOOR_PLAN_CRITIC_THINKING
 export FURNITURE_DESIGNER_THINKING FURNITURE_CRITIC_THINKING
@@ -502,6 +504,17 @@ echo "continue after batch failure: $CRITIC_PROBE_CONTINUE_ON_BATCH_FAILURE"
 echo "final-view parallelism: $CRITIC_PROBE_FINAL_VIEW_PARALLELISM"
 echo "fail unresolved furniture hard constraints: $FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS"
 echo "HSSD retrieval: backend=$HSSD_RETRIEVAL_BACKEND rendered_asset_choice=$HSSD_RENDERED_ASSET_CHOICE"
+if [ "$HSSD_RETRIEVAL_BACKEND" = "embedding" ]; then
+    if [ -z "$HSSD_ZVEC_COLLECTION_PATH" ]; then
+        echo "ERROR: HSSD_ZVEC_COLLECTION_PATH is required for embedding retrieval" >&2
+        exit 1
+    fi
+    if [ ! -f "$HSSD_ZVEC_COLLECTION_PATH/0/embedding.index.3.proxima" ]; then
+        echo "ERROR: HSSD zvec index is missing or unreadable: $HSSD_ZVEC_COLLECTION_PATH" >&2
+        exit 1
+    fi
+    echo "HSSD zvec collection: $HSSD_ZVEC_COLLECTION_PATH"
+fi
 echo "skip controller bpy import: $SKIP_MAIN_BPY_IMPORT"
 if [ -n "$CONVEX_MAX_OMP_THREADS" ]; then
     echo "convex decomposition max OMP threads: $CONVEX_MAX_OMP_THREADS"
@@ -584,6 +597,19 @@ COMMON_ARGS=(
     "ceiling_agent.asset_manager.hssd.rendered_asset_choice.enabled=${HSSD_RENDERED_ASSET_CHOICE}"
     "manipuland_agent.asset_manager.hssd.rendered_asset_choice.enabled=${HSSD_RENDERED_ASSET_CHOICE}"
 )
+
+if [ "$HSSD_RETRIEVAL_BACKEND" = "embedding" ]; then
+    # Do not rely on paths.hssd_data_dir for the zvec index: on ACP hosts it
+    # resolves through the protected /mnt/afs FUSE mount. Explicitly override
+    # every agent so the override survives internal batch re-entry and Hydra
+    # composes the same writable local collection in each scene process.
+    COMMON_ARGS+=(
+        "furniture_agent.asset_manager.hssd.zvec.collection_path=${HSSD_ZVEC_COLLECTION_PATH}"
+        "wall_agent.asset_manager.hssd.zvec.collection_path=${HSSD_ZVEC_COLLECTION_PATH}"
+        "ceiling_agent.asset_manager.hssd.zvec.collection_path=${HSSD_ZVEC_COLLECTION_PATH}"
+        "manipuland_agent.asset_manager.hssd.zvec.collection_path=${HSSD_ZVEC_COLLECTION_PATH}"
+    )
+fi
 
 if [ -n "$CONVEX_MAX_OMP_THREADS" ]; then
     COMMON_ARGS+=(
