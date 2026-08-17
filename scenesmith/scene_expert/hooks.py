@@ -1768,13 +1768,13 @@ def build_hook_runner(
     retriever: Any | None = None
     memory_writer: MemoryWriter | None = None
     structured_llm_client: Any | None = None
+    structured_llm_cfg = se_cfg.get("structured_llm", {}) or {}
 
     if component_flags["structured_llm"]:
         from scenesmith.scene_expert.structured_llm import (
             SceneExpertStructuredLLMClient,
         )
 
-        structured_llm_cfg = se_cfg.get("structured_llm", {}) or {}
         structured_llm_client = SceneExpertStructuredLLMClient(
             model=model,
             api_base_url=api_base,
@@ -1814,10 +1814,23 @@ def build_hook_runner(
                 "Use 'lexical' or 'hybrid'."
             )
     if component_flags["memory_writer"]:
+        writer_role_cfg = (
+            (structured_llm_cfg.get("roles", {}) or {}).get("memory_writer", {})
+            or {}
+        )
         memory_writer = MemoryWriter(
             model=model,
             api_base_url=api_base,
             api_key=api_key,
+            max_tokens=_cfg_int(writer_role_cfg.get("max_tokens"), 2048),
+            retry_max_tokens=_cfg_int(
+                writer_role_cfg.get("retry_max_tokens"), 4096
+            ),
+            thinking_mode=str(writer_role_cfg.get("thinking_mode", "none")),
+            timeout_seconds=_cfg_float(
+                writer_role_cfg.get("timeout_seconds"), 90.0
+            ),
+            temperature=_cfg_float(writer_role_cfg.get("temperature"), 0.1),
             debug_dir=scene_debug_dir / "memory",
         )
 

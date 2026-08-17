@@ -15,6 +15,7 @@ import logging
 import os
 import re
 import time
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -27,7 +28,11 @@ from scenesmith.scene_expert.memory.schemas import (
 from scenesmith.scene_expert.context_bundle import build_llm_call_debug_record
 from scenesmith.scene_expert.memory.text_builder import build_embedding_text
 from scenesmith.scene_expert.schemas import FullVerifyReport
-from scenesmith.agent_utils.thinking import chat_template_kwargs_from_effort
+from scenesmith.agent_utils.thinking import (
+    chat_template_kwargs_from_effort,
+    prepend_text_thinking_directive,
+    thinking_directive_from_effort,
+)
 
 console_logger = logging.getLogger(__name__)
 SUCCESS_MEMORY_MIN_OVERALL_SCORE = 0.75
@@ -103,6 +108,9 @@ class MemoryWriter:
         api_base_url: str | None = None,
         api_key: str | None = None,
         max_tokens: int = 3072,
+        retry_max_tokens: int | None = None,
+        thinking_mode: str = "none",
+        timeout_seconds: float = 90.0,
         temperature: float = 0.1,
         debug_dir: str | Path | None = None,
     ) -> None:
@@ -112,6 +120,19 @@ class MemoryWriter:
         self._max_tokens = int(
             os.environ.get("SCENEEXPERT_MEMORY_WRITER_MAX_TOKENS", max_tokens)
         )
+        default_retry_tokens = (
+            int(retry_max_tokens)
+            if retry_max_tokens is not None
+            else max(self._max_tokens, 4096)
+        )
+        self._retry_max_tokens = int(
+            os.environ.get(
+                "SCENEEXPERT_MEMORY_WRITER_RETRY_MAX_TOKENS",
+                default_retry_tokens,
+            )
+        )
+        self._thinking_mode = str(thinking_mode or "none")
+        self._timeout_seconds = float(timeout_seconds)
         self._temperature = temperature
         debug_dir = debug_dir or os.environ.get("SCENEEXPERT_MEMORY_WRITER_DEBUG_DIR")
         self._debug_dir = Path(debug_dir) if debug_dir else None
@@ -182,53 +203,89 @@ class MemoryWriter:
 
         attempt_logs: list[dict[str, Any]] = []
         attempts = (
-            ("json_mode", True),
-            ("plain_json_retry", False),
+            ("json_mode", True, self._max_tokens, self._thinking_mode),
+            ("plain_json_retry", False, self._retry_max_tokens, "none"),
         )
-        for label, use_response_format in attempts:
+        for attempt_index, (
+            label,
+            use_response_format,
+            max_tokens,
+            thinking_effort,
+        ) in enumerate(attempts):
             attempt_log = {
                 "label": label,
                 "use_response_format": use_response_format,
+                "max_tokens": max_tokens,
+                "thinking_effort": thinking_effort,
             }
+            response = None
+            content = ""
+            reasoning = ""
             try:
                 response = self._request_completion(
                     user_message=user_message,
                     use_response_format=use_response_format,
+                    max_tokens=max_tokens,
+                    thinking_effort=thinking_effort,
                 )
-                raw = self._extract_response_text(response)
-                self._append_llm_debug(
-                    prompt=user_message,
-                    output=raw or "",
-                    response=response,
-                    label=label,
-                )
+                content, reasoning = self._extract_response_parts(response)
                 attempt_log.update(
                     {
                         "finish_reason": self._response_finish_reason(response),
-                        "raw_present": bool(raw),
-                        "raw_excerpt": self._compact_text(raw, 2000),
+                        "content_present": bool(content),
+                        "content_excerpt": self._compact_text(content, 4000),
+                        "reasoning_present": bool(reasoning),
+                        "reasoning_excerpt": self._compact_text(reasoning, 4000),
                         "response_snapshot": self._response_snapshot(response),
                     }
                 )
-                if not raw:
+                self._append_llm_debug(
+                    prompt=user_message,
+                    output=content,
+                    response=response,
+                    label=label,
+                )
+                if not content:
+                    response_kind = "reasoning-only" if reasoning else "empty"
                     raise ValueError(
-                        "Qwen/vLLM returned an empty assistant message content. "
+                        f"Qwen/vLLM returned a {response_kind} response; final "
+                        "assistant content is empty. "
                         f"finish_reason={attempt_log['finish_reason']!r}"
                     )
 
-                data = self._parse_json_payload(raw)
+                try:
+                    data = self._parse_json_payload(content)
+                except ValueError as parse_error:
+                    if attempt_log["finish_reason"] == "length":
+                        raise ValueError(
+                            "Model exhausted max_tokens before completing the "
+                            f"memory JSON object: {parse_error}"
+                        ) from parse_error
+                    raise
                 attempt_log["parsed_keys"] = sorted(data.keys())
                 attempt_logs.append(attempt_log)
-                console_logger.debug("MemoryWriter raw response: %s", raw)
+                console_logger.debug("MemoryWriter final content: %s", content)
             except Exception as e:
                 self._append_llm_debug(
                     prompt=user_message,
+                    output=content,
+                    response=response,
                     error=f"{type(e).__name__}: {e}",
                     label=label,
                 )
                 attempt_log["error"] = f"{type(e).__name__}: {e}"
                 attempt_logs.append(attempt_log)
-                console_logger.warning("MemoryWriter attempt %s failed: %s", label, e)
+                if attempt_index + 1 < len(attempts):
+                    console_logger.info(
+                        "MemoryWriter attempt %s was unusable; retrying with "
+                        "thinking disabled: %s",
+                        label,
+                        e,
+                    )
+                else:
+                    console_logger.warning(
+                        "MemoryWriter attempt %s failed: %s", label, e
+                    )
                 continue
 
             try:
@@ -249,6 +306,12 @@ class MemoryWriter:
             if self._has_mutating_ops(ops) or not self._should_build_fallback(
                 full_report
             ):
+                self._save_recovery_debug_if_needed(
+                    attempts=attempt_logs,
+                    trace_summary=trace_summary,
+                    full_report=full_report,
+                    result_ops=ops,
+                )
                 console_logger.info(
                     "MemoryWriter: %d update ops generated via %s",
                     len(ops),
@@ -278,6 +341,12 @@ class MemoryWriter:
                 len(ops),
                 label,
             )
+            self._save_recovery_debug_if_needed(
+                attempts=attempt_logs,
+                trace_summary=trace_summary,
+                full_report=full_report,
+                result_ops=ops,
+            )
             return ops
 
         fallback_ops = self._fallback_success_ops(trace_summary, full_report)
@@ -303,14 +372,25 @@ class MemoryWriter:
         )
         return []
 
-    def _request_completion(self, user_message: str, use_response_format: bool):
+    def _request_completion(
+        self,
+        user_message: str,
+        use_response_format: bool,
+        *,
+        max_tokens: int | None = None,
+        thinking_effort: str | None = None,
+    ):
         """Call the OpenAI-compatible server with a Qwen-tolerant retry mode."""
+        active_effort = str(thinking_effort or self._thinking_mode or "none")
+        system_prompt = prepend_text_thinking_directive(
+            _SYSTEM_PROMPT,
+            thinking_directive_from_effort(active_effort, model=self._model),
+        )
         if use_response_format:
-            system_prompt = _SYSTEM_PROMPT
             prompt = user_message
         else:
             system_prompt = (
-                _SYSTEM_PROMPT
+                system_prompt
                 + "\nReturn ONLY one JSON object. Do not include markdown fences, "
                 "reasoning text, comments, or XML/tool tags."
             )
@@ -320,6 +400,12 @@ class MemoryWriter:
                 '"success_case|failure_case|skill","target_id":"","content":{}}]}'
             )
 
+        client = self._client
+        if hasattr(client, "with_options"):
+            client = client.with_options(
+                timeout=self._timeout_seconds,
+                max_retries=0,
+            )
         kwargs: dict[str, Any] = {
             "model": self._model,
             "messages": [
@@ -327,50 +413,76 @@ class MemoryWriter:
                 {"role": "user", "content": prompt},
             ],
             "temperature": self._temperature,
-            "max_tokens": self._max_tokens,
-            "extra_body": chat_template_kwargs_from_effort("high"),
+            "max_tokens": int(max_tokens or self._max_tokens),
+            "extra_body": chat_template_kwargs_from_effort(
+                active_effort,
+                model=self._model,
+            ),
         }
         if use_response_format:
             kwargs["response_format"] = {"type": "json_object"}
-        return self._client.chat.completions.create(**kwargs)
+        return client.chat.completions.create(**kwargs)
 
     def _extract_response_text(self, response: Any) -> str:
-        """Extract content from OpenAI/vLLM/Qwen response variants."""
+        """Extract final assistant content without treating reasoning as JSON."""
+        content, _ = self._extract_response_parts(response)
+        return content
+
+    def _extract_response_parts(self, response: Any) -> tuple[str, str]:
+        """Return final content and reasoning as separate response channels."""
         choices = getattr(response, "choices", None) or []
         if not choices:
-            return ""
+            return "", ""
 
         message = getattr(choices[0], "message", None)
-        candidates: list[Any] = []
+        content_candidates: list[Any] = []
+        reasoning_candidates: list[Any] = []
         if message is not None:
-            candidates.extend(
+            content_candidates.extend(
                 [
                     getattr(message, "content", None),
-                    getattr(message, "reasoning_content", None),
                     getattr(message, "text", None),
                     getattr(message, "refusal", None),
                 ]
             )
+            reasoning_candidates.extend(
+                [
+                    getattr(message, "reasoning_content", None),
+                    getattr(message, "reasoning", None),
+                ]
+            )
             dump = self._model_dump(message)
             if isinstance(dump, dict):
-                candidates.extend(
+                content_candidates.extend(
                     [
                         dump.get("content"),
-                        dump.get("reasoning_content"),
                         dump.get("text"),
                         dump.get("refusal"),
                     ]
                 )
+                reasoning_candidates.extend(
+                    [dump.get("reasoning_content"), dump.get("reasoning")]
+                )
                 extra = dump.get("model_extra")
                 if isinstance(extra, dict):
-                    candidates.extend(
+                    content_candidates.extend(
                         [
                             extra.get("content"),
-                            extra.get("reasoning_content"),
                             extra.get("text"),
                         ]
                     )
+                    reasoning_candidates.extend(
+                        [
+                            extra.get("reasoning_content"),
+                            extra.get("reasoning"),
+                        ]
+                    )
 
+        content = self._first_response_text(content_candidates)
+        reasoning = self._first_response_text(reasoning_candidates)
+        return content, reasoning
+
+    def _first_response_text(self, candidates: list[Any]) -> str:
         for candidate in candidates:
             text = self._stringify_content(candidate)
             if text:
@@ -393,22 +505,39 @@ class MemoryWriter:
                     parts.append(str(item))
             return "\n".join(part for part in parts if part).strip()
         if isinstance(value, dict):
-            for key in ("text", "content", "reasoning_content"):
+            for key in ("text", "content"):
                 if value.get(key):
                     return str(value[key]).strip()
         return str(value).strip()
 
     def _parse_json_payload(self, raw: str) -> dict:
         """Parse JSON even when a local model wraps it in prose or fences."""
-        text = raw.strip()
-        if text.startswith("```"):
-            text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
-            text = re.sub(r"\s*```$", "", text)
+        text = re.sub(
+            r"<(?:think|analysis)>.*?</(?:think|analysis)>",
+            "",
+            raw,
+            flags=re.IGNORECASE | re.DOTALL,
+        ).strip()
+        text = re.sub(r"```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+        text = text.replace("```", "").strip()
 
         try:
             parsed = json.loads(text)
         except json.JSONDecodeError:
-            parsed = json.loads(self._extract_first_json_object(text))
+            parsed = None
+            for candidate in self._iter_json_objects(text):
+                try:
+                    value = json.loads(candidate)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(value, dict) and isinstance(value.get("updates"), list):
+                    parsed = value
+                    break
+            if parsed is None:
+                raise ValueError(
+                    "No complete JSON object with an 'updates' list found in "
+                    "model output"
+                )
 
         if not isinstance(parsed, dict):
             raise ValueError(f"MemoryWriter expected JSON object, got {type(parsed)}")
@@ -419,32 +548,24 @@ class MemoryWriter:
         return parsed
 
     def _extract_first_json_object(self, text: str) -> str:
-        start = text.find("{")
-        if start < 0:
+        """Return the first balanced JSON object for backward compatibility."""
+        for candidate in self._iter_json_objects(text):
+            return candidate
+        if "{" not in text:
             raise ValueError("No JSON object start found in model output")
-
-        depth = 0
-        in_string = False
-        escape = False
-        for index in range(start, len(text)):
-            char = text[index]
-            if in_string:
-                if escape:
-                    escape = False
-                elif char == "\\":
-                    escape = True
-                elif char == '"':
-                    in_string = False
-                continue
-            if char == '"':
-                in_string = True
-            elif char == "{":
-                depth += 1
-            elif char == "}":
-                depth -= 1
-                if depth == 0:
-                    return text[start : index + 1]
         raise ValueError("No complete JSON object found in model output")
+
+    def _iter_json_objects(self, text: str) -> Iterator[str]:
+        """Yield decodable JSON objects, skipping malformed leading fragments."""
+        decoder = json.JSONDecoder()
+        for index, char in enumerate(text):
+            if char != "{":
+                continue
+            try:
+                _, end = decoder.raw_decode(text[index:])
+            except json.JSONDecodeError:
+                continue
+            yield text[index : index + end]
 
     def _has_mutating_ops(self, ops: list[MemoryUpdateOp]) -> bool:
         return any(op.op in ("ADD", "UPDATE") for op in ops)
@@ -453,7 +574,9 @@ class MemoryWriter:
     def _normalize_update_op(raw_op: Any) -> dict[str, Any]:
         """Normalize common local-model JSON nulls before schema validation."""
         if not isinstance(raw_op, dict):
-            raise TypeError(f"Memory update must be an object, got {type(raw_op).__name__}")
+            raise TypeError(
+                f"Memory update must be an object, got {type(raw_op).__name__}"
+            )
         op = dict(raw_op)
         if op.get("content") is None:
             op["content"] = {}
@@ -611,6 +734,7 @@ class MemoryWriter:
         trace_summary: str,
         full_report: FullVerifyReport,
         fallback_ops: list[MemoryUpdateOp],
+        result_ops: list[MemoryUpdateOp] | None = None,
     ) -> None:
         if self._debug_dir is None:
             return
@@ -625,6 +749,7 @@ class MemoryWriter:
             "trace_summary_excerpt": self._compact_text(trace_summary, 6000),
             "attempts": attempts,
             "fallback_ops": [op.model_dump() for op in fallback_ops],
+            "result_ops": [op.model_dump() for op in (result_ops or [])],
         }
         debug_path = self._debug_dir / "memory_writer_debug.json"
         debug_path.write_text(
@@ -634,6 +759,26 @@ class MemoryWriter:
         jsonl_path = self._debug_dir / "memory_writer_debug.jsonl"
         with jsonl_path.open("a", encoding="utf-8", newline="\n") as f:
             f.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
+
+    def _save_recovery_debug_if_needed(
+        self,
+        *,
+        attempts: list[dict[str, Any]],
+        trace_summary: str,
+        full_report: FullVerifyReport,
+        result_ops: list[MemoryUpdateOp],
+    ) -> None:
+        """Persist diagnostics when a later attempt recovers an earlier failure."""
+        if not any(attempt.get("error") for attempt in attempts[:-1]):
+            return
+        self._save_debug_payload(
+            status="recovered_after_retry",
+            attempts=attempts,
+            trace_summary=trace_summary,
+            full_report=full_report,
+            fallback_ops=[],
+            result_ops=result_ops,
+        )
 
     def _response_finish_reason(self, response: Any) -> str:
         choices = getattr(response, "choices", None) or []

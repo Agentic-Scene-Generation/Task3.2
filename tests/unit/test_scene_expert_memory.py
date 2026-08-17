@@ -921,31 +921,6 @@ class SceneExpertMemoryTest(unittest.TestCase):
         self.assertEqual("stage", failure.content["scope"])
         self.assertTrue(failure.content["embedding_text"])
 
-    def test_memory_writer_extracts_reasoning_content_and_markdown_json(self) -> None:
-        writer = MemoryWriter.__new__(MemoryWriter)
-        message = types.SimpleNamespace(
-            content=None,
-            model_dump=lambda: {
-                "content": None,
-                "model_extra": {
-                    "reasoning_content": (
-                        "```json\n"
-                        '{"updates":[{"op":"NOOP","memory_type":"success_case","content":{}}]}'
-                        "\n```"
-                    )
-                },
-            },
-        )
-        response = types.SimpleNamespace(
-            choices=[types.SimpleNamespace(message=message, finish_reason="stop")]
-        )
-
-        raw = writer._extract_response_text(response)
-        data = writer._parse_json_payload(raw)
-
-        self.assertEqual(1, len(data["updates"]))
-        self.assertEqual("NOOP", data["updates"][0]["op"])
-
     def test_memory_writer_builds_conservative_fallback_success_ops(self) -> None:
         writer = MemoryWriter.__new__(MemoryWriter)
         trace_summary = "\n".join(

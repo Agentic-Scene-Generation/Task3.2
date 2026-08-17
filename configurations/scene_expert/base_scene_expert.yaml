@@ -78,7 +78,7 @@ structured_llm:
       # required JSON and avoids reasoning-only/length failures.
       thinking_mode: "none"
       max_tokens: ${oc.env:SCENEEXPERT_MEMORY_WRITER_MAX_TOKENS,2048}
-      retry_max_tokens: ${oc.env:SCENEEXPERT_MEMORY_WRITER_MAX_TOKENS,2048}
+      retry_max_tokens: ${oc.env:SCENEEXPERT_MEMORY_WRITER_RETRY_MAX_TOKENS,4096}
       timeout_seconds: 90
       temperature: 0.1
       max_attempts: 2
