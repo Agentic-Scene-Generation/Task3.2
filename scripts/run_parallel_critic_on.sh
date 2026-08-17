@@ -77,22 +77,149 @@ fi
 MODEL_NAME="${MODEL_NAME:-${SCENEEXPERT_MODEL_ID:-Qwen3.6-27B-Q8_0}}"
 RUN_ID="${RUN_ID:-critic_on_$(date +%Y-%m-%d_%H-%M-%S)}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-$PROJECT_ROOT/outputs/critic_probe/$RUN_ID}"
+CASE_SET="${CASE_SET:-new3}"
+SCENE_SELECTION="${SCENE_SELECTION:-all}"
+SCENE_SELECTION_EXPLICIT="false"
+REPLAY_FROM_PATH="${REPLAY_FROM_PATH:-}"
+REPLAY_MODE="${REPLAY_MODE:-floor_plan}"
+RESUME_FURNITURE_RENDER_MODE=""
 
-if [ "${1:-}" = "--output-root" ] || [ "${1:-}" = "--output-dir" ]; then
-    if [ "$#" -lt 2 ] || [ -z "${2:-}" ]; then
-        echo "ERROR: $1 requires a directory" >&2
-        exit 2
-    fi
-    OUTPUT_ROOT="$2"
-    shift 2
-elif [[ "${1:-}" == --output-root=* || "${1:-}" == --output-dir=* ]]; then
-    OUTPUT_ROOT="${1#*=}"
-    if [ -z "$OUTPUT_ROOT" ]; then
-        echo "ERROR: --output-root/--output-dir requires a directory" >&2
-        exit 2
-    fi
-    shift
+usage() {
+    cat <<'EOF'
+Usage: bash scripts/run_parallel_critic_on.sh [options]
+
+Options:
+  --case-set <set>         case registry: new3 (default) or legacy8 (old8 alias)
+  --scenes <selection>     all, or a comma-separated list chosen from:
+                           the selected case registry
+  --output-root <dir>      write probe output below <dir>
+  --output-dir <dir>       alias for --output-root
+  --resume-from <dir>      reuse prior critic batch outputs below <dir>
+  --resume-mode <mode>     floor_plan (default), furniture_initial_render, or
+                           furniture_latest_render
+  -h, --help               show this help
+
+Case registries:
+  new3      bedroom, office, long_living_room
+  legacy8   default_bedroom, default_living_room, default_classroom,
+            default_rustic_bedroom, meeting_room_mixed_edge_seating,
+            study_desk_access_crunch, bedroom_bedside_blockage,
+            dining_room_service_squeeze
+
+CASE_FILTER remains available for legacy substring filtering when --scenes is
+not supplied. An explicit --scenes selection takes precedence. A reusable
+shared base must use the same case registry and fixed scene ordering.
+EOF
+}
+
+# Internal children receive positional batch payloads and must bypass the
+# public option parser. The top-level parser accepts options in any order.
+if [ "${1:-}" != "--internal-run-batch" ]; then
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --output-root|--output-dir)
+                if [ "$#" -lt 2 ] || [ -z "${2:-}" ]; then
+                    echo "ERROR: $1 requires a directory" >&2
+                    exit 2
+                fi
+                OUTPUT_ROOT="$2"
+                shift 2
+                ;;
+            --output-root=*|--output-dir=*)
+                OUTPUT_ROOT="${1#*=}"
+                if [ -z "$OUTPUT_ROOT" ]; then
+                    echo "ERROR: --output-root/--output-dir requires a directory" >&2
+                    exit 2
+                fi
+                shift
+                ;;
+            --scenes)
+                if [ "$#" -lt 2 ] || [ -z "${2:-}" ]; then
+                    echo "ERROR: --scenes requires all or a comma-separated scene list" >&2
+                    exit 2
+                fi
+                SCENE_SELECTION="$2"
+                SCENE_SELECTION_EXPLICIT="true"
+                shift 2
+                ;;
+            --scenes=*)
+                SCENE_SELECTION="${1#*=}"
+                if [ -z "$SCENE_SELECTION" ]; then
+                    echo "ERROR: --scenes requires all or a comma-separated scene list" >&2
+                    exit 2
+                fi
+                SCENE_SELECTION_EXPLICIT="true"
+                shift
+                ;;
+            --case-set)
+                if [ "$#" -lt 2 ] || [ -z "${2:-}" ]; then
+                    echo "ERROR: --case-set requires new3 or legacy8" >&2
+                    exit 2
+                fi
+                CASE_SET="$2"
+                shift 2
+                ;;
+            --case-set=*)
+                CASE_SET="${1#*=}"
+                if [ -z "$CASE_SET" ]; then
+                    echo "ERROR: --case-set requires new3 or legacy8" >&2
+                    exit 2
+                fi
+                shift
+                ;;
+            --resume-from)
+                if [ "$#" -lt 2 ] || [ -z "${2:-}" ]; then
+                    echo "ERROR: --resume-from requires a directory" >&2
+                    exit 2
+                fi
+                REPLAY_FROM_PATH="$2"
+                shift 2
+                ;;
+            --resume-from=*)
+                REPLAY_FROM_PATH="${1#*=}"
+                if [ -z "$REPLAY_FROM_PATH" ]; then
+                    echo "ERROR: --resume-from requires a directory" >&2
+                    exit 2
+                fi
+                shift
+                ;;
+            --resume-mode)
+                if [ "$#" -lt 2 ] || [ -z "${2:-}" ]; then
+                    echo "ERROR: --resume-mode requires floor_plan, furniture_initial_render, or furniture_latest_render" >&2
+                    exit 2
+                fi
+                REPLAY_MODE="$2"
+                shift 2
+                ;;
+            --resume-mode=*)
+                REPLAY_MODE="${1#*=}"
+                if [ -z "$REPLAY_MODE" ]; then
+                    echo "ERROR: --resume-mode requires floor_plan, furniture_initial_render, or furniture_latest_render" >&2
+                    exit 2
+                fi
+                shift
+                ;;
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            *)
+                echo "ERROR: unknown argument: $1" >&2
+                usage >&2
+                exit 2
+                ;;
+        esac
+    done
 fi
+
+case "$CASE_SET" in
+    old8) CASE_SET="legacy8" ;;
+    new3|legacy8) ;;
+    *)
+        echo "ERROR: CASE_SET must be new3 or legacy8, got '$CASE_SET'" >&2
+        exit 2
+        ;;
+esac
 
 SCENE_BATCH_SIZE="${SCENE_BATCH_SIZE:-1}"
 SCENE_WORKERS_PER_PROCESS="${SCENE_WORKERS_PER_PROCESS:-1}"
@@ -118,6 +245,9 @@ PIPELINE_STOP_STAGE="${PIPELINE_STOP_STAGE:-manipuland}"
 # when intentionally allowing unresolved furniture hard constraints through.
 # Example: FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS=false bash scripts/run_parallel_critic_on.sh
 FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS="${FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS:-true}"
+# Preserve failed quality trajectories and final renders by default in probes.
+# Production experiments keep their base-config default of "strict".
+QUALITY_FAILURE_POLICY="${QUALITY_FAILURE_POLICY:-degraded}"
 BRANCH_FROM_SHARED_BASE="${BRANCH_FROM_SHARED_BASE:-false}"
 SHARED_BASE_STOP_STAGE="${SHARED_BASE_STOP_STAGE:-floor_plan}"
 SHARED_BASE_ROOT="${SHARED_BASE_ROOT:-}"
@@ -233,6 +363,37 @@ csv_quote() {
     printf '"%s"' "$value"
 }
 
+normalize_replay_source_root() {
+    local requested_root="$1"
+    local candidate
+
+    if [ ! -d "$requested_root" ]; then
+        echo "ERROR: --resume-from directory does not exist: $requested_root" >&2
+        return 1
+    fi
+
+    # Normal runs write batches below <output>/critic_on, while a shared base
+    # uses <output>/shared_base. Accept those output roots and either already
+    # normalized batch root.
+    for candidate in "$requested_root" "$requested_root/critic_on" "$requested_root/shared_base"; do
+        if find "$candidate" -mindepth 1 -maxdepth 1 -type d \
+            -name 'batch_[0-9][0-9][0-9]' -print -quit 2>/dev/null | grep -q .; then
+            printf '%s' "$candidate"
+            return 0
+        fi
+    done
+
+    # Permit targeting one failed batch; its parent is the batch root used by
+    # run_batch below.
+    if [[ "$(basename "$requested_root")" =~ ^batch_[0-9]{3}$ ]]; then
+        printf '%s' "$(dirname "$requested_root")"
+        return 0
+    fi
+
+    echo "ERROR: --resume-from must be an output root, critic_on/shared_base root, or batch_XXX directory containing reusable batches: $requested_root" >&2
+    return 1
+}
+
 require_positive_integer SCENE_BATCH_SIZE "$SCENE_BATCH_SIZE"
 require_positive_integer SCENE_WORKERS_PER_PROCESS "$SCENE_WORKERS_PER_PROCESS"
 if [[ ! "$SCENE_RETRY_ATTEMPTS" =~ ^[0-9]+$ ]]; then
@@ -270,6 +431,37 @@ fi
 if ! GENERATE_SHARED_BASE="$(normalize_bool "$GENERATE_SHARED_BASE")"; then
     echo "ERROR: GENERATE_SHARED_BASE must be true or false" >&2
     exit 1
+fi
+if [ -n "$REPLAY_FROM_PATH" ]; then
+    if [ "$GENERATE_SHARED_BASE" != "false" ]; then
+        echo "ERROR: --resume-from cannot be combined with GENERATE_SHARED_BASE=true" >&2
+        exit 2
+    fi
+    case "$REPLAY_MODE" in
+        floor_plan)
+            RESUME_FURNITURE_RENDER_MODE=""
+            ;;
+        furniture_initial_render)
+            RESUME_FURNITURE_RENDER_MODE="initial"
+            ;;
+        furniture_latest_render)
+            RESUME_FURNITURE_RENDER_MODE="latest"
+            ;;
+        *)
+            echo "ERROR: --resume-mode must be floor_plan, furniture_initial_render, or furniture_latest_render" >&2
+            exit 2
+            ;;
+    esac
+    BRANCH_FROM_SHARED_BASE="true"
+    if ! SHARED_BASE_ROOT="$(normalize_replay_source_root "$REPLAY_FROM_PATH")"; then
+        exit 2
+    fi
+    # Both furniture-render modes add a saved furniture snapshot before the
+    # furniture stage; floor-plan resume starts from the persisted geometry.
+    SHARED_BASE_STOP_STAGE="floor_plan"
+elif [ "$REPLAY_MODE" != "floor_plan" ]; then
+    echo "ERROR: --resume-mode requires --resume-from" >&2
+    exit 2
 fi
 if ! DRY_RUN="$(normalize_bool "$DRY_RUN")"; then
     echo "ERROR: DRY_RUN must be true or false" >&2
@@ -313,6 +505,10 @@ if ! SCENEEXPERT_MEMORY_EMBEDDING_PREFLIGHT="$(normalize_bool "$SCENEEXPERT_MEMO
 fi
 if ! FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS="$(normalize_bool "$FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS")"; then
     echo "ERROR: FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS must be true or false" >&2
+    exit 1
+fi
+if [[ "$QUALITY_FAILURE_POLICY" != "strict" && "$QUALITY_FAILURE_POLICY" != "degraded" ]]; then
+    echo "ERROR: QUALITY_FAILURE_POLICY must be strict or degraded" >&2
     exit 1
 fi
 if ! CRITIC_PROBE_RENDER_FINAL_VIEWS="$(normalize_bool "$CRITIC_PROBE_RENDER_FINAL_VIEWS")"; then
@@ -393,11 +589,132 @@ if [ "$BRANCH_FROM_SHARED_BASE" = "true" ] || [ "$GENERATE_SHARED_BASE" = "true"
     fi
 fi
 
+validate_scene_selection() {
+    local scene_id seen="," selection_count=0
+    if [ "$SCENE_SELECTION" = "all" ]; then
+        return 0
+    fi
+    # Bash's ``read -a`` drops a trailing empty field, so reject malformed CSV
+    # before splitting rather than relying only on the per-item empty check.
+    if [[ "$SCENE_SELECTION" == ,* \
+        || "$SCENE_SELECTION" == *, \
+        || "$SCENE_SELECTION" == *,,* ]]; then
+        echo "ERROR: --scenes contains an empty scene ID" >&2
+        exit 2
+    fi
+    IFS=',' read -r -a selected_scene_ids <<< "$SCENE_SELECTION"
+    for scene_id in "${selected_scene_ids[@]}"; do
+        if [ -z "$scene_id" ]; then
+            echo "ERROR: --scenes contains an empty scene ID" >&2
+            exit 2
+        fi
+        case "$scene_id" in
+            all)
+                echo "ERROR: --scenes all cannot be combined with individual scene IDs" >&2
+                exit 2
+                ;;
+        esac
+        if ! case_registry_contains "$scene_id"; then
+            echo "ERROR: unknown scene ID '$scene_id' for case set '$CASE_SET'; choose an ID from: $CASE_SET_IDS" >&2
+            echo "       Or use --scenes all." >&2
+            exit 2
+        fi
+        if [[ "$seen" == *",$scene_id,"* ]]; then
+            echo "ERROR: duplicate scene ID in --scenes: $scene_id" >&2
+            exit 2
+        fi
+        seen+="$scene_id,"
+        selection_count=$((selection_count + 1))
+    done
+    if [ "$selection_count" -eq 0 ]; then
+        echo "ERROR: --scenes did not select any scenes" >&2
+        exit 2
+    fi
+}
+
+case_registry_contains() {
+    local requested_id="$1"
+    local case_entry case_id
+    for case_entry in "${CASES[@]}"; do
+        IFS='|' read -r case_id _ <<< "$case_entry"
+        if [ "$case_id" = "$requested_id" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+select_case_registry() {
+    case "$CASE_SET" in
+        legacy8)
+            # Preserved verbatim from commit 1c45466. Both ID order and
+            # prompts define the persisted shared-base batch/scene mapping.
+            CASES=(
+                "default_bedroom|ACP default scene 0|A bedroom with a bed, two nightstands, and a wardrobe in the corner of the room."
+                "default_living_room|ACP default scene 1|A living room with a two-seater sofa against the wall, a square rug in the middle in front of the sofa, and two large plants on the floor near the sofa."
+                "default_classroom|ACP default scene 2|A classroom with six student desks, each with a chair. A teacher's desk sits at the front near the chalkboard, which hangs on the wall."
+                "default_rustic_bedroom|ACP default scene 3|A bedroom featuring rustic farmhouse decor with exposed wooden beams."
+                "meeting_room_mixed_edge_seating|conference-table mixed long-and-short-side equal chair distribution|A meeting room with one rectangular conference table centered in the room and seven office chairs. Arrange six office chairs in two equal groups of three, evenly spaced along the table's two long sides, with all chairs facing the table. Place one remaining office chair centered along one short side, facing the table. Keep the opposite short side free of chairs. Keep clear circulation around the table."
+                "study_desk_access_crunch|desk-chair-monitor functional relation and study access|A study with a desk centered against the back wall, an office chair tucked under the desk, a computer monitor on the desk, two guest chairs against the side wall with their usable fronts perpendicular to the wall and facing into the room, and a bookshelf on the adjacent wall with its usable front perpendicular to the wall and facing into the room. A desk lamp and a notebook sit on the desk, a pen holder next to the monitor, and a small trash can beside the desk."
+                "bedroom_bedside_blockage|bed-nightstand-lamp functional relation and bed-side/wardrobe accessibility|A bedroom with a bed centered on the main wall, a nightstand with a table lamp on each side of the bed, a dresser against the opposite wall directly facing the bed, and a wardrobe placed next to the dresser. An alarm clock sits on one nightstand, a book on the other, and a small wastebasket near the dresser."
+                "dining_room_service_squeeze|dining table-chair-place-setting relation and dining/sideboard accessibility|A dining room with a dining table in the center, four dining chairs arranged around it with one on each side, a sideboard against the wall behind the chairs on one side, and table settings for four including plates, cutlery, and glasses. A centerpiece vase with flowers sits in the middle of the table, and a set of coasters sits on the sideboard."
+            )
+            ;;
+        new3)
+            CASES=(
+                "bedroom|bed-nightstand flanking, dressing station alignment, storage access, and wall mirror|A functional bedroom with one bed centered against the back wall. Place two nightstands, one on each side of the bed. Place one wardrobe against a side wall. Position one low freestanding dressing table against a free wall, with one stool centered in front of and facing the dressing table. Mount one separate mirror on the wall, centered directly above the dressing table; the mirror must not be integrated into the table. Keep the entrance route clear and leave enough usable space in front of the wardrobe and dressing table."
+                "office|four one-to-one desk-chair-monitor workstations, shared circulation, and corner wastebasket|A practical office with four separate desks forming four workstations. Pair each desk with exactly one office chair positioned at its usable side and facing the desk. Place exactly one computer monitor on top of each desk, for four monitors in total, with every monitor facing its paired chair. Place one freestanding water dispenser against a wall and keep its front accessible. Place one wastebasket on the floor in one corner of the room. Maintain a clear central aisle and enough clearance to use every workstation."
+                "long_living_room|living-media alignment, five-seat dining edge distribution, wall storage, and distinct-corner plants|A long rectangular living room with separate living and dining areas. In the living area, place one sofa against a wall facing one TV stand on the opposite side, with one television supported on top of the TV stand. Center one coffee table between the sofa and the TV stand. In the dining area, place one rectangular dining table with five complete table settings, each including a plate, cutlery, and a drinking glass. Arrange five dining chairs around the table: two evenly spaced along each long side and one centered on one short side, all facing the table; keep the opposite short side free of chairs. Place one storage cabinet against a wall without blocking circulation. Place four large floor plants in four distinct room corners, exactly one plant per corner. Keep a clear route between the entrance, living area, dining area, and storage cabinet."
+            )
+            ;;
+        *)
+            echo "ERROR: CASE_SET must be new3 or legacy8, got '$CASE_SET'" >&2
+            exit 2
+            ;;
+    esac
+
+    local case_entry case_id
+    CASE_SET_IDS=""
+    for case_entry in "${CASES[@]}"; do
+        IFS='|' read -r case_id _ <<< "$case_entry"
+        if [ -n "$CASE_SET_IDS" ]; then
+            CASE_SET_IDS+=", "
+        fi
+        CASE_SET_IDS+="$case_id"
+    done
+}
+
+select_case_registry
+
+# Reject invalid selections before creating shared-base metadata, an output
+# directory, or a lock file.
+validate_scene_selection
+
+SHARED_BASE_CASE_SET_FILE=""
+if [ "$BRANCH_FROM_SHARED_BASE" = "true" ]; then
+    SHARED_BASE_CASE_SET_FILE="$SHARED_BASE_ROOT/.critic_on_case_set"
+    if [ "$GENERATE_SHARED_BASE" = "true" ]; then
+        if [ "$DRY_RUN" = "false" ]; then
+            mkdir -p "$SHARED_BASE_ROOT"
+            printf '%s\n' "$CASE_SET" > "$SHARED_BASE_CASE_SET_FILE"
+        fi
+    elif [ -f "$SHARED_BASE_CASE_SET_FILE" ]; then
+        shared_base_case_set="$(tr -d '[:space:]' < "$SHARED_BASE_CASE_SET_FILE")"
+        if [ "$shared_base_case_set" != "$CASE_SET" ]; then
+            echo "ERROR: shared base case set is '$shared_base_case_set', but this run requested '$CASE_SET'" >&2
+            echo "       Reuse only a shared base generated for the same case registry." >&2
+            exit 2
+        fi
+    else
+        echo "WARNING: reusable shared base has no .critic_on_case_set metadata; compatibility is inferred from batch files." >&2
+    fi
+fi
+
 # Parallel batches re-enter this script in a new session. Export every value
 # that may have been normalized or defaulted above so the child uses exactly
 # the same run configuration as the parent.
 export SCENEEXPERT_EXPERIMENT="$EXPERIMENT"
-export PYTHON_BIN MODEL_NAME RUN_ID OUTPUT_ROOT
+export PYTHON_BIN MODEL_NAME RUN_ID OUTPUT_ROOT CASE_SET CASE_SET_IDS
 export SCENE_BATCH_SIZE SCENE_WORKERS_PER_PROCESS SCENE_RETRY_ATTEMPTS
 export CRITIC_PROBE_PARALLEL CRITIC_PROBE_INNER_PARALLELISM
 export CRITIC_PROBE_MAX_SAFE_INNER_PARALLELISM CRITIC_PROBE_ALLOW_UNSAFE_PARALLELISM
@@ -409,7 +726,8 @@ export CRITIC_PROBE_FINAL_VIEW_PARALLELISM
 export FINAL_VIEW_PYTHON_BIN
 export PIPELINE_STOP_STAGE BRANCH_FROM_SHARED_BASE SHARED_BASE_STOP_STAGE
 export SHARED_BASE_ROOT GENERATE_SHARED_BASE MAX_CASES CASE_FILTER
-export INCLUDE_HOLDOUT_CASES DRY_RUN
+export INCLUDE_HOLDOUT_CASES DRY_RUN SCENE_SELECTION SCENE_SELECTION_EXPLICIT
+export REPLAY_FROM_PATH REPLAY_MODE RESUME_FURNITURE_RENDER_MODE
 export SCENEEXPERT_DISABLE_ARTICULATED="$DISABLE_ARTICULATED"
 export SCENEEXPERT_DISABLE_MATERIALS="$DISABLE_MATERIALS"
 export SCENEEXPERT_DISABLE_BWRAP="$DISABLE_BWRAP"
@@ -454,10 +772,10 @@ read_cgroup_memory_current() {
 }
 
 if [ "$INTERNAL_RUN_BATCH" = "false" ]; then
-    # Prevent two top-level probes from sharing one llama-server/cgroup.  The
-    # descriptor stays locked until this script exits, while internal batch
-    # children inherit the lock owner and do not try to acquire it again.
-    LOCK_FILE="${CRITIC_PROBE_LOCK_FILE:-${TMPDIR:-/tmp}/scenesmith_critic_probe.lock}"
+    # Serialize only re-entry into the same output root.  Independent replay
+    # roots have non-overlapping service-port blocks and can safely share a
+    # llama server configured for concurrent requests.
+    LOCK_FILE="${CRITIC_PROBE_LOCK_FILE:-${OUTPUT_ROOT}.lock}"
     mkdir -p "$(dirname "$LOCK_FILE")"
     if ! command -v flock >/dev/null 2>&1; then
         echo "ERROR: flock is required to prevent overlapping critic probes" >&2
@@ -465,7 +783,7 @@ if [ "$INTERNAL_RUN_BATCH" = "false" ]; then
     fi
     exec 9>"$LOCK_FILE"
     if ! flock -n 9; then
-        echo "ERROR: another critic probe already owns $LOCK_FILE" >&2
+        echo "ERROR: another critic probe already owns output lock $LOCK_FILE" >&2
         echo "       Wait for it to finish or inspect its process/log before retrying." >&2
         exit 1
     fi
@@ -489,6 +807,7 @@ echo "project: $PROJECT_ROOT"
 echo "experiment: $EXPERIMENT"
 echo "run id: $RUN_ID"
 echo "output root: $OUTPUT_ROOT"
+echo "case set: $CASE_SET"
 echo "model: $MODEL_NAME"
 echo "OpenAI base URL: $OPENAI_BASE_URL"
 if [ -n "${SCENEEXPERT_MEMORY_EMBEDDING_MODEL_DIR:-}" ]; then
@@ -501,6 +820,7 @@ echo "port allocation: base=$CRITIC_PROBE_PORT_BASE block=$CRITIC_PROBE_PORT_BLO
 echo "continue after batch failure: $CRITIC_PROBE_CONTINUE_ON_BATCH_FAILURE"
 echo "final-view parallelism: $CRITIC_PROBE_FINAL_VIEW_PARALLELISM"
 echo "fail unresolved furniture hard constraints: $FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS"
+echo "quality failure policy: $QUALITY_FAILURE_POLICY"
 echo "HSSD retrieval: backend=$HSSD_RETRIEVAL_BACKEND rendered_asset_choice=$HSSD_RENDERED_ASSET_CHOICE"
 echo "skip controller bpy import: $SKIP_MAIN_BPY_IMPORT"
 if [ -n "$CONVEX_MAX_OMP_THREADS" ]; then
@@ -514,35 +834,26 @@ if [ "$INTERNAL_RUN_BATCH" = "false" ] \
 fi
 echo "thinking profile: floor_plan=${FLOOR_PLAN_DESIGNER_THINKING}/${FLOOR_PLAN_CRITIC_THINKING}, furniture=${FURNITURE_DESIGNER_THINKING}/${FURNITURE_CRITIC_THINKING}, wall=${WALL_DESIGNER_THINKING}/${WALL_CRITIC_THINKING}, ceiling=${CEILING_DESIGNER_THINKING}/${CEILING_CRITIC_THINKING}, manipuland=${MANIPULAND_DESIGNER_THINKING}/${MANIPULAND_CRITIC_THINKING}"
 echo "shared base: $BRANCH_FROM_SHARED_BASE (generate=$GENERATE_SHARED_BASE)"
+echo "replay source: ${REPLAY_FROM_PATH:-none} (mode=$REPLAY_MODE)"
 echo "holdout cases: $INCLUDE_HOLDOUT_CASES"
+echo "scene selection: $SCENE_SELECTION"
 echo "==============================================="
-
-# case_id|critic goal|prompt. Override only selection/count with CASE_FILTER
-# and MAX_CASES; this keeps batch indices stable for reusable shared bases.
-# CASE_FILTER accepts one substring or a comma-separated list of substrings.
-CASES=(
-    "default_bedroom|ACP default scene 0|A bedroom with a bed, two nightstands, and a wardrobe in the corner of the room."
-    "default_living_room|ACP default scene 1|A living room with a two-seater sofa against the wall, a square rug in the middle in front of the sofa, and two large plants on the floor near the sofa."
-    "default_classroom|ACP default scene 2|A classroom with six student desks, each with a chair. A teacher's desk sits at the front near the chalkboard, which hangs on the wall."
-    "default_rustic_bedroom|ACP default scene 3|A bedroom featuring rustic farmhouse decor with exposed wooden beams."
-    "living_room_media_bottleneck|sofa-coffee-table-TV functional relation and living-room circulation bottleneck|A living room with a sofa against the back wall facing a TV stand and television on the opposite wall, a coffee table centered between the sofa and TV stand, two armchairs flanking the coffee table near each end of the sofa, and a floor lamp beside one armchair. A remote control and a few magazines lie on the coffee table, and a small rug lies between the coffee table and TV stand."
-    "study_desk_access_crunch|desk-chair-monitor functional relation and study access|A study with a desk centered against the back wall, an office chair tucked under the desk, a computer monitor on the desk, two guest chairs against the side wall with their usable fronts perpendicular to the wall and facing into the room, and a bookshelf on the adjacent wall with its usable front perpendicular to the wall and facing into the room. A desk lamp and a notebook sit on the desk, a pen holder next to the monitor, and a small trash can beside the desk."
-    "meeting_room_mixed_edge_seating|conference-table mixed long-and-short-side equal chair distribution|A meeting room with one rectangular conference table centered in the room and seven office chairs. Arrange six office chairs in two equal groups of three, evenly spaced along the table's two long sides, with all chairs facing the table. Place one remaining office chair centered along one short side, facing the table. Keep the opposite short side free of chairs. Keep clear circulation around the table."
-    "dining_room_service_squeeze|dining table-chair-place-setting relation and dining/sideboard accessibility|A dining room with a dining table in the center, four dining chairs arranged around it with one on each side, a sideboard against the wall behind the chairs on one side, and table settings for four including plates, cutlery, and glasses. A centerpiece vase with flowers sits in the middle of the table, and a set of coasters sits on the sideboard."
-)
-
-if [ "$INCLUDE_HOLDOUT_CASES" = "true" ]; then
-    CASES+=(
-        "holdout_office|office workstation pairing and shared central circulation|A collaborative office with two desks facing each other across the center, an office chair and computer monitor at each desk, a filing cabinet against one wall, and a clear walking path between the workstations. A keyboard and desk lamp sit on each desk."
-        "holdout_reception|reception workflow, guest seating, and brochure access|A reception room with a reception desk against the back wall, an office chair behind it, two guest chairs facing the desk, a side table between the guest chairs, a filing cabinet in a corner, and a brochure holder on top of the reception desk. Keep an open route from the entrance to the desk and chairs."
-        "holdout_workshop|workbench tool access and safe circulation|A workshop with a workbench against the back wall, two stools paired with the workbench, a tool cabinet against a side wall, a freestanding assembly table in the center, and storage shelves on the opposite wall. A toolbox and task lamp sit on the workbench, with a clear path around the assembly table."
-        "holdout_nursery|crib access, paired bedside storage, and reading corner|A nursery with a crib centered against the back wall, a changing table against a side wall, a dresser on the opposite wall, and a rocking chair near a small side table in one corner. A table lamp and two books sit on the side table, while the route to the crib remains clear."
-    )
-fi
 
 case_selected() {
     local case_id="$1"
     local filter
+    if [ "$SCENE_SELECTION_EXPLICIT" = "true" ] || [ "$SCENE_SELECTION" != "all" ]; then
+        if [ "$SCENE_SELECTION" = "all" ]; then
+            return 0
+        fi
+        IFS=',' read -r -a selected_scene_ids <<< "$SCENE_SELECTION"
+        for filter in "${selected_scene_ids[@]}"; do
+            if [ "$case_id" = "$filter" ]; then
+                return 0
+            fi
+        done
+        return 1
+    fi
     if [ -z "$CASE_FILTER" ]; then
         return 0
     fi
@@ -555,9 +866,47 @@ case_selected() {
     return 1
 }
 
+validate_shared_base_case_mapping() {
+    local index entry case_id _critic_goal _prompt batch_index batch_csv selected=0
+
+    if [ "$BRANCH_FROM_SHARED_BASE" != "true" ] \
+        || [ "$GENERATE_SHARED_BASE" = "true" ]; then
+        return 0
+    fi
+
+    for index in "${!CASES[@]}"; do
+        entry="${CASES[$index]}"
+        IFS='|' read -r case_id _critic_goal _prompt <<< "$entry"
+        if ! case_selected "$case_id"; then
+            continue
+        fi
+        if [ "$MAX_CASES" -gt 0 ] && [ "$selected" -ge "$MAX_CASES" ]; then
+            break
+        fi
+        batch_index=$((index / SCENE_BATCH_SIZE + 1))
+        batch_csv="$SHARED_BASE_ROOT/$(printf 'batch_%03d' "$batch_index")/batch_cases.csv"
+        if [ ! -f "$batch_csv" ]; then
+            echo "ERROR: reusable shared base has no batch manifest: $batch_csv" >&2
+            echo "       Expected case '$case_id' at scene index $index for case set '$CASE_SET'." >&2
+            exit 2
+        fi
+        if ! awk -F',' -v expected_index="$index" -v expected_id="$case_id" \
+            '$1 == expected_index && index($0, "\"" expected_id "\"") { found = 1 } END { exit !found }' \
+            "$batch_csv"; then
+            echo "ERROR: reusable shared base batch mapping does not contain case '$case_id' at scene index $index: $batch_csv" >&2
+            echo "       The base belongs to another case registry or was generated with a different ordering." >&2
+            exit 2
+        fi
+        selected=$((selected + 1))
+    done
+}
+
+validate_shared_base_case_mapping
+
 COMMON_ARGS=(
     "experiment.num_workers=${SCENE_WORKERS_PER_PROCESS}"
     "experiment.scene_retry_attempts=${SCENE_RETRY_ATTEMPTS}"
+    "experiment.quality_failure_policy=${QUALITY_FAILURE_POLICY}"
     "furniture_agent.fail_stage_on_unresolved_hard_constraints=${FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS}"
     "experiment.pipeline.parallel_rooms=false"
     "experiment.pipeline.max_parallel_rooms=1"
@@ -689,18 +1038,20 @@ run_batch() {
         else
             resume_from="$shared_base_batch_root"
         fi
-        if [ ! -d "$resume_from" ]; then
+        if [ "$DRY_RUN" = "false" ] && [ ! -d "$resume_from" ]; then
             echo "ERROR: missing reusable shared-base batch: $resume_from" >&2
             exit 1
         fi
-        for entry in "${batch_entries[@]}"; do
-            IFS='|' read -r scene_index _case_id _critic_goal _prompt <<< "$entry"
-            if [ ! -d "$resume_from/scene_$(printf '%03d' "$scene_index")" ]; then
-                echo "ERROR: shared-base scene directory not found: $resume_from/scene_$(printf '%03d' "$scene_index")" >&2
-                echo "       Expected the shared base under $shared_base_batch_root/hydra or $shared_base_batch_root." >&2
-                exit 1
-            fi
-        done
+        if [ "$DRY_RUN" = "false" ]; then
+            for entry in "${batch_entries[@]}"; do
+                IFS='|' read -r scene_index _case_id _critic_goal _prompt <<< "$entry"
+                if [ ! -d "$resume_from/scene_$(printf '%03d' "$scene_index")" ]; then
+                    echo "ERROR: shared-base scene directory not found: $resume_from/scene_$(printf '%03d' "$scene_index")" >&2
+                    echo "       Expected the shared base under $shared_base_batch_root/hydra or $shared_base_batch_root." >&2
+                    exit 1
+                fi
+            done
+        fi
     fi
 
     local cmd=(
@@ -715,6 +1066,9 @@ run_batch() {
     )
     if [ -n "$start_stage" ]; then
         cmd+=("experiment.pipeline.start_stage=${start_stage}" "experiment.pipeline.resume_from_path=${resume_from}")
+        if [ -n "$RESUME_FURNITURE_RENDER_MODE" ]; then
+            cmd+=("experiment.pipeline.resume_furniture_from_render=${RESUME_FURNITURE_RENDER_MODE}")
+        fi
     fi
 
     echo "[$run_kind/$batch_label] ${cmd[*]}"

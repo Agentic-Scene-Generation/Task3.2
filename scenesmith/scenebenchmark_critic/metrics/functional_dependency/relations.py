@@ -307,8 +307,19 @@ def _eval_relation_over_targets(
                 )
             else:
                 label, confidence, reason = evaluator(subject, target, target_relation)
+            evidence = None
+            if target_relation == "seating_to_media":
+                axis = _media_lateral_axis_diagnostics(subject, target)
+                evidence = axis[3] if axis is not None else None
             scored.append(
-                _target_eval_payload(target, label, confidence, reason, target_relation)
+                _target_eval_payload(
+                    target,
+                    label,
+                    confidence,
+                    reason,
+                    target_relation,
+                    evidence=evidence,
+                )
             )
     if not scored:
         return "unknown", 0.0, "no target could be evaluated.", _empty_fd_diagnostics()
@@ -902,6 +913,11 @@ def _eval_facing_relation(
     # 会把屏幕背向座椅或明显偏离观看区域的壁挂电视判为 pass。壁挂媒体还
     # 必须满足“TV front -> 座椅”方向；普通电视柜/非壁挂媒体继续使用原有
     # 允许斜向观看的规则，避免把正常的家具布局误判为失败。
+    axis = _media_lateral_axis_diagnostics(subject, target)
+    if axis is None:
+        return "unknown", 0.0, "missing media lateral-axis geometry."
+    lateral_offset, pass_offset, degraded_offset, _ = axis
+
     if wall_mounted_media and media_front_angle is not None:
         if media_front_angle > 45.0:
             media_alignment_reason = (
@@ -950,6 +966,25 @@ def _eval_facing_relation(
             f"relation does not support use: distance {dist:.2f}m, angle {angle:.0f}deg.",
         )
 
+    axis_reason = (
+        f"lateral center-axis offset {lateral_offset:.2f}m "
+        f"(pass <= {pass_offset:.2f}m, degraded <= {degraded_offset:.2f}m)"
+    )
+    if lateral_offset > degraded_offset:
+        label, confidence, reason = (
+            "fail",
+            max(confidence, 0.9),
+            f"{reason.rstrip('.')}; {axis_reason} is too large.",
+        )
+    elif lateral_offset > pass_offset and label != "fail":
+        label, confidence, reason = (
+            "degraded",
+            min(confidence, 0.82),
+            f"{reason.rstrip('.')}; {axis_reason} is only loosely aligned.",
+        )
+    else:
+        reason = f"{reason.rstrip('.')}; {axis_reason}."
+
     if wall_mounted_media and media_front_angle is not None:
         if media_front_angle > 35.0:
             return (
@@ -965,6 +1000,57 @@ def _eval_facing_relation(
             f"{media_front_angle:.0f}deg.",
         )
     return label, confidence, reason
+
+
+def _media_lateral_axis_diagnostics(
+    subject: dict[str, Any], target: dict[str, Any]
+) -> tuple[float, float, float, dict[str, Any]] | None:
+    subject_center = bbox_center_xy(subject)
+    target_center = bbox_center_xy(target)
+    if subject_center is None or target_center is None:
+        return None
+    lateral_axis = side_vector(subject)
+    lateral_norm = math.hypot(*lateral_axis)
+    if lateral_norm <= 1e-6:
+        return None
+    lateral_axis = (
+        lateral_axis[0] / lateral_norm,
+        lateral_axis[1] / lateral_norm,
+    )
+    delta = (
+        target_center[0] - subject_center[0],
+        target_center[1] - subject_center[1],
+    )
+    signed_offset = delta[0] * lateral_axis[0] + delta[1] * lateral_axis[1]
+    subject_width = _footprint_span_along(subject, lateral_axis)
+    target_width = _footprint_span_along(target, lateral_axis)
+    if subject_width is None or target_width is None:
+        return None
+    narrower_width = min(subject_width, target_width)
+    pass_offset = max(0.35, 0.25 * narrower_width)
+    degraded_offset = max(0.75, 0.5 * narrower_width)
+    evidence = {
+        "lateral_offset_m": round(abs(signed_offset), 6),
+        "signed_lateral_offset_m": round(signed_offset, 6),
+        "lateral_axis_xy": [round(value, 6) for value in lateral_axis],
+        "subject_center_xy_m": [round(value, 6) for value in subject_center],
+        "target_center_xy_m": [round(value, 6) for value in target_center],
+        "current_front_xy": [round(value, 6) for value in front_vector(subject)],
+        "media_axis_pass_offset_m": round(pass_offset, 6),
+        "media_axis_degraded_offset_m": round(degraded_offset, 6),
+        "narrower_lateral_width_m": round(narrower_width, 6),
+    }
+    return abs(signed_offset), pass_offset, degraded_offset, evidence
+
+
+def _footprint_span_along(
+    obj: dict[str, Any], axis: tuple[float, float]
+) -> float | None:
+    footprint = object_footprint_polygon(obj)
+    if not footprint:
+        return None
+    projections = [point[0] * axis[0] + point[1] * axis[1] for point in footprint]
+    return max(projections) - min(projections)
 
 
 def _is_wall_mounted_media_target(target: dict[str, Any]) -> bool:
@@ -1331,6 +1417,7 @@ def _eval_face_to_target(
         return "unknown", 0.0, "missing distance geometry."
     max_distance = _dependency_float(dependency, "max_distance_m", 1.8)
     max_angle = _dependency_float(dependency, "max_angle_deg", 60.0)
+    distance_required = _face_dependency_requires_distance(dependency)
     subject_face = str(dependency.get("subject_face") or "front").strip().lower()
     target_face = str(dependency.get("target_face") or "any").strip().lower()
     subject_angle = _face_angle_to_target_deg(subject, target, subject_face)
@@ -1347,23 +1434,40 @@ def _eval_face_to_target(
         target_ok = target_angle <= max_angle
         target_clause = f", target {target_face} angle {target_angle:.0f}deg"
 
-    if gap <= max_distance and subject_angle <= max_angle and target_ok:
+    distance_ok = not distance_required or gap <= max_distance
+    weak_distance_ok = not distance_required or gap <= max_distance * 1.25
+    distance_clause = f"gap {gap:.2f}m, " if distance_required else ""
+    if distance_ok and subject_angle <= max_angle and target_ok:
         return (
             "pass",
             0.88,
-            f"`{relation_type}` holds: gap {gap:.2f}m, subject {subject_face} angle {subject_angle:.0f}deg{target_clause}.",
+            f"`{relation_type}` holds: {distance_clause}subject {subject_face} angle {subject_angle:.0f}deg{target_clause}.",
         )
-    if gap <= max_distance * 1.25 and subject_angle <= max_angle + 30.0:
+    if weak_distance_ok and subject_angle <= max_angle + 30.0:
         return (
             "degraded",
             0.72,
-            f"`{relation_type}` is weak: gap {gap:.2f}m, subject {subject_face} angle {subject_angle:.0f}deg{target_clause}.",
+            f"`{relation_type}` is weak: {distance_clause}subject {subject_face} angle {subject_angle:.0f}deg{target_clause}.",
         )
     return (
         "fail",
         0.84,
-        f"`{relation_type}` fails: gap {gap:.2f}m, subject {subject_face} angle {subject_angle:.0f}deg{target_clause}.",
+        f"`{relation_type}` fails: {distance_clause}subject {subject_face} angle {subject_angle:.0f}deg{target_clause}.",
     )
+
+
+def _face_dependency_requires_distance(dependency: dict[str, Any]) -> bool:
+    """Keep legacy HSSD orientation priors from acquiring a default 1.8m cap."""
+    if dependency.get("distance_required") is False:
+        return False
+    source = str(dependency.get("source") or "")
+    if not source.startswith("hssd_annotations:"):
+        return True
+    try:
+        distance = float(dependency.get("max_distance_m"))
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(distance) and distance >= 0.0
 
 
 def _eval_vertical_attachment(
@@ -1625,9 +1729,18 @@ def _relation_target_is_valid(
     if relation_type == "seat_faces_surface":
         return _is_seating_subject(subject) and _is_work_surface_target(target)
     if relation_type == "furniture_faces_furniture":
-        return _is_directional_facing_subject(subject) and _is_facing_relation_target(
-            target
+        target_category = object_category(target)
+        directional_target = _is_facing_relation_target(target) or (
+            target_category
+            in {
+                "instructional_surface",
+                "chalkboard",
+                "blackboard",
+                "whiteboard",
+                "projection_screen",
+            }
         )
+        return _is_directional_facing_subject(subject) and directional_target
     if relation_type in {
         "back_against_wall",
         "side_or_back_against_wall",

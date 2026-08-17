@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 from typing import Any
 
 from scenesmith.scenebenchmark_critic.core.geometry import (
@@ -854,13 +856,34 @@ def _build_dependency_annotation_checks(
 def _hard_contract_orientation_subjects(
     case_pack: dict[str, Any], objects: dict[str, dict[str, Any]]
 ) -> set[str]:
-    """Return subjects whose usable front is owned by a hard intent contract."""
+    """Return subjects whose usable front is owned by a hard intent contract.
+
+    Asset orientation priors are useful when the prompt leaves a furniture
+    object's facing open.  They must not compete with a hard prompt relation
+    that already assigns the object's front.  In particular, an inward-facing
+    edge distribution owns every seat's facing even though its group evaluator
+    intentionally does not emit duplicate pairwise ``faces`` rows.
+    """
     subject_ids: set[str] = set()
-    for constraint in contract_constraints(
-        case_pack,
-        relations=("operation_zone_at_wall", "instructional_surface_alignment"),
-        include_auxiliary=False,
-    ):
+    for constraint in contract_constraints(case_pack, include_auxiliary=False):
+        relation = str(constraint.get("relation") or "")
+        owns_orientation = relation in {
+            "across_from",
+            "against_wall",
+            "faces",
+            "aligned_with",
+            "paired_with",
+            "operation_zone_at_wall",
+            "instructional_surface_alignment",
+        }
+        if relation == "edge_distribution":
+            owns_orientation = str(constraint.get("orientation") or "") in {
+                "toward_target",
+                "away_from_target",
+                "parallel_to_edge",
+            }
+        if not owns_orientation:
+            continue
         subject_ids.update(bound_ids(constraint.get("subjects"), objects.values()))
     return subject_ids
 
@@ -1001,7 +1024,11 @@ def _dependency_targets(
     if not target_categories:
         return []
 
-    max_distance = _float_value(dependency.get("max_distance_m"), 2.4)
+    max_distance = (
+        math.inf
+        if _dependency_is_orientation_only(dependency)
+        else _float_value(dependency.get("max_distance_m"), 2.4)
+    )
     limit = 6 if target_kind == "architecture" else 4
     nearby_targets = _nearby_targets(
         subject,
@@ -1106,6 +1133,31 @@ def _float_value(value: Any, default: float) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _dependency_is_orientation_only(dependency: dict[str, Any]) -> bool:
+    """Whether an asset prior deliberately omits a proximity requirement."""
+    relation_type = _normalize_relation_token(
+        dependency.get("relation_type") or dependency.get("type")
+    )
+    if relation_type not in {
+        "face_to",
+        "faces",
+        "facing",
+        "front_faces",
+        "furniture_faces_furniture",
+    }:
+        return False
+    if dependency.get("distance_required") is False:
+        return True
+    source = str(dependency.get("source") or "")
+    if not source.startswith("hssd_annotations:"):
+        return False
+    try:
+        distance = float(dependency.get("max_distance_m"))
+    except (TypeError, ValueError):
+        return True
+    return not math.isfinite(distance) or distance < 0.0
 
 
 def _grouped_dining_checks(

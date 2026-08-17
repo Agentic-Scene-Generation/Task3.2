@@ -18,6 +18,7 @@ from scenesmith.experiments.indoor_scene_generation import (
     _fix_paths_in_json_file,
     _raise_for_unresolved_furniture_relations,
     _rescore_furniture_after_postprocessing,
+    _restore_furniture_render_checkpoint,
 )
 
 
@@ -120,7 +121,10 @@ class TestFinalFurnitureRescore(unittest.TestCase):
         improve.assert_called_once_with(
             scene,
             config=cfg_dict,
-            allowed_relation_types={"instructional_surface_alignment"},
+            allowed_relation_types={
+                "instructional_surface_alignment",
+                "furniture_faces_furniture",
+            },
         )
         validate.assert_called_once_with(scene=scene, cfg_dict=cfg_dict)
 
@@ -528,9 +532,19 @@ class TestCopyCheckpointForStage(unittest.TestCase):
         shutil.rmtree(self.source_dir)
         shutil.rmtree(self.target_dir)
 
-    def _create_source_scene(self, with_furniture_assets: bool = True):
+    def _create_source_scene(
+        self,
+        with_furniture_assets: bool = True,
+        *,
+        geometry_first: bool = False,
+    ):
         """Create a source scene directory structure for testing."""
         scene_dir = self.source_dir / "scene_000"
+        room_geometry = scene_dir / "room_geometry"
+        if geometry_first:
+            room_geometry.mkdir(parents=True)
+            (room_geometry / "room_geometry_main.sdf").write_text("<sdf>room</sdf>")
+
         room_dir = scene_dir / "room_main"
         room_dir.mkdir(parents=True)
 
@@ -544,9 +558,9 @@ class TestCopyCheckpointForStage(unittest.TestCase):
         (floor_plans / "floor.sdf").write_text("<sdf>floor</sdf>")
 
         # Create room_geometry at scene level.
-        room_geometry = scene_dir / "room_geometry"
-        room_geometry.mkdir()
-        (room_geometry / "room_geometry_main.sdf").write_text("<sdf>room</sdf>")
+        if not geometry_first:
+            room_geometry.mkdir()
+            (room_geometry / "room_geometry_main.sdf").write_text("<sdf>room</sdf>")
 
         if with_furniture_assets:
             # Create generated_assets with absolute paths.
@@ -623,6 +637,161 @@ class TestCopyCheckpointForStage(unittest.TestCase):
         target_room = target_scene / "room_main"
         self.assertTrue(target_room.exists())
         self.assertFalse((target_room / "scene_states").exists())
+
+    def test_copy_scene_for_furniture_initial_render_resume(self):
+        """The first furniture render can seed critique/repair without regeneration."""
+        # Real floor-plan output creates room_geometry before the room
+        # directory. The replay must not mistake that scene-level directory
+        # for a furniture checkpoint.
+        source_scene = self._create_source_scene(
+            with_furniture_assets=True,
+            geometry_first=True,
+        )
+        source_room = source_scene / "room_main"
+        source_render_state = (
+            source_room
+            / "scene_renders"
+            / "furniture"
+            / "renders_001"
+            / "scene_state.json"
+        )
+        source_render_state.write_text(
+            json.dumps(
+                {
+                    "objects": [
+                        {
+                            "id": "table_01",
+                            "sdf_path": str(
+                                source_room / "generated_assets/furniture/table.sdf"
+                            ),
+                        }
+                    ]
+                }
+            )
+        )
+        target_scene = self.target_dir / "scene_000"
+        target_scene.mkdir(parents=True)
+
+        _copy_checkpoint_for_stage(
+            source_scene_dir=source_scene,
+            target_scene_dir=target_scene,
+            start_stage="furniture",
+            resume_furniture_from_initial_render=True,
+        )
+
+        target_room = target_scene / "room_main"
+        restored_state = (
+            target_room
+            / "scene_states"
+            / "scene_from_furniture_initial_render"
+            / "scene_state.json"
+        )
+        self.assertTrue(restored_state.exists())
+        self.assertTrue(
+            (target_room / "generated_assets" / "furniture" / "table.sdf").exists()
+        )
+        self.assertFalse((target_room / "scene_renders").exists())
+
+        with open(restored_state) as f:
+            state = json.load(f)
+        self.assertIn(str(target_room), state["objects"][0]["sdf_path"])
+        self.assertNotIn(str(source_room), state["objects"][0]["sdf_path"])
+
+    def test_copy_scene_for_latest_furniture_render_resume(self):
+        """Latest render selection is numeric and ignores incomplete directories."""
+        source_scene = self._create_source_scene(with_furniture_assets=True)
+        source_room = source_scene / "room_main"
+        source_asset = source_room / "generated_assets/furniture/table.sdf"
+        render_root = source_room / "scene_renders" / "furniture"
+        for render_id, marker in (("002", "older"), ("010", "latest")):
+            state_path = render_root / f"renders_{render_id}" / "scene_state.json"
+            state_path.parent.mkdir(parents=True, exist_ok=True)
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "render_marker": marker,
+                        "objects": [{"id": "table_01", "sdf_path": str(source_asset)}],
+                    }
+                )
+            )
+        (render_root / "renders_999").mkdir(parents=True, exist_ok=True)
+
+        target_scene = self.target_dir / "scene_000"
+        target_scene.mkdir(parents=True)
+        _copy_checkpoint_for_stage(
+            source_scene_dir=source_scene,
+            target_scene_dir=target_scene,
+            start_stage="furniture",
+            resume_furniture_from_render="latest",
+        )
+
+        restored_state = (
+            target_scene
+            / "room_main"
+            / "scene_states"
+            / "scene_from_furniture_latest_render"
+            / "scene_state.json"
+        )
+        with open(restored_state) as f:
+            state = json.load(f)
+        self.assertEqual(state["render_marker"], "latest")
+        self.assertIn(str(target_scene / "room_main"), state["objects"][0]["sdf_path"])
+
+    def test_furniture_render_restore_rebinds_current_prompt_and_contract(self):
+        """A checkpoint's prior task text must not override the replay task."""
+        render_state_path = self.target_dir / "scene_state.json"
+        render_state_path.write_text(
+            json.dumps(
+                {
+                    "text_description": "legacy bedroom prompt",
+                    "metadata": {
+                        "scenebenchmark_intent_contract": {"source": "legacy"}
+                    },
+                }
+            )
+        )
+
+        class RestoredScene:
+            text_description = ""
+            metadata: dict = {}
+
+            def restore_from_state_dict(self, state):
+                self.text_description = state["text_description"]
+                self.metadata = dict(state["metadata"])
+                self.scenebenchmark_intent_contract = self.metadata[
+                    "scenebenchmark_intent_contract"
+                ]
+
+        scene = RestoredScene()
+        current_contract = {"schema_version": "4.0", "source": "current"}
+        current_prompt = "current bedroom prompt with a dressing table"
+
+        _restore_furniture_render_checkpoint(
+            scene=scene,
+            render_state_path=render_state_path,
+            room_prompt=current_prompt,
+            intent_contract=current_contract,
+        )
+
+        self.assertEqual(scene.text_description, current_prompt)
+        self.assertIs(scene.scenebenchmark_intent_contract, current_contract)
+        self.assertIs(
+            scene.metadata["scenebenchmark_intent_contract"], current_contract
+        )
+
+    def test_initial_render_resume_requires_furniture_start(self):
+        """A partial furniture snapshot cannot seed another pipeline stage."""
+        source_scene = self._create_source_scene(with_furniture_assets=True)
+        target_scene = self.target_dir / "scene_000"
+        target_scene.mkdir(parents=True)
+
+        with self.assertRaises(ValueError):
+            _copy_checkpoint_for_stage(
+                source_scene_dir=source_scene,
+                target_scene_dir=target_scene,
+                start_stage="wall_mounted",
+                resume_furniture_from_initial_render=True,
+            )
 
     def test_copy_scene_for_wall_mounted_stage(self):
         """Test copying scene for wall_mounted stage copies furniture checkpoint."""

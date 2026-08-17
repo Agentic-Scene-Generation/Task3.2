@@ -1,4 +1,4 @@
-"""Typed v4 schema for the independent SceneBenchmark intent contract.
+"""Typed v5 schema for the independent SceneBenchmark intent contract.
 
 The contract is deliberately separate from :class:`SceneTaskSpec`.  The task
 compiler describes inventory and stage ownership; this module describes hard
@@ -10,16 +10,20 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from copy import deepcopy
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from scenesmith.scenebenchmark_critic.object_taxonomy import (
+    canonical_object_category,
+    execution_owner,
+)
 from scenesmith.scenebenchmark_critic.relation_registry import (
-    CEILING_MOUNTED_CATEGORIES,
-    MANIPULAND_CATEGORIES,
+    RELATION_REGISTRY,
     STAGE_ORDER,
-    WALL_MOUNTED_CATEGORIES,
     relation_spec,
+    relations_are_exclusive,
 )
 
 
@@ -32,6 +36,7 @@ _GENERIC_SELECTOR_FAMILIES = {
             "student_chair",
             "dining_chair",
             "armchair",
+            "stool",
         }
     ),
     "table": frozenset(
@@ -42,6 +47,7 @@ _GENERIC_SELECTOR_FAMILIES = {
             "coffee_table",
             "side_table",
             "desk",
+            "dressing_table",
         }
     ),
     "desk": frozenset({"desk", "student_desk", "teacher_desk", "reception_desk"}),
@@ -50,60 +56,9 @@ _GENERIC_SELECTOR_FAMILIES = {
 }
 
 
-_SELECTOR_CATEGORY_ALIASES = {
-    "dining_chairs": "dining_chair",
-    "large_plants": "large_plant",
-    "two_seater_sofas": "two_seater_sofa",
-    "centerpiece_vase": "vase",
-    "centerpiece_vases": "vase",
-    "vases": "vase",
-    "coasters": "coaster",
-    "plates": "plate",
-    "glasses": "glass",
-    "wine_glasses": "glass",
-    "drinking_glasses": "glass",
-    "cutleries": "cutlery",
-    "flatware": "cutlery",
-    "silverware": "cutlery",
-    "fork": "cutlery",
-    "forks": "cutlery",
-    "knife": "cutlery",
-    "knives": "cutlery",
-    "spoon": "cutlery",
-    "spoons": "cutlery",
-    "wine_glass": "glass",
-    "drinking_glass": "glass",
-    "tumbler": "glass",
-    "table_settings": "table_setting",
-    "place_settings": "table_setting",
-    "place_setting": "table_setting",
-    "flowers": "flower",
-}
-
-
-def _singularize_selector_category(normalized: str) -> str:
-    """Apply conservative English plural normalization to the final noun."""
-    if normalized.endswith("ies") and len(normalized) > 3:
-        return f"{normalized[:-3]}y"
-    if normalized.endswith(("ches", "shes", "xes", "zes", "sses")):
-        return normalized[:-2]
-    if normalized.endswith("s") and not normalized.endswith(("ss", "us", "is")):
-        return normalized[:-1]
-    return normalized
-
-
 def canonical_selector_category(value: Any) -> str:
     """Normalize compiler selector spellings to stable semantic categories."""
-    normalized = str(value or "").strip().lower()
-    # Possessive role labels identify the same category ("teacher's desk" and
-    # "teacher desk").  Keep compiler selectors aligned with asset semantic
-    # names so a hard relation can bind the retrieved object.
-    normalized = re.sub(r"(?<=[a-z])['\u2019]s\b", "", normalized)
-    normalized = re.sub(r"[^a-z0-9]+", "_", normalized).strip("_")
-    aliased = _SELECTOR_CATEGORY_ALIASES.get(normalized)
-    if aliased is not None:
-        return aliased
-    return _singularize_selector_category(normalized)
+    return canonical_object_category(value)
 
 
 def selector_categories_overlap(first: str, second: str) -> bool:
@@ -121,8 +76,8 @@ def selector_categories_overlap(first: str, second: str) -> bool:
 _selector_categories_overlap = selector_categories_overlap
 
 
-INTENT_CONTRACT_SCHEMA_VERSION = "scenesmith.intent_contract.v4"
-INTENT_COMPILER_SPEC_VERSION = "scenesmith.intent_compiler.v5"
+INTENT_CONTRACT_SCHEMA_VERSION = "scenesmith.intent_contract.v5"
+INTENT_COMPILER_SPEC_VERSION = "scenesmith.intent_compiler.v9"
 
 _WALL_QUALIFIED_DIRECTION_PATTERN = re.compile(
     r"(?P<subject>[^,.;!?]{1,100}?)\s+against\s+"
@@ -234,6 +189,7 @@ class IntentRelation(BaseModel):
     ) = None
     source: Literal[
         "explicit_prompt",
+        "task_compiler_inventory",
         "model_inferred",
         "room_ontology",
         "deterministic_fallback",
@@ -257,6 +213,13 @@ class IntentRelation(BaseModel):
             raise ValueError("explicit_prompt relations require evidence_span")
         if self.source == "model_inferred" and not self.inference_reason.strip():
             raise ValueError("model_inferred relations require inference_reason")
+        if (
+            self.source == "task_compiler_inventory"
+            and not self.inference_reason.strip()
+        ):
+            raise ValueError(
+                "task_compiler_inventory relations require inventory provenance"
+            )
         if self.stage and self.stage not in STAGE_ORDER:
             raise ValueError(f"Unknown intent contract stage: {self.stage!r}")
 
@@ -390,6 +353,48 @@ class IntentContract(BaseModel):
                     f"for {relation.subjects.category!r}"
                 )
 
+        for relation in self.constraints:
+            if relation.relation == "one_per_support":
+                if relation.targets is None:
+                    continue
+                subject_count = relation.subjects.count
+                target_count = relation.targets.count
+                if (
+                    subject_count is None
+                    or target_count is None
+                    or subject_count != target_count
+                ):
+                    raise ValueError(
+                        "one_per_support requires equal explicit subject and target counts"
+                    )
+            elif relation.relation == "corner_distribution":
+                if (
+                    relation.targets is None
+                    or relation.targets.category != "room"
+                    or (relation.subjects.count or 0) < 2
+                ):
+                    raise ValueError(
+                        "corner_distribution requires at least two subjects and a room target"
+                    )
+
+        for index, first in enumerate(self.constraints):
+            for second in self.constraints[index + 1 :]:
+                if not relations_are_exclusive(first.relation, second.relation):
+                    continue
+                if not _selector_categories_overlap(
+                    first.subjects.category, second.subjects.category
+                ):
+                    continue
+                first_role = first.subjects.role
+                second_role = second.subjects.role
+                if first_role and second_role and first_role != second_role:
+                    continue
+                raise ValueError(
+                    "conflicting hard relations for overlapping subject selector "
+                    f"{first.subjects.category!r}: {first.relation!r} and "
+                    f"{second.relation!r}"
+                )
+
         edge_pairs = {
             (
                 relation.subjects.category,
@@ -433,27 +438,20 @@ def validate_intent_contract(payload: dict[str, Any]) -> dict[str, Any]:
         stage = (
             stage if stage in STAGE_ORDER else relation_spec(relation).earliest_stage
         )
-        categories = {
-            str((constraint.get("subjects") or {}).get("category") or ""),
-            str((constraint.get("targets") or {}).get("category") or ""),
-            str((constraint.get("targets") or {}).get("secondary_category") or ""),
-        }
+        subjects = constraint.get("subjects") or {}
+        targets = constraint.get("targets") or {}
         endpoint_stages = [
-            (
-                "wall_mounted"
-                if category in WALL_MOUNTED_CATEGORIES
-                else (
-                    "ceiling_mounted"
-                    if category in CEILING_MOUNTED_CATEGORIES
-                    else (
-                        "manipuland"
-                        if category in MANIPULAND_CATEGORIES
-                        or category == "table_setting"
-                        else ""
-                    )
-                )
-            )
-            for category in categories
+            execution_owner(
+                subjects.get("category"), relation=relation, endpoint="subject"
+            ),
+            execution_owner(
+                targets.get("category"), relation=relation, endpoint="target"
+            ),
+            execution_owner(
+                targets.get("secondary_category"),
+                relation=relation,
+                endpoint="target",
+            ),
         ]
         constraint["stage"] = max(
             [stage, *(value for value in endpoint_stages if value)],
@@ -480,6 +478,143 @@ def validate_intent_contract(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def intent_contract_json_schema() -> dict[str, Any]:
-    """Return the exact schema supplied to the independent LLM request."""
+    """Return an LLM schema that enforces relation-specific target arity.
 
-    return IntentContract.model_json_schema()
+    Pydantic's ``IntentRelation`` must keep ``targets`` optional because count
+    relations have no endpoint.  A plain model schema consequently lets an LLM
+    omit ``targets`` for every relation, including ``flanking`` and
+    ``corner_of_room``.  Encode the registry's target arity in JSON Schema as
+    well, so decoders that honor JSON Schema conditionals require an object
+    target whenever the selected relation has an endpoint.  The compiler keeps
+    a separate post-parse safeguard for llama.cpp's more limited grammar.
+    """
+
+    schema = deepcopy(IntentContract.model_json_schema())
+    schema.setdefault("required", [])
+    if "constraints" not in schema["required"]:
+        schema["required"].append("constraints")
+    relation_schema = schema["$defs"]["IntentRelation"]
+    relation_properties = relation_schema["properties"]
+    relation_names_by_arity = {
+        arity: sorted(
+            name
+            for name, spec in RELATION_REGISTRY.items()
+            if spec.target_arity == arity
+        )
+        for arity in (0, 1, 2)
+    }
+    relation_properties["relation"] = {"enum": sorted(RELATION_REGISTRY)}
+    # llama.cpp's grammar converter ignores JSON Schema if/then branches, but
+    # it does honor a top-level required list. Requiring the key for every row
+    # prevents the local model from silently omitting relation endpoints;
+    # zero-arity relations use an explicit null value.
+    relation_schema.setdefault("required", [])
+    if "targets" not in relation_schema["required"]:
+        relation_schema["required"].append("targets")
+
+    endpoint_conditions: list[dict[str, Any]] = [
+        {
+            "if": {
+                "properties": {"relation": {"enum": relation_names_by_arity[0]}},
+                "required": ["relation"],
+            },
+            "then": {"properties": {"targets": {"type": "null"}}},
+        }
+    ]
+    for arity in (1, 2):
+        relation_names = relation_names_by_arity[arity]
+        target_schema: dict[str, Any] = {"$ref": "#/$defs/IntentSelector"}
+        if arity == 2:
+            target_schema = {
+                "allOf": [
+                    target_schema,
+                    {"required": ["secondary_category"]},
+                ]
+            }
+        endpoint_conditions.append(
+            {
+                "if": {
+                    "properties": {"relation": {"enum": relation_names}},
+                    "required": ["relation"],
+                },
+                "then": {
+                    "required": ["targets"],
+                    "properties": {"targets": target_schema},
+                },
+            }
+        )
+    relation_schema["allOf"] = endpoint_conditions
+    return schema
+
+
+def intent_compiler_wire_json_schema() -> dict[str, Any]:
+    """Return the compact, provenance-free schema generated by the LLM.
+
+    Long evidence and inference strings are deterministic compiler metadata.
+    Keeping them out of constrained generation prevents a malformed string from
+    consuming the entire completion budget before the JSON object can close.
+    """
+
+    full_schema = intent_contract_json_schema()
+    selector_schema = deepcopy(full_schema["$defs"]["IntentSelector"])
+    for field in ("category", "role", "secondary_category", "secondary_role"):
+        selector_schema["properties"][field]["maxLength"] = 64
+
+    group_schema = deepcopy(full_schema["$defs"]["EdgeDistributionGroup"])
+    relation_schema = deepcopy(full_schema["$defs"]["IntentRelation"])
+    retained = {
+        "relation",
+        "subjects",
+        "targets",
+        "edge_frame",
+        "groups",
+        "orientation",
+    }
+    relation_schema["properties"] = {
+        key: value
+        for key, value in relation_schema["properties"].items()
+        if key in retained
+    }
+    relation_schema["properties"]["grounding"] = {
+        "type": "string",
+        "pattern": r"^(prompt|interaction|aesthetic):[0-9]+$",
+        "maxLength": 32,
+    }
+    relation_schema["required"] = ["relation", "subjects", "targets", "grounding"]
+    relation_schema["additionalProperties"] = False
+
+    allowed_relations = sorted(set(RELATION_REGISTRY) - {"required_count"})
+    relation_schema["properties"]["relation"] = {"enum": allowed_relations}
+    for condition in relation_schema.get("allOf") or []:
+        relation_enum = (
+            condition.get("if", {})
+            .get("properties", {})
+            .get("relation", {})
+            .get("enum")
+        )
+        if relation_enum is not None:
+            relation_enum[:] = [
+                name for name in relation_enum if name != "required_count"
+            ]
+    relation_schema["allOf"] = [
+        condition
+        for condition in relation_schema.get("allOf") or []
+        if condition.get("if", {}).get("properties", {}).get("relation", {}).get("enum")
+    ]
+
+    return {
+        "$defs": {
+            "EdgeDistributionGroup": group_schema,
+            "IntentSelector": selector_schema,
+            "IntentWireRelation": relation_schema,
+        },
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "constraints": {
+                "type": "array",
+                "items": {"$ref": "#/$defs/IntentWireRelation"},
+            }
+        },
+        "required": ["constraints"],
+    }

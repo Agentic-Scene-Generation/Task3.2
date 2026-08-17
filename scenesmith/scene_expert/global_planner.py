@@ -13,12 +13,17 @@ import json
 import logging
 import os
 import re
+import time
 from pathlib import Path
 
 from openai import OpenAI
 
 from scenesmith.scene_expert.context_bundle import build_llm_call_debug_record
-from scenesmith.agent_utils.thinking import chat_template_kwargs_from_effort
+from scenesmith.agent_utils.thinking import (
+    chat_template_kwargs_from_effort,
+    prepend_text_thinking_directive,
+    thinking_directive_from_effort,
+)
 from scenesmith.scene_expert.schemas import (
     HarnessContext,
     MemoryPack,
@@ -70,6 +75,19 @@ You MUST output valid JSON matching this exact schema:
 Guidelines:
 - Be specific and actionable. Vague guidance is useless for small models.
 - Derive constraints from: the task spec, the current scene state, AND the retrieved memory.
+- The Authoritative Stage Intent section contains the exact hard contract rows
+  for this stage. Cover every constraint_id and never rewrite, weaken, or
+  replace one with a convention.
+- At floor_plan, Architectural Surface Reservations are hard prerequisites for
+  later-stage wall anchors. Reserve a continuous wall segment for every listed
+  object; doors and windows must not intersect a reserved segment. Do not move
+  a later object away from its explicit required wall merely to keep an opening.
+- Functional zones named only through later furniture (for example, living,
+  dining, work, or storage areas) are not architectural partitions. At
+  floor_plan, make those later arrangements feasible through dimensions,
+  circulation, and opening-free wall length. Do not invent rooms, partitions,
+  or other structural markers unless the Immutable User Task explicitly asks
+  for structural separation.
 - Prioritize failure patterns from memory — they encode hard-won lessons.
 - When an Immutable User Task is supplied, its explicit object, topology, and
   facing relations are authoritative. Memory and current-scene observations may
@@ -185,6 +203,23 @@ _LIGHTING_TERMS = frozenset(
     }
 )
 
+_STRUCTURAL_ZONE_PATTERNS = (
+    re.compile(r"\b(?:separate|distinct)\s+(?:rooms?|enclosed\s+areas?)\b", re.I),
+    re.compile(r"\b(?:interior\s+)?(?:wall|partition)s?\b", re.I),
+    re.compile(r"\b(?:divide|split)\s+(?:the\s+)?room\b", re.I),
+)
+
+_FURNITURE_ZONE_WORDING = re.compile(
+    r"\b(?:physically|architecturally)\s+(?:separate|define)|"
+    r"\b(?:spatially\s+)?distinct\s+(?:living|dining|sleeping|working|storage|"
+    r"seating|media|functional)\s+zones?\b|"
+    r"\b(?:living|dining|sleeping|working|storage|seating|media|functional)\s+"
+    r"zones?\s+(?:are|should\s+be|remain)\s+(?:spatially\s+)?distinct\b|"
+    r"\b(?:define|create)\s+(?:the\s+)?(?:living|dining|sleeping|working|"
+    r"storage|seating|media|functional)\s+zones?\b",
+    re.I,
+)
+
 
 def _text_mentions_lighting(text: str) -> bool:
     """Return whether a brief statement introduces a lighting fixture."""
@@ -203,6 +238,69 @@ def _is_structural_only_ceiling_task(original_task: str) -> bool:
     """
     terms = set(re.findall(r"[a-z0-9]+", str(original_task or "").lower()))
     return bool(terms & _STRUCTURAL_CEILING_TERMS) and not bool(terms & _LIGHTING_TERMS)
+
+
+def _task_requests_structural_zoning(original_task: str) -> bool:
+    """Return whether the user explicitly asks for a structural room division."""
+    normalized = " ".join(str(original_task or "").split())
+    return any(pattern.search(normalized) for pattern in _STRUCTURAL_ZONE_PATTERNS)
+
+
+def _reconcile_floor_plan_zone_guidance(
+    brief: StageBrief,
+    *,
+    original_task: str,
+    functional_zones: list[str],
+) -> StageBrief:
+    """Keep later furniture zones from becoming imaginary floor-plan work.
+
+    Functional zones such as living, dining, or work areas normally describe the
+    later furniture arrangement.  A floor-plan agent can make them feasible by
+    providing adequate room proportions, circulation, and usable wall segments,
+    but it cannot represent them as labelled architectural state.  Requiring a
+    partition where the user did not request one makes the critic repeatedly
+    mutate doors and windows without improving the downstream scene.
+    """
+    if (
+        brief.stage != "floor_plan"
+        or not functional_zones
+        or _task_requests_structural_zoning(original_task)
+    ):
+        return brief
+
+    capacity_guidance = (
+        "Treat the named functional zones as later furniture zones: provide room "
+        "capacity, unobstructed circulation, and usable wall segments for them, "
+        "but do not add rooms, partitions, or architectural markers unless the "
+        "immutable user task explicitly requests structural separation."
+    )
+    capacity_check = (
+        "Evaluate functional zones through room capacity, circulation, and usable "
+        "opening-free wall length; do not score absent furniture-zone markers or "
+        "partitions as a floor-plan failure."
+    )
+
+    def reconcile_values(values: list[str], replacement: str) -> list[str]:
+        reconciled = [
+            replacement if _FURNITURE_ZONE_WORDING.search(value) else value
+            for value in values
+        ]
+        return list(dict.fromkeys(reconciled))
+
+    constraints = reconcile_values(
+        list(brief.constraints_for_designer), capacity_guidance
+    )
+    checks = reconcile_values(list(brief.checks_for_critic), capacity_check)
+    if capacity_guidance not in constraints:
+        constraints.append(capacity_guidance)
+    if capacity_check not in checks:
+        checks.append(capacity_check)
+    return brief.model_copy(
+        update={
+            "constraints_for_designer": constraints[:6],
+            "checks_for_critic": checks,
+        }
+    )
 
 
 def _text_closes_stage_inventory(text: str) -> bool:
@@ -319,6 +417,89 @@ def _reconcile_stage_brief(
     return brief.model_copy(update=updates)
 
 
+def _add_floor_plan_reservation_guidance(
+    brief: StageBrief,
+    context: HarnessContext,
+) -> StageBrief:
+    """Make later explicit wall anchors actionable before openings are created."""
+    if context.stage != "floor_plan" or context.relation_context is None:
+        return brief
+    reservations = context.relation_context.floor_plan_reservations
+    manifest = context.relation_context.floor_plan_manifest
+    if not reservations and not (manifest and manifest.enabled):
+        return brief
+
+    anchors: list[str] = []
+    for reservation in reservations:
+        subject = reservation.get("subjects") or {}
+        target = reservation.get("targets") or {}
+        category = str(subject.get("category") or "object").replace("_", " ")
+        role = str(target.get("role") or "").strip().lower()
+        relation = str(reservation.get("relation") or "")
+        if relation == "centered_on_wall" and role:
+            anchors.append(f"{category} centered on the {role} wall")
+        elif role:
+            anchors.append(f"{category} on a {role} wall")
+        else:
+            anchors.append(f"{category} on a wall")
+
+    details: list[str] = []
+    if anchors:
+        details.append("later hard anchors: " + "; ".join(anchors))
+    if manifest and manifest.enabled:
+        pair_count = sum(
+            item.kind == "opposed_anchor_pair" for item in manifest.reservations
+        )
+        zone_area = sum(
+            item.min_zone_area_m2
+            for item in manifest.reservations
+            if item.kind == "functional_zone"
+        )
+        if pair_count:
+            details.append(
+                "aligned opening-free spans on opposed walls for each media-viewing pair"
+            )
+        if zone_area:
+            details.append(
+                f"at least {zone_area:g} m2 total usable area for later functional zones"
+            )
+        details.append(
+            "an adaptive implicit-window budget of 1 for rooms up to 25 m2, "
+            "2 for rooms up to 50 m2, and 3 above 50 m2, normally no more "
+            "than one implicit window per wall"
+        )
+        if manifest.explicit_window_required:
+            details.append(
+                f"all {manifest.explicit_window_count} explicitly required window(s)"
+            )
+    guidance = (
+        "Before adding doors or windows, reserve continuous opening-free usable "
+        "wall segments and capacity for "
+        + "; ".join(details)
+        + ". Size each segment for the named object and its required alignment; "
+        "never place an implicit opening through a reserved segment. Keep an "
+        "exterior entrance and its route available. A reservation is satisfied "
+        "by usable capacity; do not create a partition solely to represent a "
+        "later furniture zone."
+    )
+    check = (
+        "Verify every reserved wall-anchor segment remains large enough and "
+        "unobstructed by doors or windows before handing the room to furniture."
+    )
+    constraints = list(brief.constraints_for_designer)
+    if guidance not in constraints:
+        constraints = [*constraints[:5], guidance]
+    checks = list(brief.checks_for_critic)
+    if check not in checks:
+        checks.append(check)
+    return brief.model_copy(
+        update={
+            "constraints_for_designer": constraints,
+            "checks_for_critic": checks,
+        }
+    )
+
+
 def _format_memory_for_prompt(memory_pack: MemoryPack) -> str:
     """Format memory pack into a compact text block."""
     parts: list[str] = []
@@ -417,6 +598,7 @@ class GlobalPlanner:
             or os.environ.get("OPENAI_BASE_URL", "http://localhost:8000/v1"),
             api_key=api_key or os.environ.get("OPENAI_API_KEY", "dummy"),
         )
+        self.last_trace: dict = {}
 
     def generate_stage_brief(
         self,
@@ -440,12 +622,29 @@ class GlobalPlanner:
         # Empty inventories must be a true no-op.  Letting an LLM read the
         # original prompt here can otherwise recreate a manipuland or furniture
         # object in the wall stage, contradicting the compiled contract.
-        if not _stage_required_objects(context.task_spec, stage):
+        hard_constraints = (
+            context.relation_context.hard_constraints
+            if context.relation_context is not None
+            else []
+        )
+        if (
+            not _stage_required_objects(context.task_spec, stage)
+            and not hard_constraints
+        ):
             console_logger.info(
                 "GlobalPlanner: %s has no TaskCompiler-owned objects; using no-op brief",
                 stage,
             )
-            return self._fallback_brief(context)
+            self.last_trace = {
+                "status": "no_op",
+                "stage": stage,
+                "attempts": [],
+                "hard_constraint_ids": [],
+                "hard_constraint_coverage": 1.0,
+            }
+            return _add_floor_plan_reservation_guidance(
+                self._fallback_brief(context), context
+            )
 
         user_message = self._build_user_message(
             context,
@@ -453,62 +652,153 @@ class GlobalPlanner:
             original_task=original_task,
         )
 
-        try:
-            response = self._client.chat.completions.create(
-                model=self._model,
-                messages=[
-                    {"role": "system", "content": _SYSTEM_PROMPT},
-                    {"role": "user", "content": user_message},
-                ],
-                temperature=self._temperature,
-                max_tokens=self._max_tokens,
-                extra_body=chat_template_kwargs_from_effort("none"),
-            )
-            raw = response.choices[0].message.content
-            # Qwen3 with --reasoning-parser may put output in reasoning_content
-            if not raw:
-                raw = getattr(response.choices[0].message, "reasoning_content", None)
-            console_logger.debug(f"GlobalPlanner raw response: {raw}")
-            _append_llm_debug(
-                build_llm_call_debug_record(
-                    stage=stage,
-                    agent_role="global_planner",
-                    event="generate_stage_brief",
-                    prompt=user_message,
-                    output=raw or "",
-                    raw_response=response,
-                ).model_dump()
-            )
-            data = _extract_json_from_text(raw)
-            # Ensure stage field is set correctly
-            data["stage"] = stage
-            brief = StageBrief.model_validate(data)
-            brief = _reconcile_stage_brief(
-                brief,
-                original_task=original_task,
-                room_type=context.task_spec.room_type,
-                required_objects=_stage_required_objects(context.task_spec, stage),
-            )
-            console_logger.info(
-                f"GlobalPlanner: brief for {stage}: {len(brief.constraints_for_designer)} constraints, "
-                f"{len(brief.failure_patterns_to_avoid)} failure patterns"
-            )
-            return brief
-        except Exception as e:
-            _append_llm_debug(
-                build_llm_call_debug_record(
-                    stage=stage,
-                    agent_role="global_planner",
-                    event="generate_stage_brief",
-                    prompt=user_message,
-                    output="",
-                    error=f"{type(e).__name__}: {e}",
-                ).model_dump()
-            )
-            console_logger.warning(
-                f"GlobalPlanner failed for stage {stage}, using minimal fallback brief: {e}"
-            )
-            return self._fallback_brief(context)
+        attempts: list[dict] = []
+        previous_output = ""
+        validation_error = ""
+        for attempt in range(2):
+            messages = [
+                {
+                    "role": "system",
+                    "content": prepend_text_thinking_directive(
+                        _SYSTEM_PROMPT,
+                        thinking_directive_from_effort("none", model=self._model),
+                    ),
+                },
+                {"role": "user", "content": user_message},
+            ]
+            if attempt:
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "The previous candidate failed validation. Return a corrected "
+                            "JSON object only.\nValidation error: "
+                            f"{validation_error}\nPrevious candidate:\n{previous_output}"
+                        ),
+                    }
+                )
+            started_at = time.perf_counter()
+            raw = ""
+            try:
+                response = self._client.chat.completions.create(
+                    model=self._model,
+                    messages=messages,
+                    temperature=self._temperature,
+                    max_tokens=self._max_tokens,
+                    response_format={
+                        "type": "json_schema",
+                        "json_schema": {
+                            "name": "stage_brief",
+                            "strict": True,
+                            "schema": StageBrief.model_json_schema(),
+                        },
+                    },
+                    extra_body=chat_template_kwargs_from_effort(
+                        "none", model=self._model
+                    ),
+                )
+                message = response.choices[0].message
+                raw = message.content
+                if not raw:
+                    raw = getattr(message, "reasoning_content", None)
+                if not raw:
+                    extra = getattr(message, "model_extra", None)
+                    if isinstance(extra, dict):
+                        raw = extra.get("reasoning_content")
+                data = _extract_json_from_text(raw)
+                brief = StageBrief.model_validate(data)
+                if brief.stage != stage:
+                    raise ValueError(
+                        f"StageBrief.stage must be {stage!r}, got {brief.stage!r}"
+                    )
+                brief = _reconcile_stage_brief(
+                    brief,
+                    original_task=original_task,
+                    room_type=context.task_spec.room_type,
+                    required_objects=_stage_required_objects(context.task_spec, stage),
+                )
+                brief = _reconcile_floor_plan_zone_guidance(
+                    brief,
+                    original_task=original_task,
+                    functional_zones=context.task_spec.functional_zones,
+                )
+                brief = _add_floor_plan_reservation_guidance(brief, context)
+                attempts.append(
+                    {
+                        "attempt": attempt,
+                        "status": "ok",
+                        "elapsed_sec": round(time.perf_counter() - started_at, 6),
+                    }
+                )
+                self.last_trace = {
+                    "status": "ok",
+                    "stage": stage,
+                    "attempts": attempts,
+                    "hard_constraint_ids": (
+                        context.relation_context.hard_constraint_ids
+                        if context.relation_context is not None
+                        else []
+                    ),
+                    "hard_constraint_coverage": 1.0,
+                }
+                _append_llm_debug(
+                    build_llm_call_debug_record(
+                        stage=stage,
+                        agent_role="global_planner",
+                        event="generate_stage_brief",
+                        prompt=messages,
+                        output=raw or "",
+                        raw_response=response,
+                    ).model_dump()
+                    | {"attempt": attempt, "status": "ok"}
+                )
+                return brief
+            except Exception as exc:
+                validation_error = f"{type(exc).__name__}: {exc}"
+                previous_output = raw
+                attempts.append(
+                    {
+                        "attempt": attempt,
+                        "status": "error",
+                        "error": validation_error,
+                        "elapsed_sec": round(time.perf_counter() - started_at, 6),
+                    }
+                )
+                _append_llm_debug(
+                    build_llm_call_debug_record(
+                        stage=stage,
+                        agent_role="global_planner",
+                        event="generate_stage_brief",
+                        prompt=messages,
+                        output=raw,
+                        error=validation_error,
+                    ).model_dump()
+                    | {"attempt": attempt, "status": "error"}
+                )
+
+        attempts.append(
+            {"attempt": 2, "status": "minimal_fallback", "elapsed_sec": 0.0}
+        )
+        self.last_trace = {
+            "status": "fallback",
+            "stage": stage,
+            "attempts": attempts,
+            "failure_reason": validation_error,
+            "hard_constraint_ids": (
+                context.relation_context.hard_constraint_ids
+                if context.relation_context is not None
+                else []
+            ),
+            "hard_constraint_coverage": 1.0,
+        }
+        console_logger.warning(
+            "GlobalPlanner failed twice for stage %s, using minimal fallback brief: %s",
+            stage,
+            validation_error,
+        )
+        return _add_floor_plan_reservation_guidance(
+            self._fallback_brief(context), context
+        )
 
     def _build_user_message(
         self,
@@ -546,6 +836,30 @@ class GlobalPlanner:
                 "## Current Scene State (already placed objects)",
                 scene_state_summary,
             ]
+
+        if context.relation_context is not None:
+            parts += [
+                "",
+                "## Authoritative Stage Intent (exact JSON; hard)",
+                json.dumps(
+                    context.relation_context.hard_constraints,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+            ]
+            if (
+                context.stage == "floor_plan"
+                and context.relation_context.floor_plan_reservations
+            ):
+                parts += [
+                    "",
+                    "## Architectural Surface Reservations (hard)",
+                    json.dumps(
+                        context.relation_context.floor_plan_reservations,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ),
+                ]
 
         parts += [
             "",

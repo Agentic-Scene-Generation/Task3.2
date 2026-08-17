@@ -27,7 +27,11 @@ from scenesmith.scene_expert.memory.schemas import (
 from scenesmith.scene_expert.context_bundle import build_llm_call_debug_record
 from scenesmith.scene_expert.memory.text_builder import build_embedding_text
 from scenesmith.scene_expert.schemas import FullVerifyReport
-from scenesmith.agent_utils.thinking import chat_template_kwargs_from_effort
+from scenesmith.agent_utils.thinking import (
+    chat_template_kwargs_from_effort,
+    prepend_text_thinking_directive,
+    thinking_directive_from_effort,
+)
 
 console_logger = logging.getLogger(__name__)
 SUCCESS_MEMORY_MIN_OVERALL_SCORE = 0.75
@@ -306,11 +310,17 @@ class MemoryWriter:
     def _request_completion(self, user_message: str, use_response_format: bool):
         """Call the OpenAI-compatible server with a Qwen-tolerant retry mode."""
         if use_response_format:
-            system_prompt = _SYSTEM_PROMPT
+            system_prompt = prepend_text_thinking_directive(
+                _SYSTEM_PROMPT,
+                thinking_directive_from_effort("high", model=self._model),
+            )
             prompt = user_message
         else:
             system_prompt = (
-                _SYSTEM_PROMPT
+                prepend_text_thinking_directive(
+                    _SYSTEM_PROMPT,
+                    thinking_directive_from_effort("high", model=self._model),
+                )
                 + "\nReturn ONLY one JSON object. Do not include markdown fences, "
                 "reasoning text, comments, or XML/tool tags."
             )
@@ -328,7 +338,7 @@ class MemoryWriter:
             ],
             "temperature": self._temperature,
             "max_tokens": self._max_tokens,
-            "extra_body": chat_template_kwargs_from_effort("high"),
+            "extra_body": chat_template_kwargs_from_effort("high", model=self._model),
         }
         if use_response_format:
             kwargs["response_format"] = {"type": "json_object"}
@@ -453,7 +463,9 @@ class MemoryWriter:
     def _normalize_update_op(raw_op: Any) -> dict[str, Any]:
         """Normalize common local-model JSON nulls before schema validation."""
         if not isinstance(raw_op, dict):
-            raise TypeError(f"Memory update must be an object, got {type(raw_op).__name__}")
+            raise TypeError(
+                f"Memory update must be an object, got {type(raw_op).__name__}"
+            )
         op = dict(raw_op)
         if op.get("content") is None:
             op["content"] = {}

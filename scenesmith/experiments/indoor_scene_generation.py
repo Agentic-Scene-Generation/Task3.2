@@ -4,6 +4,7 @@ import faulthandler
 import json
 import logging
 import os
+import re
 import shutil
 import time
 import uuid
@@ -14,7 +15,7 @@ from threading import Lock
 
 # SceneExpert hook runner (imported lazily to avoid circular imports at module level)
 # TYPE_CHECKING block keeps the type hint available without a hard import.
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from agents import custom_span, trace
 from omegaconf import DictConfig, OmegaConf
@@ -94,6 +95,195 @@ STAGE_ASSET_DIRS = {
 
 _SCENE_STATUS_FILENAME = "scene_status.json"
 _SCENE_SUCCESS_MARKER = "_SUCCESS"
+_SCENE_DEGRADED_MARKER = "_DEGRADED"
+_FURNITURE_RENDER_RESUME_MODES = frozenset({"initial", "latest"})
+_QUALITY_FAILURE_POLICIES = frozenset({"strict", "degraded"})
+
+
+class SceneExpertStageCommitError(RuntimeError):
+    """A stage verifier rejected its checkpoint before pipeline advancement."""
+
+    def __init__(self, stage: str, *, retryable: bool, reason: str = "") -> None:
+        self.stage = stage
+        self.retryable = retryable
+        self.reason = reason
+        detail = f": {reason}" if reason else ""
+        super().__init__(f"SceneExpert stage '{stage}' was not committed{detail}")
+
+
+def _commit_scene_expert_stage(
+    *,
+    hooks: "SceneExpertHookRunner | None",
+    stage: str,
+    scene: RoomScene,
+    room_dir: Path,
+    allow_degraded_quality: bool = False,
+) -> None:
+    """Advance only when the hook verifier accepts this stage checkpoint."""
+    if hooks is None:
+        return
+    result = hooks.post_stage(stage, scene, room_dir)
+    if result is None or result.passed:
+        return
+    if result.quality_failure and not result.retryable and allow_degraded_quality:
+        hooks.accept_degraded_stage(stage)
+        console_logger.warning(
+            "Advancing past SceneExpert-rejected stage %s with degraded quality: %s",
+            stage,
+            result.reason,
+        )
+        return
+    raise SceneExpertStageCommitError(
+        stage,
+        retryable=result.retryable,
+        reason=result.reason,
+    )
+
+
+def _quality_failure_policy(cfg_dict: dict[str, Any]) -> str:
+    """Return the configured deterministic quality-failure disposition."""
+    value = (
+        str((cfg_dict.get("experiment") or {}).get("quality_failure_policy", "strict"))
+        .strip()
+        .lower()
+    )
+    if value not in _QUALITY_FAILURE_POLICIES:
+        allowed = ", ".join(sorted(_QUALITY_FAILURE_POLICIES))
+        raise ValueError(
+            f"experiment.quality_failure_policy must be one of: {allowed}; got {value!r}"
+        )
+    return value
+
+
+def _configure_stage_quality_gates(cfg_dict: dict[str, Any]) -> str:
+    """Let SceneExpert own bounded recovery when degraded output is requested."""
+    policy = _quality_failure_policy(cfg_dict)
+    if policy != "degraded":
+        return policy
+    for agent_key in ("furniture_agent", "manipuland_agent"):
+        agent_cfg = cfg_dict.get(agent_key)
+        if isinstance(agent_cfg, dict):
+            agent_cfg["fail_stage_on_unresolved_hard_constraints"] = False
+    return policy
+
+
+def _write_scene_completion(
+    *,
+    output_dir: Path,
+    scene_id: int,
+    prompt: str,
+    attempt: int,
+    degraded: bool,
+) -> None:
+    """Persist a truthful terminal status and exactly one completion marker."""
+    scene_dir = output_dir / f"scene_{scene_id:03d}"
+    scene_dir.mkdir(parents=True, exist_ok=True)
+    success_marker = scene_dir / _SCENE_SUCCESS_MARKER
+    degraded_marker = scene_dir / _SCENE_DEGRADED_MARKER
+    success_marker.unlink(missing_ok=True)
+    degraded_marker.unlink(missing_ok=True)
+    if degraded:
+        status = "completed_with_quality_issues"
+        degraded_marker.write_text(status + "\n", encoding="utf-8")
+    else:
+        status = "completed"
+        success_marker.write_text(status + "\n", encoding="utf-8")
+    _write_scene_status(
+        output_dir=output_dir,
+        scene_id=scene_id,
+        prompt=prompt,
+        status=status,
+        attempt=attempt,
+    )
+
+
+def _should_skip_noop_scene_expert_stage(
+    hooks: "SceneExpertHookRunner | None", stage: str
+) -> bool:
+    """Return whether SceneExpert compiled the current stage as a true no-op.
+
+    Check only after ``pre_stage``.  The hook has then projected the
+    stage-local hard constraints and generated the authoritative planner trace.
+    The caller still writes its regular checkpoint and invokes ``post_stage`` so
+    retries, resume, and verification retain their normal semantics.
+    """
+    return bool(hooks is not None and hooks.should_skip_stage_agent(stage))
+
+
+def _is_targeted_manipuland_replay(
+    *,
+    cfg_dict: dict[str, Any],
+    start_stage: str,
+    stop_stage: str,
+) -> bool:
+    """Return whether this run intentionally evaluates selected support surfaces."""
+    if start_stage != "manipuland" or stop_stage != "manipuland":
+        return False
+
+    manipuland_cfg = cfg_dict.get("manipuland_agent") or {}
+    if hasattr(manipuland_cfg, "get"):
+        target_ids = manipuland_cfg.get("target_furniture_ids", [])
+    else:
+        target_ids = getattr(manipuland_cfg, "target_furniture_ids", [])
+
+    if isinstance(target_ids, str):
+        target_ids = target_ids.split(",")
+    return any(str(object_id).strip() for object_id in (target_ids or []))
+
+
+def _resolve_furniture_render_resume_mode(
+    value: object,
+    *,
+    legacy_initial_render: bool = False,
+) -> str | None:
+    """Normalize the furniture-render replay selector and retain legacy config."""
+    if value is None or value is False or value == "":
+        mode = None
+    elif isinstance(value, str):
+        mode = value.strip().lower()
+        if mode not in _FURNITURE_RENDER_RESUME_MODES:
+            allowed = ", ".join(sorted(_FURNITURE_RENDER_RESUME_MODES))
+            raise ValueError(
+                "resume_furniture_from_render must be one of "
+                f"{allowed}; got {value!r}"
+            )
+    else:
+        raise ValueError(
+            "resume_furniture_from_render must be null, 'initial', or 'latest'"
+        )
+    if legacy_initial_render and mode not in {None, "initial"}:
+        raise ValueError(
+            "resume_furniture_from_initial_render cannot be combined with "
+            "resume_furniture_from_render='latest'"
+        )
+    return mode or ("initial" if legacy_initial_render else None)
+
+
+def _furniture_render_state_path(room_dir: Path, mode: str) -> Path:
+    """Return the requested complete furniture state, selecting latest numerically."""
+    render_root = room_dir / "scene_renders" / "furniture"
+    if mode == "initial":
+        state_path = render_root / "renders_001" / "scene_state.json"
+        if state_path.exists():
+            return state_path
+        raise FileNotFoundError(
+            "Cannot resume furniture from the initial render: missing "
+            f"{state_path}. Run furniture until renders_001 exists first."
+        )
+
+    candidates: list[tuple[int, Path]] = []
+    if render_root.is_dir():
+        for render_dir in render_root.iterdir():
+            match = re.fullmatch(r"renders_(\d+)", render_dir.name)
+            state_path = render_dir / "scene_state.json"
+            if match is not None and state_path.is_file():
+                candidates.append((int(match.group(1)), state_path))
+    if candidates:
+        return max(candidates, key=lambda item: item[0])[1]
+    raise FileNotFoundError(
+        "Cannot resume furniture from the latest render: no complete "
+        f"renders_NNN/scene_state.json under {render_root}."
+    )
 
 
 def _write_final_critic_report(
@@ -629,7 +819,10 @@ def _apply_final_wall_functional_guards(*, scene: RoomScene, cfg_dict: dict) -> 
     fixes = improve_furniture_relations(
         scene,
         config=cfg_dict,
-        allowed_relation_types={"instructional_surface_alignment"},
+        allowed_relation_types={
+            "instructional_surface_alignment",
+            "furniture_faces_furniture",
+        },
     )
     if fixes:
         console_logger.info(
@@ -825,7 +1018,12 @@ def _fix_paths_in_yaml_file(
 
 
 def _copy_checkpoint_for_stage(
-    source_scene_dir: Path, target_scene_dir: Path, start_stage: str
+    source_scene_dir: Path,
+    target_scene_dir: Path,
+    start_stage: str,
+    *,
+    resume_furniture_from_initial_render: bool = False,
+    resume_furniture_from_render: str | None = None,
 ) -> None:
     """Copy only the checkpoint state needed to resume from start_stage.
 
@@ -843,7 +1041,17 @@ def _copy_checkpoint_for_stage(
         source_scene_dir: Path to source scene directory.
         target_scene_dir: Path to target scene directory.
         start_stage: Stage to resume from (determines what to copy).
+        resume_furniture_from_initial_render: Legacy alias that restores the first
+            furniture render candidate and its assets.
+        resume_furniture_from_render: "initial" restores renders_001; "latest"
+            restores the highest-numbered complete furniture render.
     """
+    furniture_render_resume_mode = _resolve_furniture_render_resume_mode(
+        resume_furniture_from_render,
+        legacy_initial_render=resume_furniture_from_initial_render,
+    )
+    if furniture_render_resume_mode and start_stage != "furniture":
+        raise ValueError("furniture-render resume requires start_stage='furniture'")
     if not source_scene_dir.exists():
         raise FileNotFoundError(
             f"Source scene directory not found: {source_scene_dir}. "
@@ -878,18 +1086,47 @@ def _copy_checkpoint_for_stage(
 
     checkpoint_name = STAGE_CHECKPOINTS[start_stage]
     asset_dirs = STAGE_ASSET_DIRS[start_stage]
+    if furniture_render_resume_mode:
+        asset_dirs = ["furniture"]
 
     # Copy room-level checkpoint state and assets.
     for room_dir in source_scene_dir.iterdir():
-        if not room_dir.is_dir() or not room_dir.name.startswith("room_"):
+        # ``room_geometry`` is a scene-level directory and shares the
+        # ``room_`` prefix with actual room directories. It must never be
+        # interpreted as a room checkpoint, regardless of filesystem order.
+        if (
+            not room_dir.is_dir()
+            or not room_dir.name.startswith("room_")
+            or room_dir.name == "room_geometry"
+        ):
             continue
 
         target_room = target_scene_dir / room_dir.name
         target_room.mkdir(parents=True, exist_ok=True)
 
+        # A furniture render is a complete scene state but not a stage-completion
+        # checkpoint. Preserve it under scene_states so the resumed agent can
+        # critique and repair it without regenerating furniture.
+        if furniture_render_resume_mode:
+            source_state = _furniture_render_state_path(
+                room_dir, furniture_render_resume_mode
+            )
+            target_state = (
+                target_room
+                / "scene_states"
+                / f"scene_from_furniture_{furniture_render_resume_mode}_render"
+                / "scene_state.json"
+            )
+            target_state.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source_state, target_state)
+            _fix_paths_in_json_file(
+                json_path=target_state,
+                new_room_dir=target_room,
+                new_scene_dir=target_scene_dir,
+            )
         # Copy entire checkpoint directory for self-containment.
         # Includes scene_state.json, scene.dmd.yaml, and scene.blend.
-        if checkpoint_name:
+        elif checkpoint_name:
             source_state = room_dir / "scene_states" / checkpoint_name
             if source_state.exists():
                 target_state = target_room / "scene_states" / checkpoint_name
@@ -927,7 +1164,8 @@ def _copy_checkpoint_for_stage(
 
     console_logger.info(
         f"Copied checkpoint for {start_stage}: "
-        f"checkpoint={checkpoint_name}, assets={asset_dirs}"
+        f"checkpoint={checkpoint_name}, assets={asset_dirs}, "
+        f"resume_furniture_from_render={furniture_render_resume_mode}"
     )
 
 
@@ -974,6 +1212,39 @@ def _add_manipulands_with_cleanup(
         asyncio.run(manipuland_agent.add_manipulands(scene=scene))
     finally:
         manipuland_agent.cleanup()
+
+
+def _restore_room_stage_checkpoint(
+    *,
+    scene: RoomScene,
+    state: dict,
+    room_prompt: str,
+    intent_contract: dict | None,
+) -> None:
+    """Restore reusable geometry without inheriting a stale stage prompt."""
+    scene.restore_from_state_dict(state)
+    scene.text_description = room_prompt
+    if intent_contract:
+        setattr(scene, "scenebenchmark_intent_contract", intent_contract)
+        scene.metadata["scenebenchmark_intent_contract"] = intent_contract
+
+
+def _restore_furniture_render_checkpoint(
+    *,
+    scene: RoomScene,
+    render_state_path: Path,
+    room_prompt: str,
+    intent_contract: dict[str, Any] | None,
+) -> None:
+    """Restore geometry while preserving the current replay's task contract."""
+    with open(render_state_path) as f:
+        state = json.load(f)
+    _restore_room_stage_checkpoint(
+        scene=scene,
+        state=state,
+        room_prompt=room_prompt,
+        intent_contract=intent_contract,
+    )
 
 
 def _generate_room(
@@ -1052,6 +1323,40 @@ def _generate_room(
     # ["furniture", "wall_mounted", "ceiling_mounted", "manipuland"]
     room_stages = PIPELINE_STAGES[1:]
     start_idx = room_stages.index(start_stage) if start_stage in room_stages else 0
+    pipeline_cfg = cfg_dict.get("experiment", {}).get("pipeline", {})
+    furniture_render_resume_mode = _resolve_furniture_render_resume_mode(
+        pipeline_cfg.get("resume_furniture_from_render"),
+        legacy_initial_render=bool(
+            pipeline_cfg.get("resume_furniture_from_initial_render", False)
+        ),
+    )
+    if furniture_render_resume_mode and start_stage != "furniture":
+        raise ValueError("furniture-render resume requires start_stage='furniture'")
+    if furniture_render_resume_mode:
+        render_state_path = (
+            room_dir
+            / "scene_states"
+            / f"scene_from_furniture_{furniture_render_resume_mode}_render"
+            / "scene_state.json"
+        )
+        if not render_state_path.exists():
+            raise FileNotFoundError(
+                "Cannot resume furniture from the selected render: missing "
+                f"{render_state_path}"
+            )
+        _restore_furniture_render_checkpoint(
+            scene=scene,
+            render_state_path=render_state_path,
+            room_prompt=room_prompt,
+            intent_contract=(
+                intent_contract if isinstance(intent_contract, dict) else None
+            ),
+        )
+        console_logger.info(
+            "Loaded %d objects from the %s furniture render checkpoint",
+            len(scene.objects),
+            furniture_render_resume_mode,
+        )
 
     # Load projection config (needed for furniture and final post-processing).
     projection_cfg = cfg_dict["experiment"]["projection"]
@@ -1059,7 +1364,13 @@ def _generate_room(
     # Furniture stage.
     if start_idx <= 0:  # Run furniture if starting from furniture or earlier.
         with custom_span("furniture_placement"):
-            console_logger.info("Adding furniture to scene")
+            action = (
+                "Resuming furniture critique/repair from saved render "
+                f"({furniture_render_resume_mode})"
+                if furniture_render_resume_mode
+                else "Adding furniture to scene"
+            )
+            console_logger.info(action)
             start_time = time.time()
             if scene_expert_hooks:
                 scene_expert_hooks.pre_stage("furniture", scene)
@@ -1072,7 +1383,12 @@ def _generate_room(
                 render_gpu_id=render_gpu_id,
             )
             try:
-                asyncio.run(furniture_agent.add_furniture(scene=scene))
+                if furniture_render_resume_mode:
+                    asyncio.run(
+                        furniture_agent.resume_from_furniture_render(scene=scene)
+                    )
+                else:
+                    asyncio.run(furniture_agent.add_furniture(scene=scene))
                 end_time = time.time()
                 console_logger.info(
                     f"Furniture added to room {room_id} in "
@@ -1166,8 +1482,13 @@ def _generate_room(
             name="scene_after_furniture",
         )
         console_logger.info("Saved furniture checkpoint (scene_after_furniture)")
-        if scene_expert_hooks:
-            scene_expert_hooks.post_stage("furniture", scene, room_dir)
+        _commit_scene_expert_stage(
+            hooks=scene_expert_hooks,
+            stage="furniture",
+            scene=scene,
+            room_dir=room_dir,
+            allow_degraded_quality=(_quality_failure_policy(cfg_dict) == "degraded"),
+        )
     elif start_idx == 1:
         # Starting from wall_objects - load scene from saved furniture state.
         console_logger.info("Loading scene from saved furniture state for wall_objects")
@@ -1181,7 +1502,14 @@ def _generate_room(
             )
         with open(furniture_state_path) as f:
             furniture_state = json.load(f)
-        scene.restore_from_state_dict(furniture_state)
+        _restore_room_stage_checkpoint(
+            scene=scene,
+            state=furniture_state,
+            room_prompt=room_prompt,
+            intent_contract=(
+                intent_contract if isinstance(intent_contract, dict) else None
+            ),
+        )
         console_logger.info(
             f"Loaded {len(scene.objects)} objects from furniture checkpoint"
         )
@@ -1218,21 +1546,26 @@ def _generate_room(
 
             if scene_expert_hooks:
                 scene_expert_hooks.pre_stage("wall_mounted", scene)
-            wall_agent = BaseExperiment.build_wall_agent(
-                cfg_dict=cfg_dict,
-                compatible_agents=IndoorSceneGenerationExperiment.compatible_wall_agents,
-                logger=logger,
-                house_layout=house_layout,
-                ceiling_height=scene.room_geometry.wall_height,
-                wall_thickness=scene.room_geometry.wall_thickness,
-                render_gpu_id=render_gpu_id,
-            )
-            try:
-                asyncio.run(wall_agent.add_wall_objects(scene=scene))
-                _apply_final_wall_functional_guards(scene=scene, cfg_dict=cfg_dict)
-            finally:
-                # Always cleanup server subprocesses.
-                wall_agent.cleanup()
+            if _should_skip_noop_scene_expert_stage(scene_expert_hooks, "wall_mounted"):
+                console_logger.info(
+                    "Skipping wall-mounted agent: SceneExpert compiled an empty stage"
+                )
+            else:
+                wall_agent = BaseExperiment.build_wall_agent(
+                    cfg_dict=cfg_dict,
+                    compatible_agents=IndoorSceneGenerationExperiment.compatible_wall_agents,
+                    logger=logger,
+                    house_layout=house_layout,
+                    ceiling_height=scene.room_geometry.wall_height,
+                    wall_thickness=scene.room_geometry.wall_thickness,
+                    render_gpu_id=render_gpu_id,
+                )
+                try:
+                    asyncio.run(wall_agent.add_wall_objects(scene=scene))
+                    _apply_final_wall_functional_guards(scene=scene, cfg_dict=cfg_dict)
+                finally:
+                    # Always cleanup server subprocesses.
+                    wall_agent.cleanup()
             end_time = time.time()
             console_logger.info(
                 f"Wall objects added to room {room_id} in "
@@ -1248,8 +1581,13 @@ def _generate_room(
             name="scene_after_wall_objects",
         )
         console_logger.info("Saved wall_objects checkpoint (scene_after_wall_objects)")
-        if scene_expert_hooks:
-            scene_expert_hooks.post_stage("wall_mounted", scene, room_dir)
+        _commit_scene_expert_stage(
+            hooks=scene_expert_hooks,
+            stage="wall_mounted",
+            scene=scene,
+            room_dir=room_dir,
+            allow_degraded_quality=(_quality_failure_policy(cfg_dict) == "degraded"),
+        )
     elif start_idx == 2:
         # Starting from ceiling_mounted - load scene from saved wall_objects state.
         console_logger.info("Loading scene from saved wall_objects state for ceiling")
@@ -1264,7 +1602,14 @@ def _generate_room(
             )
         with open(wall_objects_state_path) as f:
             wall_objects_state = json.load(f)
-        scene.restore_from_state_dict(wall_objects_state)
+        _restore_room_stage_checkpoint(
+            scene=scene,
+            state=wall_objects_state,
+            room_prompt=room_prompt,
+            intent_contract=(
+                intent_contract if isinstance(intent_contract, dict) else None
+            ),
+        )
         console_logger.info(
             f"Loaded {len(scene.objects)} objects from wall_objects checkpoint"
         )
@@ -1282,20 +1627,27 @@ def _generate_room(
 
             if scene_expert_hooks:
                 scene_expert_hooks.pre_stage("ceiling_mounted", scene)
-            ceiling_agent = BaseExperiment.build_ceiling_agent(
-                cfg_dict=cfg_dict,
-                compatible_agents=(
-                    IndoorSceneGenerationExperiment.compatible_ceiling_agents
-                ),
-                logger=logger,
-                ceiling_height=room_geometry.wall_height,
-                render_gpu_id=render_gpu_id,
-            )
-            try:
-                asyncio.run(ceiling_agent.add_ceiling_objects(scene=scene))
-            finally:
-                # Always cleanup server subprocesses.
-                ceiling_agent.cleanup()
+            if _should_skip_noop_scene_expert_stage(
+                scene_expert_hooks, "ceiling_mounted"
+            ):
+                console_logger.info(
+                    "Skipping ceiling-mounted agent: SceneExpert compiled an empty stage"
+                )
+            else:
+                ceiling_agent = BaseExperiment.build_ceiling_agent(
+                    cfg_dict=cfg_dict,
+                    compatible_agents=(
+                        IndoorSceneGenerationExperiment.compatible_ceiling_agents
+                    ),
+                    logger=logger,
+                    ceiling_height=room_geometry.wall_height,
+                    render_gpu_id=render_gpu_id,
+                )
+                try:
+                    asyncio.run(ceiling_agent.add_ceiling_objects(scene=scene))
+                finally:
+                    # Always cleanup server subprocesses.
+                    ceiling_agent.cleanup()
             end_time = time.time()
             console_logger.info(
                 f"Ceiling objects added to room {room_id} in "
@@ -1313,8 +1665,13 @@ def _generate_room(
         console_logger.info(
             "Saved ceiling_objects checkpoint (scene_after_ceiling_objects)"
         )
-        if scene_expert_hooks:
-            scene_expert_hooks.post_stage("ceiling_mounted", scene, room_dir)
+        _commit_scene_expert_stage(
+            hooks=scene_expert_hooks,
+            stage="ceiling_mounted",
+            scene=scene,
+            room_dir=room_dir,
+            allow_degraded_quality=(_quality_failure_policy(cfg_dict) == "degraded"),
+        )
     else:
         # Starting from manipulands - load scene from saved ceiling_objects state.
         console_logger.info("Loading scene from saved ceiling_objects state")
@@ -1332,7 +1689,14 @@ def _generate_room(
             )
         with open(ceiling_objects_state_path) as f:
             ceiling_objects_state = json.load(f)
-        scene.restore_from_state_dict(ceiling_objects_state)
+        _restore_room_stage_checkpoint(
+            scene=scene,
+            state=ceiling_objects_state,
+            room_prompt=room_prompt,
+            intent_contract=(
+                intent_contract if isinstance(intent_contract, dict) else None
+            ),
+        )
         console_logger.info(
             f"Loaded {len(scene.objects)} objects from ceiling_objects checkpoint"
         )
@@ -1348,15 +1712,20 @@ def _generate_room(
         start_time = time.time()
         if scene_expert_hooks:
             scene_expert_hooks.pre_stage("manipuland", scene)
-        manipuland_agent = BaseExperiment.build_manipuland_agent(
-            cfg_dict=cfg_dict,
-            compatible_agents=(
-                IndoorSceneGenerationExperiment.compatible_manipuland_agents
-            ),
-            logger=logger,
-            render_gpu_id=render_gpu_id,
-        )
-        _add_manipulands_with_cleanup(manipuland_agent, scene)
+        if _should_skip_noop_scene_expert_stage(scene_expert_hooks, "manipuland"):
+            console_logger.info(
+                "Skipping manipuland agent: SceneExpert compiled an empty stage"
+            )
+        else:
+            manipuland_agent = BaseExperiment.build_manipuland_agent(
+                cfg_dict=cfg_dict,
+                compatible_agents=(
+                    IndoorSceneGenerationExperiment.compatible_manipuland_agents
+                ),
+                logger=logger,
+                render_gpu_id=render_gpu_id,
+            )
+            _add_manipulands_with_cleanup(manipuland_agent, scene)
         end_time = time.time()
         console_logger.info(
             f"Manipulands added to room {room_id} in "
@@ -1440,8 +1809,13 @@ def _generate_room(
         scene=scene, scene_dir=room_dir, cfg_dict=cfg_dict, name="final_scene"
     )
     _write_final_critic_report(scene, room_dir, cfg_dict)
-    if scene_expert_hooks:
-        scene_expert_hooks.post_stage("manipuland", scene, room_dir)
+    _commit_scene_expert_stage(
+        hooks=scene_expert_hooks,
+        stage="manipuland",
+        scene=scene,
+        room_dir=room_dir,
+        allow_degraded_quality=(_quality_failure_policy(cfg_dict) == "degraded"),
+    )
 
     # Export to SceneEval format if enabled.
     sceneeval_cfg = cfg_dict["experiment"]["sceneeval_export"]
@@ -1500,19 +1874,42 @@ def _run_sequential_room_generation(
         with custom_span(f"room_{room_id}_generation"):
             with logger.room_context(room_id) as room_dir:
                 console_logger.info(f"Generating room '{room_id}': {room_spec.prompt}")
-                room_scene = _generate_room(
-                    room_id=room_id,
-                    room_prompt=room_spec.prompt,
-                    room_geometry=room_geometry,
-                    room_dir=room_dir,
-                    logger=logger,
-                    cfg_dict=cfg_dict,
-                    start_stage=start_stage,
-                    stop_stage=stop_stage,
-                    house_layout=house_layout,
-                    render_gpu_id=render_gpu_id,
-                    scene_expert_hooks=scene_expert_hooks,
-                )
+                retry_start_stage = start_stage
+                retry_count = 0
+                while True:
+                    try:
+                        room_scene = _generate_room(
+                            room_id=room_id,
+                            room_prompt=room_spec.prompt,
+                            room_geometry=room_geometry,
+                            room_dir=room_dir,
+                            logger=logger,
+                            cfg_dict=cfg_dict,
+                            start_stage=retry_start_stage,
+                            stop_stage=stop_stage,
+                            house_layout=house_layout,
+                            render_gpu_id=render_gpu_id,
+                            scene_expert_hooks=scene_expert_hooks,
+                        )
+                        break
+                    except SceneExpertStageCommitError as error:
+                        if not error.retryable:
+                            raise
+                        retry_count += 1
+                        if retry_count > 8:
+                            raise RuntimeError(
+                                "SceneExpert stage retry guard exceeded for "
+                                f"{error.stage} in room '{room_id}'"
+                            ) from error
+                        retry_start_stage = error.stage
+                        console_logger.warning(
+                            "Re-running SceneExpert-rejected stage %s for room %s "
+                            "from its prior checkpoint (retry %d): %s",
+                            error.stage,
+                            room_id,
+                            retry_count,
+                            error.reason,
+                        )
                 rooms[room_id] = room_scene
     return rooms
 
@@ -1523,6 +1920,7 @@ def _generate_floor_plan_worker(
     cfg_dict: dict,
     experiment_run_id: str | None,
     render_gpu_id: int | None = None,
+    reservation_manifest: dict | None = None,
 ) -> None:
     """Run floor plan generation in isolated subprocess.
 
@@ -1566,6 +1964,7 @@ def _generate_floor_plan_worker(
                     ),
                     logger=logger,
                     render_gpu_id=render_gpu_id,
+                    reservation_manifest=reservation_manifest,
                 )
                 try:
                     house_layout = asyncio.run(
@@ -1581,6 +1980,10 @@ def _generate_floor_plan_worker(
                 house_layout_path = scene_path / "house_layout.json"
                 with open(house_layout_path, "w") as f:
                     json.dump(house_layout.to_dict(scene_dir=scene_path), f, indent=2)
+                if reservation_manifest is not None:
+                    manifest_path = scene_path / "floor_plan_reservation_manifest.json"
+                    with manifest_path.open("w", encoding="utf-8") as stream:
+                        json.dump(reservation_manifest, stream, indent=2)
                 console_logger.info(f"Saved house layout to {house_layout_path}")
 
 
@@ -2203,6 +2606,7 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
         # Reset any SDK state inherited via fork (defense in depth).
         _reset_inherited_sdk_state()
         _configure_reasoning_persistence_for_worker(cfg_dict)
+        quality_failure_policy = _configure_stage_quality_gates(cfg_dict)
 
         faulthandler.enable()
 
@@ -2212,6 +2616,7 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
         scene_dir = output_dir / f"scene_{scene_id:03d}"
         scene_dir.mkdir(parents=True, exist_ok=True)
         (scene_dir / _SCENE_SUCCESS_MARKER).unlink(missing_ok=True)
+        (scene_dir / _SCENE_DEGRADED_MARKER).unlink(missing_ok=True)
         _write_scene_status(
             output_dir=output_dir,
             scene_id=scene_id,
@@ -2237,6 +2642,7 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
         # Create a logger for this scene.
         logger = ConsoleLogger(output_dir=scene_dir)
         scene_expert_hooks = None
+        quality_degraded = False
 
         # Get pipeline stage configuration.
         pipeline_cfg = cfg_dict["experiment"]["pipeline"]
@@ -2268,6 +2674,16 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
 
         # Handle resume from checkpoint if resume_from_path is specified.
         resume_from_path = pipeline_cfg.get("resume_from_path")
+        furniture_render_resume_mode = _resolve_furniture_render_resume_mode(
+            pipeline_cfg.get("resume_furniture_from_render"),
+            legacy_initial_render=bool(
+                pipeline_cfg.get("resume_furniture_from_initial_render", False)
+            ),
+        )
+        if furniture_render_resume_mode and start_stage != "furniture":
+            raise ValueError("furniture-render resume requires start_stage='furniture'")
+        if furniture_render_resume_mode and not resume_from_path:
+            raise ValueError("furniture-render resume requires resume_from_path")
         if resume_from_path and start_stage != "floor_plan":
             source_experiment_dir = Path(resume_from_path)
             if not source_experiment_dir.exists():
@@ -2278,6 +2694,7 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                 source_scene_dir=source_experiment_dir / f"scene_{scene_id:03d}",
                 target_scene_dir=scene_dir,
                 start_stage=start_stage,
+                resume_furniture_from_render=furniture_render_resume_mode,
             )
 
         with FileLoggingContext(log_file_path=log_path, suppress_stdout=capture_logs):
@@ -2312,6 +2729,11 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                     floor_plan_prompt = prompt
                     if scene_expert_hooks and start_stage == "floor_plan":
                         floor_plan_prompt = scene_expert_hooks.pre_floor_plan()
+                    floor_plan_manifest = (
+                        scene_expert_hooks.floor_plan_reservation_manifest
+                        if scene_expert_hooks
+                        else None
+                    )
 
                     # Stage 1: Floor plan generation (or load from saved state).
                     if start_stage == "floor_plan":
@@ -2336,6 +2758,7 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                                         "cfg_dict": cfg_dict,
                                         "experiment_run_id": experiment_run_id,
                                         "render_gpu_id": render_gpu_id,
+                                        "reservation_manifest": floor_plan_manifest,
                                     },
                                 )
                             ],
@@ -2405,23 +2828,26 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                                 final_scene_path=str(scene_dir)
                             )
                             if not verify_report.deterministic_pass:
-                                raise RuntimeError(
-                                    "SceneExpert deterministic verification failed; "
-                                    "refusing to mark scene successful"
+                                if quality_failure_policy == "strict":
+                                    raise RuntimeError(
+                                        "SceneExpert deterministic verification "
+                                        "failed; refusing to mark scene successful"
+                                    )
+                                quality_degraded = True
+                                console_logger.warning(
+                                    "SceneExpert floor-plan verification failed; "
+                                    "preserving degraded output"
                                 )
                         console_logger.info(
                             "Scene generation completed successfully in "
                             f"{timedelta(seconds=time.time() - scene_generation_start_time)}"
                         )
-                        _write_scene_status(
+                        _write_scene_completion(
                             output_dir=output_dir,
                             scene_id=scene_id,
                             prompt=prompt,
-                            status="completed",
                             attempt=attempt,
-                        )
-                        (scene_dir / _SCENE_SUCCESS_MARKER).write_text(
-                            "completed\n", encoding="utf-8"
+                            degraded=quality_degraded,
                         )
                         return
 
@@ -2475,17 +2901,6 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                     # Build HouseScene from generated rooms.
                     house_scene = HouseScene(layout=house_layout, rooms=rooms)
 
-                    # SceneExpert: finalize trace + memory update after all rooms done.
-                    if scene_expert_hooks:
-                        verify_report = scene_expert_hooks.finalize(
-                            final_scene_path=str(scene_dir / "combined_house")
-                        )
-                        if not verify_report.deterministic_pass:
-                            raise RuntimeError(
-                                "SceneExpert deterministic verification failed; "
-                                "refusing to mark scene successful"
-                            )
-
                     # Assemble house with intermediate snapshots filtered by object type.
                     # Each snapshot includes objects from completed stages only.
                     # Note: Thin coverings keep their agent's object_type (FURNITURE,
@@ -2520,6 +2935,39 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                             cfg=cfg_dict, output_name=name, include_object_types=types
                         )
 
+                    # Verify only after canonical artifacts exist. Deterministic
+                    # quality rejection must never erase the evidence needed to
+                    # diagnose or render the terminal scene.
+                    if scene_expert_hooks:
+                        verify_report = scene_expert_hooks.finalize(
+                            final_scene_path=str(scene_dir / "combined_house")
+                        )
+                        if not verify_report.deterministic_pass:
+                            targeted_replay = _is_targeted_manipuland_replay(
+                                cfg_dict=cfg_dict,
+                                start_stage=start_stage,
+                                stop_stage=stop_stage,
+                            )
+                            if (
+                                quality_failure_policy == "strict"
+                                and not targeted_replay
+                            ):
+                                raise RuntimeError(
+                                    "SceneExpert deterministic verification failed; "
+                                    "refusing to mark scene successful"
+                                )
+                            quality_degraded = True
+                            reason = (
+                                "targeted manipuland replay"
+                                if targeted_replay
+                                else "degraded quality policy"
+                            )
+                            console_logger.warning(
+                                "SceneExpert deterministic verification failed; "
+                                "preserving final artifacts under %s",
+                                reason,
+                            )
+
                     console_logger.info(
                         "Scene generation completed successfully in "
                         f"{timedelta(seconds=time.time() - scene_generation_start_time)}"
@@ -2539,14 +2987,13 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                 console_logger.error(f"Scene generation failed: {e}")
                 raise
 
-        _write_scene_status(
+        _write_scene_completion(
             output_dir=output_dir,
             scene_id=scene_id,
             prompt=prompt,
-            status="completed",
             attempt=attempt,
+            degraded=quality_degraded,
         )
-        (scene_dir / _SCENE_SUCCESS_MARKER).write_text("completed\n", encoding="utf-8")
 
     def _run_serial_generation(
         self,

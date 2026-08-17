@@ -845,8 +845,8 @@ def build_window_clearance_checks(
     geometry: dict[str, Any], objects: dict[str, dict[str, Any]]
 ) -> list[dict[str, Any]]:
     """Build checks for objects that make a window/wall opening unusable."""
-    # 2026-07-14 修改原因：窗口可能在家具阶段被衣柜、柜体或高家具遮挡；
-    # critic 应优先给出 remove_window/move_window 建议，而不是只移动家具。
+    # Window blockage remains diagnostic. Furniture must not be moved merely to
+    # preserve an opening; a real wall-mounted overlap is routed to wall tools.
     shell = geometry.get("scene_shell") or {}
     checks: list[dict[str, Any]] = []
     for window in shell.get("windows") or []:
@@ -907,7 +907,7 @@ def build_window_clearance_checks(
                 "subject_id": window_id,
                 "target_ids": sorted(set(blockers)),
                 "priority_weight": 0.8,
-                "scoring_tier": "core",
+                "scoring_tier": "auxiliary",
                 "question": f"Is window {window_id} unobstructed above its sill?",
                 "evidence_refs": ["scene_geometry", "window_clearance_zone"],
                 "clearance_result": {
@@ -926,8 +926,7 @@ def build_window_clearance_checks(
                     "repair_priority": [
                         "shrink_window",
                         "move_window",
-                        "remove_window",
-                        "move_blocking_furniture",
+                        "remove_implicit_window_only",
                     ],
                 },
             }
@@ -1205,7 +1204,10 @@ def evaluate_clearance(check: dict[str, Any]) -> dict[str, Any]:
                 f"{', '.join(str(b) for b in blockers)}."
             )
         if check_id.startswith("window_clearance__"):
-            reason += " Prefer removing the window or moving it to a clear wall position before moving suitable furniture."
+            reason += (
+                " Keep primary furniture fixed; resize or move the window when "
+                "a real wall-mounted overlap must be repaired."
+            )
     else:
         reason = "Clearance could not be determined."
     return {
@@ -1229,6 +1231,11 @@ def evaluate_clearance(check: dict[str, Any]) -> dict[str, Any]:
             "door_width_m": cr.get("door_width_m"),
             "hinge_assumption": cr.get("hinge_assumption"),
             "sweep_angle_deg": cr.get("sweep_angle_deg"),
+            "blocking_objects": cr.get("blocking_objects"),
+            "advisory_blocking_objects": cr.get("advisory_blocking_objects"),
+            "wall_mounted_blocking_objects": cr.get("wall_mounted_blocking_objects"),
+            "window_id": cr.get("window_id"),
+            "sill_height": cr.get("sill_height"),
         },
         "scoring_tier": check.get("scoring_tier", "core"),
     }

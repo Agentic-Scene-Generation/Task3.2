@@ -20,6 +20,8 @@ defaults:
 scene_expert:
   enabled: true
   mode: "harness_only"   # harness + global planner, NO memory
+  floor_plan_reservations:
+    enabled: true
   memory:
     dir: "${paths.memory_dir}/ablation_3"
     retrieval:

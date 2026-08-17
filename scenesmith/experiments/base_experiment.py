@@ -56,6 +56,7 @@ class BaseExperiment(ABC):
         compatible_agents: dict[str, type],
         logger: BaseLogger,
         render_gpu_id: int | None = None,
+        reservation_manifest: dict | None = None,
     ) -> BaseFloorPlanAgent:
         """Build floor plan agent from config dictionary.
 
@@ -96,11 +97,14 @@ class BaseExperiment(ABC):
                 "suffix."
             )
 
-        return compatible_agents[agent_name](
-            cfg=OmegaConf.create(agent_config),
-            logger=logger,
-            render_gpu_id=render_gpu_id,
-        )
+        kwargs = {
+            "cfg": OmegaConf.create(agent_config),
+            "logger": logger,
+            "render_gpu_id": render_gpu_id,
+        }
+        if reservation_manifest is not None:
+            kwargs["reservation_manifest"] = reservation_manifest
+        return compatible_agents[agent_name](**kwargs)
 
     @staticmethod
     def build_furniture_agent(

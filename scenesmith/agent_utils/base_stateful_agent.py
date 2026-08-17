@@ -1392,14 +1392,12 @@ class BaseStatefulAgent(ABC):
         if extra_args:
             kwargs["extra_args"] = extra_args
 
-        # Open-source Qwen servers do not interpret OpenAI's reasoning_effort
-        # field.  Pass the effective mode through llama.cpp's chat-template
-        # kwargs; the textual directive below is retained for readability and
-        # compatibility with other Qwen-compatible backends.
+        model = getattr(self.cfg.openai, "model", None)
         effort = None
         if settings_key and hasattr(self.cfg.openai, "reasoning_effort"):
             effort = getattr(self.cfg.openai.reasoning_effort, settings_key, None)
-        kwargs["extra_body"] = chat_template_kwargs_from_effort(effort)
+        # Qwen3.6 uses enable_thinking; Qwen3.8 uses reasoning_effort.
+        kwargs["extra_body"] = chat_template_kwargs_from_effort(effort, model=model)
 
         # Add tool_choice to force specific tool call first.
         if tool_choice:
@@ -1421,7 +1419,8 @@ class BaseStatefulAgent(ABC):
         effort = None
         if hasattr(self.cfg, "openai") and hasattr(self.cfg.openai, "reasoning_effort"):
             effort = getattr(self.cfg.openai.reasoning_effort, settings_key, None)
-        directive = thinking_directive_from_effort(effort)
+        model = getattr(self.cfg.openai, "model", None)
+        directive = thinking_directive_from_effort(effort, model=model)
         return prepend_text_thinking_directive(instructions, directive)
 
     def _create_designer_agent(
@@ -1578,7 +1577,11 @@ class BaseStatefulAgent(ABC):
         return designer_session, critic_session
 
     async def _run_planner_workflow(
-        self, *, runner_input: Any, max_turns: int
+        self,
+        *,
+        runner_input: Any,
+        max_turns: int,
+        require_initial_design: bool = True,
     ) -> RunResult:
         """Run and audit the stage Planner, including its persisted tool history."""
         planner_start = time.time()
@@ -1634,10 +1637,10 @@ class BaseStatefulAgent(ABC):
 
         # A planner can return a natural-language acknowledgement without ever
         # invoking a workflow tool.  Letting that response pass makes the stage
-        # look successful while leaving required surfaces empty.  The initial
-        # design call is mandatory for every stateful stage, so give the planner
-        # one explicit recovery turn before failing deterministically.
-        if self._planner_initial_design_tool_calls == 0:
+        # look successful while leaving required surfaces empty.  A fresh stage
+        # must create its initial design; a replay from an existing candidate
+        # intentionally starts with critique and repair instead.
+        if require_initial_design and self._planner_initial_design_tool_calls == 0:
             recovery_input = (
                 "MANDATORY WORKFLOW RECOVERY: your previous turn returned without "
                 "calling a workflow tool, so no design work has been completed. "
@@ -2440,7 +2443,9 @@ class BaseStatefulAgent(ABC):
                 + (f"\nSummary: {compact_summary}" if compact_summary else "")
             )
 
-        tools: list[FunctionTool] = [request_initial_design]
+        tools: list[FunctionTool] = []
+        if not getattr(self, "_planner_skip_initial_design", False):
+            tools.append(request_initial_design)
 
         # Only add critique-related tools if critique rounds are enabled.
         # This prevents the planner from accidentally calling critique tools

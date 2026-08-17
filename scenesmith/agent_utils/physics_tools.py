@@ -218,23 +218,36 @@ def _build_violation_message(
         )
     )
 
-    total = (
+    hard_total = (
         len(collisions)
         + len(thin_covering_overlaps)
         + len(thin_covering_boundary_violations)
         + len(door_violations)
         + len(open_violations)
         + len(height_violations)
-        + len(window_violations)
     )
 
-    if total == 0:
+    if hard_total == 0 and not window_violations:
         return "No physics violations detected. All objects are properly placed."
 
+    if hard_total == 0:
+        return (
+            "No hard physics violations detected.\n"
+            f"{chr(10).join(messages)}\n\n"
+            "Window access warnings are advisory, not collisions or placement "
+            "failures. Address them only when the immutable task or stage brief "
+            "explicitly requires that window to remain clear or usable; otherwise "
+            "do not move required furniture or supported objects merely to clear a "
+            "window view."
+        )
+
     return (
-        f"Physics violations detected ({total} issue(s)):\n"
+        f"Physics violations detected ({hard_total} hard issue(s), "
+        f"{len(window_violations)} advisory window warning(s)):\n"
         f"{chr(10).join(messages)}\n\n"
-        f"Please resolve these issues before concluding the design."
+        "Resolve the hard issues before concluding the design. Window access "
+        "warnings are advisory unless the immutable task or stage brief explicitly "
+        "requires the affected window to remain clear or usable."
     )
 
 

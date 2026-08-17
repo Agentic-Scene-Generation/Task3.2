@@ -145,8 +145,9 @@ def format_prompt_context(payload: dict[str, Any], *, max_issues: int = 8) -> st
             lines.append(f"  Repair priority: {repair_advice}")
         if str(result.get("check_id") or "").startswith("window_clearance__"):
             lines.append(
-                "  Repair priority: shrink the window first, then move it, then "
-                "remove it; only move otherwise appropriate furniture afterward."
+                "  Repair priority: shrink the window first, then move it. Remove "
+                "only an implicit window when the floor-plan contract permits; "
+                "do not move primary furniture merely to preserve the opening."
             )
         constraint = (result.get("evidence") or {}).get("intent_constraint") or {}
         if constraint:
@@ -190,6 +191,8 @@ def _format_dependency_states(
 
 
 def _is_prompt_issue(result: dict[str, Any]) -> bool:
+    if result.get("prompt_actionable_auxiliary"):
+        return result.get("label") in {"fail", "degraded", "unknown"}
     constraint = (result.get("evidence") or {}).get("intent_constraint") or {}
     return (
         str(result.get("contract_state") or "") == "failed"
@@ -202,6 +205,7 @@ def _is_prompt_issue(result: dict[str, Any]) -> bool:
         and str(constraint.get("source") or "")
         in {
             "explicit_prompt",
+            "task_compiler_inventory",
             "model_inferred",
             "room_ontology",
             "deterministic_fallback",

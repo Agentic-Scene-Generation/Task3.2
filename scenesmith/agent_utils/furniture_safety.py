@@ -79,7 +79,32 @@ DEFAULT_ALIASES = {
     "desk": ["desk", "desks"],
     "chair": ["chair", "chairs"],
     "sofa": ["sofa", "sofas", "couch", "couches"],
+    "side_table": ["side table", "side tables", "end table", "end tables"],
+    "coffee_table": ["coffee table", "coffee tables"],
+    "dining_table": ["dining table", "dining tables"],
+    "conference_table": [
+        "conference table",
+        "conference tables",
+        "meeting table",
+        "meeting tables",
+        "boardroom table",
+        "boardroom tables",
+    ],
+    "dressing_table": [
+        "dressing table",
+        "dressing tables",
+        "vanity table",
+        "vanity tables",
+        "makeup table",
+        "makeup tables",
+    ],
     "table": ["table", "tables"],
+    "storage_cabinet": [
+        "storage cabinet",
+        "storage cabinets",
+        "storage cupboard",
+        "storage cupboards",
+    ],
     "cabinet": ["cabinet", "cabinets"],
     "bookshelf": ["bookshelf", "bookshelves", "bookcase", "bookcases"],
     "plant": ["plant", "plants", "potted plant", "potted plants"],
@@ -103,6 +128,14 @@ DEFAULT_ALIASES = {
         "display",
     ],
     "sideboard": ["sideboard", "sideboards", "buffet cabinet"],
+    "water_dispenser": [
+        "water dispenser",
+        "water dispensers",
+        "water cooler",
+        "water coolers",
+        "drinking water dispenser",
+        "drinking water dispensers",
+    ],
 }
 
 # Keep specific categories for asset selection and repair, while allowing a
@@ -116,7 +149,93 @@ FURNITURE_CATEGORY_PARENTS: dict[str, frozenset[str]] = {
     "dining_chair": frozenset({"chair"}),
     "student_chair": frozenset({"chair"}),
     "armchair": frozenset({"chair"}),
+    "side_table": frozenset({"table"}),
+    "coffee_table": frozenset({"table"}),
+    "dining_table": frozenset({"table"}),
+    "conference_table": frozenset({"table"}),
+    "dressing_table": frozenset({"table"}),
 }
+
+# Retrieval uses ``cabinet`` as the stable semantic name for the freestanding
+# storage-cabinet assets selected for an explicit ``storage cabinet`` prompt.
+# Treat only this pair as interchangeable for inventory counting.  Other
+# cabinet variants keep their own semantics and must not satisfy the request.
+_RETRIEVED_ASSET_CATEGORY_COMPATIBILITIES: dict[str, frozenset[str]] = {
+    "cabinet": frozenset({"storage_cabinet"}),
+    "storage_cabinet": frozenset({"cabinet"}),
+}
+
+_NON_STORAGE_CABINET_PATTERN = re.compile(
+    r"\b(?:file|filing|wall|mounted)\s+cabinet\b", re.IGNORECASE
+)
+
+
+def _is_explicit_non_storage_cabinet(text: object) -> bool:
+    """Keep named filing/wall cabinet variants out of storage-cabinet fallback."""
+    normalized = str(text or "").lower().replace("_", " ")
+    return _NON_STORAGE_CABINET_PATTERN.search(normalized) is not None
+
+
+def _prompt_mentions_standalone_generic_furniture(prompt: str, *, generic: str) -> bool:
+    """Whether a prompt names a generic item beyond its typed subcategories.
+
+    Matching ``table`` inside ``dressing table`` or ``dining table`` must not
+    create a second generic inventory requirement.  Remove every recognized
+    subtype of the requested generic role before looking for an independent
+    occurrence; definite references such as "the table" are treated as a
+    reference to an already introduced subtype.
+    """
+    remainder = str(prompt or "").lower().replace("_", " ")
+    for specific, parents in FURNITURE_CATEGORY_PARENTS.items():
+        if generic not in parents:
+            continue
+        aliases = [specific.replace("_", " "), *DEFAULT_ALIASES.get(specific, [])]
+        for alias in aliases:
+            alias_pattern = re.escape(alias.lower()).replace(r"\ ", r"\s+")
+            remainder = re.sub(
+                rf"(?<![a-z0-9]){alias_pattern}(?:s|es)?(?![a-z0-9])",
+                " ",
+                remainder,
+            )
+
+    for alias in [generic.replace("_", " "), *DEFAULT_ALIASES.get(generic, [])]:
+        alias_pattern = re.escape(alias.lower()).replace(r"\ ", r"\s+")
+        for match in re.finditer(
+            rf"(?<![a-z0-9]){alias_pattern}(?:s|es)?(?![a-z0-9])",
+            remainder,
+        ):
+            before = remainder[: match.start()].rstrip()
+            if re.search(
+                r"\b(?:the|this|that|these|those|its|their)(?:\s+[a-z]+){0,2}$",
+                before,
+            ):
+                continue
+            return True
+    return False
+
+
+def _remove_redundant_generic_furniture_requirements(
+    requirements: set[str] | dict[str, int], prompt: str
+) -> None:
+    """Drop a broad role only when typed members fully explain its mention."""
+    generic_roles = {
+        parent
+        for specific, parents in FURNITURE_CATEGORY_PARENTS.items()
+        if specific in requirements
+        for parent in parents
+    } & {"table"}
+    for generic in generic_roles:
+        if (
+            generic in requirements
+            and not _prompt_mentions_standalone_generic_furniture(
+                prompt, generic=generic
+            )
+        ):
+            if isinstance(requirements, dict):
+                requirements.pop(generic, None)
+            else:
+                requirements.discard(generic)
+
 
 NUMBER_WORDS = {
     "a": 1,
@@ -225,10 +344,14 @@ def infer_furniture_category(text: str) -> str | None:
 
 def furniture_category_matches(text: str, required_category: str) -> bool:
     """Return whether object text satisfies a canonical inventory category."""
+    required_category = str(required_category).lower()
+    if required_category == "storage_cabinet" and _is_explicit_non_storage_cabinet(
+        text
+    ):
+        return False
     object_category = infer_furniture_category(text)
     if object_category is not None:
         return furniture_category_satisfies(object_category, required_category)
-    required_category = str(required_category).lower()
     if required_category not in DEFAULT_ALIASES:
         return _contains_alias(
             text, required_category.replace("_", " "), category=required_category
@@ -244,6 +367,8 @@ def furniture_category_satisfies(
     required = str(required_category or "").lower()
     if not observed or not required:
         return False
+    if required in _RETRIEVED_ASSET_CATEGORY_COMPATIBILITIES.get(observed, ()):
+        return True
     pending = [observed]
     visited: set[str] = set()
     while pending:
@@ -281,6 +406,12 @@ def furniture_object_category_matches(
     required_category: str,
 ) -> bool:
     """Return whether a structured scene object satisfies an inventory category."""
+    if str(
+        required_category
+    ).lower() == "storage_cabinet" and _is_explicit_non_storage_cabinet(
+        f"{object_id} {name}"
+    ):
+        return False
     object_category = infer_furniture_object_category(object_id, name, description)
     if object_category is not None:
         return furniture_category_satisfies(object_category, required_category)
@@ -531,6 +662,7 @@ class FurnitureSafetyController:
                 terms.add(canonical)
         if "twin_bed" in terms:
             terms.discard("bed")
+        _remove_redundant_generic_furniture_requirements(terms, text)
         return terms
 
     def _infer_required_counts(self, prompt: str) -> dict[str, int]:
@@ -564,6 +696,7 @@ class FurnitureSafetyController:
                 counts[canonical] = best_count
         if "twin_bed" in counts:
             counts.pop("bed", None)
+        _remove_redundant_generic_furniture_requirements(counts, text)
         self._infer_bilateral_bedside_counts(text, counts)
         self._propagate_each_relation_counts(text, counts)
         self._combine_distinct_role_counts(text, counts)

@@ -154,6 +154,64 @@ def test_returns_newest_render_first(tmp_path: Path) -> None:
     assert payload["renders"][0]["id"].endswith("renders_002")
 
 
+def test_exposes_floor_plan_renders_and_reservation_manifest(tmp_path: Path) -> None:
+    room = (
+        tmp_path
+        / "run_a"
+        / "shared_base"
+        / "batch_001"
+        / "hydra"
+        / "scene_000"
+        / "room_bedroom"
+    )
+    write(room / "action_log.json", "[]")
+    floor_plan = (
+        room.parent
+        / "floor_plans"
+        / "floor_plan_renders"
+        / "renders_001"
+        / "floor_plan.png"
+    )
+    write(floor_plan, "png")
+    write(
+        room.parent / "floor_plan_reservation_manifest.json",
+        json.dumps(
+            {
+                "schema_version": "scenesmith.floor_plan_reservations.v1",
+                "enabled": True,
+                "reservations": [
+                    {
+                        "reservation_id": "functional_zone__sleeping_zone__0",
+                        "kind": "functional_zone",
+                        "room_type": "bedroom",
+                        "subject_categories": ["sleeping_zone"],
+                        "min_zone_area_m2": 6.0,
+                        "count": 1,
+                        "hard": True,
+                    }
+                ],
+                "explicit_window_count": 0,
+                "preserve_entrance_route": True,
+            }
+        ),
+    )
+
+    payload = (
+        create_app(tmp_path)
+        .test_client()
+        .get("/api/scene", query_string={"path": str(room.relative_to(tmp_path))})
+        .get_json()
+    )
+
+    assert payload["floor_plan"]["renders"][0]["label"] == ("Floor plan / renders_001")
+    assert payload["floor_plan"]["renders"][0]["image"].endswith(
+        "floor_plans/floor_plan_renders/renders_001/floor_plan.png"
+    )
+    manifest = payload["floor_plan"]["reservation_manifest"]
+    assert manifest["enabled"] is True
+    assert manifest["reservations"][0]["min_zone_area_m2"] == 6.0
+
+
 def test_exposes_scene_final_views_as_snapshot(tmp_path: Path) -> None:
     room = (
         tmp_path

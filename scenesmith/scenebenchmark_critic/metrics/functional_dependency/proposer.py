@@ -1,6 +1,6 @@
 """Compatibility surface for the removed geometry relation proposer.
 
-The compiled v4 intent contract is the sole authority for functional
+The compiled intent contract is the sole authority for functional
 relations. These entry points remain so registry/plugin callers do not need a
 parallel mode.
 """

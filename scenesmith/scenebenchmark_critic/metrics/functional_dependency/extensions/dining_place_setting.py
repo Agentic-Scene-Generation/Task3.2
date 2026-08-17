@@ -109,15 +109,13 @@ def _evaluate_table_alignment(
         recommended_center, recommended_surface_id = _recommended_anchor_center(
             table, seat, anchor, seat_center, forward
         )
-        signed_lateral_offset = (
-            (anchor_center[0] - seat_center[0]) * lateral_axis[0]
-            + (anchor_center[1] - seat_center[1]) * lateral_axis[1]
-        )
+        signed_lateral_offset = (anchor_center[0] - seat_center[0]) * lateral_axis[
+            0
+        ] + (anchor_center[1] - seat_center[1]) * lateral_axis[1]
         lateral_offset = abs(signed_lateral_offset)
-        longitudinal = (
-            (anchor_center[0] - seat_center[0]) * forward[0]
-            + (anchor_center[1] - seat_center[1]) * forward[1]
-        )
+        longitudinal = (anchor_center[0] - seat_center[0]) * forward[0] + (
+            anchor_center[1] - seat_center[1]
+        ) * forward[1]
         allowed = _anchor_centerline_tolerance(seat, anchor, lateral_axis)
         if recommended_center is None:
             target_center = (
@@ -222,11 +220,7 @@ def _evaluate_table_alignment(
 
     table_id = str(table["id"])
     related_ids = sorted(
-        {
-            str(obj["id"])
-            for obj in [*seats, *anchors, *companions]
-            if obj.get("id")
-        }
+        {str(obj["id"]) for obj in [*seats, *anchors, *companions] if obj.get("id")}
     )
     if failures:
         reason = (
@@ -396,9 +390,11 @@ def _is_place_anchor(obj: dict[str, Any]) -> bool:
 
 def _is_place_companion(obj: dict[str, Any]) -> bool:
     text = _object_text(obj)
-    return _matches_item_group("drinkware", text) or _matches_item_group(
-        "napkin", text
-    ) or any(_matches_item_group(group, text) for group in CUTLERY_GROUPS)
+    return (
+        _matches_item_group("drinkware", text)
+        or _matches_item_group("napkin", text)
+        or any(_matches_item_group(group, text) for group in CUTLERY_GROUPS)
+    )
 
 
 def _usable_seat_front(
@@ -461,7 +457,10 @@ def _recommended_anchor_center(
     # 2026-07-13 修改原因：只投影到座椅中心线会保留餐盘靠近桌心的纵向位置，
     # 居中后容易撞中央花瓶并诱使模型再次横移。沿座椅前轴找到桌面入射边界，
     # 再按盘碗半径和桌尺度向内留边，得到可达且远离桌心装饰物的通用槽位。
-    edge_inset = 0.5 * anchor_span + max(0.03, 0.05 * table_scale)
+    # A plate already needs half its own span for containment. Keeping the
+    # remaining table-scale allowance small preserves the largest functional
+    # centre zone for an explicitly centered centerpiece.
+    edge_inset = 0.5 * anchor_span + max(0.01, 0.02 * table_scale)
     # 2026-07-14 修改原因：HSSD 桌面常被拆成窄而连续的 plank/surface 区域。
     # 不能把常规桌边 inset 推出该单独支撑面；缩放到该 ray 穿过区域的可用深度，
     # 既保留“靠椅子一侧”的餐位，也保证目标仍可实际落在该 surface 上。
@@ -484,9 +483,7 @@ def _tabletop_regions(
         if isinstance(region, dict):
             polygon = region.get("polygon_world_xy")
             if isinstance(polygon, list):
-                candidates.append(
-                    (str(region.get("region_id") or "") or None, polygon)
-                )
+                candidates.append((str(region.get("region_id") or "") or None, polygon))
     # 2026-07-14 修改原因：support regions 是可放置面的权威几何；只有提取
     # 失败时才回退到家具整体 footprint，避免桌腿/桌框扩大餐盘目标区域。
     if not candidates:
@@ -497,7 +494,9 @@ def _tabletop_regions(
         (surface_id, [(float(point[0]), float(point[1])) for point in polygon])
         for surface_id, polygon in candidates
         if len(polygon) >= 3
-        and all(isinstance(point, (list, tuple)) and len(point) >= 2 for point in polygon)
+        and all(
+            isinstance(point, (list, tuple)) and len(point) >= 2 for point in polygon
+        )
     ]
     return _coalesce_adjacent_tabletop_regions(normalized)
 
@@ -662,9 +661,7 @@ def _nearest_cluster_anchor(
     return anchor if distance <= cluster_radius else None
 
 
-def _projected_span(
-    obj: dict[str, Any], axis: tuple[float, float]
-) -> float | None:
+def _projected_span(obj: dict[str, Any], axis: tuple[float, float]) -> float | None:
     size = (obj.get("bbox_world") or {}).get("size") or []
     if len(size) < 2:
         return None

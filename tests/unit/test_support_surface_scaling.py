@@ -5,7 +5,7 @@ import tempfile
 import unittest
 
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import numpy as np
 import trimesh
@@ -203,6 +203,45 @@ class TestSupportSurfaceMeshScaling(unittest.TestCase):
             msg=f"Propagated mesh should be scaled by target's scale_factor. "
             f"Expected ratio {expected_ratio:.2f}, got {actual_ratio:.2f}.",
         )
+
+    def test_empty_hssd_annotation_does_not_recompute_high_poly_mesh(self):
+        """An explicit empty annotation is left to the hard-target policy."""
+        furniture = SceneObject(
+            object_id=UniqueID("hssd_table_001"),
+            object_type=ObjectType.FURNITURE,
+            name="dining_table",
+            description="Test HSSD dining table",
+            transform=RigidTransform(),
+            geometry_path=self.mesh_path,
+            sdf_path=None,
+            support_surfaces=[],
+            metadata={
+                "asset_source": "hssd",
+                "hssd_mesh_id": "empty_annotation_mesh",
+            },
+            bbox_min=np.array([-0.5, -0.5, 0.0]),
+            bbox_max=np.array([0.5, 0.5, 0.75]),
+        )
+        self.scene.objects = {furniture.object_id: furniture}
+
+        with (
+            patch(
+                "scenesmith.agent_utils.hssd_retrieval.support_surface_loader."
+                "load_hssd_support_surfaces",
+                return_value=[],
+            ) as load_hssd,
+            patch(
+                "scenesmith.agent_utils.room.extract_support_surfaces_from_mesh"
+            ) as extract_from_mesh,
+        ):
+            surfaces = extract_and_propagate_support_surfaces(
+                scene=self.scene, furniture_object=furniture, config=self.config
+            )
+
+        load_hssd.assert_called_once()
+        extract_from_mesh.assert_not_called()
+        self.assertEqual(surfaces, [])
+        self.assertEqual(furniture.support_surfaces, surfaces)
 
 
 class TestSupportSurfaceBehavior(unittest.TestCase):

@@ -1,6 +1,7 @@
 import asyncio
 import unittest
 
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -13,11 +14,13 @@ try:
     from scenesmith.agent_utils.base_stateful_agent import BaseStatefulAgent
     from scenesmith.agent_utils.room import ObjectType
     from scenesmith.furniture_agents.stateful_furniture_agent import (
+        REPAIR_ASSET_SPECS,
         StatefulFurnitureAgent,
     )
 except ModuleNotFoundError as exc:
     RigidTransform = None
     BaseStatefulAgent = None
+    REPAIR_ASSET_SPECS = {}
     StatefulFurnitureAgent = None
     _IMPORT_ERROR = exc
 else:
@@ -69,6 +72,19 @@ class _FakeCollisionScene:
 
 
 class StatefulFurnitureRepairTest(unittest.TestCase):
+    def test_repair_asset_specs_cover_specialized_scene_furniture(self) -> None:
+        expected_categories = {
+            "coffee_table",
+            "dining_table",
+            "dressing_table",
+            "stool",
+            "storage_cabinet",
+            "water_dispenser",
+        }
+
+        self.assertTrue(expected_categories.issubset(REPAIR_ASSET_SPECS))
+        self.assertIn("no integrated mirror", REPAIR_ASSET_SPECS["dressing_table"][0])
+
     @unittest.skipIf(
         StatefulFurnitureAgent is None,
         f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
@@ -641,6 +657,42 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         StatefulFurnitureAgent is None,
         f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
     )
+    def test_wardrobe_wall_anchor_yields_a_prompt_reserved_free_wall(self) -> None:
+        agent = object.__new__(StatefulFurnitureAgent)
+        wardrobe = _FakeFurniture("wardrobe_0", (0.0, 0.0, 1.0), (0.8, 0.6, 2.0))
+        bed = _FakeFurniture("bed_0", (0.0, 0.0, 0.4), (0.5, 0.5, 0.8))
+        dressing_table = _FakeFurniture(
+            "dressing_table_0", (-1.5, 0.0, 0.5), (1.0, 0.5, 0.8)
+        )
+        agent.scene = _FakeCollisionScene(wardrobe, bed, dressing_table)
+        agent.scene.scenebenchmark_intent_contract = {
+            "constraints": [
+                {
+                    "relation": "against_wall",
+                    "subjects": {"category": "dressing_table", "count": 1},
+                    "targets": {"category": "wall", "role": "free"},
+                    "strength": "hard",
+                }
+            ]
+        }
+        west = RigidTransform(p=[-1.5, 1.0, 1.0])
+        east = RigidTransform(p=[1.5, 1.0, 1.0])
+        agent._wardrobe_candidate_transforms = lambda _obj: [(west, 0.0), (east, 0.0)]
+        agent._opening_forbidden_zones = lambda include_windows=False: []
+        agent._furniture_by_category = lambda category: {
+            "wardrobe": [wardrobe],
+            "bed": [bed],
+            "nightstand": [],
+            "dressing_table": [dressing_table],
+        }.get(category, [])
+
+        self.assertTrue(agent._repair_wardrobe_wall_anchor())
+        np.testing.assert_allclose(wardrobe.transform.translation(), east.translation())
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
     def test_initial_design_repairs_before_planner_can_request_critique(self) -> None:
         """The first automatic critic must receive the post-repair scene."""
         agent = object.__new__(StatefulFurnitureAgent)
@@ -726,11 +778,11 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         ):
             actions = agent._repair_initial_contract_layout()
 
-        improve.assert_called_once_with(
-            agent.scene,
-            config=critic_config,
-            candidate_validator=agent._is_furniture_relation_candidate_hard_valid,
-        )
+        improve.assert_called_once()
+        improve_args, improve_kwargs = improve.call_args
+        self.assertEqual(improve_args, (agent.scene,))
+        self.assertIs(improve_kwargs["config"], critic_config)
+        self.assertTrue(callable(improve_kwargs["candidate_validator"]))
         seating_targets.assert_called_once_with(agent.scene, config=critic_config)
         align.assert_called_once_with(
             agent.scene,
@@ -818,11 +870,11 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         ):
             actions = agent._repair_relations_after_inventory_change()
 
-        improve.assert_called_once_with(
-            agent.scene,
-            config=critic_config,
-            candidate_validator=agent._is_furniture_relation_candidate_hard_valid,
-        )
+        improve.assert_called_once()
+        improve_args, improve_kwargs = improve.call_args
+        self.assertEqual(improve_args, (agent.scene,))
+        self.assertIs(improve_kwargs["config"], critic_config)
+        self.assertTrue(callable(improve_kwargs["candidate_validator"]))
         seating_targets.assert_called_once_with(agent.scene, config=critic_config)
         align.assert_called_once_with(
             agent.scene,
@@ -981,6 +1033,7 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
             repaired_categories.append(category) or 1
         )
         agent._repair_forbidden_zone_conflicts = lambda include_windows=False: False
+        agent._repair_shallow_furniture_collisions = lambda: []
         relation_repairs: list[bool] = []
         agent._repair_relations_after_inventory_change = lambda: (
             relation_repairs.append(True)
@@ -1022,6 +1075,7 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
             return True
 
         agent._repair_forbidden_zone_conflicts = repair_forbidden_zone_conflicts
+        agent._repair_shallow_furniture_collisions = lambda: []
         agent._repair_relations_after_inventory_change = lambda: [
             "bound student_desk_0 via edge_distribution after inventory repair"
         ]
@@ -1037,6 +1091,78 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         self.assertTrue(repaired)
         self.assertEqual(clearance_calls, [False])
         self.assertIn("cleared deterministic door/opening forbidden zones", actions)
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
+    def test_inventory_repair_clears_shallow_collision_before_relations(self) -> None:
+        agent = object.__new__(StatefulFurnitureAgent)
+        agent.scene = SimpleNamespace(
+            room_type="living_room",
+            text_description="A living room with a television on a TV stand.",
+            scene_expert_original_description=(
+                "A living room with a television on a TV stand."
+            ),
+        )
+        agent.furniture_safety_controller = SimpleNamespace(
+            required_counts={"floor_plant": 1}
+        )
+        agent._ensure_required_furniture_asset = lambda _category: 1
+        agent._repair_forbidden_zone_conflicts = lambda include_windows=False: False
+        agent._remove_excess_required_furniture = lambda _counts: 0
+        repair_order: list[str] = []
+        agent._repair_shallow_furniture_collisions = lambda: (
+            repair_order.append("collision")
+            or [
+                "separated shallow collision dining_chair_4<->floor_plant_1 "
+                "by moving floor_plant_1"
+            ]
+        )
+        agent._repair_relations_after_inventory_change = lambda: (
+            repair_order.append("relations")
+            or ["bound television_0 via object_on_support after inventory repair"]
+        )
+
+        repaired, actions = agent._attempt_deterministic_repair(
+            SimpleNamespace(
+                hard_valid=False,
+                hard_reasons=["missing required floor_plant: expected 1, found 0"],
+            )
+        )
+
+        self.assertTrue(repaired)
+        self.assertEqual(repair_order, ["collision", "relations"])
+        self.assertIn(
+            "separated shallow collision dining_chair_4<->floor_plant_1 "
+            "by moving floor_plant_1",
+            actions,
+        )
+        self.assertIn(
+            "bound television_0 via object_on_support after inventory repair",
+            actions,
+        )
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
+    def test_relation_candidate_gate_allows_baseline_failures_but_rejects_new_ones(
+        self,
+    ) -> None:
+        agent = object.__new__(StatefulFurnitureAgent)
+        agent.scene = object()
+        current_failures = {"hard:physics hard violation: collisions"}
+        agent._hard_violation_fingerprints = lambda: set(current_failures)
+        validator = agent._relation_candidate_preserves_hard_baseline(
+            {"hard:physics hard violation: collisions"}
+        )
+
+        self.assertTrue(validator(agent.scene))
+        current_failures.add(
+            "hard:unresolved prompt-core furniture relation: clear_access:door_1"
+        )
+        self.assertFalse(validator(agent.scene))
 
     @unittest.skipIf(
         StatefulFurnitureAgent is None,
@@ -1073,6 +1199,76 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
             ),
         )
         self.assertFalse(overlap_x > 1e-4 and overlap_y > 1e-4 and overlap_z > 1e-4)
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
+    def test_forbidden_zone_penalty_uses_clearance_epsilon(self) -> None:
+        agent = object.__new__(StatefulFurnitureAgent)
+        zones = [
+            (
+                "door_1",
+                "door",
+                np.array([0.0, 0.0, 0.0]),
+                np.array([1.0, 1.0, 2.0]),
+            )
+        ]
+        boundary_contact = (
+            np.array([-0.2 + 5e-9, 0.2, 0.0]),
+            np.array([5e-9, 0.8, 1.0]),
+        )
+        true_overlap = (
+            np.array([-0.2 + 0.02, 0.2, 0.0]),
+            np.array([0.02, 0.8, 1.0]),
+        )
+
+        self.assertEqual(agent._zone_overlap_penalty(boundary_contact, zones), 0.0)
+        self.assertGreater(agent._zone_overlap_penalty(true_overlap, zones), 0.0)
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
+    def test_hard_state_transaction_rolls_back_new_door_blocker(self) -> None:
+        state = {"pose": "baseline"}
+
+        class TransactionScene:
+            def to_state_dict(self):
+                return dict(state)
+
+            def restore_from_state_dict(self, snapshot):
+                state.clear()
+                state.update(snapshot)
+
+        agent = object.__new__(StatefulFurnitureAgent)
+        agent.scene = TransactionScene()
+        agent.rendering_manager = SimpleNamespace(clear_cache=MagicMock())
+        agent._reset_critic_candidate_cache = MagicMock()
+        fingerprints = iter(
+            [
+                {
+                    "hard:unresolved prompt-core furniture relation: seating_to_work_surface"
+                },
+                {
+                    "hard:unresolved prompt-core furniture relation: seating_to_work_surface",
+                    "door:door_1:office_chair_1",
+                },
+            ]
+        )
+        agent._hard_violation_fingerprints = lambda: next(fingerprints)
+
+        transaction = agent._begin_hard_state_transaction()
+        state["pose"] = "door_blocking_candidate"
+
+        self.assertFalse(
+            agent._commit_hard_state_transaction(
+                transaction, source="seating orientation"
+            )
+        )
+        self.assertEqual(state, {"pose": "baseline"})
+        agent.rendering_manager.clear_cache.assert_called_once_with()
+        agent._reset_critic_candidate_cache.assert_called_once_with()
 
     @unittest.skipIf(
         StatefulFurnitureAgent is None,
@@ -1160,6 +1356,86 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
                 "bound television_0 via object_on_support "
                 "after physical collision repair"
             ],
+        )
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
+    def test_collision_repair_clears_independent_pairs_before_support_repair(
+        self,
+    ) -> None:
+        agent = object.__new__(StatefulFurnitureAgent)
+        agent.scene = SimpleNamespace(
+            room_type="living_room",
+            text_description="A living room with a television on a TV stand.",
+            scene_expert_original_description=(
+                "A living room with a television on a TV stand."
+            ),
+        )
+        agent.furniture_safety_controller = SimpleNamespace(required_counts={})
+        agent._repair_forbidden_zone_conflicts = lambda include_windows=False: False
+        agent._repair_generic_wall_collisions = lambda: False
+        agent._remove_excess_required_furniture = lambda _counts: 0
+        repair_order: list[str] = []
+        agent._repair_shallow_furniture_collisions = lambda: (
+            repair_order.append("independent_collision")
+            or [
+                "separated shallow collision storage_cabinet_0<->floor_plant_1 "
+                "by moving floor_plant_1"
+            ]
+        )
+        agent._repair_prompt_contract_relations = lambda context: (
+            repair_order.append("support")
+            or [
+                "bound television_0 via object_on_support "
+                "after physical collision repair"
+            ]
+        )
+
+        repaired, actions = agent._attempt_deterministic_repair(
+            SimpleNamespace(
+                hard_valid=False,
+                hard_reasons=["physics hard violation: collisions"],
+            )
+        )
+
+        self.assertTrue(repaired)
+        self.assertEqual(repair_order, ["independent_collision", "support"])
+        self.assertIn(
+            "separated shallow collision storage_cabinet_0<->floor_plant_1 "
+            "by moving floor_plant_1",
+            actions,
+        )
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
+    def test_shallow_collision_repair_preserves_hard_support_pair(self) -> None:
+        television = _FakeFurniture("television_0", (0.0, 0.0, 0.4), (1.0, 0.2, 0.8))
+        tv_stand = _FakeFurniture("tv_stand_0", (0.0, 0.0, 0.2), (1.4, 0.5, 0.4))
+        agent = object.__new__(StatefulFurnitureAgent)
+        agent.scene = SimpleNamespace(
+            objects={
+                "television_0": television,
+                "tv_stand_0": tv_stand,
+            },
+            scenebenchmark_intent_contract={
+                "constraints": [
+                    {
+                        "relation": "on_top_of",
+                        "strength": "hard",
+                        "subjects": {"category": "television"},
+                        "targets": {"category": "tv_stand"},
+                    }
+                ]
+            },
+        )
+        agent._category_for_object = lambda object_id, _obj: object_id.rsplit("_", 1)[0]
+
+        self.assertTrue(
+            agent._is_hard_prompt_support_pair("television_0", "tv_stand_0")
         )
 
     @unittest.skipIf(
@@ -1343,6 +1619,7 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
             repaired_categories.append(category) or 1
         )
         agent._repair_forbidden_zone_conflicts = lambda include_windows=False: False
+        agent._repair_shallow_furniture_collisions = lambda: []
         agent._repair_relations_after_inventory_change = lambda: []
 
         repaired, _ = agent._attempt_deterministic_repair(
@@ -1444,6 +1721,73 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         StatefulFurnitureAgent is None,
         f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
     )
+    def test_dressing_table_contract_replaces_generic_table_task_count(self) -> None:
+        agent = object.__new__(StatefulFurnitureAgent)
+        agent.scene = SimpleNamespace(
+            objects={},
+            scene_expert_task_spec={"required_large_objects": ["table"]},
+            scenebenchmark_intent_contract={
+                "constraints": [
+                    {
+                        "relation": "required_count",
+                        "subjects": {"category": "dressing_table", "count": 1},
+                        "stage": "furniture",
+                        "strength": "hard",
+                    }
+                ]
+            },
+        )
+        agent.furniture_safety_controller = SimpleNamespace(
+            required_counts={"table": 1}
+        )
+
+        self.assertEqual(agent._repair_required_counts(), {"dressing_table": 1})
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
+    def test_task_count_sync_removes_replaced_generic_table_term(self) -> None:
+        agent = object.__new__(StatefulFurnitureAgent)
+        agent.scene = SimpleNamespace(
+            objects={},
+            scene_expert_task_spec={"required_large_objects": ["table"]},
+            scenebenchmark_intent_contract={
+                "constraints": [
+                    {
+                        "relation": "required_count",
+                        "subjects": {"category": "dressing_table", "count": 1},
+                        "stage": "furniture",
+                        "strength": "hard",
+                    }
+                ]
+            },
+        )
+        agent.furniture_safety_controller = SimpleNamespace(
+            enabled=True,
+            required_counts={"table": 1},
+            required_terms={"table"},
+        )
+        agent.stage_working_memory = MagicMock()
+
+        agent._synchronize_task_required_counts()
+
+        self.assertEqual(
+            agent.furniture_safety_controller.required_counts,
+            {"dressing_table": 1},
+        )
+        self.assertEqual(
+            agent.furniture_safety_controller.required_terms,
+            {"dressing_table"},
+        )
+        agent.stage_working_memory.set_required_counts.assert_called_once_with(
+            {"dressing_table": 1}
+        )
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
     def test_hard_media_contract_includes_repairable_television_inventory(self) -> None:
         agent = object.__new__(StatefulFurnitureAgent)
         agent.scene = SimpleNamespace(
@@ -1497,6 +1841,65 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         )
 
         self.assertEqual(3, len(agent._furniture_by_category("chair")))
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
+    def test_storage_cabinet_repair_count_includes_retrieved_cabinet(self) -> None:
+        agent = object.__new__(StatefulFurnitureAgent)
+        furniture_type = SimpleNamespace(value="furniture")
+        cabinet = SimpleNamespace(
+            object_id="cabinet_0",
+            name="cabinet",
+            description="Compact freestanding storage cabinet",
+            object_type=furniture_type,
+            immutable=False,
+            metadata={"semantic_name": "cabinet"},
+        )
+        agent.scene = SimpleNamespace(objects={cabinet.object_id: cabinet})
+        agent.furniture_safety_controller = SimpleNamespace(
+            infer_object_category=lambda _text: "cabinet"
+        )
+
+        self.assertEqual([cabinet], agent._furniture_by_category("storage_cabinet"))
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
+    def test_repair_asset_request_uses_compatible_contract_category(self) -> None:
+        agent = object.__new__(StatefulFurnitureAgent)
+        agent.scene = SimpleNamespace(
+            scene_dir=Path("test_room"),
+            scenebenchmark_intent_contract={
+                "constraints": [
+                    {
+                        "relation": "required_count",
+                        "stage": "furniture",
+                        "strength": "hard",
+                        "subjects": {"category": "storage_cabinet", "count": 1},
+                    }
+                ]
+            },
+        )
+        asset_manager = MagicMock()
+        asset_manager.list_available_assets.return_value = []
+        asset_manager.generate_assets.return_value = SimpleNamespace(
+            successful_assets=[
+                SimpleNamespace(object_id="storage_cabinet_0", metadata={})
+            ]
+        )
+        agent.asset_manager = asset_manager
+
+        self.assertEqual(
+            agent._repair_request_semantic_name("cabinet"),
+            "storage_cabinet",
+        )
+        self.assertIsNotNone(agent._get_or_generate_repair_asset("cabinet"))
+        request = asset_manager.generate_assets.call_args.args[0]
+        self.assertEqual(request.short_names, ["storage_cabinet"])
+        self.assertEqual(request.semantic_name_candidates, [["storage_cabinet"]])
 
     @unittest.skipIf(
         StatefulFurnitureAgent is None,

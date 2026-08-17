@@ -322,6 +322,115 @@ def _render_records(probe_root: Path, room_dir: Path) -> list[dict[str, Any]]:
     return sorted(records, key=lambda record: record["created_at"], reverse=True)
 
 
+def _floor_plan_scene_dirs(room_dir: Path) -> list[Path]:
+    """Return the scene roots that can own floor-plan artifacts.
+
+    Critic replays keep the floor-plan images in ``critic_on`` while the
+    reservation manifest may remain in the matching ``shared_base`` scene.
+    Both roots are still below the probe root and share the same batch/scene
+    suffix, so reading the sibling is deterministic and keeps old replays
+    useful.
+    """
+    scene_dir = room_dir.parent
+    candidates = [scene_dir]
+    try:
+        mode_dir = scene_dir.parents[2]
+        if mode_dir.name == "critic_on":
+            candidates.append(
+                mode_dir.parent / "shared_base" / scene_dir.relative_to(mode_dir)
+            )
+    except (IndexError, ValueError):
+        pass
+
+    unique: list[Path] = []
+    for candidate in candidates:
+        if candidate.is_dir() and candidate not in unique:
+            unique.append(candidate)
+    return unique
+
+
+def _floor_plan_records(probe_root: Path, room_dir: Path) -> list[dict[str, Any]]:
+    """Index floor-plan renders that do not have a scene-state checkpoint."""
+    records: list[dict[str, Any]] = []
+    seen: set[Path] = set()
+    seen_render_keys: set[str] = set()
+    seen_legacy_keys: set[str] = set()
+    for scene_dir in _floor_plan_scene_dirs(room_dir):
+        render_root = scene_dir / "floor_plans" / "floor_plan_renders"
+        render_dirs = sorted(render_root.glob("renders_*"))
+        for render_dir in render_dirs:
+            image_path = render_dir / "floor_plan.png"
+            render_key = str(render_dir.relative_to(scene_dir))
+            if (
+                not image_path.is_file()
+                or image_path in seen
+                or render_key in seen_render_keys
+            ):
+                continue
+            seen.add(image_path)
+            seen_render_keys.add(render_key)
+            material_images = [
+                str(path.relative_to(probe_root))
+                for path in sorted(render_dir.glob("material_*.png"))
+                if path.is_file()
+            ]
+            records.append(
+                {
+                    "id": str(render_dir.relative_to(probe_root)),
+                    "label": f"Floor plan / {render_dir.name}",
+                    "image": str(image_path.relative_to(probe_root)),
+                    "material_images": material_images,
+                    "has_scores": (render_dir / "scores.yaml").is_file(),
+                    "created_at": _iso_mtime(image_path),
+                }
+            )
+
+        # Some early runs persisted one final image without a renders_* folder.
+        for image_path in (
+            scene_dir / "final_floor_plan" / "floor_plan.png",
+            scene_dir / "floor_plans" / "final_floor_plan" / "floor_plan.png",
+        ):
+            legacy_key = str(image_path.relative_to(scene_dir))
+            if (
+                not image_path.is_file()
+                or image_path in seen
+                or legacy_key in seen_legacy_keys
+            ):
+                continue
+            seen.add(image_path)
+            seen_legacy_keys.add(legacy_key)
+            records.append(
+                {
+                    "id": str(image_path.parent.relative_to(probe_root)),
+                    "label": "Final floor plan",
+                    "image": str(image_path.relative_to(probe_root)),
+                    "material_images": [
+                        str(path.relative_to(probe_root))
+                        for path in sorted(image_path.parent.glob("material_*.png"))
+                        if path.is_file()
+                    ],
+                    "has_scores": (image_path.parent / "scores.yaml").is_file(),
+                    "created_at": _iso_mtime(image_path),
+                }
+            )
+    return sorted(records, key=lambda record: record["created_at"], reverse=True)
+
+
+def _floor_plan_manifest(room_dir: Path) -> dict[str, Any] | None:
+    for scene_dir in _floor_plan_scene_dirs(room_dir):
+        payload = _read_json(scene_dir / "floor_plan_reservation_manifest.json")
+        if isinstance(payload, dict) and payload:
+            return payload
+    return None
+
+
+def _floor_plan_payload(probe_root: Path, room_dir: Path) -> dict[str, Any]:
+    return {
+        "renders": _floor_plan_records(probe_root, room_dir),
+        "reservation_manifest": _floor_plan_manifest(room_dir),
+    }
+
+
 def _timing_records(room_dir: Path) -> list[dict[str, Any]]:
     rows = _read_jsonl(room_dir / "timing_stats.jsonl")
     for row in rows:
@@ -1325,6 +1434,7 @@ def create_app(probe_root: Path = DEFAULT_PROBE_ROOT) -> Flask:
                 "timings": timings,
                 "llm_calls": llm_calls,
                 "renders": _render_records(root, room),
+                "floor_plan": _floor_plan_payload(root, room),
                 "score_summary": _score_summary(room),
                 "messages": _agent_messages(room),
                 "event_counts": Counter(row.get("stage", "unknown") for row in timings),

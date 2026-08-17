@@ -1,3 +1,4 @@
+import copy
 import json
 import logging
 import math
@@ -46,7 +47,9 @@ from scenesmith.agent_utils.room import (
 from scenesmith.manipuland_agents.cross_stage_inventory import (
     contract_bound_support_object_ids,
     existing_floor_covering_ids,
+    redundant_furniture_owned_floor_request_indices,
     redundant_floor_covering_request_indices,
+    violates_hard_one_per_support_reparenting,
 )
 from scenesmith.manipuland_agents.tools.arrangement_tools import create_arrangement_impl
 from scenesmith.manipuland_agents.tools.fill_tools import fill_container_tool_impl
@@ -69,9 +72,26 @@ from scenesmith.manipuland_agents.tools.response_dataclasses import (
 )
 from scenesmith.manipuland_agents.tools.stack_tools import create_stack_tool_impl
 from scenesmith.scenebenchmark_critic import room_scene_to_case_pack
+from scenesmith.scenebenchmark_critic.intent_contract import (
+    intent_contract_constraints_for_scene,
+    selected_ids,
+)
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.dining_place_setting import (
+    _associated_discrete_seats,
+    _companion_lane_half_width,
+    _is_place_anchor,
+    _recommended_anchor_center,
+    _usable_seat_front,
     evaluate_dining_place_setting_alignment,
 )
+from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.manipuland_completeness import (
+    CUTLERY_GROUPS,
+    _matches_item_group,
+    _object_text,
+    _requested_place_count,
+    evaluate_manipuland_completeness,
+)
+from scenesmith.scenebenchmark_critic.core.geometry import bbox_center_xy
 
 console_logger = logging.getLogger(__name__)
 
@@ -115,6 +135,7 @@ class ManipulandTools:
         cfg: DictConfig,
         current_furniture_id: UniqueID,
         support_surfaces: dict[str, SupportSurface],
+        fulfilled_floor_requirements: dict[str, list[str]] | None = None,
     ):
         """Initialize manipuland tools.
 
@@ -125,12 +146,19 @@ class ManipulandTools:
             current_furniture_id: ID of furniture currently being populated.
             support_surfaces: Dictionary mapping surface_id (string) to SupportSurface.
                 All surfaces for the current furniture item.
+            fulfilled_floor_requirements: Furniture-owned floor requirements already
+                satisfied by global scene inventory for this target.
         """
         self.scene = scene
         self.asset_manager = asset_manager
         self.cfg = cfg
         self.current_furniture_id = current_furniture_id
         self.support_surfaces = support_surfaces
+        self.fulfilled_floor_requirements = fulfilled_floor_requirements or {}
+        # Asset generation can happen in several designer turns. Keep a
+        # table-specific centerpiece clearance so a later flower or vase
+        # request inherits the constraints derived from the original plates.
+        self._dining_centerpiece_budget_by_furniture: dict[str, float] = {}
 
         # HSSD sometimes describes one continuous dining tabletop as adjacent
         # coplanar strips (for example S_8/S_9 split at the table centre).  That
@@ -231,6 +259,131 @@ class ManipulandTools:
             len(surfaces),
             len(merged_surfaces),
         )
+
+    def _budget_dining_centerpiece_dimensions(
+        self,
+        *,
+        object_descriptions: list[str],
+        short_names: list[str],
+        desired_dimensions: list[list[float]],
+    ) -> list[list[float]]:
+        """Reserve tabletop clearance for a centered floral centerpiece.
+
+        A centered vase is often generated in the same batch as several place
+        settings. Its visual asset can be much wider than the usable gap between
+        opposite plates, especially on a narrow tabletop. Constrain the vase and
+        floral fill from real support-surface and plate dimensions before assets
+        are retrieved, rather than moving either hard-constrained item afterward.
+        """
+        if not (
+            len(object_descriptions) == len(short_names) == len(desired_dimensions)
+        ):
+            return desired_dimensions
+
+        furniture = self.scene.get_object(self.current_furniture_id)
+        furniture_text = (
+            f"{getattr(furniture, 'name', '')} "
+            f"{getattr(furniture, 'description', '')}"
+        ).lower()
+        scene_text = str(getattr(self.scene, "text_description", "")).lower()
+        if (
+            "dining" not in furniture_text
+            or "table" not in furniture_text
+            or "centerpiece" not in scene_text
+        ):
+            return desired_dimensions
+
+        item_text = [
+            f"{description} {short_name}".lower()
+            for description, short_name in zip(
+                object_descriptions, short_names, strict=True
+            )
+        ]
+        anchor_dimensions = [
+            dimensions
+            for text, dimensions in zip(item_text, desired_dimensions, strict=True)
+            if any(token in text for token in ("plate", "bowl"))
+            and len(dimensions) >= 2
+        ]
+        centerpiece_indices = [
+            index
+            for index, text in enumerate(item_text)
+            if any(token in text for token in ("vase", "flower", "floral"))
+        ]
+        if not centerpiece_indices:
+            return desired_dimensions
+
+        furniture_key = str(self.current_furniture_id)
+        max_footprint = self._dining_centerpiece_budget_by_furniture.get(furniture_key)
+        if max_footprint is None:
+            # Asset generation commonly acquires one reusable plate template
+            # and expands it to every seat later. Count the requested settings
+            # from the original prompt instead of mistaking that one template
+            # for a one-person table.
+            requested_place_count = _requested_place_count(scene_text)
+            if not anchor_dimensions or (
+                len(anchor_dimensions) < 2 and requested_place_count < 2
+            ):
+                return desired_dimensions
+
+            tabletop_short_sides = []
+            for surface in self.support_surfaces.values():
+                extent = np.asarray(
+                    surface.bounding_box_max[:2], dtype=float
+                ) - np.asarray(surface.bounding_box_min[:2], dtype=float)
+                if np.all(extent > 1e-6):
+                    tabletop_short_sides.append(float(np.min(np.abs(extent))))
+            if not tabletop_short_sides:
+                return desired_dimensions
+
+            tabletop_short_side = max(tabletop_short_sides)
+            largest_anchor_span = max(
+                float(max(abs(float(value)) for value in dimensions[:2]))
+                for dimensions in anchor_dimensions
+            )
+            # Two opposite settings consume one anchor diameter each. Keep a small
+            # edge allowance, then leave most of the remaining centre gap to the
+            # composite, whose fill geometry can extend beyond its container mesh.
+            center_gap = tabletop_short_side - 2.0 * (largest_anchor_span + 0.01)
+            max_footprint = min(
+                0.20 * tabletop_short_side,
+                max(0.035, 0.80 * center_gap),
+            )
+            self._dining_centerpiece_budget_by_furniture[furniture_key] = max_footprint
+        constrained = [list(dimensions) for dimensions in desired_dimensions]
+        changed_names: list[str] = []
+        for index in centerpiece_indices:
+            dimensions = constrained[index]
+            if len(dimensions) < 3:
+                continue
+            old_width, old_depth, old_height = (
+                float(value) for value in dimensions[:3]
+            )
+            # Retrieval uniformly scales compact floral fills.  They cannot
+            # satisfy a vase-like height request without invalid distortion,
+            # whereas a vase is naturally taller than its footprint.
+            height_multiplier = (
+                1.5
+                if any(token in item_text[index] for token in ("flower", "floral"))
+                else 2.0
+            )
+            max_height = height_multiplier * max_footprint
+            new_dimensions = [
+                min(old_width, max_footprint),
+                min(old_depth, max_footprint),
+                min(old_height, max_height),
+            ]
+            if new_dimensions != dimensions[:3]:
+                constrained[index] = [*new_dimensions, *dimensions[3:]]
+                changed_names.append(short_names[index])
+        if changed_names:
+            console_logger.info(
+                "Constrained centered dining centerpiece asset(s) %s to %.3fm "
+                "footprint",
+                ", ".join(changed_names),
+                max_footprint,
+            )
+        return constrained
 
     @staticmethod
     def _coalesce_adjacent_support_surfaces(
@@ -857,6 +1010,50 @@ class ManipulandTools:
                         },
                         indent=2,
                     )
+            (
+                object_descriptions,
+                short_names,
+                desired_dimensions,
+                skipped_furniture_requirements,
+            ) = self._filter_fulfilled_floor_requirement_requests(
+                object_descriptions=object_descriptions,
+                short_names=short_names,
+                desired_dimensions=desired_dimensions,
+            )
+            if skipped_furniture_requirements:
+                existing_object_ids = sorted(
+                    {
+                        object_id
+                        for category in skipped_furniture_requirements
+                        for object_id in self.fulfilled_floor_requirements[category]
+                    }
+                )
+                console_logger.info(
+                    "Skipped fulfilled furniture-owned floor requirement request(s) %s; "
+                    "already realized by %s",
+                    skipped_furniture_requirements,
+                    existing_object_ids,
+                )
+                if not short_names:
+                    return json.dumps(
+                        {
+                            "status": "already_satisfied",
+                            "message": (
+                                "The requested floor-standing requirement is already "
+                                "realized by furniture; do not generate a duplicate."
+                            ),
+                            "existing_object_ids": existing_object_ids,
+                            "skipped_categories": sorted(
+                                skipped_furniture_requirements
+                            ),
+                        },
+                        indent=2,
+                    )
+            desired_dimensions = self._budget_dining_centerpiece_dimensions(
+                object_descriptions=object_descriptions,
+                short_names=short_names,
+                desired_dimensions=desired_dimensions,
+            )
             request = AssetGenerationRequest(
                 object_descriptions=object_descriptions,
                 short_names=short_names,
@@ -876,6 +1073,11 @@ class ManipulandTools:
             if skipped_coverings:
                 result += "\nSkipped already-realized floor covering(s): " + ", ".join(
                     skipped_coverings
+                )
+            if skipped_furniture_requirements:
+                result += (
+                    "\nSkipped fulfilled furniture-owned floor requirement(s): "
+                    + ", ".join(sorted(skipped_furniture_requirements))
                 )
             return result
 
@@ -1780,8 +1982,24 @@ class ManipulandTools:
                     error_type=ManipulandErrorType.INVALID_OPERATION,
                 ).to_json()
 
-            # Note: We allow moving objects between surfaces (no validation of current
-            # surface).
+            current_surface_id = scene_obj.placement_info.parent_surface_id
+            if violates_hard_one_per_support_reparenting(
+                self.scene,
+                object_id,
+                source_surface_id=current_surface_id,
+                target_surface_id=target_surface.surface_id,
+            ):
+                return ManipulandOperationResult(
+                    success=False,
+                    message=(
+                        "Cannot move this object between two distinct hard "
+                        "one-per-support targets. Preserve the existing slot and "
+                        "place a new instance on the current furniture instead."
+                    ),
+                    object_id=object_id,
+                    error_type=ManipulandErrorType.INVALID_OPERATION,
+                ).to_json()
+
             current_position_2d = scene_obj.placement_info.position_2d
             current_rotation_2d = scene_obj.placement_info.rotation_2d
 
@@ -1995,6 +2213,32 @@ class ManipulandTools:
                 {"success": False, "message": "No dining place settings were found."}
             )
 
+        objects_by_id = {
+            str(scene_object.object_id): scene_object
+            for scene_object in self.scene.objects.values()
+        }
+        geometry_objects = [
+            item
+            for item in (case_pack.get("scene_geometry") or {}).get("objects") or []
+            if isinstance(item, dict) and item.get("id")
+        ]
+        geometry_by_id = {str(item["id"]): item for item in geometry_objects}
+        scene_snapshot = copy.deepcopy(self.scene.to_state_dict())
+        before_failure_count = self._dining_alignment_failure_count(alignment)
+        dining_object_ids = {
+            str(row.get("anchor_id") or "")
+            for row in assignments
+            if str(row.get("anchor_id") or "")
+        }
+        dining_object_ids.update(
+            str(companion_id)
+            for row in assignments
+            for companion_id in row.get("companion_ids") or []
+        )
+        before_overlap_count = self._dining_footprint_overlap_count(
+            objects_by_id, dining_object_ids
+        )
+
         surface_map = {
             str(surface.surface_id): surface for surface in table.support_surfaces
         }
@@ -2006,10 +2250,6 @@ class ManipulandTools:
                 }
             )
 
-        objects_by_id = {
-            str(scene_object.object_id): scene_object
-            for scene_object in self.scene.objects.values()
-        }
         original_xy = {
             object_id: self._object_world_xy(scene_object)
             for object_id, scene_object in objects_by_id.items()
@@ -2017,34 +2257,42 @@ class ManipulandTools:
         table_center = self._object_world_xy(table)
         moves: list[dict[str, Any]] = []
         failures: list[str] = []
+        occupied_dining_objects: list[SceneObject] = []
 
         previous_noise_profile = self.active_noise_profile
         self.active_noise_profile = self.placement_noise_config.perfect_profile
         try:
-            # Keep an optional centerpiece at the table center, leaving each edge
-            # surface available for a seated diner.
+            # A centerpiece is decorative rather than part of the one-to-one
+            # place-setting contract.  Center it when a valid position exists,
+            # but keep an already supported position when the segmented tabletop
+            # has no better candidate.
             for scene_object in objects_by_id.values():
-                if not self._is_dining_centerpiece(scene_object):
+                placement = scene_object.placement_info
+                if (
+                    not self._is_dining_centerpiece(scene_object)
+                    or placement is None
+                    or str(placement.parent_surface_id) not in surface_map
+                ):
                     continue
                 if table_center is None:
-                    failures.append("Dining table has no usable world-space center.")
-                    break
-                selected = self._select_dining_surface_position(
+                    occupied_dining_objects.append(scene_object)
+                    continue
+                selected = self._select_clear_dining_surface_position(
                     surface_map=surface_map,
                     scene_object=scene_object,
                     target_xy=table_center,
+                    occupied_objects=occupied_dining_objects,
                 )
                 if selected is None:
-                    failures.append(
-                        "Could not find a centered support position for "
-                        f"`{scene_object.object_id}`."
-                    )
+                    occupied_dining_objects.append(scene_object)
                     continue
                 surface, position = selected
                 move = self._move_dining_object(scene_object, surface, position)
                 moves.append(move)
                 if not move["success"]:
-                    failures.append(move["message"])
+                    occupied_dining_objects.append(scene_object)
+                else:
+                    occupied_dining_objects.append(scene_object)
 
             for row in assignments:
                 anchor_id = str(row.get("anchor_id") or "")
@@ -2054,6 +2302,9 @@ class ManipulandTools:
                     failures.append(f"Incomplete assignment for anchor `{anchor_id}`.")
                     continue
                 target_xy = (float(target[0]), float(target[1]))
+                # Anchor plates/bowls define the critic's seat mapping.  Keep
+                # that target exact; only their companions may take a local
+                # detour around already-settled place settings.
                 selected = self._select_dining_surface_position(
                     surface_map=surface_map,
                     scene_object=anchor,
@@ -2075,10 +2326,22 @@ class ManipulandTools:
                 if not move["success"]:
                     failures.append(move["message"])
                     continue
+                occupied_dining_objects.append(anchor)
 
                 anchor_after = self._object_world_xy(anchor)
                 if anchor_before is None or anchor_after is None:
                     continue
+                seat = geometry_by_id.get(str(row.get("seat_id") or ""))
+                seat_center = bbox_center_xy(seat)
+                seat_forward = None
+                seat_lateral = None
+                if (
+                    seat is not None
+                    and seat_center is not None
+                    and table_center is not None
+                ):
+                    seat_forward = _usable_seat_front(seat, seat_center, table_center)
+                    seat_lateral = (-seat_forward[1], seat_forward[0])
                 for companion_id in row.get("companion_ids") or []:
                     companion = objects_by_id.get(str(companion_id))
                     companion_before = original_xy.get(str(companion_id))
@@ -2088,11 +2351,58 @@ class ManipulandTools:
                         anchor_after[0] + companion_before[0] - anchor_before[0],
                         anchor_after[1] + companion_before[1] - anchor_before[1],
                     )
-                    companion_selected = self._select_dining_surface_position(
+                    companion_geometry = geometry_by_id.get(str(companion_id))
+                    lane_constraint = None
+                    search_axes = None
+                    if (
+                        companion_geometry is not None
+                        and seat is not None
+                        and seat_center is not None
+                        and seat_forward is not None
+                        and seat_lateral is not None
+                    ):
+                        allowed_lateral = _companion_lane_half_width(
+                            seat, companion_geometry, seat_lateral
+                        )
+                        relative = (
+                            companion_target[0] - seat_center[0],
+                            companion_target[1] - seat_center[1],
+                        )
+                        signed_lateral = (
+                            relative[0] * seat_lateral[0]
+                            + relative[1] * seat_lateral[1]
+                        )
+                        clamped_lateral = float(
+                            np.clip(
+                                signed_lateral,
+                                -0.95 * allowed_lateral,
+                                0.95 * allowed_lateral,
+                            )
+                        )
+                        correction = clamped_lateral - signed_lateral
+                        companion_target = (
+                            companion_target[0] + correction * seat_lateral[0],
+                            companion_target[1] + correction * seat_lateral[1],
+                        )
+                        lane_constraint = (
+                            seat_center,
+                            seat_lateral,
+                            allowed_lateral,
+                        )
+                        search_axes = (seat_lateral, seat_forward)
+                    companion_selected = self._select_clear_dining_surface_position(
                         surface_map=surface_map,
                         scene_object=companion,
                         target_xy=companion_target,
                         preferred_surface_id=str(surface.surface_id),
+                        occupied_objects=occupied_dining_objects,
+                        search_axes=search_axes,
+                        lane_constraint=lane_constraint,
+                        rotation_degrees=self._dining_companion_rotation_degrees(
+                            companion,
+                            surface,
+                            seat_forward,
+                        ),
                     )
                     if companion_selected is None:
                         failures.append(
@@ -2102,14 +2412,66 @@ class ManipulandTools:
                         continue
                     companion_surface, companion_position = companion_selected
                     companion_move = self._move_dining_object(
-                        companion, companion_surface, companion_position
+                        companion,
+                        companion_surface,
+                        companion_position,
+                        rotation_degrees=self._dining_companion_rotation_degrees(
+                            companion,
+                            companion_surface,
+                            seat_forward,
+                        ),
                     )
                     companion_move["anchor_id"] = anchor_id
                     moves.append(companion_move)
                     if not companion_move["success"]:
                         failures.append(companion_move["message"])
+                    else:
+                        occupied_dining_objects.append(companion)
         finally:
             self.active_noise_profile = previous_noise_profile
+
+        after_alignment = next(
+            (
+                result
+                for result in evaluate_dining_place_setting_alignment(
+                    room_scene_to_case_pack(
+                        self.scene, stage="dining_place_setting_repair_result"
+                    )
+                )
+                if str(result.get("primary_object") or "") == resolved_table_id
+            ),
+            None,
+        )
+        after_failure_count = self._dining_alignment_failure_count(after_alignment)
+        after_overlap_count = self._dining_footprint_overlap_count(
+            objects_by_id, dining_object_ids
+        )
+        if (
+            after_alignment is None
+            or (
+                after_failure_count >= before_failure_count
+                and str(after_alignment.get("label") or "") != "pass"
+            )
+            or after_overlap_count > before_overlap_count
+        ):
+            self.scene.restore_from_state_dict(scene_snapshot)
+            return json.dumps(
+                {
+                    "success": False,
+                    "message": (
+                        "Dining alignment did not improve the deterministic "
+                        "seat-lane contract; restored the pre-alignment scene."
+                    ),
+                    "table_id": resolved_table_id,
+                    "moves": moves,
+                    "failures": failures,
+                    "restored": True,
+                    "before_failure_count": before_failure_count,
+                    "after_failure_count": after_failure_count,
+                    "before_overlap_count": before_overlap_count,
+                    "after_overlap_count": after_overlap_count,
+                }
+            )
 
         return json.dumps(
             {
@@ -2122,8 +2484,361 @@ class ManipulandTools:
                 "table_id": resolved_table_id,
                 "moves": moves,
                 "failures": failures,
+                "restored": False,
+                "before_failure_count": before_failure_count,
+                "after_failure_count": after_failure_count,
+                "before_overlap_count": before_overlap_count,
+                "after_overlap_count": after_overlap_count,
             }
         )
+
+    def _complete_dining_place_settings_impl(self, table_id: str = "") -> str:
+        """Complete a dining inventory from existing assets and discrete seats.
+
+        This is an internal deterministic repair used before alignment. It only
+        duplicates assets already accepted for the current table, derives counts
+        from the completeness critic, and requires one unambiguous chair per place.
+        """
+        resolved_table_id = str(table_id or self.current_furniture_id)
+        table = self.scene.get_object(UniqueID(resolved_table_id))
+        if table is None or not table.support_surfaces:
+            return json.dumps(
+                {
+                    "success": False,
+                    "message": "Dining table or its support surfaces were not found.",
+                }
+            )
+
+        case_pack = room_scene_to_case_pack(
+            self.scene, stage="dining_place_setting_completeness_repair"
+        )
+        completeness = next(
+            (
+                result
+                for result in evaluate_manipuland_completeness(case_pack)
+                if str(result.get("primary_object") or "") == resolved_table_id
+            ),
+            None,
+        )
+        if completeness is None or completeness.get("label") == "pass":
+            return json.dumps(
+                {
+                    "success": True,
+                    "changed": False,
+                    "message": "Dining place-setting inventory is already complete.",
+                }
+            )
+
+        diagnostics = completeness.get("diagnostics") or {}
+        place_count = int(diagnostics.get("place_count") or 0)
+        missing = {
+            str(group): int(count)
+            for group, count in (diagnostics.get("missing") or {}).items()
+            if int(count or 0) > 0
+        }
+        geometry_objects = [
+            obj
+            for obj in (case_pack.get("scene_geometry") or {}).get("objects") or []
+            if isinstance(obj, dict) and obj.get("id")
+        ]
+        geometry_by_id = {str(obj["id"]): obj for obj in geometry_objects}
+        table_geometry = geometry_by_id.get(resolved_table_id)
+        if table_geometry is None:
+            return json.dumps(
+                {"success": False, "message": "Dining table geometry was not found."}
+            )
+        seats = _associated_discrete_seats(table_geometry, geometry_by_id)
+        if place_count < 2 or len(seats) != place_count:
+            return json.dumps(
+                {
+                    "success": False,
+                    "message": (
+                        "Dining inventory repair requires one discrete chair per "
+                        f"place setting (places={place_count}, chairs={len(seats)})."
+                    ),
+                }
+            )
+
+        surface_ids = {surface.surface_id for surface in table.support_surfaces}
+        surface_items = [
+            obj
+            for obj in self.scene.objects.values()
+            if obj.object_type == ObjectType.MANIPULAND
+            and obj.placement_info is not None
+            and obj.placement_info.parent_surface_id in surface_ids
+        ]
+
+        def item_group(scene_object: SceneObject, group: str) -> bool:
+            geometry = geometry_by_id.get(str(scene_object.object_id))
+            if geometry is None:
+                return False
+            text = _object_text(geometry)
+            if group == "cutlery":
+                return any(_matches_item_group(name, text) for name in CUTLERY_GROUPS)
+            return _matches_item_group(group, text)
+
+        templates: dict[str, SceneObject] = {}
+        for group in missing:
+            templates[group] = next(
+                (item for item in surface_items if item_group(item, group)), None
+            )
+            if templates[group] is None:
+                return json.dumps(
+                    {
+                        "success": False,
+                        "message": (
+                            f"Cannot complete dining group '{group}' without an "
+                            "existing accepted asset template."
+                        ),
+                    }
+                )
+
+        anchor_template = next(
+            (
+                item
+                for item in surface_items
+                if (geometry := geometry_by_id.get(str(item.object_id))) is not None
+                and _is_place_anchor(geometry)
+            ),
+            None,
+        )
+        if anchor_template is None:
+            return json.dumps(
+                {
+                    "success": False,
+                    "message": "Cannot derive dining slots without a plate/bowl template.",
+                }
+            )
+        anchor_geometry = geometry_by_id[str(anchor_template.object_id)]
+        table_center = bbox_center_xy(table_geometry)
+        anchor_xy = self._object_world_xy(anchor_template)
+        if table_center is None or anchor_xy is None:
+            return json.dumps(
+                {"success": False, "message": "Dining slot geometry is incomplete."}
+            )
+
+        slots: list[dict[str, Any]] = []
+        for seat in seats:
+            seat_center = bbox_center_xy(seat)
+            if seat_center is None:
+                continue
+            forward = _usable_seat_front(seat, seat_center, table_center)
+            center, preferred_surface_id = _recommended_anchor_center(
+                table_geometry, seat, anchor_geometry, seat_center, forward
+            )
+            if center is None:
+                continue
+            slots.append(
+                {
+                    "seat_id": str(seat.get("id") or ""),
+                    "center": center,
+                    "forward": forward,
+                    "lateral": (-forward[1], forward[0]),
+                    "surface_id": str(preferred_surface_id or ""),
+                }
+            )
+        if len(slots) != place_count:
+            return json.dumps(
+                {"success": False, "message": "Could not derive every dining slot."}
+            )
+
+        snapshot = copy.deepcopy(self.scene.to_state_dict())
+        cloned_ids: list[str] = []
+        try:
+            for group, count in sorted(missing.items()):
+                template = templates[group]
+                for _ in range(count):
+                    clone = copy.deepcopy(template)
+                    clone.object_id = self.scene.generate_unique_id(template.name)
+                    clone.transform = RigidTransform(
+                        R=template.transform.rotation(),
+                        p=template.transform.translation(),
+                    )
+                    clone.placement_info = copy.deepcopy(template.placement_info)
+                    self.scene.add_object(clone)
+                    surface_items.append(clone)
+                    cloned_ids.append(str(clone.object_id))
+
+            # Rebuild geometry so cloned semantic identities participate in the
+            # same category matching used by the completeness critic.
+            repaired_case_pack = room_scene_to_case_pack(
+                self.scene, stage="dining_place_setting_completeness_distribution"
+            )
+            repaired_geometry = [
+                obj
+                for obj in (repaired_case_pack.get("scene_geometry") or {}).get(
+                    "objects"
+                )
+                or []
+                if isinstance(obj, dict) and obj.get("id")
+            ]
+            repaired_by_id = {str(obj["id"]): obj for obj in repaired_geometry}
+
+            def repaired_group(scene_object: SceneObject, group: str) -> bool:
+                geometry = repaired_by_id.get(str(scene_object.object_id))
+                if geometry is None:
+                    return False
+                text = _object_text(geometry)
+                if group == "cutlery":
+                    return any(
+                        _matches_item_group(name, text) for name in CUTLERY_GROUPS
+                    )
+                return _matches_item_group(group, text)
+
+            required_groups = [
+                str(group) for group in diagnostics.get("required_groups") or []
+            ]
+            anchor_groups = [
+                group for group in required_groups if group in {"plate", "bowl"}
+            ]
+            if len(anchor_groups) != 1:
+                raise ValueError(
+                    "Dining slot repair requires exactly one plate/bowl anchor group."
+                )
+            ordered_groups = [anchor_groups[0]] + [
+                group for group in required_groups if group not in anchor_groups
+            ]
+            surface_map = {
+                str(surface.surface_id): surface for surface in table.support_surfaces
+            }
+            occupied: list[SceneObject] = []
+            for group in ordered_groups:
+                candidates = sorted(
+                    (item for item in surface_items if repaired_group(item, group)),
+                    key=lambda item: str(item.object_id),
+                )
+                if len(candidates) < place_count:
+                    raise ValueError(
+                        f"Dining group '{group}' remains incomplete after cloning."
+                    )
+                template = candidates[0]
+                template_xy = self._object_world_xy(template)
+                if template_xy is None:
+                    raise ValueError(f"Dining group '{group}' has no world pose.")
+                source_slot = min(
+                    slots,
+                    key=lambda slot: math.hypot(
+                        template_xy[0] - slot["center"][0],
+                        template_xy[1] - slot["center"][1],
+                    ),
+                )
+                dx = template_xy[0] - source_slot["center"][0]
+                dy = template_xy[1] - source_slot["center"][1]
+                lateral_offset = (
+                    dx * source_slot["lateral"][0] + dy * source_slot["lateral"][1]
+                )
+                forward_offset = (
+                    dx * source_slot["forward"][0] + dy * source_slot["forward"][1]
+                )
+                if group in anchor_groups:
+                    lateral_offset = 0.0
+                    forward_offset = 0.0
+                max_offset = 0.35
+                lateral_offset = float(np.clip(lateral_offset, -max_offset, max_offset))
+                forward_offset = float(np.clip(forward_offset, -max_offset, max_offset))
+
+                for item, slot in zip(candidates[:place_count], slots, strict=True):
+                    target_xy = (
+                        slot["center"][0]
+                        + lateral_offset * slot["lateral"][0]
+                        + forward_offset * slot["forward"][0],
+                        slot["center"][1]
+                        + lateral_offset * slot["lateral"][1]
+                        + forward_offset * slot["forward"][1],
+                    )
+                    selected = self._select_clear_dining_surface_position(
+                        surface_map=surface_map,
+                        scene_object=item,
+                        target_xy=target_xy,
+                        preferred_surface_id=slot["surface_id"],
+                        occupied_objects=occupied,
+                    )
+                    if selected is None:
+                        raise ValueError(
+                            f"No collision-free slot for dining object '{item.object_id}'."
+                        )
+                    surface, position = selected
+                    move = self._move_dining_object(item, surface, position)
+                    if not move["success"]:
+                        raise ValueError(move["message"])
+                    occupied.append(item)
+
+            after = next(
+                (
+                    result
+                    for result in evaluate_manipuland_completeness(
+                        room_scene_to_case_pack(
+                            self.scene,
+                            stage="dining_place_setting_completeness_repair_result",
+                        )
+                    )
+                    if str(result.get("primary_object") or "") == resolved_table_id
+                ),
+                None,
+            )
+            if after is None or after.get("label") != "pass":
+                raise ValueError("Dining completeness still fails after repair.")
+        except (TypeError, ValueError) as exc:
+            self.scene.restore_from_state_dict(snapshot)
+            return json.dumps(
+                {
+                    "success": False,
+                    "restored": True,
+                    "message": str(exc),
+                    "cloned_ids": cloned_ids,
+                }
+            )
+
+        return json.dumps(
+            {
+                "success": True,
+                "changed": bool(cloned_ids),
+                "restored": False,
+                "message": "Completed and distributed dining place-setting inventory.",
+                "cloned_ids": cloned_ids,
+            }
+        )
+
+    @staticmethod
+    def _dining_alignment_failure_count(result: dict[str, Any] | None) -> int:
+        if not isinstance(result, dict):
+            return 1_000_000
+        assignments = (result.get("diagnostics") or {}).get("assignments") or []
+        count = 0
+        for row in assignments:
+            if not bool(row.get("aligned")):
+                count += 1
+            count += len(row.get("misaligned_companion_ids") or [])
+        return count
+
+    def _dining_footprint_overlap_count(
+        self,
+        objects_by_id: dict[str, SceneObject],
+        object_ids: set[str],
+    ) -> int:
+        objects = [
+            objects_by_id[object_id]
+            for object_id in sorted(object_ids)
+            if object_id in objects_by_id
+        ]
+        count = 0
+        for index, first in enumerate(objects):
+            first_xy = self._object_world_xy(first)
+            if first_xy is None:
+                continue
+            for second in objects[index + 1 :]:
+                second_xy = self._object_world_xy(second)
+                if second_xy is None:
+                    continue
+                if self._dining_oriented_footprints_overlap(
+                    first,
+                    np.asarray(first_xy, dtype=float),
+                    second,
+                    np.asarray(second_xy, dtype=float),
+                    margin_m=0.0,
+                ):
+                    count += 1
+        return count
 
     @staticmethod
     def _object_world_xy(scene_object: SceneObject) -> tuple[float, float] | None:
@@ -2146,6 +2861,7 @@ class ManipulandTools:
         scene_object: SceneObject,
         target_xy: tuple[float, float],
         preferred_surface_id: str = "",
+        rotation_degrees: float | None = None,
     ) -> tuple[SupportSurface, np.ndarray] | None:
         """Map a world target onto a valid segmented tabletop support surface."""
         candidates = list(surface_map.values())
@@ -2159,7 +2875,11 @@ class ManipulandTools:
                 str(surface.surface_id),
             )
         )
-        rotation_degrees = self._surface_rotation_degrees(scene_object)
+        rotation_degrees = (
+            self._surface_rotation_degrees(scene_object)
+            if rotation_degrees is None
+            else rotation_degrees
+        )
         for surface in candidates:
             position = self._surface_local_target(surface, scene_object, target_xy)
             if position is None:
@@ -2169,6 +2889,186 @@ class ManipulandTools:
             ):
                 return surface, position
         return None
+
+    def _select_clear_dining_surface_position(
+        self,
+        *,
+        surface_map: dict[str, SupportSurface],
+        scene_object: SceneObject,
+        target_xy: tuple[float, float],
+        occupied_objects: list[SceneObject],
+        preferred_surface_id: str = "",
+        ignored_object_ids: set[str] | None = None,
+        search_axes: tuple[tuple[float, float], tuple[float, float]] | None = None,
+        lane_constraint: (
+            tuple[tuple[float, float], tuple[float, float], float] | None
+        ) = None,
+        rotation_degrees: float | None = None,
+    ) -> tuple[SupportSurface, np.ndarray] | None:
+        """Keep a dining placement clear of the settings already reflowed.
+
+        The critic supplies the seat-facing anchor positions.  Companions retain
+        their original relative offsets when possible, but those offsets can
+        carry a small pre-existing overlap into the new setting.  Test the exact
+        target first, then search nearby support-valid positions using a
+        conservative horizontal footprint radius.
+        """
+        ignored_object_ids = ignored_object_ids or set()
+        relevant_occupied_objects = [
+            item
+            for item in occupied_objects
+            if str(item.object_id) not in ignored_object_ids
+        ]
+        dimensions = self._dining_footprint_dimensions(scene_object)
+        step = max(0.015, min(0.06, 0.5 * min(dimensions)))
+        if search_axes is None:
+            first_axis = (1.0, 0.0)
+            second_axis = (0.0, 1.0)
+        else:
+            first_axis, second_axis = search_axes
+        directions = (
+            (0.0, 0.0),
+            first_axis,
+            (-first_axis[0], -first_axis[1]),
+            second_axis,
+            (-second_axis[0], -second_axis[1]),
+            (first_axis[0] + second_axis[0], first_axis[1] + second_axis[1]),
+            (first_axis[0] - second_axis[0], first_axis[1] - second_axis[1]),
+            (-first_axis[0] + second_axis[0], -first_axis[1] + second_axis[1]),
+            (-first_axis[0] - second_axis[0], -first_axis[1] - second_axis[1]),
+        )
+        # Thin companions such as cutlery need enough travel to clear a plate.
+        # Use the short side for search resolution and the long side for reach;
+        # otherwise a 15cm utensil with a 3cm short side is artificially capped
+        # at an 8cm detour even when the same seat lane has ample room.
+        max_search_distance = max(0.08, min(0.24, 1.75 * max(dimensions)))
+        ring_count = max(2, int(math.ceil(max_search_distance / step)) + 1)
+        for ring in range(ring_count):
+            distance = ring * step
+            for direction_x, direction_y in directions:
+                if ring == 0 and (direction_x != 0.0 or direction_y != 0.0):
+                    continue
+                direction_length = math.hypot(direction_x, direction_y)
+                candidate_xy = (
+                    target_xy[0] + distance * direction_x / max(direction_length, 1.0),
+                    target_xy[1] + distance * direction_y / max(direction_length, 1.0),
+                )
+                if lane_constraint is not None:
+                    seat_center, lateral_axis, allowed_lateral = lane_constraint
+                    lateral_offset = abs(
+                        (candidate_xy[0] - seat_center[0]) * lateral_axis[0]
+                        + (candidate_xy[1] - seat_center[1]) * lateral_axis[1]
+                    )
+                    if lateral_offset > allowed_lateral:
+                        continue
+                selected = self._select_dining_surface_position(
+                    surface_map=surface_map,
+                    scene_object=scene_object,
+                    target_xy=candidate_xy,
+                    preferred_surface_id=preferred_surface_id,
+                    rotation_degrees=rotation_degrees,
+                )
+                if selected is None:
+                    continue
+                surface, position = selected
+                candidate_transform = surface.to_world_pose(
+                    position,
+                    math.radians(
+                        self._surface_rotation_degrees(scene_object)
+                        if rotation_degrees is None
+                        else rotation_degrees
+                    ),
+                )
+                world_xy = candidate_transform.translation()[:2]
+                if self._dining_position_is_clear(
+                    scene_object,
+                    world_xy,
+                    relevant_occupied_objects,
+                    candidate_transform=candidate_transform,
+                ):
+                    return surface, position
+        return None
+
+    @staticmethod
+    def _dining_footprint_dimensions(scene_object: SceneObject) -> np.ndarray:
+        dimensions = np.asarray(scene_object.bbox_max[:2], dtype=float) - np.asarray(
+            scene_object.bbox_min[:2], dtype=float
+        )
+        scale_factor = float(getattr(scene_object, "scale_factor", 1.0) or 1.0)
+        return np.maximum(np.abs(dimensions * scale_factor), 0.001)
+
+    @staticmethod
+    def _dining_footprint_radius(scene_object: SceneObject) -> float:
+        """Return a conservative XY radius for local dining collision checks."""
+        dimensions = np.asarray(scene_object.bbox_max[:2], dtype=float) - np.asarray(
+            scene_object.bbox_min[:2], dtype=float
+        )
+        scale_factor = float(getattr(scene_object, "scale_factor", 1.0) or 1.0)
+        return 0.5 * float(np.linalg.norm(dimensions * scale_factor)) + 0.01
+
+    def _dining_position_is_clear(
+        self,
+        scene_object: SceneObject,
+        world_xy: np.ndarray,
+        occupied_objects: list[SceneObject],
+        *,
+        candidate_transform: RigidTransform | None = None,
+    ) -> bool:
+        for occupied in occupied_objects:
+            occupied_xy = self._object_world_xy(occupied)
+            if occupied_xy is None:
+                continue
+            if self._dining_oriented_footprints_overlap(
+                scene_object,
+                world_xy,
+                occupied,
+                np.asarray(occupied_xy, dtype=float),
+                first_transform=candidate_transform,
+            ):
+                return False
+        return True
+
+    def _dining_oriented_footprints_overlap(
+        self,
+        first: SceneObject,
+        first_xy: np.ndarray,
+        second: SceneObject,
+        second_xy: np.ndarray,
+        margin_m: float = 0.008,
+        *,
+        first_transform: RigidTransform | None = None,
+        second_transform: RigidTransform | None = None,
+    ) -> bool:
+        """Test projected 3D bounds at the candidate objects' final poses."""
+
+        def footprint(
+            scene_object: SceneObject,
+            world_xy: np.ndarray,
+            transform: RigidTransform | None,
+        ) -> Polygon:
+            pose = transform or scene_object.transform
+            rotation = pose.rotation().matrix()
+            scale = float(getattr(scene_object, "scale_factor", 1.0) or 1.0)
+            minimum = np.asarray(scene_object.bbox_min, dtype=float) * scale
+            maximum = np.asarray(scene_object.bbox_max, dtype=float) * scale
+            corners = np.asarray(
+                [
+                    [x, y, z]
+                    for x in (minimum[0], maximum[0])
+                    for y in (minimum[1], maximum[1])
+                    for z in (minimum[2], maximum[2])
+                ],
+                dtype=float,
+            )
+            projected = (rotation @ corners.T).T[:, :2]
+            projected += np.asarray(world_xy, dtype=float)
+            return Polygon(projected).convex_hull
+
+        first_footprint = footprint(first, first_xy, first_transform)
+        second_footprint = footprint(second, second_xy, second_transform)
+        if first_footprint.is_empty or second_footprint.is_empty:
+            return True
+        return first_footprint.distance(second_footprint) < max(margin_m, 1e-9)
 
     def _surface_local_target(
         self,
@@ -2230,16 +3130,58 @@ class ManipulandTools:
         placement = scene_object.placement_info
         if placement is None:
             return 0.0
-        return math.degrees(float(placement.rotation_2d))
+        try:
+            return math.degrees(float(placement.rotation_2d))
+        except (TypeError, ValueError):
+            return 0.0
+
+    @staticmethod
+    def _dining_companion_rotation_degrees(
+        scene_object: SceneObject,
+        surface: SupportSurface,
+        seat_forward: tuple[float, float] | None,
+    ) -> float:
+        """Align linear cutlery with its seat's approach axis.
+
+        Glasses and napkins keep the designer-selected orientation. Forks,
+        knives, and spoons otherwise frequently inherit a quarter-turn that
+        makes their long collision hull cross the plate they accompany.
+        """
+        text = f"{scene_object.name} {scene_object.description}".lower()
+        if seat_forward is None or not any(
+            token in text for token in ("cutlery", "fork", "knife", "spoon")
+        ):
+            return ManipulandTools._surface_rotation_degrees(scene_object)
+        surface_rotation = surface.transform.rotation().matrix()
+        surface_x = np.asarray(surface_rotation @ np.array([1.0, 0.0, 0.0]))[:2]
+        surface_y = np.asarray(surface_rotation @ np.array([0.0, 1.0, 0.0]))[:2]
+        forward = np.asarray(seat_forward, dtype=float)
+        forward_norm = float(np.linalg.norm(forward))
+        if forward_norm <= 1e-9:
+            return ManipulandTools._surface_rotation_degrees(scene_object)
+        forward /= forward_norm
+        # At zero local yaw the canonical manipuland long axis is +Y. Rotate
+        # that axis into the seat-forward direction in the support frame.
+        return math.degrees(
+            math.atan2(
+                -float(np.dot(forward, surface_x)),
+                float(np.dot(forward, surface_y)),
+            )
+        )
 
     def _move_dining_object(
         self,
         scene_object: SceneObject,
         surface: SupportSurface,
         position: np.ndarray,
+        rotation_degrees: float | None = None,
     ) -> dict[str, Any]:
         object_id = str(scene_object.object_id)
-        rotation_degrees = self._surface_rotation_degrees(scene_object)
+        rotation_degrees = (
+            self._surface_rotation_degrees(scene_object)
+            if rotation_degrees is None
+            else rotation_degrees
+        )
         result = json.loads(
             self._move_manipuland_impl(
                 object_id=object_id,
@@ -2303,6 +3245,21 @@ class ManipulandTools:
                     object_id=object_id,
                 ).to_json()
 
+            required_constraint = self._required_inventory_constraint_for_removal(
+                str(unique_id)
+            )
+            if required_constraint is not None:
+                return ManipulandOperationResult(
+                    success=False,
+                    message=(
+                        f"Cannot remove required manipuland '{object_id}': "
+                        f"it is needed by hard required_count "
+                        f"for {required_constraint}."
+                    ),
+                    error_type=ManipulandErrorType.INVALID_OPERATION,
+                    object_id=object_id,
+                ).to_json()
+
             # Remove from scene.
             success = self.scene.remove_object(unique_id)
 
@@ -2329,6 +3286,26 @@ class ManipulandTools:
                 object_id=object_id,
             ).to_json()
 
+    def _required_inventory_constraint_for_removal(self, object_id: str) -> str | None:
+        """Return the hard inventory category that would be underfilled."""
+        case_pack = room_scene_to_case_pack(self.scene, stage="removal_guard")
+        objects = (case_pack.get("scene_geometry") or {}).get("objects") or []
+        for constraint in intent_contract_constraints_for_scene(self.scene):
+            if (
+                str(constraint.get("relation") or "") != "required_count"
+                or str(constraint.get("strength") or "hard").lower() != "hard"
+            ):
+                continue
+            selector = constraint.get("subjects") or {}
+            try:
+                required_count = int(selector.get("count") or 0)
+            except (AttributeError, TypeError, ValueError):
+                continue
+            selected = selected_ids(selector, objects)
+            if object_id in selected and len(selected) <= required_count:
+                return str(selector.get("category") or "object")
+        return None
+
     @log_scene_action
     def _rescale_manipuland_impl(
         self, object_id: str, scale_factor: float, **kwargs
@@ -2345,6 +3322,33 @@ class ManipulandTools:
             asset_registry=self.asset_manager.registry,
         )
         return result.to_json()
+
+    def _filter_fulfilled_floor_requirement_requests(
+        self,
+        *,
+        object_descriptions: list[str],
+        short_names: list[str],
+        desired_dimensions: list[list[float]],
+    ) -> tuple[list[str], list[str], list[list[float]], dict[str, list[str]]]:
+        """Remove assets that would duplicate fulfilled floor requirements."""
+        skipped_indices = redundant_furniture_owned_floor_request_indices(
+            fulfilled_requirements=self.fulfilled_floor_requirements,
+            object_descriptions=object_descriptions,
+            short_names=short_names,
+        )
+        if not skipped_indices:
+            return object_descriptions, short_names, desired_dimensions, {}
+
+        skipped_index_set = set(skipped_indices)
+        retained_indices = [
+            index for index in range(len(short_names)) if index not in skipped_index_set
+        ]
+        return (
+            [object_descriptions[index] for index in retained_indices],
+            [short_names[index] for index in retained_indices],
+            [desired_dimensions[index] for index in retained_indices],
+            dict(self.fulfilled_floor_requirements),
+        )
 
     def _generate_assets_impl(self, request: AssetGenerationRequest) -> str:
         """Implementation for generating manipuland assets."""
@@ -2474,6 +3478,20 @@ class ManipulandTools:
             "num_surfaces": len(surface_infos),
             "total_manipuland_count": total_manipuland_count,
             "contract_bound_objects": contract_bound_objects,
+            "fulfilled_floor_requirements": [
+                {
+                    "category": category,
+                    "object_ids": object_ids,
+                    "owner": "furniture",
+                    "relationship": (
+                        "prompt-required floor-standing object already realized "
+                        "by furniture; preserve it and do not generate a duplicate"
+                    ),
+                }
+                for category, object_ids in sorted(
+                    self.fulfilled_floor_requirements.items()
+                )
+            ],
         }
 
         return json.dumps(result, indent=2)

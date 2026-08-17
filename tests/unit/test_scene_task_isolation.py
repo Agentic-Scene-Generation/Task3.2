@@ -116,6 +116,42 @@ class TestSceneTaskIsolation(unittest.TestCase):
         self.assertEqual(call_count, 1)
         self.assertFalse((self.output_dir / "failed_attempts").exists())
 
+    def test_degraded_quality_policy_disables_stage_abort_gates(self) -> None:
+        cfg = {
+            "experiment": {"quality_failure_policy": "degraded"},
+            "furniture_agent": {
+                "fail_stage_on_unresolved_hard_constraints": True,
+            },
+            "manipuland_agent": {
+                "fail_stage_on_unresolved_hard_constraints": True,
+            },
+        }
+
+        policy = scene_generation._configure_stage_quality_gates(cfg)
+
+        self.assertEqual(policy, "degraded")
+        self.assertFalse(
+            cfg["furniture_agent"]["fail_stage_on_unresolved_hard_constraints"]
+        )
+        self.assertFalse(
+            cfg["manipuland_agent"]["fail_stage_on_unresolved_hard_constraints"]
+        )
+
+    def test_degraded_completion_uses_truthful_marker(self) -> None:
+        scene_generation._write_scene_completion(
+            output_dir=self.output_dir,
+            scene_id=0,
+            prompt="A bedroom",
+            attempt=1,
+            degraded=True,
+        )
+
+        scene_dir = self.output_dir / "scene_000"
+        self.assertTrue((scene_dir / "_DEGRADED").exists())
+        self.assertFalse((scene_dir / "_SUCCESS").exists())
+        status = (scene_dir / "scene_status.json").read_text(encoding="utf-8")
+        self.assertIn('"status": "completed_with_quality_issues"', status)
+
 
 class TestManipulandAgentCleanup(unittest.TestCase):
     """Manipuland services must not survive a completed or failed scene."""
@@ -138,6 +174,59 @@ class TestManipulandAgentCleanup(unittest.TestCase):
             scene_generation._add_manipulands_with_cleanup(agent, MagicMock())
 
         agent.cleanup.assert_called_once_with()
+
+
+class TestTargetedManipulandReplay(unittest.TestCase):
+    """Only explicit support-surface replays may relax the full-scene gate."""
+
+    def test_explicit_target_ids_enable_targeted_replay(self) -> None:
+        cfg = {
+            "manipuland_agent": {
+                "target_furniture_ids": ["dining_table_0"],
+            }
+        }
+
+        self.assertTrue(
+            scene_generation._is_targeted_manipuland_replay(
+                cfg_dict=cfg,
+                start_stage="manipuland",
+                stop_stage="manipuland",
+            )
+        )
+
+    def test_csv_target_ids_enable_targeted_replay(self) -> None:
+        cfg = {
+            "manipuland_agent": {
+                "target_furniture_ids": "dining_table_0, sideboard_0",
+            }
+        }
+
+        self.assertTrue(
+            scene_generation._is_targeted_manipuland_replay(
+                cfg_dict=cfg,
+                start_stage="manipuland",
+                stop_stage="manipuland",
+            )
+        )
+
+    def test_stage_or_target_mismatch_keeps_full_scene_gate(self) -> None:
+        cases = (
+            ({"manipuland_agent": {"target_furniture_ids": []}}, "manipuland"),
+            (
+                {"manipuland_agent": {"target_furniture_ids": ["dining_table_0"]}},
+                "ceiling_mounted",
+            ),
+        )
+
+        for cfg, stop_stage in cases:
+            with self.subTest(cfg=cfg, stop_stage=stop_stage):
+                self.assertFalse(
+                    scene_generation._is_targeted_manipuland_replay(
+                        cfg_dict=cfg,
+                        start_stage="manipuland",
+                        stop_stage=stop_stage,
+                    )
+                )
 
 
 class TestWorkerReasoningPersistenceBootstrap(unittest.TestCase):
@@ -164,9 +253,7 @@ class TestWorkerReasoningPersistenceBootstrap(unittest.TestCase):
                 {"OPENAI_BASE_URL": "http://127.0.0.1:8002/v1"},
             ),
         ):
-            scene_generation._configure_reasoning_persistence_for_worker(
-                self.cfg_dict
-            )
+            scene_generation._configure_reasoning_persistence_for_worker(self.cfg_dict)
 
         configure.assert_called_once_with(
             enabled=True,
