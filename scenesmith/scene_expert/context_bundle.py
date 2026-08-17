@@ -17,7 +17,12 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from scenesmith.scene_expert.schemas import MemoryPack, SceneTaskSpec, StageBrief
+from scenesmith.scene_expert.schemas import (
+    MemoryPack,
+    SceneTaskSpec,
+    StageBrief,
+    StageRelationContext,
+)
 
 
 def utc_now() -> str:
@@ -113,6 +118,7 @@ class StageContextBundle(BaseModel):
     trace_id: str = ""
     scene_id: str = ""
     task_spec: dict[str, Any] = Field(default_factory=dict)
+    relation_context: dict[str, Any] | None = None
     stage_brief: dict[str, Any] | None = None
     scene_summary: str = ""
     object_table: list[ObjectContext] = Field(default_factory=list)
@@ -132,6 +138,8 @@ class StageContextBundle(BaseModel):
             lines.append("Task spec: " + compact_text(self.task_spec, 420))
         if self.scene_summary:
             lines.append("Scene state: " + compact_text(self.scene_summary, 520))
+        if self.relation_context:
+            lines.append("Stage relations: " + compact_text(self.relation_context, 720))
         if self.stage_brief:
             lines.append("Stage brief: " + compact_text(self.stage_brief, 520))
         if self.last_hard_issues:
@@ -279,6 +287,7 @@ def build_stage_context_bundle(
     agent_role: str = "",
     event: str = "",
     task_spec: SceneTaskSpec | None = None,
+    relation_context: StageRelationContext | None = None,
     stage_brief: StageBrief | None = None,
     scene: Any | None = None,
     memory_pack: MemoryPack | None = None,
@@ -324,6 +333,11 @@ def build_stage_context_bundle(
         trace_id=trace_id,
         scene_id=scene_id,
         task_spec=task_spec.model_dump() if task_spec is not None else {},
+        relation_context=(
+            relation_context.model_dump(mode="json")
+            if relation_context is not None
+            else None
+        ),
         stage_brief=stage_brief.model_dump() if stage_brief is not None else None,
         scene_summary=build_scene_summary(scene),
         object_table=objects,

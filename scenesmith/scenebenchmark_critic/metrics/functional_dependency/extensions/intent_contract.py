@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import re
+from itertools import permutations
 
 from typing import Any
 
@@ -32,7 +33,34 @@ from scenesmith.scenebenchmark_critic.relation_registry import (
     relation_spec,
 )
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.semantics import (
+    _is_media_target,
+    _is_seating_subject,
     _is_work_surface_target,
+)
+from scenesmith.scenebenchmark_critic.metrics.functional_dependency.relations import (
+    _eval_facing_relation,
+    _media_lateral_axis_diagnostics,
+)
+from scenesmith.scenebenchmark_critic.metrics.functional_dependency.seat_surface_assignment import (
+    assign_work_seats_to_surfaces,
+    room_bounds_from_case_pack,
+)
+
+
+_ENTRANCE_CATEGORIES = frozenset({"door", "entrance", "entry"})
+_VIRTUAL_ROUTE_CATEGORIES = frozenset(
+    {
+        "access_route",
+        "circulation",
+        "circulation_path",
+        "entry_route",
+        "entrance_route",
+        "path",
+        "route",
+        "walking_path",
+        "walking_route",
+        "walkway",
+    }
 )
 
 
@@ -187,6 +215,7 @@ def _evaluate_required_count(
 ) -> dict[str, Any] | None:
     selector = constraint.get("subjects") or {}
     required = int(selector.get("count") or 1)
+    exact = str(selector.get("quantifier") or "").lower() == "exactly"
     category = str(selector.get("category") or "required_object")
     if _normalize_selector_category(category) == "table_setting":
         component_selectors = {
@@ -229,16 +258,18 @@ def _evaluate_required_count(
 
     matched = selected_ids(selector, objects)
     match_count = selector_match_count(selector, objects)
+    count_ok = match_count == required if exact else match_count >= required
+    requirement = "exactly" if exact else "at least"
     return _result(
         constraint,
         suffix=category,
-        label="pass" if match_count >= required else "fail",
+        label="pass" if count_ok else "fail",
         primary=matched[0] if matched else category,
         related=matched,
         relation_type="required_count",
         tier=tier,
         reason=(
-            f"Prompt/room contract requires at least {required} `{category}` object(s); "
+            f"Prompt/room contract requires {requirement} {required} `{category}` object(s); "
             f"found {match_count}."
         ),
         diagnostics={
@@ -415,13 +446,182 @@ def _evaluate_centered_on_wall(
     return results
 
 
+def _evaluate_centered_above(
+    constraint: dict[str, Any],
+    geometry: dict[str, Any],
+    objects: list[dict[str, Any]],
+    tier: str,
+) -> list[dict[str, Any]]:
+    """Evaluate a horizontally centered object above another object."""
+    subject_ids = bound_ids(constraint.get("subjects"), objects)
+    target_ids = bound_ids(constraint.get("targets"), objects)
+    if not subject_ids or not target_ids:
+        return []
+    by_id = {str(obj["id"]): obj for obj in objects}
+    bounds = _room_bounds(geometry)
+    walls = [obj for obj in objects if object_category(obj) == "wall"]
+    results: list[dict[str, Any]] = []
+    for subject_id in subject_ids:
+        subject = by_id.get(subject_id)
+        subject_center = bbox_center_xy(subject) if subject is not None else None
+        subject_box = (subject or {}).get("bbox_world") or {}
+        subject_min = subject_box.get("min") or []
+        if subject_center is None or len(subject_min) < 3:
+            continue
+        best_target: tuple[dict[str, Any], float, str, str] | None = None
+        for target_id in target_ids:
+            target = by_id.get(target_id)
+            target_center = bbox_center_xy(target) if target is not None else None
+            target_box = (target or {}).get("bbox_world") or {}
+            target_max = target_box.get("max") or []
+            if target_center is None or len(target_max) < 3:
+                continue
+            alignment_axis = "xy"
+            alignment_error = math.hypot(
+                subject_center[0] - target_center[0],
+                subject_center[1] - target_center[1],
+            )
+            if bounds is not None and walls:
+                subject_wall = min(
+                    walls, key=lambda wall: _wall_normal_distance(subject_center, wall)
+                )
+                target_wall = min(
+                    walls, key=lambda wall: _wall_normal_distance(target_center, wall)
+                )
+                frame = _wall_frame(subject_wall, bounds)
+                if frame is not None and str(subject_wall["id"]) == str(
+                    target_wall["id"]
+                ):
+                    _, tangent_axis, _, _, _ = frame
+                    alignment_error = abs(
+                        subject_center[tangent_axis] - target_center[tangent_axis]
+                    )
+                    alignment_axis = "wall_tangent"
+            candidate = (target, alignment_error, alignment_axis, target_id)
+            if best_target is None or candidate[1] < best_target[1]:
+                best_target = candidate
+        if best_target is None:
+            continue
+        target, alignment_error, alignment_axis, target_id = best_target
+        target_box = target.get("bbox_world") or {}
+        target_max = target_box.get("max") or []
+        target_size = target_box.get("size") or []
+        subject_size = subject_box.get("size") or []
+        size_scale = max(
+            [
+                *(
+                    float(value)
+                    for value in target_size[:2]
+                    if isinstance(value, (int, float))
+                ),
+                *(
+                    float(value)
+                    for value in subject_size[:2]
+                    if isinstance(value, (int, float))
+                ),
+                0.0,
+            ]
+        )
+        allowed_alignment = max(0.15, min(0.35, 0.20 * size_scale))
+        vertical_gap = float(subject_min[2]) - float(target_max[2])
+        label = (
+            "pass"
+            if alignment_error <= allowed_alignment and vertical_gap >= -0.03
+            else "fail"
+        )
+        results.append(
+            _result(
+                constraint,
+                suffix=f"{subject_id}__{target_id}",
+                label=label,
+                primary=subject_id,
+                related=[target_id],
+                relation_type="centered_above",
+                tier=tier,
+                reason=(
+                    f"`{subject_id}` must be centered above `{target_id}`; "
+                    f"{alignment_axis} alignment error is {alignment_error:.2f}m "
+                    f"(allowed {allowed_alignment:.2f}m) and vertical gap is "
+                    f"{vertical_gap:.2f}m."
+                ),
+                diagnostics={
+                    "alignment_axis": alignment_axis,
+                    "alignment_error_m": round(alignment_error, 6),
+                    "allowed_alignment_error_m": round(allowed_alignment, 6),
+                    "vertical_gap_m": round(vertical_gap, 6),
+                    "subject_bottom_z_m": round(float(subject_min[2]), 6),
+                    "target_top_z_m": round(float(target_max[2]), 6),
+                },
+            )
+        )
+    return results
+
+
+def _evaluate_mounted_to_wall(
+    constraint: dict[str, Any],
+    geometry: dict[str, Any],
+    objects: list[dict[str, Any]],
+    tier: str,
+) -> list[dict[str, Any]]:
+    """Verify a mounted object is adjacent to and faces into a physical wall."""
+    bounds = _room_bounds(geometry)
+    walls = [obj for obj in objects if object_category(obj) == "wall"]
+    if bounds is None or not walls:
+        return []
+    by_id = {str(obj["id"]): obj for obj in objects}
+    results: list[dict[str, Any]] = []
+    for subject_id in bound_ids(constraint.get("subjects"), objects):
+        subject = by_id.get(subject_id)
+        center = bbox_center_xy(subject) if subject is not None else None
+        if center is None:
+            continue
+        wall = min(walls, key=lambda item: _wall_normal_distance(center, item))
+        frame = _wall_frame(wall, bounds)
+        if frame is None:
+            continue
+        normal_axis, _, inward, inner_face, _ = frame
+        subject_box = (subject or {}).get("bbox_world") or {}
+        subject_size = subject_box.get("size") or []
+        normal_size = (
+            float(subject_size[normal_axis]) if len(subject_size) > normal_axis else 0.0
+        )
+        wall_gap = abs(float(center[normal_axis]) - inner_face)
+        allowed_gap = max(0.10, normal_size / 2.0 + 0.08)
+        inward_vector = (inward, 0.0) if normal_axis == 0 else (0.0, inward)
+        facing_error = _front_error_deg(subject, inward_vector)
+        label = "pass" if wall_gap <= allowed_gap and facing_error <= 25.0 else "fail"
+        results.append(
+            _result(
+                constraint,
+                suffix=f"{subject_id}__{wall['id']}",
+                label=label,
+                primary=subject_id,
+                related=[str(wall["id"])],
+                relation_type="mounted_to_wall",
+                tier=tier,
+                reason=(
+                    f"`{subject_id}` must be mounted to `{wall['id']}` and face "
+                    f"into the room; wall gap is {wall_gap:.2f}m (allowed "
+                    f"{allowed_gap:.2f}m) and facing error is {facing_error:.0f}deg."
+                ),
+                diagnostics={
+                    "wall_id": str(wall["id"]),
+                    "wall_gap_m": round(wall_gap, 6),
+                    "allowed_wall_gap_m": round(allowed_gap, 6),
+                    "facing_error_deg": round(facing_error, 6),
+                },
+            )
+        )
+    return results
+
+
 def _evaluate_operation_zone_at_wall(
     constraint: dict[str, Any],
     geometry: dict[str, Any],
     objects: list[dict[str, Any]],
     tier: str,
 ) -> list[dict[str, Any]]:
-    """Center a work surface while reserving its wall-side operator zone."""
+    """Keep a wall-backed work surface and its inward operator zone usable."""
     bounds = _room_bounds(geometry)
     subject_ids = bound_ids(constraint.get("subjects"), objects)
     walls = [obj for obj in objects if object_category(obj) == "wall"]
@@ -448,29 +648,38 @@ def _evaluate_operation_zone_at_wall(
     subject_half_depth = _projected_half_extent(subject, inward_xy)
     room_depth = bounds[2 + normal_axis] - bounds[normal_axis]
     required_clearance = min(1.0, max(0.65, 0.10 * room_depth))
+    # Asset extents and placement tools each round independently. Treat a
+    # centimeter-scale miss at an otherwise unobstructed ergonomic boundary as
+    # numerical noise, while preserving meaningful blocking failures.
+    clearance_tolerance = 0.02
+    target_wall_gap = 0.08
+    allowed_wall_gap = min(0.30, max(0.15, 0.04 * room_depth))
     target = [float(center[0]), float(center[1])]
     target[tangent_axis] = float(wall_center[tangent_axis])
-    target[normal_axis] = inner_face + inward * (
-        subject_half_depth + required_clearance
-    )
+    target[normal_axis] = inner_face + inward * (subject_half_depth + target_wall_gap)
     target_xy = (float(target[0]), float(target[1]))
     target_yaw = math.degrees(math.atan2(-inward_xy[0], inward_xy[1]))
 
     tangent_error = abs(center[tangent_axis] - target_xy[tangent_axis])
-    normal_error = abs(center[normal_axis] - target_xy[normal_axis])
-    observed_clearance = max(
+    wall_gap = max(
         0.0,
         inward * (center[normal_axis] - inner_face) - subject_half_depth,
+    )
+    observed_clearance, blocking_object_id = _front_operation_clearance(
+        subject=subject,
+        objects=objects,
+        bounds=bounds,
+        inward_xy=inward_xy,
     )
     facing_error = _front_error_deg(subject, inward_xy)
     allowed_tangent = max(
         0.18, 0.05 * min(bounds[2] - bounds[0], bounds[3] - bounds[1])
     )
-    allowed_normal = 0.15
     aligned = (
         tangent_error <= allowed_tangent
-        and normal_error <= allowed_normal
+        and wall_gap <= allowed_wall_gap
         and facing_error <= 15.0
+        and observed_clearance + clearance_tolerance >= required_clearance
     )
     return [
         _result(
@@ -483,11 +692,11 @@ def _evaluate_operation_zone_at_wall(
             tier=tier,
             reason=(
                 f"`{subject_id}` must be centered on its functional wall with its "
-                f"rear edge toward the wall, usable front facing into the room, "
-                f"and a {required_clearance:.2f}m operator zone between them; "
-                f"tangent error is {tangent_error:.2f}m, "
-                f"normal error is {normal_error:.2f}m, facing error is "
-                f"{facing_error:.0f}deg, and current clearance is "
+                f"rear edge near the wall, usable front facing into the room, "
+                f"and a {required_clearance:.2f}m clear operator zone in front; "
+                f"tangent error is {tangent_error:.2f}m, wall gap is "
+                f"{wall_gap:.2f}m, facing error is {facing_error:.0f}deg, and "
+                f"front clearance is "
                 f"{observed_clearance:.2f}m."
             ),
             diagnostics={
@@ -496,15 +705,71 @@ def _evaluate_operation_zone_at_wall(
                 "target_yaw_deg": round(target_yaw, 6),
                 "tangent_error_m": round(tangent_error, 6),
                 "allowed_tangent_error_m": round(allowed_tangent, 6),
-                "normal_error_m": round(normal_error, 6),
-                "allowed_normal_error_m": allowed_normal,
+                "wall_gap_m": round(wall_gap, 6),
+                "allowed_wall_gap_m": round(allowed_wall_gap, 6),
                 "facing_error_deg": round(facing_error, 6),
                 "allowed_facing_error_deg": 15.0,
                 "operation_clearance_m": round(observed_clearance, 6),
                 "required_operation_clearance_m": round(required_clearance, 6),
+                "operation_clearance_tolerance_m": clearance_tolerance,
+                "blocking_object_id": blocking_object_id,
             },
         )
     ]
+
+
+def _front_operation_clearance(
+    *,
+    subject: dict[str, Any],
+    objects: list[dict[str, Any]],
+    bounds: tuple[float, float, float, float],
+    inward_xy: tuple[float, float],
+) -> tuple[float, str | None]:
+    """Measure clear depth before a workstation within its usable front band."""
+    subject_id = str(subject.get("id") or "")
+    center = bbox_center_xy(subject)
+    if center is None:
+        return 0.0, None
+    normal_axis = 0 if abs(inward_xy[0]) > abs(inward_xy[1]) else 1
+    tangent_axis = 1 - normal_axis
+    tangent_xy = [0.0, 0.0]
+    tangent_xy[tangent_axis] = 1.0
+    tangent_vector = (float(tangent_xy[0]), float(tangent_xy[1]))
+    subject_normal_half = _projected_half_extent(subject, inward_xy)
+    subject_tangent_half = _projected_half_extent(subject, tangent_vector)
+    room_limit = (
+        bounds[2 + normal_axis] if inward_xy[normal_axis] > 0 else bounds[normal_axis]
+    )
+    front_edge = center[normal_axis] + inward_xy[normal_axis] * subject_normal_half
+    nearest_clearance = max(0.0, inward_xy[normal_axis] * (room_limit - front_edge))
+    blocking_object_id: str | None = None
+
+    for other in objects:
+        if str(other.get("id") or "") == subject_id:
+            continue
+        if str(other.get("object_type") or "").lower() != "furniture":
+            continue
+        other_center = bbox_center_xy(other)
+        if other_center is None:
+            continue
+        other_normal_half = _projected_half_extent(other, inward_xy)
+        other_tangent_half = _projected_half_extent(other, tangent_vector)
+        forward_distance = (other_center[0] - center[0]) * inward_xy[0] + (
+            other_center[1] - center[1]
+        ) * inward_xy[1]
+        if forward_distance + other_normal_half <= subject_normal_half:
+            continue
+        tangent_distance = abs(
+            (other_center[0] - center[0]) * tangent_vector[0]
+            + (other_center[1] - center[1]) * tangent_vector[1]
+        )
+        if tangent_distance > subject_tangent_half + other_tangent_half:
+            continue
+        clearance = max(0.0, forward_distance - subject_normal_half - other_normal_half)
+        if clearance < nearest_clearance:
+            nearest_clearance = clearance
+            blocking_object_id = str(other.get("id") or "") or None
+    return nearest_clearance, blocking_object_id
 
 
 def _evaluate_instructional_surface_alignment(
@@ -648,13 +913,27 @@ def _evaluate_axial_relation(
     target_is_existential = str(
         (constraint.get("targets") or {}).get("quantifier") or ""
     ) in {"at_least", "minimum"}
+    paired_targets: dict[str, str] = {}
+    if len(target_ids) > 1 and not target_is_existential:
+        paired_targets = _hard_paired_axial_targets(
+            case_pack,
+            constraint,
+            objects,
+            subject_ids,
+            target_ids,
+        )
     # Multiple universal targets remain ambiguous without explicit pairing.
     # For an existential target, geometry can select the best satisfying
-    # candidate without inventing a semantic identity.
+    # candidate without inventing a semantic identity. Equal work-seat groups
+    # reuse the globally resolved prompt-authorized one-to-one assignment.
     if (
         not subject_ids
         or not target_ids
-        or (len(target_ids) != 1 and not target_is_existential)
+        or (
+            len(target_ids) != 1
+            and not target_is_existential
+            and len(paired_targets) != len(subject_ids)
+        )
     ):
         return []
     by_id = {str(obj["id"]): obj for obj in objects}
@@ -666,9 +945,12 @@ def _evaluate_axial_relation(
         subject_center = bbox_center_xy(subject)
         if subject is None or subject_center is None:
             continue
+        candidate_target_ids = (
+            [paired_targets[subject_id]] if subject_id in paired_targets else target_ids
+        )
         candidates = [
             candidate
-            for target_id in target_ids
+            for target_id in candidate_target_ids
             if (
                 candidate := _axial_candidate(
                     subject,
@@ -725,7 +1007,10 @@ def _evaluate_axial_relation(
             "lateral_offset_m": round(lateral_error, 6),
             "lateral_tolerance_m": round(lateral_tolerance, 6),
         }
-        if len(target_ids) > 1:
+        if paired_targets:
+            diagnostics["group_pairing"] = "global_minimum_cost_one_to_one"
+            diagnostics["paired_target_id"] = target_id
+        elif len(target_ids) > 1:
             diagnostics["candidate_target_ids"] = list(target_ids)
             diagnostics["existential_target_selection"] = True
         if repair_object_id is not None and repair_center is not None:
@@ -758,6 +1043,62 @@ def _evaluate_axial_relation(
     return results
 
 
+def _hard_paired_axial_targets(
+    case_pack: dict[str, Any],
+    constraint: dict[str, Any],
+    objects: list[dict[str, Any]],
+    subject_ids: list[str],
+    target_ids: list[str],
+) -> dict[str, str]:
+    """Resolve an equal work-seat group only when the prompt authorizes pairing."""
+    if len(subject_ids) <= 1 or len(subject_ids) != len(target_ids):
+        return {}
+    by_id = {str(obj.get("id") or ""): obj for obj in objects}
+    if not all(_is_seating_subject(by_id.get(item) or {}) for item in subject_ids):
+        return {}
+    if not all(_is_work_surface_target(by_id.get(item)) for item in target_ids):
+        return {}
+
+    subject_set = set(subject_ids)
+    target_set = set(target_ids)
+    pairing_authorized = False
+    for pairing in contract_constraints(
+        case_pack,
+        relations=("paired_with",),
+        include_auxiliary=False,
+    ):
+        if str(pairing.get("strength") or "hard").lower() != "hard":
+            continue
+        pairing_subjects = set(bound_ids(pairing.get("subjects"), objects))
+        pairing_targets = set(bound_ids(pairing.get("targets"), objects))
+        if (pairing_subjects == subject_set and pairing_targets == target_set) or (
+            pairing_subjects == target_set and pairing_targets == subject_set
+        ):
+            pairing_authorized = True
+            break
+    if not pairing_authorized:
+        return {}
+
+    assignments = assign_work_seats_to_surfaces(
+        objects,
+        task_instruction=str(
+            case_pack.get("task_instruction")
+            or case_pack.get("original_task_instruction")
+            or ""
+        ),
+        room_type=str(case_pack.get("room_type") or ""),
+        room_bounds=room_bounds_from_case_pack(case_pack),
+    )
+    resolved = {
+        assignment.seat_id: assignment.surface_id
+        for assignment in assignments
+        if assignment.seat_id in subject_set and assignment.surface_id in target_set
+    }
+    if set(resolved) != subject_set or set(resolved.values()) != target_set:
+        return {}
+    return resolved
+
+
 def _axial_candidate(
     subject: dict[str, Any],
     subject_center: tuple[float, float],
@@ -777,7 +1118,16 @@ def _axial_candidate(
     if behind:
         front = (-front[0], -front[1])
     side = (-front[1], front[0])
-    min_forward = max(0.15, _projected_half_extent(target, front) * 0.70)
+    # A center-to-center threshold based only on the target's extent can mark
+    # an overlapping subject as "in front".  Include both projected half
+    # extents so a deterministic repair has room to place a real object in the
+    # target's usable front zone without creating a collision.
+    min_forward = max(
+        0.15,
+        _projected_half_extent(target, front)
+        + _projected_half_extent(subject, front)
+        + 0.03,
+    )
     delta = (
         subject_center[0] - target_center[0],
         subject_center[1] - target_center[1],
@@ -984,9 +1334,10 @@ def _binding_state_result(
     expected_stage = _constraint_stage(constraint)
     before_expected = STAGE_ORDER.index(stage) < STAGE_ORDER.index(expected_stage)
     subject_selector = constraint.get("subjects") or {}
-    entrance_route = relation == "clear_access" and str(
-        subject_selector.get("category") or ""
-    ) in {"door", "entrance", "entry"}
+    entrance_route = relation == "clear_access" and (
+        _is_entrance_selector(subject_selector)
+        or _is_virtual_route_selector(subject_selector)
+    )
     if entrance_route:
         subject_matches = [
             str(item.get("id") or item.get("opening_id") or "")
@@ -1002,6 +1353,8 @@ def _binding_state_result(
     else:
         subject_matches = selected_ids(subject_selector, objects)
         subject_ids = bound_ids(subject_selector, objects)
+        if not subject_matches and subject_ids:
+            subject_matches = subject_ids
     virtual_targets = {"room", "ceiling"}
     target_selector = constraint.get("targets") or {}
     target_category = str(target_selector.get("category") or "")
@@ -1010,7 +1363,15 @@ def _binding_state_result(
         "centered_on_wall",
         "on_wall",
     } and target_category in {"wall", *ROOM_RELATIVE_WALL_CATEGORIES}
-    if target_category in virtual_targets:
+    if (
+        _is_virtual_route_selector(subject_selector)
+        and _normalize_selector_category(target_category) in _ENTRANCE_CATEGORIES
+    ):
+        # Compiler-shaped ``route -> entrance`` describes connectivity from
+        # the entrance into the room. Neither endpoint is a generated object.
+        target_matches = ["room"]
+        target_ids = target_matches
+    elif target_category in virtual_targets:
         target_matches = [target_category]
         target_ids = target_matches
     elif positional_wall_target:
@@ -1023,6 +1384,8 @@ def _binding_state_result(
     else:
         target_matches = selected_ids(target_selector, objects)
         target_ids = bound_ids(target_selector, objects)
+        if not target_matches and target_ids:
+            target_matches = target_ids
     secondary_category = str(target_selector.get("secondary_category") or "")
     secondary_matches: list[str] = []
     secondary_ids: list[str] = []
@@ -1043,6 +1406,8 @@ def _binding_state_result(
         }
         secondary_matches = selected_ids(secondary_selector, objects)
         secondary_ids = bound_ids(secondary_selector, objects)
+        if not secondary_matches and secondary_ids:
+            secondary_matches = secondary_ids
 
     missing = (
         not subject_matches
@@ -1320,6 +1685,148 @@ def _evaluate_corner_of_room(
     return results
 
 
+def _evaluate_corner_distribution(
+    constraint: dict[str, Any],
+    geometry: dict[str, Any],
+    objects: list[dict[str, Any]],
+    tier: str,
+) -> list[dict[str, Any]]:
+    bounds = _room_bounds(geometry)
+    if bounds is None:
+        return []
+    corners = (
+        (bounds[0], bounds[1]),
+        (bounds[0], bounds[3]),
+        (bounds[2], bounds[1]),
+        (bounds[2], bounds[3]),
+    )
+    subject_ids = bound_ids(constraint.get("subjects"), objects)
+    if not subject_ids:
+        return []
+    by_id = {str(obj["id"]): obj for obj in objects}
+    centers = [bbox_center_xy(by_id.get(object_id)) for object_id in subject_ids]
+    if any(center is None for center in centers) or len(subject_ids) > len(corners):
+        return []
+    typed_centers = [center for center in centers if center is not None]
+    best: tuple[float, tuple[int, ...]] | None = None
+    for assignment in permutations(range(len(corners)), len(subject_ids)):
+        cost = sum(
+            math.hypot(
+                typed_centers[index][0] - corners[corner_index][0],
+                typed_centers[index][1] - corners[corner_index][1],
+            )
+            for index, corner_index in enumerate(assignment)
+        )
+        if best is None or cost < best[0]:
+            best = (cost, assignment)
+    if best is None:
+        return []
+    allowed = max(
+        0.5,
+        0.12 * math.hypot(bounds[2] - bounds[0], bounds[3] - bounds[1]),
+    )
+    results: list[dict[str, Any]] = []
+    for index, corner_index in enumerate(best[1]):
+        center = typed_centers[index]
+        corner = corners[corner_index]
+        distance = math.hypot(center[0] - corner[0], center[1] - corner[1])
+        assignment = {
+            "object_id": subject_ids[index],
+            "corner_index": corner_index,
+            "target_corner_xy_m": [round(corner[0], 6), round(corner[1], 6)],
+            "distance_m": round(distance, 6),
+        }
+        results.append(
+            _result(
+                constraint,
+                suffix=subject_ids[index],
+                label="pass" if distance <= allowed else "fail",
+                primary=subject_ids[index],
+                related=[
+                    object_id
+                    for object_id in subject_ids
+                    if object_id != subject_ids[index]
+                ],
+                relation_type="corner_distribution",
+                tier=tier,
+                reason=(
+                    f"`{subject_ids[index]}` is {distance:.2f}m from its assigned "
+                    f"distinct room corner (allowed {allowed:.2f}m)."
+                ),
+                diagnostics={
+                    "assignment": assignment,
+                    "distinct_corner_count": len(set(best[1])),
+                    "allowed_distance_m": allowed,
+                },
+            )
+        )
+    return results
+
+
+def _evaluate_one_per_support(
+    constraint: dict[str, Any],
+    geometry: dict[str, Any],
+    objects: list[dict[str, Any]],
+    tier: str,
+) -> dict[str, Any] | None:
+    subject_ids = bound_ids(constraint.get("subjects"), objects)
+    target_ids = bound_ids(constraint.get("targets"), objects)
+    if not subject_ids or not target_ids:
+        return None
+    by_id = {str(obj["id"]): obj for obj in objects}
+    target_set = set(target_ids)
+    surface_owners = _support_surface_owners(geometry, by_id, target_set)
+    assignments: dict[str, str] = {}
+    counts = {target_id: 0 for target_id in target_ids}
+    for subject_id in subject_ids:
+        placement = by_id.get(subject_id, {}).get("placement_info") or {}
+        surface_id = str(placement.get("parent_surface_id") or "")
+        owner_id = surface_owners.get(surface_id, "")
+        if owner_id in target_set:
+            assignments[subject_id] = owner_id
+            counts[owner_id] += 1
+    passed = len(assignments) == len(subject_ids) and all(
+        count == 1 for count in counts.values()
+    )
+    unassigned = [
+        subject_id for subject_id in subject_ids if subject_id not in assignments
+    ]
+    duplicates = [target_id for target_id, count in counts.items() if count > 1]
+    missing_targets = [target_id for target_id, count in counts.items() if count == 0]
+    duplicate_subjects = [
+        subject_id
+        for target_id in duplicates
+        for subject_id, owner_id in assignments.items()
+        if owner_id == target_id
+    ]
+    repair_subject_id = (
+        unassigned[0]
+        if unassigned
+        else (duplicate_subjects[-1] if duplicate_subjects else subject_ids[0])
+    )
+    return _result(
+        constraint,
+        suffix="one_per_support",
+        label="pass" if passed else "fail",
+        primary=repair_subject_id,
+        related=target_ids,
+        relation_type="one_per_support",
+        tier=tier,
+        reason=(
+            f"Matched {len(assignments)}/{len(subject_ids)} subject(s) to distinct "
+            f"support owners; missing targets={missing_targets}, duplicates={duplicates}."
+        ),
+        diagnostics={
+            "support_assignments": assignments,
+            "target_subject_counts": counts,
+            "unassigned_subject_ids": unassigned,
+            "missing_target_ids": missing_targets,
+            "duplicate_target_ids": duplicates,
+            "repair_subject_id": repair_subject_id,
+        },
+    )
+
+
 def _evaluate_across_from(
     constraint: dict[str, Any], objects: list[dict[str, Any]], tier: str
 ) -> list[dict[str, Any]]:
@@ -1403,8 +1910,32 @@ def _evaluate_across_from(
     results = []
     for subject_id in subjects:
         subject = by_id.get(subject_id)
+        target = by_id.get(target_id)
         center = bbox_center_xy(subject)
-        if subject is None or center is None:
+        if subject is None or target is None or center is None:
+            continue
+        if _is_seating_subject(subject) and _is_media_target(target):
+            label, _confidence, reason = _eval_facing_relation(
+                subject, target, "seating_to_media"
+            )
+            axis = _media_lateral_axis_diagnostics(subject, target)
+            diagnostics = axis[3] if axis is not None else {}
+            diagnostics["distance_m"] = math.hypot(
+                target_center[0] - center[0], target_center[1] - center[1]
+            )
+            results.append(
+                _result(
+                    constraint,
+                    suffix=f"{subject_id}__{target_id}",
+                    label=label,
+                    primary=subject_id,
+                    related=[target_id],
+                    relation_type="seating_to_media",
+                    tier=tier,
+                    reason=reason,
+                    diagnostics=diagnostics,
+                )
+            )
             continue
         direction = (target_center[0] - center[0], target_center[1] - center[1])
         distance = math.hypot(*direction)
@@ -1431,14 +1962,50 @@ def _evaluate_clear_access(
     objects: list[dict[str, Any]],
     tier: str,
     geometry: dict[str, Any] | None = None,
+    *,
+    case_pack: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    if str((constraint.get("subjects") or {}).get("category") or "") in {
-        "door",
-        "entrance",
-        "entry",
-    }:
+    subject_selector = constraint.get("subjects") or {}
+    if _is_entrance_selector(subject_selector):
         return _evaluate_entrance_routes(
             constraint,
+            objects,
+            tier,
+            geometry=geometry or {},
+        )
+    if _is_virtual_route_selector(subject_selector):
+        normalized = dict(constraint)
+        normalized["subjects"] = {
+            "category": "entrance",
+            "count": 1,
+            "quantifier": "all",
+        }
+        target_selector = constraint.get("targets") or {}
+        if (
+            _normalize_selector_category(target_selector.get("category"))
+            in _ENTRANCE_CATEGORIES
+        ):
+            normalized["targets"] = {
+                "category": "room",
+                "count": 1,
+                "quantifier": "all",
+            }
+        return _evaluate_entrance_routes(
+            normalized,
+            objects,
+            tier,
+            geometry=geometry or {},
+        )
+    if _requests_global_circulation(constraint):
+        normalized = dict(constraint)
+        normalized["subjects"] = {
+            "category": "entrance",
+            "count": 1,
+            "quantifier": "all",
+        }
+        normalized["targets"] = dict(subject_selector)
+        return _evaluate_entrance_routes(
+            normalized,
             objects,
             tier,
             geometry=geometry or {},
@@ -1470,6 +2037,11 @@ def _evaluate_clear_access(
         center = bbox_center_xy(subject)
         if subject is None or center is None:
             continue
+        authorized_occupant_ids = _authorized_clear_access_occupants(
+            case_pack,
+            objects,
+            subject_id,
+        )
         front = front_vector(subject)
         norm = math.hypot(*front)
         if norm <= 1e-6:
@@ -1482,11 +2054,16 @@ def _evaluate_clear_access(
         )
         blockers = []
         for other_id, other in by_id.items():
-            if other_id == subject_id or object_category(other) in {
-                "wall",
-                "floor",
-                "ceiling",
-            }:
+            if (
+                other_id == subject_id
+                or other_id in authorized_occupant_ids
+                or object_category(other)
+                in {
+                    "wall",
+                    "floor",
+                    "ceiling",
+                }
+            ):
                 continue
             other_center = bbox_center_xy(other)
             if other_center is None:
@@ -1507,6 +2084,7 @@ def _evaluate_clear_access(
                 tier=tier,
                 reason=f"`{subject_id}` access zone has {len(blockers)} blocker(s).",
                 diagnostics={
+                    "authorized_occupant_ids": sorted(authorized_occupant_ids),
                     "blocking_ids": blockers,
                     "required_depth_m": required_depth,
                     "half_width_m": width,
@@ -1514,6 +2092,188 @@ def _evaluate_clear_access(
             )
         )
     return results
+
+
+def _is_entrance_selector(selector: dict[str, Any]) -> bool:
+    return (
+        _normalize_selector_category(selector.get("category")) in _ENTRANCE_CATEGORIES
+    )
+
+
+def _is_virtual_route_selector(selector: dict[str, Any]) -> bool:
+    category = _normalize_selector_category(selector.get("category"))
+    role = str(selector.get("role") or "").strip().lower().replace("-", "_")
+    return category in _VIRTUAL_ROUTE_CATEGORIES or role in {
+        "access_route",
+        "circulation_path",
+        "walking_route",
+    }
+
+
+def _requests_global_circulation(constraint: dict[str, Any]) -> bool:
+    evidence = str(constraint.get("evidence_span") or "").lower()
+    return bool(
+        re.search(
+            r"\b(?:without\s+(?:blocking|obstructing)|while\s+(?:preserving|maintaining))\s+"
+            r"(?:the\s+)?(?:circulation|traffic(?:\s+flow)?|walkway|walking\s+path)\b",
+            evidence,
+        )
+    )
+
+
+def _authorized_clear_access_occupants(
+    case_pack: dict[str, Any],
+    objects: list[dict[str, Any]],
+    access_subject_id: str,
+) -> set[str]:
+    """Return named functional occupants that may use an access zone.
+
+    A clear-access zone is normally circulation-only, but prompts can reserve
+    part of it for a user-facing companion object, such as a stool at a
+    dressing table or a chair at a workstation.  Local companions require
+    explicit ``in_front_of`` and ``faces`` rows.  Group workstations instead
+    use the existing functional-dependency chair-to-desk assignment, but only
+    when the original hard contract explicitly says the group is both paired
+    and facing.  This deliberately does not authorize a category in general
+    or infer a nearest target from the current pose.
+    """
+    pairs_by_relation: dict[str, set[tuple[str, str]]] = {
+        "in_front_of": set(),
+        "faces": set(),
+    }
+    for relation, pairs in pairs_by_relation.items():
+        for relation_constraint in contract_constraints(
+            case_pack,
+            relations=(relation,),
+            include_auxiliary=False,
+        ):
+            if str(relation_constraint.get("strength") or "hard").lower() != "hard":
+                continue
+            subject_ids = bound_ids(relation_constraint.get("subjects"), objects)
+            target_ids = bound_ids(relation_constraint.get("targets"), objects)
+            # Multiple target IDs do not encode an object pairing.  Declining
+            # that ambiguous contract is safer than exempting an unrelated
+            # obstacle from every matching access zone.
+            if len(target_ids) != 1:
+                continue
+            target_id = target_ids[0]
+            pairs.update((subject_id, target_id) for subject_id in subject_ids)
+
+    authorized = {
+        subject_id
+        for subject_id, target_id in (
+            pairs_by_relation["in_front_of"] & pairs_by_relation["faces"]
+        )
+        if target_id == access_subject_id
+    }
+    authorized.update(
+        _hard_paired_workstation_occupants(case_pack, objects, access_subject_id)
+    )
+    authorized.update(
+        _hard_edge_distribution_occupants(case_pack, objects, access_subject_id)
+    )
+    return authorized
+
+
+def _hard_edge_distribution_occupants(
+    case_pack: dict[str, Any],
+    objects: list[dict[str, Any]],
+    access_subject_id: str,
+) -> set[str]:
+    """Return seats explicitly assigned to the accessed table's perimeter."""
+    authorized: set[str] = set()
+    for constraint in contract_constraints(
+        case_pack, relations=("edge_distribution",), include_auxiliary=False
+    ):
+        if str(constraint.get("strength") or "hard").lower() != "hard":
+            continue
+        target_ids = bound_ids(constraint.get("targets"), objects)
+        if target_ids != [access_subject_id]:
+            continue
+        authorized.update(
+            object_id
+            for object_id in bound_ids(constraint.get("subjects"), objects)
+            if _is_seating_subject(
+                next(
+                    (obj for obj in objects if str(obj.get("id") or "") == object_id),
+                    {},
+                )
+            )
+        )
+    return authorized
+
+
+def _hard_paired_workstation_occupants(
+    case_pack: dict[str, Any],
+    objects: list[dict[str, Any]],
+    access_subject_id: str,
+) -> set[str]:
+    """Return concrete work seats explicitly paired and facing their desk.
+
+    ``paired_with`` may name a group of desks and chairs, so it cannot bind an
+    individual chair by itself.  Reuse the functional-dependency check's
+    already-resolved seat-to-surface pairing, then require hard group-level
+    ``paired_with`` and ``faces`` evidence before treating that chair as an
+    intentional access-zone occupant.
+    """
+    by_id = {str(obj.get("id") or ""): obj for obj in objects}
+    pairing_constraints = contract_constraints(
+        case_pack, relations=("paired_with",), include_auxiliary=False
+    )
+    facing_constraints = contract_constraints(
+        case_pack, relations=("faces",), include_auxiliary=False
+    )
+    if not pairing_constraints or not facing_constraints:
+        return set()
+
+    authorized: set[str] = set()
+    for check in case_pack.get("checks") or []:
+        if (
+            not isinstance(check, dict)
+            or str(check.get("metric") or "") != "functional_dependency"
+            or str(check.get("relation_type") or "") != "seating_to_work_surface"
+            or [str(item) for item in (check.get("target_ids") or [])]
+            != [access_subject_id]
+        ):
+            continue
+        seat_id = str(check.get("subject_id") or "")
+        if not seat_id or not _is_seating_subject(by_id.get(seat_id) or {}):
+            continue
+        if _contract_pairs_and_faces_ids(
+            pairing_constraints,
+            facing_constraints,
+            objects,
+            seat_id,
+            access_subject_id,
+        ):
+            authorized.add(seat_id)
+    return authorized
+
+
+def _contract_pairs_and_faces_ids(
+    pairing_constraints: list[dict[str, Any]],
+    facing_constraints: list[dict[str, Any]],
+    objects: list[dict[str, Any]],
+    seat_id: str,
+    surface_id: str,
+) -> bool:
+    """Check prompt evidence for one resolved work-seat assignment."""
+    paired = False
+    for constraint in pairing_constraints:
+        subject_ids = set(bound_ids(constraint.get("subjects"), objects))
+        target_ids = set(bound_ids(constraint.get("targets"), objects))
+        if (seat_id in subject_ids and surface_id in target_ids) or (
+            seat_id in target_ids and surface_id in subject_ids
+        ):
+            paired = True
+            break
+    if not paired:
+        return False
+    return any(
+        seat_id in set(bound_ids(constraint.get("subjects"), objects))
+        and surface_id in set(bound_ids(constraint.get("targets"), objects))
+        for constraint in facing_constraints
+    )
 
 
 def _evaluate_entrance_routes(
@@ -1526,8 +2286,30 @@ def _evaluate_entrance_routes(
     """Check connected walkable space from any entrance to each destination."""
     bounds = _room_bounds(geometry)
     doors = (geometry.get("scene_shell") or {}).get("doors") or []
-    target_ids = bound_ids(constraint.get("targets"), objects)
-    if bounds is None or not doors or not target_ids:
+    if bounds is None or not doors:
+        return []
+
+    target_selector = constraint.get("targets") or {}
+    target_category = _normalize_selector_category(target_selector.get("category"))
+    if target_category == "room":
+        # ``room`` is a virtual endpoint, rather than a generated scene
+        # object.  Route toward its interior center and later project that
+        # point onto the walkable region, so a center occupied by furniture
+        # still expresses access to the room rather than to that furniture.
+        target_destinations = [
+            (
+                "room",
+                ((bounds[0] + bounds[2]) / 2.0, (bounds[1] + bounds[3]) / 2.0),
+            )
+        ]
+    else:
+        by_id = {str(obj["id"]): obj for obj in objects}
+        target_destinations = []
+        for target_id in bound_ids(target_selector, objects):
+            target_center = bbox_center_xy(by_id.get(target_id))
+            if target_center is not None:
+                target_destinations.append((target_id, target_center))
+    if not target_destinations:
         return []
 
     by_id = {str(obj["id"]): obj for obj in objects}
@@ -1540,11 +2322,7 @@ def _evaluate_entrance_routes(
         return []
 
     results: list[dict[str, Any]] = []
-    for target_id in target_ids:
-        target = by_id.get(target_id)
-        target_center = bbox_center_xy(target)
-        if target is None or target_center is None:
-            continue
+    for target_id, target_center in target_destinations:
         obstacles: list[tuple[str, Polygon]] = []
         for object_id, obj in by_id.items():
             if object_id == target_id or object_category(obj) in {
@@ -1621,6 +2399,15 @@ def _evaluate_entrance_routes(
                     "evaluation_mode": "entrance_route",
                     "entrance_id": selected_door,
                     "destination_id": target_id,
+                    "destination_target_xy_m": [
+                        round(target_center[0], 6),
+                        round(target_center[1], 6),
+                    ],
+                    "destination_walkable_xy_m": (
+                        [round(selected_end.x, 6), round(selected_end.y, 6)]
+                        if selected_end is not None
+                        else None
+                    ),
                     "required_clearance_m": clearance,
                     "blocking_ids": blocking_ids,
                 },
@@ -1989,6 +2776,9 @@ _EXTENSION_EVALUATORS = {
     "centered_on_wall": lambda constraint, geometry, objects, _case_pack, tier: (
         _evaluate_centered_on_wall(constraint, geometry, objects, tier)
     ),
+    "centered_above": lambda constraint, geometry, objects, _case_pack, tier: (
+        _evaluate_centered_above(constraint, geometry, objects, tier)
+    ),
     "centered_between": lambda constraint, _geometry, objects, _case_pack, tier: (
         _evaluate_between(constraint, objects, tier)
     ),
@@ -2027,14 +2817,29 @@ _EXTENSION_EVALUATORS = {
     "corner_of_room": lambda constraint, geometry, objects, _case_pack, tier: (
         _evaluate_corner_of_room(constraint, geometry, objects, tier)
     ),
+    "corner_distribution": lambda constraint, geometry, objects, _case_pack, tier: (
+        _evaluate_corner_distribution(constraint, geometry, objects, tier)
+    ),
+    "one_per_support": lambda constraint, geometry, objects, _case_pack, tier: (
+        _evaluate_one_per_support(constraint, geometry, objects, tier)
+    ),
     "across_from": lambda constraint, _geometry, objects, _case_pack, tier: (
         _evaluate_across_from(constraint, objects, tier)
     ),
-    "clear_access": lambda constraint, geometry, objects, _case_pack, tier: (
-        _evaluate_clear_access(constraint, objects, tier, geometry)
+    "clear_access": lambda constraint, geometry, objects, case_pack, tier: (
+        _evaluate_clear_access(
+            constraint,
+            objects,
+            tier,
+            geometry,
+            case_pack=case_pack,
+        )
     ),
     "mounted_to_ceiling": lambda constraint, geometry, objects, _case_pack, tier: (
         _evaluate_hang_from_ceiling(constraint, geometry, objects, tier)
+    ),
+    "mounted_to_wall": lambda constraint, geometry, objects, _case_pack, tier: (
+        _evaluate_mounted_to_wall(constraint, geometry, objects, tier)
     ),
     "operation_zone_at_wall": lambda constraint, geometry, objects, _case_pack, tier: (
         _evaluate_operation_zone_at_wall(constraint, geometry, objects, tier)

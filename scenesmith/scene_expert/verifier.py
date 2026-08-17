@@ -17,6 +17,10 @@ from pathlib import Path
 
 import yaml
 
+from scenesmith.scenebenchmark_critic.object_taxonomy import (
+    canonical_object_category,
+    categories_are_equivalent,
+)
 from scenesmith.scene_expert.schemas import (
     FullVerifyReport,
     SceneTaskSpec,
@@ -320,6 +324,12 @@ def _check_required_objects(
 
     for required in stage_required:
         required_label = _normalize_object_label(required)
+        # A table/place setting describes a collection of manipulands rather
+        # than a mesh that an asset manager can create.  Its component counts
+        # and seating relation are checked by the intent contract; requiring a
+        # literal object here would reject every valid decomposed setting.
+        if stage == "manipuland" and required_label in _VIRTUAL_MANIPULAND_GROUPS:
+            continue
         consumed_indices = consumed_by_required_label.setdefault(required_label, set())
         match_index = next(
             (
@@ -332,8 +342,7 @@ def _check_required_objects(
                         for present in present_aliases
                     )
                     or (
-                        stage == "manipuland"
-                        and description
+                        description
                         and _description_contains_object_label(required, description)
                     )
                 )
@@ -358,14 +367,10 @@ def _check_required_objects(
     return issues
 
 
-_OBJECT_LABEL_ALIASES = {
-    "computer monitor": "monitor",
-    "computer display": "monitor",
-    "display monitor": "monitor",
-    "tv": "television",
-    "tv display": "television",
-    "television display": "television",
-}
+# These are prompt-level aggregate concepts, not independently instantiated
+# scene assets. Their concrete components remain required and are consumed
+# above, while SceneBenchmark validates their cardinality and relationship.
+_VIRTUAL_MANIPULAND_GROUPS = {"table setting", "place setting"}
 
 
 def _normalize_object_label(label: str) -> str:
@@ -379,13 +384,7 @@ def _normalize_object_label(label: str) -> str:
         words.pop()
     if not words:
         return ""
-    last = words[-1]
-    if last.endswith("ies") and len(last) > 3:
-        words[-1] = f"{last[:-3]}y"
-    elif last.endswith("s") and not last.endswith("ss") and len(last) > 3:
-        words[-1] = last[:-1]
-    normalized = " ".join(words)
-    return _OBJECT_LABEL_ALIASES.get(normalized, normalized)
+    return canonical_object_category(" ".join(words)).replace("_", " ")
 
 
 def _object_labels_match(required: str, present: str) -> bool:
@@ -393,7 +392,7 @@ def _object_labels_match(required: str, present: str) -> bool:
     present_label = _normalize_object_label(present)
     if not required_label or not present_label:
         return False
-    if required_label == present_label:
+    if categories_are_equivalent(required_label, present_label):
         return True
     return (
         f" {required_label} " in f" {present_label} "
@@ -402,12 +401,12 @@ def _object_labels_match(required: str, present: str) -> bool:
 
 
 def _description_contains_object_label(required: str, description: str) -> bool:
-    """Match a required component mentioned in a manipuland asset description.
+    """Match a required object category mentioned in an asset description.
 
-    Some asset libraries return one mesh for a compound item such as a vase
-    with flowers, without recording composite metadata. Token-wise
-    normalization lets that description satisfy the component requirement
-    while the caller still consumes only one scene object instance.
+    Asset names can encode implementation details (for example
+    ``chalkboard_land``) while their descriptions retain the user-facing
+    category. Token-wise canonicalization lets one asset satisfy a matching
+    stage requirement while still consuming a single scene object instance.
     """
     required_tokens = _normalize_object_label(required).split()
     if not required_tokens:

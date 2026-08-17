@@ -787,6 +787,7 @@ def solve_non_penetration_ik(
     iteration_limit: int = 5000,
     time_limit_s: float = 360.0,
     xy_regions: dict[BodyIndex, HPolyhedron] | None = None,
+    fixed_z_bodies: Collection[BodyIndex] | None = None,
 ) -> tuple[Context | None, bool]:
     """Solve IK for non-penetration projection of free bodies.
 
@@ -817,6 +818,10 @@ def solve_non_penetration_ik(
             region is surface_hpoly.PontryaginDifference(object_footprint_hpoly).
             This accounts for object shape - long objects (knives) can be
             placed closer to edges when oriented parallel.
+        fixed_z_bodies: Optional bodies whose current world Z translation must
+            remain fixed even when ``fix_z`` is False. This preserves explicit
+            support assignments while allowing unsupported bodies to use full
+            3D projection.
 
     Returns:
         Tuple of (plant_context, success).
@@ -879,7 +884,7 @@ def solve_non_penetration_ik(
             prog.AddBoundingBoxConstraint(model_quat, model_quat, model_quat_vars)
 
         # Fix Z if requested.
-        if fix_z:
+        if fix_z or (fixed_z_bodies and body_idx in fixed_z_bodies):
             model_q = plant.GetPositions(plant_context, model_idx)
             model_z = model_q[6]  # Z is at index 6 (after quat + x + y).
             z_var = q_vars[q_start_idx + 6]
@@ -973,10 +978,10 @@ def cyclopean_get_model_instance_for_body(
     return body.model_instance()
 
 
-def _get_colliding_object_ids(
+def _get_colliding_object_depths(
     scene: RoomScene, penetration_threshold: float = 1e-5
-) -> set[UniqueID]:
-    """Identify objects that are currently in collision.
+) -> dict[UniqueID, float]:
+    """Return the maximum current penetration depth for each colliding object.
 
     Uses broadphase collision detection to efficiently find penetrating pairs.
     This is used to reduce DOFs in large scene projection by only making
@@ -991,7 +996,7 @@ def _get_colliding_object_ids(
         penetration_threshold: Minimum penetration depth to consider (meters).
 
     Returns:
-        Set of UniqueIDs for scene objects that are in collision.
+        Mapping from scene object ID to its maximum penetration depth.
     """
 
     def is_room_geometry_id(object_id: str) -> bool:
@@ -1010,15 +1015,58 @@ def _get_colliding_object_ids(
         current_furniture_id=None,
     )
 
-    colliding_ids: set[UniqueID] = set()
+    collision_depths: dict[UniqueID, float] = {}
     for collision in collisions:
         # Only add scene object IDs, skip room geometry.
         if not is_room_geometry_id(collision.object_a_id):
-            colliding_ids.add(UniqueID(collision.object_a_id))
+            object_id = UniqueID(collision.object_a_id)
+            collision_depths[object_id] = max(
+                collision_depths.get(object_id, 0.0), collision.penetration_depth
+            )
         if not is_room_geometry_id(collision.object_b_id):
-            colliding_ids.add(UniqueID(collision.object_b_id))
+            object_id = UniqueID(collision.object_b_id)
+            collision_depths[object_id] = max(
+                collision_depths.get(object_id, 0.0), collision.penetration_depth
+            )
 
-    return colliding_ids
+    return collision_depths
+
+
+def _get_colliding_object_ids(
+    scene: RoomScene, penetration_threshold: float = 1e-5
+) -> set[UniqueID]:
+    """Identify scene objects whose penetration exceeds the threshold."""
+    return set(
+        _get_colliding_object_depths(scene, penetration_threshold=penetration_threshold)
+    )
+
+
+def _supported_projection_displacement_limit(
+    obj: SceneObject,
+    *,
+    penetration_depth: float,
+    influence_distance: float,
+) -> float:
+    """Bound collision cleanup motion using collision severity and object scale."""
+    footprint_short_side = 0.0
+    try:
+        bounds = obj.compute_world_bounds()
+    except (TypeError, ValueError):
+        bounds = None
+    if bounds is not None:
+        dimensions = np.asarray(bounds[1], dtype=float) - np.asarray(
+            bounds[0], dtype=float
+        )
+        finite_xy = dimensions[:2][np.isfinite(dimensions[:2])]
+        if finite_xy.size:
+            footprint_short_side = max(0.0, float(np.min(np.abs(finite_xy))))
+
+    return max(
+        0.05,
+        2.0 * max(0.0, float(influence_distance)),
+        3.0 * max(0.0, float(penetration_depth)),
+        0.5 * footprint_short_side,
+    )
 
 
 def apply_non_penetration_projection(
@@ -1071,13 +1119,17 @@ def apply_non_penetration_projection(
         f"xy_only={xy_only}, fix_rotation={fix_rotation}, objects={total_objects})"
     )
 
-    # For large scenes, use collision pre-check to reduce DOFs.
-    # Small scenes (per-furniture projection) use existing fast path.
+    # Final manipuland cleanup must never move unrelated, stable objects. Besides
+    # reducing DOFs, this preserves the support assignment already established by
+    # each per-furniture workflow. Furniture projection retains its historical
+    # threshold because all furniture may need to cooperate to resolve a layout.
     free_object_ids: list[UniqueID] | None = None
-    if total_objects > large_scene_optimization_threshold:
-        colliding_ids = _get_colliding_object_ids(
+    collision_depths: dict[UniqueID, float] = {}
+    if weld_furniture or total_objects > large_scene_optimization_threshold:
+        collision_depths = _get_colliding_object_depths(
             scene, penetration_threshold=collision_penetration_threshold_m
         )
+        colliding_ids = set(collision_depths)
 
         if not colliding_ids:
             elapsed = time.time() - start_time
@@ -1087,10 +1139,30 @@ def apply_non_penetration_projection(
             return scene, True
 
         console_logger.info(
-            f"Large scene optimization: {len(colliding_ids)}/{total_objects} "
+            f"Collision-scoped projection: {len(colliding_ids)}/{total_objects} "
             f"objects colliding (DOF: {total_objects * 7} -> {len(colliding_ids) * 7})"
         )
         free_object_ids = list(colliding_ids)
+
+    pre_projection_transforms = {
+        object_id: RigidTransform(
+            R=obj.transform.rotation(), p=obj.transform.translation()
+        )
+        for object_id, obj in scene.objects.items()
+    }
+    supported_displacement_limits = (
+        {
+            object_id: _supported_projection_displacement_limit(
+                obj,
+                penetration_depth=collision_depths.get(object_id, 0.0),
+                influence_distance=influence_distance,
+            )
+            for object_id, obj in scene.objects.items()
+            if weld_furniture and object_id in collision_depths
+        }
+        if weld_furniture
+        else {}
+    )
 
     try:
         # Create Drake plant for IK.
@@ -1107,6 +1179,22 @@ def apply_non_penetration_projection(
             console_logger.warning("No free bodies for projection. Skipping.")
             return scene, True
 
+        xy_regions: dict[BodyIndex, HPolyhedron] = {}
+        fixed_z_bodies: set[BodyIndex] = set()
+        if weld_furniture:
+            for obj_id, (_, body_idx) in object_indices.items():
+                obj = scene.get_object(obj_id)
+                if obj is None or obj.object_type != ObjectType.MANIPULAND:
+                    continue
+                region = _object_support_feasible_region(scene, obj)
+                if region is not None:
+                    xy_regions[body_idx] = region
+                    # A valid support assignment is a hard vertical invariant:
+                    # resolving a lateral object-object collision by moving the
+                    # object through its support surface creates a guaranteed fall
+                    # during simulation. Keep unsupported bodies free in Z.
+                    fixed_z_bodies.add(body_idx)
+
         # Solve using shared utility.
         plant_context, success = solve_non_penetration_ik(
             builder=builder,
@@ -1118,6 +1206,8 @@ def apply_non_penetration_projection(
             solver_name=solver_name,
             iteration_limit=iteration_limit,
             time_limit_s=time_limit_s,
+            xy_regions=xy_regions or None,
+            fixed_z_bodies=fixed_z_bodies or None,
         )
 
         if success and plant_context is not None:
@@ -1129,6 +1219,46 @@ def apply_non_penetration_projection(
                 object_indices=object_indices,
                 composite_info=composite_info,
             )
+            anomalous_moves: list[tuple[UniqueID, float, float, float]] = []
+            for object_id, displacement_limit in supported_displacement_limits.items():
+                obj = scene.get_object(object_id)
+                initial_transform = pre_projection_transforms.get(object_id)
+                if obj is None or initial_transform is None:
+                    continue
+                displacement = float(
+                    np.linalg.norm(
+                        obj.transform.translation() - initial_transform.translation()
+                    )
+                )
+                if not np.isfinite(displacement) or displacement > displacement_limit:
+                    anomalous_moves.append(
+                        (
+                            object_id,
+                            collision_depths.get(object_id, 0.0),
+                            displacement,
+                            displacement_limit,
+                        )
+                    )
+            if anomalous_moves:
+                for object_id, penetration, displacement, limit in anomalous_moves:
+                    console_logger.warning(
+                        "Rejecting supported-object projection for %s: initial "
+                        "penetration=%.4fm, displacement=%.4fm, limit=%.4fm",
+                        object_id,
+                        penetration,
+                        displacement,
+                        limit,
+                    )
+                for object_id, transform in pre_projection_transforms.items():
+                    obj = scene.get_object(object_id)
+                    if obj is not None:
+                        obj.transform = transform
+                console_logger.warning(
+                    "Rolled back supported-object projection atomically after "
+                    "%d anomalous move(s)",
+                    len(anomalous_moves),
+                )
+                return scene, False
             elapsed = time.time() - start_time
             console_logger.info(f"Projection succeeded in {elapsed:.2f}s")
         else:
@@ -1326,6 +1456,76 @@ def get_object_xy_footprint(
     hull_vertices = processed_vertices[hull.vertices]
     # VPolytope expects 2xN array (dim x num_vertices).
     return VPolytope(vertices=hull_vertices.T)
+
+
+def _find_support_surface(scene: RoomScene, surface_id: UniqueID):
+    """Return the support surface with ``surface_id``, if it still exists."""
+    for owner in scene.objects.values():
+        for surface in owner.support_surfaces:
+            if str(surface.surface_id) == str(surface_id):
+                return surface
+    return None
+
+
+def _object_support_feasible_region(
+    scene: RoomScene, obj: SceneObject
+) -> HPolyhedron | None:
+    """Build the world-XY region that keeps an object on its assigned surface."""
+    placement = obj.placement_info
+    if placement is None:
+        return None
+    surface = _find_support_surface(scene, placement.parent_surface_id)
+    if surface is None:
+        console_logger.warning(
+            "Cannot constrain %s to missing support surface %s",
+            obj.object_id,
+            placement.parent_surface_id,
+        )
+        return None
+
+    surface_hpoly = HPolyhedron(vpoly=surface.get_xy_convex_hull())
+    obj_mesh = None
+    geometry_path = obj.geometry_path
+    if geometry_path is None and obj.metadata.get("composite_type") == "stack":
+        members = obj.metadata.get("member_assets", [])
+        if members:
+            geometry_path = members[0].get("geometry_path")
+    elif (
+        geometry_path is None
+        and obj.metadata.get("composite_type") == "filled_container"
+    ):
+        container = obj.metadata.get("container_asset") or {}
+        geometry_path = container.get("geometry_path")
+
+    if geometry_path is not None:
+        try:
+            obj_mesh = trimesh.load(geometry_path, force="mesh")
+        except Exception as exc:
+            console_logger.warning(
+                "Failed to load support footprint for %s: %s",
+                obj.object_id,
+                exc,
+            )
+
+    if obj_mesh is None:
+        # Constraining the body origin is less exact than the footprint, but still
+        # prevents an unsupported lateral jump during global collision cleanup.
+        return surface_hpoly
+
+    if obj.scale_factor != 1.0:
+        obj_mesh.vertices *= obj.scale_factor
+    footprint = HPolyhedron(
+        vpoly=get_object_xy_footprint(obj_mesh, obj.transform.rotation())
+    )
+    try:
+        region = surface_hpoly.PontryaginDifference(footprint)
+        if not region.IsEmpty():
+            return region
+    except Exception as exc:
+        console_logger.warning(
+            "Failed to compute support region for %s: %s", obj.object_id, exc
+        )
+    return surface_hpoly
 
 
 def apply_surface_projection(
@@ -2013,7 +2213,7 @@ def apply_physical_feasibility_postprocessing(
             fallen_manipuland_z_displacement=fallen_manipuland_z_displacement,
         )
 
-    return scene, True, removed_ids
+    return scene, projection_success if projection_enabled else True, removed_ids
 
 
 def apply_per_furniture_postprocessing(
@@ -2021,7 +2221,9 @@ def apply_per_furniture_postprocessing(
     furniture_id: UniqueID,
     config: DictConfig,
     simulation_html_path: Path | None = None,
-) -> RoomScene:
+    *,
+    return_success: bool = False,
+) -> RoomScene | tuple[RoomScene, bool]:
     """Run post-processing for a single furniture piece and its manipulands.
 
     Creates a subset scene containing only the target furniture, its manipulands,
@@ -2056,7 +2258,7 @@ def apply_per_furniture_postprocessing(
         console_logger.warning(
             f"Furniture {furniture_id} not found, skipping per-furniture post-processing"
         )
-        return full_scene
+        return (full_scene, True) if return_success else full_scene
 
     subset_objects[furniture.object_id] = furniture
 
@@ -2072,7 +2274,7 @@ def apply_per_furniture_postprocessing(
         console_logger.info(
             f"No manipulands on furniture {furniture_id}, skipping post-processing"
         )
-        return full_scene
+        return (full_scene, True) if return_success else full_scene
 
     console_logger.info(
         f"Running per-furniture post-processing for {furniture_id} "
@@ -2129,4 +2331,6 @@ def apply_per_furniture_postprocessing(
             # Object was removed during post-processing (e.g., fell off furniture).
             full_scene.remove_object(manip_id)
 
+    if return_success:
+        return full_scene, success
     return full_scene

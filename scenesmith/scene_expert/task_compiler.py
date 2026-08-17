@@ -15,9 +15,17 @@ import time
 from pathlib import Path
 from typing import Any
 
-from scenesmith.agent_utils.thinking import chat_template_kwargs_from_effort
+from scenesmith.agent_utils.thinking import (
+    chat_template_kwargs_from_effort,
+    prepend_text_thinking_directive,
+    thinking_directive_from_effort,
+)
 from scenesmith.scene_expert.context_bundle import build_llm_call_debug_record
 from scenesmith.scene_expert.schemas import SceneTaskSpec
+from scenesmith.scenebenchmark_critic.object_taxonomy import (
+    canonical_object_category,
+    execution_owner,
+)
 from scenesmith.utils.llm_json import parse_llm_json_object
 
 console_logger = logging.getLogger(__name__)
@@ -153,6 +161,21 @@ _OBJECT_ALIASES: dict[str, tuple[str, list[str], str]] = {
         ],
         "conference_table",
     ),
+    "dining table": (
+        "large",
+        ["dining table", "dining tables"],
+        "dining_table",
+    ),
+    "coffee table": (
+        "large",
+        ["coffee table", "coffee tables"],
+        "coffee_table",
+    ),
+    "dressing table": (
+        "large",
+        ["dressing table", "dressing tables", "vanity table", "makeup table"],
+        "dressing_table",
+    ),
     "filing cabinet": (
         "large",
         ["filing cabinet", "filing cabinets", "file cabinet"],
@@ -163,6 +186,28 @@ _OBJECT_ALIASES: dict[str, tuple[str, list[str], str]] = {
         ["office chair", "office chairs", "desk chair", "desk chairs"],
         "office_chair",
     ),
+    "dining chair": (
+        "large",
+        ["dining chair", "dining chairs"],
+        "dining_chair",
+    ),
+    "stool": ("large", ["stool", "stools", "vanity stool"], "stool"),
+    "water dispenser": (
+        "large",
+        ["water dispenser", "water dispensers", "water cooler"],
+        "water_dispenser",
+    ),
+    "storage cabinet": (
+        "large",
+        ["storage cabinet", "storage cabinets", "storage cupboard"],
+        "storage_cabinet",
+    ),
+    "tv stand": (
+        "large",
+        ["tv stand", "tv stands", "television stand", "media console"],
+        "tv_stand",
+    ),
+    "television": ("large", ["television", "televisions"], "television"),
     "rocking chair": (
         "large",
         ["rocking chair", "rocking chairs"],
@@ -209,13 +254,25 @@ _OBJECT_ALIASES: dict[str, tuple[str, list[str], str]] = {
         "ceiling light",
     ),
     "book": ("small", ["book", "books"], "book"),
-    "plant": ("small", ["plant", "plants"], "plant"),
+    "plant": ("large", ["plant", "plants", "floor plant", "floor plants"], "plant"),
     "monitor": (
         "small",
         ["computer monitor", "computer monitors", "monitor", "monitors"],
         "monitor",
     ),
     "printer": ("small", ["printer", "printers"], "printer"),
+    "wastebasket": (
+        "small",
+        ["wastebasket", "wastebaskets", "trash can", "trash bin"],
+        "wastebasket",
+    ),
+    "plate": ("small", ["plate", "plates"], "plate"),
+    "cutlery": ("small", ["cutlery", "flatware", "silverware"], "cutlery"),
+    "drinking glass": (
+        "small",
+        ["drinking glass", "drinking glasses", "glass", "glasses"],
+        "glass",
+    ),
     "brochure holder": (
         "small",
         ["brochure holder", "brochure holders", "leaflet holder"],
@@ -231,6 +288,7 @@ _SPECIFIC_INVENTORY_FAMILIES = {
     "coffee_table": "table",
     "dining_table": "table",
     "conference_table": "table",
+    "dressing_table": "table",
     "office_chair": "chair",
     "guest_chair": "chair",
     "student_chair": "chair",
@@ -241,6 +299,11 @@ _SPECIFIC_INVENTORY_FAMILIES = {
 _INVENTORY_CATEGORY_ALIASES = {
     "computer_monitor": "monitor",
     "computer_display": "monitor",
+    "vanity": "dressing_table",
+    "vanity_table": "dressing_table",
+    "makeup_table": "dressing_table",
+    "water_cooler": "water_dispenser",
+    "storage_cupboard": "storage_cabinet",
     "chalkboard": "instructional_surface",
     "blackboard": "instructional_surface",
     "whiteboard": "instructional_surface",
@@ -248,6 +311,13 @@ _INVENTORY_CATEGORY_ALIASES = {
     "projector_screen": "instructional_surface",
     "teaching_screen": "instructional_surface",
     "presentation_screen": "instructional_surface",
+    "floor_plant": "plant",
+    "large_floor_plant": "plant",
+    "large_plant": "plant",
+    "potted_plant": "plant",
+    "table_settings": "table_setting",
+    "place_setting": "table_setting",
+    "place_settings": "table_setting",
 }
 
 _VIRTUAL_CATEGORIES = {
@@ -272,6 +342,22 @@ _WALL_STAGE_CATEGORIES = {
     "wall_light",
 }
 
+_FURNITURE_STAGE_CATEGORIES = {
+    "dressing_table",
+    "plant",
+    "stool",
+    "storage_cabinet",
+    "water_dispenser",
+}
+
+_MANIPULAND_STAGE_CATEGORIES = {
+    "cutlery",
+    "glass",
+    "monitor",
+    "plate",
+}
+
+_TABLE_SETTING_COMPONENTS = frozenset({"plate", "cutlery", "glass"})
 # Media supports are furniture even when an LLM mistakes a phrase such as
 # "TV stand on the opposite wall" for a wall-mounted placement.
 _FLOOR_STANDING_MEDIA_SUPPORT_CATEGORIES = frozenset(
@@ -288,21 +374,24 @@ _FLOOR_STANDING_MEDIA_SUPPORT_CATEGORIES = frozenset(
 def _extract_count_before_alias(text: str, alias: str) -> int:
     """Return a conservative count for an object mention in fallback parsing."""
     alias_pattern = re.escape(alias.lower()).replace(r"\ ", r"\s+")
+    if alias.lower() == "table":
+        alias_pattern += r"(?!\s+(?:setting|settings)\b)"
     number_pattern = "|".join([r"\d+", *map(re.escape, _NUMBER_WORDS)])
-    pattern = (
-        rf"(?:(?P<count>{number_pattern})\s+)?" rf"(?:\w+\s+){{0,2}}{alias_pattern}\b"
-    )
     best = 0
-    for match in re.finditer(pattern, text):
-        count_text = match.groupdict().get("count")
-        if not count_text:
-            count = 1
-        elif count_text.isdigit():
+    counted_pattern = (
+        rf"(?<![a-z0-9])(?P<count>{number_pattern})\s+"
+        rf"(?:[a-z][a-z0-9-]*\s+){{0,2}}?{alias_pattern}\b"
+    )
+    for match in re.finditer(counted_pattern, text):
+        count_text = match.group("count")
+        if count_text.isdigit():
             count = int(count_text)
         else:
             count = _NUMBER_WORDS.get(count_text, 1)
         best = max(best, count)
-    return best
+    if best:
+        return best
+    return int(re.search(rf"(?<![a-z0-9]){alias_pattern}\b", text) is not None)
 
 
 def _extract_required_objects_from_prompt(prompt_lower: str) -> dict[str, list[str]]:
@@ -435,7 +524,7 @@ def _normalize_stage_ownership(
     """
 
     def inventory_key(value: str) -> str:
-        key = "_".join(str(value or "").strip().lower().split())
+        key = canonical_object_category(value)
         return _INVENTORY_CATEGORY_ALIASES.get(key, key)
 
     inventories = {
@@ -449,6 +538,53 @@ def _normalize_stage_ownership(
         values[:] = [
             value for value in values if inventory_key(value) not in _VIRTUAL_CATEGORIES
         ]
+
+    # The model may emit aliases as separate inventories (for example four
+    # ``floor plant`` rows plus four ``plant`` rows). Repeated identical names
+    # are real cardinality, while alias-equivalent groups describe the same set.
+    alias_counts: dict[str, dict[str, int]] = {}
+    for values in inventories.values():
+        for value in values:
+            raw_key = "_".join(str(value or "").strip().lower().split())
+            category = inventory_key(value)
+            aliases = alias_counts.setdefault(category, {})
+            aliases[raw_key] = aliases.get(raw_key, 0) + 1
+    for category, counts in alias_counts.items():
+        if len(counts) <= 1:
+            continue
+        desired_count = max(counts.values())
+        owning_stage = next(
+            stage
+            for stage, values in inventories.items()
+            if any(inventory_key(value) == category for value in values)
+        )
+        for stage, values in inventories.items():
+            inventories[stage] = [
+                value for value in values if inventory_key(value) != category
+            ]
+        inventories[owning_stage].extend([category] * desired_count)
+
+    for values in inventories.values():
+        values[:] = [
+            (
+                inventory_key(value)
+                if "_".join(str(value or "").strip().lower().split())
+                in _INVENTORY_CATEGORY_ALIASES
+                else value
+            )
+            for value in values
+        ]
+
+    physical_categories = {
+        inventory_key(value) for values in inventories.values() for value in values
+    }
+    if "table_setting" in physical_categories and (
+        physical_categories & _TABLE_SETTING_COMPONENTS
+    ):
+        for stage, values in inventories.items():
+            inventories[stage] = [
+                value for value in values if inventory_key(value) != "table_setting"
+            ]
     existing_stage: dict[str, str] = {}
     for stage, values in inventories.items():
         for value in values:
@@ -463,11 +599,36 @@ def _normalize_stage_ownership(
     for category in _WALL_STAGE_CATEGORIES:
         if category in category_stages:
             category_stages[category] = "wall"
+    for category in _FURNITURE_STAGE_CATEGORIES:
+        if category in category_stages:
+            category_stages[category] = "large"
+    for category in _MANIPULAND_STAGE_CATEGORIES:
+        if category in category_stages:
+            category_stages[category] = "small"
     for category in _FLOOR_STANDING_MEDIA_SUPPORT_CATEGORIES:
         if category in category_stages:
             category_stages[category] = "large"
+    task_stage_to_owner = {
+        "large": "furniture",
+        "wall": "wall_mounted",
+        "ceiling": "ceiling_mounted",
+        "small": "manipuland",
+    }
+    owner_to_task_stage = {owner: stage for stage, owner in task_stage_to_owner.items()}
+    for category, stage in list(category_stages.items()):
+        category_stages[category] = owner_to_task_stage[
+            execution_owner(
+                category,
+                existing_owner=task_stage_to_owner.get(stage, ""),
+            )
+        ]
     desired_counts: dict[str, int] = {}
-    for category in _WALL_STAGE_CATEGORIES:
+    for category in (
+        _WALL_STAGE_CATEGORIES
+        | _FURNITURE_STAGE_CATEGORIES
+        | _MANIPULAND_STAGE_CATEGORIES
+        | {"wastebasket"}
+    ):
         inventory_count = sum(
             inventory_key(value) == category
             for values in inventories.values()
@@ -531,6 +692,23 @@ def _normalize_stage_ownership(
             "required_small_objects": inventories["small"],
         }
     )
+
+
+def _task_spec_normalization_warnings(
+    raw_spec: SceneTaskSpec, normalized_spec: SceneTaskSpec
+) -> list[str]:
+    warnings: list[str] = []
+    for field in (
+        "required_large_objects",
+        "required_wall_objects",
+        "required_ceiling_objects",
+        "required_small_objects",
+    ):
+        before = list(getattr(raw_spec, field))
+        after = list(getattr(normalized_spec, field))
+        if before != after:
+            warnings.append(f"Normalized {field}: {before!r} -> {after!r}")
+    return warnings
 
 
 def _fallback_spec_from_prompt(prompt: str) -> SceneTaskSpec:
@@ -617,6 +795,7 @@ class TaskCompiler:
                 or os.environ.get("OPENAI_BASE_URL", "http://localhost:8000/v1"),
                 api_key=api_key or os.environ.get("OPENAI_API_KEY", "dummy"),
             )
+        self.last_trace: dict = {}
 
     def compile(self, prompt: str) -> SceneTaskSpec:
         """Parse a raw text prompt into a SceneTaskSpec.
@@ -632,7 +811,7 @@ class TaskCompiler:
         """
         console_logger.info(f"TaskCompiler: compiling prompt: {prompt[:100]}...")
         user_message = f"Extract scene requirements from: {prompt}"
-        messages = [
+        base_messages = [
             {"role": "system", "content": _SYSTEM_PROMPT},
             {"role": "user", "content": user_message},
         ]
@@ -641,122 +820,224 @@ class TaskCompiler:
                 role="task_compiler",
                 stage="task_compiler",
                 event="compile",
-                messages=messages,
+                messages=base_messages,
                 response_model=SceneTaskSpec,
             )
             if result.value is None:
                 reason = (f"{result.final_error_kind}: {result.final_error}").strip(
                     ": "
                 )
+                task_spec = _fallback_spec_from_prompt(prompt).model_copy(
+                    update={"compiler_failure_reason": reason}
+                )
+                self.last_trace = {
+                    "status": "fallback",
+                    "attempts": [attempt.model_dump() for attempt in result.attempts],
+                    "retry_count": max(0, len(result.attempts) - 1),
+                    "failure_reason": reason,
+                    "normalized_task_spec": task_spec.model_dump(
+                        mode="json", exclude_none=True
+                    ),
+                    "normalization_warnings": [],
+                }
                 console_logger.warning(
                     "Structured TaskCompiler failed; using deterministic contract: %s",
                     reason,
                 )
-                return _fallback_spec_from_prompt(prompt).model_copy(
-                    update={"compiler_failure_reason": reason}
-                )
-            return _normalize_stage_ownership(
-                result.value,
-                prompt=prompt,
-            ).model_copy(
-                update={"compiler_status": "ok", "compiler_failure_reason": ""}
-            )
+                return task_spec
 
-        started_at = time.perf_counter()
-
-        try:
-            response = self._client.chat.completions.create(
-                model=self._model,
-                messages=messages,
-                temperature=self._temperature,
-                max_tokens=self._max_tokens,
-                extra_body=chat_template_kwargs_from_effort("none"),
-            )
-        except Exception as exc:
-            record = build_llm_call_debug_record(
-                stage="task_compiler",
-                agent_role="task_compiler",
-                event="compile",
-                prompt=messages,
-                error=f"{type(exc).__name__}: {exc}",
-            ).model_dump()
-            record.update(
-                {
-                    "input": messages,
-                    "output": "",
-                    "elapsed_sec": round(time.perf_counter() - started_at, 6),
-                    "status": "error",
-                }
-            )
-            _append_llm_debug(record)
-            fallback = _fallback_spec_from_prompt(prompt).model_copy(
-                update={"compiler_failure_reason": f"{type(exc).__name__}: {exc}"}
-            )
-            console_logger.warning(
-                "TaskCompiler model call failed; using deterministic contract: %s", exc
-            )
-            return fallback
-
-        message = response.choices[0].message
-        raw = message.content
-        # Qwen3 with --reasoning-parser may put output in reasoning_content.
-        if not raw:
-            raw = getattr(message, "reasoning_content", None)
-        if not raw:
-            extra = getattr(message, "model_extra", None)
-            if isinstance(extra, dict):
-                raw = extra.get("reasoning_content")
-        console_logger.debug(f"TaskCompiler raw response: {raw}")
-        record = build_llm_call_debug_record(
-            stage="task_compiler",
-            agent_role="task_compiler",
-            event="compile",
-            prompt=messages,
-            output=raw or "",
-            raw_response=response,
-        ).model_dump()
-        record.update(
-            {
-                "input": messages,
-                "output": raw or "",
-                "elapsed_sec": round(time.perf_counter() - started_at, 6),
-                "status": "ok",
-            }
-        )
-        usage = getattr(response, "usage", None)
-        if usage is not None:
-            usage_payload = (
-                usage.model_dump() if hasattr(usage, "model_dump") else vars(usage)
-            )
-            record["token_usage"] = {
-                str(key): int(value)
-                for key, value in usage_payload.items()
-                if isinstance(value, int)
-            }
-
-        try:
-            data = _extract_json_from_text(raw)
+            raw_task_spec = result.value
             task_spec = _normalize_stage_ownership(
-                SceneTaskSpec.model_validate(data), prompt=prompt
+                raw_task_spec, prompt=prompt
             ).model_copy(
                 update={"compiler_status": "ok", "compiler_failure_reason": ""}
             )
-            _append_llm_debug(record)
-            console_logger.info(
-                f"TaskCompiler: room_type={task_spec.room_type}, style={task_spec.style}, "
-                f"large_objects={task_spec.required_large_objects}"
+            normalization_warnings = _task_spec_normalization_warnings(
+                raw_task_spec, task_spec
             )
+            self.last_trace = {
+                "status": "ok",
+                "attempts": [attempt.model_dump() for attempt in result.attempts],
+                "retry_count": max(0, len(result.attempts) - 1),
+                "failure_reason": "",
+                "raw_task_spec": raw_task_spec.model_dump(
+                    mode="json", exclude_none=True
+                ),
+                "normalized_task_spec": task_spec.model_dump(
+                    mode="json", exclude_none=True
+                ),
+                "normalization_warnings": normalization_warnings,
+            }
             return task_spec
-        except Exception as e:
-            record["status"] = "error"
-            record["error"] = f"{type(e).__name__}: {e}"
-            _append_llm_debug(record)
-            fallback = _fallback_spec_from_prompt(prompt).model_copy(
-                update={"compiler_failure_reason": f"{type(e).__name__}: {e}"}
-            )
-            console_logger.warning(
-                "TaskCompiler output failed v3 validation; using deterministic "
-                "contract: %s",
-                e,
-            )
-            return fallback
+
+        attempts: list[dict] = []
+        previous_output = ""
+        validation_error = ""
+        for attempt in range(2):
+            messages = [
+                {
+                    "role": "system",
+                    "content": prepend_text_thinking_directive(
+                        _SYSTEM_PROMPT,
+                        thinking_directive_from_effort("none", model=self._model),
+                    ),
+                },
+                {"role": "user", "content": user_message},
+            ]
+            if attempt:
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "The previous candidate failed validation. Return a corrected "
+                            "JSON object only.\nValidation error: "
+                            f"{validation_error}\nPrevious candidate:\n{previous_output}"
+                        ),
+                    }
+                )
+            started_at = time.perf_counter()
+            raw = ""
+            response = None
+            try:
+                response = self._client.chat.completions.create(
+                    model=self._model,
+                    messages=messages,
+                    temperature=self._temperature,
+                    max_tokens=self._max_tokens,
+                    response_format={
+                        "type": "json_schema",
+                        "json_schema": {
+                            "name": "scene_task_spec",
+                            "strict": True,
+                            "schema": SceneTaskSpec.model_json_schema(),
+                        },
+                    },
+                    extra_body=chat_template_kwargs_from_effort(
+                        "none", model=self._model
+                    ),
+                )
+                message = response.choices[0].message
+                raw = message.content
+                if not raw:
+                    raw = getattr(message, "reasoning_content", None)
+                if not raw:
+                    extra = getattr(message, "model_extra", None)
+                    if isinstance(extra, dict):
+                        raw = extra.get("reasoning_content")
+                data = _extract_json_from_text(raw)
+                raw_task_spec = SceneTaskSpec.model_validate(data)
+                task_spec = _normalize_stage_ownership(
+                    raw_task_spec, prompt=prompt
+                ).model_copy(
+                    update={"compiler_status": "ok", "compiler_failure_reason": ""}
+                )
+                normalization_warnings = _task_spec_normalization_warnings(
+                    raw_task_spec, task_spec
+                )
+                attempts.append(
+                    {
+                        "attempt": attempt,
+                        "status": "ok",
+                        "elapsed_sec": round(time.perf_counter() - started_at, 6),
+                    }
+                )
+                self.last_trace = {
+                    "status": "ok",
+                    "attempts": attempts,
+                    "retry_count": attempt,
+                    "failure_reason": "",
+                    "raw_task_spec": raw_task_spec.model_dump(
+                        mode="json", exclude_none=True
+                    ),
+                    "normalized_task_spec": task_spec.model_dump(
+                        mode="json", exclude_none=True
+                    ),
+                    "normalization_warnings": normalization_warnings,
+                }
+                record = build_llm_call_debug_record(
+                    stage="task_compiler",
+                    agent_role="task_compiler",
+                    event="compile",
+                    prompt=messages,
+                    output=raw or "",
+                    raw_response=response,
+                ).model_dump()
+                record.update(
+                    {
+                        "input": messages,
+                        "output": raw or "",
+                        "elapsed_sec": attempts[-1]["elapsed_sec"],
+                        "status": "ok",
+                        "attempt": attempt,
+                        "raw_task_spec": raw_task_spec.model_dump(
+                            mode="json", exclude_none=True
+                        ),
+                        "normalized_task_spec": task_spec.model_dump(
+                            mode="json", exclude_none=True
+                        ),
+                        "normalization_warnings": normalization_warnings,
+                    }
+                )
+                usage = getattr(response, "usage", None)
+                if usage is not None:
+                    usage_payload = (
+                        usage.model_dump()
+                        if hasattr(usage, "model_dump")
+                        else vars(usage)
+                    )
+                    record["token_usage"] = {
+                        str(key): int(value)
+                        for key, value in usage_payload.items()
+                        if isinstance(value, int)
+                    }
+                _append_llm_debug(record)
+                return task_spec
+            except Exception as exc:
+                validation_error = f"{type(exc).__name__}: {exc}"
+                previous_output = raw
+                elapsed = round(time.perf_counter() - started_at, 6)
+                attempts.append(
+                    {
+                        "attempt": attempt,
+                        "status": "error",
+                        "error": validation_error,
+                        "elapsed_sec": elapsed,
+                    }
+                )
+                record = build_llm_call_debug_record(
+                    stage="task_compiler",
+                    agent_role="task_compiler",
+                    event="compile",
+                    prompt=messages,
+                    output=raw,
+                    raw_response=response,
+                    error=validation_error,
+                ).model_dump()
+                record.update(
+                    {
+                        "input": messages,
+                        "output": raw,
+                        "elapsed_sec": elapsed,
+                        "status": "error",
+                        "attempt": attempt,
+                    }
+                )
+                _append_llm_debug(record)
+
+        attempts.append(
+            {"attempt": 2, "status": "deterministic_fallback", "elapsed_sec": 0.0}
+        )
+        self.last_trace = {
+            "status": "fallback",
+            "attempts": attempts,
+            "retry_count": 1,
+            "failure_reason": validation_error,
+        }
+        fallback = _fallback_spec_from_prompt(prompt).model_copy(
+            update={"compiler_failure_reason": validation_error}
+        )
+        console_logger.warning(
+            "TaskCompiler failed twice; using deterministic contract: %s",
+            validation_error,
+        )
+        return fallback

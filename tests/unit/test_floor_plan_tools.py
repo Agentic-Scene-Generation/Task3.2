@@ -4,10 +4,25 @@ import json
 import random
 import unittest
 
-from scenesmith.agent_utils.house import HouseLayout, OpeningType, WallDirection
+from scenesmith.agent_utils.house import (
+    HouseLayout,
+    Opening,
+    OpeningType,
+    WallDirection,
+)
 from scenesmith.experiments.base_experiment import BaseExperiment
+from scenesmith.floor_plan_agents.reservation_validator import (
+    _candidate_walls,
+    adaptive_implicit_window_budget,
+    opening_free_spans,
+    validate_floor_plan_reservations,
+)
 from scenesmith.floor_plan_agents.tools.floor_plan_tools import FloorPlanTools
 from scenesmith.floor_plan_agents.tools.room_placement import get_shared_edge
+from scenesmith.scene_expert.schemas import (
+    FloorPlanReservation,
+    FloorPlanReservationManifest,
+)
 
 
 class _CapturingFloorPlanAgent:
@@ -41,6 +56,162 @@ def test_floor_plan_agent_receives_experiment_materials_endpoint():
 
     assert agent.cfg.materials.retrieval_server_host == "127.0.0.1"
     assert agent.cfg.materials.retrieval_server_port == 63308
+
+
+def test_adaptive_implicit_window_budget_thresholds():
+    assert adaptive_implicit_window_budget(25.0) == 1
+    assert adaptive_implicit_window_budget(25.01) == 2
+    assert adaptive_implicit_window_budget(50.0) == 2
+    assert adaptive_implicit_window_budget(50.01) == 3
+
+
+def test_opening_free_spans_treats_position_as_left_edge():
+    layout = HouseLayout()
+    tools = FloorPlanTools(layout=layout, mode="house")
+    result = tools._generate_room_specs_impl(
+        room_specs_json=json.dumps(
+            [{"type": "office", "prompt": "Office", "width": 5.0, "depth": 4.0}]
+        )
+    )
+    assert result.success
+    wall = next(
+        wall
+        for wall in layout.placed_rooms[0].walls
+        if wall.direction == WallDirection.NORTH
+    )
+    wall.openings.append(
+        Opening(
+            opening_id="window_1",
+            opening_type=OpeningType.WINDOW,
+            position_along_wall=1.0,
+            width=1.0,
+            height=1.5,
+            sill_height=0.9,
+        )
+    )
+
+    assert opening_free_spans(wall) == [(0.0, 0.85), (2.15, 5.0)]
+
+
+def test_floor_plan_validation_enforces_implicit_window_budget():
+    manifest = FloorPlanReservationManifest(enabled=True)
+    layout = HouseLayout()
+    tools = FloorPlanTools(
+        layout=layout,
+        mode="house",
+        reservation_manifest=manifest,
+    )
+    result = tools._generate_room_specs_impl(
+        room_specs_json=json.dumps(
+            [{"type": "office", "prompt": "Office", "width": 10.0, "depth": 7.0}]
+        )
+    )
+    assert result.success
+    labels = [
+        label
+        for label, (_room_a, room_b, _direction) in layout.boundary_labels.items()
+        if room_b is None
+    ]
+    assert tools._add_door_impl(wall_id=labels[0], position="left").success
+    for label in labels:
+        window = tools._add_window_impl(
+            wall_id=label,
+            position="right" if label == labels[0] else "center",
+            width=1.0,
+        )
+        assert window.success
+
+    validation = tools._validate_impl()
+    assert validation.layout == "ok"
+    assert validation.connectivity == "ok"
+    assert validation.future_capacity == "ok"
+    assert "implicit_window_budget_exceeded" in validation.opening_budget
+
+    explicit_tools = FloorPlanTools(
+        layout=layout,
+        mode="house",
+        reservation_manifest=manifest.model_copy(
+            update={"explicit_window_count": 4, "explicit_window_required": True}
+        ),
+    )
+    explicit_validation = explicit_tools._validate_impl()
+    assert explicit_validation.opening_budget == "ok"
+
+
+def test_reservation_capacity_does_not_borrow_from_other_room_types():
+    layout = HouseLayout()
+    tools = FloorPlanTools(layout=layout, mode="house")
+    result = tools._generate_room_specs_impl(
+        room_specs_json=json.dumps(
+            [
+                {"type": "office", "prompt": "Office", "width": 4.0, "depth": 4.0},
+                {
+                    "type": "living_room",
+                    "prompt": "Living room",
+                    "width": 10.0,
+                    "depth": 10.0,
+                    "connections": {"office": "DOOR"},
+                },
+            ]
+        )
+    )
+    assert result.success
+    manifest = FloorPlanReservationManifest(
+        enabled=True,
+        preserve_entrance_route=False,
+        adaptive_window_budget=False,
+        reservations=[
+            FloorPlanReservation(
+                reservation_id="office-zones",
+                kind="functional_zone",
+                room_type="office",
+                min_zone_area_m2=20.0,
+            ),
+            FloorPlanReservation(
+                reservation_id="missing-bedroom-anchor",
+                kind="wall_anchor",
+                room_type="bedroom",
+                min_wall_width_m=1.0,
+            ),
+        ],
+    )
+
+    validation = validate_floor_plan_reservations(layout, manifest)
+
+    area_issue = next(
+        issue
+        for issue in validation.issues
+        if issue["issue_type"] == "insufficient_functional_zone_area"
+    )
+    assert area_issue["room_type"] == "office"
+    assert area_issue["available_m2"] == 16.0
+    assert any(
+        issue["issue_type"] == "insufficient_opening_free_wall_capacity"
+        and issue["reservation_id"] == "missing-bedroom-anchor"
+        for issue in validation.issues
+    )
+
+
+def test_back_wall_reservation_uses_scene_local_south_wall():
+    layout = HouseLayout()
+    tools = FloorPlanTools(layout=layout, mode="house")
+    result = tools._generate_room_specs_impl(
+        room_specs_json=json.dumps(
+            [{"type": "bedroom", "prompt": "Bedroom", "width": 5.0, "depth": 4.0}]
+        )
+    )
+    assert result.success
+    reservation = FloorPlanReservation(
+        reservation_id="bed-back-wall",
+        kind="wall_anchor",
+        room_type="bedroom",
+        wall_role="back",
+        min_wall_width_m=2.0,
+    )
+
+    walls = _candidate_walls(layout, reservation)
+
+    assert {wall.direction for wall in walls} == {WallDirection.SOUTH}
 
 
 class TestOpeningPreservation(unittest.TestCase):

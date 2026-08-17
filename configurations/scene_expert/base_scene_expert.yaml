@@ -21,9 +21,6 @@ mode: "disabled"
 components:
   task_compiler:
     enabled: null
-    # auto reuses the critic intent contract when available and otherwise uses
-    # the wrapper compiler. Other values: sceneexpert, critic_intent, deterministic.
-    source: "auto"
   harness:
     enabled: null
   global_planner:
@@ -83,6 +80,22 @@ structured_llm:
       temperature: 0.1
       max_attempts: 2
       response_format: "json_schema"
+
+# Optional deterministic AgentSense-style resident behavior planner. This is
+# intentionally separate from the SceneExpert ablation mode and is a strict
+# no-op unless enabled explicitly.
+behavior:
+  enabled: false
+  planner: "template"
+  horizon: "week"
+  # When false, the full behavior report is still written for audit, but only
+  # assets explicitly found in the prompt are merged into SceneTaskSpec.
+  inferred_assets_are_required: true
+
+# Deterministic capacity/opening gate for future furniture and wall stages.
+# Kept off in the compatible base config; ablation 3 enables it explicitly.
+floor_plan_reservations:
+  enabled: false
 
 # Memory system
 memory:

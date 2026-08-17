@@ -14,6 +14,7 @@ import logging
 import os
 import re
 import time
+
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Generic, Mapping, TypeVar
@@ -64,14 +65,10 @@ class StructuredLLMProfile:
             retry_max_tokens=(
                 int(retry_tokens) if retry_tokens not in (None, "") else None
             ),
-            timeout_seconds=float(
-                data.get("timeout_seconds", base.timeout_seconds)
-            ),
+            timeout_seconds=float(data.get("timeout_seconds", base.timeout_seconds)),
             temperature=float(data.get("temperature", base.temperature)),
             max_attempts=max(1, int(data.get("max_attempts", base.max_attempts))),
-            response_format=str(
-                data.get("response_format", base.response_format)
-            ),
+            response_format=str(data.get("response_format", base.response_format)),
         )
 
     @property
@@ -244,16 +241,12 @@ class SceneExpertStructuredLLMClient:
                     previous_content,
                 )
 
-            thinking_mode = (
-                active_profile.thinking_mode if thinking_enabled else "none"
-            )
+            thinking_mode = active_profile.thinking_mode if thinking_enabled else "none"
             request_messages = self._apply_thinking_mode(
                 retry_messages,
                 thinking_mode=thinking_mode,
             )
-            prompt_text = json.dumps(
-                request_messages, ensure_ascii=False, default=str
-            )
+            prompt_text = json.dumps(request_messages, ensure_ascii=False, default=str)
             started = time.perf_counter()
             response = None
             content = ""
@@ -444,9 +437,7 @@ class SceneExpertStructuredLLMClient:
                 continue
             content = message.get("content")
             if isinstance(content, str):
-                message["content"] = prepend_text_thinking_directive(
-                    content, directive
-                )
+                message["content"] = prepend_text_thinking_directive(content, directive)
                 break
             if isinstance(content, list):
                 for item in content:
@@ -510,7 +501,9 @@ class SceneExpertStructuredLLMClient:
         return str(getattr(choices[0], "finish_reason", "") or "") if choices else ""
 
     @staticmethod
-    def _normalize_failure(exc: Exception, *, response: Any = None) -> _StructuredFailure:
+    def _normalize_failure(
+        exc: Exception, *, response: Any = None
+    ) -> _StructuredFailure:
         if isinstance(exc, _StructuredFailure):
             return exc
         name = type(exc).__name__
@@ -638,7 +631,9 @@ class SceneExpertStructuredLLMClient:
             with path.open("a", encoding="utf-8", newline="\n") as file:
                 file.write(json.dumps(record.model_dump(), ensure_ascii=False) + "\n")
         except Exception as exc:
-            console_logger.warning("Failed to write structured LLM debug record: %s", exc)
+            console_logger.warning(
+                "Failed to write structured LLM debug record: %s", exc
+            )
 
 
 def extract_json_object(text: str) -> dict[str, Any]:

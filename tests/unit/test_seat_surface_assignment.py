@@ -92,6 +92,24 @@ def test_repeated_mislabeled_surfaces_still_pair_one_to_one() -> None:
     }
 
 
+def test_boundary_workstation_keeps_usable_desk_side() -> None:
+    """Clamp a near-wall chair slot instead of assigning the desk's back side."""
+    desk = _object("office_desk_0", "office_desk", (0.0, -2.5), (1.4, 0.7), yaw=180.0)
+    chair = _object("office_chair_0", "office_chair", (0.0, -3.14), (0.6, 0.6))
+
+    assignment = assign_work_seats_to_surfaces(
+        [desk, chair],
+        task_instruction="An office with one desk and one office chair.",
+        room_type="office",
+        room_bounds=(-5.0, -3.45, 5.0, 3.45),
+    )[0]
+
+    assert assignment.surface_id == "office_desk_0"
+    assert assignment.side == "front"
+    assert assignment.target_center_xy[1] < -3.0
+    assert assignment.target_yaw_deg == 0.0
+
+
 def test_singleton_teacher_surface_does_not_take_repeated_student_cohort_seat() -> None:
     objects = [
         _object("teacher_desk_0", "desk", (0.0, 4.0), (1.6, 0.8)),

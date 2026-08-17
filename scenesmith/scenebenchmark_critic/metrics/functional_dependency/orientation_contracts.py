@@ -15,6 +15,10 @@ from scenesmith.scenebenchmark_critic.core.geometry import (
     object_affordances,
     object_category,
 )
+from scenesmith.scenebenchmark_critic.intent_contract import (
+    bound_ids,
+    contract_constraints,
+)
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.profiles import (
     object_function_profile,
 )
@@ -130,6 +134,14 @@ def stabilize_orientation_contracts(
     if not objects_by_id:
         return
 
+    # A prompt-level edge distribution with an orientation is the complete
+    # seating contract: it assigns every matching seat to the target's local
+    # edge and specifies its facing.  Do not recreate a looser pairwise
+    # ``furniture_faces_furniture`` contract from the same prompt wording.
+    # Besides duplicating the invariant, the pairwise contract has a different
+    # target-distance model and can survive after the atomic edge repair.
+    edge_owned_subject_ids = _edge_distribution_orientation_subjects(case_pack, objects)
+
     memory = getattr(scene, CONTRACT_ATTR, None)
     if not isinstance(memory, dict):
         memory = {}
@@ -168,7 +180,15 @@ def stabilize_orientation_contracts(
     checks_added = 0
     for subject in objects:
         subject_id = str(subject.get("id") or "")
-        if not subject_id or not _is_seating(subject):
+        if not subject_id:
+            continue
+
+        if subject_id in edge_owned_subject_ids:
+            memory.pop(subject_id, None)
+            _remove_orientation_contract_checks(case_pack, subject_id)
+            continue
+
+        if not _is_seating(subject):
             continue
 
         explicit_facing_target = _explicit_prompt_facing_target(
@@ -256,6 +276,41 @@ def orientation_contract_subjects(case_pack: dict[str, Any]) -> set[str]:
         if subject_id:
             subjects.add(subject_id)
     return subjects
+
+
+def _edge_distribution_orientation_subjects(
+    case_pack: dict[str, Any], objects: list[dict[str, Any]]
+) -> set[str]:
+    """Return seats whose facing is already owned by an edge contract."""
+    subject_ids: set[str] = set()
+    for constraint in contract_constraints(
+        case_pack,
+        relations=("edge_distribution",),
+        include_auxiliary=False,
+    ):
+        if str(constraint.get("orientation") or "") not in {
+            "toward_target",
+            "away_from_target",
+            "parallel_to_edge",
+        }:
+            continue
+        subject_ids.update(bound_ids(constraint.get("subjects"), objects))
+    return subject_ids
+
+
+def _remove_orientation_contract_checks(
+    case_pack: dict[str, Any], subject_id: str
+) -> None:
+    """Drop a stale per-seat contract superseded by an edge distribution."""
+    case_pack["checks"] = [
+        check
+        for check in case_pack.get("checks") or []
+        if not (
+            isinstance(check, dict)
+            and check.get("check_source") == CONTRACT_CHECK_SOURCE
+            and str(check.get("subject_id") or "") == subject_id
+        )
+    ]
 
 
 def _enabled(config: CriticConfig) -> bool:

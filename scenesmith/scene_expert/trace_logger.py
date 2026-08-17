@@ -7,26 +7,133 @@ the fast memory system and offline SFT/DPO sample construction.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import os
+import shutil
+import subprocess
 import time
 
 from pathlib import Path
+from typing import Iterable
 
 from scenesmith.scene_expert.schemas import (
     FullVerifyReport,
-    HarnessContext,
     MemoryPack,
     RepairResult,
     SceneTaskSpec,
     StageBrief,
     StageCost,
     StageExecutionEvidence,
+    StageRelationContext,
     StageTraceEntry,
     StageVerifyReport,
 )
 
 console_logger = logging.getLogger(__name__)
+
+
+_DEFAULT_CODE_PROVENANCE_PATHS = (
+    "scenesmith/scene_expert/hooks.py",
+    "scenesmith/scene_expert/task_compiler.py",
+    "scenesmith/scene_expert/verifier.py",
+    "scenesmith/scene_expert/repair_controller.py",
+    "scenesmith/scenebenchmark_critic/intent_contract.py",
+    "scenesmith/furniture_agents/stateful_furniture_agent.py",
+    "scenesmith/manipuland_agents/stateful_manipuland_agent.py",
+    "scenesmith/manipuland_agents/cross_stage_inventory.py",
+    "scenesmith/manipuland_agents/tools/manipuland_tools.py",
+    "scenesmith/agent_utils/clearance_zones.py",
+    "scenesmith/scenebenchmark_critic/asset_library_annotations.py",
+    "scenesmith/scenebenchmark_critic/metrics/functional_dependency/builder.py",
+    "scenesmith/scenebenchmark_critic/metrics/functional_dependency/relations.py",
+)
+
+
+def collect_code_provenance(
+    repo_root: Path | None = None,
+    source_paths: Iterable[str] = _DEFAULT_CODE_PROVENANCE_PATHS,
+) -> dict[str, object]:
+    """Capture the code identity loaded at scene-run startup.
+
+    A replay can outlive a commit or start from a dirty worktree.  Resolved
+    Hydra configuration alone therefore cannot identify the code that produced
+    a trace.  This helper intentionally records both Git state and hashes of
+    the modules that own the SceneExpert/repair behavior under investigation.
+    """
+    root = repo_root or Path(__file__).resolve().parents[2]
+    root = root.resolve()
+    provenance: dict[str, object] = {
+        "repo_root": str(root),
+        "git_revision": "",
+        "git_status": "",
+        "git_status_hash": "",
+        "dirty": None,
+        "source_hashes": {},
+    }
+
+    git_executable = _git_executable()
+
+    def git_output(*args: str) -> str:
+        if git_executable is None:
+            return ""
+        try:
+            result = subprocess.run(
+                [git_executable, *args],
+                cwd=root,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return ""
+        return result.stdout.strip() if result.returncode == 0 else ""
+
+    revision = git_output("rev-parse", "HEAD")
+    status = git_output("status", "--porcelain=v1", "--untracked-files=normal")
+    provenance["git_revision"] = revision
+    provenance["git_status"] = status
+    provenance["git_status_hash"] = hashlib.sha256(status.encode("utf-8")).hexdigest()
+    provenance["dirty"] = bool(status) if revision else None
+
+    source_hashes: dict[str, str] = {}
+    for relative_path in source_paths:
+        path = (root / relative_path).resolve()
+        try:
+            path.relative_to(root)
+        except ValueError:
+            continue
+        if path.is_file():
+            # Keep provenance stable across Windows and Linux checkouts. Git
+            # tracks these Python sources as text, while a Windows worktree may
+            # materialize CRLF bytes for the same committed content.
+            content = path.read_bytes().replace(b"\r\n", b"\n")
+            source_hashes[str(relative_path)] = hashlib.sha256(content).hexdigest()
+    provenance["source_hashes"] = source_hashes
+    return provenance
+
+
+def _git_executable() -> str | None:
+    """Find Git even when isolated workers receive a minimal ``PATH``."""
+    configured = os.environ.get("GIT")
+    windows_candidates = (
+        str(Path(os.environ.get("ProgramFiles", "")) / "Git" / "cmd" / "git.exe"),
+        str(Path(os.environ.get("ProgramFiles", "")) / "Git" / "bin" / "git.exe"),
+        str(Path(os.environ.get("ProgramFiles(x86)", "")) / "Git" / "cmd" / "git.exe"),
+    )
+    candidates = (
+        shutil.which(configured) if configured else None,
+        shutil.which("git"),
+        "/usr/bin/git",
+        "/bin/git",
+        *windows_candidates,
+    )
+    for candidate in candidates:
+        if candidate and Path(candidate).is_file() and os.access(candidate, os.X_OK):
+            return candidate
+    return None
 
 
 class TraceLogger:
@@ -35,7 +142,7 @@ class TraceLogger:
     One TraceLogger instance per scene generation run.
     """
 
-    SCHEMA_VERSION = "1.2"
+    SCHEMA_VERSION = "1.4"
 
     def __init__(
         self,
@@ -46,6 +153,7 @@ class TraceLogger:
         config_hash: str = "",
         task_spec_status: dict | None = None,
         task_spec: dict | None = None,
+        code_provenance: dict[str, object] | None = None,
     ) -> None:
         self._output_dir = Path(output_dir)
         self._traces_dir = self._output_dir / "traces"
@@ -70,6 +178,7 @@ class TraceLogger:
         self._experiment_name = experiment_name
         self._config_hash = config_hash
         self._task_spec = dict(task_spec or {})
+        self._code_provenance = dict(code_provenance or {})
         self._stage_entries: list[StageTraceEntry] = []
         self._start_time = time.time()
         self._full_report: FullVerifyReport | None = None
@@ -91,13 +200,16 @@ class TraceLogger:
             if bool(status.get("degraded", False))
         ]
 
-    def record_task_compiler(self, task_spec: SceneTaskSpec) -> Path:
+    def record_task_compiler(
+        self, task_spec: SceneTaskSpec, compiler_trace: dict | None = None
+    ) -> Path:
         """Persist the inventory-only TaskCompiler result."""
         self._task_compiler = {
             "compiler_status": task_spec.compiler_status,
             "failure_reason": task_spec.compiler_failure_reason,
             "compiler_spec_version": task_spec.compiler_spec_version,
             "task_spec": task_spec.model_dump(mode="json", exclude_none=True),
+            "structured_output": dict(compiler_trace or {}),
         }
         self._task_spec = task_spec.model_dump(mode="json", exclude_none=True)
         self.record_component_status(
@@ -127,10 +239,12 @@ class TraceLogger:
         self,
         stage: str,
         memory_pack: MemoryPack,
-        stage_brief: StageBrief | None,
-        scene_state_path: str,
-        verify_report: StageVerifyReport | None,
-        repair_actions: list[RepairResult],
+        relation_context: StageRelationContext | None = None,
+        planner_trace: dict | None = None,
+        stage_brief: StageBrief | None = None,
+        scene_state_path: str = "",
+        verify_report: StageVerifyReport | None = None,
+        repair_actions: list[RepairResult] | None = None,
         qwen_calls: int = 0,
         stage_time_sec: float | None = None,
         execution_evidence: StageExecutionEvidence | None = None,
@@ -142,10 +256,12 @@ class TraceLogger:
         entry = StageTraceEntry(
             stage=stage,
             memory_pack=memory_pack,
+            relation_context=relation_context,
+            planner_trace=dict(planner_trace or {}),
             stage_brief=stage_brief,
             scene_state_path=scene_state_path,
             verify_report=verify_report,
-            repair_actions=repair_actions,
+            repair_actions=list(repair_actions or []),
             cost=StageCost(qwen_calls=qwen_calls, stage_time_sec=round(elapsed, 1)),
             execution_evidence=execution_evidence or StageExecutionEvidence(),
         )
@@ -158,6 +274,7 @@ class TraceLogger:
         self,
         stage: str,
         memory_pack: MemoryPack,
+        relation_context: StageRelationContext | None,
         stage_brief: StageBrief | None,
         phase: str = "pre",
         execution_evidence: StageExecutionEvidence | None = None,
@@ -171,6 +288,11 @@ class TraceLogger:
             "phase": phase,
             "time_sec": round(time.time() - self._start_time, 1),
             "memory_pack": memory_pack.model_dump(),
+            "relation_context": (
+                relation_context.model_dump(mode="json")
+                if relation_context is not None
+                else None
+            ),
             "stage_brief": stage_brief.model_dump() if stage_brief else None,
             "execution_evidence": (
                 execution_evidence.model_dump() if execution_evidence else None
@@ -263,6 +385,7 @@ class TraceLogger:
             "component_status": self._component_status,
             "experiment_name": self._experiment_name,
             "config_hash": self._config_hash,
+            "code_provenance": self._code_provenance,
             "prompt": self._prompt,
             "task_compiler": self._task_compiler,
             "intent_compiler": self._intent_compiler,
@@ -288,6 +411,7 @@ class TraceLogger:
             "error": error,
             "experiment_name": self._experiment_name,
             "config_hash": self._config_hash,
+            "code_provenance": self._code_provenance,
             "prompt": self._prompt,
             "task_compiler": self._task_compiler,
             "intent_compiler": self._intent_compiler,
@@ -313,6 +437,7 @@ class TraceLogger:
                 "component_status": self._component_status,
                 "experiment_name": self._experiment_name,
                 "config_hash": self._config_hash,
+                "code_provenance": self._code_provenance,
                 "prompt": self._prompt,
                 "task_compiler": self._task_compiler,
                 "intent_compiler": self._intent_compiler,

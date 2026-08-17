@@ -1716,7 +1716,12 @@ def extract_and_propagate_support_surfaces(
         source = "HSSD"
 
         if surfaces is None:
-            # Fallback to HSM algorithm.
+            # A missing or unreadable annotation has no information to preserve,
+            # so recompute it from geometry. An explicit empty annotation is
+            # intentionally returned to the manipuland stage: that stage can
+            # decide whether a hard prompt-owned support target is eligible for
+            # a tightly bounded fallback without inventing surfaces for general
+            # furniture.
             console_logger.info(
                 f"Falling back to HSM algorithm for {furniture_object.object_id}"
             )

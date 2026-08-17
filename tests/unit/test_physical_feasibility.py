@@ -5,7 +5,7 @@ import unittest
 import xml.etree.ElementTree as ET
 
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import numpy as np
 
@@ -18,6 +18,7 @@ from scenesmith.agent_utils.physical_feasibility import (
     _get_colliding_object_ids,
     _restore_collectively_unstable_instances,
     _restore_furniture_that_fell_through_floor,
+    _supported_projection_displacement_limit,
     apply_forward_simulation,
     apply_non_penetration_projection,
     apply_physical_feasibility_postprocessing,
@@ -385,6 +386,133 @@ class TestApplyNonPenetrationProjection(PhysicalFeasibilityTestCase):
                 )
             )
 
+    @patch("scenesmith.agent_utils.physical_feasibility.solve_non_penetration_ik")
+    @patch("scenesmith.agent_utils.physical_feasibility._get_colliding_object_depths")
+    def test_supported_manipuland_has_per_body_fixed_z_constraint(
+        self, mock_collision_depths, mock_solve
+    ) -> None:
+        """Full-3D cleanup must not project an object through its support."""
+        from scenesmith.agent_utils.room import PlacementInfo, SupportSurface
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            scene = self._create_scene_with_manipuland(Path(tmp_dir))
+            table = scene.get_object(UniqueID("table_0"))
+            ball = scene.get_object(UniqueID("ball_0"))
+            surface = SupportSurface(
+                surface_id=UniqueID("table_top"),
+                bounding_box_min=np.array([-0.25, -0.25, 0.0]),
+                bounding_box_max=np.array([0.25, 0.25, 0.0]),
+                transform=RigidTransform(p=[0.0, 0.0, 0.5]),
+            )
+            table.support_surfaces = [surface]
+            ball.placement_info = PlacementInfo(
+                parent_surface_id=surface.surface_id,
+                position_2d=np.array([0.0, 0.0]),
+                rotation_2d=0.0,
+            )
+            mock_collision_depths.return_value = {ball.object_id: 0.01}
+            mock_solve.return_value = (None, False)
+
+            _, success = apply_non_penetration_projection(
+                scene,
+                weld_furniture=True,
+                xy_only=False,
+                solver_name="ipopt",
+            )
+
+            self.assertFalse(success)
+            kwargs = mock_solve.call_args.kwargs
+            fixed_z_bodies = kwargs["fixed_z_bodies"]
+            xy_regions = kwargs["xy_regions"]
+            self.assertIsNotNone(fixed_z_bodies)
+            self.assertEqual(fixed_z_bodies, set(xy_regions))
+            self.assertEqual(len(fixed_z_bodies), 1)
+
+    @patch("scenesmith.agent_utils.physical_feasibility._update_scene_from_plant")
+    @patch("scenesmith.agent_utils.physical_feasibility.solve_non_penetration_ik")
+    @patch("scenesmith.agent_utils.physical_feasibility._create_drake_plant_for_ik")
+    @patch("scenesmith.agent_utils.physical_feasibility._get_colliding_object_depths")
+    def test_supported_projection_anomalous_move_rolls_back_atomically(
+        self, mock_depths, mock_create, mock_solve, mock_update
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            scene = self._create_scene_with_manipuland(Path(tmp_dir))
+            table = scene.get_object(UniqueID("table_0"))
+            ball = scene.get_object(UniqueID("ball_0"))
+            initial_table = table.transform.translation().copy()
+            initial_ball = ball.transform.translation().copy()
+
+            body_index = Mock()
+            plant = Mock()
+            plant.get_body.return_value = Mock()
+            mock_depths.return_value = {ball.object_id: 0.002}
+            mock_create.return_value = (
+                plant,
+                Mock(),
+                {ball.object_id: (Mock(), body_index)},
+                {},
+            )
+            mock_solve.return_value = (Mock(), True)
+
+            def apply_bad_solution(**_kwargs):
+                ball.transform = RigidTransform(p=initial_ball + [0.87, 0.0, 0.0])
+                table.transform = RigidTransform(p=initial_table + [0.1, 0.0, 0.0])
+
+            mock_update.side_effect = apply_bad_solution
+
+            projected, success = apply_non_penetration_projection(
+                scene,
+                weld_furniture=True,
+                influence_distance=0.02,
+            )
+
+            self.assertFalse(success)
+            np.testing.assert_allclose(
+                projected.get_object(UniqueID("ball_0")).transform.translation(),
+                initial_ball,
+            )
+            np.testing.assert_allclose(
+                projected.get_object(UniqueID("table_0")).transform.translation(),
+                initial_table,
+            )
+
+    def test_supported_projection_limit_accepts_centimeter_cleanup(self) -> None:
+        obj = Mock()
+        obj.compute_world_bounds.return_value = (
+            np.array([-0.15, -0.15, 0.0]),
+            np.array([0.15, 0.15, 0.03]),
+        )
+
+        limit = _supported_projection_displacement_limit(
+            obj,
+            penetration_depth=0.02,
+            influence_distance=0.02,
+        )
+
+        self.assertGreaterEqual(limit, 0.02)
+        self.assertLess(limit, 0.87)
+
+    def test_supported_projection_limit_scales_for_severe_overlap(self) -> None:
+        obj = Mock()
+        obj.compute_world_bounds.return_value = (
+            np.array([-0.1, -0.1, 0.0]),
+            np.array([0.1, 0.1, 0.2]),
+        )
+
+        mild_limit = _supported_projection_displacement_limit(
+            obj,
+            penetration_depth=0.005,
+            influence_distance=0.02,
+        )
+        severe_limit = _supported_projection_displacement_limit(
+            obj,
+            penetration_depth=0.2,
+            influence_distance=0.02,
+        )
+
+        self.assertGreater(severe_limit, mild_limit)
+        self.assertAlmostEqual(severe_limit, 0.6)
+
     def test_empty_scene_returns_success(self) -> None:
         """Test that empty scene returns success."""
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -625,6 +753,24 @@ class TestApplyPhysicalFeasibilityPostprocessing(PhysicalFeasibilityTestCase):
             self.assertTrue(
                 np.allclose(box1_after.transform.translation(), initial_pos)
             )
+
+    def test_failed_supported_projection_status_is_preserved(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            scene = self._create_non_overlapping_boxes_scene(Path(tmp_dir))
+            with patch(
+                "scenesmith.agent_utils.physical_feasibility.apply_non_penetration_projection",
+                return_value=(scene, False),
+            ):
+                _processed_scene, success, _ = (
+                    apply_physical_feasibility_postprocessing(
+                        scene=scene,
+                        weld_furniture=True,
+                        projection_enabled=True,
+                        simulation_enabled=False,
+                    )
+                )
+
+            self.assertFalse(success)
 
     def test_anomalous_projection_jump_is_restored_before_simulation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

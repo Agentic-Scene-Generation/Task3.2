@@ -15,24 +15,25 @@ import logging
 import os
 import re
 import time
+
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+from scenesmith.agent_utils.thinking import (
+    chat_template_kwargs_from_effort,
+    prepend_text_thinking_directive,
+    thinking_directive_from_effort,
+)
+from scenesmith.scene_expert.context_bundle import build_llm_call_debug_record
 from scenesmith.scene_expert.memory.schemas import (
     FailureCase,
     MemoryUpdateOp,
     Skill,
     SuccessCase,
 )
-from scenesmith.scene_expert.context_bundle import build_llm_call_debug_record
 from scenesmith.scene_expert.memory.text_builder import build_embedding_text
 from scenesmith.scene_expert.schemas import FullVerifyReport
-from scenesmith.agent_utils.thinking import (
-    chat_template_kwargs_from_effort,
-    prepend_text_thinking_directive,
-    thinking_directive_from_effort,
-)
 
 console_logger = logging.getLogger(__name__)
 SUCCESS_MEMORY_MIN_OVERALL_SCORE = 0.75
@@ -109,7 +110,7 @@ class MemoryWriter:
         api_key: str | None = None,
         max_tokens: int = 3072,
         retry_max_tokens: int | None = None,
-        thinking_mode: str = "none",
+        thinking_mode: str = "high",
         timeout_seconds: float = 90.0,
         temperature: float = 0.1,
         debug_dir: str | Path | None = None,

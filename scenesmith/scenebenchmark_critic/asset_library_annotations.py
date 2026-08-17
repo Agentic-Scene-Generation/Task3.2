@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -581,17 +582,36 @@ def _orientation_dependencies(record: dict[str, Any]) -> list[dict[str, Any]]:
         target = _normalize_category_token(relation.get("target_category"))
         if not target:
             continue
+        max_distance = _distance_upper_bound(relation.get("distance_range_m"))
         dep = {
             "relation_type": "front_faces",
             "target_category": target,
             "target_kind": "object_category",
-            "max_distance_m": (relation.get("distance_range_m") or [None, None])[-1],
+            # Relation priors describe a preferred facing direction.  They only
+            # constrain proximity when their source annotation supplies an
+            # actual upper bound; otherwise an opposite-wall layout is valid.
+            "distance_required": max_distance is not None,
             "confidence": relation.get("confidence"),
             "source": "hssd_annotations:relation_priors",
         }
+        if max_distance is not None:
+            dep["max_distance_m"] = max_distance
         if dep not in dependencies:
             dependencies.append(dep)
     return dependencies
+
+
+def _distance_upper_bound(value: Any) -> float | None:
+    """Return a usable distance-range upper bound without inventing one."""
+    if isinstance(value, (list, tuple)):
+        value = value[-1] if value else None
+    try:
+        distance = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(distance) or distance < 0.0:
+        return None
+    return distance
 
 
 def _metric_relevance(

@@ -101,6 +101,23 @@ _HSSD_FRONT_AXIS_SOURCES = {
 _LINEAR_CEILING_REQUEST_ASPECT_MIN = 4.0
 _LINEAR_CEILING_CANDIDATE_ASPECT_MIN = 3.0
 _LINEAR_CEILING_AXIS_SCALE_MAX = 6.0
+_LINEAR_CUTLERY_HORIZONTAL_ASPECT_MIN = 3.0
+_LINEAR_CUTLERY_UNIFORM_FIT_MAX_RATIO = 1.75
+_LINEAR_CUTLERY_TERMS = frozenset(
+    {
+        "chopstick",
+        "chopsticks",
+        "cutlery",
+        "fork",
+        "forks",
+        "knife",
+        "knives",
+        "spoon",
+        "spoons",
+        "utensil",
+        "utensils",
+    }
+)
 _STRUCTURAL_CEILING_TERMS = frozenset({"beam", "joist", "rafter"})
 _NON_STRUCTURAL_CEILING_TERMS = frozenset(
     {"chair", "chandelier", "lamp", "light", "pendant", "stool"}
@@ -649,6 +666,116 @@ class AssetManager:
             return 0.5
         hssd_cfg = self.cfg.asset_manager.get("hssd", {}) or {}
         return float(hssd_cfg.get("plant_uniform_fit_min_ratio", 0.45))
+
+    def _align_linear_cutlery_requested_dimensions(
+        self,
+        *,
+        canonical_path: Path,
+        object_type: ObjectType,
+        description: str,
+        short_name: str,
+        desired_dimensions: list[float] | tuple[float, ...] | None,
+    ) -> list[float] | tuple[float, ...] | None:
+        """Match linear cutlery requests to the candidate's horizontal long axis.
+
+        HSSD meshes preserve their asset-local horizontal axes after
+        canonicalization.  A fork can therefore have its long axis on scene Y
+        while the designer requested width along scene X.  Uniform scaling
+        would reject that otherwise suitable asset.  This only corrects the
+        requested envelope for explicit cutlery manipulands when both the
+        request and candidate are clearly linear; it never changes furniture or
+        round/table-setting assets.
+        """
+        if object_type != ObjectType.MANIPULAND or desired_dimensions is None:
+            return desired_dimensions
+        if len(desired_dimensions) != 3:
+            return desired_dimensions
+
+        terms = set(re.findall(r"[a-z0-9]+", f"{description} {short_name}".lower()))
+        if not terms & _LINEAR_CUTLERY_TERMS:
+            return desired_dimensions
+
+        try:
+            desired = np.asarray(desired_dimensions, dtype=float)
+        except (TypeError, ValueError):
+            return desired_dimensions
+        if np.any(desired <= 0.0):
+            return desired_dimensions
+
+        requested_horizontal = desired[:2]
+        request_minor = float(np.min(requested_horizontal))
+        if (
+            request_minor <= 0.0
+            or float(np.max(requested_horizontal)) / request_minor
+            < _LINEAR_CUTLERY_HORIZONTAL_ASPECT_MIN
+        ):
+            return desired_dimensions
+
+        try:
+            mesh = load_mesh_as_trimesh(canonical_path, force_merge=True)
+            bbox_min, bbox_max = gltf_y_up_bounds_to_scene_z_up(mesh.bounds)
+        except Exception as exc:
+            console_logger.warning(
+                "Cannot inspect canonical cutlery mesh for axis alignment: %s", exc
+            )
+            return desired_dimensions
+
+        candidate = np.asarray(bbox_max - bbox_min, dtype=float)
+        candidate_horizontal = candidate[:2]
+        candidate_minor = float(np.min(candidate_horizontal))
+        if (
+            candidate_minor <= 0.0
+            or float(np.max(candidate_horizontal)) / candidate_minor
+            < _LINEAR_CUTLERY_HORIZONTAL_ASPECT_MIN
+        ):
+            return desired_dimensions
+
+        aligned_dimensions = desired.tolist()
+        requested_axis = int(np.argmax(requested_horizontal))
+        candidate_axis = int(np.argmax(candidate_horizontal))
+        axis_swapped = requested_axis != candidate_axis
+        if axis_swapped:
+            aligned_dimensions[0], aligned_dimensions[1] = (
+                aligned_dimensions[1],
+                aligned_dimensions[0],
+            )
+
+        # A retrieved fork or spoon can have a slightly wider natural handle
+        # than the LLM's nominal envelope. Keep the requested long axis and
+        # height intact, but widen only the short axis enough to meet the same
+        # validation tolerance used by ``validate_uniform_dimension_fit``.
+        # Recompute after each adjustment because uniform scaling uses the
+        # median scale across all three dimensions.
+        minor_axis = 1 - candidate_axis
+        short_axis_adjusted = False
+        for _ in range(3):
+            scale = float(
+                np.median(np.asarray(aligned_dimensions, dtype=float) / candidate)
+            )
+            # Keep a small numeric buffer below the validator's hard ratio so
+            # glTF export precision cannot turn an exact boundary into a fail.
+            minimum_short_axis = (
+                candidate[minor_axis]
+                * scale
+                / (_LINEAR_CUTLERY_UNIFORM_FIT_MAX_RATIO * 0.995)
+            )
+            if aligned_dimensions[minor_axis] >= minimum_short_axis - 1e-9:
+                break
+            aligned_dimensions[minor_axis] = minimum_short_axis
+            short_axis_adjusted = True
+
+        if not axis_swapped and not short_axis_adjusted:
+            return desired_dimensions
+        console_logger.info(
+            "Aligned linear cutlery dimensions to canonical mesh for %s: "
+            "requested=%s, candidate=%s, aligned=%s, axis_swapped=%s",
+            short_name,
+            desired.round(4).tolist(),
+            candidate.round(4).tolist(),
+            np.asarray(aligned_dimensions).round(4).tolist(),
+            axis_swapped,
+        )
+        return aligned_dimensions
 
     def _linear_ceiling_exact_fit_axes(
         self,
@@ -1447,12 +1574,19 @@ class AssetManager:
             blender_server=self.blender_server,
             object_type=request.object_type,
         )
+        scaling_dimensions = self._align_linear_cutlery_requested_dimensions(
+            canonical_path=canonical_path,
+            object_type=request.object_type,
+            description=request.object_descriptions[index],
+            short_name=short_name,
+            desired_dimensions=request.desired_dimensions[index],
+        )
 
         final_gltf_path, bbox_min, bbox_max, applied_scale = (
             self._scale_and_measure_canonical_mesh(
                 canonical_path=canonical_path,
                 final_path=config.sdf_dir / f"{config.short_name}.gltf",
-                desired_dimensions=request.desired_dimensions[index],
+                desired_dimensions=scaling_dimensions,
                 uniform_fit_min_ratio=self._hssd_uniform_fit_min_ratio(
                     request.object_descriptions[index]
                 ),
@@ -1467,7 +1601,7 @@ class AssetManager:
                     else (
                         self._linear_ceiling_exact_fit_axes(
                             canonical_path=canonical_path,
-                            desired_dimensions=request.desired_dimensions[index],
+                            desired_dimensions=scaling_dimensions,
                         )
                         if request.object_type == ObjectType.CEILING_MOUNTED
                         else ()
@@ -2817,6 +2951,17 @@ class AssetManager:
             blender_server=self.blender_server,
             object_type=object_type,
         )
+        scaling_dimensions = (
+            self._align_linear_cutlery_requested_dimensions(
+                canonical_path=canonical_path,
+                object_type=object_type,
+                description=config.description,
+                short_name=config.short_name,
+                desired_dimensions=desired_dimensions,
+            )
+            if is_hssd
+            else desired_dimensions
+        )
 
         # Scale mesh to desired dimensions while keeping glTF Y-up explicit.
         # For generated assets: scale_factor=1.0 because support surface extraction runs
@@ -2827,7 +2972,7 @@ class AssetManager:
             self._scale_and_measure_canonical_mesh(
                 canonical_path=canonical_path,
                 final_path=config.sdf_dir / f"{config.short_name}.gltf",
-                desired_dimensions=desired_dimensions,
+                desired_dimensions=scaling_dimensions,
                 fit_axes=(0, 1) if floor_covering else (0, 1, 2),
             )
         )

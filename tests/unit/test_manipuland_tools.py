@@ -91,10 +91,226 @@ class TestManipulandTools(unittest.TestCase):
             self.cfg.placement_noise.perfect_profile,
         )
 
+    def test_generation_filter_blocks_fulfilled_floor_requirement(self):
+        self.manipuland_tools.fulfilled_floor_requirements = {
+            "wastebasket": ["wastebasket_0"]
+        }
+
+        (
+            descriptions,
+            short_names,
+            dimensions,
+            skipped,
+        ) = self.manipuland_tools._filter_fulfilled_floor_requirement_requests(
+            object_descriptions=["Small office wastebasket", "Hardcover notebook"],
+            short_names=["wastebasket_floor", "notebook"],
+            desired_dimensions=[[0.25, 0.25, 0.35], [0.18, 0.03, 0.24]],
+        )
+
+        self.assertEqual(descriptions, ["Hardcover notebook"])
+        self.assertEqual(short_names, ["notebook"])
+        self.assertEqual(dimensions, [[0.18, 0.03, 0.24]])
+        self.assertEqual(skipped, {"wastebasket": ["wastebasket_0"]})
+
     def test_dining_place_setting_alignment_tool_is_available(self):
         # 2026-07-23 修改原因：餐位对齐 critic 必须能调用实际修复工具，不能只输出
         # 文字建议，否则盘子虽齐全仍会随机散落在餐桌上。
         self.assertIn("align_dining_place_settings", self.manipuland_tools.tools)
+
+    def test_dining_centerpiece_budget_uses_tabletop_and_place_setting_size(self):
+        surface = SupportSurface(
+            surface_id=UniqueID("S_table"),
+            bounding_box_min=np.array([-0.75, -0.316, 0.0]),
+            bounding_box_max=np.array([0.75, 0.316, 0.48]),
+            transform=RigidTransform(),
+        )
+        table = SceneObject(
+            object_id=UniqueID("dining_table_0"),
+            object_type=ObjectType.FURNITURE,
+            name="dining_table",
+            description="Compact dining table",
+            transform=RigidTransform(),
+            support_surfaces=[surface],
+        )
+        self.mock_scene.objects = {table.object_id: table}
+        self.mock_scene.get_object.return_value = table
+        self.mock_scene.text_description = (
+            "Four place settings surround a centerpiece vase with flowers."
+        )
+        self.manipuland_tools.current_furniture_id = table.object_id
+        self.manipuland_tools.support_surfaces = {"S_table": surface}
+
+        constrained = self.manipuland_tools._budget_dining_centerpiece_dimensions(
+            object_descriptions=[
+                "Dinner plate",
+                "Dinner plate",
+                "Tall centerpiece vase",
+                "Flower bouquet for the vase",
+            ],
+            short_names=["plate_a", "plate_b", "vase", "flowers"],
+            desired_dimensions=[
+                [0.27, 0.27, 0.04],
+                [0.27, 0.27, 0.04],
+                [0.18, 0.18, 0.35],
+                [0.30, 0.30, 0.30],
+            ],
+        )
+
+        self.assertEqual(constrained[:2], [[0.27, 0.27, 0.04]] * 2)
+        self.assertLessEqual(constrained[2][0], 0.058)
+        self.assertLessEqual(constrained[2][1], 0.058)
+        self.assertLessEqual(constrained[3][0], 0.058)
+        self.assertLessEqual(constrained[3][1], 0.058)
+        self.assertLessEqual(constrained[2][2], 0.116)
+        self.assertLessEqual(constrained[3][2], 0.087)
+
+    def test_dining_centerpiece_budget_recognizes_reusable_plate_template(self):
+        surface = SupportSurface(
+            surface_id=UniqueID("S_table"),
+            bounding_box_min=np.array([-0.75, -0.316, 0.0]),
+            bounding_box_max=np.array([0.75, 0.316, 0.48]),
+            transform=RigidTransform(),
+        )
+        table = SceneObject(
+            object_id=UniqueID("dining_table_0"),
+            object_type=ObjectType.FURNITURE,
+            name="dining_table",
+            description="Compact dining table",
+            transform=RigidTransform(),
+            support_surfaces=[surface],
+        )
+        self.mock_scene.objects = {table.object_id: table}
+        self.mock_scene.get_object.return_value = table
+        self.mock_scene.text_description = (
+            "Table settings for four surround a centerpiece vase with flowers."
+        )
+        self.manipuland_tools.current_furniture_id = table.object_id
+        self.manipuland_tools.support_surfaces = {"S_table": surface}
+
+        constrained = self.manipuland_tools._budget_dining_centerpiece_dimensions(
+            object_descriptions=["Dinner plate", "Tall centerpiece vase"],
+            short_names=["plate", "vase"],
+            desired_dimensions=[[0.27, 0.27, 0.04], [0.18, 0.18, 0.35]],
+        )
+
+        self.assertEqual(constrained[0], [0.27, 0.27, 0.04])
+        self.assertLessEqual(constrained[1][0], 0.058)
+        self.assertLessEqual(constrained[1][1], 0.058)
+
+    def test_dining_centerpiece_budget_persists_across_generation_batches(self):
+        surface = SupportSurface(
+            surface_id=UniqueID("S_table"),
+            bounding_box_min=np.array([-0.75, -0.316, 0.0]),
+            bounding_box_max=np.array([0.75, 0.316, 0.48]),
+            transform=RigidTransform(),
+        )
+        table = SceneObject(
+            object_id=UniqueID("dining_table_0"),
+            object_type=ObjectType.FURNITURE,
+            name="dining_table",
+            description="Compact dining table",
+            transform=RigidTransform(),
+            support_surfaces=[surface],
+        )
+        self.mock_scene.objects = {table.object_id: table}
+        self.mock_scene.get_object.return_value = table
+        self.mock_scene.text_description = (
+            "Table settings for four surround a centerpiece vase with flowers."
+        )
+        self.manipuland_tools.current_furniture_id = table.object_id
+        self.manipuland_tools.support_surfaces = {"S_table": surface}
+
+        self.manipuland_tools._budget_dining_centerpiece_dimensions(
+            object_descriptions=["Dinner plate", "Tall centerpiece vase"],
+            short_names=["plate", "vase"],
+            desired_dimensions=[[0.27, 0.27, 0.04], [0.18, 0.18, 0.35]],
+        )
+        constrained = self.manipuland_tools._budget_dining_centerpiece_dimensions(
+            object_descriptions=["Tall centerpiece vase", "Flower bouquet"],
+            short_names=["vase", "flowers"],
+            desired_dimensions=[[0.18, 0.18, 0.35], [0.30, 0.30, 0.30]],
+        )
+
+        self.assertLessEqual(constrained[0][0], 0.058)
+        self.assertLessEqual(constrained[0][1], 0.058)
+        self.assertLessEqual(constrained[0][2], 0.116)
+        self.assertLessEqual(constrained[1][0], 0.058)
+        self.assertLessEqual(constrained[1][1], 0.058)
+        self.assertLessEqual(constrained[1][2], 0.087)
+
+    def test_dining_cutlery_rotation_follows_seat_approach_axis(self):
+        surface = SupportSurface(
+            surface_id=UniqueID("S_table"),
+            bounding_box_min=np.array([-1.0, -1.0, 0.0]),
+            bounding_box_max=np.array([1.0, 1.0, 0.5]),
+            transform=RigidTransform(),
+        )
+        cutlery = Mock()
+        cutlery.name = "dinner_fork"
+        cutlery.description = "silver cutlery"
+        cutlery.placement_info = Mock(rotation_2d=0.0)
+
+        self.assertAlmostEqual(
+            self.manipuland_tools._dining_companion_rotation_degrees(
+                cutlery, surface, (0.0, 1.0)
+            ),
+            0.0,
+        )
+        self.assertAlmostEqual(
+            abs(
+                self.manipuland_tools._dining_companion_rotation_degrees(
+                    cutlery, surface, (1.0, 0.0)
+                )
+            ),
+            90.0,
+        )
+
+    @patch(
+        "scenesmith.manipuland_agents.tools.manipuland_tools."
+        "evaluate_dining_place_setting_alignment"
+    )
+    @patch(
+        "scenesmith.manipuland_agents.tools.manipuland_tools.room_scene_to_case_pack"
+    )
+    def test_dining_alignment_builds_object_index_before_overlap_baseline(
+        self, mock_case_pack, mock_evaluate
+    ):
+        """Assignments must reach transactional overlap checks without scope errors."""
+        table = SceneObject(
+            object_id=UniqueID("furniture_001"),
+            object_type=ObjectType.FURNITURE,
+            name="dining_table",
+            description="Test dining table",
+            transform=RigidTransform(),
+            support_surfaces=[self.mock_surface],
+        )
+        self.mock_scene.objects = {table.object_id: table}
+        self.mock_scene.get_object.return_value = table
+        self.mock_scene.to_state_dict.return_value = {}
+        alignment = {
+            "primary_object": "furniture_001",
+            "label": "fail",
+            "diagnostics": {
+                "assignments": [
+                    {
+                        "anchor_id": "missing_plate",
+                        "companion_ids": [],
+                        "recommended_anchor_center_xy_m": [0.0, 0.0],
+                    }
+                ]
+            },
+        }
+        mock_case_pack.return_value = {}
+        mock_evaluate.return_value = [alignment]
+
+        result = json.loads(
+            self.manipuland_tools._align_dining_place_settings_impl(
+                table_id="furniture_001"
+            )
+        )
+
+        self.assertIn("restored", result)
+        self.assertTrue(result["restored"])
 
     def test_adjacent_dining_table_strips_are_coalesced(self):
         # 2026-07-23 修改原因：桌面内部的 HSSD seam 不应把长边中点餐位推到
@@ -164,6 +380,197 @@ class TestManipulandTools(unittest.TestCase):
         self.assertEqual(str(selected_surface.surface_id), "S_north")
         self.assertLess(abs(float(selected_position[1])), 0.1)
 
+    @patch.object(ManipulandTools, "_select_dining_surface_position")
+    def test_dining_target_shifts_clear_of_settled_setting(self, mock_select):
+        surface = SupportSurface(
+            surface_id=UniqueID("S_table"),
+            bounding_box_min=np.array([-1.0, -1.0, 0.0]),
+            bounding_box_max=np.array([1.0, 1.0, 0.5]),
+            transform=RigidTransform(),
+        )
+        candidate = Mock()
+        candidate.bbox_min = np.array([-0.1, -0.1, 0.0])
+        candidate.bbox_max = np.array([0.1, 0.1, 0.03])
+        candidate.scale_factor = 1.0
+        candidate.transform = RigidTransform()
+        candidate.placement_info = None
+        occupied = Mock()
+        occupied.bbox_min = np.array([-0.1, -0.1, 0.0])
+        occupied.bbox_max = np.array([0.1, 0.1, 0.03])
+        occupied.scale_factor = 1.0
+        occupied.transform = RigidTransform(p=[0.0, 0.0, 0.8])
+
+        def select_position(**kwargs):
+            return surface, np.asarray(kwargs["target_xy"], dtype=float)
+
+        mock_select.side_effect = select_position
+        selected = self.manipuland_tools._select_clear_dining_surface_position(
+            surface_map={"S_table": surface},
+            scene_object=candidate,
+            target_xy=(0.0, 0.0),
+            occupied_objects=[occupied],
+        )
+
+        self.assertIsNotNone(selected)
+        _surface, position = selected
+        self.assertGreater(np.linalg.norm(position), 0.0)
+        self.assertFalse(
+            self.manipuland_tools._dining_oriented_footprints_overlap(
+                candidate,
+                position,
+                occupied,
+                np.asarray(occupied.transform.translation()[:2]),
+            )
+        )
+
+    @patch.object(ManipulandTools, "_select_dining_surface_position")
+    def test_dining_target_avoids_overlap_with_current_setting(self, mock_select):
+        surface = SupportSurface(
+            surface_id=UniqueID("S_table"),
+            bounding_box_min=np.array([-1.0, -1.0, 0.0]),
+            bounding_box_max=np.array([1.0, 1.0, 0.5]),
+            transform=RigidTransform(),
+        )
+        candidate = Mock()
+        candidate.object_id = "cutlery_0"
+        candidate.bbox_min = np.array([-0.1, -0.1, 0.0])
+        candidate.bbox_max = np.array([0.1, 0.1, 0.03])
+        candidate.scale_factor = 1.0
+        candidate.transform = RigidTransform()
+        candidate.placement_info = None
+        anchor = Mock()
+        anchor.object_id = "dinner_plate_0"
+        anchor.bbox_min = np.array([-0.1, -0.1, 0.0])
+        anchor.bbox_max = np.array([0.1, 0.1, 0.03])
+        anchor.scale_factor = 1.0
+        anchor.transform = RigidTransform(p=[0.0, 0.0, 0.8])
+        mock_select.side_effect = lambda **kwargs: (
+            surface,
+            np.asarray(kwargs["target_xy"], dtype=float),
+        )
+
+        selected = self.manipuland_tools._select_clear_dining_surface_position(
+            surface_map={"S_table": surface},
+            scene_object=candidate,
+            target_xy=(0.0, 0.0),
+            occupied_objects=[anchor],
+        )
+
+        self.assertIsNotNone(selected)
+        _surface, position = selected
+        self.assertFalse(
+            self.manipuland_tools._dining_oriented_footprints_overlap(
+                candidate,
+                position,
+                anchor,
+                np.asarray(anchor.transform.translation()[:2]),
+            )
+        )
+
+    @patch.object(ManipulandTools, "_select_dining_surface_position")
+    def test_thin_dining_companion_search_uses_long_side_within_lane(self, mock_select):
+        surface = SupportSurface(
+            surface_id=UniqueID("S_table"),
+            bounding_box_min=np.array([-1.0, -1.0, 0.0]),
+            bounding_box_max=np.array([1.0, 1.0, 0.5]),
+            transform=RigidTransform(),
+        )
+        cutlery = Mock()
+        cutlery.object_id = "cutlery_0"
+        cutlery.bbox_min = np.array([-0.015, -0.075, 0.0])
+        cutlery.bbox_max = np.array([0.015, 0.075, 0.02])
+        cutlery.scale_factor = 1.0
+        cutlery.transform = RigidTransform()
+        cutlery.placement_info = None
+        plate = Mock()
+        plate.object_id = "plate_0"
+        plate.bbox_min = np.array([-0.10, -0.10, 0.0])
+        plate.bbox_max = np.array([0.10, 0.10, 0.03])
+        plate.scale_factor = 1.0
+        plate.transform = RigidTransform()
+        mock_select.side_effect = lambda **kwargs: (
+            surface,
+            np.asarray(kwargs["target_xy"], dtype=float),
+        )
+
+        selected = self.manipuland_tools._select_clear_dining_surface_position(
+            surface_map={"S_table": surface},
+            scene_object=cutlery,
+            target_xy=(0.0, 0.0),
+            occupied_objects=[plate],
+            search_axes=((1.0, 0.0), (0.0, 1.0)),
+            lane_constraint=((0.0, 0.0), (1.0, 0.0), 0.16),
+        )
+
+        self.assertIsNotNone(selected)
+        _surface, position = selected
+        self.assertGreater(abs(float(position[0])), 0.08)
+        self.assertLessEqual(abs(float(position[0])), 0.16)
+        self.assertAlmostEqual(float(position[1]), 0.0)
+
+    def test_dining_oriented_clearance_does_not_treat_cutlery_as_circle(self):
+        plate = Mock()
+        plate.bbox_min = np.array([-0.135, -0.135, 0.0])
+        plate.bbox_max = np.array([0.135, 0.135, 0.03])
+        plate.scale_factor = 1.0
+        plate.transform = RigidTransform()
+        cutlery = Mock()
+        cutlery.bbox_min = np.array([-0.015, -0.11, 0.0])
+        cutlery.bbox_max = np.array([0.015, 0.11, 0.02])
+        cutlery.scale_factor = 1.0
+        cutlery.transform = RigidTransform()
+
+        self.assertFalse(
+            self.manipuland_tools._dining_oriented_footprints_overlap(
+                cutlery,
+                np.array([0.17, 0.0]),
+                plate,
+                np.array([0.0, 0.0]),
+            )
+        )
+        self.assertTrue(
+            self.manipuland_tools._dining_oriented_footprints_overlap(
+                cutlery,
+                np.array([0.14, 0.0]),
+                plate,
+                np.array([0.0, 0.0]),
+            )
+        )
+
+    def test_dining_candidate_clearance_uses_final_target_rotation(self):
+        plate = Mock()
+        plate.bbox_min = np.array([-0.135, -0.135, 0.0])
+        plate.bbox_max = np.array([0.135, 0.135, 0.03])
+        plate.scale_factor = 1.0
+        plate.transform = RigidTransform()
+        cutlery = Mock()
+        cutlery.bbox_min = np.array([-0.015, -0.11, 0.0])
+        cutlery.bbox_max = np.array([0.015, 0.11, 0.02])
+        cutlery.scale_factor = 1.0
+        cutlery.transform = RigidTransform()
+
+        candidate_xy = np.array([0.17, 0.0])
+        self.assertFalse(
+            self.manipuland_tools._dining_oriented_footprints_overlap(
+                cutlery,
+                candidate_xy,
+                plate,
+                np.array([0.0, 0.0]),
+            )
+        )
+        self.assertTrue(
+            self.manipuland_tools._dining_oriented_footprints_overlap(
+                cutlery,
+                candidate_xy,
+                plate,
+                np.array([0.0, 0.0]),
+                first_transform=RigidTransform(
+                    rpy=RollPitchYaw(0.0, 0.0, math.pi / 2.0),
+                    p=[candidate_xy[0], candidate_xy[1], 0.0],
+                ),
+            )
+        )
+
     def test_move_manipuland_out_of_bounds_fails(self):
         """Test that move_manipuland fails when position is out of bounds."""
         # Create a mock object.
@@ -209,6 +616,36 @@ class TestManipulandTools(unittest.TestCase):
         result_dict = json.loads(result_json)
         self.assertFalse(result_dict["success"])
         self.assertEqual(result_dict["error_type"], "object_not_found")
+
+    @patch(
+        "scenesmith.manipuland_agents.tools.manipuland_tools.intent_contract_constraints_for_scene"
+    )
+    @patch(
+        "scenesmith.manipuland_agents.tools.manipuland_tools.room_scene_to_case_pack"
+    )
+    def test_remove_required_manipuland_is_rejected(
+        self, mock_case_pack, mock_constraints
+    ):
+        required = Mock()
+        required.object_type = ObjectType.MANIPULAND
+        required.name = "plate"
+        self.mock_scene.get_object.return_value = required
+        mock_case_pack.return_value = {
+            "scene_geometry": {"objects": [{"id": "plate_0", "category": "plate"}]}
+        }
+        mock_constraints.return_value = [
+            {
+                "relation": "required_count",
+                "strength": "hard",
+                "subjects": {"category": "plate", "count": 1},
+            }
+        ]
+
+        result = json.loads(self.manipuland_tools._remove_manipuland_impl("plate_0"))
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["error_type"], "invalid_operation")
+        self.mock_scene.remove_object.assert_not_called()
 
     @patch.object(
         ManipulandTools, "_validate_convex_hull_footprint", return_value=(True, None)

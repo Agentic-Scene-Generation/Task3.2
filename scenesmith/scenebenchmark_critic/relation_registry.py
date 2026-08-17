@@ -97,6 +97,7 @@ class RelationSpec:
     thresholds: Mapping[str, float] = field(default_factory=dict)
     repair_strategy: str | None = None
     repair_relation_types: tuple[str, ...] = ()
+    exclusive_with: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.target_arity not in {0, 1, 2}:
@@ -132,6 +133,7 @@ def _relation(
     thresholds: Mapping[str, float] | None = None,
     repair_strategy: str | None = None,
     repair_relation_types: tuple[str, ...] = (),
+    exclusive_with: tuple[str, ...] = (),
 ) -> RelationSpec:
     return RelationSpec(
         name=name,
@@ -144,6 +146,7 @@ def _relation(
         thresholds=MappingProxyType(dict(thresholds or {})),
         repair_strategy=repair_strategy,
         repair_relation_types=repair_relation_types,
+        exclusive_with=exclusive_with,
     )
 
 
@@ -162,6 +165,7 @@ _RELATIONS = (
             "back_against_wall",
             "wall_backed_storage_alignment",
         ),
+        exclusive_with=("centered_in_room",),
     ),
     _relation(
         "centered_on_wall",
@@ -172,6 +176,14 @@ _RELATIONS = (
         dependencies=("against_wall",),
         dependency_binding="subject",
         repair_strategy="furniture_relation",
+        exclusive_with=("centered_in_room", "corner_of_room", "corner_distribution"),
+    ),
+    _relation(
+        "centered_above",
+        1,
+        "furniture",
+        "centered_above",
+        "subject horizontally centered above target",
     ),
     _relation(
         "centered_in_room",
@@ -181,6 +193,12 @@ _RELATIONS = (
         "object centered in the room",
         repair_strategy="furniture_relation",
         repair_relation_types=("room_center_alignment",),
+        exclusive_with=(
+            "against_wall",
+            "centered_on_wall",
+            "corner_of_room",
+            "corner_distribution",
+        ),
     ),
     _relation(
         "centered_between",
@@ -231,6 +249,7 @@ _RELATIONS = (
             "faces",
             "furniture_faces_furniture",
             "front_axis_alignment",
+            "seating_to_media",
             "seating_to_work_surface",
             "workstation_focal_alignment",
         ),
@@ -242,6 +261,7 @@ _RELATIONS = (
         "object_on_support",
         "subject supported on target",
         repair_strategy="support_relation",
+        exclusive_with=("on_wall",),
     ),
     _relation(
         "near",
@@ -269,6 +289,8 @@ _RELATIONS = (
         "furniture",
         "across_from",
         "subject across from and facing target",
+        repair_strategy="furniture_relation",
+        repair_relation_types=("seating_to_media",),
     ),
     _relation(
         "aligned_with",
@@ -306,6 +328,17 @@ _RELATIONS = (
         ),
     ),
     _relation(
+        "one_per_support",
+        1,
+        "furniture",
+        "one_per_support",
+        "one subject supported by each member of a target group",
+        dependencies=("required_count",),
+        dependency_binding="any_endpoint",
+        repair_strategy="support_relation",
+        repair_relation_types=("object_on_support", "one_per_support"),
+    ),
+    _relation(
         "distributed_evenly",
         1,
         "furniture",
@@ -332,9 +365,27 @@ _RELATIONS = (
         "corner_of_room",
         "subject placed in a room corner",
         repair_strategy="furniture_relation",
+        exclusive_with=("centered_in_room", "centered_on_wall"),
     ),
     _relation(
-        "on_wall", 1, "wall_mounted", "mounted_to_wall", "subject mounted on a wall"
+        "corner_distribution",
+        1,
+        "furniture",
+        "corner_distribution",
+        "subjects assigned one-to-one to distinct room corners",
+        dependencies=("required_count",),
+        dependency_binding="subject",
+        repair_strategy="furniture_relation",
+        repair_relation_types=("corner_distribution",),
+        exclusive_with=("centered_in_room", "centered_on_wall"),
+    ),
+    _relation(
+        "on_wall",
+        1,
+        "wall_mounted",
+        "mounted_to_wall",
+        "subject mounted on a wall",
+        exclusive_with=("on_top_of",),
     ),
     _relation(
         "hang_from_ceiling",
@@ -413,6 +464,11 @@ def validate_relation_registry() -> None:
                 raise ValueError(
                     f"Relation {name!r} depends on unknown relation {dependency!r}"
                 )
+        for exclusive in spec.exclusive_with:
+            if exclusive not in RELATION_REGISTRY:
+                raise ValueError(
+                    f"Relation {name!r} conflicts with unknown relation {exclusive!r}"
+                )
         if spec.repair_strategy is not None and not spec.repair_strategy.strip():
             raise ValueError(f"Relation {name!r} has an empty repair strategy")
 
@@ -430,9 +486,23 @@ def relation_registry_payload() -> dict[str, dict[str, Any]]:
             "thresholds": dict(spec.thresholds),
             "repair_strategy": spec.repair_strategy,
             "repair_relation_types": list(spec.repair_relation_types),
+            "exclusive_with": list(spec.exclusive_with),
         }
         for name, spec in RELATION_REGISTRY.items()
     }
 
 
 validate_relation_registry()
+
+
+def relations_are_exclusive(first: str, second: str) -> bool:
+    """Return whether two hard relation names cannot own one subject selector."""
+    aliases = {"against": "against_wall"}
+    first = aliases.get(str(first), str(first))
+    second = aliases.get(str(second), str(second))
+    if first not in RELATION_REGISTRY or second not in RELATION_REGISTRY:
+        return False
+    return (
+        second in RELATION_REGISTRY[first].exclusive_with
+        or first in RELATION_REGISTRY[second].exclusive_with
+    )

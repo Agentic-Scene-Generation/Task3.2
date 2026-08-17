@@ -31,6 +31,47 @@ export type Render = {
   created_at: string;
 };
 
+export type FloorPlanRender = {
+  id: string;
+  label: string;
+  image: string;
+  material_images?: string[];
+  has_scores: boolean;
+  created_at: string;
+};
+
+export type FloorPlanReservation = {
+  reservation_id?: string;
+  kind?: string;
+  source_constraint_ids?: string[];
+  room_type?: string;
+  subject_categories?: string[];
+  target_categories?: string[];
+  wall_role?: string;
+  min_wall_width_m?: number;
+  min_zone_area_m2?: number;
+  count?: number;
+  hard?: boolean;
+  [key: string]: unknown;
+};
+
+export type FloorPlanManifest = {
+  schema_version?: string;
+  enabled?: boolean;
+  reservations?: FloorPlanReservation[];
+  explicit_window_count?: number;
+  explicit_window_required?: boolean;
+  preserve_entrance_route?: boolean;
+  adaptive_window_budget?: boolean;
+  max_implicit_windows_per_wall?: number;
+  [key: string]: unknown;
+};
+
+export type FloorPlanData = {
+  renders: FloorPlanRender[];
+  reservation_manifest: FloorPlanManifest | null;
+};
+
 export type TimedEvent = {
   created_at?: string;
   stage?: string;
@@ -237,6 +278,7 @@ export type SceneDetail = {
   llm_calls: TimedEvent[];
   audit_events: AuditEvent[];
   renders: Render[];
+  floor_plan: FloorPlanData;
   score_summary: { grades?: Record<string, number>; summary?: string };
   messages: Array<{ id: string; agent: string; created_at: string; content: string }>;
   event_counts: Record<string, number>;

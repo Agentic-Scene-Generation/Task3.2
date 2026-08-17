@@ -10,6 +10,7 @@ import pytest
 
 from pydrake.math import RigidTransform, RollPitchYaw
 
+from scenesmith.agent_utils.clearance_zones import compute_door_clearance_violations
 from scenesmith.agent_utils.house import ClearanceOpeningData, RoomGeometry
 from scenesmith.agent_utils.room import (
     AgentType,
@@ -23,9 +24,16 @@ from scenesmith.agent_utils.room import (
 from scenesmith.scenebenchmark_critic import furniture_relation_repair
 from scenesmith.scenebenchmark_critic.api import evaluate_room_scene
 from scenesmith.scenebenchmark_critic.config import CriticConfig
+from scenesmith.scenebenchmark_critic.prompt_context import (
+    filter_prompt_results_for_agent,
+    format_agent_prompt_context,
+)
 from scenesmith.scenebenchmark_critic.furniture_relation_repair import (
     _RepairTarget,
+    _RepairHandlerContext,
+    _between_repair_targets,
     _candidate_improves,
+    _is_hard_support_collision_target,
     _prioritize_coordinated_seating_targets,
     _score_payload,
     improve_furniture_relations,
@@ -307,6 +315,284 @@ def test_one_per_edge_dining_repair_is_atomic_and_table_local(tmp_path: Path) ->
     for slot in result["diagnostics"]["seat_slots"]:
         assert not slot["failure"]
         assert slot["facing_error_deg"] <= 10.0
+
+
+def test_edge_distribution_repair_can_cross_room_from_fallback_pose(
+    tmp_path: Path,
+) -> None:
+    table = _object(
+        "dining_table_0",
+        "dining_table",
+        (0.0, 0.0, 0.4),
+        (2.0, 0.8, 0.8),
+    )
+    chairs = [
+        _object(
+            f"dining_chair_{index}",
+            "dining_chair",
+            (-2.15, -1.65, 0.45),
+            (0.5, 0.5, 0.9),
+            yaw_deg=0.0,
+        )
+        for index in range(4)
+    ]
+    scene = _scene(
+        tmp_path,
+        table,
+        *chairs,
+        text="A dining room with four dining chairs, one on each table side.",
+    )
+    _attach_intent_contract(
+        scene,
+        [
+            {
+                "relation": "edge_distribution",
+                "subjects": {
+                    "category": "dining_chair",
+                    "count": 4,
+                    "quantifier": "all",
+                },
+                "targets": {"category": "dining_table", "count": 1},
+                "edge_frame": "target_local_rectangle",
+                "groups": [
+                    {
+                        "edge_class": "long",
+                        "counts_per_edge": [1, 1],
+                        "spacing": "equal_segments",
+                    },
+                    {
+                        "edge_class": "short",
+                        "counts_per_edge": [1, 1],
+                        "spacing": "equal_segments",
+                    },
+                ],
+                "orientation": "toward_target",
+                "source": "explicit_prompt",
+                "evidence_span": "one on each table side",
+            }
+        ],
+    )
+    config = CriticConfig(enabled=True, metrics=("functional_dependency",))
+
+    fixes = improve_furniture_relations(
+        scene,
+        config=config,
+        max_translation_m=3.0,
+    )
+
+    assert {fix.object_id for fix in fixes} == {
+        f"dining_chair_{index}" for index in range(4)
+    }
+    result = next(
+        item
+        for item in evaluate_room_scene(scene, config=config, stage="edge_far_after")[
+            "results"
+        ]
+        if item.get("relation_type") == "edge_distribution"
+    )
+    assert result["label"] == "pass"
+
+
+def test_relocates_table_and_chair_topology_out_of_door_clearance(
+    tmp_path: Path,
+) -> None:
+    """A door-blocking chair group must move with its table, not split apart."""
+    table = _object(
+        "dining_table_0",
+        "dining_table",
+        (-1.0, 0.0, 0.4),
+        (1.4, 0.8, 0.8),
+    )
+    chairs = [
+        _object(
+            f"dining_chair_{index}",
+            "dining_chair",
+            (0.0, 1.45, 0.45),
+            (0.5, 0.5, 0.9),
+            yaw_deg=0.0,
+        )
+        for index in range(4)
+    ]
+    scene = _scene(
+        tmp_path,
+        table,
+        *chairs,
+        text="A dining room with four dining chairs, one on each table side.",
+    )
+    scene.room_geometry.openings = [
+        ClearanceOpeningData(
+            opening_id="door_0",
+            opening_type="door",
+            wall_direction="west",
+            center_world=[-2.5, 0.0, 1.05],
+            width=0.9,
+            sill_height=0.0,
+            height=2.1,
+            clearance_bbox_min=[-2.5, -0.45, 0.0],
+            clearance_bbox_max=[-1.6, 0.45, 2.1],
+            wall_start=[-2.5, -2.0],
+            wall_end=[-2.5, 2.0],
+            position_along_wall=1.55,
+        )
+    ]
+    _attach_intent_contract(
+        scene,
+        [
+            {
+                "relation": "edge_distribution",
+                "subjects": {
+                    "category": "dining_chair",
+                    "count": 4,
+                    "quantifier": "all",
+                },
+                "targets": {"category": "dining_table", "count": 1},
+                "edge_frame": "target_local_rectangle",
+                "groups": [
+                    {
+                        "edge_class": "long",
+                        "counts_per_edge": [1, 1],
+                        "spacing": "equal_segments",
+                    },
+                    {
+                        "edge_class": "short",
+                        "counts_per_edge": [1, 1],
+                        "spacing": "equal_segments",
+                    },
+                ],
+                "orientation": "toward_target",
+                "source": "explicit_prompt",
+                "evidence_span": "one on each table side",
+            }
+        ],
+    )
+    config = CriticConfig(enabled=True, metrics=("functional_dependency",))
+
+    fixes = improve_furniture_relations(scene, config=config)
+
+    assert {fix.object_id for fix in fixes} == {
+        "dining_table_0",
+        *(f"dining_chair_{index}" for index in range(4)),
+    }
+    assert table.transform.translation()[0] > -0.5
+    assert not compute_door_clearance_violations(scene)
+    result = next(
+        item
+        for item in evaluate_room_scene(scene, config=config, stage="door_safe_after")[
+            "results"
+        ]
+        if item.get("relation_type") == "edge_distribution"
+    )
+    assert result["label"] == "pass"
+
+
+def test_corner_distribution_repair_can_cross_room_from_fallback_pose(
+    tmp_path: Path,
+) -> None:
+    plants = [
+        _object("plant_0", "plant", (-4.76, -2.76, 0.6), (0.4, 0.4, 1.2)),
+        _object("plant_1", "plant", (-4.76, 2.76, 0.6), (0.4, 0.4, 1.2)),
+        _object("plant_2", "plant", (0.0, 0.0, 0.6), (0.4, 0.4, 1.2)),
+        _object("plant_3", "plant", (0.0, 2.0, 0.6), (0.4, 0.4, 1.2)),
+    ]
+    scene = _scene(
+        tmp_path,
+        *plants,
+        text="A dining room with four plants in four distinct room corners.",
+    )
+    scene.room_geometry.length = 10.0
+    scene.room_geometry.width = 6.0
+    _attach_intent_contract(
+        scene,
+        [
+            {
+                "relation": "corner_distribution",
+                "subjects": {"category": "plant", "count": 4, "quantifier": "all"},
+                "targets": {"category": "room", "count": 1},
+                "source": "explicit_prompt",
+                "evidence_span": "four plants in four distinct room corners",
+            }
+        ],
+    )
+    config = CriticConfig(enabled=True, metrics=("functional_dependency",))
+
+    fixes = improve_furniture_relations(
+        scene,
+        config=config,
+        max_translation_m=3.0,
+    )
+
+    assert {fix.object_id for fix in fixes} == {"plant_2", "plant_3"}
+    results = [
+        item
+        for item in evaluate_room_scene(
+            scene, config=config, stage="corners_far_after"
+        )["results"]
+        if item.get("relation_type") == "corner_distribution"
+    ]
+    assert len(results) == 4
+    assert all(item["label"] == "pass" for item in results)
+
+
+def test_corner_distribution_repair_uses_inward_physics_safe_candidate(
+    tmp_path: Path,
+) -> None:
+    """Corner semantics remain repairable when flush poses fail physics clearance."""
+    plants = [
+        _object("plant_0", "plant", (-2.0, -1.5, 0.6), (0.4, 0.4, 1.2)),
+        _object("plant_1", "plant", (-2.0, 1.5, 0.6), (0.4, 0.4, 1.2)),
+        _object("plant_2", "plant", (0.0, 0.0, 0.6), (0.4, 0.4, 1.2)),
+        _object("plant_3", "plant", (0.0, 0.5, 0.6), (0.4, 0.4, 1.2)),
+    ]
+    scene = _scene(
+        tmp_path,
+        *plants,
+        text="A dining room with four plants in four distinct room corners.",
+    )
+    _attach_intent_contract(
+        scene,
+        [
+            {
+                "relation": "corner_distribution",
+                "subjects": {"category": "plant", "count": 4, "quantifier": "all"},
+                "targets": {"category": "room", "count": 1},
+                "source": "explicit_prompt",
+                "evidence_span": "four plants in four distinct room corners",
+            }
+        ],
+    )
+    config = CriticConfig(enabled=True, metrics=("functional_dependency",))
+
+    def physics_safe(scene_to_validate: RoomScene) -> bool:
+        # Stand in for collision geometry wider than the display bbox. The
+        # existing west-corner plants already meet this clearance; only the
+        # flush repair alternatives for the east corners should be rejected.
+        for object_id in (UniqueID("plant_2"), UniqueID("plant_3")):
+            obj = scene_to_validate.objects[object_id]
+            center = obj.transform.translation()
+            if float(center[0]) > 2.15 or abs(float(center[1])) > 1.8:
+                return False
+        return True
+
+    fixes = improve_furniture_relations(
+        scene,
+        config=config,
+        candidate_validator=physics_safe,
+    )
+
+    assert {fix.object_id for fix in fixes} == {"plant_2", "plant_3"}
+    assert all(
+        scene.objects[UniqueID(object_id)].transform.translation()[0] <= 2.15
+        for object_id in ("plant_2", "plant_3")
+    )
+    results = [
+        item
+        for item in evaluate_room_scene(
+            scene, config=config, stage="corners_physics_safe_after"
+        )["results"]
+        if item.get("relation_type") == "corner_distribution"
+    ]
+    assert len(results) == 4
+    assert all(item["label"] == "pass" for item in results)
 
 
 def test_centered_table_and_edge_group_repair_as_one_candidate(tmp_path: Path) -> None:
@@ -689,6 +975,69 @@ def test_instructional_contract_repairs_furniture_then_wall_surface(
     )
     assert pending_alignment["contract_state"] == "pending"
 
+
+def test_operation_zone_requires_clear_space_in_front_of_wall_backed_workstation(
+    tmp_path: Path,
+) -> None:
+    teacher = _object(
+        "teacher_desk_0",
+        "teacher_desk",
+        (0.0, 1.55, 0.4),
+        (1.4, 0.7, 0.8),
+        yaw_deg=180.0,
+    )
+    student = _object(
+        "student_desk_0",
+        "student_desk",
+        (0.0, 0.85, 0.4),
+        (1.2, 0.6, 0.7),
+        yaw_deg=180.0,
+    )
+    scene = _scene(
+        tmp_path,
+        teacher,
+        student,
+        text=(
+            "A classroom with a teacher desk at the front near a chalkboard and "
+            "a student desk."
+        ),
+    )
+    scene.scene_expert_task_spec = {
+        "room_type": "classroom",
+        "required_large_objects": ["teacher desk"],
+        "functional_zones": ["teaching_zone"],
+    }
+    _attach_fixture_contract(scene)
+    config = CriticConfig(enabled=True, metrics=("functional_dependency",))
+
+    blocked = next(
+        item
+        for item in evaluate_room_scene(scene, config=config, stage="furniture")[
+            "results"
+        ]
+        if item.get("relation_type") == "operation_zone_at_wall"
+    )
+    assert blocked["label"] == "fail"
+    assert (
+        blocked["diagnostics"]["wall_gap_m"]
+        <= blocked["diagnostics"]["allowed_wall_gap_m"]
+    )
+    assert blocked["diagnostics"]["blocking_object_id"] == "student_desk_0"
+
+    student.transform.set_translation(np.array([0.0, -0.1, 0.4]))
+    clear = next(
+        item
+        for item in evaluate_room_scene(scene, config=config, stage="furniture")[
+            "results"
+        ]
+        if item.get("relation_type") == "operation_zone_at_wall"
+    )
+    assert clear["label"] == "pass"
+    assert (
+        clear["diagnostics"]["operation_clearance_m"]
+        >= clear["diagnostics"]["required_operation_clearance_m"]
+    )
+
     wall_surfaces = {
         surface.wall_direction.value: surface
         for surface in extract_wall_surfaces_from_room_geometry(
@@ -761,6 +1110,61 @@ def test_instructional_contract_repairs_furniture_then_wall_surface(
     assert restored_chalkboard.placement_info is not None
     assert (
         restored_chalkboard.placement_info.parent_surface_id == north_surface.surface_id
+    )
+
+
+def test_operation_zone_accepts_unobstructed_clearance_within_geometry_tolerance(
+    tmp_path: Path,
+) -> None:
+    teacher = _object(
+        "teacher_desk_0",
+        "teacher_desk",
+        (0.0, 1.52, 0.4),
+        (1.4, 0.7, 0.8),
+        yaw_deg=180.0,
+    )
+    student = _object(
+        "student_desk_0",
+        "student_desk",
+        (0.0, 0.23, 0.4),
+        (1.2, 0.6, 0.7),
+        yaw_deg=180.0,
+    )
+    scene = _scene(
+        tmp_path,
+        teacher,
+        student,
+        text=(
+            "A classroom with a teacher desk at the front near a chalkboard and "
+            "a student desk."
+        ),
+    )
+    scene.scene_expert_task_spec = {
+        "room_type": "classroom",
+        "required_large_objects": ["teacher desk"],
+        "functional_zones": ["teaching_zone"],
+    }
+    _attach_fixture_contract(scene)
+
+    operation = next(
+        item
+        for item in evaluate_room_scene(
+            scene,
+            config=CriticConfig(enabled=True, metrics=("functional_dependency",)),
+            stage="furniture",
+        )["results"]
+        if item.get("relation_type") == "operation_zone_at_wall"
+    )
+
+    assert operation["label"] == "pass"
+    assert (
+        operation["diagnostics"]["operation_clearance_m"]
+        < operation["diagnostics"]["required_operation_clearance_m"]
+    )
+    assert (
+        operation["diagnostics"]["operation_clearance_m"]
+        + operation["diagnostics"]["operation_clearance_tolerance_m"]
+        >= operation["diagnostics"]["required_operation_clearance_m"]
     )
 
 
@@ -988,7 +1392,7 @@ def test_does_not_infer_generic_storage_to_wall(tmp_path: Path) -> None:
     np.testing.assert_allclose(storage.transform.translation()[:2], [-1.0, 0.0])
 
 
-def test_repairs_window_blocking_wall_backed_bookshelf(tmp_path: Path) -> None:
+def test_window_clearance_does_not_move_wall_backed_bookshelf(tmp_path: Path) -> None:
     bookshelf = _object(
         "bookshelf_0",
         "bookshelf",
@@ -1027,14 +1431,346 @@ def test_repairs_window_blocking_wall_backed_bookshelf(tmp_path: Path) -> None:
 
     fixes = improve_furniture_relations(scene, config=config)
 
-    assert [(fix.object_id, fix.relation_type) for fix in fixes] == [
-        ("bookshelf_0", "window_clearance")
-    ]
-    assert abs(float(bookshelf.transform.translation()[0])) >= 1.27
+    assert fixes == []
+    np.testing.assert_allclose(bookshelf.transform.translation()[:2], [0.0, -1.78])
     after = evaluate_room_scene(scene, config=config, stage="window_after")
     result_by_id = {result["check_id"]: result for result in after["results"]}
-    assert result_by_id["window_clearance__window_0"]["label"] == "pass"
+    assert result_by_id["window_clearance__window_0"]["label"] == "fail"
+    assert result_by_id["window_clearance__window_0"]["scoring_tier"] == "auxiliary"
     assert "wall_backed_storage__bookshelf_0" not in result_by_id
+
+
+def test_auxiliary_window_conflict_routes_only_wall_mounted_blocker() -> None:
+    payload = {
+        "case_pack": {
+            "scene_geometry": {
+                "objects": [
+                    {
+                        "id": "television_0",
+                        "object_type": "wall_mounted",
+                        "category_norm": "television",
+                    },
+                    {
+                        "id": "cabinet_0",
+                        "object_type": "furniture",
+                        "category_norm": "cabinet",
+                    },
+                ]
+            }
+        },
+        "results": [
+            {
+                "check_id": "window_clearance__window_0",
+                "metric": "interaction_clearance",
+                "label": "fail",
+                "primary_object": "window_0",
+                "related_objects": ["television_0", "cabinet_0"],
+                "scoring_tier": "auxiliary",
+                "diagnostics": {"wall_mounted_blocking_objects": ["television_0"]},
+            }
+        ],
+    }
+
+    wall_results = filter_prompt_results_for_agent(
+        payload, agent_type=AgentType.WALL_MOUNTED
+    )
+    furniture_results = filter_prompt_results_for_agent(
+        payload, agent_type=AgentType.FURNITURE
+    )
+    assert [item["check_id"] for item in wall_results] == ["window_clearance__window_0"]
+    assert wall_results[0]["prompt_actionable_auxiliary"] is True
+    assert furniture_results == []
+
+
+def test_furniture_prompt_locks_passed_hard_topology_by_stage() -> None:
+    payload = {
+        "case_pack": {"checks": []},
+        "results": [
+            {
+                "check_id": "intent_dining_chair_distribution",
+                "label": "pass",
+                "relation_type": "edge_distribution",
+                "primary_object": "dining_table_0",
+                "related_objects": [
+                    "dining_chair_0",
+                    "dining_chair_1",
+                    "dining_chair_2",
+                    "dining_chair_3",
+                    "dining_chair_4",
+                ],
+                "evidence": {
+                    "intent_constraint": {
+                        "constraint_id": "dining_chair_distribution",
+                        "relation": "edge_distribution",
+                        "stage": "furniture",
+                        "strength": "hard",
+                        "groups": [
+                            {"edge_class": "long", "counts_per_edge": 2},
+                            {"edge_class": "short", "counts_per_edge": 1},
+                        ],
+                    }
+                },
+            },
+            {
+                "check_id": "intent_television_on_stand",
+                "label": "pass",
+                "relation_type": "object_on_support",
+                "primary_object": "television_0",
+                "related_objects": ["tv_stand_0"],
+                "evidence": {
+                    "intent_constraint": {
+                        "constraint_id": "television_on_stand",
+                        "relation": "on_top_of",
+                        "stage": "furniture",
+                        "strength": "hard",
+                    }
+                },
+            },
+            {
+                "check_id": "intent_monitor_on_desk",
+                "label": "pass",
+                "relation_type": "object_on_support",
+                "primary_object": "computer_monitor_0",
+                "related_objects": ["study_desk_0"],
+                "evidence": {
+                    "intent_constraint": {
+                        "constraint_id": "monitor_on_desk",
+                        "relation": "on_top_of",
+                        "stage": "manipuland",
+                        "strength": "hard",
+                    }
+                },
+            },
+        ],
+    }
+
+    context = format_agent_prompt_context(payload, agent_type=AgentType.FURNITURE)
+
+    assert "Authoritative deterministic hard topology already satisfied" in context
+    assert "edge_distribution" in context
+    assert "dining_table_0" in context
+    assert "television_0" in context
+    assert "tv_stand_0" in context
+    assert "target-local edge" in context
+    assert "computer_monitor_0" not in context
+    assert "study_desk_0" not in context
+
+
+def test_media_axis_offset_fails_and_repairs_living_group(tmp_path: Path) -> None:
+    sofa = _object("sofa_0", "sofa", (-2.1, -1.2, 0.4), (2.0, 0.8, 0.8), yaw_deg=0.0)
+    tv_stand = _object(
+        "tv_stand_0", "tv_stand", (0.0, 1.2, 0.3), (1.4, 0.5, 0.6), yaw_deg=180.0
+    )
+    television = _object(
+        "television_0",
+        "television",
+        (0.0, 1.2, 0.91),
+        (0.9, 0.18, 0.6),
+        yaw_deg=180.0,
+    )
+    coffee_table = _object(
+        "coffee_table_0", "coffee_table", (-1.05, 0.0, 0.2), (1.2, 0.7, 0.4)
+    )
+    scene = _scene(
+        tmp_path,
+        sofa,
+        tv_stand,
+        television,
+        coffee_table,
+        text=(
+            "A living room with a sofa facing a television on a TV stand and a "
+            "coffee table centered between the sofa and TV stand."
+        ),
+    )
+    scene.room_type = "living_room"
+    _attach_intent_contract(
+        scene,
+        [
+            {
+                "relation": "across_from",
+                "stage": "furniture",
+                "strength": "hard",
+                "subjects": {"category": "sofa", "count": 1},
+                "targets": {"category": "tv_stand", "count": 1},
+                "source": "explicit_prompt",
+                "evidence_span": "sofa facing TV stand",
+            },
+            {
+                "relation": "on_top_of",
+                "stage": "furniture",
+                "strength": "hard",
+                "subjects": {"category": "television", "count": 1},
+                "targets": {"category": "tv_stand", "count": 1},
+                "source": "explicit_prompt",
+                "evidence_span": "television on TV stand",
+            },
+            {
+                "relation": "centered_between",
+                "stage": "furniture",
+                "strength": "hard",
+                "subjects": {"category": "coffee_table", "count": 1},
+                "targets": {
+                    "category": "sofa",
+                    "count": 1,
+                    "secondary_category": "tv_stand",
+                    "secondary_count": 1,
+                },
+                "source": "explicit_prompt",
+                "evidence_span": "coffee table centered between sofa and TV stand",
+            },
+        ],
+    )
+    config = CriticConfig(enabled=True, metrics=("functional_dependency",))
+
+    before = evaluate_room_scene(scene, config=config, stage="media_axis_before")
+    media_before = next(
+        result
+        for result in before["results"]
+        if result.get("relation_type") == "seating_to_media"
+    )
+    assert media_before["label"] == "fail"
+    assert media_before["diagnostics"]["lateral_offset_m"] == pytest.approx(2.1)
+    assert media_before["diagnostics"]["media_axis_pass_offset_m"] == 0.35
+    assert media_before["diagnostics"]["media_axis_degraded_offset_m"] == 0.75
+
+    fixes = improve_furniture_relations(scene, config=config)
+
+    assert {fix.object_id for fix in fixes} == {
+        "sofa_0",
+        "tv_stand_0",
+        "television_0",
+    }
+    np.testing.assert_allclose(coffee_table.transform.translation()[:2], [-1.05, 0.0])
+    after = evaluate_room_scene(scene, config=config, stage="media_axis_after")
+    assert all(
+        result["label"] == "pass"
+        for result in after["results"]
+        if result.get("relation_type")
+        in {
+            "seating_to_media",
+            "object_on_support",
+            "centered_between_alignment",
+        }
+    )
+
+
+def test_media_group_repair_resolves_failed_support_and_between_dependencies(
+    tmp_path: Path,
+) -> None:
+    sofa = _object("sofa_0", "sofa", (-2.1, -1.2, 0.4), (2.0, 0.8, 0.8))
+    tv_stand = _object(
+        "tv_stand_0", "tv_stand", (0.0, 1.2, 0.3), (1.4, 0.5, 0.6), yaw_deg=180.0
+    )
+    # This display intersects the stand. The media candidate must repair that
+    # support relation while correcting the sofa axis and coffee-table midpoint.
+    television = _object(
+        "television_0",
+        "television",
+        (0.0, 1.2, 0.3),
+        (0.9, 0.18, 0.6),
+        yaw_deg=180.0,
+    )
+    coffee_table = _object(
+        "coffee_table_0", "coffee_table", (1.3, -1.1, 0.2), (1.2, 0.7, 0.4)
+    )
+    scene = _scene(
+        tmp_path,
+        sofa,
+        tv_stand,
+        television,
+        coffee_table,
+        text=(
+            "A living room with a sofa facing a television on a TV stand and a "
+            "coffee table centered between the sofa and TV stand."
+        ),
+    )
+    scene.room_type = "living_room"
+    _attach_intent_contract(
+        scene,
+        [
+            {
+                "relation": "across_from",
+                "stage": "furniture",
+                "strength": "hard",
+                "subjects": {"category": "sofa", "count": 1},
+                "targets": {"category": "tv_stand", "count": 1},
+                "source": "explicit_prompt",
+                "evidence_span": "sofa facing TV stand",
+            },
+            {
+                "relation": "on_top_of",
+                "stage": "furniture",
+                "strength": "hard",
+                "subjects": {"category": "television", "count": 1},
+                "targets": {"category": "tv_stand", "count": 1},
+                "source": "explicit_prompt",
+                "evidence_span": "television on TV stand",
+            },
+            {
+                "relation": "centered_between",
+                "stage": "furniture",
+                "strength": "hard",
+                "subjects": {"category": "coffee_table", "count": 1},
+                "targets": {
+                    "category": "sofa",
+                    "count": 1,
+                    "secondary_category": "tv_stand",
+                    "secondary_count": 1,
+                },
+                "source": "explicit_prompt",
+                "evidence_span": "coffee table centered between sofa and TV stand",
+            },
+        ],
+    )
+    config = CriticConfig(enabled=True, metrics=("functional_dependency",))
+
+    before = evaluate_room_scene(scene, config=config, stage="media_group_before")
+    labels_before = {
+        str(result["relation_type"]): str(result["label"])
+        for result in before["results"]
+        if result.get("relation_type")
+        in {
+            "seating_to_media",
+            "object_on_support",
+            "centered_between_alignment",
+        }
+    }
+    assert labels_before == {
+        "seating_to_media": "fail",
+        "object_on_support": "fail",
+        "centered_between_alignment": "fail",
+    }
+
+    targets = furniture_relation_repair._repair_targets(scene, before)
+    media_target = next(
+        target for target in targets if target.relation_type == "seating_to_media"
+    )
+    assert {pose.object_id for pose in media_target.member_poses} == {
+        "sofa_0",
+        "tv_stand_0",
+        "television_0",
+        "coffee_table_0",
+    }
+
+    fixes = improve_furniture_relations(scene, config=config)
+
+    assert {fix.object_id for fix in fixes} >= {
+        "sofa_0",
+        "tv_stand_0",
+        "television_0",
+        "coffee_table_0",
+    }
+    after = evaluate_room_scene(scene, config=config, stage="media_group_after")
+    assert all(
+        result["label"] == "pass"
+        for result in after["results"]
+        if result.get("relation_type")
+        in {
+            "seating_to_media",
+            "object_on_support",
+            "centered_between_alignment",
+        }
+    )
 
 
 def test_repairs_multiple_wall_backed_stools_with_wall_normal_orientation(
@@ -1258,7 +1994,9 @@ def test_wall_backed_repair_keeps_nearby_required_relation(tmp_path: Path) -> No
 
 
 def test_freestanding_television_repair_restores_media_support(tmp_path: Path) -> None:
-    tv_stand = _object("tv_stand_0", "tv_stand", (0.0, 1.1, 0.3), (1.4, 0.5, 0.6))
+    tv_stand = _object(
+        "tv_stand_0", "tv_stand", (0.0, 1.1, 0.3), (1.4, 0.5, 0.6), yaw_deg=90.0
+    )
     television = _object(
         "television_0", "television", (1.6, -0.2, 0.31), (0.9, 0.18, 0.6)
     )
@@ -1289,11 +2027,32 @@ def test_freestanding_television_repair_restores_media_support(tmp_path: Path) -
         for item in unresolved_furniture_relation_failures(scene, config=config)
     ] == [("television_0", "object_on_support")]
 
-    fixes = improve_furniture_relations(scene, config=config)
+    validator_calls = 0
+
+    def candidate_validator(candidate: RoomScene) -> bool:
+        nonlocal validator_calls
+        validator_calls += 1
+        candidate_tv_bounds = candidate.objects[
+            UniqueID("television_0")
+        ].compute_world_bounds()
+        candidate_stand_bounds = candidate.objects[
+            UniqueID("tv_stand_0")
+        ].compute_world_bounds()
+        assert candidate_tv_bounds is not None and candidate_stand_bounds is not None
+        # The support repair must clear the physical support volume rather than
+        # only satisfying the evaluator's XY overlap criterion.
+        return bool(candidate_tv_bounds[0][2] > candidate_stand_bounds[1][2])
+
+    fixes = improve_furniture_relations(
+        scene,
+        config=config,
+        candidate_validator=candidate_validator,
+    )
 
     assert [(fix.object_id, fix.relation_type) for fix in fixes] == [
         ("television_0", "object_on_support")
     ]
+    assert validator_calls == 1
     tv_bounds = television.compute_world_bounds()
     stand_bounds = tv_stand.compute_world_bounds()
     assert tv_bounds is not None and stand_bounds is not None
@@ -1303,6 +2062,11 @@ def test_freestanding_television_repair_restores_media_support(tmp_path: Path) -
     )
     assert math.isclose(
         float(tv_bounds[0][2]), float(stand_bounds[1][2]) + 0.01, abs_tol=1e-6
+    )
+    assert math.isclose(
+        RollPitchYaw(television.transform.rotation()).yaw_angle(),
+        RollPitchYaw(tv_stand.transform.rotation()).yaw_angle(),
+        abs_tol=1e-6,
     )
     after = next(
         item
@@ -1315,7 +2079,64 @@ def test_freestanding_television_repair_restores_media_support(tmp_path: Path) -
     assert after["label"] == "pass"
 
 
-def test_media_support_repair_moves_pair_clear_of_window(tmp_path: Path) -> None:
+def test_hard_support_collision_is_prioritized_before_unrelated_repairs(
+    tmp_path: Path,
+) -> None:
+    tv_stand = _object("tv_stand_0", "tv_stand", (0.0, 0.0, 0.3), (1.4, 0.5, 0.6))
+    # Its volume currently intersects the stand.  A normal on-top-of repair
+    # lifts it above the support before any independent relation is evaluated.
+    television = _object(
+        "television_0", "television", (0.0, 0.0, 0.31), (0.9, 0.18, 0.6)
+    )
+    dining_chair = _object(
+        "dining_chair_0", "dining_chair", (1.7, 1.4, 0.45), (0.5, 0.5, 0.9)
+    )
+    scene = _scene(tmp_path, tv_stand, television, dining_chair)
+    support_target = _RepairTarget(
+        "television_0",
+        "object_on_support",
+        "support_check",
+        (0.0, 0.0),
+        None,
+        target_center_z=0.91,
+    )
+    unrelated_target = _RepairTarget(
+        "dining_chair_0",
+        "edge_distribution",
+        "seat_check",
+        (1.0, 1.0),
+        0.0,
+    )
+    payload = {
+        "results": [
+            {
+                "check_id": "support_check",
+                "relation_type": "object_on_support",
+                "label": "fail",
+                "selected_related_objects": ["tv_stand_0"],
+                "evidence": {"intent_constraint": {"strength": "hard"}},
+            },
+            {
+                "check_id": "seat_check",
+                "relation_type": "edge_distribution",
+                "label": "fail",
+                "evidence": {"intent_constraint": {"strength": "hard"}},
+            },
+        ]
+    }
+
+    assert _is_hard_support_collision_target(scene, payload, support_target)
+    assert not _is_hard_support_collision_target(scene, payload, unrelated_target)
+    assert sorted(
+        [unrelated_target, support_target],
+        key=lambda target: (
+            0 if _is_hard_support_collision_target(scene, payload, target) else 1,
+            target.check_id,
+        ),
+    ) == [support_target, unrelated_target]
+
+
+def test_media_support_repair_does_not_move_pair_for_window(tmp_path: Path) -> None:
     tv_stand = _object("tv_stand_0", "tv_stand", (0.0, 1.7, 0.3), (1.4, 0.5, 0.6))
     television = _object(
         "television_0", "television", (-2.0, -1.2, 0.31), (0.9, 0.18, 0.6)
@@ -1364,7 +2185,8 @@ def test_media_support_repair_moves_pair_clear_of_window(tmp_path: Path) -> None
 
     fixes = improve_furniture_relations(scene, config=config)
 
-    assert {fix.object_id for fix in fixes} == {"television_0", "tv_stand_0"}
+    assert {fix.object_id for fix in fixes} == {"television_0"}
+    np.testing.assert_allclose(tv_stand.transform.translation()[:2], [0.0, 1.7])
     payload = evaluate_room_scene(scene, config=config, stage="media_window_after")
     result_by_id = {result["check_id"]: result for result in payload["results"]}
     support_result = next(
@@ -1374,10 +2196,11 @@ def test_media_support_repair_moves_pair_clear_of_window(tmp_path: Path) -> None
         and result.get("primary_object") == "television_0"
     )
     assert support_result["label"] == "pass"
-    assert result_by_id["window_clearance__window_0"]["label"] == "pass"
+    assert result_by_id["window_clearance__window_0"]["label"] == "fail"
+    assert result_by_id["window_clearance__window_0"]["scoring_tier"] == "auxiliary"
 
 
-def test_media_support_pair_preserves_hard_between_dependent(tmp_path: Path) -> None:
+def test_media_support_repair_leaves_between_group_for_window(tmp_path: Path) -> None:
     tv_stand = _object("tv_stand_0", "tv_stand", (0.0, 1.7, 0.3), (1.4, 0.5, 0.6))
     television = _object(
         "television_0", "television", (-2.0, -1.2, 0.31), (0.9, 0.18, 0.6)
@@ -1524,14 +2347,7 @@ def test_media_support_pair_preserves_hard_between_dependent(tmp_path: Path) -> 
         candidate_validator=candidate_validator,
     )
 
-    assert {fix.object_id for fix in fixes} == {
-        "television_0",
-        "tv_stand_0",
-        "rug_0",
-        "coffee_table_0",
-        "armchair_0",
-        "armchair_1",
-    }
+    assert {fix.object_id for fix in fixes} == {"television_0"}
     new_rug_center = (
         rug.compute_world_bounds()[0][:2] + rug.compute_world_bounds()[1][:2]
     ) / 2.0
@@ -1539,8 +2355,8 @@ def test_media_support_pair_preserves_hard_between_dependent(tmp_path: Path) -> 
         coffee_table.compute_world_bounds()[0][:2]
         + coffee_table.compute_world_bounds()[1][:2]
     ) / 2.0
-    assert not np.allclose(new_rug_center, old_rug_center)
-    assert not np.allclose(new_table_center, old_table_center)
+    np.testing.assert_allclose(new_rug_center, old_rug_center)
+    np.testing.assert_allclose(new_table_center, old_table_center)
     payload = evaluate_room_scene(
         scene, config=config, stage="media_window_between_after"
     )
@@ -1552,7 +2368,8 @@ def test_media_support_pair_preserves_hard_between_dependent(tmp_path: Path) -> 
         and result.get("primary_object") == "television_0"
     )
     assert support_result["label"] == "pass"
-    assert result_by_id["window_clearance__window_0"]["label"] == "pass"
+    assert result_by_id["window_clearance__window_0"]["label"] == "fail"
+    assert result_by_id["window_clearance__window_0"]["scoring_tier"] == "auxiliary"
     assert (
         next(
             result
@@ -1766,6 +2583,35 @@ def test_manipuland_support_contract_is_deferred_from_furniture_gate(
             "intent_constraint": {
                 "relation": "on_top_of",
                 "stage": "manipuland",
+                "strength": "hard",
+            }
+        },
+    }
+    monkeypatch.setattr(
+        furniture_relation_repair,
+        "_evaluate",
+        lambda *_args, **_kwargs: {"case_pack": {}, "results": [failure]},
+    )
+
+    assert unresolved_furniture_relation_failures(scene, config=config) == []
+
+
+def test_wall_owned_inventory_contract_is_deferred_from_furniture_gate(
+    tmp_path: Path, monkeypatch
+) -> None:
+    scene = _scene(tmp_path, text="A classroom with a chalkboard on the wall.")
+    config = CriticConfig(enabled=True, metrics=("functional_dependency",))
+    failure = {
+        "check_id": "intent_required_instructional_surface",
+        "label": "fail",
+        "contract_state": "failed",
+        "scoring_tier": "core",
+        "relation_type": "required_count",
+        "primary_object": "instructional_surface",
+        "evidence": {
+            "intent_constraint": {
+                "relation": "required_count",
+                "stage": "wall_mounted",
                 "strength": "hard",
             }
         },
@@ -2258,6 +3104,31 @@ def test_dining_chair_repair_uses_outward_slot_when_exact_pose_blocks_access(
 
     assert [fix.object_id for fix in fixes] == ["dining_chair"]
     np.testing.assert_allclose(chair.transform.translation()[:2], [0.0, 1.06])
+
+
+def test_coordinated_table_seat_repair_uses_bounded_gap_candidates() -> None:
+    exact_targets = [
+        _RepairTarget(
+            "dining_chair_0",
+            "edge_distribution",
+            "dining_slots",
+            (0.0, -1.0),
+            180.0,
+        )
+    ]
+    diagnostics = [
+        {
+            "facing_target_xy_m": [0.0, 0.0],
+            "allowed_normal_deviation_m": 0.30,
+        }
+    ]
+
+    candidates = furniture_relation_repair._coordinated_dining_targets(
+        exact_targets, diagnostics
+    )
+
+    positions = [candidate.member_poses[0].target_center_xy for candidate in candidates]
+    assert positions == [(0.0, -1.0), (0.0, -1.15), (0.0, -1.27)]
 
 
 def test_room_center_repair_coordinates_wall_storage_access(
@@ -2844,6 +3715,40 @@ def test_repairs_two_anchor_living_room_group(tmp_path: Path) -> None:
     }
 
 
+def test_between_repair_derives_midpoint_when_diagnostics_omit_target(
+    tmp_path: Path,
+) -> None:
+    sofa = _object("sofa_0", "sofa", (-2.0, -1.0, 0.4), (2.0, 0.8, 0.8))
+    tv_stand = _object("tv_stand_0", "tv_stand", (2.0, 1.0, 0.3), (1.4, 0.5, 0.6))
+    coffee_table = _object(
+        "coffee_table_0", "coffee_table", (0.5, 0.0, 0.25), (1.0, 0.6, 0.5)
+    )
+    scene = _scene(tmp_path, sofa, tv_stand, coffee_table)
+    result = {
+        "check_id": "centered_between_check",
+        "relation_type": "centered_between_alignment",
+        "primary_object": "coffee_table_0",
+        "selected_related_objects": ["sofa_0", "tv_stand_0"],
+        "diagnostics": {},
+    }
+    context = _RepairHandlerContext(
+        scene=scene,
+        payload={"results": [result]},
+        result=result,
+        check_id="centered_between_check",
+        relation="centered_between_alignment",
+        diagnostics={},
+        coordinated_front_checks=set(),
+        claimed_near_checks=set(),
+    )
+
+    targets = _between_repair_targets(context)
+
+    assert len(targets) == 1
+    assert targets[0].object_id == "coffee_table_0"
+    assert targets[0].target_center_xy == (0.0, 0.0)
+
+
 def test_centered_anchor_repair_preserves_passing_flanking_clearance(
     tmp_path: Path,
 ) -> None:
@@ -2972,6 +3877,46 @@ def test_repairs_paired_workstation_aisle_without_moving_other_furniture(
     )
     assert after_clear_access["label"] == "pass"
     assert after_clear_access["diagnostics"]["free_depth_m"] >= 0.8
+
+
+def test_repairs_local_clear_access_by_moving_reported_blocker(
+    tmp_path: Path,
+) -> None:
+    dressing_table = _object(
+        "dressing_table_0", "dressing_table", (0.0, 0.0, 0.4), (1.0, 0.5, 0.8)
+    )
+    blocker = _object("nightstand_0", "nightstand", (0.2, 0.6, 0.3), (0.45, 0.4, 0.6))
+    scene = _scene(
+        tmp_path,
+        dressing_table,
+        blocker,
+        text="A bedroom with usable space in front of a dressing table.",
+    )
+    scene.room_type = "bedroom"
+    _attach_intent_contract(
+        scene,
+        [
+            {
+                "relation": "clear_access",
+                "subjects": {"category": "dressing_table", "count": 1},
+                "targets": {"category": "room", "count": 1},
+                "source": "explicit_prompt",
+                "strength": "hard",
+                "evidence_span": "usable space in front of the dressing table",
+            }
+        ],
+    )
+    config = CriticConfig(enabled=True, metrics=("functional_dependency",))
+
+    fixes = improve_furniture_relations(scene, config=config)
+
+    assert [fix.object_id for fix in fixes] == ["nightstand_0"]
+    after = evaluate_room_scene(scene, config=config, stage="furniture_relation_repair")
+    clear_access = next(
+        item for item in after["results"] if item.get("relation_type") == "clear_access"
+    )
+    assert clear_access["label"] == "pass"
+    assert clear_access["diagnostics"]["blocking_ids"] == []
 
 
 def test_repairs_work_seats_blocking_a_paired_workstation_aisle(

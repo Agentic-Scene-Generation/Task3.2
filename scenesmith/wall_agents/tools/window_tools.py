@@ -140,9 +140,11 @@ class WindowRepairTools:
             rows.append(
                 {
                     "window_id": window.id,
-                    "wall_surface_id": f"{room_id}_{window.wall_direction.value}"
-                    if window.wall_direction
-                    else window.boundary_label,
+                    "wall_surface_id": (
+                        f"{room_id}_{window.wall_direction.value}"
+                        if window.wall_direction
+                        else window.boundary_label
+                    ),
                     "wall_direction": (
                         window.wall_direction.value if window.wall_direction else None
                     ),
@@ -184,6 +186,32 @@ class WindowRepairTools:
         return self._finish_edit(result, f"moved window '{window_id}'")
 
     def _remove_window_impl(self, *, window_id: str) -> str:
+        manifest_path = (
+            Path(self.house_layout.house_dir or self.room_output_dir.parent)
+            / "floor_plan_reservation_manifest.json"
+        )
+        if manifest_path.exists():
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                explicit_count = int(manifest.get("explicit_window_count") or 0)
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                explicit_count = 0
+            # The current layout format does not retain which generated window
+            # fulfilled an explicit prompt obligation.  Removing any one of them
+            # could therefore delete a required opening even when extra windows
+            # remain, so use resize/move whenever the contract names windows.
+            if explicit_count:
+                return json.dumps(
+                    {
+                        "success": False,
+                        "message": (
+                            "Cannot remove windows: the floor-plan contract "
+                            f"explicitly requires {explicit_count} window(s), and "
+                            "their identities are not tracked. "
+                            "Resize or move it instead."
+                        ),
+                    }
+                )
         result = self.floor_plan_tools._remove_window_impl(window_id)
         return self._finish_edit(result, f"removed window '{window_id}'")
 

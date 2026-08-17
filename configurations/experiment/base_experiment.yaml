@@ -77,6 +77,11 @@ num_workers: 1
 # validation failures are not retried. One retry is the production default.
 scene_retry_attempts: 1
 
+# Deterministic quality failures are distinct from runtime failures. Production
+# remains strict by default; critic probes may select "degraded" to preserve
+# failed checkpoints, traces, and final renders without marking them successful.
+quality_failure_policy: "strict"  # Options: "strict", "degraded"
+
 # Pipeline stage control
 # Stages run in order: floor_plan → furniture → wall_mounted → ceiling_mounted → manipuland
 # Set start_stage to resume from a specific stage (loads previous stage's state)
@@ -87,6 +92,14 @@ pipeline:
   stop_stage: "manipuland"  # Options: "floor_plan", "furniture", "wall_mounted", "ceiling_mounted", "manipuland"
   # Path to source experiment dir (e.g., "outputs/2025-12-21/10-30-45")
   resume_from_path: null
+  # Resume furniture after its first rendered candidate instead of generating
+  # another initial layout. Requires resume_from_path and furniture/renders_001.
+  resume_furniture_from_initial_render: false
+  # Optional furniture render checkpoint for critique/repair replay. "initial"
+  # restores renders_001; "latest" restores the highest numbered render with a
+  # complete scene_state.json. The boolean above remains as a compatibility alias
+  # for "initial".
+  resume_furniture_from_render: null
   # Parallelize rooms within a house (mutually exclusive with num_workers > 1).
   parallel_rooms: false
   # Max concurrent rooms when parallel_rooms=true.

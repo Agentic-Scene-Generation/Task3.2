@@ -17,6 +17,7 @@ from scenesmith.scene_expert.schemas import (
     SceneTaskSpec,
     StageBrief,
     StageBudget,
+    StageRelationContext,
     StageVerifyReport,
 )
 
@@ -74,6 +75,7 @@ class Harness:
         task_spec: SceneTaskSpec,
         memory_pack: MemoryPack,
         stage_brief: StageBrief | None = None,
+        relation_context: StageRelationContext | None = None,
     ) -> HarnessContext:
         """Assemble the HarnessContext for a stage execution.
 
@@ -94,6 +96,7 @@ class Harness:
             stage=stage,
             task_spec=task_spec,
             memory_pack=memory_pack,
+            relation_context=relation_context,
             stage_brief=stage_brief,
             stage_budget=budget,
             allowed_scene_smith_stage=stage,

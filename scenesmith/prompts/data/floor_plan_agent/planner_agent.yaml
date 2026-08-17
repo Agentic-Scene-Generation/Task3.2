@@ -107,20 +107,32 @@ prompt: |
 
   After receiving scores, check these conditions IN ORDER:
 
-  1. **Score threshold met**: If ALL 5 scores are ≥{{ early_finish_min_score }}/10:
+  1. **Architectural sufficiency**: If `validate` passes and the critique identifies
+     no concrete violation of the immutable user task, supplied Stage Brief, or
+     authoritative structured layout state:
+     - **STOP IMMEDIATELY** - this applies even when a critic mentions optional
+       daylight, material, or aesthetic preferences with a lower score
+     - Do NOT call `request_design_change()` for a larger window, alternate door
+       location, conventional proportion, or another subjective refinement
+     - Proceed directly to completion summary
+     - Rationale: modifying validated architecture for nice-to-haves risks
+       destroying later-stage wall reservations and circulation
+
+  2. **Score threshold met**: If ALL 5 scores are ≥{{ early_finish_min_score }}/10:
      - **STOP IMMEDIATELY** - This is a MANDATORY EXIT
      - Do NOT call request_design_change()
      - Do NOT request another critique
      - Proceed directly to completion summary
      - Rationale: High scores = excellent design; further changes risk regression
 
-  2. **Max cycles reached**: {{ max_critique_rounds }} complete cycles → STOP
+  3. **Max cycles reached**: {{ max_critique_rounds }} complete cycles → STOP
 
-  3. **Diminishing returns**: Same issues persist after 2+ attempts → STOP
+  4. **Diminishing returns**: Same issues persist after 2+ attempts → STOP
 
-  **HARD GATE**: Condition #1 overrides everything. When ALL scores ≥ threshold,
-  you MUST stop. Do not second-guess, do not pursue "nice-to-have" improvements,
-  do not continue because critic mentioned suggestions. HIGH SCORES = STOP.
+  **HARD GATE**: Conditions #1 and #2 override everything. When architecture is
+  validated and task-complete, or when ALL scores ≥ threshold, you MUST stop. Do
+  not second-guess, do not pursue "nice-to-have" improvements, and do not continue
+  because critic mentioned optional suggestions.
 
   # Communication Style
 
