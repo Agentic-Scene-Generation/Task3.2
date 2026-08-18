@@ -14,6 +14,8 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from pydrake.math import RigidTransform, RollPitchYaw, RotationMatrix
+from shapely.affinity import translate as translate_polygon
+from shapely.geometry import Polygon
 
 from scenesmith.agent_utils.clearance_zones import (
     compute_door_clearance_violations,
@@ -22,6 +24,7 @@ from scenesmith.agent_utils.clearance_zones import (
 from scenesmith.agent_utils.furniture_accessibility_guard import (
     improve_storage_front_access,
 )
+from scenesmith.agent_utils.physics_validation import compute_scene_collisions
 from scenesmith.agent_utils.room import (
     ObjectType,
     PlacementInfo,
@@ -53,6 +56,7 @@ _FURNITURE_GATE_STRATEGIES = (
     "furniture_relation",
     "edge_distribution",
 )
+_SYSTEM_REPAIRABLE_RELATIONS = frozenset({"room_containment"})
 _PAIRED_SURFACE_RELATION = "furniture_faces_furniture"
 _OPENING_CLEARANCE_MARGIN_M = 0.03
 _WALL_BACKED_CONTACT_GAP_M = 0.03
@@ -61,6 +65,7 @@ _WALL_BACKED_CONTACT_GAP_M = 0.03
 # in-tolerance pose instead of forcing a newly conflicting flush placement.
 _WALL_BACKED_DEFAULT_MAX_GAP_M = 0.25
 _WALL_BACKED_GAP_MARGIN_M = 0.02
+_ROOM_CONTAINMENT_MARGIN_M = 0.02
 # A room-center repair only needs to enter the evaluator's allowed region.  A
 # small interior margin avoids reintroducing nearby clearance conflicts solely
 # to reach an arbitrary exact coordinate.
@@ -78,6 +83,7 @@ _ROOM_BOUNDED_TOPOLOGY_RELATIONS = frozenset(
         "corner_of_room",
         "corner_distribution",
         "edge_distribution",
+        "room_containment",
     }
 )
 
@@ -309,6 +315,19 @@ def improve_furniture_relations(
                 continue
             snapshot = _ScenePoseSnapshot.capture(scene)
             keep_candidate = False
+            baseline_collision_pairs: set[tuple[str, str]] | None = None
+            if target.relation_type == "room_containment":
+                try:
+                    baseline_collision_pairs = {
+                        tuple(sorted((pair.object_a_id, pair.object_b_id)))
+                        for pair in compute_scene_collisions(scene)
+                    }
+                except Exception:
+                    console_logger.warning(
+                        "Could not validate baseline collisions for containment repair",
+                        exc_info=True,
+                    )
+                    continue
             try:
                 candidate_obj = scene.objects[UniqueID(target.object_id)]
                 new_transform = _transform_for_target(candidate_obj, target)
@@ -328,6 +347,20 @@ def improve_furniture_relations(
                         max_candidate_evaluations=16,
                         repair_degraded=True,
                     )
+                if baseline_collision_pairs is not None:
+                    try:
+                        candidate_collision_pairs = {
+                            tuple(sorted((pair.object_a_id, pair.object_b_id)))
+                            for pair in compute_scene_collisions(scene)
+                        }
+                    except Exception:
+                        console_logger.warning(
+                            "Containment repair collision validation failed",
+                            exc_info=True,
+                        )
+                        continue
+                    if candidate_collision_pairs - baseline_collision_pairs:
+                        continue
                 candidate_evaluations += 1
                 if candidate_validator is not None:
                     try:
@@ -440,6 +473,7 @@ def unresolved_furniture_relation_failures(
         and (
             str(result.get("relation_type") or "")
             in repair_relation_types(strategies=_FURNITURE_GATE_STRATEGIES)
+            or str(result.get("relation_type") or "") in _SYSTEM_REPAIRABLE_RELATIONS
             or _is_required_media_on_support_result(payload, scene, result)
             or _is_paired_surface_facing_result(payload, result)
             or _is_hard_furniture_contract_failure(result)
@@ -659,8 +693,8 @@ def _label_severity(label: str) -> int:
 
 
 def _is_registry_repairable_relation(relation_type: str) -> bool:
-    return relation_type in repair_relation_types(
-        strategies=_FURNITURE_REPAIR_STRATEGIES
+    return relation_type in _SYSTEM_REPAIRABLE_RELATIONS or relation_type in (
+        repair_relation_types(strategies=_FURNITURE_REPAIR_STRATEGIES)
     )
 
 
@@ -1517,6 +1551,124 @@ def _back_against_wall_repair_targets(
     ]
 
 
+def _room_containment_repair_targets(
+    context: _RepairHandlerContext,
+) -> list[_RepairTarget]:
+    """Move an escaped floor object minimally back into the usable room bounds."""
+    object_id = str(context.result.get("primary_object") or "")
+    obj = context.scene.objects.get(UniqueID(object_id))
+    geometry = context.scene.room_geometry
+    if obj is None or geometry is None:
+        return []
+
+    for result in context.payload.get("results") or []:
+        if (
+            str(result.get("primary_object") or "") != object_id
+            or str(result.get("relation_type") or "") != "back_against_wall"
+        ):
+            continue
+        wall_id = next(
+            (
+                str(value)
+                for value in (
+                    result.get("selected_related_objects")
+                    or result.get("related_objects")
+                    or []
+                )
+                if _scene_wall(context.scene, str(value)) is not None
+            ),
+            None,
+        )
+        if wall_id is None:
+            continue
+        wall_targets = _wall_backed_targets(context.scene, object_id, wall_id)
+        if wall_targets:
+            return [
+                _RepairTarget(
+                    object_id,
+                    "room_containment",
+                    context.check_id,
+                    center,
+                    yaw,
+                )
+                for center, yaw in wall_targets
+            ]
+
+    center = _world_center_xy(obj)
+    if center is None:
+        return []
+
+    diagnostics = context.result.get("diagnostics") or {}
+    footprint_values = diagnostics.get("footprint_world")
+    room_values = diagnostics.get("room_floor_polygon")
+    try:
+        footprint = Polygon(footprint_values)
+        floor_polygon = Polygon(room_values)
+    except (TypeError, ValueError):
+        footprint = Polygon()
+        floor_polygon = Polygon()
+    has_floor_polygons = not (
+        footprint.is_empty
+        or floor_polygon.is_empty
+        or not footprint.is_valid
+        or not floor_polygon.is_valid
+    )
+    usable_floor: Polygon | None = None
+    if not has_floor_polygons:
+        bounds = obj.compute_world_bounds()
+        if bounds is None:
+            return []
+        lower = np.asarray(bounds[0], dtype=float)
+        upper = np.asarray(bounds[1], dtype=float)
+        room_min = np.array(
+            [
+                -float(geometry.length) / 2.0 + _ROOM_CONTAINMENT_MARGIN_M,
+                -float(geometry.width) / 2.0 + _ROOM_CONTAINMENT_MARGIN_M,
+            ]
+        )
+        room_max = np.array(
+            [
+                float(geometry.length) / 2.0 - _ROOM_CONTAINMENT_MARGIN_M,
+                float(geometry.width) / 2.0 - _ROOM_CONTAINMENT_MARGIN_M,
+            ]
+        )
+    else:
+        usable_floor = floor_polygon.buffer(-_ROOM_CONTAINMENT_MARGIN_M, join_style=2)
+        if usable_floor.is_empty:
+            return []
+        lower = np.asarray(footprint.bounds[:2], dtype=float)
+        upper = np.asarray(footprint.bounds[2:], dtype=float)
+        room_min = np.asarray(usable_floor.bounds[:2], dtype=float)
+        room_max = np.asarray(usable_floor.bounds[2:], dtype=float)
+
+    object_span = upper - lower
+    if np.any(object_span > room_max - room_min):
+        return []
+    shift = np.zeros(2, dtype=float)
+    for axis in range(2):
+        if lower[axis] < room_min[axis]:
+            shift[axis] = room_min[axis] - lower[axis]
+        elif upper[axis] > room_max[axis]:
+            shift[axis] = room_max[axis] - upper[axis]
+    if np.linalg.norm(shift) <= 1e-9:
+        return []
+    if usable_floor is not None:
+        candidate_footprint = translate_polygon(
+            footprint, xoff=float(shift[0]), yoff=float(shift[1])
+        )
+        if not usable_floor.covers(candidate_footprint):
+            return []
+    return [
+        _RepairTarget(
+            object_id,
+            "room_containment",
+            context.check_id,
+            (center[0] + float(shift[0]), center[1] + float(shift[1])),
+            None,
+        )
+    ]
+
+
 _REPAIR_TARGET_HANDLERS = {
     "faces": _faces_room_repair_targets,
     _PAIRED_SURFACE_RELATION: _paired_surface_targets,
@@ -1541,6 +1693,7 @@ _REPAIR_TARGET_HANDLERS = {
     "one_per_support": _support_repair_targets,
     "wall_backed_storage_alignment": _wall_backed_storage_repair_targets,
     "back_against_wall": _back_against_wall_repair_targets,
+    "room_containment": _room_containment_repair_targets,
 }
 
 
@@ -2062,7 +2215,9 @@ def _bounds_center_xy(
 ) -> tuple[float, float] | None:
     if bounds is None:
         return None
-    center = (np.asarray(bounds[0], dtype=float) + np.asarray(bounds[1], dtype=float)) / 2.0
+    center = (
+        np.asarray(bounds[0], dtype=float) + np.asarray(bounds[1], dtype=float)
+    ) / 2.0
     return float(center[0]), float(center[1])
 
 
@@ -2077,9 +2232,7 @@ def _structural_opening_bounds(
             continue
         return opening_physical_bounds(
             opening,
-            wall_thickness_m=float(
-                getattr(geometry, "wall_thickness", 0.05) or 0.05
-            ),
+            wall_thickness_m=float(getattr(geometry, "wall_thickness", 0.05) or 0.05),
         )
     return None
 
@@ -3259,7 +3412,9 @@ def _wall_backed_targets(
     tangent_axis = 1 - normal_axis
     seat_center = np.asarray(_world_center_xy(seat), dtype=float)
     wall_center = (np.asarray(wall_min, dtype=float) + wall_max) / 2.0
-    direction = float(seat_center[normal_axis] - wall_center[normal_axis])
+    # Choose the wall side containing the room centre.  An escaped object can
+    # already be on the exterior side, so its current centre is not authoritative.
+    direction = float(-wall_center[normal_axis])
     if abs(direction) < 1e-6:
         return []
     inward = 1.0 if direction > 0.0 else -1.0
@@ -3671,12 +3826,13 @@ def _within_floor_bounds(
     if bounds is None:
         return False
     lower, upper = bounds
-    margin = 0.03
+    margin = _ROOM_CONTAINMENT_MARGIN_M
+    epsilon = 1e-6
     return (
-        float(lower[0]) >= -float(geometry.length) / 2.0 + margin
-        and float(upper[0]) <= float(geometry.length) / 2.0 - margin
-        and float(lower[1]) >= -float(geometry.width) / 2.0 + margin
-        and float(upper[1]) <= float(geometry.width) / 2.0 - margin
+        float(lower[0]) >= -float(geometry.length) / 2.0 + margin - epsilon
+        and float(upper[0]) <= float(geometry.length) / 2.0 - margin + epsilon
+        and float(lower[1]) >= -float(geometry.width) / 2.0 + margin - epsilon
+        and float(upper[1]) <= float(geometry.width) / 2.0 - margin + epsilon
     )
 
 

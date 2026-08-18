@@ -2670,6 +2670,63 @@ def test_intent_schema_requires_target_for_endpoint_relations() -> None:
     assert zero_arity_condition["then"]["properties"]["targets"] == {"type": "null"}
 
 
+def test_intent_schema_preserves_supported_inventory_reconciliation_reason() -> None:
+    relation = {
+        "relation": "required_count",
+        "subjects": {
+            "category": "glass_bowl",
+            "count": 3,
+            "quantifier": "minimum",
+        },
+        "targets": None,
+        "source": "task_compiler_inventory",
+        "inference_reason": "SceneTaskSpec required_small_objects",
+        "reconciliation_reason": "disjoint_support_cohort_minimum",
+    }
+
+    validated = validate_intent_contract(_contract(relation))
+
+    assert validated["constraints"][0]["reconciliation_reason"] == (
+        "disjoint_support_cohort_minimum"
+    )
+
+
+def test_intent_schema_rejects_unknown_reconciliation_reason() -> None:
+    relation = {
+        "relation": "required_count",
+        "subjects": {"category": "glass_bowl", "count": 3},
+        "targets": None,
+        "source": "task_compiler_inventory",
+        "inference_reason": "SceneTaskSpec required_small_objects",
+        "reconciliation_reason": "unknown_reason",
+    }
+
+    with pytest.raises(ValidationError, match="reconciliation_reason"):
+        validate_intent_contract(_contract(relation))
+
+
+def test_generic_speaker_selector_matches_floor_speaker_assets() -> None:
+    selector = {"category": "speaker", "count": 4, "quantifier": "exactly"}
+    objects = [
+        {
+            "id": f"floor_speaker_{index}",
+            "category": "floor_speaker",
+            "category_norm": "floor_speaker",
+            "object_type": "furniture",
+            "metadata": {"semantic_name": "floor_speaker"},
+        }
+        for index in range(4)
+    ]
+
+    assert selected_ids(selector, objects) == [
+        "floor_speaker_0",
+        "floor_speaker_1",
+        "floor_speaker_2",
+        "floor_speaker_3",
+    ]
+    assert selector_match_count(selector, objects) == 4
+
+
 def test_intent_compiler_wire_schema_excludes_free_text_provenance() -> None:
     schema = intent_compiler_wire_json_schema()
     relation_schema = schema["$defs"]["IntentWireRelation"]

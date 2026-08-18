@@ -75,6 +75,8 @@ _CATEGORY_ALIASES = {
     "projector_screen": "instructional_surface",
     "teaching_screen": "instructional_surface",
     "presentation_screen": "instructional_surface",
+    "loudspeaker": "speaker",
+    "loudspeakers": "speaker",
 }
 
 # Ordered from specialized to generic so prompt parsing and descriptor
@@ -148,6 +150,11 @@ OBJECT_CATEGORY_PHRASES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("wardrobe", ("wardrobe", "closet", "armoire")),
     ("dresser", ("dresser", "chest of drawers", "chest of drawer", "bureau")),
     ("floor_lamp", ("floor lamp",)),
+    (
+        "floor_speaker",
+        ("floor speaker", "floor-standing speaker", "speaker tower"),
+    ),
+    ("speaker", ("speaker", "loudspeaker")),
     ("table_lamp", ("table lamp", "desk lamp")),
     ("vase", ("vase",)),
     ("flower", ("flower", "flowers")),

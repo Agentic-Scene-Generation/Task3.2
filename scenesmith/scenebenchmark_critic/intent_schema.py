@@ -53,6 +53,7 @@ _GENERIC_SELECTOR_FAMILIES = {
     "desk": frozenset({"desk", "student_desk", "teacher_desk", "reception_desk"}),
     "plant": frozenset({"plant", "large_plant", "potted_plant"}),
     "sofa": frozenset({"sofa", "two_seater_sofa", "loveseat", "sectional_sofa"}),
+    "speaker": frozenset({"speaker", "floor_speaker"}),
 }
 
 
@@ -197,6 +198,7 @@ class IntentRelation(BaseModel):
     confidence: float = Field(default=1.0, ge=0.0, le=1.0)
     evidence_span: str = ""
     inference_reason: str = ""
+    reconciliation_reason: Literal["disjoint_support_cohort_minimum"] | None = None
 
     @field_validator("relation", mode="before")
     @classmethod

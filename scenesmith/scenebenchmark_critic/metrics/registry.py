@@ -32,6 +32,9 @@ from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.m
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.room_center import (
     evaluate_room_center_alignment,
 )
+from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.room_containment import (
+    evaluate_room_containment,
+)
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.study_furniture_layout import (
     evaluate_study_furniture_layout,
 )
@@ -91,6 +94,7 @@ METRIC_REGISTRY: dict[str, MetricPlugin] = {
             evaluate_bedside_group_alignment,
             evaluate_classroom_workstation_distribution,
             evaluate_room_center_alignment,
+            evaluate_room_containment,
             evaluate_study_furniture_layout,
             evaluate_edge_distribution,
             evaluate_manipuland_completeness,

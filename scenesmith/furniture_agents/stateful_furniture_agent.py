@@ -45,6 +45,7 @@ from scenesmith.agent_utils.furniture_placement_order import (
     build_furniture_placement_order_reference,
 )
 from scenesmith.agent_utils.furniture_safety import (
+    FURNITURE_CATEGORY_COMPONENT_SHADOWS,
     furniture_category_satisfies,
     furniture_object_category_matches,
     infer_furniture_category,
@@ -123,6 +124,10 @@ REPAIR_ASSET_SPECS: dict[str, tuple[str, list[float]]] = {
         "Ergonomic office task chair with an adjustable back",
         [0.60, 0.60, 1.05],
     ),
+    "sofa_chair": (
+        "Single-seat upholstered sofa chair with a supportive back",
+        [0.85, 0.85, 0.90],
+    ),
     "guest_chair": (
         "Compact upholstered guest chair with a fixed wooden frame",
         [0.60, 0.65, 0.90],
@@ -150,6 +155,10 @@ REPAIR_ASSET_SPECS: dict[str, tuple[str, list[float]]] = {
     "rug": ("Square low-pile area rug", [1.80, 1.80, 0.03]),
     "armchair": ("Compact upholstered armchair", [0.75, 0.75, 0.95]),
     "floor_lamp": ("Slim standing floor lamp", [0.40, 0.40, 1.60]),
+    "speaker": (
+        "Tall floor-standing speaker tower with a compact footprint",
+        [0.40, 0.35, 1.20],
+    ),
     "tv_stand": ("Low media console TV stand", [1.60, 0.45, 0.65]),
     "television": ("Slim flat-screen television display", [1.10, 0.18, 0.65]),
     "sideboard": ("Compact dining room sideboard", [1.40, 0.45, 0.80]),
@@ -2088,6 +2097,11 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                     ) or furniture_category_satisfies(category, contract_category):
                         counts.pop(category, None)
             counts.update(contract_counts)
+        authoritative_categories = set(semantic_counts) | set(contract_counts)
+        for category in authoritative_categories:
+            for shadowed in FURNITURE_CATEGORY_COMPONENT_SHADOWS.get(category, ()):
+                if shadowed not in authoritative_categories:
+                    counts.pop(shadowed, None)
         for generic in ("desk", "chair"):
             if generic in contract_counts:
                 continue

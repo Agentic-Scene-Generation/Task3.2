@@ -1138,11 +1138,29 @@ def apply_non_penetration_projection(
             )
             return scene, True
 
+        if weld_furniture:
+            free_object_ids = [
+                object_id
+                for object_id in colliding_ids
+                if (
+                    (obj := scene.get_object(object_id)) is not None
+                    and obj.object_type == ObjectType.MANIPULAND
+                )
+            ]
+            if not free_object_ids:
+                console_logger.warning(
+                    "Welded projection found collisions but no movable manipulands; "
+                    "leaving the scene unchanged"
+                )
+                return scene, False
+        else:
+            free_object_ids = list(colliding_ids)
+
         console_logger.info(
             f"Collision-scoped projection: {len(colliding_ids)}/{total_objects} "
-            f"objects colliding (DOF: {total_objects * 7} -> {len(colliding_ids) * 7})"
+            f"objects colliding (DOF: {total_objects * 7} -> "
+            f"{len(free_object_ids) * 7})"
         )
-        free_object_ids = list(colliding_ids)
 
     pre_projection_transforms = {
         object_id: RigidTransform(
@@ -1268,6 +1286,10 @@ def apply_non_penetration_projection(
         return scene, success
 
     except Exception as e:
+        for object_id, transform in pre_projection_transforms.items():
+            obj = scene.get_object(object_id)
+            if obj is not None:
+                obj.transform = transform
         console_logger.error(f"Projection failed with exception: {e}")
         return scene, False
 
@@ -1302,7 +1324,7 @@ def _apply_floor_penetration_fallback(
 ) -> tuple[RoomScene, int]:
     """Lift furniture above floor when NLP projection fails.
 
-    Uses Drake's signed distance query to find floor penetrations and
+    Uses Drake's point-pair penetration query to find floor penetrations and
     lifts each penetrating furniture piece by the exact penetration
     depth plus a small margin.
 
@@ -1313,24 +1335,27 @@ def _apply_floor_penetration_fallback(
     Returns:
         Tuple of (updated scene, number of objects lifted).
     """
-    # Create Drake scene to query collisions.
-    builder = DiagramBuilder()
-    _, scene_graph = create_drake_plant_and_scene_graph_from_scene(
-        scene=scene, builder=builder, weld_furniture=False
-    )
-    diagram = builder.Build()
-    context = diagram.CreateDefaultContext()
-
-    # Get query object for collision detection.
-    scene_graph_context = scene_graph.GetMyContextFromRoot(context)
-    query_object: QueryObject = scene_graph.get_query_output_port().Eval(
-        scene_graph_context
-    )
-
-    # Find all floor penetrations.
-    all_pairs = query_object.ComputeSignedDistancePairwiseClosestPoints(
-        max_distance=0.0  # Only penetrating pairs.
-    )
+    try:
+        builder = DiagramBuilder()
+        _, scene_graph = create_drake_plant_and_scene_graph_from_scene(
+            scene=scene, builder=builder, weld_furniture=False
+        )
+        diagram = builder.Build()
+        context = diagram.CreateDefaultContext()
+        scene_graph_context = scene_graph.GetMyContextFromRoot(context)
+        query_object: QueryObject = scene_graph.get_query_output_port().Eval(
+            scene_graph_context
+        )
+        all_pairs = query_object.ComputePointPairPenetration()
+    except Exception as exc:
+        console_logger.warning(
+            "floor_penetration_query_failed scene=%s query=point_pair_penetration "
+            "error_type=%s error=%s; preserving the original scene",
+            getattr(scene, "room_id", "unknown"),
+            type(exc).__name__,
+            exc,
+        )
+        return scene, 0
 
     # Track max penetration per furniture piece.
     furniture_penetrations: dict[UniqueID, float] = {}
@@ -1352,7 +1377,7 @@ def _apply_floor_penetration_fallback(
 
         # Get the non-floor object name.
         other_name = name_b if is_floor_a else name_a
-        penetration_depth = abs(pair.distance)
+        penetration_depth = max(0.0, float(pair.depth))
 
         # Find furniture ID from geometry name.
         for obj in scene.objects.values():
@@ -2280,6 +2305,13 @@ def apply_per_furniture_postprocessing(
         f"Running per-furniture post-processing for {furniture_id} "
         f"with {len(manipuland_ids)} manipuland(s)"
     )
+    pose_snapshot = {
+        object_id: RigidTransform(
+            R=obj.transform.rotation(), p=obj.transform.translation()
+        )
+        for object_id in [furniture_id, *manipuland_ids]
+        if (obj := full_scene.get_object(object_id)) is not None
+    }
 
     # Create subset scene.
     subset_scene = RoomScene(
@@ -2319,6 +2351,37 @@ def apply_per_furniture_postprocessing(
         console_logger.warning(
             f"Per-furniture post-processing for {furniture_id} had issues"
         )
+
+    processed_furniture = processed_subset.get_object(furniture_id)
+    original_furniture_pose = pose_snapshot[furniture_id]
+    furniture_moved = processed_furniture is None or not (
+        np.allclose(
+            processed_furniture.transform.GetAsMatrix4(),
+            original_furniture_pose.GetAsMatrix4(),
+            atol=1e-9,
+            rtol=0.0,
+        )
+    )
+    if furniture_moved:
+        console_logger.error(
+            "Welded per-furniture post-processing moved support %s; rolling back "
+            "the entire transaction",
+            furniture_id,
+        )
+        success = False
+
+    if not success:
+        for object_id, transform in pose_snapshot.items():
+            obj = full_scene.get_object(object_id)
+            if obj is not None:
+                obj.transform = transform
+        if return_success:
+            return full_scene, False
+        return full_scene
+
+    # Even a numerically insignificant solver update must not leak into the
+    # support pose shared by the full scene.
+    furniture.transform = original_furniture_pose
 
     # Merge manipuland poses back to full scene.
     for manip_id in manipuland_ids:

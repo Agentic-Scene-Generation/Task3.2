@@ -150,8 +150,17 @@ def _normalize_independent_media_requests(
 ) -> "AssetGenerationRequest":
     """Avoid a display-bearing console when the scene requests a second display."""
     context = str(request.scene_prompt_context or "")
-    if request.object_type != ObjectType.FURNITURE or not _SEPARATE_MEDIA_ROLES.search(
-        context
+    forbidden_components = request.forbidden_semantic_components or [
+        [] for _ in request.object_descriptions
+    ]
+    has_structured_separate_media = any(
+        normalize_semantic_name(component)
+        in {"television", "tv", "display", "screen", "monitor"}
+        for values in forbidden_components
+        for component in values
+    )
+    if request.object_type != ObjectType.FURNITURE or not (
+        has_structured_separate_media or _SEPARATE_MEDIA_ROLES.search(context)
     ):
         return request
 
@@ -207,6 +216,7 @@ def _normalize_independent_media_requests(
         operation_type=request.operation_type,
         scene_id=request.scene_id,
         semantic_name_candidates=semantic_candidates,
+        forbidden_semantic_components=[list(values) for values in forbidden_components],
     )
 
 
@@ -319,6 +329,9 @@ class AssetGenerationRequest:
 
     semantic_name_candidates: list[list[str]] | None = None
     """TaskCompiler-owned labels that rendered VLM selection may choose from."""
+
+    forbidden_semantic_components: list[list[str]] | None = None
+    """Per-asset components that must remain separate physical objects."""
 
 
 @dataclass
@@ -1438,7 +1451,13 @@ class AssetManager:
         rendered_assets_dir: Path,
     ) -> RenderedAssetChoice:
         """Apply rendered-choice ranking to the direct, non-router HSSD path."""
-        if not enabled or len(candidates) <= 1:
+        forbidden_components = (
+            request.forbidden_semantic_components[index]
+            if request.forbidden_semantic_components
+            and index < len(request.forbidden_semantic_components)
+            else None
+        )
+        if not enabled or (len(candidates) <= 1 and not forbidden_components):
             return RenderedAssetChoice(
                 candidates=candidates,
                 semantic_name=normalize_semantic_name(request.short_names[index])
@@ -1473,6 +1492,7 @@ class AssetManager:
                 and index < len(request.semantic_name_candidates)
                 else None
             ),
+            forbidden_components=forbidden_components,
             # Keep a per-room, machine-readable trail for the observability UI.
             audit_path=self.output_dir / "audit" / "hssd_rendered_choice.jsonl",
             retrieval_backend=str(
@@ -1928,6 +1948,11 @@ class AssetManager:
             if request.semantic_name_candidates is not None
             else None
         )
+        unique_forbidden_components = (
+            [request.forbidden_semantic_components[i] for i in unique_indices]
+            if request.forbidden_semantic_components is not None
+            else None
+        )
 
         # Create reduced request with only unique items.
         unique_request = AssetGenerationRequest(
@@ -1940,6 +1965,7 @@ class AssetManager:
             operation_type=request.operation_type,
             scene_id=request.scene_id,
             semantic_name_candidates=unique_semantic_candidates,
+            forbidden_semantic_components=unique_forbidden_components,
         )
 
         # Create asset path configurations.
@@ -2150,6 +2176,20 @@ class AssetManager:
                             )
                         )
                         continue
+
+                    # Preserve per-request component separation through router
+                    # analysis, including when it rewrites the support name.
+                    forbidden = (
+                        request.forbidden_semantic_components[idx]
+                        if request.forbidden_semantic_components
+                        and idx < len(request.forbidden_semantic_components)
+                        else []
+                    )
+                    for item in analysis.items:
+                        if _MEDIA_SUPPORT_SHORT_NAME.search(
+                            normalize_semantic_name(item.short_name)
+                        ):
+                            item.forbidden_semantic_components = list(forbidden)
 
                     # Collect items and track modifications.
                     all_items.extend(analysis.items)

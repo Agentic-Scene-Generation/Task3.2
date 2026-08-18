@@ -1783,6 +1783,49 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         StatefulFurnitureAgent is None,
         f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
     )
+    def test_sofa_chair_task_count_does_not_expand_to_sofa_and_chair(self) -> None:
+        agent = object.__new__(StatefulFurnitureAgent)
+        agent.scene = SimpleNamespace(
+            objects={},
+            scene_expert_task_spec={"required_large_objects": ["sofa_chair"] * 4},
+        )
+        agent.furniture_safety_controller = SimpleNamespace(
+            required_counts={"sofa_chair": 4, "sofa": 4, "chair": 4}
+        )
+
+        self.assertEqual(agent._repair_required_counts(), {"sofa_chair": 4})
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
+    def test_group_contract_count_overrides_single_task_speaker_entry(self) -> None:
+        agent = object.__new__(StatefulFurnitureAgent)
+        agent.scene = SimpleNamespace(
+            objects={},
+            scene_expert_task_spec={"required_large_objects": ["speaker"]},
+            scenebenchmark_intent_contract={
+                "constraints": [
+                    {
+                        "relation": "corner_distribution",
+                        "stage": "furniture",
+                        "strength": "hard",
+                        "subjects": {"category": "speaker", "count": 4},
+                        "targets": {"category": "room", "count": 1},
+                    }
+                ]
+            },
+        )
+        agent.furniture_safety_controller = SimpleNamespace(
+            required_counts={"speaker": 1}
+        )
+
+        self.assertEqual(agent._repair_required_counts(), {"speaker": 4})
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
     def test_task_counts_override_prompt_safety_counts(self) -> None:
         agent = object.__new__(StatefulFurnitureAgent)
         agent.scene = SimpleNamespace(

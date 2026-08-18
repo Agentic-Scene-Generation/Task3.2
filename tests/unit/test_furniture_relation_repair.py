@@ -1381,9 +1381,7 @@ def test_window_proxy_binds_and_repairs_strict_furniture_adjacency(
         metrics=("functional_dependency",),
     )
     proxy = next(
-        obj
-        for obj in case_pack["scene_geometry"]["objects"]
-        if obj["id"] == "window_0"
+        obj for obj in case_pack["scene_geometry"]["objects"] if obj["id"] == "window_0"
     )
     assert proxy["category_norm"] == "window"
     assert proxy["metadata"]["structural_proxy"] is True
@@ -1975,6 +1973,149 @@ def test_repairs_multiple_wall_backed_stools_with_wall_normal_orientation(
         stool_bounds = stool.compute_world_bounds()
         assert stool_bounds is not None
         assert abs(stool_bounds[0][0] - wall_bounds[1][0] - 0.03) < 1e-7
+
+
+def test_room_containment_core_repairs_floor_object_outside_wall(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sofa = _object(
+        "sofa_0",
+        "sofa",
+        (0.0, 2.30, 0.45),
+        (1.70, 0.80, 0.90),
+    )
+    scene = _scene(tmp_path, sofa)
+    config = CriticConfig(enabled=True, metrics=("functional_dependency",))
+    monkeypatch.setattr(
+        furniture_relation_repair, "compute_scene_collisions", lambda _scene: []
+    )
+
+    before = evaluate_room_scene(scene, config=config, stage="containment_before")
+    before_result = next(
+        result
+        for result in before["results"]
+        if result.get("relation_type") == "room_containment"
+    )
+    assert before_result["label"] == "fail"
+
+    fixes = improve_furniture_relations(scene, config=config)
+
+    assert [(fix.object_id, fix.relation_type) for fix in fixes] == [
+        ("sofa_0", "room_containment")
+    ]
+    after = evaluate_room_scene(scene, config=config, stage="containment_after")
+    after_result = next(
+        result
+        for result in after["results"]
+        if result.get("relation_type") == "room_containment"
+    )
+    assert after_result["label"] == "pass"
+    assert sofa.compute_world_bounds()[1][1] <= 1.98 + 1e-9
+
+
+def test_room_containment_repair_preserves_rotated_obb_yaw(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sofa = _object(
+        "sofa_0",
+        "sofa",
+        (0.0, 2.25, 0.45),
+        (1.70, 0.80, 0.90),
+        yaw_deg=30.0,
+    )
+    scene = _scene(tmp_path, sofa)
+    config = CriticConfig(enabled=True, metrics=("functional_dependency",))
+    monkeypatch.setattr(
+        furniture_relation_repair, "compute_scene_collisions", lambda _scene: []
+    )
+
+    before = evaluate_room_scene(scene, config=config, stage="containment_before")
+    assert any(
+        result.get("relation_type") == "room_containment"
+        and result.get("label") == "fail"
+        for result in before["results"]
+    )
+
+    fixes = improve_furniture_relations(scene, config=config)
+
+    assert [(fix.object_id, fix.relation_type) for fix in fixes] == [
+        ("sofa_0", "room_containment")
+    ]
+    assert fixes[0].old_yaw_deg == pytest.approx(fixes[0].new_yaw_deg)
+    after = evaluate_room_scene(scene, config=config, stage="containment_after")
+    assert any(
+        result.get("relation_type") == "room_containment"
+        and result.get("label") == "pass"
+        for result in after["results"]
+    )
+
+
+def test_wall_backed_relation_rejects_exterior_wall_side(tmp_path: Path) -> None:
+    sofa = _object(
+        "sofa_0",
+        "sofa",
+        (0.0, 2.25, 0.45),
+        (1.70, 0.40, 0.90),
+        yaw_deg=0.0,
+    )
+    scene = _scene(tmp_path, sofa, text="A sofa placed against the north wall.")
+    _attach_intent_contract(
+        scene,
+        [
+            {
+                "relation": "against_wall",
+                "subjects": {"category": "sofa", "count": 1},
+                "targets": {"category": "north_wall"},
+                "source": "explicit_prompt",
+                "evidence_span": "sofa placed against the north wall",
+            }
+        ],
+    )
+    config = CriticConfig(enabled=True, metrics=("functional_dependency",))
+
+    payload = evaluate_room_scene(scene, config=config, stage="exterior_wall_side")
+    result = next(
+        item
+        for item in payload["results"]
+        if item.get("relation_type") == "back_against_wall"
+    )
+
+    assert result["label"] == "fail"
+    assert "exterior side" in result["reason"]
+
+
+def test_explicit_wall_relation_degrades_five_degree_skew(tmp_path: Path) -> None:
+    sofa = _object(
+        "sofa_0",
+        "sofa",
+        (0.0, 1.45, 0.45),
+        (1.70, 0.80, 0.90),
+        yaw_deg=185.0,
+    )
+    scene = _scene(tmp_path, sofa, text="A sofa placed against the north wall.")
+    _attach_intent_contract(
+        scene,
+        [
+            {
+                "relation": "against_wall",
+                "subjects": {"category": "sofa", "count": 1},
+                "targets": {"category": "north_wall"},
+                "source": "explicit_prompt",
+                "evidence_span": "sofa placed against the north wall",
+            }
+        ],
+    )
+    config = CriticConfig(enabled=True, metrics=("functional_dependency",))
+
+    payload = evaluate_room_scene(scene, config=config, stage="wall_angle")
+    result = next(
+        item
+        for item in payload["results"]
+        if item.get("relation_type") == "back_against_wall"
+    )
+
+    assert result["label"] == "fail"
+    assert result["diagnostics"]["target_evaluations"][0]["label"] == "degraded"
 
 
 def test_wall_backed_targets_offer_small_move_from_just_outside_tolerance(

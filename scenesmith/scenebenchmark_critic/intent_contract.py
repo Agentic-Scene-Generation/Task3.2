@@ -3662,6 +3662,9 @@ def _selector_matches_object(category: str, role: str, obj: dict[str, Any]) -> b
             "stool",
             "bench",
         },
+        "speaker": base_category in {"speaker", "floor_speaker"}
+        or semantic_name in {"speaker", "floor_speaker"}
+        or semantic_name.endswith("_speaker"),
         "wall": base_category == "wall",
         "room": False,
     }.get(category)
@@ -3751,6 +3754,9 @@ def _relation_threshold_dependency(
     thresholds = relation_spec(str(constraint.get("relation") or "")).thresholds
     max_gap = thresholds.get("max_gap_m")
     dependency = {"max_distance_m": float(max_gap)} if max_gap is not None else {}
+    for key in ("max_angle_deg", "max_degraded_angle_deg"):
+        if key in thresholds:
+            dependency[key] = float(thresholds[key])
     if relation == "faces":
         # Prompt-level facing is directional.  Pairing/near constraints own
         # interaction distance, while a classroom desk may legitimately face

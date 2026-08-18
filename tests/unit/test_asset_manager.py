@@ -135,6 +135,22 @@ def test_separate_display_rewrites_named_media_console_with_display() -> None:
     assert "without a television" in normalized.object_descriptions[0]
 
 
+def test_structured_component_exclusion_rewrites_without_prompt_pattern() -> None:
+    request = AssetGenerationRequest(
+        object_descriptions=["Media console with a television mounted on top"],
+        short_names=["media_console"],
+        object_type=ObjectType.FURNITURE,
+        desired_dimensions=[[1.6, 0.45, 1.1]],
+        scene_prompt_context="The TV is supported by a TV stand.",
+        forbidden_semantic_components=[["television"]],
+    )
+
+    normalized = _normalize_independent_media_requests(request)
+
+    assert normalized.short_names == ["tv_stand"]
+    assert normalized.forbidden_semantic_components == [["television"]]
+
+
 class TestAssetManager(unittest.TestCase):
     """Test AssetManager functionality."""
 
@@ -355,6 +371,41 @@ class TestAssetManager(unittest.TestCase):
         )
         self.assertEqual(result.successful_assets, [recovered])
         self.assertEqual(result.failed_assets, [])
+
+    def test_direct_hssd_assesses_single_candidate_with_component_exclusion(self):
+        request = AssetGenerationRequest(
+            object_descriptions=["TV stand without a display"],
+            short_names=["tv_stand"],
+            object_type=ObjectType.FURNITURE,
+            desired_dimensions=[[1.4, 0.45, 0.7]],
+            forbidden_semantic_components=[["television"]],
+        )
+        candidate = HssdRetrievalResult(
+            mesh_path="/tmp/stand.glb",
+            hssd_id="stand",
+            object_name="tv stand",
+            similarity_score=0.91,
+            size=(1.4, 0.45, 0.7),
+            category="storage",
+        )
+        with patch(
+            "scenesmith.agent_utils.asset_manager."
+            "choose_hssd_candidate_from_iso_renders",
+            return_value=RenderedAssetChoice(candidates=[]),
+        ) as choice:
+            ranked = self.asset_manager._rank_direct_hssd_candidates(
+                request=request,
+                index=0,
+                candidates=[candidate],
+                enabled=True,
+                top_n=1,
+                rendered_assets_dir=self.temp_dir,
+            )
+
+        self.assertEqual(ranked.candidates, [])
+        self.assertEqual(
+            choice.call_args.kwargs["forbidden_components"], ["television"]
+        )
 
     def test_selected_hssd_beam_uses_procedural_fallback_without_retrying_rejects(self):
         """A rejected HSSD candidate cannot replace a failed selected beam."""
