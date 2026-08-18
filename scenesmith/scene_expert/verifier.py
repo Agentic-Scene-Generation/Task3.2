@@ -393,12 +393,28 @@ def _object_labels_match(required: str, present: str) -> bool:
     present_label = _normalize_object_label(present)
     if not required_label or not present_label:
         return False
-    if categories_are_equivalent(required_label, present_label):
+    required_components = _object_label_component_categories(required)
+    present_components = _object_label_component_categories(present)
+    if any(
+        categories_are_equivalent(required_category, present_category)
+        for required_category in required_components
+        for present_category in present_components
+    ):
         return True
     return (
         f" {required_label} " in f" {present_label} "
         or f" {present_label} " in f" {required_label} "
     )
+
+
+def _object_label_component_categories(label: str) -> set[str]:
+    """Return both a label's primary category and compound asset components."""
+    words = re.sub(r"[^a-z0-9]+", " ", str(label).lower()).split()
+    while words and words[-1].isdigit():
+        words.pop()
+    categories = {canonical_object_category(" ".join(words))} if words else set()
+    categories.update(canonical_object_category(word) for word in words)
+    return {category for category in categories if category}
 
 
 def _description_contains_object_label(required: str, description: str) -> bool:

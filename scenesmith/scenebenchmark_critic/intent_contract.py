@@ -41,6 +41,7 @@ from scenesmith.scenebenchmark_critic.intent_schema import (
     canonical_selector_category,
     validate_intent_contract,
 )
+from scenesmith.scenebenchmark_critic.object_taxonomy import OBJECT_CATEGORY_PHRASES
 
 
 SCHEMA_VERSION = INTENT_CONTRACT_SCHEMA_VERSION
@@ -69,89 +70,7 @@ _DIRECT_FD_EVALUATORS = frozenset(
     }
 )
 
-_CATEGORY_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    (
-        "instructional_surface",
-        (
-            "chalkboard",
-            "blackboard",
-            "whiteboard",
-            "projection screen",
-            "projector screen",
-            "teaching screen",
-        ),
-    ),
-    ("student_desk", ("student desk",)),
-    ("teacher_desk", ("teacher desk", "instructor desk")),
-    ("reception_desk", ("reception desk", "reception counter")),
-    ("office_chair", ("office chair", "desk chair", "task chair")),
-    (
-        "guest_chair",
-        ("guest chair", "visitor chair", "guest armchair", "visitor armchair"),
-    ),
-    ("dining_chair", ("dining chair",)),
-    ("rocking_chair", ("rocking chair",)),
-    ("armchair", ("armchair", "arm chair")),
-    ("dining_table", ("dining table",)),
-    (
-        "conference_table",
-        ("conference table", "meeting table", "boardroom table"),
-    ),
-    ("coffee_table", ("coffee table",)),
-    ("side_table", ("side table", "end table", "accent table")),
-    (
-        "dressing_table",
-        ("dressing table", "vanity table", "makeup table", "vanity"),
-    ),
-    ("filing_cabinet", ("filing cabinet", "file cabinet")),
-    ("storage_cabinet", ("storage cabinet", "storage cupboard")),
-    (
-        "water_dispenser",
-        ("water dispenser", "water cooler", "drinking water dispenser"),
-    ),
-    ("tv_stand", ("tv stand", "television stand", "media console")),
-    ("television", ("television", "tv")),
-    (
-        "monitor",
-        ("computer monitor", "computer display", "monitor", "display", "screen"),
-    ),
-    ("brochure_holder", ("brochure holder", "leaflet holder", "brochure stand")),
-    ("printer", ("printer",)),
-    ("nightstand", ("nightstand", "bedside table")),
-    ("stool", ("stool", "vanity stool", "dressing stool")),
-    ("bookshelf", ("bookshelf", "bookcase", "shelving unit")),
-    ("sideboard", ("sideboard", "buffet")),
-    ("wardrobe", ("wardrobe", "closet", "armoire")),
-    ("dresser", ("dresser", "chest of drawers", "bureau")),
-    ("floor_lamp", ("floor lamp",)),
-    ("table_lamp", ("table lamp", "desk lamp")),
-    ("vase", ("vase",)),
-    ("flowers", ("flower", "flowers")),
-    ("alarm_clock", ("alarm clock",)),
-    ("plate", ("plate",)),
-    ("cutlery", ("cutlery", "fork", "knife", "spoon")),
-    ("glass", ("glass", "drinking glass", "wine glass")),
-    ("coaster", ("coaster",)),
-    ("book", ("book",)),
-    ("wastebasket", ("wastebasket", "waste basket", "trash can", "trash bin")),
-    ("bottle", ("bottle",)),
-    ("bowl", ("bowl",)),
-    ("cup", ("cup",)),
-    ("mug", ("mug",)),
-    ("keyboard", ("keyboard",)),
-    ("laptop", ("laptop",)),
-    ("remote", ("remote", "remote control")),
-    ("rug", ("rug", "carpet", "area rug")),
-    ("mirror", ("mirror",)),
-    ("table_setting", ("table setting", "place setting")),
-    ("plant", ("plant",)),
-    ("bed", ("bed",)),
-    ("sofa", ("sofa", "couch", "settee")),
-    ("desk", ("desk",)),
-    ("chair", ("chair", "seat")),
-    ("table", ("table",)),
-    ("floor", ("floor",)),
-)
+_CATEGORY_PATTERNS = OBJECT_CATEGORY_PHRASES
 
 _NUMBER_WORDS = {
     "a": 1,
@@ -2428,13 +2347,9 @@ def _explicit_required_count_constraints(prompt: str) -> list[dict[str, Any]]:
     constraints: list[dict[str, Any]] = []
     filtered_candidates = []
     for span, candidate in candidates.items():
-        category, _count, _evidence = candidate
-        if category in generic_categories and any(
-            other_span != span
-            and other_span[0] <= span[0]
-            and other_span[1] >= span[1]
-            and other_candidate[0] not in generic_categories
-            for other_span, other_candidate in candidates.items()
+        if any(
+            other_span != span and other_span[0] <= span[0] and other_span[1] >= span[1]
+            for other_span in candidates
         ):
             continue
         filtered_candidates.append(candidate)
@@ -2781,7 +2696,14 @@ def _task_spec_payload(task_spec: Any | None) -> dict[str, Any]:
 def _apply_task_spec_contract_metadata(
     constraints: list[dict[str, Any]], task_spec: Any | None
 ) -> list[dict[str, Any]]:
-    """Derive endpoint stage and existential selectors from typed inventory."""
+    """Derive endpoint stage and existential selectors from typed inventory.
+
+    When a TaskSpec supplies inventory, its generated ``required_count`` rows
+    are authoritative. Prompt parsing can find overlapping noun fragments in a
+    compound label (for example ``sofa`` and ``chair`` inside
+    ``sofa_chair``); retaining those fragments would require extra physical
+    objects that the TaskSpec never requested.
+    """
 
     payload = _task_spec_payload(task_spec)
     category_stages: dict[str, str] = {}
@@ -2802,6 +2724,12 @@ def _apply_task_spec_contract_metadata(
     result: list[dict[str, Any]] = []
     for original in constraints:
         constraint = dict(original)
+        if (
+            category_counts
+            and constraint.get("relation") == "required_count"
+            and constraint.get("source") != "task_compiler_inventory"
+        ):
+            continue
         subjects = _canonicalize_selector_to_typed_inventory(
             constraint.get("subjects"), category_counts
         )

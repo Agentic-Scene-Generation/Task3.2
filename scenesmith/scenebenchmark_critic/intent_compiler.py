@@ -66,6 +66,9 @@ _LEGAL_ENVIRONMENT_ANCHORS = frozenset(
         "ceiling",
         "entrance",
         "entry",
+        "door",
+        "opening",
+        "window",
         *ROOM_RELATIVE_WALL_CATEGORIES,
     }
 )

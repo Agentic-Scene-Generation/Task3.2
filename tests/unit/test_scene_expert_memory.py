@@ -340,6 +340,41 @@ class SceneExpertMemoryTest(unittest.TestCase):
             any("setting" in value for value in spec.required_small_objects)
         )
 
+    def test_task_compiler_drops_structural_anchors_from_inventory(self) -> None:
+        spec = _normalize_stage_ownership(
+            SceneTaskSpec(
+                room_type="living room",
+                style="functional",
+                required_large_objects=["table", "door"],
+                required_wall_objects=["mirror", "window"],
+                required_small_objects=["opening"],
+            )
+        )
+
+        self.assertEqual(["table"], spec.required_large_objects)
+        self.assertEqual(["mirror"], spec.required_wall_objects)
+        self.assertEqual([], spec.required_small_objects)
+
+    def test_task_compiler_normalizes_descriptive_inventory_categories(self) -> None:
+        spec = _normalize_stage_ownership(
+            SceneTaskSpec(
+                room_type="living room",
+                style="functional",
+                required_large_objects=[
+                    "circular ceramic table",
+                    "rectangular rug",
+                    "chest_of_drawer",
+                    "sofa_chair",
+                    "wall_cabinet",
+                ],
+            )
+        )
+
+        self.assertEqual(
+            ["table", "rug", "dresser", "sofa_chair", "wall_cabinet"],
+            spec.required_large_objects,
+        )
+
     def test_contract_ownership_respects_floor_and_surface_support(self) -> None:
         floor_contract = {
             "constraints": [

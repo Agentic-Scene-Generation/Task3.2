@@ -76,6 +76,95 @@ _CATEGORY_ALIASES = {
     "presentation_screen": "instructional_surface",
 }
 
+# Ordered from specialized to generic so prompt parsing and descriptor
+# stripping resolve the same noun phrase. This is the shared semantic
+# vocabulary for TaskCompiler inventory and intent relation selectors.
+OBJECT_CATEGORY_PHRASES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "instructional_surface",
+        (
+            "chalkboard",
+            "blackboard",
+            "whiteboard",
+            "projection screen",
+            "projector screen",
+            "teaching screen",
+        ),
+    ),
+    ("student_desk", ("student desk",)),
+    ("teacher_desk", ("teacher desk", "instructor desk")),
+    ("reception_desk", ("reception desk", "reception counter")),
+    ("office_chair", ("office chair", "desk chair", "task chair")),
+    (
+        "guest_chair",
+        ("guest chair", "visitor chair", "guest armchair", "visitor armchair"),
+    ),
+    ("dining_chair", ("dining chair",)),
+    ("sofa_chair", ("sofa chair",)),
+    ("rocking_chair", ("rocking chair",)),
+    ("armchair", ("armchair", "arm chair")),
+    ("dining_table", ("dining table",)),
+    (
+        "conference_table",
+        ("conference table", "meeting table", "boardroom table"),
+    ),
+    ("coffee_table", ("coffee table",)),
+    ("side_table", ("side table", "end table", "accent table")),
+    (
+        "dressing_table",
+        ("dressing table", "vanity table", "makeup table", "vanity"),
+    ),
+    ("filing_cabinet", ("filing cabinet", "file cabinet")),
+    ("storage_cabinet", ("storage cabinet", "storage cupboard")),
+    (
+        "water_dispenser",
+        ("water dispenser", "water cooler", "drinking water dispenser"),
+    ),
+    ("tv_stand", ("tv stand", "television stand", "media console")),
+    ("television", ("television", "tv")),
+    (
+        "monitor",
+        ("computer monitor", "computer display", "monitor", "display", "screen"),
+    ),
+    ("brochure_holder", ("brochure holder", "leaflet holder", "brochure stand")),
+    ("printer", ("printer",)),
+    ("nightstand", ("nightstand", "bedside table")),
+    ("stool", ("stool", "vanity stool", "dressing stool")),
+    ("bookshelf", ("bookshelf", "bookcase", "shelving unit")),
+    ("sideboard", ("sideboard", "buffet")),
+    ("wardrobe", ("wardrobe", "closet", "armoire")),
+    ("dresser", ("dresser", "chest of drawers", "chest of drawer", "bureau")),
+    ("floor_lamp", ("floor lamp",)),
+    ("table_lamp", ("table lamp", "desk lamp")),
+    ("vase", ("vase",)),
+    ("flower", ("flower", "flowers")),
+    ("alarm_clock", ("alarm clock",)),
+    ("plate", ("plate",)),
+    ("cutlery", ("cutlery", "fork", "knife", "spoon")),
+    ("glass_bowl", ("glass bowl",)),
+    ("glass", ("glass", "drinking glass", "wine glass")),
+    ("coaster", ("coaster",)),
+    ("book", ("book",)),
+    ("wastebasket", ("wastebasket", "waste basket", "trash can", "trash bin")),
+    ("bottle", ("bottle",)),
+    ("bowl", ("bowl",)),
+    ("cup", ("cup",)),
+    ("mug", ("mug",)),
+    ("keyboard", ("keyboard",)),
+    ("laptop", ("laptop",)),
+    ("remote", ("remote", "remote control")),
+    ("rug", ("rug", "carpet", "area rug")),
+    ("mirror", ("mirror",)),
+    ("table_setting", ("table setting", "place setting")),
+    ("plant", ("plant",)),
+    ("bed", ("bed",)),
+    ("sofa", ("sofa", "couch", "settee")),
+    ("desk", ("desk",)),
+    ("chair", ("chair", "seat")),
+    ("table", ("table",)),
+    ("floor", ("floor",)),
+)
+
 # These are equivalence classes, not aliases.  Keeping the concrete category
 # preserves useful role data (for example, a desk lamp is not renamed in the
 # scene), while inventory verification can still satisfy the requested concept.
@@ -120,12 +209,73 @@ def _singularize_category(normalized: str) -> str:
     return normalized
 
 
+def _phrase_category_map() -> dict[str, str]:
+    result: dict[str, str] = {}
+    for category, aliases in OBJECT_CATEGORY_PHRASES:
+        for value in (category, *aliases):
+            normalized = re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_")
+            result[_singularize_category(normalized)] = category
+    return result
+
+
+_PHRASE_CATEGORY_MAP = _phrase_category_map()
+_KNOWN_CATEGORIES = frozenset(
+    set(_CATEGORY_ALIASES.values())
+    | set(_PHRASE_CATEGORY_MAP.values())
+    | set(WALL_MOUNTED_CATEGORIES)
+    | set(CEILING_MOUNTED_CATEGORIES)
+    | set(MANIPULAND_CATEGORIES)
+    | {"door", "opening", "room", "wall", "window"}
+)
+
+
+def _token_is_known_category(token: str) -> bool:
+    singular = _singularize_category(token)
+    return (
+        singular in _CATEGORY_ALIASES
+        or singular in _PHRASE_CATEGORY_MAP
+        or singular in _KNOWN_CATEGORIES
+    )
+
+
 def canonical_object_category(value: Any) -> str:
-    """Normalize prompt, selector, and asset labels to a stable category."""
+    """Resolve a label to the longest known semantic object category."""
     normalized = str(value or "").strip().lower()
     normalized = re.sub(r"(?<=[a-z])['\u2019]s\b", "", normalized)
     normalized = re.sub(r"[^a-z0-9]+", "_", normalized).strip("_")
-    return _CATEGORY_ALIASES.get(normalized, _singularize_category(normalized))
+    if not normalized:
+        return ""
+    alias = _CATEGORY_ALIASES.get(normalized)
+    if alias is not None:
+        return alias
+
+    singular = _singularize_category(normalized)
+    alias = _CATEGORY_ALIASES.get(singular)
+    if alias is not None:
+        return alias
+    phrase_category = _PHRASE_CATEGORY_MAP.get(singular)
+    if phrase_category is not None:
+        return phrase_category
+    if singular in _KNOWN_CATEGORIES:
+        return singular
+
+    # Descriptor-heavy inventory labels put shape, size, material, or style
+    # before the semantic noun (for example ``circular_ceramic_table``). Match
+    # only a known suffix. Matching arbitrary interior tokens would collapse
+    # real compound categories such as ``wall_cabinet`` or ``vase_flowers``.
+    tokens = singular.split("_")
+    for width in range(len(tokens), 0, -1):
+        start = len(tokens) - width
+        phrase = "_".join(tokens[start:])
+        phrase_category = _PHRASE_CATEGORY_MAP.get(phrase)
+        if phrase_category is None and phrase in _KNOWN_CATEGORIES:
+            phrase_category = phrase
+        if phrase_category is None:
+            continue
+        if any(_token_is_known_category(token) for token in tokens[:start]):
+            continue
+        return phrase_category
+    return singular
 
 
 def categories_are_equivalent(first: Any, second: Any) -> bool:

@@ -588,6 +588,15 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             source="planner_turn_limit",
         )
         if repaired_state is None or not repaired_state.hard_valid:
+            delegation_failure = self._planner_terminal_failure_text()
+            if delegation_failure:
+                remaining = "; ".join(
+                    getattr(repaired_state or hard_state, "hard_reasons", None) or []
+                )
+                raise RuntimeError(
+                    f"Furniture planner stopped after {delegation_failure}; "
+                    f"remaining hard constraints: {remaining or 'unknown'}"
+                ) from error
             raise error
         console_logger.warning(
             "Furniture planner exhausted its turn budget; deterministic repair "
@@ -957,11 +966,16 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 # The shallow repair itself preserves hard support pairs, so it
                 # cannot horizontally split an object from its required surface.
                 actions.extend(self._repair_shallow_furniture_collisions())
+                actions.extend(self._repair_bounded_furniture_collisions())
                 actions.extend(
                     self._repair_prompt_contract_relations(
                         "after physical collision repair"
                     )
                 )
+                # A relation target may occupy the same region as an old
+                # collision. Check once more so an existing hard fingerprint
+                # cannot hide a pair reintroduced by relation repair.
+                actions.extend(self._repair_bounded_furniture_collisions())
             removed_excess = self._remove_excess_required_furniture(required_counts)
             if removed_excess:
                 actions.append(
@@ -1465,6 +1479,83 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 )
         return result
 
+    def _reported_furniture_collisions(
+        self, physics_context: str
+    ) -> list[tuple[str, str, float]]:
+        """Parse all object-addressable furniture collisions for bounded search."""
+        scale = {"mm": 0.001, "cm": 0.01, "m": 1.0}
+        result: list[tuple[str, str, float]] = []
+        for match in _SHALLOW_FURNITURE_COLLISION_RE.finditer(
+            str(physics_context or "")
+        ):
+            penetration = (
+                float(match.group("depth")) * scale[match.group("unit").lower()]
+            )
+            if penetration > 0.0:
+                result.append(
+                    (match.group("first"), match.group("second"), penetration)
+                )
+        return result
+
+    def _repair_bounded_furniture_collisions(self) -> list[str]:
+        """Separate one deep collision using bounded geometry candidates."""
+        if self.scene is None:
+            return []
+        room_bounds = self._room_bounds_xy()
+        if room_bounds is None:
+            return []
+        min_x, min_y, max_x, max_y = room_bounds
+        max_translation = min(1.5, math.hypot(max_x - min_x, max_y - min_y))
+        clearance = max(
+            0.005,
+            float(self._repair_cfg_value("collision_separation_margin_m", 0.025)),
+        )
+        reported = self._reported_furniture_collisions(
+            self._get_cached_physics_context()
+        )
+        if not reported:
+            return []
+
+        objects_by_id = {
+            str(object_id): obj for object_id, obj in self.scene.objects.items()
+        }
+        before_pairs = self._furniture_aabb_overlap_pairs()
+        for first_id, second_id, penetration in reported:
+            pair = frozenset((first_id, second_id))
+            if pair not in before_pairs or self._is_hard_prompt_support_pair(
+                first_id, second_id
+            ):
+                continue
+            first = objects_by_id.get(first_id)
+            second = objects_by_id.get(second_id)
+            if first is None or second is None:
+                continue
+            candidates = [
+                obj
+                for obj in (first, second)
+                if not getattr(obj, "immutable", False)
+                and getattr(obj, "object_type", None) == ObjectType.FURNITURE
+            ]
+            candidates.sort(key=self._collision_repair_candidate_key)
+            for moving in candidates:
+                other = second if moving is first else first
+                transform = self._safe_shallow_collision_transform(
+                    moving,
+                    other,
+                    penetration=penetration,
+                    clearance=clearance,
+                    before_pairs=before_pairs,
+                    max_translation=max_translation,
+                )
+                if transform is None:
+                    continue
+                self.scene.move_object(moving.object_id, transform)
+                return [
+                    "separated bounded collision "
+                    f"{first_id}<->{second_id} by moving {moving.object_id}"
+                ]
+        return []
+
     def _collision_repair_candidate_key(self, obj: SceneObject) -> tuple[float, str]:
         """Prefer moving the smaller object when both are equally modifiable."""
         bounds = obj.compute_world_bounds()
@@ -1484,6 +1575,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         penetration: float,
         clearance: float,
         before_pairs: set[frozenset[str]],
+        max_translation: float | None = None,
     ) -> RigidTransform | None:
         moving_bounds = moving.compute_world_bounds()
         other_bounds = other.compute_world_bounds()
@@ -1515,10 +1607,22 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 )
                 if abs(actual_shift) < separation * 0.5:
                     continue
+                if (
+                    max_translation is not None
+                    and float(
+                        np.linalg.norm(
+                            np.asarray(candidate.translation(), dtype=float)[:2]
+                            - old_translation[:2]
+                        )
+                    )
+                    > max_translation
+                ):
+                    continue
                 after_pairs = self._furniture_aabb_overlap_pairs(
                     overrides={str(moving.object_id): candidate}
                 )
-                if after_pairs - before_pairs:
+                target_pair = frozenset((str(moving.object_id), str(other.object_id)))
+                if target_pair in after_pairs or after_pairs - before_pairs:
                     continue
                 return candidate
         return None
@@ -3010,12 +3114,84 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             return 1e9
         return self._zone_overlap_penalty(bounds, zones)
 
+    def _zone_ejection_candidate_transforms(
+        self,
+        obj: SceneObject,
+        zones: list[tuple[str, str, np.ndarray, np.ndarray]],
+    ) -> list[RigidTransform]:
+        """Return minimum axis translations that eject an object from a zone."""
+        bounds = obj.compute_world_bounds()
+        if bounds is None:
+            return []
+        obj_min, obj_max = bounds
+        original = np.asarray(obj.transform.translation(), dtype=float)
+        margin = max(
+            0.005,
+            float(self._repair_cfg_value("collision_separation_margin_m", 0.025)),
+        )
+        candidates: list[RigidTransform] = []
+        for _, _, zone_min, zone_max in zones:
+            overlap_x, overlap_y, _ = aabb_overlap_depths(
+                list(obj_min), list(obj_max), list(zone_min), list(zone_max)
+            )
+            if (
+                overlap_x <= AABB_INTERSECTION_EPSILON_M
+                or overlap_y <= AABB_INTERSECTION_EPSILON_M
+            ):
+                continue
+            deltas = (
+                (0, float(zone_min[0] - obj_max[0] - margin)),
+                (0, float(zone_max[0] - obj_min[0] + margin)),
+                (1, float(zone_min[1] - obj_max[1] - margin)),
+                (1, float(zone_max[1] - obj_min[1] + margin)),
+            )
+            for axis, delta in deltas:
+                translation = original.copy()
+                translation[axis] += delta
+                candidates.append(
+                    self._fit_transform_inside_room(
+                        obj,
+                        RigidTransform(R=obj.transform.rotation(), p=translation),
+                    )
+                )
+        return candidates
+
+    def _furniture_overlap_penalty_for_transform(
+        self, obj: SceneObject, transform: RigidTransform
+    ) -> float:
+        """Return total 3D AABB overlap volume with other furniture."""
+        bounds = self._bounds_for_transform(obj, transform)
+        if bounds is None:
+            return float("inf")
+        penalty = 0.0
+        for other_id, other in self.scene.objects.items():
+            if (
+                str(other_id) == str(obj.object_id)
+                or getattr(other, "immutable", False)
+                or getattr(other, "object_type", None) != ObjectType.FURNITURE
+            ):
+                continue
+            other_bounds = other.compute_world_bounds()
+            if other_bounds is None:
+                continue
+            overlap_x, overlap_y = self._xy_overlap_depths(bounds, other_bounds)
+            overlap_z = max(
+                0.0,
+                float(
+                    min(bounds[1][2], other_bounds[1][2])
+                    - max(bounds[0][2], other_bounds[0][2])
+                ),
+            )
+            penalty += overlap_x * overlap_y * overlap_z
+        return penalty
+
     def _best_forbidden_zone_repair_transform(
         self,
         obj: SceneObject,
         zones: list[tuple[str, str, np.ndarray, np.ndarray]],
     ) -> RigidTransform | None:
-        candidates = self._generic_wall_candidate_transforms(obj)
+        candidates = self._zone_ejection_candidate_transforms(obj, zones)
+        candidates.extend(self._generic_wall_candidate_transforms(obj))
         room_bounds = self._room_bounds_xy()
         if room_bounds is not None:
             min_x, min_y, max_x, max_y = room_bounds
@@ -3041,46 +3217,28 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                     )
         if not candidates:
             return None
-        obstacles = [
-            other
-            for other_id, other in self.scene.objects.items()
-            if str(other_id) != str(obj.object_id)
-            and not getattr(other, "immutable", False)
-            and getattr(other, "object_type", None) == ObjectType.FURNITURE
-        ]
-        best_transform = None
-        best_score = -1e18
+        before_pairs = self._furniture_aabb_overlap_pairs()
+        best_transform: RigidTransform | None = None
+        best_score: tuple[float, int, float, float] | None = None
         original_center = np.asarray(obj.transform.translation(), dtype=float)
         for transform in candidates:
             bounds = self._bounds_for_transform(obj, transform)
             if bounds is None:
                 continue
-            has_furniture_overlap = False
-            for obstacle in obstacles:
-                obstacle_bounds = obstacle.compute_world_bounds()
-                if obstacle_bounds is None:
-                    continue
-                overlap_x, overlap_y = self._xy_overlap_depths(bounds, obstacle_bounds)
-                overlap_z = max(
-                    0.0,
-                    float(
-                        min(bounds[1][2], obstacle_bounds[1][2])
-                        - max(bounds[0][2], obstacle_bounds[0][2])
-                    ),
-                )
-                if overlap_x > 1e-4 and overlap_y > 1e-4 and overlap_z > 1e-4:
-                    has_furniture_overlap = True
-                    break
-            if has_furniture_overlap:
+            after_pairs = self._furniture_aabb_overlap_pairs(
+                overrides={str(obj.object_id): transform}
+            )
+            if after_pairs - before_pairs:
                 continue
             zone_penalty = self._zone_overlap_penalty(bounds, zones)
             center = np.asarray(transform.translation(), dtype=float)
-            move_penalty = (
-                float(np.linalg.norm(center[:2] - original_center[:2])) * 0.15
+            score = (
+                zone_penalty,
+                len(after_pairs),
+                self._furniture_overlap_penalty_for_transform(obj, transform),
+                float(np.linalg.norm(center[:2] - original_center[:2])),
             )
-            wall_bonus = 0.25
-            score = wall_bonus - zone_penalty - move_penalty
-            if score > best_score:
+            if best_score is None or score < best_score:
                 best_score = score
                 best_transform = transform
         return best_transform
@@ -3145,10 +3303,11 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         return getattr(safety_cfg, "bedroom_layout", None)
 
     def _room_bounds_xy(self) -> tuple[float, float, float, float] | None:
-        if self.scene is None or self.scene.room_geometry is None:
+        geometry = getattr(self.scene, "room_geometry", None)
+        if geometry is None:
             return None
-        length = float(getattr(self.scene.room_geometry, "length", 0.0) or 0.0)
-        width = float(getattr(self.scene.room_geometry, "width", 0.0) or 0.0)
+        length = float(getattr(geometry, "length", 0.0) or 0.0)
+        width = float(getattr(geometry, "width", 0.0) or 0.0)
         if length <= 0 or width <= 0:
             return None
         return (-length / 2, -width / 2, length / 2, width / 2)

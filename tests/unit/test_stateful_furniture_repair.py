@@ -546,7 +546,7 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         StatefulFurnitureAgent is None,
         f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
     )
-    def test_deep_collision_is_left_for_the_planner(self) -> None:
+    def test_deep_collision_uses_bounded_deterministic_repair(self) -> None:
         agent = object.__new__(StatefulFurnitureAgent)
         chair = _FakeFurniture("chair_0", (0.0, 0.0, 0.45), (0.70, 0.70, 0.90))
         shelf = _FakeFurniture("shelf_0", (0.0, 0.65, 0.90), (0.80, 0.70, 1.80))
@@ -569,6 +569,17 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         self.assertEqual(agent._repair_shallow_furniture_collisions(), [])
         np.testing.assert_allclose(chair.transform.translation(), old_translation)
 
+        actions = agent._repair_bounded_furniture_collisions()
+
+        self.assertEqual(len(actions), 1)
+        self.assertEqual(agent._furniture_aabb_overlap_pairs(), set())
+        self.assertLessEqual(
+            float(
+                np.linalg.norm(chair.transform.translation()[:2] - old_translation[:2])
+            ),
+            1.5,
+        )
+
     @unittest.skipIf(
         StatefulFurnitureAgent is None,
         f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
@@ -589,6 +600,42 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         self.assertEqual(
             actions, ["separated shallow collision guest_chair_1<->bookshelf_0"]
         )
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
+    def test_planner_turn_limit_preserves_prior_delegation_failure(self) -> None:
+        from agents.exceptions import MaxTurnsExceeded
+
+        agent = object.__new__(StatefulFurnitureAgent)
+        agent._planner_terminal_failure = {
+            "operation": "request_design_change",
+            "child_agent": "designer",
+            "error_type": "APITimeoutError",
+            "error": "request timed out",
+            "recovered": False,
+        }
+        hard_state = SimpleNamespace(
+            hard_valid=False,
+            hard_reasons=["physics hard violation: collisions"],
+        )
+        agent._evaluate_current_hard_state = lambda: hard_state
+        agent._try_deterministic_repair_for_hard_state = lambda _state, source: (
+            hard_state,
+            None,
+            [],
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "designer delegation request_design_change failed with "
+            "APITimeoutError: request timed out.*remaining hard constraints: "
+            "physics hard violation: collisions",
+        ):
+            agent._recover_from_planner_turn_limit(
+                MaxTurnsExceeded("Max turns exceeded")
+            )
 
     @unittest.skipIf(
         StatefulFurnitureAgent is None,
@@ -1199,6 +1246,48 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
             ),
         )
         self.assertFalse(overlap_x > 1e-4 and overlap_y > 1e-4 and overlap_z > 1e-4)
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
+    def test_forbidden_zone_repair_allows_strict_improvement_with_old_collision(
+        self,
+    ) -> None:
+        moving = _FakeFurniture("sofa_0", (0.0, 0.0, 0.5), (1.0, 1.0, 1.0))
+        blocker = _FakeFurniture("coffee_table_0", (0.4, 0.0, 0.5), (1.0, 1.0, 1.0))
+        agent = object.__new__(StatefulFurnitureAgent)
+        agent.scene = _FakeCollisionScene(moving, blocker)
+        agent.cfg = SimpleNamespace(furniture_safety_controller=None)
+        improved = RigidTransform(p=(-0.3, 0.0, 0.5))
+        agent._zone_ejection_candidate_transforms = lambda _obj, _zones: [improved]
+        agent._generic_wall_candidate_transforms = lambda _obj: []
+        agent._room_bounds_xy = lambda: None
+        zones = [
+            (
+                "door_1",
+                "door",
+                np.array([-0.5, -0.5, 0.0]),
+                np.array([0.5, 0.5, 2.0]),
+            )
+        ]
+
+        original_penalty = agent._zone_overlap_penalty(
+            moving.compute_world_bounds(), zones
+        )
+        repaired = agent._best_forbidden_zone_repair_transform(moving, zones)
+
+        self.assertIsNotNone(repaired)
+        repaired_penalty = agent._zone_overlap_penalty(
+            agent._bounds_for_transform(moving, repaired), zones
+        )
+        self.assertLess(repaired_penalty, original_penalty)
+        self.assertEqual(
+            agent._furniture_aabb_overlap_pairs(
+                overrides={str(moving.object_id): repaired}
+            ),
+            {frozenset(("sofa_0", "coffee_table_0"))},
+        )
 
     @unittest.skipIf(
         StatefulFurnitureAgent is None,

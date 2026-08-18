@@ -213,6 +213,7 @@ class BaseStatefulAgent(ABC):
         self._planner_design_change_tool_calls = 0
         self._planner_budget_exhausted = False
         self._planner_orchestration_calls = 0
+        self._planner_terminal_failure: dict[str, Any] | None = None
         self._critic_failed = False
         working_memory_cfg = _cfg_get(cfg, "stage_working_memory", {})
         working_memory_enabled = bool(_cfg_get(working_memory_cfg, "enabled", True))
@@ -301,6 +302,15 @@ class BaseStatefulAgent(ABC):
         try:
             result = await action()
         except Exception as exc:
+            failure_detail = {
+                "operation": operation,
+                "child_agent": child_agent,
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+                "recovered": False,
+            }
+            if getattr(self, "_planner_terminal_failure", None) is None:
+                self._planner_terminal_failure = failure_detail
             self._record_planner_orchestration(
                 call_id=call_id,
                 phase="resume",
@@ -1921,15 +1931,23 @@ class BaseStatefulAgent(ABC):
             if final_hard_state is not None and not final_hard_state.hard_valid:
                 reasons = "; ".join(final_hard_state.hard_reasons)
                 stage_name = self.agent_type.value.replace("_", " ").capitalize()
+                delegation_failure = self._planner_terminal_failure_text()
+                failure_context = (
+                    f" after {delegation_failure}" if delegation_failure else ""
+                )
                 console_logger.error(
-                    "%s stage failed with unresolved deterministic hard constraints: %s",
+                    "%s stage failed%s with unresolved deterministic hard constraints: %s",
                     stage_name,
+                    failure_context,
                     reasons,
                 )
                 raise RuntimeError(
-                    f"{stage_name} stage failed with unresolved hard constraints: "
+                    f"{stage_name} stage failed{failure_context} with unresolved "
+                    "hard constraints: "
                     f"{reasons}"
                 )
+            if final_hard_state is None or final_hard_state.hard_valid:
+                self._mark_planner_terminal_failure_recovered()
 
         # Copy final scores and renders to per-stage directory.
         # Use final_render_dir (tracks actual last render) instead of checkpoint_render_dir
@@ -2093,6 +2111,7 @@ class BaseStatefulAgent(ABC):
         self._planner_critique_tool_calls = 0
         self._planner_design_change_tool_calls = 0
         self._planner_budget_exhausted = False
+        self._planner_terminal_failure = None
         self._critic_failed = False
         self._pending_hard_repair_hint = ""
         self._hard_repair_design_change_calls = 0
@@ -2106,6 +2125,34 @@ class BaseStatefulAgent(ABC):
         return (
             f"STOP: {reason} Do not restart the initial design or call more "
             "planner tools. Return the final concise workflow summary now."
+        )
+
+    def _planner_terminal_failure_text(self) -> str:
+        failure = getattr(self, "_planner_terminal_failure", None)
+        if not isinstance(failure, dict):
+            return ""
+        return (
+            f"{failure.get('child_agent', 'child')} delegation "
+            f"{failure.get('operation', 'unknown')} failed with "
+            f"{failure.get('error_type', 'Exception')}: "
+            f"{failure.get('error', '')}"
+        ).strip()
+
+    def _mark_planner_terminal_failure_recovered(self) -> None:
+        failure = getattr(self, "_planner_terminal_failure", None)
+        if not isinstance(failure, dict) or failure.get("recovered"):
+            return
+        failure["recovered"] = True
+        self._record_planner_orchestration(
+            call_id=f"{self.agent_type.value}:deterministic_recovery",
+            phase="resume",
+            operation=str(failure.get("operation") or "unknown"),
+            child_agent=str(failure.get("child_agent") or "child"),
+            status="recovered",
+            detail={
+                "error_type": failure.get("error_type"),
+                "error": failure.get("error"),
+            },
         )
 
     def _planner_context_limit(self, key: str, default: int) -> int:
@@ -2280,11 +2327,17 @@ class BaseStatefulAgent(ABC):
                     "completed."
                 )
             self._planner_initial_design_tool_calls += 1
-            result = await self._run_planner_delegation(
-                operation="request_initial_design",
-                child_agent="designer",
-                action=self._request_initial_design_impl,
-            )
+            try:
+                result = await self._run_planner_delegation(
+                    operation="request_initial_design",
+                    child_agent="designer",
+                    action=self._request_initial_design_impl,
+                )
+            except Exception as exc:
+                console_logger.exception("Planner-requested initial design failed")
+                return self._stop_planner_after_failure(
+                    "Initial designer failed with " f"{type(exc).__name__}: {exc}."
+                )
             result += await self._score_design_attempt_if_configured("initial design")
             return self._truncate_planner_tool_output(
                 result,
@@ -2389,12 +2442,18 @@ class BaseStatefulAgent(ABC):
                     f"{self._pending_hard_repair_hint}"
                 )
 
-            result = await self._run_planner_delegation(
-                operation="request_design_change",
-                child_agent="designer",
-                action=lambda: self._request_design_change_impl(instruction),
-                detail={"instruction": instruction},
-            )
+            try:
+                result = await self._run_planner_delegation(
+                    operation="request_design_change",
+                    child_agent="designer",
+                    action=lambda: self._request_design_change_impl(instruction),
+                    detail={"instruction": instruction},
+                )
+            except Exception as exc:
+                console_logger.exception("Planner-requested design change failed")
+                return self._stop_planner_after_failure(
+                    "Designer change failed with " f"{type(exc).__name__}: {exc}."
+                )
             if hard_repair_allowance:
                 self._hard_repair_design_change_calls += 1
             result += await self._score_design_attempt_if_configured("design change")

@@ -327,6 +327,9 @@ _VIRTUAL_CATEGORIES = {
     "ceiling",
     "entrance",
     "entry",
+    "door",
+    "opening",
+    "window",
     "back_wall",
     "front_wall",
     "side_wall",
@@ -565,15 +568,7 @@ def _normalize_stage_ownership(
         inventories[owning_stage].extend([category] * desired_count)
 
     for values in inventories.values():
-        values[:] = [
-            (
-                inventory_key(value)
-                if "_".join(str(value or "").strip().lower().split())
-                in _INVENTORY_CATEGORY_ALIASES
-                else value
-            )
-            for value in values
-        ]
+        values[:] = [inventory_key(value) for value in values]
 
     physical_categories = {
         inventory_key(value) for values in inventories.values() for value in values

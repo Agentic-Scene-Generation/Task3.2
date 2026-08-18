@@ -313,6 +313,18 @@ def test_schema_canonicalizes_instructional_surface_aliases_to_wall_stage() -> N
         ("whiteboard", "instructional_surface"),
         ("entrance_route", "entrance"),
         ("batteries", "battery"),
+        ("circular ceramic table", "table"),
+        ("large rectangular rug", "rug"),
+        ("rectangular coffee table", "coffee_table"),
+        ("chest_of_drawer", "dresser"),
+        ("chest of drawers", "dresser"),
+        ("large abstract painting", "painting"),
+        ("wall_cabinet", "wall_cabinet"),
+        ("sofa_chair", "sofa_chair"),
+        ("sofa chair", "sofa_chair"),
+        ("glass bowls", "glass_bowl"),
+        ("vase_flowers", "vase_flower"),
+        ("unlisted modular console", "unlisted_modular_console"),
     ],
 )
 def test_schema_normalizes_common_plural_selector_categories(
@@ -2184,6 +2196,27 @@ def test_intent_compiler_injects_complete_task_spec_and_owns_inventory() -> None
     assert any("Inventory count conflict" in warning for warning in result["warnings"])
 
 
+def test_task_spec_inventory_drops_overlapping_prompt_fragment_counts() -> None:
+    task_spec = SceneTaskSpec(
+        room_type="living room",
+        style="standard",
+        required_large_objects=["sofa_chair"] * 4,
+        required_small_objects=["glass_bowl"] * 2,
+    )
+    compiler = _compiler_with_responses([_response('{"constraints": []}')])
+
+    result = compiler.compile(
+        "A room with four sofa chairs and two glass bowls.", task_spec=task_spec
+    )
+
+    required = {
+        row["subjects"]["category"]: row["subjects"]["count"]
+        for row in result["constraints"]
+        if row["relation"] == "required_count"
+    }
+    assert required == {"glass_bowl": 2, "sofa_chair": 4}
+
+
 def test_intent_compiler_retries_parseable_length_response() -> None:
     compiler = _compiler_with_responses(
         [
@@ -2321,7 +2354,17 @@ def test_contract_completeness_accepts_specific_endpoint_for_generic_inventory()
 
 @pytest.mark.parametrize(
     "anchor",
-    ["room", "wall", "floor", "ceiling", "entrance", "adjacent_wall"],
+    [
+        "room",
+        "wall",
+        "floor",
+        "ceiling",
+        "entrance",
+        "door",
+        "opening",
+        "window",
+        "adjacent_wall",
+    ],
 )
 def test_contract_completeness_accepts_environment_anchors(anchor: str) -> None:
     contract = build_intent_contract(

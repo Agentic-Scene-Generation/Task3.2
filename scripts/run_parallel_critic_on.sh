@@ -760,6 +760,11 @@ validate_scene_selection() {
             echo "       Or use --scenes all." >&2
             exit 2
         fi
+        if [ "${CASE_SCOPE_BY_ID[$scene_id]:-single_room}" = "multi_room" ]; then
+            echo "ERROR: scene ID '$scene_id' is marked multi_room in $SCENEEVAL_ANNOTATIONS" >&2
+            echo "       This runner supports only SceneEval single_room cases." >&2
+            exit 2
+        fi
         if [[ "$seen" == *",$scene_id,"* ]]; then
             echo "ERROR: duplicate scene ID in --scenes: $scene_id" >&2
             exit 2
@@ -804,7 +809,7 @@ limit = int(sys.argv[2])
 with open(path, newline="", encoding="utf-8-sig") as handle:
     rows = list(csv.DictReader(handle))
 
-required = {"ID", "Description", "Difficulty"}
+required = {"ID", "Description", "Difficulty", "SceneScope"}
 if not rows or not required.issubset(rows[0]):
     raise SystemExit(
         f"ERROR: SceneEval CSV must contain columns {sorted(required)}: {path}"
@@ -826,17 +831,24 @@ for expected_id, row in enumerate(rows[:limit]):
         )
     description = (row["Description"] or "").strip()
     difficulty = (row["Difficulty"] or "").strip().lower()
+    scene_scope = (row["SceneScope"] or "").strip().lower()
     if not description:
         raise SystemExit(f"ERROR: SceneEval ID {scene_id} has an empty Description")
     if difficulty not in {"easy", "medium", "hard"}:
         raise SystemExit(
             f"ERROR: SceneEval ID {scene_id} has invalid Difficulty {difficulty!r}"
         )
+    if scene_scope not in {"single_room", "multi_room"}:
+        raise SystemExit(
+            f"ERROR: SceneEval ID {scene_id} has invalid SceneScope {scene_scope!r}"
+        )
     if "|" in description or "\x00" in description or "\n" in description or "\r" in description:
         raise SystemExit(
             f"ERROR: SceneEval ID {scene_id} contains an unsupported record separator"
         )
-    record = f"{scene_id}|SceneEval {difficulty}|{description}".encode("utf-8")
+    record = (
+        f"{scene_id}|SceneEval {difficulty}|{description}|{scene_scope}"
+    ).encode("utf-8")
     sys.stdout.buffer.write(record + b"\x00")
 PY
     )
@@ -847,6 +859,10 @@ PY
 }
 
 declare -A CASE_DIFFICULTY_BY_ID=()
+declare -A CASE_SCOPE_BY_ID=()
+SCENEEVAL_SINGLE_ROOM_COUNT=0
+SCENEEVAL_MULTI_ROOM_COUNT=0
+SCENEEVAL_MULTI_ROOM_IDS=""
 
 select_case_registry() {
     case "$CASE_SET" in
@@ -880,13 +896,24 @@ select_case_registry() {
             ;;
     esac
 
-    local case_entry case_id critic_goal difficulty
+    local case_entry case_id critic_goal prompt scene_scope difficulty
     CASE_SET_IDS=""
     for case_entry in "${CASES[@]}"; do
-        IFS='|' read -r case_id critic_goal _ <<< "$case_entry"
+        IFS='|' read -r case_id critic_goal prompt scene_scope <<< "$case_entry"
+        scene_scope="${scene_scope:-single_room}"
+        CASE_SCOPE_BY_ID["$case_id"]="$scene_scope"
         if [[ "$CASE_SET" == sceneeval* ]]; then
             difficulty="${critic_goal#SceneEval }"
             CASE_DIFFICULTY_BY_ID["$case_id"]="$difficulty"
+            if [ "$scene_scope" = "multi_room" ]; then
+                SCENEEVAL_MULTI_ROOM_COUNT=$((SCENEEVAL_MULTI_ROOM_COUNT + 1))
+                if [ -n "$SCENEEVAL_MULTI_ROOM_IDS" ]; then
+                    SCENEEVAL_MULTI_ROOM_IDS+=","
+                fi
+                SCENEEVAL_MULTI_ROOM_IDS+="$case_id"
+            else
+                SCENEEVAL_SINGLE_ROOM_COUNT=$((SCENEEVAL_SINGLE_ROOM_COUNT + 1))
+            fi
             continue
         fi
         if [ -n "$CASE_SET_IDS" ]; then
@@ -1029,6 +1056,8 @@ echo "case set: $CASE_SET"
 if [[ "$CASE_SET" == sceneeval* ]]; then
     echo "SceneEval annotations: $SCENEEVAL_ANNOTATIONS"
     echo "SceneEval difficulty: $DIFFICULTY_SELECTION"
+    echo "SceneEval scope: single_room only ($SCENEEVAL_SINGLE_ROOM_COUNT supported, $SCENEEVAL_MULTI_ROOM_COUNT filtered)"
+    echo "SceneEval filtered multi_room IDs: ${SCENEEVAL_MULTI_ROOM_IDS:-none}"
 fi
 echo "model: $MODEL_NAME"
 echo "OpenAI base URL: $OPENAI_BASE_URL"
@@ -1090,6 +1119,9 @@ difficulty_selected() {
 case_selected() {
     local case_id="$1"
     local filter
+    if [ "${CASE_SCOPE_BY_ID[$case_id]:-single_room}" != "single_room" ]; then
+        return 1
+    fi
     if ! difficulty_selected "$case_id"; then
         return 1
     fi
@@ -1132,7 +1164,7 @@ validate_nonempty_case_selection() {
 validate_nonempty_case_selection
 
 validate_shared_base_case_mapping() {
-    local index entry case_id _critic_goal _prompt batch_index batch_csv selected=0
+    local index entry case_id _critic_goal _prompt _scene_scope batch_index batch_csv selected=0
 
     if [ "$BRANCH_FROM_SHARED_BASE" != "true" ] \
         || [ "$GENERATE_SHARED_BASE" = "true" ]; then
@@ -1141,7 +1173,7 @@ validate_shared_base_case_mapping() {
 
     for index in "${!CASES[@]}"; do
         entry="${CASES[$index]}"
-        IFS='|' read -r case_id _critic_goal _prompt <<< "$entry"
+        IFS='|' read -r case_id _critic_goal _prompt _scene_scope <<< "$entry"
         if ! case_selected "$case_id"; then
             continue
         fi
@@ -1628,7 +1660,7 @@ run_batches() {
     }
 
     for index in "${!CASES[@]}"; do
-        IFS='|' read -r case_id critic_goal prompt <<< "${CASES[$index]}"
+        IFS='|' read -r case_id critic_goal prompt _scene_scope <<< "${CASES[$index]}"
         if ! case_selected "$case_id"; then continue; fi
         if [ "$MAX_CASES" -gt 0 ] && [ "$selected" -ge "$MAX_CASES" ]; then break; fi
         source_batch_index=$((index / SCENE_BATCH_SIZE + 1))
@@ -1657,7 +1689,7 @@ shared_base_incomplete_scene_ids() {
     local selected=0 ids=""
 
     for index in "${!CASES[@]}"; do
-        IFS='|' read -r case_id critic_goal prompt <<< "${CASES[$index]}"
+        IFS='|' read -r case_id critic_goal prompt _scene_scope <<< "${CASES[$index]}"
         if ! case_selected "$case_id"; then continue; fi
         if [ "$MAX_CASES" -gt 0 ] && [ "$selected" -ge "$MAX_CASES" ]; then break; fi
         selected=$((selected + 1))
