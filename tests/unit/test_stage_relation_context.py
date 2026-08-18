@@ -195,6 +195,85 @@ def test_floor_plan_manifest_projects_media_zones_and_explicit_windows() -> None
     )
 
 
+def test_strict_window_adjacency_projects_v2_capacity_and_window_count() -> None:
+    context = StageRelationProjector(
+        floor_plan_reservation_gate_enabled=True,
+    ).project(
+        stage="floor_plan",
+        task_spec=_task_spec(required_large_objects=["table"]),
+        intent_contract={
+            "constraints": [
+                {
+                    "constraint_id": "table-window",
+                    "stage": "furniture",
+                    "strength": "hard",
+                    "relation": "next_to",
+                    "subjects": {"category": "table", "count": 1},
+                    "targets": {"category": "window", "count": 2},
+                }
+            ]
+        },
+    )
+
+    manifest = context.floor_plan_manifest
+    assert manifest is not None
+    assert manifest.schema_version == "scenesmith.floor_plan_reservations.v2"
+    assert manifest.explicit_window_count == 2
+    assert manifest.explicit_window_required
+    reservations = [
+        item for item in manifest.reservations if item.kind == "opening_adjacency"
+    ]
+    assert len(reservations) == 1
+    assert reservations[0].subject_categories == ["table"]
+    assert reservations[0].target_categories == ["window"]
+
+    brief = _add_floor_plan_reservation_guidance(
+        StageBrief(
+            stage="floor_plan",
+            stage_objective="Create an office.",
+        ),
+        HarnessContext(
+            stage="floor_plan",
+            task_spec=_task_spec(required_large_objects=["table"]),
+            memory_pack=MemoryPack(),
+            relation_context=context,
+        ),
+    )
+    guidance = "\n".join(
+        [*brief.constraints_for_designer, *brief.checks_for_critic]
+    ).lower()
+    assert "table next to a window" in guidance
+    assert "window-side segment" in guidance
+
+
+def test_loose_window_near_requires_window_without_adjacency_capacity() -> None:
+    context = StageRelationProjector(
+        floor_plan_reservation_gate_enabled=True,
+    ).project(
+        stage="floor_plan",
+        task_spec=_task_spec(required_large_objects=["bed"]),
+        intent_contract={
+            "constraints": [
+                {
+                    "constraint_id": "bed-window-near",
+                    "stage": "furniture",
+                    "strength": "hard",
+                    "relation": "near",
+                    "subjects": {"category": "bed", "count": 1},
+                    "targets": {"category": "window", "count": 1},
+                }
+            ]
+        },
+    )
+
+    manifest = context.floor_plan_manifest
+    assert manifest is not None
+    assert manifest.explicit_window_count == 1
+    assert not any(
+        item.kind == "opening_adjacency" for item in manifest.reservations
+    )
+
+
 def test_floor_plan_manifest_scopes_multi_room_capacity_to_all_rooms() -> None:
     task_spec = _task_spec(
         room_type="living room, dining room, kitchen",

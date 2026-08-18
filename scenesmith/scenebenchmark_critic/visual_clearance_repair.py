@@ -6,7 +6,8 @@ import logging
 import math
 
 from dataclasses import dataclass
-from typing import Any, Iterable, Protocol
+from collections.abc import Callable, Iterator, Sequence
+from typing import Any, Iterable, Protocol, overload
 
 import numpy as np
 
@@ -30,6 +31,8 @@ class WallSurfaceLike(Protocol):
     """Wall-surface operations needed by the critic repair guard."""
 
     surface_id: UniqueID
+    bounding_box_min: list[float]
+    bounding_box_max: list[float]
 
     def check_object_bounds(
         self,
@@ -46,14 +49,49 @@ class WallSurfaceLike(Protocol):
 
 @dataclass(frozen=True)
 class VisualClearanceFix:
-    """One accepted same-wall move."""
+    """One accepted transactional wall move."""
 
     object_id: str
-    wall_surface_id: str
+    old_wall_surface_id: str
+    new_wall_surface_id: str
     old_position: tuple[float, float]
     new_position: tuple[float, float]
     old_issue_count: int
     new_issue_count: int
+    old_occlusion_fraction: float
+    new_occlusion_fraction: float
+
+    @property
+    def wall_surface_id(self) -> str:
+        """Compatibility alias for the accepted destination surface."""
+        return self.new_wall_surface_id
+
+
+@dataclass(frozen=True)
+class VisualClearanceRejection:
+    object_id: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class VisualClearanceRepairReport(Sequence[VisualClearanceFix]):
+    accepted_fixes: tuple[VisualClearanceFix, ...] = ()
+    rejections: tuple[VisualClearanceRejection, ...] = ()
+
+    @overload
+    def __getitem__(self, index: int) -> VisualClearanceFix: ...
+
+    @overload
+    def __getitem__(self, index: slice) -> Sequence[VisualClearanceFix]: ...
+
+    def __getitem__(self, index: int | slice) -> Any:
+        return self.accepted_fixes[index]
+
+    def __len__(self) -> int:
+        return len(self.accepted_fixes)
+
+    def __iter__(self) -> Iterator[VisualClearanceFix]:
+        return iter(self.accepted_fixes)
 
 
 def improve_wall_visual_clearance(
@@ -64,16 +102,20 @@ def improve_wall_visual_clearance(
     step_m: float = 0.2,
     max_shift_m: float = 2.0,
     max_repairs: int = 8,
-) -> list[VisualClearanceFix]:
+    max_candidate_evaluations: int = 2048,
+    on_accept: Callable[[], None] | None = None,
+) -> VisualClearanceRepairReport:
     """Move still-occluded wall objects after the LLM repair budget is exhausted."""
     critic_config = (
         config if isinstance(config, CriticConfig) else critic_config_from_any(config)
     )
     if not critic_config.enabled or "visual_clearance" not in critic_config.metrics:
-        return []
+        return VisualClearanceRepairReport()
 
     surfaces = {str(surface.surface_id): surface for surface in wall_surfaces}
     fixes: list[VisualClearanceFix] = []
+    rejections: dict[str, VisualClearanceRejection] = {}
+    candidate_evaluations = 0
     for _ in range(max_repairs):
         baseline = _evaluate(scene, config)
         baseline_score = _score_payload(baseline)
@@ -82,38 +124,75 @@ def improve_wall_visual_clearance(
         for object_id in issue_ids:
             obj = scene.objects.get(UniqueID(object_id))
             if obj is None or obj.object_type != ObjectType.WALL_MOUNTED:
+                rejections[object_id] = VisualClearanceRejection(
+                    object_id, "object_missing_or_not_wall_mounted"
+                )
                 continue
             placement = obj.placement_info
             if placement is None:
+                rejections[object_id] = VisualClearanceRejection(
+                    object_id, "missing_wall_placement"
+                )
                 continue
             surface = surfaces.get(str(placement.parent_surface_id))
             if surface is None:
+                rejections[object_id] = VisualClearanceRejection(
+                    object_id, "current_wall_surface_missing"
+                )
                 continue
-            best = _best_candidate(
+            remaining_budget = max_candidate_evaluations - candidate_evaluations
+            if remaining_budget <= 0:
+                rejections[object_id] = VisualClearanceRejection(
+                    object_id, "candidate_budget_exhausted"
+                )
+                break
+            best, evaluated, reason = _best_candidate(
                 scene,
                 obj=obj,
-                surface=surface,
+                current_surface=surface,
+                surfaces=surfaces.values(),
                 config=config,
+                baseline_payload=baseline,
                 baseline_score=baseline_score,
                 step_m=step_m,
                 max_shift_m=max_shift_m,
+                candidate_budget=remaining_budget,
             )
+            candidate_evaluations += evaluated
             if best is None:
+                rejections[object_id] = VisualClearanceRejection(object_id, reason)
                 continue
             old_position = tuple(float(value) for value in placement.position_2d)
-            new_x, new_z, new_transform, new_placement, new_score = best
+            (
+                destination,
+                new_x,
+                new_z,
+                new_transform,
+                new_placement,
+                new_score,
+                new_payload,
+            ) = best
             obj.transform = new_transform
             obj.placement_info = new_placement
-            fixes.append(
-                VisualClearanceFix(
-                    object_id=object_id,
-                    wall_surface_id=str(surface.surface_id),
-                    old_position=old_position,
-                    new_position=(new_x, new_z),
-                    old_issue_count=baseline_score.issue_count,
-                    new_issue_count=new_score.issue_count,
-                )
+            fix = VisualClearanceFix(
+                object_id=object_id,
+                old_wall_surface_id=str(surface.surface_id),
+                new_wall_surface_id=str(destination.surface_id),
+                old_position=old_position,
+                new_position=(new_x, new_z),
+                old_issue_count=baseline_score.issue_count,
+                new_issue_count=new_score.issue_count,
+                old_occlusion_fraction=_object_visual_severity(
+                    baseline, object_id
+                ),
+                new_occlusion_fraction=_object_visual_severity(
+                    new_payload, object_id
+                ),
             )
+            fixes.append(fix)
+            if on_accept is not None:
+                on_accept()
+            rejections.pop(object_id, None)
             accepted = True
             break
         if not accepted:
@@ -130,7 +209,10 @@ def improve_wall_visual_clearance(
                 for fix in fixes
             ),
         )
-    return fixes
+    return VisualClearanceRepairReport(
+        accepted_fixes=tuple(fixes),
+        rejections=tuple(rejections[key] for key in sorted(rejections)),
+    )
 
 
 @dataclass(frozen=True, order=True)
@@ -218,67 +300,164 @@ def _best_candidate(
     scene: RoomScene,
     *,
     obj: SceneObject,
-    surface: WallSurfaceLike,
+    current_surface: WallSurfaceLike,
+    surfaces: Iterable[WallSurfaceLike],
     config: Any,
+    baseline_payload: dict[str, Any],
     baseline_score: _PayloadScore,
     step_m: float,
     max_shift_m: float,
-) -> tuple[float, float, Any, PlacementInfo, _PayloadScore] | None:
+    candidate_budget: int,
+) -> tuple[
+    tuple[
+        WallSurfaceLike,
+        float,
+        float,
+        Any,
+        PlacementInfo,
+        _PayloadScore,
+        dict[str, Any],
+    ]
+    | None,
+    int,
+    str,
+]:
     placement = obj.placement_info
     if placement is None:
-        return None
+        return None, 0, "missing_wall_placement"
     old_transform = obj.transform
     old_placement = placement
     old_x, old_z = (float(value) for value in placement.position_2d)
     rotation_degrees = math.degrees(float(placement.rotation_2d))
     object_width = float(obj.bbox_max[0] - obj.bbox_min[0])
     object_height = float(obj.bbox_max[2] - obj.bbox_min[2])
-    best: tuple[float, float, Any, PlacementInfo, _PayloadScore] | None = None
-    best_key: tuple[_PayloadScore, float, float, float] | None = None
+    old_world_center = np.asarray(old_transform.translation(), dtype=float)
+    best: tuple[
+        WallSurfaceLike,
+        float,
+        float,
+        Any,
+        PlacementInfo,
+        _PayloadScore,
+        dict[str, Any],
+    ] | None = None
+    evaluated = 0
+    legal_candidates = 0
+    baseline_fail_ids = _core_hard_fail_ids(baseline_payload)
+    protected_relations = _passing_explicit_relation_ids(
+        baseline_payload, str(obj.object_id)
+    )
 
     try:
-        for new_x, new_z in _candidate_positions(
-            old_x,
-            old_z,
-            step_m=step_m,
-            max_shift_m=max_shift_m,
-        ):
-            valid, _ = surface.check_object_bounds(
-                position_x=new_x,
-                position_z=new_z,
-                object_width=object_width,
-                object_height=object_height,
-            )
-            if not valid:
-                continue
-            new_transform = surface.to_world_pose(
-                position_x=new_x,
-                position_z=new_z,
-                rotation_deg=rotation_degrees,
-            )
-            new_placement = PlacementInfo(
-                parent_surface_id=surface.surface_id,
-                position_2d=np.array([new_x, new_z]),
-                rotation_2d=float(placement.rotation_2d),
-                placement_method=placement.placement_method,
-            )
-            obj.transform = new_transform
-            obj.placement_info = new_placement
-            payload = _evaluate(scene, config)
-            score = _score_payload(payload)
-            if score >= baseline_score or _object_still_has_visual_issue(
-                payload, str(obj.object_id)
-            ):
-                continue
-            move_distance = math.hypot(new_x - old_x, new_z - old_z)
-            key = (score, move_distance, new_z - old_z, new_x)
-            if best_key is None or key < best_key:
-                best_key = key
-                best = (new_x, new_z, new_transform, new_placement, score)
+        ordered_surfaces = sorted(
+            surfaces,
+            key=lambda surface: (
+                str(surface.surface_id) != str(current_surface.surface_id),
+                str(surface.surface_id),
+            ),
+        )
+        for same_wall in (True, False):
+            group_best = None
+            group_key = None
+            for surface in ordered_surfaces:
+                if (str(surface.surface_id) == str(current_surface.surface_id)) != same_wall:
+                    continue
+                positions = (
+                    _candidate_positions(
+                        old_x,
+                        old_z,
+                        step_m=step_m,
+                        max_shift_m=max_shift_m,
+                    )
+                    if same_wall
+                    else _surface_grid_positions(
+                        surface,
+                        object_width=object_width,
+                        object_height=object_height,
+                        step_m=step_m,
+                    )
+                )
+                for new_x, new_z in positions:
+                    if evaluated >= candidate_budget:
+                        break
+                    valid, _ = surface.check_object_bounds(
+                        position_x=new_x,
+                        position_z=new_z,
+                        object_width=object_width,
+                        object_height=object_height,
+                    )
+                    if not valid:
+                        continue
+                    legal_candidates += 1
+                    new_transform = surface.to_world_pose(
+                        position_x=new_x,
+                        position_z=new_z,
+                        rotation_deg=rotation_degrees,
+                    )
+                    new_placement = PlacementInfo(
+                        parent_surface_id=surface.surface_id,
+                        position_2d=np.array([new_x, new_z]),
+                        rotation_2d=float(placement.rotation_2d),
+                        placement_method=placement.placement_method,
+                    )
+                    obj.transform = new_transform
+                    obj.placement_info = new_placement
+                    payload = _evaluate(scene, config)
+                    evaluated += 1
+                    score = _score_payload(payload)
+                    if _object_still_has_visual_issue(payload, str(obj.object_id)):
+                        continue
+                    if _core_hard_fail_ids(payload) - baseline_fail_ids:
+                        continue
+                    if not protected_relations.issubset(
+                        _passing_explicit_relation_ids(payload, str(obj.object_id))
+                    ):
+                        continue
+                    if _visual_score_key(score) >= _visual_score_key(baseline_score):
+                        continue
+                    world_distance = float(
+                        np.linalg.norm(
+                            np.asarray(new_transform.translation(), dtype=float)
+                            - old_world_center
+                        )
+                    )
+                    key = (
+                        score.visual_fail,
+                        score.visual_degraded,
+                        score.visual_severity,
+                        world_distance,
+                        str(surface.surface_id),
+                        new_x,
+                        new_z,
+                    )
+                    if group_key is None or key < group_key:
+                        group_key = key
+                        group_best = (
+                            surface,
+                            new_x,
+                            new_z,
+                            new_transform,
+                            new_placement,
+                            score,
+                            payload,
+                        )
+                if evaluated >= candidate_budget:
+                    break
+            if group_best is not None:
+                best = group_best
+                break
+            if evaluated >= candidate_budget:
+                break
     finally:
         obj.transform = old_transform
         obj.placement_info = old_placement
-    return best
+    if best is not None:
+        return best, evaluated, ""
+    if evaluated >= candidate_budget:
+        return None, evaluated, "candidate_budget_exhausted"
+    if legal_candidates == 0:
+        return None, evaluated, "no_legal_wall_candidate"
+    return None, evaluated, "no_candidate_resolved_visual_issue"
 
 
 def _object_still_has_visual_issue(payload: dict[str, Any], object_id: str) -> bool:
@@ -294,6 +473,98 @@ def _object_still_has_visual_issue(payload: dict[str, Any], object_id: str) -> b
         if object_id in involved:
             return True
     return False
+
+
+def _visual_score_key(score: _PayloadScore) -> tuple[int, int, float]:
+    return score.visual_fail, score.visual_degraded, score.visual_severity
+
+
+def _core_hard_fail_ids(payload: dict[str, Any]) -> frozenset[str]:
+    return frozenset(
+        str(result.get("check_id") or f"result_{index}")
+        for index, result in enumerate(payload.get("results") or [])
+        if str(result.get("scoring_tier") or "core").lower() == "core"
+        and str(result.get("label") or "").lower() == "fail"
+    )
+
+
+def _result_object_ids(result: dict[str, Any]) -> set[str]:
+    diagnostics = result.get("diagnostics") or {}
+    return {
+        str(value)
+        for value in (
+            result.get("primary_object"),
+            *(result.get("related_objects") or []),
+            *(result.get("selected_related_objects") or []),
+            *(diagnostics.get("selected_target_ids") or []),
+        )
+        if str(value or "")
+    }
+
+
+def _passing_explicit_relation_ids(
+    payload: dict[str, Any], object_id: str
+) -> frozenset[str]:
+    protected: set[str] = set()
+    for index, result in enumerate(payload.get("results") or []):
+        if str(result.get("label") or "") != "pass":
+            continue
+        constraint = (result.get("evidence") or {}).get("intent_constraint") or {}
+        if not constraint or str(constraint.get("relation") or "") == "required_count":
+            continue
+        if object_id not in _result_object_ids(result):
+            continue
+        protected.add(str(result.get("check_id") or f"result_{index}"))
+    return frozenset(protected)
+
+
+def _object_visual_severity(payload: dict[str, Any], object_id: str) -> float:
+    severity = 0.0
+    for result in payload.get("results") or []:
+        if result.get("metric") != "visual_clearance":
+            continue
+        if object_id not in _result_object_ids(result):
+            continue
+        diagnostics = result.get("diagnostics") or {}
+        severity = max(
+            severity,
+            float(
+                diagnostics.get("occluded_fraction")
+                or diagnostics.get("overlap_ratio")
+                or 0.0
+            ),
+        )
+    return round(severity, 9)
+
+
+def _surface_grid_positions(
+    surface: WallSurfaceLike,
+    *,
+    object_width: float,
+    object_height: float,
+    step_m: float,
+) -> list[tuple[float, float]]:
+    lower = np.asarray(surface.bounding_box_min, dtype=float)
+    upper = np.asarray(surface.bounding_box_max, dtype=float)
+    x_min = float(lower[0]) + object_width / 2.0
+    x_max = float(upper[0]) - object_width / 2.0
+    z_min = float(lower[2]) + object_height / 2.0
+    z_max = float(upper[2]) - object_height / 2.0
+    if x_min > x_max or z_min > z_max:
+        return []
+
+    def values(start: float, end: float) -> list[float]:
+        count = max(0, int(math.floor((end - start) / step_m)))
+        result = [round(start + index * step_m, 6) for index in range(count + 1)]
+        if not result or end - result[-1] > 1e-6:
+            result.append(round(end, 6))
+        return result
+
+    return [
+        (position_x, position_z)
+        for position_z in values(z_min, z_max)
+        for position_x in values(x_min, x_max)
+    ]
 
 
 def _candidate_positions(

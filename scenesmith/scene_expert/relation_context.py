@@ -75,12 +75,12 @@ def _normalize_relation(value: Any) -> str:
 
 
 def _floor_plan_reservations(constraints: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Project future wall anchors into opening-reservation requirements.
+    """Project future wall anchors and strict window adjacency requirements.
 
     Furniture and wall-mounted stages need physical wall area which is decided
     earlier by the floor plan. This projection deliberately contains only
-    explicit wall relations: proximity and seating constraints must not affect
-    doors or windows.
+    explicit wall relations and literal ``next_to`` relations involving a
+    window. Loose proximity and seating constraints must not affect openings.
     """
     reservations: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str]] = set()
@@ -88,14 +88,41 @@ def _floor_plan_reservations(constraints: list[dict[str, Any]]) -> list[dict[str
         if str(constraint.get("stage") or "") == "floor_plan":
             continue
         relation = str(constraint.get("relation") or "")
+        subject = constraint.get("subjects") or {}
+        target = constraint.get("targets") or {}
+        subject_category = canonical_selector_category(subject.get("category"))
+        target_category = canonical_selector_category(target.get("category"))
+        if relation == "next_to" and "window" in {
+            subject_category,
+            target_category,
+        }:
+            furniture = target if subject_category == "window" else subject
+            window = subject if subject_category == "window" else target
+            furniture_category = canonical_selector_category(
+                furniture.get("category")
+            )
+            if not furniture_category or furniture_category == "window":
+                continue
+            source_id = str(constraint.get("constraint_id") or "")
+            key = (source_id or furniture_category, relation, "window")
+            if key in seen:
+                continue
+            seen.add(key)
+            reservations.append(
+                {
+                    "constraint_id": source_id,
+                    "source_stage": str(constraint.get("stage") or ""),
+                    "relation": relation,
+                    "subjects": dict(furniture),
+                    "targets": dict(window),
+                    "reservation_kind": "opening_adjacency",
+                }
+            )
+            continue
         if relation not in _FLOOR_PLAN_RESERVATION_RELATIONS:
             continue
-        target = constraint.get("targets") or {}
-        target_category = canonical_selector_category(target.get("category"))
         if target_category not in _WALL_TARGET_CATEGORIES:
             continue
-        subject = constraint.get("subjects") or {}
-        subject_category = canonical_selector_category(subject.get("category"))
         if not subject_category:
             continue
         wall_role = str(target.get("role") or "").strip().lower()
@@ -156,12 +183,15 @@ def _reservation_room_scope(room_type: str) -> str:
 def _explicit_window_count(constraints: list[dict[str, Any]]) -> int:
     counts: list[int] = []
     for constraint in constraints:
-        if _normalize_relation(constraint.get("relation")) != "required_count":
+        if str(constraint.get("strength") or "hard").lower() != "hard":
             continue
-        subject = constraint.get("subjects") or {}
-        if canonical_selector_category(subject.get("category")) != "window":
-            continue
-        counts.append(_selector_count(subject))
+        relation = _normalize_relation(constraint.get("relation"))
+        selectors = [constraint.get("subjects") or {}]
+        if relation != "required_count":
+            selectors.append(constraint.get("targets") or {})
+        for selector in selectors:
+            if canonical_selector_category(selector.get("category")) == "window":
+                counts.append(_selector_count(selector))
     return max(counts, default=0)
 
 
@@ -226,10 +256,12 @@ def _floor_plan_manifest(
         target = raw.get("targets") or {}
         category = canonical_selector_category(subject.get("category"))
         source_id = str(raw.get("constraint_id") or "")
+        reservation_kind = str(raw.get("reservation_kind") or "wall_anchor")
         reservations.append(
             FloorPlanReservation(
-                reservation_id=source_id or f"wall_anchor__{category}__{index}",
-                kind="wall_anchor",
+                reservation_id=source_id
+                or f"{reservation_kind}__{category}__{index}",
+                kind=reservation_kind,
                 source_constraint_ids=[source_id] if source_id else [],
                 room_type=room_scope,
                 subject_categories=[category],

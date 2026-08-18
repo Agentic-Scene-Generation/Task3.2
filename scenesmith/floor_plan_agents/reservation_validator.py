@@ -112,9 +112,7 @@ def _candidate_walls(
     return walls
 
 
-def _wall_capacity_issues(
-    layout: HouseLayout, reservations: list[FloorPlanReservation]
-) -> list[dict[str, Any]]:
+def _wall_free_capacity_spans(layout: HouseLayout) -> list[dict[str, Any]]:
     spans: list[dict[str, Any]] = []
     seen_walls: set[str] = set()
     for room in layout.placed_rooms:
@@ -125,10 +123,21 @@ def _wall_capacity_issues(
             spans.extend(
                 {
                     "wall": wall,
-                    "remaining": end - start,
+                    "start": start,
+                    "end": end,
                 }
                 for start, end in opening_free_spans(wall)
             )
+    return spans
+
+
+def _wall_capacity_issues(
+    layout: HouseLayout,
+    reservations: list[FloorPlanReservation],
+    *,
+    spans: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    spans = spans if spans is not None else _wall_free_capacity_spans(layout)
 
     requests: list[tuple[float, FloorPlanReservation]] = []
     for reservation in reservations:
@@ -142,7 +151,7 @@ def _wall_capacity_issues(
         candidates = [
             span
             for span in spans
-            if span["remaining"] >= width
+            if span["end"] - span["start"] >= width
             and span["wall"] in _candidate_walls(layout, reservation)
         ]
         if not candidates:
@@ -155,8 +164,118 @@ def _wall_capacity_issues(
                 }
             )
             continue
-        selected = min(candidates, key=lambda span: span["remaining"])
-        selected["remaining"] -= width
+        selected = min(
+            candidates,
+            key=lambda span: span["end"] - span["start"],
+        )
+        selected["start"] += width
+    return issues
+
+
+def _opening_adjacency_capacity_issues(
+    layout: HouseLayout,
+    reservations: list[FloorPlanReservation],
+    *,
+    spans: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Allocate non-overlapping wall capacity immediately beside windows."""
+    spans = spans if spans is not None else _wall_free_capacity_spans(layout)
+    capacities: list[dict[str, Any]] = []
+    for room in layout.placed_rooms:
+        for wall in room.walls:
+            for opening in wall.openings:
+                if opening.opening_type != OpeningType.WINDOW:
+                    continue
+                opening_start = float(opening.position_along_wall)
+                opening_end = opening_start + max(0.0, float(opening.width))
+                left_edge = max(0.0, opening_start - _OPENING_MARGIN_M)
+                right_edge = min(float(wall.length), opening_end + _OPENING_MARGIN_M)
+                for span in spans:
+                    if span["wall"].wall_id != wall.wall_id:
+                        continue
+                    start, end = span["start"], span["end"]
+                    side = ""
+                    if abs(end - left_edge) <= 1e-6:
+                        side = "left"
+                    elif abs(start - right_edge) <= 1e-6:
+                        side = "right"
+                    if side:
+                        capacities.append(
+                            {
+                                "wall": wall,
+                                "window_id": opening.opening_id,
+                                "side": side,
+                                "span": span,
+                            }
+                        )
+
+    issues: list[dict[str, Any]] = []
+    requests: list[tuple[float, FloorPlanReservation]] = []
+    for reservation in reservations:
+        requests.extend(
+            (reservation.min_wall_width_m, reservation)
+            for _ in range(reservation.count)
+        )
+    requests.sort(key=lambda item: item[0], reverse=True)
+    for width, reservation in requests:
+        candidate_wall_ids = {
+            wall.wall_id for wall in _candidate_walls(layout, reservation)
+        }
+        matching_window_exists = any(
+            wall.wall_id in candidate_wall_ids
+            and any(
+                opening.opening_type == OpeningType.WINDOW
+                for opening in wall.openings
+            )
+            for room in layout.placed_rooms
+            for wall in room.walls
+        )
+        matching = [
+            capacity
+            for capacity in capacities
+            if capacity["wall"].wall_id in candidate_wall_ids
+        ]
+        if not matching:
+            issues.append(
+                {
+                    "issue_type": (
+                        "insufficient_window_side_capacity"
+                        if matching_window_exists
+                        else "missing_matching_window_for_opening_adjacency"
+                    ),
+                    "reservation_id": reservation.reservation_id,
+                    "required_width_m": width,
+                    "count": reservation.count,
+                }
+            )
+            continue
+        feasible = [
+            capacity
+            for capacity in matching
+            if capacity["span"]["end"] - capacity["span"]["start"] >= width
+        ]
+        if not feasible:
+            issues.append(
+                {
+                    "issue_type": "insufficient_window_side_capacity",
+                    "reservation_id": reservation.reservation_id,
+                    "required_width_m": width,
+                    "count": reservation.count,
+                }
+            )
+            continue
+        selected = min(
+            feasible,
+            key=lambda capacity: (
+                capacity["span"]["end"] - capacity["span"]["start"],
+                str(capacity["window_id"]),
+                str(capacity["side"]),
+            ),
+        )
+        if selected["side"] == "left":
+            selected["span"]["end"] -= width
+        else:
+            selected["span"]["start"] += width
     return issues
 
 
@@ -211,10 +330,27 @@ def validate_floor_plan_reservations(
 
     result = FloorPlanReservationValidation()
     hard_reservations = [item for item in manifest.reservations if item.hard]
+    wall_capacity_spans = _wall_free_capacity_spans(layout)
     wall_reservations = [
         item for item in hard_reservations if item.kind == "wall_anchor"
     ]
-    result.issues.extend(_wall_capacity_issues(layout, wall_reservations))
+    opening_adjacency_reservations = [
+        item for item in hard_reservations if item.kind == "opening_adjacency"
+    ]
+    result.issues.extend(
+        _opening_adjacency_capacity_issues(
+            layout,
+            opening_adjacency_reservations,
+            spans=wall_capacity_spans,
+        )
+    )
+    result.issues.extend(
+        _wall_capacity_issues(
+            layout,
+            wall_reservations,
+            spans=wall_capacity_spans,
+        )
+    )
     zone_area_by_room_type: dict[str, float] = {}
     for reservation in hard_reservations:
         if reservation.kind != "functional_zone":
@@ -238,7 +374,11 @@ def validate_floor_plan_reservations(
             )
 
     for reservation in hard_reservations:
-        if reservation.kind in {"functional_zone", "wall_anchor"}:
+        if reservation.kind in {
+            "functional_zone",
+            "wall_anchor",
+            "opening_adjacency",
+        }:
             continue
         walls = _candidate_walls(layout, reservation)
         if reservation.kind == "opposed_anchor_pair" and not any(

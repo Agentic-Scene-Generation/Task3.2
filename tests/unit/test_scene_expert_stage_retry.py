@@ -11,7 +11,14 @@ import pytest
 from scenesmith.experiments import indoor_scene_generation as scene_generation
 from scenesmith.scene_expert.harness import Harness, RepairDecision
 from scenesmith.scene_expert.hooks import SceneExpertHookRunner, StageCommitResult
-from scenesmith.scene_expert.schemas import RepairResult, StageVerifyReport, VerifyIssue
+from scenesmith.scene_expert.schemas import (
+    RepairResult,
+    SceneTaskSpec,
+    StageVerifyReport,
+    VerifyIssue,
+)
+from scenesmith.scene_expert.verifier import StageVerifier
+from scenesmith.scenebenchmark_critic.config import CriticConfig
 
 
 def _failed_report(stage: str) -> StageVerifyReport:
@@ -25,6 +32,122 @@ def _failed_report(stage: str) -> StageVerifyReport:
                 description="Required wastebasket is missing",
             )
         ],
+    )
+
+
+def test_wall_stage_verifier_hard_fails_fresh_core_visual_issue(tmp_path) -> None:
+    payload = {
+        "results": [
+            {
+                "check_id": "wall_visibility__mirror_0",
+                "metric": "visual_clearance",
+                "scoring_tier": "core",
+                "label": "degraded",
+                "primary_object": "mirror_0",
+                "diagnostics": {"occluded_fraction": 0.08},
+            }
+        ]
+    }
+
+    report = StageVerifier().verify(
+        stage="wall_mounted",
+        stage_output_dir=str(tmp_path),
+        task_spec=SceneTaskSpec(room_type="bedroom", style="standard"),
+        scene_state_info={"object_names": ["mirror_0"]},
+        deterministic_critic_payload=payload,
+    )
+
+    assert not report.pass_stage
+    assert {issue.issue_type for issue in report.issues} == {
+        "visual_clearance_failure"
+    }
+
+
+def test_wall_stage_verifier_ignores_auxiliary_visual_issue(tmp_path) -> None:
+    report = StageVerifier().verify(
+        stage="wall_mounted",
+        stage_output_dir=str(tmp_path),
+        task_spec=SceneTaskSpec(room_type="bedroom", style="standard"),
+        scene_state_info={"object_names": ["mirror_0"]},
+        deterministic_critic_payload={
+            "results": [
+                {
+                    "check_id": "auxiliary-window",
+                    "metric": "visual_clearance",
+                    "scoring_tier": "auxiliary",
+                    "label": "fail",
+                    "primary_object": "mirror_0",
+                }
+            ]
+        },
+    )
+
+    assert report.pass_stage
+
+
+def test_wall_post_stage_passes_fresh_deterministic_payload_to_verifier(
+    tmp_path,
+) -> None:
+    stage = "wall_mounted"
+    payload = {
+        "results": [
+            {
+                "check_id": "wall_visibility__mirror_0",
+                "metric": "visual_clearance",
+                "scoring_tier": "core",
+                "label": "pass",
+                "primary_object": "mirror_0",
+            }
+        ]
+    }
+    runner = object.__new__(SceneExpertHookRunner)
+    runner._mode = "harness_only"
+    runner._original_text_descriptions = {stage: "original prompt"}
+    runner._stage_verifier = Mock(
+        verify=Mock(return_value=StageVerifyReport(stage=stage, pass_stage=True))
+    )
+    runner._task_spec = SceneTaskSpec(room_type="bedroom", style="standard")
+    runner._current_stage_brief = None
+    runner._critic_config = CriticConfig(
+        enabled=True,
+        metrics=("visual_clearance",),
+    )
+    runner._harness = Mock()
+    runner._repair_controller = Mock()
+    runner._pending_stage_repairs = {}
+    runner._stage_reports = []
+    runner._completed_stages = []
+    runner._stage_start_time = time.time()
+    runner._current_memory_pack = SimpleNamespace()
+    runner._current_relation_context = None
+    runner._current_planner_trace = {}
+    runner._qwen_calls = 0
+    runner._commit_stage_memory = Mock()
+    runner._trace_logger = Mock()
+    scene = SimpleNamespace(
+        text_description="wall brief",
+        objects={},
+        room_geometry=None,
+    )
+
+    with patch(
+        "scenesmith.scenebenchmark_critic.api.evaluate_room_scene",
+        return_value=payload,
+    ) as evaluate:
+        result = runner.post_stage(stage, scene, tmp_path)
+
+    assert result == StageCommitResult(stage=stage, passed=True)
+    evaluate.assert_called_once_with(
+        scene,
+        config=runner._critic_config,
+        stage="wall_mounted_post_stage",
+        annotate_assets=False,
+    )
+    assert (
+        runner._stage_verifier.verify.call_args.kwargs[
+            "deterministic_critic_payload"
+        ]
+        is payload
     )
 
 

@@ -42,6 +42,7 @@ from scenesmith.scenebenchmark_critic.intent_schema import (
     validate_intent_contract,
 )
 from scenesmith.scenebenchmark_critic.object_taxonomy import OBJECT_CATEGORY_PHRASES
+from scenesmith.scenebenchmark_critic.object_taxonomy import is_structural_anchor
 
 
 SCHEMA_VERSION = INTENT_CONTRACT_SCHEMA_VERSION
@@ -174,7 +175,11 @@ def _record_contract_inventory_count(counts: dict[str, int], selector: Any) -> N
     if not isinstance(selector, dict):
         return
     category = _normalize_selector_category(selector.get("category"))
-    if not category or category in _NON_FURNITURE_INVENTORY_CATEGORIES:
+    if (
+        not category
+        or is_structural_anchor(category)
+        or category in _NON_FURNITURE_INVENTORY_CATEGORIES
+    ):
         return
     try:
         count = int(selector.get("count") or 0)
@@ -191,6 +196,9 @@ _NON_FURNITURE_INVENTORY_CATEGORIES = frozenset(
         "floor",
         "ceiling",
         "wall",
+        "door",
+        "opening",
+        "window",
         *ROOM_RELATIVE_WALL_CATEGORIES,
         *WALL_MOUNTED_CATEGORIES,
         *CEILING_MOUNTED_CATEGORIES,
@@ -1608,14 +1616,22 @@ def _explicit_prompt_constraints(prompt: str, lowered: str) -> list[dict[str, An
 
         for match in re.finditer(
             r"(?P<subject>[a-z0-9_\- ,']{1,70}?)\s+"
-            r"(?:tucked\s+under|at|beside|next\s+to)\s+(?:the\s+|a\s+|an\s+)?"
+            r"(?P<adjacency>tucked\s+under|at|beside|next\s+to)\s+"
+            r"(?:the\s+|a\s+|an\s+)?"
             r"(?P<target>(?:[a-z]+\s+){0,2}(?:desk|table|monitor|screen))\b",
             normalized,
         ):
             subject = selector_for_phrase(match.group("subject"))
             target = selector_for_phrase(match.group("target"))
             if subject is not None and target is not None:
-                relation = "aligned_with" if "tucked" in match.group(0) else "near"
+                adjacency = match.group("adjacency")
+                relation = (
+                    "aligned_with"
+                    if adjacency.startswith("tucked")
+                    else "next_to"
+                    if adjacency in {"beside", "next to"}
+                    else "near"
+                )
                 constraints.append(
                     _constraint(
                         relation,
@@ -1633,7 +1649,8 @@ def _explicit_prompt_constraints(prompt: str, lowered: str) -> list[dict[str, An
         for match in re.finditer(
             r"(?P<subject>[a-z0-9_\- ,']{1,70}?)\s+"
             r"(?:is |sits |placed |positioned )?"
-            r"(?:beside|next\s+to|adjacent\s+to|near)\s+(?:the\s+|a\s+|an\s+)?"
+            r"(?P<adjacency>beside|next\s+to|adjacent\s+to|near)\s+"
+            r"(?:the\s+|a\s+|an\s+)?"
             r"(?P<target>[a-z0-9_\- ,']{1,70}?)(?:[,.;]|$)",
             normalized,
         ):
@@ -1645,7 +1662,11 @@ def _explicit_prompt_constraints(prompt: str, lowered: str) -> list[dict[str, An
             if subject is not None and target is not None:
                 constraints.append(
                     _constraint(
-                        "near",
+                        (
+                            "near"
+                            if match.group("adjacency") == "near"
+                            else "next_to"
+                        ),
                         subject,
                         target,
                         source="explicit_prompt",
@@ -2632,7 +2653,11 @@ def _task_spec_inventory_constraints(task_spec: Any | None) -> list[dict[str, An
     ):
         for value in payload.get(field) or []:
             category = _normalize_selector_category(value)
-            if not category or category in {"room", "wall", "floor", "ceiling"}:
+            if (
+                not category
+                or is_structural_anchor(category)
+                or category in {"room", "wall", "floor", "ceiling"}
+            ):
                 continue
             counts[category] = counts.get(category, 0) + 1
             fields_by_category.setdefault(category, field)

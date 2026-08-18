@@ -1215,6 +1215,42 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         StatefulFurnitureAgent is None,
         f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
     )
+    def test_relation_candidate_gate_rejects_new_window_clearance_violation(
+        self,
+    ) -> None:
+        agent = object.__new__(StatefulFurnitureAgent)
+        agent.scene = object()
+        agent._evaluate_current_furniture_hard_state = lambda: None
+        window_violations = []
+
+        with (
+            patch(
+                "scenesmith.furniture_agents.stateful_furniture_agent."
+                "compute_door_clearance_violations",
+                return_value=[],
+            ),
+            patch(
+                "scenesmith.furniture_agents.stateful_furniture_agent."
+                "compute_window_clearance_violations",
+                side_effect=lambda _: list(window_violations),
+            ),
+        ):
+            baseline = agent._hard_violation_fingerprints()
+            validator = agent._relation_candidate_preserves_hard_baseline(baseline)
+            self.assertTrue(validator(agent.scene))
+
+            window_violations.append(
+                SimpleNamespace(
+                    window_label="window_0",
+                    furniture_id="table_0",
+                )
+            )
+            self.assertFalse(validator(agent.scene))
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
     def test_forbidden_zone_repair_rejects_all_category_furniture_collisions(
         self,
     ) -> None:

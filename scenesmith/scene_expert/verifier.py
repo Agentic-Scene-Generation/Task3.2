@@ -516,6 +516,7 @@ class StageVerifier:
         task_spec: SceneTaskSpec,
         stage_brief: StageBrief | None = None,
         scene_state_info: dict | None = None,
+        deterministic_critic_payload: dict | None = None,
     ) -> StageVerifyReport:
         """Run stage verification.
 
@@ -526,6 +527,8 @@ class StageVerifier:
             stage_brief: StageBrief injected for this stage (for constraint checking).
             scene_state_info: Lightweight scene info for rule checks.
                 Expected keys: "object_names" (list[str]).
+            deterministic_critic_payload: Fresh core critic output for hard,
+                geometry-derived stage checks.
 
         Returns:
             StageVerifyReport with pass/fail, scores, issues, and repair suggestions.
@@ -599,6 +602,37 @@ class StageVerifier:
                     repair_suggestions.append(
                         f"Add missing object '{issue.object_name}' to the scene"
                     )
+        if stage == "wall_mounted" and deterministic_critic_payload:
+            visual_failures = [
+                result
+                for result in deterministic_critic_payload.get("results") or []
+                if result.get("metric") == "visual_clearance"
+                and str(result.get("scoring_tier") or "core").lower() == "core"
+                and str(result.get("label") or "").lower()
+                in {"fail", "degraded"}
+            ]
+            if visual_failures:
+                object_ids = sorted(
+                    {
+                        str(result.get("primary_object") or "<unknown>")
+                        for result in visual_failures
+                    }
+                )
+                _add_issue_once(
+                    issues,
+                    VerifyIssue(
+                        issue_type="visual_clearance_failure",
+                        description=(
+                            "Deterministic wall visual-clearance check remains "
+                            "unresolved for: " + ", ".join(object_ids)
+                        ),
+                    ),
+                )
+                repair_suggestions.append(
+                    "Relocate occluded or overlapping wall objects to a legal "
+                    "wall surface and rerun deterministic visual clearance"
+                )
+
         # --- 2b. Optional visual-score ablation gate ---
         # Inventory is already checked from scene state above and physical
         # feasibility/geometry critic own collisions.  Do not let VLM prose or

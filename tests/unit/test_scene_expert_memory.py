@@ -451,6 +451,82 @@ class SceneExpertMemoryTest(unittest.TestCase):
         self.assertNotIn("television", media_spec.required_small_objects)
         self.assertEqual("furniture", media_contract["constraints"][0]["stage"])
 
+    def test_supported_plant_ownership_is_relation_first_and_order_independent(
+        self,
+    ) -> None:
+        required = {
+            "relation": "required_count",
+            "stage": "furniture",
+            "strength": "hard",
+            "subjects": {"category": "plant", "count": 3},
+        }
+        supported = {
+            "relation": "on_top_of",
+            "stage": "furniture",
+            "strength": "hard",
+            "subjects": {"category": "plant", "count": 3},
+            "targets": {"category": "sideboard", "count": 1},
+        }
+
+        results = []
+        for constraints in ([dict(required), dict(supported)], [dict(supported), dict(required)]):
+            contract = {"constraints": constraints}
+            results.append(
+                _reconcile_task_spec_stage_ownership(
+                    SceneTaskSpec(
+                        room_type="dining_room",
+                        style="standard",
+                        required_large_objects=["sideboard", "plant", "plant", "plant"],
+                    ),
+                    contract,
+                )
+            )
+            relation = next(
+                row for row in contract["constraints"] if row["relation"] == "on_top_of"
+            )
+            self.assertEqual("manipuland", relation["stage"])
+            required_row = next(
+                row
+                for row in contract["constraints"]
+                if row["relation"] == "required_count"
+            )
+            self.assertEqual("manipuland", required_row["stage"])
+
+        for result in results:
+            self.assertEqual(3, result.required_small_objects.count("plant"))
+            self.assertNotIn("plant", result.required_large_objects)
+
+    def test_floor_or_near_plant_remains_furniture(self) -> None:
+        contract = {
+            "constraints": [
+                {
+                    "relation": "required_count",
+                    "stage": "furniture",
+                    "strength": "hard",
+                    "subjects": {"category": "plant", "count": 1},
+                },
+                {
+                    "relation": "near",
+                    "stage": "furniture",
+                    "strength": "hard",
+                    "subjects": {"category": "plant", "count": 1},
+                    "targets": {"category": "sofa", "count": 1},
+                },
+            ]
+        }
+
+        result = _reconcile_task_spec_stage_ownership(
+            SceneTaskSpec(
+                room_type="living_room",
+                style="standard",
+                required_large_objects=["sofa", "plant"],
+            ),
+            contract,
+        )
+
+        self.assertIn("plant", result.required_large_objects)
+        self.assertNotIn("plant", result.required_small_objects)
+
     def test_repair_taxonomy_classifies_core_hard_failures(self) -> None:
         failures = classify_hard_reasons(
             [

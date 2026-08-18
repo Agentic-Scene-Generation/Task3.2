@@ -23,6 +23,7 @@ from scenesmith.agent_utils.room import (
 )
 from scenesmith.scenebenchmark_critic import furniture_relation_repair
 from scenesmith.scenebenchmark_critic.api import evaluate_room_scene
+from scenesmith.scenebenchmark_critic.adapter import room_scene_to_case_pack
 from scenesmith.scenebenchmark_critic.config import CriticConfig
 from scenesmith.scenebenchmark_critic.prompt_context import (
     filter_prompt_results_for_agent,
@@ -34,6 +35,7 @@ from scenesmith.scenebenchmark_critic.furniture_relation_repair import (
     _between_repair_targets,
     _candidate_improves,
     _is_hard_support_collision_target,
+    _near_candidate_centers,
     _prioritize_coordinated_seating_targets,
     _score_payload,
     improve_furniture_relations,
@@ -1331,6 +1333,153 @@ def test_repairs_generic_near_contract_for_unrelated_categories(
     )
     assert near_after["label"] == "pass"
     assert near_after["contract_state"] == "passed"
+
+
+def test_window_proxy_binds_and_repairs_strict_furniture_adjacency(
+    tmp_path: Path,
+) -> None:
+    table = _object(
+        "table_0",
+        "table",
+        (0.0, -1.2, 0.4),
+        (1.0, 0.8, 0.8),
+    )
+    scene = _scene(tmp_path, table, text="A table next to a window.")
+    opening = ClearanceOpeningData(
+        opening_id="window_0",
+        opening_type="window",
+        wall_direction="north",
+        center_world=[0.0, 2.0, 1.5],
+        width=1.2,
+        sill_height=0.9,
+        height=1.2,
+        clearance_bbox_min=[-0.6, 1.5, 0.0],
+        clearance_bbox_max=[0.6, 2.1, 2.1],
+        wall_start=[-2.5, 2.0],
+        wall_end=[2.5, 2.0],
+        position_along_wall=1.9,
+    )
+    scene.room_geometry.openings = [opening]
+    _attach_intent_contract(
+        scene,
+        [
+            {
+                "relation": "next_to",
+                "stage": "furniture",
+                "subjects": {"category": "table", "count": 1},
+                "targets": {"category": "window", "count": 1},
+                "source": "explicit_prompt",
+                "evidence_span": "A table next to a window",
+            }
+        ],
+    )
+    config = CriticConfig(enabled=True, metrics=("functional_dependency",))
+
+    case_pack = room_scene_to_case_pack(
+        scene,
+        stage="window_proxy",
+        metrics=("functional_dependency",),
+    )
+    proxy = next(
+        obj
+        for obj in case_pack["scene_geometry"]["objects"]
+        if obj["id"] == "window_0"
+    )
+    assert proxy["category_norm"] == "window"
+    assert proxy["metadata"]["structural_proxy"] is True
+    assert proxy["bbox_world"]["size"] == pytest.approx([1.2, 0.05, 1.2])
+    assert "window_0" not in {str(object_id) for object_id in scene.objects}
+
+    before = evaluate_room_scene(scene, config=config, stage="window_next_to_before")
+    relation_before = next(
+        result
+        for result in before["results"]
+        if result.get("relation_type") == "generic_near_relation"
+    )
+    assert relation_before["label"] == "fail"
+    assert relation_before["selected_related_objects"] == ["window_0"]
+    proxy_bounds = (
+        np.asarray(proxy["bbox_world"]["min"], dtype=float),
+        np.asarray(proxy["bbox_world"]["max"], dtype=float),
+    )
+    candidates = _near_candidate_centers(table, proxy_bounds, relation_before)
+    assert len(candidates) == 4
+    assert all(len(candidate) == 2 for candidate in candidates)
+    original_opening = opening.to_dict()
+
+    fixes = improve_furniture_relations(scene, config=config)
+
+    assert [(fix.object_id, fix.relation_type) for fix in fixes] == [
+        ("table_0", "generic_near_relation")
+    ]
+    assert opening.to_dict() == original_opening
+    assert "window_0" not in {str(object_id) for object_id in scene.objects}
+    after = evaluate_room_scene(scene, config=config, stage="window_next_to_after")
+    relation_after = next(
+        result
+        for result in after["results"]
+        if result.get("relation_type") == "generic_near_relation"
+    )
+    assert relation_after["label"] == "pass"
+
+
+def test_structural_subject_relation_moves_furniture_target_only(
+    tmp_path: Path,
+) -> None:
+    table = _object(
+        "table_0",
+        "table",
+        (0.0, -1.2, 0.4),
+        (1.0, 0.8, 0.8),
+    )
+    scene = _scene(tmp_path, table, text="A window next to a table.")
+    opening = ClearanceOpeningData(
+        opening_id="window_0",
+        opening_type="window",
+        wall_direction="north",
+        center_world=[0.0, 2.0, 1.5],
+        width=1.2,
+        sill_height=0.9,
+        height=1.2,
+        clearance_bbox_min=[-0.6, 1.5, 0.0],
+        clearance_bbox_max=[0.6, 2.1, 2.1],
+        wall_start=[-2.5, 2.0],
+        wall_end=[2.5, 2.0],
+        position_along_wall=1.9,
+    )
+    scene.room_geometry.openings = [opening]
+    _attach_intent_contract(
+        scene,
+        [
+            {
+                "relation": "next_to",
+                "stage": "furniture",
+                "subjects": {"category": "window", "count": 1},
+                "targets": {"category": "table", "count": 1},
+                "source": "explicit_prompt",
+                "evidence_span": "A window next to a table",
+            }
+        ],
+    )
+    config = CriticConfig(enabled=True, metrics=("functional_dependency",))
+    original_opening = opening.to_dict()
+    old_table_xy = table.transform.translation()[:2].copy()
+
+    fixes = improve_furniture_relations(scene, config=config)
+
+    assert [(fix.object_id, fix.relation_type) for fix in fixes] == [
+        ("table_0", "generic_near_relation")
+    ]
+    assert not np.allclose(table.transform.translation()[:2], old_table_xy)
+    assert opening.to_dict() == original_opening
+    assert "window_0" not in {str(object_id) for object_id in scene.objects}
+    after = evaluate_room_scene(scene, config=config, stage="reverse_window_after")
+    relation = next(
+        result
+        for result in after["results"]
+        if result.get("relation_type") == "generic_near_relation"
+    )
+    assert relation["label"] == "pass"
 
 
 def test_repairs_corner_of_room_contract(tmp_path: Path) -> None:

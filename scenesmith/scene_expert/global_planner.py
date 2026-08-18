@@ -574,7 +574,10 @@ def _add_floor_plan_reservation_guidance(
         category = str(subject.get("category") or "object").replace("_", " ")
         role = str(target.get("role") or "").strip().lower()
         relation = str(reservation.get("relation") or "")
-        if relation == "centered_on_wall" and role:
+        reservation_kind = str(reservation.get("reservation_kind") or "")
+        if reservation_kind == "opening_adjacency":
+            anchors.append(f"{category} next to a window")
+        elif relation == "centered_on_wall" and role:
             anchors.append(f"{category} centered on the {role} wall")
         elif role:
             anchors.append(f"{category} on a {role} wall")
@@ -596,6 +599,17 @@ def _add_floor_plan_reservation_guidance(
         if pair_count:
             details.append(
                 "aligned opening-free spans on opposed walls for each media-viewing pair"
+            )
+        opening_adjacency = [
+            item
+            for item in manifest.reservations
+            if item.kind == "opening_adjacency"
+        ]
+        if opening_adjacency:
+            details.append(
+                "a separate continuous opening-free wall segment on at least one "
+                "side of a matching window for every strict next-to reservation; "
+                "doors and other openings cannot share that capacity"
             )
         if zone_area:
             details.append(
@@ -622,7 +636,9 @@ def _add_floor_plan_reservation_guidance(
     )
     check = (
         "Verify every reserved wall-anchor segment remains large enough and "
-        "unobstructed by doors or windows before handing the room to furniture."
+        "unobstructed by doors or windows, and every reserved window-side segment "
+        "remains large enough and unobstructed by doors or other openings before "
+        "handing the room to furniture."
     )
     constraints = list(brief.constraints_for_designer)
     if guidance not in constraints:

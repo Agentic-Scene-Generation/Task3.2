@@ -995,6 +995,10 @@ area clear" may emit clear_access(X, room). General phrases such as "clear
 walking paths around the room" do not identify an exact registered endpoint
 relation and must remain context only.
 
+Preserve explicit adjacency wording: "next to", "beside", and "adjacent to"
+must emit next_to. Emit the looser near relation only for literal "near" wording
+or the accessibility mapping described above. Never downgrade next_to to near.
+
 Registered relations:
 {relation_lines}
 

@@ -60,6 +60,7 @@ from scenesmith.scenebenchmark_critic.object_taxonomy import (
     canonical_object_category,
     categories_are_equivalent,
     execution_owner,
+    is_structural_anchor,
 )
 from scenesmith.scenebenchmark_critic.relation_registry import STAGE_ORDER
 
@@ -443,6 +444,9 @@ _NON_OBJECT_INVENTORY_CATEGORIES = frozenset(
         "adjacent_wall",
         "entrance",
         "entry",
+        "door",
+        "opening",
+        "window",
     }
 )
 _GENERIC_INVENTORY_CATEGORIES = frozenset({"chair", "desk", "table"})
@@ -466,21 +470,25 @@ def _contract_inventory_ownership(
     contract: dict[str, Any], existing_owners: dict[str, str]
 ) -> dict[str, tuple[str, int]]:
     """Return contract-owned inventory categories and their generation stages."""
-    ownership: dict[str, tuple[str, int]] = {}
+    counts: dict[str, int] = {}
+    relation_owners: dict[str, set[str]] = {}
+    fallback_owners: dict[str, set[str]] = {}
 
-    def record(selector: Any, stage: str) -> None:
+    def record(selector: Any, stage: str, *, explicit_relation: bool) -> None:
         if not isinstance(selector, dict):
             return
         category = _inventory_category(selector.get("category"))
-        if category in _NON_OBJECT_INVENTORY_CATEGORIES:
+        if category in _NON_OBJECT_INVENTORY_CATEGORIES or is_structural_anchor(
+            category
+        ):
             return
         try:
             count = max(1, int(selector.get("count") or 1))
         except (TypeError, ValueError):
             count = 1
-        previous = ownership.get(category)
-        if previous is None or count > previous[1]:
-            ownership[category] = (stage, count)
+        counts[category] = max(counts.get(category, 0), count)
+        owners = relation_owners if explicit_relation else fallback_owners
+        owners.setdefault(category, set()).add(stage)
 
     constraints = contract.get("constraints") if isinstance(contract, dict) else []
     for constraint in constraints or []:
@@ -489,6 +497,7 @@ def _contract_inventory_ownership(
         if str(constraint.get("strength") or "hard").lower() != "hard":
             continue
         relation = str(constraint.get("relation") or "")
+        explicit_relation = relation != "required_count"
         subject = constraint.get("subjects")
         subject_category = _inventory_category(
             subject.get("category") if isinstance(subject, dict) else ""
@@ -500,7 +509,7 @@ def _contract_inventory_ownership(
                 endpoint="subject",
                 existing_owner=existing_owners.get(subject_category, ""),
             )
-            record(subject, subject_stage)
+            record(subject, subject_stage, explicit_relation=explicit_relation)
 
         # A target can be the only explicit mention of an object. It keeps its
         # intrinsic owner instead of inheriting a relation's later stage.
@@ -516,8 +525,20 @@ def _contract_inventory_ownership(
                 endpoint="target",
                 existing_owner=existing_owners.get(target_category, ""),
             ),
+            explicit_relation=explicit_relation,
         )
 
+    ownership: dict[str, tuple[str, int]] = {}
+    for category, count in counts.items():
+        candidate_owners = relation_owners.get(category) or fallback_owners.get(
+            category
+        )
+        if not candidate_owners:
+            continue
+        ownership[category] = (
+            max(candidate_owners, key=STAGE_ORDER.index),
+            count,
+        )
     return ownership
 
 
@@ -548,23 +569,29 @@ def _reconcile_task_spec_stage_ownership(
         relation = str(constraint.get("relation") or "")
         subjects = constraint.get("subjects") or {}
         targets = constraint.get("targets") or {}
+
+        def reconciled_endpoint_stage(selector: dict[str, Any], endpoint: str) -> str:
+            category = _inventory_category(selector.get("category"))
+            owned_category = next(
+                (
+                    owned
+                    for owned in ownership
+                    if _categories_match_inventory(category, owned)
+                ),
+                None,
+            )
+            if owned_category is not None:
+                return ownership[owned_category][0]
+            return execution_owner(
+                category,
+                relation=relation,
+                endpoint=endpoint,
+                existing_owner=existing_owners.get(category, ""),
+            )
+
         endpoint_stages = [
-            execution_owner(
-                _inventory_category(subjects.get("category")),
-                relation=relation,
-                endpoint="subject",
-                existing_owner=existing_owners.get(
-                    _inventory_category(subjects.get("category")), ""
-                ),
-            ),
-            execution_owner(
-                _inventory_category(targets.get("category")),
-                relation=relation,
-                endpoint="target",
-                existing_owner=existing_owners.get(
-                    _inventory_category(targets.get("category")), ""
-                ),
-            ),
+            reconciled_endpoint_stage(subjects, "subject"),
+            reconciled_endpoint_stage(targets, "target"),
         ]
         constraint["stage"] = max(endpoint_stages, key=STAGE_ORDER.index)
 
@@ -573,6 +600,8 @@ def _reconcile_task_spec_stage_ownership(
     for source_stage, field in _TASK_SPEC_STAGE_FIELDS.items():
         for label in getattr(task_spec, field):
             category = _inventory_category(label)
+            if is_structural_anchor(category):
+                continue
             matched_category = next(
                 (
                     owned
@@ -634,6 +663,7 @@ class SceneExpertHookRunner:
         intent_contract: dict[str, Any] | None = None,
         intent_trace: dict[str, Any] | None = None,
         task_compiler_trace: dict[str, Any] | None = None,
+        critic_config: Any | None = None,
     ) -> None:
         self._prompt = prompt
         self._scene_id = scene_id
@@ -663,6 +693,7 @@ class SceneExpertHookRunner:
         self._start_stage = start_stage
         self._intent_contract = dict(intent_contract or {})
         self._intent_trace = dict(intent_trace or {})
+        self._critic_config = critic_config
         self._stage_order_baseline = self._initial_completed_stages(start_stage)
         self._room_start_stage = (
             "furniture" if start_stage == "floor_plan" else start_stage
@@ -1493,12 +1524,29 @@ class SceneExpertHookRunner:
         result_reason = ""
         try:
             verify_start = time.time()
+            deterministic_critic_payload = None
+            critic_config = getattr(self, "_critic_config", None)
+            if (
+                stage == "wall_mounted"
+                and critic_config is not None
+                and critic_config.enabled
+                and critic_config.metric_enabled("visual_clearance")
+            ):
+                from scenesmith.scenebenchmark_critic.api import evaluate_room_scene
+
+                deterministic_critic_payload = evaluate_room_scene(
+                    scene,
+                    config=critic_config,
+                    stage="wall_mounted_post_stage",
+                    annotate_assets=False,
+                )
             verify_report = self._run_stage_verifier(
                 stage=stage,
                 stage_output_dir=str(room_dir),
                 task_spec=self._task_spec,
                 stage_brief=self._current_stage_brief,
                 scene_state_info=scene_state_info,
+                deterministic_critic_payload=deterministic_critic_payload,
             )
             console_logger.info(
                 "[SceneExpertTiming] stage=%s module=stage_verifier elapsed=%.2fs",
@@ -2069,6 +2117,7 @@ def build_hook_runner(
     console_logger.info(f"[SceneExpert] Building hook runner (mode={mode})")
 
     # Model / API settings (shared with SceneSmith agents)
+    critic_config = critic_config_from_any(cfg_dict)
     model = _intent_compiler_model(cfg_dict)
     api_base = os.environ.get("OPENAI_BASE_URL", "http://localhost:8000/v1")
     api_key = os.environ.get("OPENAI_API_KEY", "dummy")
@@ -2322,4 +2371,5 @@ def build_hook_runner(
         intent_contract=intent_contract,
         intent_trace=intent_trace,
         task_compiler_trace=task_compiler_trace,
+        critic_config=critic_config,
     )

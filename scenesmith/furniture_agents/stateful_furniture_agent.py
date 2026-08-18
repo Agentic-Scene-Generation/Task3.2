@@ -33,6 +33,7 @@ from scenesmith.agent_utils.clearance_zones import (
     WALL_HEIGHT_TOLERANCE_M,
     aabb_overlap_depths,
     compute_door_clearance_violations,
+    compute_window_clearance_violations,
     door_swing_clearance_bounds,
 )
 from scenesmith.agent_utils.furniture_layout_planning import (
@@ -727,6 +728,16 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         except Exception:
             console_logger.debug(
                 "Could not collect structured door violations for repair transaction",
+                exc_info=True,
+            )
+        try:
+            for violation in compute_window_clearance_violations(scene):
+                fingerprints.add(
+                    "window:" f"{violation.window_label}:{violation.furniture_id}"
+                )
+        except Exception:
+            console_logger.debug(
+                "Could not collect structured window violations for repair transaction",
                 exc_info=True,
             )
         return fingerprints

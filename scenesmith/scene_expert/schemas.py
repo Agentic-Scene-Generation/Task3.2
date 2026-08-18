@@ -180,7 +180,12 @@ class FloorPlanReservation(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     reservation_id: str
-    kind: Literal["wall_anchor", "opposed_anchor_pair", "functional_zone"]
+    kind: Literal[
+        "wall_anchor",
+        "opposed_anchor_pair",
+        "functional_zone",
+        "opening_adjacency",
+    ]
     source_constraint_ids: list[str] = Field(default_factory=list)
     room_type: str = ""
     subject_categories: list[str] = Field(default_factory=list)
@@ -197,7 +202,7 @@ class FloorPlanReservationManifest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: str = "scenesmith.floor_plan_reservations.v1"
+    schema_version: str = "scenesmith.floor_plan_reservations.v2"
     enabled: bool = False
     reservations: list[FloorPlanReservation] = Field(default_factory=list)
     explicit_window_count: int = Field(default=0, ge=0)

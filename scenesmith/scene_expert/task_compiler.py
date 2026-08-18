@@ -25,6 +25,7 @@ from scenesmith.scene_expert.schemas import SceneTaskSpec
 from scenesmith.scenebenchmark_critic.object_taxonomy import (
     canonical_object_category,
     execution_owner,
+    is_structural_anchor,
 )
 from scenesmith.utils.llm_json import parse_llm_json_object
 
@@ -80,6 +81,8 @@ Rules:
 - Infer reasonable functional zones based on the room type and objects.
 - Infer reachability constraints for any small objects placed on furniture surfaces.
 - Keep object names concise (e.g. "bed" not "a large king-sized bed").
+- Windows, doors, and open connections are structural anchors owned by the
+  floor plan. Do not put them in any required_* object array.
 - Do not invent coordinates, room sides, or nearest-object identities.
 - Output ONLY the JSON object, no other text.
 
@@ -539,7 +542,10 @@ def _normalize_stage_ownership(
     _remove_spurious_generic_inventory_entries(inventories, prompt=prompt)
     for values in inventories.values():
         values[:] = [
-            value for value in values if inventory_key(value) not in _VIRTUAL_CATEGORIES
+            value
+            for value in values
+            if inventory_key(value) not in _VIRTUAL_CATEGORIES
+            and not is_structural_anchor(inventory_key(value))
         ]
 
     # The model may emit aliases as separate inventories (for example four

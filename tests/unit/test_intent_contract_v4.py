@@ -62,6 +62,55 @@ from scenesmith.scene_expert import hooks
 from scenesmith.scene_expert.schemas import SceneTaskSpec
 
 
+@pytest.mark.parametrize(
+    ("wording", "expected_relation"),
+    [
+        ("next to", "next_to"),
+        ("beside", "next_to"),
+        ("adjacent to", "next_to"),
+        ("near", "near"),
+    ],
+)
+def test_deterministic_parser_preserves_window_adjacency_strength(
+    wording: str, expected_relation: str
+) -> None:
+    contract = build_intent_contract(
+        f"A bedroom with a bed positioned {wording} a window."
+    )
+
+    window_rows = [
+        row
+        for row in contract["constraints"]
+        if row["relation"] in {"near", "next_to"}
+        and row["subjects"]["category"] == "bed"
+        and (row.get("targets") or {}).get("category") == "window"
+    ]
+
+    assert [row["relation"] for row in window_rows] == [expected_relation]
+    assert window_rows[0]["stage"] == "furniture"
+
+
+def test_structural_window_is_not_furniture_inventory() -> None:
+    contract = build_intent_contract(
+        "A bedroom with a bed next to a window.",
+        task_spec=SceneTaskSpec(
+            room_type="bedroom",
+            style="standard",
+            required_large_objects=["bed", "window"],
+            required_wall_objects=["door"],
+        ),
+    )
+    scene = SimpleNamespace(scenebenchmark_intent_contract=contract)
+
+    assert not any(
+        row["relation"] == "required_count"
+        and row["subjects"]["category"] in {"door", "opening", "window"}
+        for row in contract["constraints"]
+    )
+    assert "window" not in intent_contract_required_counts(scene)
+    assert INTENT_COMPILER_SPEC_VERSION == "scenesmith.intent_compiler.v11"
+
+
 def test_repair_placeholder_uses_stable_compound_name_as_category() -> None:
     placeholder = SimpleNamespace(
         object_id="water_dispenser_repair_placeholder_0",
@@ -3546,6 +3595,57 @@ def test_enabled_hook_runner_compiles_task_spec_before_intent(
         )
 
     assert events == ["task:A bedroom with a bed.", "intent"]
+
+
+def test_enabled_hook_runner_retains_normalized_critic_config(
+    monkeypatch, tmp_path
+) -> None:
+    task_spec = SceneTaskSpec(room_type="bedroom", style="standard")
+
+    class FakeTaskCompiler:
+        def __init__(self, **_kwargs):
+            self.last_trace = {}
+
+        def compile(self, _prompt: str) -> SceneTaskSpec:
+            return task_spec
+
+    monkeypatch.setattr(hooks, "TaskCompiler", FakeTaskCompiler)
+    monkeypatch.setattr(
+        hooks,
+        "apply_behavior_template",
+        lambda *_args, **_kwargs: (task_spec, None),
+    )
+    monkeypatch.setattr(
+        hooks,
+        "_compile_intent_contract_if_enabled",
+        lambda **_kwargs: ({}, {}),
+    )
+    monkeypatch.setattr(hooks, "GlobalPlanner", lambda **_kwargs: object())
+    monkeypatch.setattr(
+        hooks,
+        "SceneExpertHookRunner",
+        lambda **kwargs: kwargs,
+    )
+
+    runner_args = hooks.build_hook_runner(
+        prompt="A bedroom with a bed.",
+        scene_id=0,
+        output_dir=tmp_path,
+        cfg_dict={
+            "experiment": {
+                "scene_expert": {"enabled": True, "mode": "harness_only"}
+            },
+            "furniture_agent": {"openai": {"model": "test-model"}},
+            "scenebenchmark_critic": {
+                "enabled": True,
+                "metrics": ["visual_clearance"],
+            },
+        },
+    )
+
+    assert isinstance(runner_args, dict)
+    assert runner_args["critic_config"].enabled
+    assert runner_args["critic_config"].metric_enabled("visual_clearance")
 
 
 def test_new_scene_prompts_compile_complete_deterministic_contracts() -> None:

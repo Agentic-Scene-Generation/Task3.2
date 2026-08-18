@@ -31,6 +31,7 @@ from scenesmith.agent_utils.room import (
 )
 from scenesmith.scenebenchmark_critic.api import evaluate_room_scene
 from scenesmith.scenebenchmark_critic.config import CriticConfig, critic_config_from_any
+from scenesmith.scenebenchmark_critic.opening_geometry import opening_physical_bounds
 from scenesmith.scenebenchmark_critic.relation_registry import (
     relation_spec,
     repair_relation_types,
@@ -1950,25 +1951,48 @@ def _generic_near_targets(
     object_id = str(result.get("primary_object") or "")
     target_ids = _result_related_object_ids(result)
     subject = scene.objects.get(UniqueID(object_id))
+    target: SceneObject | None = None
+    target_bounds: tuple[np.ndarray, np.ndarray] | None = None
     if subject is None or subject.object_type != ObjectType.FURNITURE:
-        return []
+        target_bounds = _structural_opening_bounds(scene, object_id)
+        if target_bounds is None:
+            return []
+        for target_id in sorted(target_ids):
+            candidate = scene.objects.get(UniqueID(str(target_id)))
+            if candidate is not None and candidate.object_type == ObjectType.FURNITURE:
+                subject = candidate
+                object_id = str(candidate.object_id)
+                break
+        else:
+            return []
     subject_bounds = subject.compute_world_bounds()
     if subject_bounds is None:
         return []
 
-    target: SceneObject | None = None
-    for target_id in sorted(target_ids):
-        candidate = scene.objects.get(UniqueID(str(target_id)))
-        if candidate is not None and candidate.object_id != subject.object_id:
-            target = candidate
-            break
-    if target is None:
+    if target_bounds is None:
+        for target_id in sorted(target_ids):
+            candidate = scene.objects.get(UniqueID(str(target_id)))
+            if candidate is not None and candidate.object_id != subject.object_id:
+                target = candidate
+                break
+            target_bounds = _structural_opening_bounds(scene, str(target_id))
+            if target_bounds is not None:
+                break
+    if target is None and target_bounds is None:
         return []
-    target_center = _world_center_xy(target)
+    target_center = (
+        _world_center_xy(target)
+        if target is not None
+        else _bounds_center_xy(target_bounds)
+    )
     subject_center = _world_center_xy(subject)
     if target_center is None or subject_center is None:
         return []
-    candidates = _near_candidate_centers(subject, target, result)
+    candidates = _near_candidate_centers(
+        subject,
+        target if target is not None else target_bounds,
+        result,
+    )
     candidates.sort(
         key=lambda center: math.hypot(
             center[0] - subject_center[0], center[1] - subject_center[1]
@@ -1982,15 +2006,21 @@ def _generic_near_targets(
 
 def _near_candidate_centers(
     subject: SceneObject,
-    target: SceneObject,
+    target: SceneObject | tuple[np.ndarray, np.ndarray],
     result: dict[str, Any],
     *,
     target_center: tuple[float, float] | None = None,
 ) -> list[tuple[float, float]]:
     """Return adjacent slots around the target's current or requested bounds."""
     subject_bounds = subject.compute_world_bounds()
-    target_bounds = target.compute_world_bounds()
-    current_target_center = _world_center_xy(target)
+    target_bounds = (
+        target.compute_world_bounds() if isinstance(target, SceneObject) else target
+    )
+    current_target_center = (
+        _world_center_xy(target)
+        if isinstance(target, SceneObject)
+        else _bounds_center_xy(target_bounds)
+    )
     if subject_bounds is None or target_bounds is None or current_target_center is None:
         return []
     target_center = target_center or current_target_center
@@ -2025,6 +2055,33 @@ def _near_candidate_centers(
             float(target_lower[1]) + shift_y - desired_gap_m - subject_half_y,
         ),
     ]
+
+
+def _bounds_center_xy(
+    bounds: tuple[np.ndarray, np.ndarray] | None,
+) -> tuple[float, float] | None:
+    if bounds is None:
+        return None
+    center = (np.asarray(bounds[0], dtype=float) + np.asarray(bounds[1], dtype=float)) / 2.0
+    return float(center[0]), float(center[1])
+
+
+def _structural_opening_bounds(
+    scene: RoomScene, opening_id: str
+) -> tuple[np.ndarray, np.ndarray] | None:
+    geometry = scene.room_geometry
+    if geometry is None:
+        return None
+    for opening in getattr(geometry, "openings", ()) or ():
+        if str(getattr(opening, "opening_id", "") or "") != opening_id:
+            continue
+        return opening_physical_bounds(
+            opening,
+            wall_thickness_m=float(
+                getattr(geometry, "wall_thickness", 0.05) or 0.05
+            ),
+        )
+    return None
 
 
 def _corner_of_room_targets(
