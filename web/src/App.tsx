@@ -14,7 +14,6 @@ import {
   Command,
   Copy,
   Image as ImageIcon,
-  LayoutGrid,
   LoaderCircle,
   PanelLeftClose,
   PanelLeftOpen,
@@ -31,9 +30,6 @@ import type {
   Action,
   AuditEvent,
   Diff,
-  FloorPlanData,
-  FloorPlanManifest,
-  FloorPlanReservation,
   Render,
   Run,
   Scene,
@@ -43,7 +39,7 @@ import type {
 
 const API_REFRESH_MS = 5000;
 type SortOrder = "asc" | "desc";
-type View = "review" | "diff" | "actions" | "floor_plan";
+type View = "review" | "diff" | "actions";
 const EVENT_FILTER_OPTIONS = ["all", "attention", "contract", "llm", "benchmark", "tool", "repair", "orchestration", "system"] as const;
 type EventFilter = (typeof EVENT_FILTER_OPTIONS)[number];
 
@@ -53,7 +49,7 @@ function queryValue(name: string): string {
 
 function initialView(): View {
   const value = queryValue("view");
-  return value === "diff" || value === "actions" || value === "floor_plan" ? value : "review";
+  return value === "diff" || value === "actions" ? value : "review";
 }
 
 function initialSortOrder(): SortOrder {
@@ -205,7 +201,6 @@ function App() {
   const [selectedScene, setSelectedScene] = useState(() => queryValue("scene"));
   const [detail, setDetail] = useState<SceneDetail | null>(null);
   const [selectedRender, setSelectedRender] = useState(() => queryValue("render"));
-  const [selectedFloorPlan, setSelectedFloorPlan] = useState(() => queryValue("floor_plan"));
   const [comparisonRender, setComparisonRender] = useState(() => queryValue("compare"));
   const [diff, setDiff] = useState<Diff | null>(null);
   const [drawerEvent, setDrawerEvent] = useState<AuditEvent | Action | null>(null);
@@ -276,8 +271,6 @@ function App() {
         const chronological = sortByTime(payload.renders, "asc");
         setSelectedRender((current) => payload.renders.some((render) => render.id === current) ? current : chronological.at(-1)?.id || "");
         setComparisonRender((current) => payload.renders.some((render) => render.id === current) ? current : chronological.at(-2)?.id || "");
-        const floorPlanRenders = payload.floor_plan?.renders ?? [];
-        setSelectedFloorPlan((current) => floorPlanRenders.some((render) => render.id === current) ? current : floorPlanRenders[0]?.id || "");
       } catch (reason) {
         if (!cancelled) setError(reason instanceof Error ? reason.message : "Unable to load scene details");
       }
@@ -291,8 +284,6 @@ function App() {
   }, [selectedScene]);
 
   const activeScene = scenes.find((scene) => scene.path === selectedScene);
-  const floorPlan: FloorPlanData = detail?.floor_plan ?? { renders: [], reservation_manifest: null };
-  const floorPlanAvailable = floorPlan.renders.length > 0 || Boolean(floorPlan.reservation_manifest);
   const chronologicalRenders = useMemo(() => sortByTime(detail?.renders ?? [], "asc"), [detail]);
   const renders = useMemo(() => sortByTime(chronologicalRenders, sortOrder), [chronologicalRenders, sortOrder]);
   const currentRender = renders.find((render) => render.id === selectedRender) ?? renders[0];
@@ -353,10 +344,6 @@ function App() {
   }, [stages]);
 
   useEffect(() => {
-    if (view === "floor_plan" && !floorPlanAvailable) setView("review");
-  }, [floorPlanAvailable, view]);
-
-  useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       const target = event.target;
       if (
@@ -380,7 +367,6 @@ function App() {
     if (selectedRun) params.set("run", selectedRun);
     if (selectedScene) params.set("scene", selectedScene);
     if (selectedRender) params.set("render", selectedRender);
-    if (selectedFloorPlan) params.set("floor_plan", selectedFloorPlan);
     if (comparisonRender) params.set("compare", comparisonRender);
     if (view !== "review") params.set("view", view);
     if (stageFilter !== "all") params.set("stage", stageFilter);
@@ -391,7 +377,7 @@ function App() {
     if (nextLocation !== `${window.location.pathname}${window.location.search}`) {
       window.history.replaceState(null, "", nextLocation);
     }
-  }, [comparisonRender, eventFilter, eventSearch, selectedFloorPlan, selectedRender, selectedRun, selectedScene, sortOrder, stageFilter, view]);
+  }, [comparisonRender, eventFilter, eventSearch, selectedRender, selectedRun, selectedScene, sortOrder, stageFilter, view]);
 
   useEffect(() => {
     if (view !== "review" || !selectedRender) return;
@@ -485,13 +471,11 @@ function App() {
             <button className={view === "review" ? "active" : ""} onClick={() => setView("review")}><Activity size={16} />Review</button>
             <button className={view === "diff" ? "active" : ""} onClick={() => setView("diff")}><ArrowLeftRight size={16} />Scene diff</button>
             <button className={view === "actions" ? "active" : ""} onClick={() => setView("actions")}><Wrench size={16} />Tool log</button>
-            {floorPlanAvailable && <button className={view === "floor_plan" ? "active" : ""} onClick={() => setView("floor_plan")}><LayoutGrid size={16} />Floor plan</button>}
           </nav>
 
-          {view === "review" && <ReviewView currentRender={currentRender} renders={renders} selectedRender={selectedRender} setSelectedRender={setSelectedRender} sortOrder={sortOrder} setSortOrder={setSortOrder} groups={timelineGroups} stages={stages} stageFilter={stageFilter} setStageFilter={setStageFilter} eventSearch={eventSearch} setEventSearch={setEventSearch} eventFilter={eventFilter} setEventFilter={setEventFilter} visibleEventCount={visibleEvents.length} totalEventCount={allEvents.length} attentionCount={attentionCount} onOpenEvent={setDrawerEvent} />}
+          {view === "review" && <ReviewView prompt={detail?.prompt} currentRender={currentRender} renders={renders} selectedRender={selectedRender} setSelectedRender={setSelectedRender} sortOrder={sortOrder} setSortOrder={setSortOrder} groups={timelineGroups} stages={stages} stageFilter={stageFilter} setStageFilter={setStageFilter} eventSearch={eventSearch} setEventSearch={setEventSearch} eventFilter={eventFilter} setEventFilter={setEventFilter} visibleEventCount={visibleEvents.length} totalEventCount={allEvents.length} attentionCount={attentionCount} onOpenEvent={setDrawerEvent} />}
           {view === "diff" && <DiffView beforeRender={beforeRender} currentRender={currentRender} renders={renders} comparisonRender={comparisonRender} selectedRender={selectedRender} setComparisonRender={setComparisonRender} setSelectedRender={setSelectedRender} diff={diff} />}
           {view === "actions" && <ActionView actions={visibleActions} totalActions={detail?.actions.length ?? 0} onOpenAction={(action) => setDrawerEvent(actionAuditEvents([action])[0])} />}
-          {view === "floor_plan" && <FloorPlanView data={floorPlan} selectedRender={selectedFloorPlan} setSelectedRender={setSelectedFloorPlan} />}
         </>}
       </section>
       {drawerEvent && ("tool_name" in drawerEvent
@@ -524,7 +508,7 @@ function SceneFrame({ render, side = false }: { render?: Render; side?: boolean 
   return <div className="scene-frame">{path ? <img src={imageUrl(path)!} alt={`${render?.label} ${side ? "side" : "top"} render`} /> : <div className="empty-frame"><ImageIcon size={22} /><span>{side ? "Side render unavailable" : "Top render unavailable"}</span></div>}<span className="frame-label">{side ? "Side" : "Top"}</span></div>;
 }
 
-function ReviewView({ currentRender, renders, selectedRender, setSelectedRender, sortOrder, setSortOrder, groups, stages, stageFilter, setStageFilter, eventSearch, setEventSearch, eventFilter, setEventFilter, visibleEventCount, totalEventCount, attentionCount, onOpenEvent }: { currentRender?: Render; renders: Render[]; selectedRender: string; setSelectedRender: (value: string) => void; sortOrder: SortOrder; setSortOrder: (value: SortOrder) => void; groups: TimelineGroup[]; stages: string[]; stageFilter: string; setStageFilter: (value: string) => void; eventSearch: string; setEventSearch: (value: string) => void; eventFilter: EventFilter; setEventFilter: (value: EventFilter) => void; visibleEventCount: number; totalEventCount: number; attentionCount: number; onOpenEvent: (event: AuditEvent) => void }) {
+function ReviewView({ prompt, currentRender, renders, selectedRender, setSelectedRender, sortOrder, setSortOrder, groups, stages, stageFilter, setStageFilter, eventSearch, setEventSearch, eventFilter, setEventFilter, visibleEventCount, totalEventCount, attentionCount, onOpenEvent }: { prompt?: string; currentRender?: Render; renders: Render[]; selectedRender: string; setSelectedRender: (value: string) => void; sortOrder: SortOrder; setSortOrder: (value: SortOrder) => void; groups: TimelineGroup[]; stages: string[]; stageFilter: string; setStageFilter: (value: string) => void; eventSearch: string; setEventSearch: (value: string) => void; eventFilter: EventFilter; setEventFilter: (value: EventFilter) => void; visibleEventCount: number; totalEventCount: number; attentionCount: number; onOpenEvent: (event: AuditEvent) => void }) {
   return (
     <div className="review-grid">
       <section className="render-panel">
@@ -533,38 +517,11 @@ function ReviewView({ currentRender, renders, selectedRender, setSelectedRender,
           <SnapshotPicker renders={renders} value={selectedRender} onChange={setSelectedRender} sortOrder={sortOrder} setSortOrder={setSortOrder} />
         </div>
         <div className="render-grid"><SceneFrame render={currentRender} /><SceneFrame render={currentRender} side /></div>
+        {prompt?.trim() && <div className="scene-prompt"><span>Scene prompt</span><p>{prompt}</p></div>}
       </section>
       <StageTimeline groups={groups} selectedRender={selectedRender} stages={stages} stageFilter={stageFilter} setStageFilter={setStageFilter} eventSearch={eventSearch} setEventSearch={setEventSearch} eventFilter={eventFilter} setEventFilter={setEventFilter} visibleEventCount={visibleEventCount} totalEventCount={totalEventCount} attentionCount={attentionCount} onOpenEvent={onOpenEvent} />
     </div>
   );
-}
-
-function FloorPlanView({ data, selectedRender, setSelectedRender }: { data: FloorPlanData; selectedRender: string; setSelectedRender: (value: string) => void }) {
-  const current = data.renders.find((render) => render.id === selectedRender) ?? data.renders[0];
-  const manifest = data.reservation_manifest;
-  const reservations = manifest?.reservations ?? [];
-  const hardCount = reservations.filter((reservation) => reservation.hard !== false).length;
-  const reservedArea = reservations.reduce((total, reservation) => total + (Number(reservation.min_zone_area_m2) || 0) * (Number(reservation.count) || 1), 0);
-  const image = current ? imageUrl(current.image) : null;
-  return <section className="floor-plan-panel"><div className="panel-heading"><div><span className="eyebrow">Architectural stage</span><h2>Floor plan</h2></div>{data.renders.length > 0 && <label className="render-select"><span>Snapshot</span><div><select value={current?.id ?? ""} onChange={(event) => setSelectedRender(event.target.value)}>{data.renders.map((render) => <option value={render.id} key={render.id}>{render.label}</option>)}</select><ChevronDown size={15} /></div></label>}</div><div className="floor-plan-layout"><div className="floor-plan-visual">{image ? <img src={image} alt={`${current?.label ?? "Floor plan"} architectural render`} /> : <div className="empty-frame"><ImageIcon size={22} /><span>Floor plan render unavailable</span></div>}{current && <div className="floor-plan-caption"><span>{current.label}</span><small>{formatTime(current.created_at)}{current.has_scores ? " · scored" : ""}</small></div>}{current?.material_images && current.material_images.length > 0 && <details className="floor-plan-materials"><summary>Material layers</summary><div>{current.material_images.map((path) => <img key={path} src={imageUrl(path)!} alt="Floor plan material layer" />)}</div></details>}</div>{manifest ? <ReservationManifest manifest={manifest} hardCount={hardCount} reservedArea={reservedArea} /> : <aside className="reservation-panel"><div className="structured-audit-heading"><span>Reservation contract</span><small>not recorded</small></div><div className="excerpt-note">No floor-plan reservation manifest was recorded for this scene.</div></aside>}</div></section>;
-}
-
-function ReservationManifest({ manifest, hardCount, reservedArea }: { manifest: FloorPlanManifest; hardCount: number; reservedArea: number }) {
-  const reservations = manifest.reservations ?? [];
-  return <aside className="reservation-panel"><div className="structured-audit-heading"><span>Reservation contract</span><small className={manifest.enabled === false ? "disabled" : "enabled"}>{manifest.enabled === false ? "disabled" : "enabled"}</small></div><div className="reservation-facts"><div><span>Reservations</span><strong>{reservations.length}</strong></div><div><span>Hard requirements</span><strong>{hardCount}</strong></div><div><span>Reserved zone area</span><strong>{reservedArea > 0 ? `${reservedArea.toFixed(1)} m²` : "--"}</strong></div><div><span>Explicit windows</span><strong>{typeof manifest.explicit_window_count === "number" ? manifest.explicit_window_count : "--"}</strong></div><div><span>Entrance route</span><strong>{manifest.preserve_entrance_route === false ? "No" : "Preserved"}</strong></div><div><span>Implicit windows / wall</span><strong>{typeof manifest.max_implicit_windows_per_wall === "number" ? manifest.max_implicit_windows_per_wall : "--"}</strong></div></div><div className="reservation-list">{reservations.map((reservation, index) => <article key={reservation.reservation_id ?? `${reservation.kind ?? "reservation"}-${index}`}><header><strong>{reservationTitle(reservation)}</strong><span>{reservation.hard === false ? "soft" : "hard"}</span></header><small>{formatCategoryList(reservation.subject_categories)}{reservation.room_type ? ` · ${reservation.room_type}` : ""}</small><dl><div><dt>Count</dt><dd>{reservation.count ?? 1}</dd></div><div><dt>Zone area</dt><dd>{formatMeasurement(reservation.min_zone_area_m2, "m²")}</dd></div><div><dt>Wall width</dt><dd>{formatMeasurement(reservation.min_wall_width_m, "m")}</dd></div></dl></article>)}{reservations.length === 0 && <div className="excerpt-note">No reservation items were compiled.</div>}</div></aside>;
-}
-
-function reservationTitle(reservation: FloorPlanReservation): string {
-  const value = reservation.reservation_id || reservation.kind || "Reservation";
-  return value.replaceAll("__", " / ").replaceAll("_", " ").replace(/\s+\d+$/, "").replace(/\s+\/\s*$/, "");
-}
-
-function formatCategoryList(values?: string[]): string {
-  return values?.length ? values.map((value) => value.replaceAll("_", " ")).join(", ") : "No category specified";
-}
-
-function formatMeasurement(value: number | undefined, unit: string): string {
-  return typeof value === "number" && value > 0 ? `${value.toFixed(1)} ${unit}` : "--";
 }
 
 function DiffView({ beforeRender, currentRender, renders, comparisonRender, selectedRender, setComparisonRender, setSelectedRender, diff }: { beforeRender?: Render; currentRender?: Render; renders: Render[]; comparisonRender: string; selectedRender: string; setComparisonRender: (value: string) => void; setSelectedRender: (value: string) => void; diff: Diff | null }) {

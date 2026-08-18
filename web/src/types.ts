@@ -273,6 +273,7 @@ export type Action = {
 
 export type SceneDetail = {
   path: string;
+  prompt?: string;
   actions: Action[];
   timings: TimedEvent[];
   llm_calls: TimedEvent[];

@@ -165,6 +165,10 @@ def test_exposes_floor_plan_renders_and_reservation_manifest(tmp_path: Path) -> 
         / "room_bedroom"
     )
     write(room / "action_log.json", "[]")
+    write(
+        room.parent / "scene_expert" / "trace" / "trace_000001.json",
+        json.dumps({"prompt": "A bedroom with a reading corner."}),
+    )
     floor_plan = (
         room.parent
         / "floor_plans"
@@ -210,6 +214,14 @@ def test_exposes_floor_plan_renders_and_reservation_manifest(tmp_path: Path) -> 
     manifest = payload["floor_plan"]["reservation_manifest"]
     assert manifest["enabled"] is True
     assert manifest["reservations"][0]["min_zone_area_m2"] == 6.0
+    assert payload["prompt"] == "A bedroom with a reading corner."
+    reservation_event = next(
+        event
+        for event in payload["audit_events"]
+        if event["id"] == "contract:floor-reservation"
+    )
+    assert reservation_event["stage"] == "floor_plan"
+    assert reservation_event["detail"]["reservation_count"] == 1
 
 
 def test_exposes_scene_final_views_as_snapshot(tmp_path: Path) -> None:

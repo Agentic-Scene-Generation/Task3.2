@@ -424,11 +424,47 @@ def _floor_plan_manifest(room_dir: Path) -> dict[str, Any] | None:
     return None
 
 
+def _floor_plan_reservation_record(
+    room_dir: Path,
+) -> tuple[dict[str, Any], str] | None:
+    """返回预留清单及其文件记录的创建时间。"""
+    for scene_dir in _floor_plan_scene_dirs(room_dir):
+        manifest_path = scene_dir / "floor_plan_reservation_manifest.json"
+        payload = _read_json(manifest_path)
+        if isinstance(payload, dict) and payload and manifest_path.is_file():
+            return payload, _iso_mtime(manifest_path)
+    return None
+
+
 def _floor_plan_payload(probe_root: Path, room_dir: Path) -> dict[str, Any]:
     return {
         "renders": _floor_plan_records(probe_root, room_dir),
         "reservation_manifest": _floor_plan_manifest(room_dir),
     }
+
+
+def _scene_prompt(room_dir: Path) -> str:
+    """从最新可用的 trace 中读取场景原始提示词。"""
+    trace_paths = [
+        path
+        for scene_dir in _floor_plan_scene_dirs(room_dir)
+        for trace_root in (scene_dir / "scene_expert" / "trace",)
+        for path in (
+            *trace_root.glob("trace_*.json"),
+            *trace_root.glob("*_partial.json"),
+        )
+    ]
+    trace_paths = sorted(
+        set(trace_paths),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    for trace_path in trace_paths:
+        payload = _read_json(trace_path, {})
+        prompt = payload.get("prompt") if isinstance(payload, dict) else None
+        if isinstance(prompt, str) and prompt.strip():
+            return prompt.strip()
+    return ""
 
 
 def _timing_records(room_dir: Path) -> list[dict[str, Any]]:
@@ -779,6 +815,29 @@ def _audit_events(room_dir: Path) -> list[dict[str, Any]]:
                     "retry_count": compiler.get("retry_count", 0),
                 },
                 "contract": contract,
+            }
+        )
+    reservation_record = _floor_plan_reservation_record(room_dir)
+    if reservation_record is not None:
+        manifest, created_at = reservation_record
+        reservations = manifest.get("reservations", [])
+        reservation_count = len(reservations) if isinstance(reservations, list) else 0
+        enabled = manifest.get("enabled") is not False
+        events.append(
+            {
+                "id": "contract:floor-reservation",
+                "kind": "contract",
+                "source": "floor_plan_reservation_manifest",
+                "created_at": created_at,
+                "stage": "floor_plan",
+                "actor": "floor_reservation",
+                "function": "compile_floor_reservation",
+                "title": "Compiled floor reservation",
+                "audit_status": "enabled" if enabled else "disabled",
+                "detail": {
+                    "reservation_count": reservation_count,
+                    "reservation_manifest": manifest,
+                },
             }
         )
     for index, row in enumerate(timings):
@@ -1430,6 +1489,7 @@ def create_app(probe_root: Path = DEFAULT_PROBE_ROOT) -> Flask:
         return _json_response(
             {
                 "path": relative_path,
+                "prompt": _scene_prompt(room),
                 "actions": action_log,
                 "timings": timings,
                 "llm_calls": llm_calls,
