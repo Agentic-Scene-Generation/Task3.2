@@ -845,8 +845,6 @@ def build_window_clearance_checks(
     geometry: dict[str, Any], objects: dict[str, dict[str, Any]]
 ) -> list[dict[str, Any]]:
     """Build checks for objects that make a window/wall opening unusable."""
-    # Window blockage remains diagnostic. Furniture must not be moved merely to
-    # preserve an opening; a real wall-mounted overlap is routed to wall tools.
     shell = geometry.get("scene_shell") or {}
     checks: list[dict[str, Any]] = []
     for window in shell.get("windows") or []:
@@ -859,9 +857,20 @@ def build_window_clearance_checks(
         wmin, wmax = bbox.get("min"), bbox.get("max")
         if not isinstance(wmin, (list, tuple)) or not isinstance(wmax, (list, tuple)):
             continue
-        sill = float(window.get("sill_height") or 0.0)
-        blockers: list[str] = []
-        advisory_blockers: list[str] = []
+        sill = float(window.get("sill_height") or wmin[2])
+        head = float(wmax[2])
+        axes = _window_projection_axes(window, bbox)
+        if axes is None or head <= sill:
+            continue
+        _wall_axis, along_axis = axes
+        opening_along_min = float(wmin[along_axis])
+        opening_along_max = float(wmax[along_axis])
+        opening_width = opening_along_max - opening_along_min
+        opening_height = head - sill
+        opening_area = opening_width * opening_height
+        if opening_area <= 1e-8:
+            continue
+        blocker_evidence: list[dict[str, Any]] = []
         wall_mounted_blockers: list[str] = []
         for object_id, obj in objects.items():
             if _norm_category(obj) in _STRUCTURAL_BLOCKER_CATEGORIES:
@@ -874,32 +883,57 @@ def build_window_clearance_checks(
                 omax, (list, tuple)
             ):
                 continue
-            # 2026-07-14 修改原因：低于窗台的家具不遮挡窗洞，避免误报床底、
-            # 地毯等低矮物体；只报告高度超过 sill 且 XY 投影相交的对象。
             if float(omax[2]) <= sill:
                 continue
-            if (
+            furniture_overlap = (
                 float(omin[0]) < float(wmax[0])
                 and float(omax[0]) > float(wmin[0])
                 and float(omin[1]) < float(wmax[1])
                 and float(omax[1]) > float(wmin[1])
-            ):
-                # 2026-07-14 修改原因：sideboard 等靠墙家具略高于窗台是常见
-                # 且可接受的布局（旧 physics 检查中约 9cm 超高即属此类）。只有
-                # 明显高出窗台的物体才应触发 furniture agent 移动/换窗循环。
-                if float(omax[2]) - sill <= 0.15:
-                    advisory_blockers.append(str(object_id))
-                else:
-                    blockers.append(str(object_id))
-            # 2026-07-14 修改原因：壁挂电视/镜子等不是“房间侧家具”，但窗口
-            # 仍会占用同一面墙的有效挂载区。原先只比较完整 3D AABB，且只检查
-            # 窗口被家具遮挡，导致同墙的 window + wall-mounted display 同时 pass。
-            # 沿墙轴和高度轴检查开口重叠，并验证物体确实贴近该窗口所在墙面，
-            # 适配南北/东西墙和不同厚度的壁挂资产。
-            if _wall_mounted_overlaps_window(obj, window, bbox):
+            )
+            wall_mounted_overlap = _wall_mounted_overlaps_window(obj, window, bbox)
+            if not furniture_overlap and not wall_mounted_overlap:
+                continue
+            along_min = max(float(omin[along_axis]), opening_along_min)
+            along_max = min(float(omax[along_axis]), opening_along_max)
+            vertical_min = max(float(omin[2]), sill)
+            vertical_max = min(float(omax[2]), head)
+            lateral_overlap = max(0.0, along_max - along_min)
+            vertical_overlap = max(0.0, vertical_max - vertical_min)
+            overlap_area = lateral_overlap * vertical_overlap
+            if overlap_area <= 1e-8:
+                continue
+            if wall_mounted_overlap:
                 wall_mounted_blockers.append(str(object_id))
+            blocker_evidence.append(
+                {
+                    "object_id": str(object_id),
+                    "category": _norm_category(obj),
+                    "object_type": str(obj.get("object_type") or ""),
+                    "wall_mounted": wall_mounted_overlap,
+                    "lateral_overlap_m": round(lateral_overlap, 6),
+                    "vertical_overlap_m": round(vertical_overlap, 6),
+                    "lateral_overlap_ratio": round(lateral_overlap / opening_width, 9),
+                    "vertical_overlap_ratio": round(
+                        vertical_overlap / opening_height, 9
+                    ),
+                    "occluded_area_m2": round(overlap_area, 9),
+                    "occlusion_ratio": round(overlap_area / opening_area, 9),
+                    "projected_rectangle": [
+                        round(along_min, 6),
+                        round(along_max, 6),
+                        round(vertical_min, 6),
+                        round(vertical_max, 6),
+                    ],
+                    "height_above_sill_m": round(max(0.0, float(omax[2]) - sill), 6),
+                }
+            )
 
-        blockers = sorted(set([*blockers, *wall_mounted_blockers]))
+        blockers = sorted({str(item["object_id"]) for item in blocker_evidence})
+        occluded_area = _projected_rectangle_union_area(
+            [item["projected_rectangle"] for item in blocker_evidence]
+        )
+        occlusion_ratio = min(1.0, occluded_area / opening_area)
         checks.append(
             {
                 "check_id": f"window_clearance__{window_id}",
@@ -912,21 +946,20 @@ def build_window_clearance_checks(
                 "evidence_refs": ["scene_geometry", "window_clearance_zone"],
                 "clearance_result": {
                     "label": "fail" if blockers else "pass",
-                    "blocking_objects": sorted(set(blockers)),
-                    "advisory_blocking_objects": sorted(set(advisory_blockers)),
+                    "blocking_objects": blockers,
                     "wall_mounted_blocking_objects": sorted(set(wall_mounted_blockers)),
                     "window_id": window_id,
                     "sill_height": sill,
-                    "advisory_reason": (
-                        "minor sill-height overlap; do not move wall-backed furniture "
-                        "unless the window is substantially blocked"
-                        if advisory_blockers and not blockers
-                        else None
-                    ),
+                    "window_head_height": head,
+                    "window_opening_width_m": round(opening_width, 6),
+                    "window_opening_height_m": round(opening_height, 6),
+                    "window_opening_area_m2": round(opening_area, 9),
+                    "occluded_area_m2": round(occluded_area, 9),
+                    "occlusion_ratio": round(occlusion_ratio, 9),
+                    "occlusion_evidence": blocker_evidence,
                     "repair_priority": [
-                        "shrink_window",
-                        "move_window",
-                        "remove_implicit_window_only",
+                        "move_blocking_object",
+                        "move_implicit_window_if_contract_safe",
                     ],
                 },
             }
@@ -1146,19 +1179,11 @@ def _wall_mounted_overlaps_window(
     if any(len(value) < 3 for value in (omin, omax, wmin, wmax)):
         return False
 
+    axes = _window_projection_axes(window, window_bbox)
+    if axes is None:
+        return False
+    wall_axis, along_axis = axes
     direction = str(window.get("wall_direction") or "").strip().lower()
-    if direction in {"north", "south"}:
-        along_axis = 0
-        wall_axis = 1
-    elif direction in {"east", "west"}:
-        along_axis = 1
-        wall_axis = 0
-    else:
-        # 2026-07-14 修改原因：部分导出的 shell 没有 wall_direction；用窗口
-        # bbox 的薄轴推断墙面方向，避免规则只适用于带完整标注的房间。
-        horizontal_sizes = [float(wmax[index]) - float(wmin[index]) for index in (0, 1)]
-        wall_axis = 0 if horizontal_sizes[0] <= horizontal_sizes[1] else 1
-        along_axis = 1 - wall_axis
 
     overlap_min = max(float(omin[along_axis]), float(wmin[along_axis]))
     overlap_max = min(float(omax[along_axis]), float(wmax[along_axis]))
@@ -1183,12 +1208,109 @@ def _wall_mounted_overlaps_window(
     return distance_to_wall <= max(0.12, window_depth + 0.05)
 
 
-def evaluate_clearance(check: dict[str, Any]) -> dict[str, Any]:
+def _window_projection_axes(
+    window: dict[str, Any], window_bbox: dict[str, Any]
+) -> tuple[int, int] | None:
+    wmin, wmax = window_bbox.get("min"), window_bbox.get("max")
+    if not isinstance(wmin, (list, tuple)) or not isinstance(wmax, (list, tuple)):
+        return None
+    if len(wmin) < 2 or len(wmax) < 2:
+        return None
+    direction = str(window.get("wall_direction") or "").strip().lower()
+    if direction in {"north", "south"}:
+        return 1, 0
+    if direction in {"east", "west"}:
+        return 0, 1
+    horizontal_sizes = [float(wmax[index]) - float(wmin[index]) for index in (0, 1)]
+    wall_axis = 0 if horizontal_sizes[0] <= horizontal_sizes[1] else 1
+    return wall_axis, 1 - wall_axis
+
+
+def _projected_rectangle_union_area(rectangles: list[list[float]]) -> float:
+    """Return exact union area for axis-aligned tangent/height rectangles."""
+    valid = [
+        tuple(float(value) for value in rectangle[:4])
+        for rectangle in rectangles
+        if len(rectangle) >= 4
+        and float(rectangle[1]) > float(rectangle[0])
+        and float(rectangle[3]) > float(rectangle[2])
+    ]
+    x_values = sorted({value for rect in valid for value in rect[:2]})
+    area = 0.0
+    for left, right in zip(x_values, x_values[1:], strict=False):
+        if right <= left:
+            continue
+        intervals = sorted(
+            (bottom, top)
+            for x_min, x_max, bottom, top in valid
+            if x_min < right and x_max > left
+        )
+        covered = 0.0
+        current_min = current_max = None
+        for bottom, top in intervals:
+            if current_min is None:
+                current_min, current_max = bottom, top
+            elif bottom > current_max:
+                covered += current_max - current_min
+                current_min, current_max = bottom, top
+            else:
+                current_max = max(current_max, top)
+        if current_min is not None:
+            covered += current_max - current_min
+        area += (right - left) * covered
+    return max(0.0, area)
+
+
+def _window_severity(
+    clearance_result: dict[str, Any], config: Any | None
+) -> tuple[str, str, list[str], list[str], float, float]:
+    run = getattr(config, "run", config)
+    advisory_threshold = float(
+        getattr(run, "window_clearance_advisory_occlusion_ratio", 0.02)
+    )
+    core_threshold = float(getattr(run, "window_clearance_core_occlusion_ratio", 0.15))
+    advisory_threshold = min(1.0, max(0.0, advisory_threshold))
+    core_threshold = min(1.0, max(advisory_threshold, core_threshold))
+    ratio = float(clearance_result.get("occlusion_ratio") or 0.0)
+    all_blockers = sorted(
+        str(item.get("object_id"))
+        for item in clearance_result.get("occlusion_evidence") or []
+        if item.get("object_id")
+    )
+    if ratio >= core_threshold and all_blockers:
+        return "fail", "core", all_blockers, [], advisory_threshold, core_threshold
+    if ratio >= advisory_threshold and all_blockers:
+        return (
+            "degraded",
+            "auxiliary",
+            [],
+            all_blockers,
+            advisory_threshold,
+            core_threshold,
+        )
+    return "pass", "auxiliary", [], all_blockers, advisory_threshold, core_threshold
+
+
+def evaluate_clearance(
+    check: dict[str, Any], config: Any | None = None
+) -> dict[str, Any]:
     """Reshape the embedded clearance verdict into a critic result row."""
     cr = check.get("clearance_result") or {}
     label = str(cr.get("label") or "unknown")
     blockers = list(cr.get("blocking_objects") or [])
     check_id = str(check.get("check_id") or "")
+    scoring_tier = check.get("scoring_tier", "core")
+    advisory_blockers = list(cr.get("advisory_blocking_objects") or [])
+    advisory_threshold = core_threshold = None
+    if check_id.startswith("window_clearance__"):
+        (
+            label,
+            scoring_tier,
+            blockers,
+            advisory_blockers,
+            advisory_threshold,
+            core_threshold,
+        ) = _window_severity(cr, config)
     if label == "pass":
         reason = "Functional clearance zone is unobstructed."
     elif blockers:
@@ -1204,10 +1326,16 @@ def evaluate_clearance(check: dict[str, Any]) -> dict[str, Any]:
                 f"{', '.join(str(b) for b in blockers)}."
             )
         if check_id.startswith("window_clearance__"):
-            reason += (
-                " Keep primary furniture fixed; resize or move the window when "
-                "a real wall-mounted overlap must be repaired."
+            reason = (
+                f"Window opening is substantially occluded by {', '.join(blockers)} "
+                f"({float(cr.get('occlusion_ratio') or 0.0):.1%} projected area)."
             )
+    elif label == "degraded":
+        reason = (
+            "Window opening has minor projected occlusion by "
+            f"{', '.join(advisory_blockers)} "
+            f"({float(cr.get('occlusion_ratio') or 0.0):.1%} projected area)."
+        )
     else:
         reason = "Clearance could not be determined."
     return {
@@ -1232,10 +1360,18 @@ def evaluate_clearance(check: dict[str, Any]) -> dict[str, Any]:
             "hinge_assumption": cr.get("hinge_assumption"),
             "sweep_angle_deg": cr.get("sweep_angle_deg"),
             "blocking_objects": cr.get("blocking_objects"),
-            "advisory_blocking_objects": cr.get("advisory_blocking_objects"),
+            "core_blocking_objects": blockers,
+            "advisory_blocking_objects": advisory_blockers,
             "wall_mounted_blocking_objects": cr.get("wall_mounted_blocking_objects"),
             "window_id": cr.get("window_id"),
             "sill_height": cr.get("sill_height"),
+            "window_head_height": cr.get("window_head_height"),
+            "window_opening_area_m2": cr.get("window_opening_area_m2"),
+            "occluded_area_m2": cr.get("occluded_area_m2"),
+            "occlusion_ratio": cr.get("occlusion_ratio"),
+            "occlusion_evidence": cr.get("occlusion_evidence"),
+            "advisory_occlusion_ratio_threshold": advisory_threshold,
+            "core_occlusion_ratio_threshold": core_threshold,
         },
-        "scoring_tier": check.get("scoring_tier", "core"),
+        "scoring_tier": scoring_tier,
     }

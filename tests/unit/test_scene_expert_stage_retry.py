@@ -12,12 +12,13 @@ from scenesmith.experiments import indoor_scene_generation as scene_generation
 from scenesmith.scene_expert.harness import Harness, RepairDecision
 from scenesmith.scene_expert.hooks import SceneExpertHookRunner, StageCommitResult
 from scenesmith.scene_expert.schemas import (
+    FullVerifyReport,
     RepairResult,
     SceneTaskSpec,
     StageVerifyReport,
     VerifyIssue,
 )
-from scenesmith.scene_expert.verifier import StageVerifier
+from scenesmith.scene_expert.verifier import FullVerifier, StageVerifier
 from scenesmith.scenebenchmark_critic.config import CriticConfig
 
 
@@ -58,9 +59,7 @@ def test_wall_stage_verifier_hard_fails_fresh_core_visual_issue(tmp_path) -> Non
     )
 
     assert not report.pass_stage
-    assert {issue.issue_type for issue in report.issues} == {
-        "visual_clearance_failure"
-    }
+    assert {issue.issue_type for issue in report.issues} == {"visual_clearance_failure"}
 
 
 def test_wall_stage_verifier_ignores_auxiliary_visual_issue(tmp_path) -> None:
@@ -83,6 +82,113 @@ def test_wall_stage_verifier_ignores_auxiliary_visual_issue(tmp_path) -> None:
     )
 
     assert report.pass_stage
+
+
+def _binding_failure_payload(*, earliest_stage: str) -> dict:
+    return {
+        "results": [
+            {
+                "check_id": "intent_on_top_of__binding",
+                "metric": "functional_dependency",
+                "scoring_tier": "core",
+                "label": "fail",
+                "primary_object": "plush_toy",
+                "reason": "Required endpoint is missing.",
+                "diagnostics": {
+                    "binding_issue": "missing",
+                    "earliest_stage": earliest_stage,
+                },
+                "evidence": {
+                    "intent_constraint": {
+                        "constraint_id": "plush_on_desk",
+                        "relation": "on_top_of",
+                        "stage": earliest_stage,
+                        "strength": "hard",
+                    }
+                },
+            }
+        ]
+    }
+
+
+def test_stage_verifier_defers_future_endpoint_binding_failure(tmp_path) -> None:
+    report = StageVerifier().verify(
+        stage="furniture",
+        stage_output_dir=str(tmp_path),
+        task_spec=SceneTaskSpec(room_type="bedroom", style="standard"),
+        scene_state_info={"object_names": []},
+        deterministic_critic_payload=_binding_failure_payload(
+            earliest_stage="manipuland"
+        ),
+    )
+
+    assert report.pass_stage
+
+
+def test_stage_verifier_fails_due_endpoint_binding_failure(tmp_path) -> None:
+    report = StageVerifier().verify(
+        stage="manipuland",
+        stage_output_dir=str(tmp_path),
+        task_spec=SceneTaskSpec(room_type="bedroom", style="standard"),
+        scene_state_info={"object_names": []},
+        deterministic_critic_payload=_binding_failure_payload(
+            earliest_stage="manipuland"
+        ),
+    )
+
+    assert not report.pass_stage
+    assert [issue.issue_type for issue in report.issues] == ["contract_binding_failure"]
+    assert report.issues[0].constraint_id == "plush_on_desk"
+
+
+def test_full_verifier_fails_fresh_final_deterministic_payload() -> None:
+    report = FullVerifier().verify(
+        stage_reports=[StageVerifyReport(stage="manipuland", pass_stage=True)],
+        deterministic_critic_payload=_binding_failure_payload(
+            earliest_stage="manipuland"
+        ),
+    )
+
+    assert not report.deterministic_pass
+    assert not report.pass_scene
+
+
+def test_hook_finalize_refreshes_final_deterministic_payload(tmp_path) -> None:
+    fresh_payload = _binding_failure_payload(earliest_stage="manipuland")
+    scene = SimpleNamespace()
+    runner = object.__new__(SceneExpertHookRunner)
+    runner._mode = "harness_only"
+    runner._scene_id = 1
+    runner._stage_reports = [StageVerifyReport(stage="manipuland", pass_stage=True)]
+    runner._latest_scene = scene
+    runner._latest_deterministic_payload = {"results": []}
+    runner._critic_config = CriticConfig(enabled=True)
+    runner._full_verifier = Mock(
+        verify=Mock(return_value=FullVerifyReport(deterministic_pass=False))
+    )
+    runner._trace_logger = Mock()
+    runner._trace_logger.finalize.return_value = {}
+    runner._trace_logger.save.return_value = tmp_path / "trace.json"
+    runner._qwen_model = "qwen"
+    runner._memory_writer = None
+    runner._memory_store = None
+
+    with patch(
+        "scenesmith.scenebenchmark_critic.api.evaluate_room_scene",
+        return_value=fresh_payload,
+    ) as evaluate:
+        runner.finalize(str(tmp_path))
+
+    evaluate.assert_called_once_with(
+        scene,
+        config=runner._critic_config,
+        stage="final_scene_verification",
+        annotate_assets=False,
+    )
+    assert (
+        runner._full_verifier.verify.call_args.kwargs["deterministic_critic_payload"]
+        is fresh_payload
+    )
 
 
 def test_wall_post_stage_passes_fresh_deterministic_payload_to_verifier(
@@ -144,9 +250,7 @@ def test_wall_post_stage_passes_fresh_deterministic_payload_to_verifier(
         annotate_assets=False,
     )
     assert (
-        runner._stage_verifier.verify.call_args.kwargs[
-            "deterministic_critic_payload"
-        ]
+        runner._stage_verifier.verify.call_args.kwargs["deterministic_critic_payload"]
         is payload
     )
 

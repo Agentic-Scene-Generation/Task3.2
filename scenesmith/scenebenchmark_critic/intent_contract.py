@@ -42,7 +42,10 @@ from scenesmith.scenebenchmark_critic.intent_schema import (
     validate_intent_contract,
 )
 from scenesmith.scenebenchmark_critic.object_taxonomy import OBJECT_CATEGORY_PHRASES
-from scenesmith.scenebenchmark_critic.object_taxonomy import is_structural_anchor
+from scenesmith.scenebenchmark_critic.object_taxonomy import (
+    is_known_object_category,
+    is_structural_anchor,
+)
 
 
 SCHEMA_VERSION = INTENT_CONTRACT_SCHEMA_VERSION
@@ -1628,9 +1631,7 @@ def _explicit_prompt_constraints(prompt: str, lowered: str) -> list[dict[str, An
                 relation = (
                     "aligned_with"
                     if adjacency.startswith("tucked")
-                    else "next_to"
-                    if adjacency in {"beside", "next to"}
-                    else "near"
+                    else "next_to" if adjacency in {"beside", "next to"} else "near"
                 )
                 constraints.append(
                     _constraint(
@@ -1662,11 +1663,7 @@ def _explicit_prompt_constraints(prompt: str, lowered: str) -> list[dict[str, An
             if subject is not None and target is not None:
                 constraints.append(
                     _constraint(
-                        (
-                            "near"
-                            if match.group("adjacency") == "near"
-                            else "next_to"
-                        ),
+                        ("near" if match.group("adjacency") == "near" else "next_to"),
                         subject,
                         target,
                         source="explicit_prompt",
@@ -3466,24 +3463,39 @@ def _selector_matches_object(category: str, role: str, obj: dict[str, Any]) -> b
         .lower()
         .replace("-", "_")
     )
+    base_category = _normalize_selector_category(
+        obj.get("category_norm") or obj.get("category")
+    )
+    exact_adapter_category = _matches_category_or_instance_suffix(
+        category, base_category
+    )
+    open_vocabulary_adapter_category = (
+        exact_adapter_category and not is_known_object_category(category)
+    )
     # Generated decor can retain a furniture category for retrieval, such as
     # ``dresser_mirror_tabletop``. It is still a manipuland and must not bind
     # a furniture contract endpoint solely because its parent noun appears in
     # the asset category.
-    if scene_object_type == "manipuland" and category not in MANIPULAND_CATEGORIES:
+    if (
+        scene_object_type == "manipuland"
+        and category not in MANIPULAND_CATEGORIES
+        and not open_vocabulary_adapter_category
+    ):
         return False
-    if scene_object_type == "wall_mounted" and category not in WALL_MOUNTED_CATEGORIES:
+    if (
+        scene_object_type == "wall_mounted"
+        and category not in WALL_MOUNTED_CATEGORIES
+        and not exact_adapter_category
+    ):
         return False
     if (
         scene_object_type == "ceiling_mounted"
         and category not in CEILING_MOUNTED_CATEGORIES
+        and not exact_adapter_category
     ):
         return False
     if _matches_category_or_instance_suffix(category, semantic_name):
         return _role_matches_object(role, obj)
-    base_category = _normalize_selector_category(
-        obj.get("category_norm") or obj.get("category")
-    )
     if _matches_category_or_instance_suffix(
         category, object_cat
     ) or _matches_category_or_instance_suffix(category, base_category):

@@ -65,9 +65,9 @@ from scenesmith.scenebenchmark_critic.metrics.visual_clearance.evaluator import 
 
 
 def _interaction_evaluator(
-    _case_pack: dict, check: dict, _config: object
+    _case_pack: dict, check: dict, config: object
 ) -> dict | None:
-    return evaluate_clearance(check)
+    return evaluate_clearance(check, config=config)
 
 
 def _spatial_evaluator(case_pack: dict, check: dict, config: object) -> dict | None:

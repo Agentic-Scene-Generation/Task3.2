@@ -89,7 +89,7 @@ class SceneTaskSpec(BaseModel):
     )
     compiler_status: Literal["ok", "degraded"] = "ok"
     compiler_failure_reason: str = ""
-    compiler_spec_version: str = "scenesmith.task_compiler.v3"
+    compiler_spec_version: str = "scenesmith.task_compiler.v4"
 
 
 # ---------------------------------------------------------------------------
@@ -315,6 +315,14 @@ class VerifyIssue(BaseModel):
     issue_type: str  # e.g., "unreachable", "missing_object", "overcrowded"
     object_name: str = ""
     description: str = ""
+    constraint_id: str = ""
+    relation: str = ""
+    subject_ids: list[str] = Field(default_factory=list)
+    target_ids: list[str] = Field(default_factory=list)
+    metric: str = ""
+    scoring_tier: str = ""
+    repair_strategy: str = ""
+    diagnostics: dict[str, Any] = Field(default_factory=dict)
 
 
 class StageVerifyReport(BaseModel):

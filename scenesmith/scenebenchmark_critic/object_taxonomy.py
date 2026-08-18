@@ -14,6 +14,7 @@ from typing import Any
 from scenesmith.scenebenchmark_critic.relation_registry import (
     CEILING_MOUNTED_CATEGORIES,
     MANIPULAND_CATEGORIES,
+    STAGE_ORDER,
     WALL_MOUNTED_CATEGORIES,
 )
 
@@ -124,6 +125,15 @@ OBJECT_CATEGORY_PHRASES: tuple[tuple[str, tuple[str, ...]], ...] = (
         ("water dispenser", "water cooler", "drinking water dispenser"),
     ),
     ("tv_stand", ("tv stand", "television stand", "media console")),
+    (
+        "media_cabinet",
+        (
+            "media cabinet",
+            "floating media cabinet",
+            "media unit",
+            "entertainment cabinet",
+        ),
+    ),
     ("television", ("television", "tv")),
     (
         "monitor",
@@ -240,6 +250,11 @@ _KNOWN_CATEGORIES = frozenset(
 )
 
 
+def is_known_object_category(category: Any) -> bool:
+    """Return whether taxonomy has an intrinsic policy for this category."""
+    return canonical_object_category(category) in _KNOWN_CATEGORIES
+
+
 def _token_is_known_category(token: str) -> bool:
     singular = _singularize_category(token)
     return (
@@ -303,22 +318,20 @@ def categories_are_equivalent(first: Any, second: Any) -> bool:
     )
 
 
-def execution_owner(
+def generation_owner(
     category: Any,
     *,
     relation: str = "",
     endpoint: str = "subject",
-    existing_owner: str = "",
+    declared_owner: str = "",
 ) -> str:
-    """Return the pipeline stage that must create an object category.
+    """Return the stage that creates an object, independently of check timing.
 
     Explicit mounting relations take precedence over category defaults. Surface
-    support promotes canonical small-object categories and support-sensitive
-    decor such as plants to ``manipuland``: a television on a media console is
-    still furniture and must be placed while both furniture endpoints are
-    available. An existing inventory owner is only a fallback; it must not make
-    a normally floor-standing object become a manipuland merely because an
-    upstream model emitted it in the wrong inventory list.
+    support only overrides a declared inventory for categories with a reliable
+    intrinsic policy. Open-vocabulary objects otherwise retain their typed
+    TaskCompiler inventory, so an unknown small object cannot be promoted to
+    furniture merely because its support already exists there.
     """
     normalized_category = canonical_object_category(category)
     normalized_relation = str(relation or "").strip().lower().replace("-", "_")
@@ -334,12 +347,16 @@ def execution_owner(
             # stand). The latter must remain at the furniture stage so the
             # support-pose repair can place it in XYZ, not as a loose floor
             # object deferred to the manipuland agent.
-            return (
-                "manipuland"
-                if normalized_category
-                in MANIPULAND_CATEGORIES | _SUPPORT_SENSITIVE_CATEGORIES
-                else "furniture"
-            )
+            if normalized_category in (
+                MANIPULAND_CATEGORIES | _SUPPORT_SENSITIVE_CATEGORIES
+            ):
+                return "manipuland"
+            if (
+                declared_owner == "manipuland"
+                and normalized_category not in _KNOWN_CATEGORIES
+            ):
+                return "manipuland"
+            return "furniture"
         if normalized_relation in _FLOOR_SUPPORT_RELATIONS:
             return "furniture"
         if normalized_relation in _WALL_MOUNT_RELATIONS:
@@ -355,6 +372,30 @@ def execution_owner(
         return "ceiling_mounted"
     if normalized_category in MANIPULAND_CATEGORIES:
         return "manipuland"
-    if existing_owner in _EXECUTION_STAGES:
-        return existing_owner
+    if declared_owner in _EXECUTION_STAGES:
+        return declared_owner
     return "furniture"
+
+
+def constraint_evaluation_stage(*endpoint_owners: str) -> str:
+    """Return the first stage at which every relation endpoint can exist."""
+    owners = [owner for owner in endpoint_owners if owner in STAGE_ORDER]
+    if not owners:
+        return "furniture"
+    return max(owners, key=STAGE_ORDER.index)
+
+
+def execution_owner(
+    category: Any,
+    *,
+    relation: str = "",
+    endpoint: str = "subject",
+    existing_owner: str = "",
+) -> str:
+    """Compatibility wrapper for the retired combined ownership helper."""
+    return generation_owner(
+        category,
+        relation=relation,
+        endpoint=endpoint,
+        declared_owner=existing_owner,
+    )

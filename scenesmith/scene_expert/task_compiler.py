@@ -24,7 +24,7 @@ from scenesmith.scene_expert.context_bundle import build_llm_call_debug_record
 from scenesmith.scene_expert.schemas import SceneTaskSpec
 from scenesmith.scenebenchmark_critic.object_taxonomy import (
     canonical_object_category,
-    execution_owner,
+    generation_owner,
     is_structural_anchor,
 )
 from scenesmith.utils.llm_json import parse_llm_json_object
@@ -618,9 +618,9 @@ def _normalize_stage_ownership(
     owner_to_task_stage = {owner: stage for stage, owner in task_stage_to_owner.items()}
     for category, stage in list(category_stages.items()):
         category_stages[category] = owner_to_task_stage[
-            execution_owner(
+            generation_owner(
                 category,
-                existing_owner=task_stage_to_owner.get(stage, ""),
+                declared_owner=task_stage_to_owner.get(stage, ""),
             )
         ]
     desired_counts: dict[str, int] = {}

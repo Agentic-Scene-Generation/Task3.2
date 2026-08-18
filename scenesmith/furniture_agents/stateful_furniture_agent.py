@@ -82,7 +82,10 @@ from scenesmith.furniture_agents.tools.scene_tools import SceneTools
 from scenesmith.furniture_agents.tools.vision_tools import VisionTools
 from scenesmith.prompts.registry import FurnitureAgentPrompts
 from scenesmith.scene_expert.repair_taxonomy import FailureCategory, build_repair_plan
-from scenesmith.scenebenchmark_critic.api import seating_orientation_targets
+from scenesmith.scenebenchmark_critic.api import (
+    evaluate_room_scene,
+    seating_orientation_targets,
+)
 from scenesmith.scenebenchmark_critic.config import critic_config_from_any
 from scenesmith.scenebenchmark_critic.furniture_relation_repair import (
     improve_furniture_relations,
@@ -522,6 +525,13 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             )
         self._converge_prompt_required_inventory(source="before final critique")
 
+        window_actions = self._repair_substantial_window_clearance()
+        if window_actions:
+            console_logger.info(
+                "Deterministic window-clearance repair before final critique: %s",
+                "; ".join(window_actions),
+            )
+
         seating_fixes = self._align_seating_with_hard_state_guard(
             seating_orientation_targets(scene, config=self.cfg)
         )
@@ -781,6 +791,187 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             "; ".join(introduced),
         )
         return False
+
+    def _restore_hard_state_transaction(
+        self,
+        transaction: tuple[dict[str, Any], set[str]] | None,
+        *,
+        source: str,
+        reasons: list[str],
+    ) -> None:
+        """Restore an outer deterministic-repair snapshot after critic rejection."""
+        if transaction is None:
+            return
+        snapshot, _before = transaction
+        self.scene.restore_from_state_dict(snapshot)
+        if getattr(self, "rendering_manager", None) is not None:
+            self.rendering_manager.clear_cache()
+        self._reset_critic_candidate_cache()
+        console_logger.info(
+            "Rejected deterministic %s repair: %s",
+            source,
+            "; ".join(reasons),
+        )
+
+    @staticmethod
+    def _critic_core_window_failures(payload: dict[str, Any]) -> list[dict[str, Any]]:
+        return [
+            result
+            for result in payload.get("results") or []
+            if str(result.get("check_id") or "").startswith("window_clearance__")
+            and str(result.get("scoring_tier") or "").lower() == "core"
+            and str(result.get("label") or "").lower() == "fail"
+        ]
+
+    def _checkpoint_eligible_furniture_hard_state(
+        self, hard_state: HardStateEvaluation | None
+    ) -> HardStateEvaluation | None:
+        """Keep substantially window-blocked scenes out of rollback checkpoints."""
+        checkpoint_state = super()._checkpoint_eligible_furniture_hard_state(hard_state)
+        if checkpoint_state is None or not checkpoint_state.hard_valid:
+            return checkpoint_state
+        critic_config = critic_config_from_any(self.cfg)
+        if not critic_config.enabled or not critic_config.metric_enabled(
+            "interaction_clearance"
+        ):
+            return checkpoint_state
+        try:
+            payload = evaluate_room_scene(
+                self.scene,
+                config=critic_config,
+                stage="furniture_checkpoint_window_gate",
+                annotate_assets=False,
+            )
+        except Exception:
+            console_logger.warning(
+                "Could not evaluate window clearance for checkpoint safety",
+                exc_info=True,
+            )
+            return checkpoint_state
+        window_failures = self._critic_core_window_failures(payload)
+        if not window_failures:
+            return checkpoint_state
+        gated_state = copy.deepcopy(checkpoint_state)
+        gated_state.hard_valid = False
+        gated_state.hard_reasons.extend(
+            f"substantial window occlusion: {result.get('check_id')}"
+            for result in window_failures
+            if f"substantial window occlusion: {result.get('check_id')}"
+            not in gated_state.hard_reasons
+        )
+        return gated_state
+
+    @staticmethod
+    def _critic_core_failure_ids(payload: dict[str, Any]) -> set[str]:
+        return {
+            str(result.get("check_id") or f"result_{index}")
+            for index, result in enumerate(payload.get("results") or [])
+            if str(result.get("scoring_tier") or "core").lower() == "core"
+            and str(result.get("label") or "").lower() == "fail"
+        }
+
+    @staticmethod
+    def _critic_passing_explicit_relation_ids(payload: dict[str, Any]) -> set[str]:
+        passing: set[str] = set()
+        for index, result in enumerate(payload.get("results") or []):
+            if str(result.get("label") or "").lower() != "pass":
+                continue
+            constraint = (result.get("evidence") or {}).get("intent_constraint") or {}
+            if (
+                not constraint
+                or str(constraint.get("relation") or "") == "required_count"
+            ):
+                continue
+            if str(constraint.get("strength") or "hard").lower() != "hard":
+                continue
+            passing.add(str(result.get("check_id") or f"result_{index}"))
+        return passing
+
+    def _repair_substantial_window_clearance(self) -> list[str]:
+        """Move only critic-proven core window blockers in a fresh transaction."""
+        if self.scene is None:
+            return []
+        critic_config = critic_config_from_any(self.cfg)
+        if not critic_config.enabled or not critic_config.metric_enabled(
+            "interaction_clearance"
+        ):
+            return []
+        baseline = evaluate_room_scene(
+            self.scene,
+            config=critic_config,
+            stage="furniture_window_clearance_repair_baseline",
+            annotate_assets=False,
+        )
+        target_results = self._critic_core_window_failures(baseline)
+        if not target_results:
+            return []
+        target_check_ids = {str(result.get("check_id")) for result in target_results}
+        target_window_ids = {
+            str(result.get("primary_object") or "")
+            for result in target_results
+            if result.get("primary_object")
+        }
+        target_blocker_ids = {
+            str(object_id)
+            for result in target_results
+            for object_id in (
+                result.get("blocking_objects")
+                or (result.get("diagnostics") or {}).get("core_blocking_objects")
+                or []
+            )
+        }
+        if not target_window_ids or not target_blocker_ids:
+            return []
+
+        transaction = self._begin_hard_state_transaction()
+        baseline_core_failures = self._critic_core_failure_ids(baseline)
+        protected_relations = self._critic_passing_explicit_relation_ids(baseline)
+        changed = self._repair_forbidden_zone_conflicts(
+            include_windows=True,
+            opening_ids=target_window_ids,
+            blocker_ids=target_blocker_ids,
+        )
+        if not changed:
+            return []
+        self.rendering_manager.clear_cache()
+        self._reset_critic_candidate_cache()
+        fresh = evaluate_room_scene(
+            self.scene,
+            config=critic_config,
+            stage="furniture_window_clearance_repair_fresh",
+            annotate_assets=False,
+        )
+        fresh_result_ids = {
+            str(result.get("check_id") or "") for result in fresh.get("results") or []
+        }
+        fresh_core_failures = self._critic_core_failure_ids(fresh)
+        fresh_relations = self._critic_passing_explicit_relation_ids(fresh)
+        rejection_reasons: list[str] = []
+        if not target_check_ids.issubset(fresh_result_ids):
+            rejection_reasons.append("target window check disappeared")
+        unresolved = sorted(target_check_ids & fresh_core_failures)
+        if unresolved:
+            rejection_reasons.append("target blockers remain: " + ", ".join(unresolved))
+        introduced = sorted(fresh_core_failures - baseline_core_failures)
+        if introduced:
+            rejection_reasons.append("new core failures: " + ", ".join(introduced))
+        lost_relations = sorted(protected_relations - fresh_relations)
+        if lost_relations:
+            rejection_reasons.append(
+                "lost explicit relations: " + ", ".join(lost_relations)
+            )
+        if rejection_reasons:
+            self._restore_hard_state_transaction(
+                transaction,
+                source="window-clearance",
+                reasons=rejection_reasons,
+            )
+            return []
+        return [
+            "cleared substantial window occlusion "
+            f"for {', '.join(sorted(target_window_ids))} by moving "
+            f"{', '.join(sorted(target_blocker_ids))}"
+        ]
 
     def _align_seating_with_hard_state_guard(
         self, allowed_targets_by_seat: dict[str, set[str]]
@@ -2940,15 +3131,25 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         self.scene.move_object(wardrobe.object_id, best_transform)
         return True
 
-    def _repair_forbidden_zone_conflicts(self, include_windows: bool = False) -> bool:
+    def _repair_forbidden_zone_conflicts(
+        self,
+        include_windows: bool = False,
+        *,
+        opening_ids: set[str] | None = None,
+        blocker_ids: set[str] | None = None,
+    ) -> bool:
         """Move objects out of door/opening clearance zones using generic anchors."""
         if self.scene is None:
             return False
         transaction = self._begin_hard_state_transaction()
         zones = self._opening_forbidden_zones(include_windows=include_windows)
+        if opening_ids is not None:
+            zones = [zone for zone in zones if zone[0] in opening_ids]
         if not zones:
             return False
         blockers = self._objects_overlapping_zones(zones)
+        if blocker_ids is not None:
+            blockers = [item for item in blockers if item[0] in blocker_ids]
         if not blockers:
             return False
 

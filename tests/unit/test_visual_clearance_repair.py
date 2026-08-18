@@ -326,3 +326,182 @@ def test_guard_repairs_two_occluded_wall_objects_and_invalidates_each_move(
     }
     assert len(invalidations) == 2
     assert report[-1].new_issue_count == 0
+
+
+def test_guard_moves_wall_media_group_to_surface_that_satisfies_seating_facing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    scene, _unused_surface = _scene(tmp_path)
+    surfaces = extract_wall_surfaces_from_room_geometry(
+        scene.room_geometry, room_id=scene.room_id
+    )
+    north = next(
+        surface for surface in surfaces if surface.wall_direction == WallDirection.NORTH
+    )
+    south = next(
+        surface for surface in surfaces if surface.wall_direction == WallDirection.SOUTH
+    )
+
+    def add_wall_object(object_id: str, local_z: float) -> SceneObject:
+        placement = PlacementInfo(
+            parent_surface_id=north.surface_id,
+            position_2d=np.array([north.length / 2.0, local_z]),
+            rotation_2d=0.0,
+            placement_method="wall_placement",
+        )
+        obj = _object(
+            object_id,
+            ObjectType.WALL_MOUNTED,
+            position=(0.0, 0.0, local_z),
+            size=(0.8, 0.08, 0.45),
+            placement=placement,
+        )
+        obj.transform = north.to_world_pose(north.length / 2.0, local_z)
+        scene.add_object(obj)
+        return obj
+
+    television = add_wall_object("television_0", 1.65)
+    cabinet = add_wall_object("media_cabinet_0", 1.05)
+
+    def fake_evaluate(_scene, _config):
+        assert television.placement_info is not None
+        assert cabinet.placement_info is not None
+        tv_surface = str(television.placement_info.parent_surface_id)
+        cabinet_surface = str(cabinet.placement_info.parent_surface_id)
+        centered = (
+            tv_surface == cabinet_surface
+            and abs(
+                float(television.placement_info.position_2d[0])
+                - float(cabinet.placement_info.position_2d[0])
+            )
+            < 1e-6
+        )
+        return {
+            "results": [
+                {
+                    "check_id": "intent_faces__sofa_0__television_0",
+                    "metric": "functional_dependency",
+                    "relation_type": "seating_to_media",
+                    "scoring_tier": "core",
+                    "label": "pass" if tv_surface == str(south.surface_id) else "fail",
+                    "primary_object": "sofa_0",
+                    "related_objects": ["television_0"],
+                    "evidence": {
+                        "intent_constraint": {
+                            "constraint_id": "faces_tv",
+                            "relation": "faces",
+                            "strength": "hard",
+                        }
+                    },
+                },
+                {
+                    "check_id": "intent_centered_above__television_0__media_cabinet_0",
+                    "metric": "functional_dependency",
+                    "relation_type": "centered_above",
+                    "scoring_tier": "core",
+                    "label": "pass" if centered else "fail",
+                    "primary_object": "television_0",
+                    "related_objects": ["media_cabinet_0"],
+                    "evidence": {
+                        "intent_constraint": {
+                            "constraint_id": "tv_above_cabinet",
+                            "relation": "centered_above",
+                            "strength": "hard",
+                        }
+                    },
+                },
+            ]
+        }
+
+    monkeypatch.setattr(visual_clearance_repair, "_evaluate", fake_evaluate)
+
+    report = improve_wall_visual_clearance(
+        scene,
+        wall_surfaces=surfaces,
+        config=CriticConfig(enabled=True, metrics=("functional_dependency",)),
+        step_m=0.5,
+    )
+
+    assert len(report) == 1
+    assert report[0].resolved_check_ids == ("intent_faces__sofa_0__television_0",)
+    assert set(report[0].moved_object_ids) == {
+        "television_0",
+        "media_cabinet_0",
+    }
+    assert television.placement_info is not None
+    assert cabinet.placement_info is not None
+    assert television.placement_info.parent_surface_id == south.surface_id
+    assert cabinet.placement_info.parent_surface_id == south.surface_id
+    assert float(television.placement_info.position_2d[0]) == float(
+        cabinet.placement_info.position_2d[0]
+    )
+
+
+def test_guard_rolls_back_when_no_wall_resolves_hard_media_relation(
+    tmp_path: Path, monkeypatch
+) -> None:
+    scene, _unused_surface = _scene(tmp_path)
+    surfaces = extract_wall_surfaces_from_room_geometry(
+        scene.room_geometry, room_id=scene.room_id
+    )
+    north = next(
+        surface for surface in surfaces if surface.wall_direction == WallDirection.NORTH
+    )
+    placement = PlacementInfo(
+        parent_surface_id=north.surface_id,
+        position_2d=np.array([north.length / 2.0, 1.5]),
+        rotation_2d=0.0,
+        placement_method="wall_placement",
+    )
+    television = _object(
+        "television_0",
+        ObjectType.WALL_MOUNTED,
+        position=(0.0, 0.0, 1.5),
+        size=(0.8, 0.08, 0.45),
+        placement=placement,
+    )
+    television.transform = north.to_world_pose(north.length / 2.0, 1.5)
+    scene.add_object(television)
+    old_transform = television.transform
+
+    monkeypatch.setattr(
+        visual_clearance_repair,
+        "_evaluate",
+        lambda _scene, _config: {
+            "results": [
+                {
+                    "check_id": "intent_faces__sofa_0__television_0",
+                    "metric": "functional_dependency",
+                    "relation_type": "seating_to_media",
+                    "scoring_tier": "core",
+                    "label": "fail",
+                    "primary_object": "sofa_0",
+                    "related_objects": ["television_0"],
+                    "evidence": {
+                        "intent_constraint": {
+                            "relation": "faces",
+                            "strength": "hard",
+                        }
+                    },
+                }
+            ]
+        },
+    )
+
+    report = improve_wall_visual_clearance(
+        scene,
+        wall_surfaces=surfaces,
+        config=CriticConfig(enabled=True, metrics=("functional_dependency",)),
+        step_m=0.5,
+        max_candidate_evaluations=512,
+    )
+
+    assert len(report) == 0
+    assert report.rejections[0].reason in {
+        "no_candidate_resolved_hard_wall_relation",
+        "candidate_budget_exhausted",
+    }
+    np.testing.assert_allclose(
+        television.transform.GetAsMatrix4(), old_transform.GetAsMatrix4()
+    )
+    assert television.placement_info is placement

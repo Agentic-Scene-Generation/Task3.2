@@ -108,7 +108,7 @@ def test_structural_window_is_not_furniture_inventory() -> None:
         for row in contract["constraints"]
     )
     assert "window" not in intent_contract_required_counts(scene)
-    assert INTENT_COMPILER_SPEC_VERSION == "scenesmith.intent_compiler.v11"
+    assert INTENT_COMPILER_SPEC_VERSION == "scenesmith.intent_compiler.v12"
 
 
 def test_repair_placeholder_uses_stable_compound_name_as_category() -> None:
@@ -1059,6 +1059,41 @@ def test_furniture_selector_ignores_later_stage_decor_with_parent_category() -> 
 
     assert selected_ids(selector, [dresser, tabletop_mirror]) == ["dresser_0"]
     assert selector_match_count(selector, [dresser, tabletop_mirror]) == 1
+
+
+@pytest.mark.parametrize("category", ["television", "media_cabinet"])
+def test_canonical_adapter_category_binds_wall_mounted_open_category(
+    category: str,
+) -> None:
+    mounted = _record("mounted_media_0", "decor", (0.0, 2.0), (1.2, 0.1, 0.7))
+    mounted.update(
+        {
+            "category_norm": category,
+            "object_type": "wall_mounted",
+            "metadata": {"semantic_name": "mounted_media_endpoint"},
+            "functional_hints": {"scene_object_type": "wall_mounted"},
+        }
+    )
+    selector = {"category": category, "count": 1, "quantifier": "exactly"}
+
+    assert selected_ids(selector, [mounted]) == ["mounted_media_0"]
+    assert bound_ids(selector, [mounted]) == ["mounted_media_0"]
+
+
+def test_open_vocabulary_canonical_adapter_category_binds_manipuland() -> None:
+    plush = _record("plush_toy_0", "decor", (0.0, 0.0), (0.2, 0.2, 0.2))
+    plush.update(
+        {
+            "category_norm": "plush_toy",
+            "object_type": "manipuland",
+            "metadata": {"semantic_name": "soft_bear_asset"},
+            "functional_hints": {"scene_object_type": "manipuland"},
+        }
+    )
+    selector = {"category": "plush_toy", "count": 1, "quantifier": "exactly"}
+
+    assert selected_ids(selector, [plush]) == ["plush_toy_0"]
+    assert bound_ids(selector, [plush]) == ["plush_toy_0"]
 
 
 def test_bedside_lamp_semantic_name_is_valid_for_nightstand_support() -> None:
@@ -3632,9 +3667,7 @@ def test_enabled_hook_runner_retains_normalized_critic_config(
         scene_id=0,
         output_dir=tmp_path,
         cfg_dict={
-            "experiment": {
-                "scene_expert": {"enabled": True, "mode": "harness_only"}
-            },
+            "experiment": {"scene_expert": {"enabled": True, "mode": "harness_only"}},
             "furniture_agent": {"openai": {"model": "test-model"}},
             "scenebenchmark_critic": {
                 "enabled": True,

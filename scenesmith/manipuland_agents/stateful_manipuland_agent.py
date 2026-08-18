@@ -55,6 +55,7 @@ from scenesmith.agent_utils.support_surface_extraction import (
 from scenesmith.agent_utils.workflow_tools import WorkflowTools
 from scenesmith.manipuland_agents.base_manipuland_agent import BaseManipulandAgent
 from scenesmith.manipuland_agents.cross_stage_inventory import (
+    contract_manipuland_support_cohorts,
     existing_floor_covering_ids,
     is_floor_target,
     is_single_explicit_required_category_request,
@@ -750,7 +751,7 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
         return hard_state
 
     def _current_target_cardinality_failures(self) -> list[str]:
-        """Return hard exact-count failures uniquely owned by this furniture target."""
+        """Return hard count/support failures owned by this furniture target."""
         furniture_id = str(getattr(self, "current_furniture_id", "") or "")
         if not furniture_id or getattr(self, "scene", None) is None:
             return []
@@ -763,14 +764,50 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
             if isinstance(item, dict) and item.get("id")
         ]
         failures: list[str] = []
+        scene_objects = getattr(self.scene, "objects", {}) or {}
+        object_by_id = (
+            {str(object_id): obj for object_id, obj in scene_objects.items()}
+            if isinstance(scene_objects, dict)
+            else {}
+        )
+        target = object_by_id.get(furniture_id)
+        support_surface_ids = {
+            str(surface.surface_id)
+            for surface in getattr(target, "support_surfaces", []) or []
+            if getattr(surface, "surface_id", None)
+        }
+        support_cohorts = contract_manipuland_support_cohorts(self.scene)
+        for cohort in support_cohorts:
+            if cohort.target_id != furniture_id:
+                continue
+            subject_ids = selected_ids(cohort.subject_selector, objects)
+            observed_ids = []
+            for subject_id in subject_ids:
+                subject = object_by_id.get(str(subject_id))
+                placement = getattr(subject, "placement_info", None)
+                if (
+                    placement is not None
+                    and str(placement.parent_surface_id) in support_surface_ids
+                ):
+                    observed_ids.append(str(subject_id))
+            if len(observed_ids) < cohort.required_count:
+                failures.append(
+                    "support_capacity_or_wrong_support: prompt-required "
+                    f"{cohort.category} cohort {cohort.constraint_id} on "
+                    f"{furniture_id} requires {cohort.required_count} distinct "
+                    f"supported instance(s), found {len(observed_ids)}"
+                )
+
         for constraint in intent_contract_constraints_for_scene(self.scene):
             if not isinstance(constraint, dict):
                 continue
             subjects = constraint.get("subjects") or {}
             targets = constraint.get("targets") or {}
+            relation = str(constraint.get("relation") or "")
             if (
                 str(constraint.get("stage") or "") != "manipuland"
                 or not is_hard_constraint(constraint)
+                or (relation in {"on_top_of", "one_per_support"} and support_cohorts)
                 or str(subjects.get("quantifier") or "") != "exactly"
                 or not targets
             ):
@@ -1904,6 +1941,10 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
 
         # Phase 1: Initial analysis - identify which furniture to populate.
         furniture_data = await self._analyze_furniture_for_placement(scene)
+        furniture_data = self._recover_contract_required_manipuland_targets(
+            scene=scene,
+            furniture_data=furniture_data,
+        )
         furniture_data = self._recover_prompt_required_manipuland_targets(
             scene=scene,
             furniture_data=furniture_data,
@@ -2428,6 +2469,85 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
                     "Recovered prompt-required manipuland target omitted by VLM: %s (%s)",
                     obj.object_id,
                     obligation.category,
+                )
+        return recovered
+
+    def _recover_contract_required_manipuland_targets(
+        self,
+        *,
+        scene: RoomScene,
+        furniture_data: list[FurnitureSelection],
+    ) -> list[FurnitureSelection]:
+        """Recover support targets directly from the compiled hard contract."""
+        recovered = list(furniture_data)
+        by_target = {str(selection.furniture_id): selection for selection in recovered}
+        for cohort in contract_manipuland_support_cohorts(scene):
+            selection = by_target.get(cohort.target_id)
+            target_object = next(
+                (
+                    obj
+                    for object_id, obj in scene.objects.items()
+                    if str(object_id) == cohort.target_id
+                ),
+                None,
+            )
+            if target_object is None:
+                continue
+            count_word = (
+                "exactly" if cohort.quantifier in {"exactly", "exact"} else "at least"
+            )
+            category_label = cohort.category.replace("_", " ")
+            inventory_line = (
+                f"REQUIRED CONTRACT COHORT {cohort.constraint_id}: place {count_word} "
+                f"{cohort.required_count} distinct {category_label} instance(s) on "
+                f"{cohort.target_id}. This target owns its share of "
+                f"{cohort.cohort_total} across {', '.join(cohort.target_ids)}."
+            )
+            constraint_line = (
+                f"Contract relation {cohort.relation}: every counted {category_label} "
+                "must be placed on a verified support surface of this exact target. "
+                "For repeated identical items, generate or retrieve one reusable asset "
+                "template and call place_manipuland_on_surface separately for each "
+                "instance. If the verified surfaces cannot fit the required distinct "
+                "instances without overlap, stop with a support_capacity failure."
+            )
+            if selection is None:
+                selection = FurnitureSelection(
+                    furniture_id=next(
+                        object_id
+                        for object_id in scene.objects
+                        if str(object_id) == cohort.target_id
+                    ),
+                    suggested_items=inventory_line,
+                    prompt_constraints=constraint_line,
+                    style_notes="Preserve hard count and support provenance.",
+                    context_furniture_ids=[
+                        object_id
+                        for object_id in scene.objects
+                        if str(object_id) in set(cohort.target_ids)
+                        and str(object_id) != cohort.target_id
+                    ],
+                    is_prompt_required=True,
+                )
+                recovered.append(selection)
+                by_target[cohort.target_id] = selection
+                console_logger.warning(
+                    "Recovered contract-required manipuland target omitted by VLM: %s",
+                    cohort.target_id,
+                )
+                continue
+            selection.is_prompt_required = True
+            if inventory_line not in (selection.suggested_items or ""):
+                selection.suggested_items = "\n".join(
+                    value
+                    for value in (selection.suggested_items, inventory_line)
+                    if value
+                )
+            if constraint_line not in (selection.prompt_constraints or ""):
+                selection.prompt_constraints = "\n".join(
+                    value
+                    for value in (selection.prompt_constraints, constraint_line)
+                    if value
                 )
         return recovered
 
