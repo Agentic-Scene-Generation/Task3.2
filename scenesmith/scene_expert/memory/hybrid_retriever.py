@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import time
@@ -23,6 +24,7 @@ from scenesmith.scene_expert.memory.scoring import (
     task_required_objects,
 )
 from scenesmith.scene_expert.memory.store import FastMemoryStore
+from scenesmith.scene_expert.memory.text_builder import build_embedding_text
 from scenesmith.scene_expert.schemas import MemoryPack, SceneTaskSpec
 
 console_logger = logging.getLogger(__name__)
@@ -48,6 +50,7 @@ class HybridMemoryRetriever:
         require_indexes: bool = True,
         auto_build_indexes: bool = False,
         timing_path: str | Path | None = None,
+        exclude_source_task_id: str = "",
     ) -> None:
         self._store = store
         self._memory_dir = Path(memory_dir)
@@ -64,13 +67,32 @@ class HybridMemoryRetriever:
         self._timing_path = Path(timing_path) if timing_path else None
         self._require_indexes = require_indexes
         self._auto_build_indexes = auto_build_indexes
+        self._exclude_source_task_id = str(exclude_source_task_id or "")
 
         if require_indexes:
             self._ensure_required_indexes()
 
     def retrieve(self, task_spec: SceneTaskSpec, stage: str) -> MemoryPack:
         total_start = time.perf_counter()
+        if self._store.refresh_if_changed():
+            self._index_cache.clear()
         query_text = build_query_text(task_spec, stage)
+        if not self._has_active_stage_records(stage):
+            total_sec = time.perf_counter() - total_start
+            self._record_timing(
+                stage=stage,
+                query_text=query_text,
+                embedding_encode_sec=0.0,
+                bank_timings=[],
+                success_count=0,
+                failure_count=0,
+                skill_count=0,
+                total_sec=total_sec,
+            )
+            return MemoryPack(
+                memory_bank_id=self._store.bank_id,
+                memory_bank_revision=self._store.revision,
+            )
         encode_start = time.perf_counter()
         query_vec = self._embedder.encode([query_text])
         embedding_encode_sec = time.perf_counter() - encode_start
@@ -156,7 +178,20 @@ class HybridMemoryRetriever:
             skill_names=[
                 record.skill_name for _, record in skills if isinstance(record, Skill)
             ],
+            memory_bank_id=self._store.bank_id,
+            memory_bank_revision=self._store.revision,
         ).deduplicated()
+
+    def _has_active_stage_records(self, stage: str) -> bool:
+        return any(
+            record.stage == stage
+            for records in (
+                self._store.active_success_cases,
+                self._store.active_failure_cases,
+                self._store.active_skills,
+            )
+            for record in records
+        )
 
     def _retrieve_bank(
         self,
@@ -177,6 +212,7 @@ class HybridMemoryRetriever:
             "below_threshold_count": 0,
             "stale_count": 0,
             "structured_filtered_count": 0,
+            "same_task_filtered_count": 0,
             "accepted_count": 0,
             "returned_count": 0,
             "index_load_sec": 0.0,
@@ -210,6 +246,9 @@ class HybridMemoryRetriever:
             if record is None:
                 bank_timing["stale_count"] += 1
                 continue
+            if self._same_task(record):
+                bank_timing["same_task_filtered_count"] += 1
+                continue
             if not self._structured_filter(record, task_spec, stage, memory_type):
                 bank_timing["structured_filtered_count"] += 1
                 continue
@@ -230,6 +269,15 @@ class HybridMemoryRetriever:
         bank_timing["returned_count"] = len(output)
         bank_timings.append(bank_timing)
         return output
+
+    def _same_task(self, record: MemoryRecord) -> bool:
+        if not self._exclude_source_task_id:
+            return False
+        task_ids = list(record.source_task_ids)
+        if record.source_task_id:
+            task_ids.append(record.source_task_id)
+        known_task_ids = {value for value in task_ids if value}
+        return known_task_ids == {self._exclude_source_task_id}
 
     def _structured_filter(
         self,
@@ -343,17 +391,17 @@ class HybridMemoryRetriever:
         stage: str,
     ) -> list[MemoryRecord]:
         if memory_type == "success":
-            records: list[MemoryRecord] = self._store.success_cases
+            records: list[MemoryRecord] = self._store.active_success_cases
         elif memory_type == "failure":
-            records = self._store.failure_cases
+            records = self._store.active_failure_cases
         elif memory_type == "skill":
-            records = self._store.skills
+            records = self._store.active_skills
         else:
             raise ValueError(f"Unknown memory type: {memory_type}")
         return [record for record in records if record.stage == stage]
 
-    @staticmethod
     def _index_matches_records(
+        self,
         index: NumpyMemoryIndex,
         records: list[MemoryRecord],
     ) -> bool:
@@ -361,7 +409,29 @@ class HybridMemoryRetriever:
             index.load()
         indexed_ids = [str(item.get("memory_id", "")) for item in index.metadata]
         record_ids = [_record_id(record) for record in records]
-        return indexed_ids == record_ids
+        if indexed_ids != record_ids:
+            return False
+        manifest = index.manifest or {}
+        indexed_bank_id = str(manifest.get("memory_bank_id", ""))
+        indexed_revision = manifest.get("memory_bank_revision")
+        indexed_type_revision = manifest.get("memory_type_revision")
+        indexed_fingerprint = str(manifest.get("records_fingerprint", ""))
+        if indexed_bank_id and indexed_bank_id != self._store.bank_id:
+            return False
+        if isinstance(indexed_type_revision, int):
+            memory_type = str(manifest.get("memory_type", ""))
+            current_type_revision = int(
+                (self._store.manifest.get("bank_revisions", {}) or {}).get(
+                    memory_type, self._store.revision
+                )
+            )
+            if indexed_type_revision != current_type_revision:
+                return False
+        elif isinstance(indexed_revision, int) and indexed_revision != self._store.revision:
+            return False
+        if indexed_fingerprint and indexed_fingerprint != _records_fingerprint(records):
+            return False
+        return True
 
     def _build_runtime_index_if_enabled(
         self,
@@ -402,11 +472,11 @@ class HybridMemoryRetriever:
     ) -> MemoryRecord | None:
         records: list[MemoryRecord]
         if memory_type == "success":
-            records = self._store.success_cases
+            records = self._store.active_success_cases
         elif memory_type == "failure":
-            records = self._store.failure_cases
+            records = self._store.active_failure_cases
         elif memory_type == "skill":
-            records = self._store.skills
+            records = self._store.active_skills
         else:
             return None
 
@@ -430,9 +500,9 @@ class HybridMemoryRetriever:
     def _missing_required_indexes(self) -> list[tuple[str, str]]:
         missing_keys: list[tuple[str, str]] = []
         for memory_type, records in (
-            ("success", self._store.success_cases),
-            ("failure", self._store.failure_cases),
-            ("skill", self._store.skills),
+            ("success", self._store.active_success_cases),
+            ("failure", self._store.active_failure_cases),
+            ("skill", self._store.active_skills),
         ):
             for stage in sorted({record.stage for record in records}):
                 index = NumpyMemoryIndex.for_bank(self._index_dir, memory_type, stage)
@@ -515,6 +585,8 @@ class HybridMemoryRetriever:
             "retriever_type": "hybrid",
             "memory_dir": str(self._memory_dir),
             "index_dir": str(self._index_dir),
+            "memory_bank_id": self._store.bank_id,
+            "memory_bank_revision": self._store.revision,
             "query_text": query_text,
             "embedding_encode_sec": round(embedding_encode_sec, 6),
             "index_load_sec": round(index_load_sec, 6),
@@ -563,6 +635,22 @@ def _record_id(record: MemoryRecord) -> str:
     if isinstance(record, FailureCase):
         return record.failure_id
     return record.skill_name
+
+
+def _records_fingerprint(records: list[MemoryRecord]) -> str:
+    payload = [
+        {
+            "memory_id": _record_id(record),
+            "status": record.status,
+            "embedding_text": record.embedding_text or build_embedding_text(record),
+            "quality_score": record.quality_score,
+            "confidence": record.confidence,
+        }
+        for record in records
+    ]
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
 
 
 def build_query_text(task_spec: SceneTaskSpec, stage: str) -> str:

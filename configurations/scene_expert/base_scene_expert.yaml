@@ -48,8 +48,8 @@ components:
     source: "scenebenchmark_critic"
   trace:
     enabled: null
-  # Bounded JSON-schema transport for TaskCompiler and GlobalPlanner. The
-  # memory writer keeps its own conservative fallback and quality gates.
+  # Bounded JSON-schema transport for TaskCompiler, GlobalPlanner, and
+  # MemoryWriter. A failed writer call is auditable and performs no write.
   structured_llm:
     enabled: false
 
@@ -113,6 +113,12 @@ memory:
     recall_top_k: ${oc.env:SCENEEXPERT_MEMORY_RECALL_TOP_K,30}
     sim_threshold: ${oc.env:SCENEEXPERT_MEMORY_SIM_THRESHOLD,0.0}
     object_overlap_threshold: ${oc.env:SCENEEXPERT_MEMORY_OBJECT_OVERLAP_THRESHOLD,0.15}
+    # Prevent an identical prompt from retrieving its own earlier output. This
+    # makes 4c evidence genuinely cross-task rather than replay leakage.
+    exclude_same_task: ${oc.env:SCENEEXPERT_MEMORY_EXCLUDE_SAME_TASK,true}
+  writer:
+    # Success memory requires both final/stage pass evidence and this score.
+    success_min_overall_score: ${oc.env:SCENEEXPERT_MEMORY_SUCCESS_MIN_SCORE,0.75}
   embedding:
     model_id: "${oc.env:SCENEEXPERT_MEMORY_EMBEDDING_MODEL_ID,BAAI/bge-m3}"
     # Actual local loading path. Keep BGE-M3 directly under models_dir/bge-m3.

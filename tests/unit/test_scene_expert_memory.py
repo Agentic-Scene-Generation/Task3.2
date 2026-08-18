@@ -1195,7 +1195,7 @@ class SceneExpertMemoryTest(unittest.TestCase):
         self.assertEqual("stage", failure.content["scope"])
         self.assertTrue(failure.content["embedding_text"])
 
-    def test_memory_writer_builds_conservative_fallback_success_ops(self) -> None:
+    def test_memory_writer_never_builds_retrievable_fallback_success(self) -> None:
         writer = MemoryWriter.__new__(MemoryWriter)
         trace_summary = "\n".join(
             [
@@ -1209,16 +1209,7 @@ class SceneExpertMemoryTest(unittest.TestCase):
         full_report = FullVerifyReport(overall_score=0.8, pass_scene=True)
 
         ops = writer._fallback_success_ops(trace_summary, full_report)
-        filtered = writer._gate_and_enrich_ops(ops, full_report)
-
-        self.assertEqual(1, len(filtered))
-        op = filtered[0]
-        self.assertEqual("ADD", op.op)
-        self.assertEqual("success_case", op.memory_type)
-        self.assertEqual("furniture", op.content["stage"])
-        self.assertEqual("bedroom", op.content["room_type"])
-        self.assertIn("bed", op.content["required_objects"])
-        self.assertTrue(op.content["embedding_text"])
+        self.assertEqual([], ops)
 
     def test_embedding_model_dir_resolves_to_bge_m3_under_models_dir(self) -> None:
         with patch.dict(
@@ -1339,6 +1330,7 @@ class SceneExpertMemoryTest(unittest.TestCase):
                 str(Path("/models/bge-m3")),
                 index.manifest["embedding_model_dir"],
             )
+            self.assertTrue(index.manifest["records_fingerprint"])
 
     def test_hybrid_retriever_strict_mode_fails_on_missing_index(self) -> None:
         class DummyEmbedder:

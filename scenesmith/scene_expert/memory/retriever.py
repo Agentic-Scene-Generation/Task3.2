@@ -131,14 +131,26 @@ class MemoryRetriever:
         max_success: int = 3,
         max_failure: int = 3,
         max_skills: int = 2,
+        exclude_source_task_id: str = "",
     ) -> None:
         self._store = store
         self._max_success = max_success
         self._max_failure = max_failure
         self._max_skills = max_skills
+        self._exclude_source_task_id = str(exclude_source_task_id or "")
+
+    def _same_task(self, record: SuccessCase | FailureCase | Skill) -> bool:
+        if not self._exclude_source_task_id:
+            return False
+        task_ids = list(record.source_task_ids)
+        if record.source_task_id:
+            task_ids.append(record.source_task_id)
+        known_task_ids = {value for value in task_ids if value}
+        return known_task_ids == {self._exclude_source_task_id}
 
     def retrieve(self, task_spec: SceneTaskSpec, stage: str) -> MemoryPack:
         """Retrieve and format memory for injection into a StageBrief."""
+        self._store.refresh_if_changed()
         query_tokens = _build_query_tokens(task_spec, stage)
 
         success_hints, placement_reference, success_ids = self._retrieve_success(
@@ -157,6 +169,8 @@ class MemoryRetriever:
             success_case_ids=success_ids,
             failure_case_ids=failure_ids,
             skill_names=skill_names,
+            memory_bank_id=self._store.bank_id,
+            memory_bank_revision=self._store.revision,
         ).deduplicated()
 
     def _retrieve_success(
@@ -170,7 +184,9 @@ class MemoryRetriever:
         """
         scored: list[tuple[float, SuccessCase]] = []
         required_tokens = _stage_required_object_tokens(task_spec, stage)
-        for case in self._store.success_cases:
+        for case in self._store.active_success_cases:
+            if self._same_task(case):
+                continue
             if case.stage != stage or not _room_type_matches(
                 case.room_type, task_spec.room_type
             ):
@@ -208,7 +224,9 @@ class MemoryRetriever:
     ) -> tuple[list[str], list[str]]:
         scored: list[tuple[float, FailureCase]] = []
         task_object_tokens = _stage_required_object_tokens(task_spec, stage)
-        for case in self._store.failure_cases:
+        for case in self._store.active_failure_cases:
+            if self._same_task(case):
+                continue
             if case.stage != stage or not _room_type_matches(
                 case.room_type, task_spec.room_type
             ):
@@ -237,7 +255,9 @@ class MemoryRetriever:
         self, task_spec: SceneTaskSpec, stage: str, query_tokens: set[str]
     ) -> tuple[list[str], list[str]]:
         scored: list[tuple[float, Skill]] = []
-        for skill in self._store.skills:
+        for skill in self._store.active_skills:
+            if self._same_task(skill):
+                continue
             if skill.stage != stage:
                 continue
             skill_rooms = list(skill.room_types)

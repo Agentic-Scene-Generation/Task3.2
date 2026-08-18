@@ -23,7 +23,11 @@ class _DummyEmbedder:
     batch_size = 8
     max_length = 512
 
+    def __init__(self) -> None:
+        self.encode_calls = 0
+
     def encode(self, texts: list[str]) -> np.ndarray:
+        self.encode_calls += 1
         return np.asarray([[1.0, 0.0] for _ in texts], dtype=np.float32)
 
 
@@ -40,10 +44,11 @@ class HybridMemoryIndexLifecycleTest(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             memory_dir = Path(tmp) / "memory"
             store = FastMemoryStore(str(memory_dir))
+            embedder = _DummyEmbedder()
             retriever = HybridMemoryRetriever(
                 store=store,
                 memory_dir=str(memory_dir),
-                embedder=_DummyEmbedder(),
+                embedder=embedder,
                 require_indexes=True,
                 auto_build_indexes=True,
             )
@@ -55,15 +60,17 @@ class HybridMemoryIndexLifecycleTest(unittest.TestCase):
             self.assertEqual([], pack.success_hints)
             self.assertEqual([], pack.failure_hints)
             self.assertEqual([], pack.skill_texts)
+            self.assertEqual(0, embedder.encode_calls)
 
     def test_runtime_records_build_and_refresh_cached_index(self) -> None:
         with TemporaryDirectory() as tmp:
             memory_dir = Path(tmp) / "memory"
             store = FastMemoryStore(str(memory_dir))
+            embedder = _DummyEmbedder()
             retriever = HybridMemoryRetriever(
                 store=store,
                 memory_dir=str(memory_dir),
-                embedder=_DummyEmbedder(),
+                embedder=embedder,
                 max_success=0,
                 max_failure=2,
                 max_skills=0,
@@ -80,7 +87,8 @@ class HybridMemoryIndexLifecycleTest(unittest.TestCase):
                 ).failure_hints,
             )
 
-            store.add_failure_case(
+            external_store = FastMemoryStore(str(memory_dir))
+            external_store.add_failure_case(
                 FailureCase(
                     failure_id="failure_tv_support_001",
                     room_type="living_room",
@@ -93,10 +101,11 @@ class HybridMemoryIndexLifecycleTest(unittest.TestCase):
             )
             first_pack = retriever.retrieve(_living_room_task(), "furniture")
             self.assertEqual(1, len(first_pack.failure_hints))
+            self.assertGreater(embedder.encode_calls, 0)
 
             # A second write makes the already cached one-row index stale. The
             # next retrieval must rebuild it instead of silently hiding memory.
-            store.add_failure_case(
+            external_store.add_failure_case(
                 FailureCase(
                     failure_id="failure_tv_support_002",
                     room_type="living_room",
@@ -107,9 +116,12 @@ class HybridMemoryIndexLifecycleTest(unittest.TestCase):
                     repair_action="refresh support surfaces before placement",
                 )
             )
+            self.assertEqual(1, len(store.failure_cases))
             second_pack = retriever.retrieve(_living_room_task(), "furniture")
 
             self.assertEqual(2, len(second_pack.failure_hints))
+            self.assertEqual(external_store.revision, second_pack.memory_bank_revision)
+            self.assertEqual(external_store.bank_id, second_pack.memory_bank_id)
             index = NumpyMemoryIndex.for_bank(
                 memory_dir / "indexes",
                 "failure",

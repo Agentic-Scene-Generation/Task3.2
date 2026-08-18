@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 
+from contextlib import contextmanager
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any
@@ -75,41 +76,69 @@ class NumpyMemoryIndex:
             **(manifest or {}),
         }
 
-        self._write_npy_atomic(self.vectors_path, matrix)
-        self._write_jsonl_atomic(self.metadata_path, metadata)
-        self._write_json_atomic(self.manifest_path, payload_manifest)
+        # The three files form one logical generation. Atomic replacement of
+        # each file prevents partial bytes; this lock also prevents concurrent
+        # ACP workers from interleaving two otherwise valid generations.
+        with self._build_lock():
+            self._write_npy_atomic(self.vectors_path, matrix)
+            self._write_jsonl_atomic(self.metadata_path, metadata)
+            self._write_json_atomic(self.manifest_path, payload_manifest)
 
-        self.vectors = matrix
-        self.metadata = list(metadata)
-        self.manifest = payload_manifest
+            self.vectors = matrix
+            self.metadata = list(metadata)
+            self.manifest = payload_manifest
+
+    @contextmanager
+    def _build_lock(self):
+        lock_path = self.manifest_path.with_suffix(self.manifest_path.suffix + ".lock")
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with lock_path.open("a+") as lock_file:
+            try:
+                import fcntl
+
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            except Exception:
+                pass
+            try:
+                yield
+            finally:
+                try:
+                    import fcntl
+
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                except Exception:
+                    pass
 
     def load(self) -> None:
         """Load index files from disk."""
-        if not self.vectors_path.exists():
-            raise FileNotFoundError(f"Missing numpy index vectors: {self.vectors_path}")
-        if not self.metadata_path.exists():
-            raise FileNotFoundError(
-                f"Missing numpy index metadata: {self.metadata_path}"
-            )
+        with self._build_lock():
+            if not self.vectors_path.exists():
+                raise FileNotFoundError(
+                    f"Missing numpy index vectors: {self.vectors_path}"
+                )
+            if not self.metadata_path.exists():
+                raise FileNotFoundError(
+                    f"Missing numpy index metadata: {self.metadata_path}"
+                )
 
-        self.vectors = np.load(self.vectors_path).astype(np.float32, copy=False)
-        self.metadata = []
-        with self.metadata_path.open(encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    self.metadata.append(json.loads(line))
-        if self.vectors.shape[0] != len(self.metadata):
-            raise ValueError(
-                "Loaded vector row count does not match metadata count: "
-                f"{self.vectors.shape[0]} vs {len(self.metadata)}"
-            )
+            self.vectors = np.load(self.vectors_path).astype(np.float32, copy=False)
+            self.metadata = []
+            with self.metadata_path.open(encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        self.metadata.append(json.loads(line))
+            if self.vectors.shape[0] != len(self.metadata):
+                raise ValueError(
+                    "Loaded vector row count does not match metadata count: "
+                    f"{self.vectors.shape[0]} vs {len(self.metadata)}"
+                )
 
-        if self.manifest_path.exists():
-            with self.manifest_path.open(encoding="utf-8") as f:
-                self.manifest = json.load(f)
-        else:
-            self.manifest = {}
+            if self.manifest_path.exists():
+                with self.manifest_path.open(encoding="utf-8") as f:
+                    self.manifest = json.load(f)
+            else:
+                self.manifest = {}
 
     def search(
         self, query_vec: np.ndarray, top_k: int

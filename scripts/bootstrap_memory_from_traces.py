@@ -12,8 +12,8 @@ What it does:
     3. Applies ops to the FastMemoryStore at --memory-dir.
 
 Run this ONCE before starting ablation_4 to seed memory from ablation_3 runs.
-Idempotency: safe to re-run — Qwen3 is prompted to avoid duplicates, but
-duplicate entries may appear if traces are imported multiple times.
+Re-running is exact-signature idempotent. Because an LLM may paraphrase the same
+lesson, use --dry-run before intentionally importing the same traces again.
 """
 
 from __future__ import annotations
@@ -105,11 +105,12 @@ def _trace_to_summary(trace: dict) -> str:
 def _build_related_memory_text(store: FastMemoryStore) -> str:
     """Give the writer a snapshot of current memory to avoid near-duplicates."""
     hints: list[str] = []
-    for sc in store.success_cases[-5:]:
+    store.refresh_if_changed()
+    for sc in store.active_success_cases[-5:]:
         hints.append(sc.to_hint_text())
-    for fc in store.failure_cases[-5:]:
+    for fc in store.active_failure_cases[-5:]:
         hints.append(fc.to_hint_text())
-    for sk in store.skills[-3:]:
+    for sk in store.active_skills[-3:]:
         hints.append(f"[Skill] {sk.skill_name}")
     return "\n".join(hints) if hints else ""
 
@@ -147,6 +148,23 @@ def bootstrap(
             trace_summary=trace_summary,
             full_report=full_report,
             related_old_memory=related,
+            evidence_payload={
+                "schema_version": "sceneexpert.memory_writer_evidence.v1",
+                "trace_id": trace.get("trace_id", ""),
+                "scene_id": trace.get("scene_id", ""),
+                "run_id": (
+                    (trace.get("exports") or {}).get("scene_dir", "")
+                    or str(trace_path.parent.resolve())
+                ),
+                "experiment_name": trace.get("experiment_name", ""),
+                "config_hash": trace.get("config_hash", ""),
+                "prompt": trace.get("prompt", ""),
+                "task_spec": trace.get("task_spec", {}),
+                "stages": trace.get("stages", []),
+                "full_report": trace.get("final_report", {}),
+                "component_status": trace.get("component_status", {}),
+                "code_provenance": trace.get("code_provenance", {}),
+            },
         )
         logger.info(f"  → {len(ops)} ops from {trace_path.name}")
 

@@ -1,7 +1,7 @@
 """Build SceneExpert memory vector indexes from JSONL memory banks.
 
-This script is for PR-2 offline preparation only. The runtime hook still uses
-the lexical retriever until the hybrid retriever is introduced.
+The same builder is used for offline preparation and bounded runtime rebuilds
+when a hybrid retriever detects a missing or stale derived index.
 
 Example:
     python scripts/build_memory_index.py \
@@ -14,6 +14,8 @@ Example:
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import os
 import sys
 
@@ -74,6 +76,24 @@ def _record_id(record: SuccessCase | FailureCase | Skill) -> str:
     return record.skill_name
 
 
+def _records_fingerprint(
+    records: list[SuccessCase | FailureCase | Skill],
+) -> str:
+    payload = [
+        {
+            "memory_id": _record_id(record),
+            "status": record.status,
+            "embedding_text": record.embedding_text or build_embedding_text(record),
+            "quality_score": record.quality_score,
+            "confidence": record.confidence,
+        }
+        for record in records
+    ]
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+
+
 def _record_required_objects(record: SuccessCase | FailureCase | Skill) -> list[str]:
     if isinstance(record, SuccessCase):
         return record.required_objects or record.task_signature
@@ -97,6 +117,14 @@ def _record_metadata(
         "quality_score": getattr(record, "quality_score", 0.5),
         "confidence": getattr(record, "confidence", 0.5),
         "trace_ref": getattr(record, "trace_ref", ""),
+        "status": getattr(record, "status", "active"),
+        "source": getattr(record, "source", "legacy"),
+        "source_task_id": getattr(record, "source_task_id", ""),
+        "source_run_id": getattr(record, "source_run_id", ""),
+        "source_task_ids": getattr(record, "source_task_ids", []),
+        "source_run_ids": getattr(record, "source_run_ids", []),
+        "prompt_fingerprint": getattr(record, "prompt_fingerprint", ""),
+        "bank_version": getattr(record, "bank_version", 0),
     }
 
 
@@ -104,9 +132,9 @@ def _records_by_type(
     store: FastMemoryStore,
 ) -> dict[str, list[SuccessCase | FailureCase | Skill]]:
     return {
-        "success": store.success_cases,
-        "failure": store.failure_cases,
-        "skill": store.skills,
+        "success": store.active_success_cases,
+        "failure": store.active_failure_cases,
+        "skill": store.active_skills,
     }
 
 
@@ -195,6 +223,19 @@ def build_memory_indexes(
                 "stage": stage,
                 "normalize": True,
                 "source_files": source_files,
+                "memory_bank_id": store.bank_id,
+                "memory_bank_revision": store.revision,
+                "memory_type_revision": int(
+                    (store.manifest.get("bank_revisions", {}) or {}).get(
+                        memory_type, store.revision
+                    )
+                ),
+                "memory_record_schema_version": store.manifest.get(
+                    "record_schema_version", ""
+                ),
+                "records_fingerprint": _records_fingerprint(
+                    [record for _, record in stage_records]
+                ),
             }
             index = NumpyMemoryIndex.for_bank(index_dir, memory_type, stage)
             summary = {

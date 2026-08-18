@@ -1,10 +1,9 @@
-"""MemoryWriter: Qwen3 memory_writer role that updates fast memory after each run.
+"""Strict, evidence-gated long-term memory writer for SceneExpert.
 
-Takes a trace summary + final verifier report and produces structured memory
-update operations (ADD/UPDATE/NOOP) for the three memory banks.
-
-MVP only uses ADD, UPDATE, NOOP — DELETE is intentionally not implemented
-to avoid accidentally removing useful experience.
+The LLM only proposes compact lessons. Deterministic code owns identity, task
+metadata, critic evidence, quality gates, provenance, and promotion into the
+active memory bank. A failed or empty LLM response is a no-write outcome; it
+can never manufacture a retrievable fallback record.
 """
 
 from __future__ import annotations
@@ -16,27 +15,36 @@ import os
 import re
 import time
 
-from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
-from scenesmith.agent_utils.thinking import (
-    chat_template_kwargs_from_effort,
-    prepend_text_thinking_directive,
-    thinking_directive_from_effort,
-)
-from scenesmith.scene_expert.context_bundle import build_llm_call_debug_record
 from scenesmith.scene_expert.memory.schemas import (
     FailureCase,
+    FailureMemoryCandidate,
     MemoryUpdateOp,
+    MemoryWriterResponse,
     Skill,
+    SkillMemoryCandidate,
     SuccessCase,
+    SuccessMemoryCandidate,
 )
 from scenesmith.scene_expert.memory.text_builder import build_embedding_text
 from scenesmith.scene_expert.schemas import FullVerifyReport
+from scenesmith.scene_expert.structured_llm import (
+    SceneExpertStructuredLLMClient,
+    StructuredLLMProfile,
+)
 
 console_logger = logging.getLogger(__name__)
+
 SUCCESS_MEMORY_MIN_OVERALL_SCORE = 0.75
+_SUPPORTED_STAGES = {
+    "floor_plan",
+    "furniture",
+    "wall_mounted",
+    "ceiling_mounted",
+    "manipuland",
+}
 _DETERMINISTIC_FAILURE_KEYWORDS = (
     "deterministic",
     "missing mesh",
@@ -52,56 +60,37 @@ _DETERMINISTIC_FAILURE_KEYWORDS = (
     "asset file",
     "candidate file",
     "geometry failure",
+    "hard failure",
+    "hard constraint",
+    "missing required",
 )
-_SYSTEM_PROMPT = """\
-/think
-You are the memory_writer for SceneExpert, a 3D scene generation system.
-Your job is to analyze a completed scene generation trace and extract reusable knowledge
-to update the long-term memory system.
 
-You MUST output valid JSON in this exact format:
-{
-  "updates": [
-    {
-      "op": "ADD" | "UPDATE" | "NOOP",
-      "memory_type": "success_case" | "failure_case" | "skill",
-      "target_id": "<case_id or skill_name — only required for UPDATE>",
-      "content": { ... }
-    }
-  ]
-}
+_SYSTEM_PROMPT = """\
+You are SceneExpert's long-term memory curator.
+
+Extract only reusable lessons that are explicitly supported by the supplied
+trace and the authoritative SceneSmith/SceneBenchmark critic evidence.
 
 Rules:
-- Use "ADD" to add new memory entries.
-- Use "UPDATE" to update existing entries (must provide target_id).
-- Use "NOOP" if nothing useful to save.
-- Do NOT use "DELETE".
-- For success_case content, include: case_id, room_type, style, stage,
-  task_signature, required_objects, functional_zones, scene_summary,
-  successful_pattern, positive_guidance, scores, quality_score, confidence,
-  embedding_text, trace_ref.
-- Only add success_case entries when the final scene is clearly good. If the
-  final overall score is below 0.75, do not add success_case entries.
-- For failure_case content, include: failure_id, room_type, stage, object,
-  failure_type, bad_pattern, failure_reason, repair_action, repair_verified,
-  scope, is_deterministic, repeat_count, negative_constraint, critic_check,
-  quality_score, confidence, embedding_text, trace_ref.
-- Only add failure_case entries when a repair was verified OR the failure is
-  deterministic/repeatable, such as missing mesh, degenerate mesh, OpenCLIP
-  missing, HSSD file missing, or repeated geometry/asset loading failure.
-- For skill content, include: skill_name, stage, room_type, room_types, style,
-  required_objects, functional_zones, scene_summary, preconditions, procedure,
-  failure_avoidance, postconditions, success_rate, quality_score, confidence,
-  embedding_text, trace_ref.
-- Do not create a new skill unless the trace shows a reusable multi-step
-  procedure. Prefer NOOP over inventing a vague skill.
-- Focus on patterns that generalize to other rooms of the same type, not one-off details.
-- Extract one memory entry per distinct lesson learned. Avoid redundancy with existing memory.
+- Return the exact JSON schema supplied by the server.
+- Always return all four top-level keys using this shape:
+  {"success_cases": [{"stage": "furniture", "successful_pattern": ["..."],
+  "positive_guidance": ["..."]}], "failure_cases": [], "skills": [],
+  "noop_reason": ""}
+- stage must be one of floor_plan, furniture, wall_mounted,
+  ceiling_mounted, or manipuland.
+- Do not invent IDs, scores, object coordinates, task metadata, or provenance.
+- A success lesson must describe what transferred well, not merely that a stage passed.
+- A failure lesson is allowed only when the trace shows a verified repair or a
+  deterministic/repeatable hard failure. Never label visual opinion as deterministic.
+- A skill must contain a reusable procedure with at least two concrete steps.
+- Prefer empty arrays with a clear noop_reason over weak, duplicate, or speculative memory.
+- Keep each lesson concise and useful for a different scene with similar requirements.
 """
 
 
 class MemoryWriter:
-    """Calls Qwen3 to generate memory update operations from a completed trace."""
+    """Generate typed memory candidates and promote only evidence-backed records."""
 
     def __init__(
         self,
@@ -110,850 +99,538 @@ class MemoryWriter:
         api_key: str | None = None,
         max_tokens: int = 3072,
         retry_max_tokens: int | None = None,
-        thinking_mode: str = "high",
+        thinking_mode: str = "none",
         timeout_seconds: float = 90.0,
         temperature: float = 0.1,
+        success_min_overall_score: float = SUCCESS_MEMORY_MIN_OVERALL_SCORE,
         debug_dir: str | Path | None = None,
+        llm_client: SceneExpertStructuredLLMClient | None = None,
     ) -> None:
-        from openai import OpenAI
-
         self._model = model
-        self._max_tokens = int(
+        self._debug_dir = Path(debug_dir) if debug_dir else None
+        self._success_min_overall_score = float(success_min_overall_score)
+        max_tokens = int(
             os.environ.get("SCENEEXPERT_MEMORY_WRITER_MAX_TOKENS", max_tokens)
         )
-        default_retry_tokens = (
-            int(retry_max_tokens)
-            if retry_max_tokens is not None
-            else max(self._max_tokens, 4096)
-        )
-        self._retry_max_tokens = int(
+        retry_tokens = int(
             os.environ.get(
                 "SCENEEXPERT_MEMORY_WRITER_RETRY_MAX_TOKENS",
-                default_retry_tokens,
+                retry_max_tokens if retry_max_tokens is not None else max(max_tokens, 4096),
             )
         )
-        self._thinking_mode = str(thinking_mode or "none")
-        self._timeout_seconds = float(timeout_seconds)
-        self._temperature = temperature
-        debug_dir = debug_dir or os.environ.get("SCENEEXPERT_MEMORY_WRITER_DEBUG_DIR")
-        self._debug_dir = Path(debug_dir) if debug_dir else None
-        self._client = OpenAI(
-            base_url=api_base_url
-            or os.environ.get("OPENAI_BASE_URL", "http://localhost:8000/v1"),
-            api_key=api_key or os.environ.get("OPENAI_API_KEY", "dummy"),
+        self._profile = StructuredLLMProfile(
+            thinking_mode=str(thinking_mode or "none"),
+            max_tokens=max_tokens,
+            retry_max_tokens=retry_tokens,
+            timeout_seconds=float(timeout_seconds),
+            temperature=float(temperature),
+            max_attempts=2,
+            response_format="json_schema",
         )
-
-    def _append_llm_debug(
-        self,
-        *,
-        prompt: str,
-        output: str = "",
-        response: Any = None,
-        error: str = "",
-        label: str = "",
-    ) -> None:
-        path = os.environ.get("SCENEEXPERT_LLM_DEBUG_PATH", "")
-        if not path:
-            return
-        try:
-            record = build_llm_call_debug_record(
-                stage="memory_writer",
-                agent_role="memory_writer",
-                event=label or "write",
-                prompt=prompt,
-                output=output,
-                raw_response=response,
-                error=error,
-            )
-            debug_path = Path(path)
-            debug_path.parent.mkdir(parents=True, exist_ok=True)
-            with debug_path.open("a", encoding="utf-8", newline="\n") as f:
-                f.write(
-                    json.dumps(
-                        record.model_dump(),
-                        ensure_ascii=False,
-                        default=str,
-                    )
-                    + "\n"
-                )
-        except Exception as debug_error:
-            console_logger.warning(
-                "MemoryWriter failed to write LLM debug record: %s",
-                debug_error,
-            )
+        self._llm_client = llm_client or SceneExpertStructuredLLMClient(
+            model=model,
+            api_base_url=api_base_url,
+            api_key=api_key,
+        )
+        self.last_trace: dict[str, Any] = {
+            "success": False,
+            "source": "not_run",
+            "degraded": False,
+            "attempt_count": 0,
+        }
 
     def write(
         self,
         trace_summary: str,
         full_report: FullVerifyReport,
         related_old_memory: str = "",
+        evidence_payload: dict[str, Any] | None = None,
     ) -> list[MemoryUpdateOp]:
-        """Generate memory update operations for a completed scene run.
+        """Return active-bank mutations derived from one completed scene.
 
-        Args:
-            trace_summary: Human-readable summary of the full trace.
-            full_report: Final verifier report.
-            related_old_memory: Relevant existing memory entries (for deduplication context).
-
-        Returns:
-            List of MemoryUpdateOp to apply to the store.
+        ``evidence_payload`` is the preferred runtime contract. It contains the
+        untruncated main critic reports, repair outcomes, task spec, and trace
+        identity. ``trace_summary`` remains for human context and compatibility.
         """
+        evidence = dict(evidence_payload or {})
         user_message = self._build_user_message(
-            trace_summary, full_report, related_old_memory
+            trace_summary=trace_summary,
+            full_report=full_report,
+            related_old_memory=related_old_memory,
+            evidence_payload=evidence,
         )
-
-        attempt_logs: list[dict[str, Any]] = []
-        attempts = (
-            ("json_mode", True, self._max_tokens, self._thinking_mode),
-            ("plain_json_retry", False, self._retry_max_tokens, "none"),
+        result = self._llm_client.complete(
+            role="memory_writer",
+            stage="full_scene",
+            event="write_long_term_memory",
+            messages=[
+                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "user", "content": user_message},
+            ],
+            response_model=MemoryWriterResponse,
+            profile=self._profile,
         )
-        for attempt_index, (
-            label,
-            use_response_format,
-            max_tokens,
-            thinking_effort,
-        ) in enumerate(attempts):
-            attempt_log = {
-                "label": label,
-                "use_response_format": use_response_format,
-                "max_tokens": max_tokens,
-                "thinking_effort": thinking_effort,
-            }
-            response = None
-            content = ""
-            reasoning = ""
-            try:
-                response = self._request_completion(
-                    user_message=user_message,
-                    use_response_format=use_response_format,
-                    max_tokens=max_tokens,
-                    thinking_effort=thinking_effort,
-                )
-                content, reasoning = self._extract_response_parts(response)
-                attempt_log.update(
-                    {
-                        "finish_reason": self._response_finish_reason(response),
-                        "content_present": bool(content),
-                        "content_excerpt": self._compact_text(content, 4000),
-                        "reasoning_present": bool(reasoning),
-                        "reasoning_excerpt": self._compact_text(reasoning, 4000),
-                        "response_snapshot": self._response_snapshot(response),
-                    }
-                )
-                self._append_llm_debug(
-                    prompt=user_message,
-                    output=content,
-                    response=response,
-                    label=label,
-                )
-                if not content:
-                    response_kind = "reasoning-only" if reasoning else "empty"
-                    raise ValueError(
-                        f"Qwen/vLLM returned a {response_kind} response; final "
-                        "assistant content is empty. "
-                        f"finish_reason={attempt_log['finish_reason']!r}"
-                    )
+        self.last_trace = result.status_dict()
 
-                try:
-                    data = self._parse_json_payload(content)
-                except ValueError as parse_error:
-                    if attempt_log["finish_reason"] == "length":
-                        raise ValueError(
-                            "Model exhausted max_tokens before completing the "
-                            f"memory JSON object: {parse_error}"
-                        ) from parse_error
-                    raise
-                attempt_log["parsed_keys"] = sorted(data.keys())
-                attempt_logs.append(attempt_log)
-                console_logger.debug("MemoryWriter final content: %s", content)
-            except Exception as e:
-                self._append_llm_debug(
-                    prompt=user_message,
-                    output=content,
-                    response=response,
-                    error=f"{type(e).__name__}: {e}",
-                    label=label,
-                )
-                attempt_log["error"] = f"{type(e).__name__}: {e}"
-                attempt_logs.append(attempt_log)
-                if attempt_index + 1 < len(attempts):
-                    console_logger.info(
-                        "MemoryWriter attempt %s was unusable; retrying with "
-                        "thinking disabled: %s",
-                        label,
-                        e,
-                    )
-                else:
-                    console_logger.warning(
-                        "MemoryWriter attempt %s failed: %s", label, e
-                    )
-                continue
-
-            try:
-                ops = [
-                    MemoryUpdateOp.model_validate(self._normalize_update_op(op))
-                    for op in data.get("updates", [])
-                ]
-                ops = self._gate_and_enrich_ops(ops, full_report)
-            except Exception as e:
-                attempt_log["error"] = f"{type(e).__name__}: {e}"
-                console_logger.warning(
-                    "MemoryWriter attempt %s returned invalid update ops: %s",
-                    label,
-                    e,
-                )
-                continue
-
-            if self._has_mutating_ops(ops) or not self._should_build_fallback(
-                full_report
-            ):
-                self._save_recovery_debug_if_needed(
-                    attempts=attempt_logs,
-                    trace_summary=trace_summary,
-                    full_report=full_report,
-                    result_ops=ops,
-                )
-                console_logger.info(
-                    "MemoryWriter: %d update ops generated via %s",
-                    len(ops),
-                    label,
-                )
-                return ops
-
-            fallback_ops = self._fallback_success_ops(trace_summary, full_report)
-            fallback_ops = self._gate_and_enrich_ops(fallback_ops, full_report)
-            if self._has_mutating_ops(fallback_ops):
-                self._save_debug_payload(
-                    status="fallback_after_empty_ops",
-                    attempts=attempt_logs,
-                    trace_summary=trace_summary,
-                    full_report=full_report,
-                    fallback_ops=fallback_ops,
-                )
-                console_logger.warning(
-                    "MemoryWriter produced no mutating ops for a passed scene; "
-                    "using %d conservative fallback success ops.",
-                    len(fallback_ops),
-                )
-                return fallback_ops
-
-            console_logger.info(
-                "MemoryWriter: %d non-mutating update ops generated via %s",
-                len(ops),
-                label,
+        if not result.success or result.value is None:
+            self.last_trace.update(
+                {
+                    "structured_call_source": self.last_trace.get("source", ""),
+                    "source": "no_write",
+                    "write_status": "model_failure_no_write",
+                    "promoted_count": 0,
+                    "fallback_written": False,
+                }
             )
-            self._save_recovery_debug_if_needed(
-                attempts=attempt_logs,
+            self._save_debug_payload(
+                status="model_failure_no_write",
+                result_status=self.last_trace,
                 trace_summary=trace_summary,
                 full_report=full_report,
-                result_ops=ops,
+                evidence_payload=evidence,
+                response=None,
+                result_ops=[],
             )
-            return ops
-
-        fallback_ops = self._fallback_success_ops(trace_summary, full_report)
-        fallback_ops = self._gate_and_enrich_ops(fallback_ops, full_report)
-        self._save_debug_payload(
-            status="fallback_after_failed_attempts",
-            attempts=attempt_logs,
-            trace_summary=trace_summary,
-            full_report=full_report,
-            fallback_ops=fallback_ops,
-        )
-        if self._has_mutating_ops(fallback_ops):
             console_logger.warning(
-                "MemoryWriter model output was unusable; using %d conservative "
-                "fallback success ops.",
-                len(fallback_ops),
+                "MemoryWriter structured output failed after %d attempts; "
+                "the active memory bank was not modified: %s",
+                len(result.attempts),
+                result.final_error or result.final_error_kind,
             )
-            return fallback_ops
-
-        console_logger.warning(
-            "MemoryWriter failed and no fallback memory passed quality gates; "
-            "skipping memory update."
-        )
-        return []
-
-    def _request_completion(
-        self,
-        user_message: str,
-        use_response_format: bool,
-        *,
-        max_tokens: int | None = None,
-        thinking_effort: str | None = None,
-    ):
-        """Call the OpenAI-compatible server with a Qwen-tolerant retry mode."""
-        active_effort = str(thinking_effort or self._thinking_mode or "none")
-        system_prompt = prepend_text_thinking_directive(
-            _SYSTEM_PROMPT,
-            thinking_directive_from_effort(active_effort, model=self._model),
-        )
-        if use_response_format:
-            prompt = user_message
-        else:
-            system_prompt = (
-                system_prompt
-                + "\nReturn ONLY one JSON object. Do not include markdown fences, "
-                "reasoning text, comments, or XML/tool tags."
-            )
-            prompt = (
-                user_message + "\n\nReturn ONLY this JSON shape now:\n"
-                '{"updates":[{"op":"ADD|UPDATE|NOOP","memory_type":'
-                '"success_case|failure_case|skill","target_id":"","content":{}}]}'
-            )
-
-        client = self._client
-        if hasattr(client, "with_options"):
-            client = client.with_options(
-                timeout=self._timeout_seconds,
-                max_retries=0,
-            )
-        kwargs: dict[str, Any] = {
-            "model": self._model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": prompt},
-            ],
-            "temperature": self._temperature,
-            "max_tokens": int(max_tokens or self._max_tokens),
-            "extra_body": chat_template_kwargs_from_effort(
-                active_effort,
-                model=self._model,
-            ),
-        }
-        if use_response_format:
-            kwargs["response_format"] = {"type": "json_object"}
-        return client.chat.completions.create(**kwargs)
-
-    def _extract_response_text(self, response: Any) -> str:
-        """Extract final assistant content without treating reasoning as JSON."""
-        content, _ = self._extract_response_parts(response)
-        return content
-
-    def _extract_response_parts(self, response: Any) -> tuple[str, str]:
-        """Return final content and reasoning as separate response channels."""
-        choices = getattr(response, "choices", None) or []
-        if not choices:
-            return "", ""
-
-        message = getattr(choices[0], "message", None)
-        content_candidates: list[Any] = []
-        reasoning_candidates: list[Any] = []
-        if message is not None:
-            content_candidates.extend(
-                [
-                    getattr(message, "content", None),
-                    getattr(message, "text", None),
-                    getattr(message, "refusal", None),
-                ]
-            )
-            reasoning_candidates.extend(
-                [
-                    getattr(message, "reasoning_content", None),
-                    getattr(message, "reasoning", None),
-                ]
-            )
-            dump = self._model_dump(message)
-            if isinstance(dump, dict):
-                content_candidates.extend(
-                    [
-                        dump.get("content"),
-                        dump.get("text"),
-                        dump.get("refusal"),
-                    ]
-                )
-                reasoning_candidates.extend(
-                    [dump.get("reasoning_content"), dump.get("reasoning")]
-                )
-                extra = dump.get("model_extra")
-                if isinstance(extra, dict):
-                    content_candidates.extend(
-                        [
-                            extra.get("content"),
-                            extra.get("text"),
-                        ]
-                    )
-                    reasoning_candidates.extend(
-                        [
-                            extra.get("reasoning_content"),
-                            extra.get("reasoning"),
-                        ]
-                    )
-
-        content = self._first_response_text(content_candidates)
-        reasoning = self._first_response_text(reasoning_candidates)
-        return content, reasoning
-
-    def _first_response_text(self, candidates: list[Any]) -> str:
-        for candidate in candidates:
-            text = self._stringify_content(candidate)
-            if text:
-                return text
-        return ""
-
-    def _stringify_content(self, value: Any) -> str:
-        if value is None:
-            return ""
-        if isinstance(value, str):
-            return value.strip()
-        if isinstance(value, list):
-            parts: list[str] = []
-            for item in value:
-                if isinstance(item, dict):
-                    text = item.get("text") or item.get("content")
-                    if text:
-                        parts.append(str(text))
-                elif item is not None:
-                    parts.append(str(item))
-            return "\n".join(part for part in parts if part).strip()
-        if isinstance(value, dict):
-            for key in ("text", "content"):
-                if value.get(key):
-                    return str(value[key]).strip()
-        return str(value).strip()
-
-    def _parse_json_payload(self, raw: str) -> dict:
-        """Parse JSON even when a local model wraps it in prose or fences."""
-        text = re.sub(
-            r"<(?:think|analysis)>.*?</(?:think|analysis)>",
-            "",
-            raw,
-            flags=re.IGNORECASE | re.DOTALL,
-        ).strip()
-        text = re.sub(r"```(?:json)?\s*", "", text, flags=re.IGNORECASE)
-        text = text.replace("```", "").strip()
-
-        try:
-            parsed = json.loads(text)
-        except json.JSONDecodeError:
-            parsed = None
-            for candidate in self._iter_json_objects(text):
-                try:
-                    value = json.loads(candidate)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(value, dict) and isinstance(value.get("updates"), list):
-                    parsed = value
-                    break
-            if parsed is None:
-                raise ValueError(
-                    "No complete JSON object with an 'updates' list found in "
-                    "model output"
-                )
-
-        if not isinstance(parsed, dict):
-            raise ValueError(f"MemoryWriter expected JSON object, got {type(parsed)}")
-        if "updates" not in parsed:
-            raise ValueError("MemoryWriter JSON object is missing 'updates'")
-        if not isinstance(parsed["updates"], list):
-            raise ValueError("MemoryWriter JSON 'updates' must be a list")
-        return parsed
-
-    def _extract_first_json_object(self, text: str) -> str:
-        """Return the first balanced JSON object for backward compatibility."""
-        for candidate in self._iter_json_objects(text):
-            return candidate
-        if "{" not in text:
-            raise ValueError("No JSON object start found in model output")
-        raise ValueError("No complete JSON object found in model output")
-
-    def _iter_json_objects(self, text: str) -> Iterator[str]:
-        """Yield decodable JSON objects, skipping malformed leading fragments."""
-        decoder = json.JSONDecoder()
-        for index, char in enumerate(text):
-            if char != "{":
-                continue
-            try:
-                _, end = decoder.raw_decode(text[index:])
-            except json.JSONDecodeError:
-                continue
-            yield text[index : index + end]
-
-    def _has_mutating_ops(self, ops: list[MemoryUpdateOp]) -> bool:
-        return any(op.op in ("ADD", "UPDATE") for op in ops)
-
-    @staticmethod
-    def _normalize_update_op(raw_op: Any) -> dict[str, Any]:
-        """Normalize common local-model JSON nulls before schema validation."""
-        if not isinstance(raw_op, dict):
-            raise TypeError(
-                f"Memory update must be an object, got {type(raw_op).__name__}"
-            )
-        op = dict(raw_op)
-        if op.get("content") is None:
-            op["content"] = {}
-        if op.get("target_id") is None:
-            op["target_id"] = ""
-        return op
-
-    def _should_build_fallback(self, full_report: FullVerifyReport) -> bool:
-        return (
-            bool(full_report.pass_scene)
-            and full_report.overall_score >= SUCCESS_MEMORY_MIN_OVERALL_SCORE
-        )
-
-    def _fallback_success_ops(
-        self,
-        trace_summary: str,
-        full_report: FullVerifyReport,
-    ) -> list[MemoryUpdateOp]:
-        """Build conservative success cases when the model response is unusable."""
-        if not self._should_build_fallback(full_report):
             return []
 
-        trace_id = self._extract_trace_id(trace_summary)
-        prompt = self._extract_prompt(trace_summary)
-        room_type = self._infer_room_type(trace_summary)
-        required_objects = self._infer_required_objects(trace_summary)
-        stages = self._extract_passed_stage_scores(trace_summary)
-        if not stages:
-            stages = [("furniture", {"overall": full_report.overall_score})]
-
-        ops: list[MemoryUpdateOp] = []
-        created_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        for stage, scores in stages:
-            digest = hashlib.sha1(
-                f"{trace_id}|{stage}|{prompt}|{scores}".encode("utf-8")
-            ).hexdigest()[:12]
-            content = {
-                "case_id": f"success_{room_type}_{stage}_{digest}",
-                "room_type": room_type,
-                "style": "standard",
-                "stage": stage,
-                "task_signature": required_objects or [room_type, stage],
-                "required_objects": required_objects,
-                "functional_zones": [],
-                "scene_summary": (
-                    "Conservative fallback memory generated from a completed "
-                    "SceneExpert trace because the LLM memory-writer response was "
-                    "not parseable."
-                ),
-                "successful_pattern": [
-                    f"{stage} passed SceneExpert verifier in trace {trace_id}.",
-                    (
-                        "Use this only as a weak positive prior; still verify "
-                        "collisions, walkability, and plausibility in the new scene."
-                    ),
-                ],
-                "positive_guidance": [
-                    (
-                        f"For a matching {room_type} task, preserve the verifier-"
-                        f"passing {stage} strategy and adapt it to current geometry."
-                    ),
-                    (
-                        "Do not copy coordinates blindly; re-check object sizes, "
-                        "door/window constraints, and local support surfaces."
-                    ),
-                ],
-                "scores": scores,
-                "trace_ref": trace_id,
-                "quality_score": full_report.overall_score,
-                "confidence": 0.35,
-                "created_at": created_at,
-            }
-            ops.append(
-                MemoryUpdateOp(
-                    op="ADD",
-                    memory_type="success_case",
-                    content=content,
-                )
-            )
-        return ops
-
-    def _extract_passed_stage_scores(
-        self, trace_summary: str
-    ) -> list[tuple[str, dict[str, float]]]:
-        stages: list[tuple[str, dict[str, float]]] = []
-        pattern = re.compile(
-            r"^\s*\[(?P<stage>[^\]]+)\].*?verify=PASS\s+scores=\((?P<scores>[^)]*)\)",
-            re.MULTILINE,
-        )
-        for match in pattern.finditer(trace_summary):
-            stage = match.group("stage").strip()
-            scores = self._parse_score_list(match.group("scores"))
-            stages.append((stage, scores))
-        return stages
-
-    def _parse_score_list(self, score_text: str) -> dict[str, float]:
-        scores: dict[str, float] = {}
-        for item in score_text.split(","):
-            if "=" not in item:
-                continue
-            key, value = item.split("=", 1)
-            try:
-                scores[key.strip()] = float(value.strip())
-            except ValueError:
-                continue
-        return scores
-
-    def _extract_trace_id(self, trace_summary: str) -> str:
-        match = re.search(r"^Trace:\s*(\S+)", trace_summary, flags=re.MULTILINE)
-        return match.group(1) if match else "trace_unknown"
-
-    def _extract_prompt(self, trace_summary: str) -> str:
-        match = re.search(r"^Prompt:\s*(.+)$", trace_summary, flags=re.MULTILINE)
-        return match.group(1).strip() if match else ""
-
-    def _infer_room_type(self, trace_summary: str) -> str:
-        text = trace_summary.lower()
-        for room_type in (
-            "bedroom",
-            "living_room",
-            "kitchen",
-            "dining_room",
-            "office",
-            "bathroom",
-        ):
-            if room_type.replace("_", " ") in text or room_type in text:
-                return room_type
-        return "room"
-
-    def _infer_required_objects(self, trace_summary: str) -> list[str]:
-        text = trace_summary.lower()
-        aliases = {
-            "bed": ("bed",),
-            "nightstand": ("nightstand", "nightstands", "bedside table"),
-            "wardrobe": ("wardrobe", "closet"),
-            "sofa": ("sofa", "couch"),
-            "table": ("table", "desk"),
-            "chair": ("chair",),
-            "lamp": ("lamp", "light"),
-            "painting": ("painting", "artwork", "wall art"),
-            "shelf": ("shelf", "shelves"),
-        }
-        objects = [
-            canonical
-            for canonical, terms in aliases.items()
-            if any(term in text for term in terms)
-        ]
-        return objects
-
-    def _save_debug_payload(
-        self,
-        *,
-        status: str,
-        attempts: list[dict[str, Any]],
-        trace_summary: str,
-        full_report: FullVerifyReport,
-        fallback_ops: list[MemoryUpdateOp],
-        result_ops: list[MemoryUpdateOp] | None = None,
-    ) -> None:
-        if self._debug_dir is None:
-            return
-        self._debug_dir.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "schema_version": "1.0",
-            "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "status": status,
-            "model": self._model,
-            "max_tokens": self._max_tokens,
-            "full_report": full_report.model_dump(),
-            "trace_summary_excerpt": self._compact_text(trace_summary, 6000),
-            "attempts": attempts,
-            "fallback_ops": [op.model_dump() for op in fallback_ops],
-            "result_ops": [op.model_dump() for op in (result_ops or [])],
-        }
-        debug_path = self._debug_dir / "memory_writer_debug.json"
-        debug_path.write_text(
-            json.dumps(payload, indent=2, ensure_ascii=False, default=str),
-            encoding="utf-8",
-        )
-        jsonl_path = self._debug_dir / "memory_writer_debug.jsonl"
-        with jsonl_path.open("a", encoding="utf-8", newline="\n") as f:
-            f.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
-
-    def _save_recovery_debug_if_needed(
-        self,
-        *,
-        attempts: list[dict[str, Any]],
-        trace_summary: str,
-        full_report: FullVerifyReport,
-        result_ops: list[MemoryUpdateOp],
-    ) -> None:
-        """Persist diagnostics when a later attempt recovers an earlier failure."""
-        if not any(attempt.get("error") for attempt in attempts[:-1]):
-            return
-        self._save_debug_payload(
-            status="recovered_after_retry",
-            attempts=attempts,
+        candidate_ops = self._response_to_ops(
+            response=result.value,
             trace_summary=trace_summary,
             full_report=full_report,
-            fallback_ops=[],
-            result_ops=result_ops,
+            evidence_payload=evidence,
         )
+        promoted_ops = self._gate_and_enrich_ops(
+            candidate_ops,
+            full_report,
+            evidence_payload=evidence,
+        )
+        mutating_ops = [op for op in promoted_ops if op.op in {"ADD", "UPDATE"}]
+        status = "promoted" if mutating_ops else "no_valid_candidates"
+        self.last_trace.update(
+            {
+                "write_status": status,
+                "candidate_count": len(candidate_ops),
+                "promoted_count": len(mutating_ops),
+                "noop_reason": result.value.noop_reason,
+                "fallback_written": False,
+            }
+        )
+        self._save_debug_payload(
+            status=status,
+            result_status=self.last_trace,
+            trace_summary=trace_summary,
+            full_report=full_report,
+            evidence_payload=evidence,
+            response=result.value,
+            result_ops=mutating_ops,
+        )
+        console_logger.info(
+            "MemoryWriter: promoted %d/%d schema-valid candidates; fallback_written=false",
+            len(mutating_ops),
+            len(candidate_ops),
+        )
+        return mutating_ops
 
-    def _response_finish_reason(self, response: Any) -> str:
-        choices = getattr(response, "choices", None) or []
-        if not choices:
-            return ""
-        return str(getattr(choices[0], "finish_reason", "") or "")
-
-    def _response_snapshot(self, response: Any) -> dict[str, Any]:
-        dumped = self._model_dump(response)
-        if isinstance(dumped, dict):
-            return dumped
-        return {"repr": self._compact_text(repr(response), 4000)}
-
-    def _model_dump(self, value: Any) -> Any:
-        if hasattr(value, "model_dump"):
-            try:
-                return value.model_dump()
-            except Exception:
-                return None
-        if hasattr(value, "dict"):
-            try:
-                return value.dict()
-            except Exception:
-                return None
-        return None
-
-    def _compact_text(self, text: Any, max_chars: int) -> str:
-        value = "" if text is None else str(text)
-        if len(value) <= max_chars:
-            return value
-        return value[: max_chars - 3] + "..."
-
-    def _build_user_message(
+    def _response_to_ops(
         self,
+        *,
+        response: MemoryWriterResponse,
         trace_summary: str,
         full_report: FullVerifyReport,
-        related_old_memory: str,
-    ) -> str:
-        score_str = (
-            f"overall={full_report.overall_score:.2f}, "
-            f"semantic={full_report.semantic_score:.2f}, "
-            f"aesthetic={full_report.aesthetic_score:.2f}, "
-            f"plausibility={full_report.plausibility_score:.2f}, "
-            f"reachability={full_report.reachability_score:.2f}, "
-            f"physics={full_report.collision_free_rate:.2f}"
+        evidence_payload: dict[str, Any],
+    ) -> list[MemoryUpdateOp]:
+        context = self._canonical_context(evidence_payload, trace_summary)
+        ops: list[MemoryUpdateOp] = []
+        for candidate in response.success_cases:
+            content = self._success_content(candidate, context, full_report)
+            ops.append(
+                MemoryUpdateOp(op="ADD", memory_type="success_case", content=content)
+            )
+        for candidate in response.failure_cases:
+            content = self._failure_content(candidate, context)
+            ops.append(
+                MemoryUpdateOp(op="ADD", memory_type="failure_case", content=content)
+            )
+        for candidate in response.skills:
+            content = self._skill_content(candidate, context, full_report)
+            ops.append(MemoryUpdateOp(op="ADD", memory_type="skill", content=content))
+        return ops
+
+    def _success_content(
+        self,
+        candidate: SuccessMemoryCandidate,
+        context: dict[str, Any],
+        full_report: FullVerifyReport,
+    ) -> dict[str, Any]:
+        stage_evidence = self._stage_evidence(context, candidate.stage)
+        required_objects = self._required_objects(context["task_spec"], candidate.stage)
+        scores = self._stage_scores(stage_evidence)
+        now = self._now()
+        record = SuccessCase(
+            case_id=self._record_id("success", candidate, context),
+            room_type=context["room_type"],
+            style=context["style"],
+            stage=candidate.stage,
+            task_signature=self._unique(required_objects + context["functional_zones"]),
+            successful_pattern=self._clean_list(candidate.successful_pattern),
+            positive_guidance=self._clean_list(
+                candidate.positive_guidance or candidate.successful_pattern
+            ),
+            scores=scores,
+            trace_ref=context["trace_id"],
+            required_objects=required_objects,
+            functional_zones=context["functional_zones"],
+            scene_summary=f"Evidence-backed {candidate.stage} lesson from {context['trace_id']}.",
+            confidence=self._evidence_confidence(stage_evidence),
+            quality_score=float(full_report.overall_score),
+            created_at=now,
+            updated_at=now,
+            status="active",
+            source="llm",
+            source_task_id=context["source_task_id"],
+            source_run_id=context["source_run_id"],
+            source_task_ids=[context["source_task_id"]],
+            source_run_ids=[context["source_run_id"]],
+            prompt_fingerprint=context["prompt_fingerprint"],
+            evidence_refs=self._evidence_refs(context, candidate.stage),
+            critic_evidence=self._critic_evidence(stage_evidence),
         )
-        parts = [
-            "## Scene Generation Trace Summary",
-            trace_summary,
-            "",
-            f"## Final Verifier Scores\n{score_str}",
-            f"## Pass: {'YES' if full_report.pass_scene else 'NO'}",
-        ]
-        if related_old_memory:
-            parts += [
-                "",
-                "## Related Existing Memory (avoid duplicating these)",
-                related_old_memory,
-            ]
-        parts += ["", "Please generate memory update operations as specified."]
-        return "\n".join(parts)
+        return record.model_dump()
+
+    def _failure_content(
+        self,
+        candidate: FailureMemoryCandidate,
+        context: dict[str, Any],
+    ) -> dict[str, Any]:
+        stage_evidence = self._stage_evidence(context, candidate.stage)
+        required_objects = self._required_objects(context["task_spec"], candidate.stage)
+        now = self._now()
+        record = FailureCase(
+            failure_id=self._record_id("failure", candidate, context),
+            room_type=context["room_type"],
+            stage=candidate.stage,
+            object=candidate.object,
+            failure_type=candidate.failure_type,
+            bad_pattern=candidate.bad_pattern,
+            failure_reason=candidate.failure_reason,
+            repair_action=candidate.repair_action,
+            repair_verified=candidate.repair_verified,
+            required_objects=required_objects,
+            functional_zones=context["functional_zones"],
+            scene_summary=f"Evidence-backed {candidate.stage} failure from {context['trace_id']}.",
+            confidence=0.7,
+            quality_score=0.7,
+            created_at=now,
+            updated_at=now,
+            scope=candidate.scope,
+            is_deterministic=candidate.is_deterministic,
+            negative_constraint=candidate.negative_constraint or candidate.bad_pattern,
+            critic_check=candidate.critic_check,
+            trace_ref=context["trace_id"],
+            status="active",
+            source="llm",
+            source_task_id=context["source_task_id"],
+            source_run_id=context["source_run_id"],
+            source_task_ids=[context["source_task_id"]],
+            source_run_ids=[context["source_run_id"]],
+            prompt_fingerprint=context["prompt_fingerprint"],
+            evidence_refs=self._evidence_refs(context, candidate.stage),
+            critic_evidence=self._critic_evidence(stage_evidence),
+        )
+        return record.model_dump()
+
+    def _skill_content(
+        self,
+        candidate: SkillMemoryCandidate,
+        context: dict[str, Any],
+        full_report: FullVerifyReport,
+    ) -> dict[str, Any]:
+        stage_evidence = self._stage_evidence(context, candidate.stage)
+        required_objects = self._required_objects(context["task_spec"], candidate.stage)
+        now = self._now()
+        record = Skill(
+            skill_name=candidate.skill_name,
+            stage=candidate.stage,
+            room_type=context["room_type"],
+            room_types=[context["room_type"]] if context["room_type"] else [],
+            style=context["style"],
+            required_objects=required_objects,
+            functional_zones=context["functional_zones"],
+            scene_summary=f"Evidence-backed procedure from {context['trace_id']}.",
+            preconditions=self._clean_list(candidate.preconditions),
+            procedure=self._clean_list(candidate.procedure),
+            failure_avoidance=self._clean_list(candidate.failure_avoidance),
+            postconditions=self._clean_list(candidate.postconditions),
+            confidence=self._evidence_confidence(stage_evidence),
+            quality_score=float(full_report.overall_score),
+            success_rate=float(full_report.overall_score),
+            trace_ref=context["trace_id"],
+            created_at=now,
+            updated_at=now,
+            status="active",
+            source="llm",
+            source_task_id=context["source_task_id"],
+            source_run_id=context["source_run_id"],
+            source_task_ids=[context["source_task_id"]],
+            source_run_ids=[context["source_run_id"]],
+            prompt_fingerprint=context["prompt_fingerprint"],
+            evidence_refs=self._evidence_refs(context, candidate.stage),
+            critic_evidence=self._critic_evidence(stage_evidence),
+        )
+        return record.model_dump()
 
     def _gate_and_enrich_ops(
         self,
         ops: list[MemoryUpdateOp],
         full_report: FullVerifyReport,
+        evidence_payload: dict[str, Any] | None = None,
     ) -> list[MemoryUpdateOp]:
-        """Apply deterministic quality gates and fill missing retrieval text."""
+        """Validate persisted records and enforce deterministic promotion gates."""
+        evidence = dict(evidence_payload or {})
+        has_structured_evidence = bool(evidence.get("stages"))
+        success_threshold = float(
+            getattr(
+                self,
+                "_success_min_overall_score",
+                SUCCESS_MEMORY_MIN_OVERALL_SCORE,
+            )
+        )
         filtered: list[MemoryUpdateOp] = []
         for op in ops:
             if op.op == "NOOP":
-                filtered.append(op)
                 continue
-            if op.op not in ("ADD", "UPDATE"):
-                console_logger.info(f"MemoryWriter: dropped unsupported op {op.op!r}")
-                continue
-
             if op.memory_type == "success_case":
-                if full_report.overall_score < SUCCESS_MEMORY_MIN_OVERALL_SCORE:
+                record = self._validate_success(op.content)
+                if record is None:
+                    continue
+                stage_evidence = self._stage_evidence(evidence, record.stage)
+                if (
+                    not full_report.pass_scene
+                    or full_report.overall_score < success_threshold
+                    or (has_structured_evidence and not self._stage_passed(stage_evidence))
+                ):
                     console_logger.info(
-                        "MemoryWriter: dropped success_case below quality gate "
-                        f"(overall={full_report.overall_score:.2f})"
+                        "MemoryWriter: rejected success %s because final/stage "
+                        "evidence did not pass",
+                        record.case_id,
                     )
                     continue
-                enriched = self._enrich_success_content(op.content, full_report)
-                if enriched is not None:
-                    filtered.append(op.model_copy(update={"content": enriched}))
+                filtered.append(op.model_copy(update={"content": record.model_dump()}))
                 continue
 
             if op.memory_type == "failure_case":
-                enriched = self._enrich_failure_content(op.content)
-                if enriched is None:
+                record = self._validate_failure(op.content)
+                if record is None:
                     continue
-                repair_verified = bool(enriched.get("repair_verified", False))
-                deterministic = bool(enriched.get("is_deterministic", False))
+                stage_evidence = self._stage_evidence(evidence, record.stage)
+                if has_structured_evidence:
+                    repair_verified = self._repair_verified(stage_evidence)
+                    deterministic = self._deterministic_failure_in_evidence(stage_evidence)
+                else:
+                    repair_verified = record.repair_verified
+                    deterministic = self._detect_deterministic_failure(record.model_dump())
                 if not repair_verified and not deterministic:
                     console_logger.info(
-                        "MemoryWriter: dropped failure_case that is neither "
-                        "verified nor deterministic"
+                        "MemoryWriter: rejected unverified/non-deterministic failure %s",
+                        record.failure_id,
                     )
                     continue
-                filtered.append(op.model_copy(update={"content": enriched}))
+                record = record.model_copy(
+                    update={
+                        "repair_verified": repair_verified,
+                        "is_deterministic": deterministic,
+                        "scope": (
+                            "stage"
+                            if deterministic and record.scope == "object"
+                            else record.scope
+                        ),
+                        "confidence": 0.85,
+                    }
+                )
+                filtered.append(op.model_copy(update={"content": record.model_dump()}))
                 continue
 
             if op.memory_type == "skill":
-                if op.op == "ADD" and not self._looks_like_reusable_skill(op.content):
+                record = self._validate_skill(op.content)
+                if record is None:
+                    continue
+                stage_evidence = self._stage_evidence(evidence, record.stage)
+                if (
+                    not full_report.pass_scene
+                    or full_report.overall_score < success_threshold
+                    or (has_structured_evidence and not self._stage_passed(stage_evidence))
+                    or len(self._clean_list(record.procedure)) < 2
+                ):
                     console_logger.info(
-                        "MemoryWriter: dropped vague skill ADD without reusable "
-                        "multi-step procedure"
+                        "MemoryWriter: rejected unsupported skill %s", record.skill_name
                     )
                     continue
-                enriched = self._enrich_skill_content(op.content)
-                if enriched is not None:
-                    filtered.append(op.model_copy(update={"content": enriched}))
-                continue
-
-            console_logger.info(
-                f"MemoryWriter: dropped unknown memory_type {op.memory_type!r}"
-            )
-
+                filtered.append(op.model_copy(update={"content": record.model_dump()}))
         return filtered
 
-    def _enrich_success_content(
-        self,
-        content: dict,
-        full_report: FullVerifyReport,
-    ) -> dict | None:
-        enriched = dict(content)
-        enriched.setdefault("quality_score", full_report.overall_score)
-        enriched.setdefault("confidence", 0.7 if full_report.pass_scene else 0.5)
+    def _validate_success(self, content: dict[str, Any]) -> SuccessCase | None:
         try:
-            record = SuccessCase.model_validate(enriched)
-        except Exception as e:
-            console_logger.info(f"MemoryWriter: dropped invalid success_case: {e}")
+            record = SuccessCase.model_validate(content)
+        except Exception as exc:
+            console_logger.info("MemoryWriter: invalid success record: %s", exc)
+            return None
+        if record.stage not in _SUPPORTED_STAGES or not record.successful_pattern:
             return None
         if not record.embedding_text:
-            record = record.model_copy(
-                update={"embedding_text": build_embedding_text(record)}
-            )
-        return record.model_dump()
+            record = record.model_copy(update={"embedding_text": build_embedding_text(record)})
+        return record
 
-    def _enrich_failure_content(self, content: dict) -> dict | None:
-        enriched = dict(content)
-        deterministic = self._detect_deterministic_failure(enriched)
-        if deterministic:
-            enriched["is_deterministic"] = True
-            if enriched.get("scope", "object") == "object":
-                enriched["scope"] = "stage"
+    def _validate_failure(self, content: dict[str, Any]) -> FailureCase | None:
         try:
-            record = FailureCase.model_validate(enriched)
-        except Exception as e:
-            console_logger.info(f"MemoryWriter: dropped invalid failure_case: {e}")
+            record = FailureCase.model_validate(content)
+        except Exception as exc:
+            console_logger.info("MemoryWriter: invalid failure record: %s", exc)
+            return None
+        if record.stage not in _SUPPORTED_STAGES or not record.bad_pattern:
             return None
         if not record.embedding_text:
-            record = record.model_copy(
-                update={"embedding_text": build_embedding_text(record)}
-            )
-        return record.model_dump()
+            record = record.model_copy(update={"embedding_text": build_embedding_text(record)})
+        return record
 
-    def _enrich_skill_content(self, content: dict) -> dict | None:
+    def _validate_skill(self, content: dict[str, Any]) -> Skill | None:
         try:
             record = Skill.model_validate(content)
-        except Exception as e:
-            console_logger.info(f"MemoryWriter: dropped invalid skill: {e}")
+        except Exception as exc:
+            console_logger.info("MemoryWriter: invalid skill record: %s", exc)
+            return None
+        if record.stage not in _SUPPORTED_STAGES:
             return None
         if not record.embedding_text:
-            record = record.model_copy(
-                update={"embedding_text": build_embedding_text(record)}
-            )
-        return record.model_dump()
+            record = record.model_copy(update={"embedding_text": build_embedding_text(record)})
+        return record
 
-    def _detect_deterministic_failure(self, content: dict) -> bool:
-        if bool(content.get("is_deterministic", False)):
-            return True
+    def _canonical_context(
+        self,
+        evidence_payload: dict[str, Any],
+        trace_summary: str,
+    ) -> dict[str, Any]:
+        task_spec = dict(evidence_payload.get("task_spec") or {})
+        prompt = str(evidence_payload.get("prompt") or self._extract_prompt(trace_summary))
+        prompt_fingerprint = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+        trace_id = str(
+            evidence_payload.get("trace_id") or self._extract_trace_id(trace_summary)
+        )
+        stage_paths = [
+            str(item.get("scene_state_path", ""))
+            for item in evidence_payload.get("stages", []) or []
+            if isinstance(item, dict) and item.get("scene_state_path")
+        ]
+        run_locator = str(
+            evidence_payload.get("run_id")
+            or evidence_payload.get("output_dir")
+            or "|".join(stage_paths)
+        )
+        run_fingerprint = hashlib.sha256(
+            "|".join(
+                [
+                    run_locator,
+                    trace_id,
+                    prompt,
+                    str(evidence_payload.get("config_hash", "")),
+                ]
+            ).encode("utf-8")
+        ).hexdigest()
+        return {
+            **evidence_payload,
+            "task_spec": task_spec,
+            "prompt": prompt,
+            "prompt_fingerprint": prompt_fingerprint,
+            "source_task_id": f"task_{prompt_fingerprint[:16]}",
+            "source_run_id": f"run_{run_fingerprint[:20]}",
+            "trace_id": trace_id,
+            "room_type": str(task_spec.get("room_type") or "room"),
+            "style": str(task_spec.get("style") or ""),
+            "functional_zones": self._clean_list(task_spec.get("functional_zones", [])),
+        }
+
+    def _record_id(self, prefix: str, candidate: Any, context: dict[str, Any]) -> str:
+        payload = {
+            "prefix": prefix,
+            "source_run_id": context["source_run_id"],
+            "prompt_fingerprint": context["prompt_fingerprint"],
+            "candidate": candidate.model_dump(),
+        }
+        digest = hashlib.sha256(
+            json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
+        ).hexdigest()[:16]
+        stage = str(candidate.stage).strip().lower()
+        return f"{prefix}_{stage}_{digest}"
+
+    @staticmethod
+    def _required_objects(task_spec: dict[str, Any], stage: str) -> list[str]:
+        key = {
+            "floor_plan": "required_large_objects",
+            "furniture": "required_large_objects",
+            "wall_mounted": "required_wall_objects",
+            "ceiling_mounted": "required_ceiling_objects",
+            "manipuland": "required_small_objects",
+        }.get(stage, "")
+        value = task_spec.get(key, []) if key else []
+        return MemoryWriter._clean_list(value)
+
+    @staticmethod
+    def _stage_evidence(payload: dict[str, Any], stage: str) -> dict[str, Any]:
+        for item in payload.get("stages", []) or []:
+            if isinstance(item, dict) and str(item.get("stage")) == stage:
+                return item
+        return {}
+
+    @staticmethod
+    def _stage_report(stage_evidence: dict[str, Any]) -> dict[str, Any]:
+        report = stage_evidence.get("verify_report") or {}
+        return report if isinstance(report, dict) else {}
+
+    def _stage_passed(self, stage_evidence: dict[str, Any]) -> bool:
+        return bool(self._stage_report(stage_evidence).get("pass_stage", False))
+
+    def _stage_scores(self, stage_evidence: dict[str, Any]) -> dict[str, float]:
+        report = self._stage_report(stage_evidence)
+        raw = report.get("visual_scores") or report.get("scores") or {}
+        if not isinstance(raw, dict):
+            return {}
+        return {
+            str(key): float(value)
+            for key, value in raw.items()
+            if isinstance(value, (int, float))
+        }
+
+    def _repair_verified(self, stage_evidence: dict[str, Any]) -> bool:
+        repairs = stage_evidence.get("repair_actions") or []
+        return any(
+            isinstance(item, dict) and bool(item.get("repair_verified"))
+            for item in repairs
+        )
+
+    def _deterministic_failure_in_evidence(
+        self, stage_evidence: dict[str, Any]
+    ) -> bool:
+        report = self._stage_report(stage_evidence)
+        hard_report = report.get("hard_check_report") or {}
+        if isinstance(hard_report, dict) and hard_report:
+            if hard_report.get("hard_valid") is False or hard_report.get("pass") is False:
+                return True
+            if hard_report.get("failed_checks") or hard_report.get("hard_failures"):
+                return True
+        # Free-form critique often contains negated phrases such as "no
+        # deterministic hard failure". Only structured issues and failed hard
+        # checks may certify a deterministic failure.
+        evidence_text = json.dumps(
+            report.get("issues", []), ensure_ascii=False, default=str
+        ).lower()
+        return any(keyword in evidence_text for keyword in _DETERMINISTIC_FAILURE_KEYWORDS)
+
+    def _detect_deterministic_failure(self, content: dict[str, Any]) -> bool:
         text = " ".join(
             str(content.get(key, ""))
             for key in (
@@ -965,21 +642,147 @@ class MemoryWriter:
                 "critic_check",
             )
         ).lower()
-        return any(keyword in text for keyword in _DETERMINISTIC_FAILURE_KEYWORDS)
+        return bool(content.get("is_deterministic")) or any(
+            keyword in text for keyword in _DETERMINISTIC_FAILURE_KEYWORDS
+        )
 
-    def _looks_like_reusable_skill(self, content: dict) -> bool:
-        procedure = content.get("procedure") or []
-        if (
-            not isinstance(procedure, list)
-            or len([x for x in procedure if str(x).strip()]) < 2
-        ):
-            return False
-        support_fields = (
-            content.get("preconditions") or [],
-            content.get("failure_avoidance") or [],
-            content.get("postconditions") or [],
+    def _critic_evidence(self, stage_evidence: dict[str, Any]) -> list[str]:
+        report = self._stage_report(stage_evidence)
+        values = [
+            f"score_source={report.get('score_source', 'unknown')}",
+            self._compact_text(report.get("critique_summary", ""), 1600),
+        ]
+        for issue in report.get("issues", []) or []:
+            if isinstance(issue, dict):
+                values.append(
+                    self._compact_text(
+                        issue.get("description") or issue.get("issue_type") or "", 500
+                    )
+                )
+        return self._unique(values)
+
+    def _evidence_refs(self, context: dict[str, Any], stage: str) -> list[str]:
+        stage_evidence = self._stage_evidence(context, stage)
+        return self._unique(
+            [
+                context.get("source_run_id", ""),
+                context.get("trace_id", ""),
+                stage_evidence.get("scene_state_path", ""),
+            ]
         )
-        return any(
-            isinstance(items, list) and any(str(x).strip() for x in items)
-            for items in support_fields
+
+    def _evidence_confidence(self, stage_evidence: dict[str, Any]) -> float:
+        report = self._stage_report(stage_evidence)
+        if report.get("critique_summary") and report.get("score_source") not in {
+            "",
+            "unknown",
+        }:
+            return 0.85
+        return 0.65
+
+    def _build_user_message(
+        self,
+        *,
+        trace_summary: str,
+        full_report: FullVerifyReport,
+        related_old_memory: str,
+        evidence_payload: dict[str, Any],
+    ) -> str:
+        payload = {
+            "trace_summary": trace_summary,
+            "evidence": evidence_payload,
+            "final_report": full_report.model_dump(),
+            "related_existing_memory": related_old_memory,
+        }
+        return (
+            "Analyze this completed run. Treat evidence.verify_report and final_report "
+            "as authoritative. Return only schema-valid reusable candidates.\n"
+            + json.dumps(payload, ensure_ascii=False, default=str)
         )
+
+    def _save_debug_payload(
+        self,
+        *,
+        status: str,
+        result_status: dict[str, Any],
+        trace_summary: str,
+        full_report: FullVerifyReport,
+        evidence_payload: dict[str, Any],
+        response: MemoryWriterResponse | None,
+        result_ops: list[MemoryUpdateOp],
+    ) -> None:
+        if self._debug_dir is None:
+            return
+        self._debug_dir.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "schema_version": "sceneexpert.memory_writer_debug.v2",
+            "created_at": self._now(),
+            "status": status,
+            "model": self._model,
+            "success_min_overall_score": self._success_min_overall_score,
+            "result_status": result_status,
+            "full_report": full_report.model_dump(),
+            "trace_summary_excerpt": self._compact_text(trace_summary, 6000),
+            "evidence_trace_id": evidence_payload.get("trace_id", ""),
+            "response": response.model_dump() if response is not None else None,
+            "result_ops": [op.model_dump() for op in result_ops],
+            "fallback_written": False,
+        }
+        self._atomic_write_json(self._debug_dir / "memory_writer_debug.json", payload)
+        with (self._debug_dir / "memory_writer_debug.jsonl").open(
+            "a", encoding="utf-8", newline="\n"
+        ) as file:
+            file.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
+
+    def _fallback_success_ops(
+        self, trace_summary: str, full_report: FullVerifyReport
+    ) -> list[MemoryUpdateOp]:
+        """Compatibility shim: fallback records are intentionally never persisted."""
+        del trace_summary, full_report
+        return []
+
+    @staticmethod
+    def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+        temporary = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
+        temporary.write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False, default=str),
+            encoding="utf-8",
+        )
+        temporary.replace(path)
+
+    @staticmethod
+    def _extract_trace_id(trace_summary: str) -> str:
+        match = re.search(r"^Trace:\s*(\S+)", trace_summary, flags=re.MULTILINE)
+        return match.group(1) if match else "trace_unknown"
+
+    @staticmethod
+    def _extract_prompt(trace_summary: str) -> str:
+        match = re.search(r"^Prompt:\s*(.+)$", trace_summary, flags=re.MULTILINE)
+        return match.group(1).strip() if match else ""
+
+    @staticmethod
+    def _clean_list(values: Any) -> list[str]:
+        if not isinstance(values, (list, tuple, set)):
+            return []
+        return MemoryWriter._unique(str(value).strip() for value in values)
+
+    @staticmethod
+    def _unique(values: Any) -> list[str]:
+        output: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            text = str(value or "").strip()
+            key = text.casefold()
+            if text and key not in seen:
+                output.append(text)
+                seen.add(key)
+        return output
+
+    @staticmethod
+    def _compact_text(value: Any, max_chars: int) -> str:
+        text = str(value or "")
+        return text if len(text) <= max_chars else text[: max_chars - 3] + "..."
+
+    @staticmethod
+    def _now() -> str:
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())

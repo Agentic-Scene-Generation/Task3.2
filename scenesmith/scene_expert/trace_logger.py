@@ -533,3 +533,50 @@ class TraceLogger:
                 f"pass={'YES' if self._full_report.pass_scene else 'NO'}"
             )
         return "\n".join(lines)
+
+    def build_memory_writer_evidence(self) -> dict[str, object]:
+        """Return the structured, untruncated evidence contract for memory writing.
+
+        The long-term writer consumes the existing main critic output through
+        ``verify_report`` and never has to infer scores, task metadata, or repair
+        outcomes from the human-readable summary.
+        """
+        stages: list[dict[str, object]] = []
+        for entry in self._stage_entries:
+            stages.append(
+                {
+                    "stage": entry.stage,
+                    "scene_state_path": entry.scene_state_path,
+                    "stage_brief": (
+                        entry.stage_brief.model_dump() if entry.stage_brief else None
+                    ),
+                    "verify_report": (
+                        entry.verify_report.model_dump() if entry.verify_report else None
+                    ),
+                    "repair_actions": [
+                        action.model_dump() for action in entry.repair_actions
+                    ],
+                    "execution_evidence": entry.execution_evidence.model_dump(),
+                    "retrieved_memory_ids": (
+                        list(entry.memory_pack.success_case_ids)
+                        + list(entry.memory_pack.failure_case_ids)
+                        + list(entry.memory_pack.skill_names)
+                    ),
+                }
+            )
+        return {
+            "schema_version": "sceneexpert.memory_writer_evidence.v1",
+            "trace_id": self._trace_id,
+            "scene_id": self._scene_id,
+            "run_id": str(self._output_dir.resolve()),
+            "experiment_name": self._experiment_name,
+            "config_hash": self._config_hash,
+            "prompt": self._prompt,
+            "task_spec": dict(self._task_spec),
+            "stages": stages,
+            "full_report": (
+                self._full_report.model_dump() if self._full_report else None
+            ),
+            "component_status": dict(self._component_status),
+            "code_provenance": dict(self._code_provenance),
+        }

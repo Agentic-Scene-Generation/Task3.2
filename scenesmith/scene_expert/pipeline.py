@@ -569,8 +569,6 @@ class SceneExpertPipeline:
             exports=exports,
             model=self._cfg.furniture_agent.openai.model,
         )
-        trace_path = trace_logger.save(trace_dict)
-        console_logger.info(f"[SceneExpert] Trace saved to {trace_path}")
 
         # --- Step 6: Memory update ---
         console_logger.info("[SceneExpert] Updating fast memory")
@@ -578,11 +576,36 @@ class SceneExpertPipeline:
             memory_ops = self._memory_writer.write(
                 trace_summary=trace_summary,
                 full_report=full_report,
+                evidence_payload=trace_logger.build_memory_writer_evidence(),
             )
             qwen_call_count += 1
-            self._memory_store.apply_updates(memory_ops)
+            apply_summary = self._memory_store.apply_updates(memory_ops)
+            trace_logger.record_component_status(
+                "memory_writer",
+                {
+                    **dict(self._memory_writer.last_trace),
+                    "store_apply": apply_summary,
+                },
+            )
         except Exception as e:
             console_logger.warning(f"Memory update failed (non-fatal): {e}")
+            trace_logger.record_component_status(
+                "memory_writer",
+                {
+                    "success": False,
+                    "degraded": True,
+                    "source": "exception",
+                    "error": f"{type(e).__name__}: {e}",
+                },
+            )
+
+        trace_dict = trace_logger.finalize(
+            full_report=full_report,
+            exports=exports,
+            model=self._cfg.furniture_agent.openai.model,
+        )
+        trace_path = trace_logger.save(trace_dict)
+        console_logger.info(f"[SceneExpert] Trace saved to {trace_path}")
 
         console_logger.info(
             f"[SceneExpert] scene_{scene_id:03d} complete: "

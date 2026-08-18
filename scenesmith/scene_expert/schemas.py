@@ -122,6 +122,8 @@ class MemoryPack(BaseModel):
     success_case_ids: list[str] = Field(default_factory=list)
     failure_case_ids: list[str] = Field(default_factory=list)
     skill_names: list[str] = Field(default_factory=list)
+    memory_bank_id: str = ""
+    memory_bank_revision: int = 0
 
     def deduplicated(self) -> "MemoryPack":
         """Return an order-preserving copy without repeated prompt content."""

@@ -1,11 +1,45 @@
-"""Pydantic schemas for the SceneExpert fast memory system."""
+"""Stable data contracts for the SceneExpert fast-memory bank.
+
+The persisted record schemas are intentionally backward compatible: old JSONL
+records load with conservative defaults, while new records carry provenance and
+bank-version metadata.  The compact ``MemoryWriterResponse`` schemas are kept
+separate from persisted records so an LLM never owns record identity, quality
+scores, provenance, or promotion status.
+"""
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field
 
 
-class SuccessCase(BaseModel):
+MEMORY_SCHEMA_VERSION = "sceneexpert.memory.v2"
+MemoryStatus = Literal["candidate", "active", "quarantined"]
+MemorySource = Literal["llm", "deterministic", "legacy", "imported"]
+
+
+class MemoryRecordBase(BaseModel):
+    """Common lifecycle and provenance fields for every persisted record."""
+
+    schema_version: str = MEMORY_SCHEMA_VERSION
+    status: MemoryStatus = "active"
+    source: MemorySource = "legacy"
+    source_task_id: str = ""
+    source_run_id: str = ""
+    source_task_ids: list[str] = Field(default_factory=list)
+    source_run_ids: list[str] = Field(default_factory=list)
+    prompt_fingerprint: str = ""
+    evidence_refs: list[str] = Field(default_factory=list)
+    critic_evidence: list[str] = Field(default_factory=list)
+    bank_version: int = Field(default=0, ge=0)
+    observation_count: int = Field(default=1, ge=1)
+    positive_utility_count: int = Field(default=0, ge=0)
+    negative_utility_count: int = Field(default=0, ge=0)
+    updated_at: str = ""
+
+
+class SuccessCase(MemoryRecordBase):
     """A recorded successful scene generation pattern."""
 
     case_id: str
@@ -76,7 +110,7 @@ class SuccessCase(BaseModel):
         return "\n".join(lines)
 
 
-class FailureCase(BaseModel):
+class FailureCase(MemoryRecordBase):
     """A recorded failure pattern with its verified repair action."""
 
     failure_id: str
@@ -124,7 +158,7 @@ class FailureCase(BaseModel):
         return " ".join(part for part in parts if part)
 
 
-class Skill(BaseModel):
+class Skill(MemoryRecordBase):
     """A reusable procedural skill template."""
 
     skill_name: str
@@ -165,7 +199,63 @@ class Skill(BaseModel):
 class MemoryUpdateOp(BaseModel):
     """A single memory update operation from the memory writer."""
 
-    op: str  # "ADD", "UPDATE", "NOOP"
-    memory_type: str  # "success_case", "failure_case", "skill"
+    op: Literal["ADD", "UPDATE", "NOOP"]
+    memory_type: Literal["success_case", "failure_case", "skill"]
     content: dict = Field(default_factory=dict)
     target_id: str = ""  # for UPDATE: the case_id / skill_name to update
+
+
+class SuccessMemoryCandidate(BaseModel):
+    """Small, strict LLM output for one reusable successful pattern."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    stage: str = Field(min_length=1)
+    successful_pattern: list[str] = Field(min_length=1)
+    positive_guidance: list[str] = Field(default_factory=list)
+
+
+class FailureMemoryCandidate(BaseModel):
+    """Small, strict LLM output for one transferable failure lesson."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    stage: str = Field(min_length=1)
+    object: str = ""
+    failure_type: str = Field(min_length=1)
+    bad_pattern: str = Field(min_length=1)
+    failure_reason: str = Field(min_length=1)
+    repair_action: str = Field(min_length=1)
+    repair_verified: bool = False
+    scope: Literal["global", "stage", "room", "object"] = "stage"
+    is_deterministic: bool = False
+    negative_constraint: str = ""
+    critic_check: str = ""
+
+
+class SkillMemoryCandidate(BaseModel):
+    """Small, strict LLM output for a genuinely reusable procedure."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    skill_name: str = Field(min_length=1)
+    stage: str = Field(min_length=1)
+    preconditions: list[str] = Field(default_factory=list)
+    procedure: list[str] = Field(min_length=2)
+    failure_avoidance: list[str] = Field(default_factory=list)
+    postconditions: list[str] = Field(default_factory=list)
+
+
+class MemoryWriterResponse(BaseModel):
+    """Validated MemoryWriter response before deterministic promotion."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    success_cases: list[SuccessMemoryCandidate] = Field(
+        default_factory=list, max_length=5
+    )
+    failure_cases: list[FailureMemoryCandidate] = Field(
+        default_factory=list, max_length=5
+    )
+    skills: list[SkillMemoryCandidate] = Field(default_factory=list, max_length=2)
+    noop_reason: str = ""
