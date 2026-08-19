@@ -1383,12 +1383,40 @@ if [ "${1:-}" = "--internal-run-batch" ]; then
     exit $?
 fi
 
+run_exit_code=0
 if [ "$GENERATE_SHARED_BASE" = "true" ]; then
-    run_batches shared_base
+    if run_batches shared_base; then
+        :
+    else
+        run_exit_code=$?
+    fi
 fi
-run_batches critic_on
+if [ "$run_exit_code" -eq 0 ]; then
+    if run_batches critic_on; then
+        :
+    else
+        run_exit_code=$?
+    fi
+fi
+
+# Metrics are generated for successful and failed probes alike.  The collector
+# is read-only outside OUTPUT_ROOT/metrics and is deliberately non-fatal so it
+# can never hide or replace the generation process exit code.
+if [ "$DRY_RUN" = "false" ]; then
+    echo "collecting independent run metrics: $OUTPUT_ROOT/metrics"
+    if ! "$PYTHON_BIN" -m scenesmith.scene_expert.run_metrics \
+        --output-root "$OUTPUT_ROOT" \
+        --run-id "$RUN_ID" \
+        --process-exit-code "$run_exit_code"; then
+        echo "WARNING: run metrics collection failed; generation artifacts are unchanged" >&2
+    fi
+fi
 if [ "$CRITIC_PROBE_RENDER_FINAL_VIEWS" = "true" ] \
     && [ "$PIPELINE_STOP_STAGE" != "manipuland" ]; then
     echo "skipping final combined-house views: pipeline stops at $PIPELINE_STOP_STAGE"
+fi
+if [ "$run_exit_code" -ne 0 ]; then
+    echo "critic-on probe failed with exit code $run_exit_code: $OUTPUT_ROOT" >&2
+    exit "$run_exit_code"
 fi
 echo "critic-on probe complete: $OUTPUT_ROOT"

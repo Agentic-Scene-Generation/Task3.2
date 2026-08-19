@@ -753,6 +753,8 @@ class SceneExpertHookRunner:
             if self._current_stage_brief is not None
             else ""
         )
+        memory_text = _format_memory_directives(self._current_memory_pack)
+        placement_reference = self._current_memory_pack.placement_reference
         memory_ids = list(
             dict.fromkeys(
                 [
@@ -779,11 +781,22 @@ class SceneExpertHookRunner:
                 if brief_text
                 else ""
             ),
+            injected_memory_hash=(
+                hashlib.sha256(memory_text.encode("utf-8")).hexdigest()
+                if memory_text
+                else ""
+            ),
             designer_prompt_hash=hashlib.sha256(
                 str(prompt).encode("utf-8")
             ).hexdigest(),
             designer_prompt_contains_brief=bool(
                 brief_text and brief_text in str(prompt)
+            ),
+            designer_prompt_contains_memory=bool(
+                memory_text and memory_text in str(prompt)
+            ),
+            placement_reference_injected=bool(
+                placement_reference and placement_reference in str(prompt)
             ),
             degraded=self._task_spec.compiler_status == "degraded",
         )
@@ -854,6 +867,10 @@ class SceneExpertHookRunner:
     ) -> None:
         """Record pre-stage memory retrieval timing even for empty/fallback stores."""
         if not self._trace_enabled():
+            return
+        if not error and bool(
+            getattr(self._retriever, "writes_detailed_timing", False)
+        ):
             return
         try:
             record = {
@@ -982,6 +999,7 @@ class SceneExpertHookRunner:
         if not instruction:
             return False
         scene.text_description += "\n\n[REPAIR INSTRUCTION]\n" + instruction
+        pending_repair[0].execution_status = "executed"
         return True
 
     # ------------------------------------------------------------------
@@ -2182,6 +2200,7 @@ def build_hook_runner(
                 "degraded": task_spec.compiler_status == "degraded",
             },
             code_provenance=collect_code_provenance(),
+            component_flags=component_flags,
         )
 
     return SceneExpertHookRunner(

@@ -131,7 +131,9 @@ class RepairController:
         else:
             console_logger.warning(f"Unknown repair type: {repair_type}, skipping")
             return RepairResult(
-                repair_type="skipped", failure_type="unknown_repair_type"
+                repair_type="skipped",
+                execution_status="skipped",
+                failure_type="unknown_repair_type",
             )
 
     def _local_repair(

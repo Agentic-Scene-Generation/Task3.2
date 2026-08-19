@@ -358,6 +358,8 @@ class RepairResult(BaseModel):
     """Outcome of a repair attempt."""
 
     repair_type: str  # "local_repair", "stage_regeneration", "rollback", "skipped"
+    repair_owner: str = "scene_expert_repair_controller"
+    execution_status: str = "planned"
     failure_type: str = ""
     repair_action: str = ""
     repair_verified: bool = False
@@ -382,8 +384,11 @@ class StageExecutionEvidence(BaseModel):
     retrieved_memory_ids: list[str] = Field(default_factory=list)
     context_bundle_hash: str = ""
     injected_brief_hash: str = ""
+    injected_memory_hash: str = ""
     designer_prompt_hash: str = ""
     designer_prompt_contains_brief: bool = False
+    designer_prompt_contains_memory: bool = False
+    placement_reference_injected: bool = False
     degraded: bool = False
 
 

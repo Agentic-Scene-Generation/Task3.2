@@ -85,6 +85,7 @@ def test_failed_hook_stage_is_uncommitted_until_retry_verifies(tmp_path) -> None
     assert scene.text_description.endswith(
         "[REPAIR INSTRUCTION]\nPlace the missing wastebasket on the floor."
     )
+    assert repair_result.execution_status == "executed"
 
     passed = runner.post_stage(stage, scene, tmp_path)
 

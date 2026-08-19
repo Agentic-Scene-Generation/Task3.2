@@ -450,6 +450,8 @@ class SceneExpertPipeline:
                     task_spec=task_spec,
                 )
                 repair_actions.append(repair_result)
+                if decision.strategy in {"stage_regeneration", "local_repair"}:
+                    repair_result.execution_status = "executed"
 
                 if decision.strategy == "stage_regeneration":
                     # Re-run this stage with updated prompt incorporating repair action

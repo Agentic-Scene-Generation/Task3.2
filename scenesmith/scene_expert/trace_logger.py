@@ -142,7 +142,7 @@ class TraceLogger:
     One TraceLogger instance per scene generation run.
     """
 
-    SCHEMA_VERSION = "1.4"
+    SCHEMA_VERSION = "1.5"
 
     def __init__(
         self,
@@ -154,6 +154,7 @@ class TraceLogger:
         task_spec_status: dict | None = None,
         task_spec: dict | None = None,
         code_provenance: dict[str, object] | None = None,
+        component_flags: dict[str, bool] | None = None,
     ) -> None:
         self._output_dir = Path(output_dir)
         self._traces_dir = self._output_dir / "traces"
@@ -179,6 +180,10 @@ class TraceLogger:
         self._config_hash = config_hash
         self._task_spec = dict(task_spec or {})
         self._code_provenance = dict(code_provenance or {})
+        self._component_flags = {
+            str(name): bool(enabled)
+            for name, enabled in dict(component_flags or {}).items()
+        }
         self._stage_entries: list[StageTraceEntry] = []
         self._start_time = time.time()
         self._full_report: FullVerifyReport | None = None
@@ -382,6 +387,7 @@ class TraceLogger:
                 self._degraded_components() or trace_status == "degraded_incomplete"
             ),
             "degraded_components": self._degraded_components(),
+            "component_flags": self._component_flags,
             "component_status": self._component_status,
             "experiment_name": self._experiment_name,
             "config_hash": self._config_hash,
@@ -407,6 +413,7 @@ class TraceLogger:
             "status": status,
             "degraded": bool(self._degraded_components()),
             "degraded_components": self._degraded_components(),
+            "component_flags": self._component_flags,
             "component_status": self._component_status,
             "error": error,
             "experiment_name": self._experiment_name,
@@ -434,6 +441,7 @@ class TraceLogger:
                 "status": "partial",
                 "degraded": bool(self._degraded_components()),
                 "degraded_components": self._degraded_components(),
+                "component_flags": self._component_flags,
                 "component_status": self._component_status,
                 "experiment_name": self._experiment_name,
                 "config_hash": self._config_hash,
@@ -577,6 +585,7 @@ class TraceLogger:
             "full_report": (
                 self._full_report.model_dump() if self._full_report else None
             ),
+            "component_flags": dict(self._component_flags),
             "component_status": dict(self._component_status),
             "code_provenance": dict(self._code_provenance),
         }

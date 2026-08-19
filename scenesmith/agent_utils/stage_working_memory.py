@@ -440,6 +440,7 @@ class StageWorkingMemory:
         source: str,
         strategy: str,
         status: str,
+        repair_owner: str = "scenesmith_core",
         attempt: int | None = None,
         trigger_reasons: list[str] | None = None,
         actions: list[str] | None = None,
@@ -456,6 +457,7 @@ class StageWorkingMemory:
             "room": (
                 self.root_dir.name if self.root_dir.name.startswith("room_") else ""
             ),
+            "repair_owner": repair_owner,
             "source": source,
             "strategy": strategy,
             "status": status,

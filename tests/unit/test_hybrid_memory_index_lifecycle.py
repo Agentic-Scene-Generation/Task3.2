@@ -8,6 +8,7 @@ import numpy as np
 
 from scenesmith.scene_expert.memory.hybrid_retriever import (
     HybridMemoryRetriever,
+    _zero_result_reason,
     console_logger,
 )
 from scenesmith.scene_expert.memory.index import NumpyMemoryIndex
@@ -39,7 +40,54 @@ def _living_room_task() -> SceneTaskSpec:
     )
 
 
+def test_zero_result_reason_preserves_filter_attribution() -> None:
+    common = {
+        "candidate_count": 2,
+        "below_threshold_count": 0,
+        "stale_count": 0,
+        "same_task_filtered_count": 0,
+        "structured_filtered_count": 2,
+        "index_found": True,
+    }
+    assert (
+        _zero_result_reason(
+            bank_timings=[common],
+            active_stage_records={"success": 2, "failure": 0, "skill": 0},
+            returned_count=0,
+        )
+        == "no_structurally_compatible_memory"
+    )
+    assert (
+        _zero_result_reason(
+            bank_timings=[],
+            active_stage_records={"success": 0, "failure": 0, "skill": 0},
+            returned_count=0,
+        )
+        == "no_active_stage_records"
+    )
+
+
 class HybridMemoryIndexLifecycleTest(unittest.TestCase):
+    def test_timing_write_failure_does_not_discard_a_valid_empty_pack(self) -> None:
+        with TemporaryDirectory() as tmp:
+            memory_dir = Path(tmp) / "memory"
+            store = FastMemoryStore(str(memory_dir))
+            retriever = HybridMemoryRetriever(
+                store=store,
+                memory_dir=str(memory_dir),
+                embedder=_DummyEmbedder(),
+                require_indexes=True,
+                auto_build_indexes=True,
+                timing_path=memory_dir,
+            )
+
+            with patch.object(console_logger, "warning") as warning:
+                pack = retriever.retrieve(_living_room_task(), "furniture")
+
+            self.assertEqual([], pack.success_hints)
+            warning.assert_called_once()
+            self.assertIn("Could not write", warning.call_args.args[0])
+
     def test_empty_banks_are_normal_and_do_not_warn(self) -> None:
         with TemporaryDirectory() as tmp:
             memory_dir = Path(tmp) / "memory"

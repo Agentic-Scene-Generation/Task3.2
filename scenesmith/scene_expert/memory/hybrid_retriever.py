@@ -34,6 +34,10 @@ MemoryRecord = SuccessCase | FailureCase | Skill
 class HybridMemoryRetriever:
     """Retrieve success/failure/skill memory with vector recall + hybrid rerank."""
 
+    # The hook runner uses this marker to avoid appending a second, less
+    # informative timing row after this retriever has recorded its audit row.
+    writes_detailed_timing = True
+
     def __init__(
         self,
         store: FastMemoryStore,
@@ -183,15 +187,21 @@ class HybridMemoryRetriever:
         ).deduplicated()
 
     def _has_active_stage_records(self, stage: str) -> bool:
-        return any(
-            record.stage == stage
-            for records in (
-                self._store.active_success_cases,
-                self._store.active_failure_cases,
-                self._store.active_skills,
-            )
-            for record in records
-        )
+        return any(self._active_stage_counts(stage).values())
+
+    def _active_stage_counts(self, stage: str) -> dict[str, int]:
+        """Return active-bank coverage for one stage before vector filtering."""
+        return {
+            "success": sum(
+                record.stage == stage for record in self._store.active_success_cases
+            ),
+            "failure": sum(
+                record.stage == stage for record in self._store.active_failure_cases
+            ),
+            "skill": sum(
+                record.stage == stage for record in self._store.active_skills
+            ),
+        }
 
     def _retrieve_bank(
         self,
@@ -427,9 +437,14 @@ class HybridMemoryRetriever:
             )
             if indexed_type_revision != current_type_revision:
                 return False
-        elif isinstance(indexed_revision, int) and indexed_revision != self._store.revision:
+        elif (
+            isinstance(indexed_revision, int)
+            and indexed_revision != self._store.revision
+        ):
             return False
-        if indexed_fingerprint and indexed_fingerprint != _records_fingerprint(records):
+        if indexed_fingerprint and indexed_fingerprint != _records_fingerprint(
+            records
+        ):
             return False
         return True
 
@@ -578,6 +593,12 @@ class HybridMemoryRetriever:
             float(x.get("vector_search_sec", 0.0)) for x in bank_timings
         )
         rerank_sec = sum(float(x.get("rerank_sec", 0.0)) for x in bank_timings)
+        active_stage_records = self._active_stage_counts(stage)
+        zero_result_reason = _zero_result_reason(
+            bank_timings=bank_timings,
+            active_stage_records=active_stage_records,
+            returned_count=success_count + failure_count + skill_count,
+        )
         payload = {
             "schema_version": "1.0",
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -593,6 +614,8 @@ class HybridMemoryRetriever:
             "vector_search_sec": round(vector_search_sec, 6),
             "rerank_sec": round(rerank_sec, 6),
             "total_sec": round(total_sec, 6),
+            "active_stage_records": active_stage_records,
+            "zero_result_reason": zero_result_reason,
             "returned": {
                 "success": success_count,
                 "failure": failure_count,
@@ -611,7 +634,7 @@ class HybridMemoryRetriever:
         console_logger.info(
             "[SceneExpertTiming] stage=%s module=hybrid_memory_retrieval "
             "embedding_encode=%.3fs index_load=%.3fs vector_search=%.3fs "
-            "rerank=%.3fs total=%.3fs returned=%s/%s/%s",
+            "rerank=%.3fs total=%.3fs returned=%s/%s/%s zero_reason=%s",
             stage,
             embedding_encode_sec,
             index_load_sec,
@@ -621,12 +644,66 @@ class HybridMemoryRetriever:
             success_count,
             failure_count,
             skill_count,
+            zero_result_reason or "none",
         )
         if self._timing_path is None:
             return
-        self._timing_path.parent.mkdir(parents=True, exist_ok=True)
-        with self._timing_path.open("a", encoding="utf-8", newline="\n") as f:
-            f.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
+        try:
+            self._timing_path.parent.mkdir(parents=True, exist_ok=True)
+            with self._timing_path.open(
+                "a", encoding="utf-8", newline="\n"
+            ) as file:
+                file.write(
+                    json.dumps(payload, ensure_ascii=False, default=str) + "\n"
+                )
+        except OSError as error:
+            # Observability must never turn a valid retrieval into an empty pack.
+            console_logger.warning(
+                "Could not write hybrid-memory retrieval timing %s: %s",
+                self._timing_path,
+                error,
+            )
+
+
+def _zero_result_reason(
+    *,
+    bank_timings: list[dict[str, Any]],
+    active_stage_records: dict[str, int],
+    returned_count: int,
+) -> str:
+    """Explain an empty hybrid retrieval without weakening safety filters."""
+    if returned_count > 0:
+        return ""
+    if not any(active_stage_records.values()):
+        return "no_active_stage_records"
+    if bank_timings and not any(
+        bool(bank.get("index_found")) for bank in bank_timings
+    ):
+        return "no_index_available"
+
+    candidates = sum(int(bank.get("candidate_count", 0)) for bank in bank_timings)
+    if candidates == 0:
+        return "no_vector_candidates"
+    below = sum(int(bank.get("below_threshold_count", 0)) for bank in bank_timings)
+    if below >= candidates:
+        return "below_similarity_threshold"
+    stale = sum(int(bank.get("stale_count", 0)) for bank in bank_timings)
+    remaining = max(0, candidates - below)
+    if stale >= remaining:
+        return "all_candidates_stale"
+    same_task = sum(
+        int(bank.get("same_task_filtered_count", 0)) for bank in bank_timings
+    )
+    remaining = max(0, remaining - stale)
+    if same_task >= remaining:
+        return "all_candidates_same_task"
+    structured = sum(
+        int(bank.get("structured_filtered_count", 0)) for bank in bank_timings
+    )
+    remaining = max(0, remaining - same_task)
+    if structured >= remaining:
+        return "no_structurally_compatible_memory"
+    return "no_accepted_candidates"
 
 
 def _record_id(record: MemoryRecord) -> str:
