@@ -24,6 +24,9 @@ from scenesmith.agent_utils.base_stateful_agent import (
     BaseStatefulAgent,
     log_agent_usage,
 )
+from scenesmith.agent_utils.hssd_retrieval.support_surface_loader import (
+    hssd_support_surface_path,
+)
 from scenesmith.agent_utils.manipuland_placement_order import (
     build_manipuland_placement_order_reference,
 )
@@ -77,6 +80,10 @@ from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.d
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.manipuland_completeness import (
     evaluate_manipuland_completeness,
 )
+from scenesmith.scenebenchmark_critic.metrics.functional_dependency.constants import (
+    SEATING,
+)
+from scenesmith.scenebenchmark_critic.object_taxonomy import canonical_object_category
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.seat_surface_assignment import (
     assign_work_seats_to_surfaces,
     room_bounds_from_case_pack,
@@ -114,6 +121,10 @@ _REQUIRED_BBOX_SUPPORT_CATEGORIES = frozenset(
         "dresser",
         "tv_stand",
     }
+)
+
+_UPHOLSTERED_SEAT_MANIPULAND_TOKENS = frozenset(
+    {"cushion", "pillow", "bolster", "blanket", "throw"}
 )
 
 
@@ -1898,6 +1909,57 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
             )
         ]
 
+    @staticmethod
+    def _required_target_support_surface_policy(
+        *,
+        scene: RoomScene,
+        furniture: Any,
+        furniture_id: UniqueID,
+        selection: FurnitureSelection,
+        config: SupportSurfaceExtractionConfig,
+    ) -> str:
+        """Select the relaxed HSSD seat policy only for a hard soft-furnishing cohort."""
+        if not selection.is_prompt_required:
+            return "general"
+        if config.recompute_hssd_surfaces:
+            return "general"
+        metadata = getattr(furniture, "metadata", {}) or {}
+        mesh_id = str(metadata.get("hssd_mesh_id") or "")
+        if metadata.get("asset_source") != "hssd" or not mesh_id:
+            return "general"
+        if not hssd_support_surface_path(
+            mesh_id=mesh_id, data_dir=config.hssd_data_dir
+        ).exists():
+            return "general"
+
+        category_candidates = (
+            metadata.get("semantic_name"),
+            metadata.get("category"),
+            getattr(furniture, "name", ""),
+            getattr(furniture, "description", ""),
+            str(furniture_id),
+        )
+        target_category = next(
+            (
+                category
+                for value in category_candidates
+                if (category := canonical_object_category(value)) in SEATING
+            ),
+            "",
+        )
+        if not target_category:
+            return "general"
+
+        for cohort in contract_manipuland_support_cohorts(scene):
+            subject_tokens = set(canonical_object_category(cohort.category).split("_"))
+            if (
+                cohort.target_id == str(furniture_id)
+                and cohort.relation == "on_top_of"
+                and subject_tokens & _UPHOLSTERED_SEAT_MANIPULAND_TOKENS
+            ):
+                return "upholstered_seat"
+        return "general"
+
     async def add_manipulands(self, scene: RoomScene) -> None:
         """Add manipulands to furniture surfaces in the scene.
 
@@ -2060,9 +2122,25 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
                 hsm_config = SupportSurfaceExtractionConfig.from_config(
                     cfg=self.cfg.support_surface_extraction
                 )
+                surface_policy = self._required_target_support_surface_policy(
+                    scene=self.scene,
+                    furniture=furniture,
+                    furniture_id=furniture_id,
+                    selection=furniture_selection,
+                    config=hsm_config,
+                )
+                if surface_policy == "upholstered_seat":
+                    console_logger.info(
+                        "Using upholstered-seat HSSD support policy for hard "
+                        "prompt-owned target %s",
+                        furniture_id,
+                    )
                 try:
                     surfaces = extract_and_propagate_support_surfaces(
-                        scene=self.scene, furniture_object=furniture, config=hsm_config
+                        scene=self.scene,
+                        furniture_object=furniture,
+                        config=hsm_config,
+                        surface_policy=surface_policy,
                     )
                 except (FileNotFoundError, ValueError) as error:
                     if not furniture_selection.is_prompt_required:

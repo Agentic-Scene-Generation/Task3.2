@@ -243,6 +243,69 @@ class TestSupportSurfaceMeshScaling(unittest.TestCase):
         self.assertEqual(surfaces, [])
         self.assertEqual(furniture.support_surfaces, surfaces)
 
+    def test_upholstered_policy_passes_unscaled_bounds_without_propagation(self):
+        """A relaxed seat surface remains scoped to its hard target instance."""
+        geometry_path = self.mesh_path
+        furniture = SceneObject(
+            object_id=UniqueID("loveseat_0"),
+            object_type=ObjectType.FURNITURE,
+            name="loveseat",
+            description="Test HSSD loveseat",
+            transform=RigidTransform(),
+            geometry_path=geometry_path,
+            support_surfaces=[],
+            metadata={
+                "asset_source": "hssd",
+                "hssd_mesh_id": "annotated_loveseat",
+            },
+            bbox_min=np.array([-1.0, -0.5, 0.0]),
+            bbox_max=np.array([1.0, 0.5, 1.0]),
+            scale_factor=2.0,
+        )
+        identical = SceneObject(
+            object_id=UniqueID("loveseat_1"),
+            object_type=ObjectType.FURNITURE,
+            name="loveseat",
+            description="Identical optional loveseat",
+            transform=RigidTransform(p=[3.0, 0.0, 0.0]),
+            geometry_path=geometry_path,
+            support_surfaces=[],
+            metadata={},
+        )
+        self.scene.objects = {
+            furniture.object_id: furniture,
+            identical.object_id: identical,
+        }
+        local_surface = SupportSurface(
+            surface_id=UniqueID("local_seat"),
+            bounding_box_min=np.array([-0.4, -0.2, 0.01]),
+            bounding_box_max=np.array([0.4, 0.2, 0.2]),
+            transform=RigidTransform(p=[0.0, 0.0, 0.5]),
+        )
+
+        with patch(
+            "scenesmith.agent_utils.hssd_retrieval.support_surface_loader."
+            "load_hssd_support_surfaces",
+            return_value=[local_surface],
+        ) as load_hssd:
+            surfaces = extract_and_propagate_support_surfaces(
+                scene=self.scene,
+                furniture_object=furniture,
+                config=self.config,
+                surface_policy="upholstered_seat",
+            )
+
+        _, kwargs = load_hssd.call_args
+        self.assertEqual(kwargs["surface_policy"], "upholstered_seat")
+        np.testing.assert_allclose(kwargs["furniture_bbox_min"], [-0.5, -0.25, 0.0])
+        np.testing.assert_allclose(kwargs["furniture_bbox_max"], [0.5, 0.25, 0.5])
+        self.assertEqual(kwargs["furniture_scale_factor"], 2.0)
+        self.assertEqual(len(surfaces), 1)
+        self.assertEqual(
+            furniture.metadata["support_surface_policy"], "upholstered_seat"
+        )
+        self.assertEqual(identical.support_surfaces, [])
+
 
 class TestSupportSurfaceBehavior(unittest.TestCase):
     """Tests for SupportSurface behavior with scaled meshes."""

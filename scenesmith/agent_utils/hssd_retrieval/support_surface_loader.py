@@ -13,6 +13,7 @@ import logging
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 import trimesh
@@ -26,6 +27,9 @@ from scenesmith.agent_utils.support_surface_filters import (
 )
 
 console_logger = logging.getLogger(__name__)
+
+SupportSurfacePolicy = Literal["general", "upholstered_seat"]
+_SUPPORTED_SURFACE_POLICIES = frozenset({"general", "upholstered_seat"})
 
 
 @dataclass
@@ -49,6 +53,22 @@ class HsmSupportSurfaceData:
 
     clearance: float
     """Minimum clearance height above the surface in meters."""
+
+    clearance_samples: tuple[float, ...] = ()
+    """All finite HSM clearance samples used by policy-specific filtering."""
+
+
+def hssd_support_surface_path(mesh_id: str, data_dir: Path | None = None) -> Path:
+    """Return the annotation path used by the HSSD support-surface loader."""
+    if data_dir is None:
+        data_dir = Path(__file__).parent.parent.parent.parent / "data"
+    return (
+        Path(data_dir)
+        / "hssd-models"
+        / "support-surfaces"
+        / mesh_id
+        / f"{mesh_id}.supportSurface.json.gz"
+    )
 
 
 def _compute_obb_corners(obb_data: dict) -> np.ndarray:
@@ -313,11 +333,16 @@ def _load_hsm_support_surfaces(
         # Extract clearance from samples (use minimum clearance for safety).
         samples = surface_data.get("samples", [])
         if samples:
-            clearances = [s["clearance"] for s in samples if "clearance" in s]
+            clearances = tuple(
+                float(sample["clearance"])
+                for sample in samples
+                if "clearance" in sample and np.isfinite(float(sample["clearance"]))
+            )
             # Use minimum clearance (most conservative estimate).
             clearance = min(clearances) if clearances else top_surface_clearance_m
         else:
             # No samples - this is a top surface, use configured clearance.
+            clearances = ()
             clearance = top_surface_clearance_m
 
         surface = HsmSupportSurfaceData(
@@ -327,6 +352,7 @@ def _load_hsm_support_surfaces(
             is_horizontal=is_horizontal,
             corners=corners_hsm,
             clearance=clearance,
+            clearance_samples=clearances,
         )
         surfaces.append(surface)
 
@@ -376,7 +402,15 @@ def _corners_to_bbox_and_transform(
 
 
 def load_hssd_support_surfaces(
-    mesh_id: str, config, scene: "RoomScene", data_dir: Path | None = None
+    mesh_id: str,
+    config,
+    scene: "RoomScene",
+    data_dir: Path | None = None,
+    *,
+    surface_policy: SupportSurfacePolicy = "general",
+    furniture_bbox_min: np.ndarray | None = None,
+    furniture_bbox_max: np.ndarray | None = None,
+    furniture_scale_factor: float = 1.0,
 ) -> list[SupportSurface] | None:
     """Load pre-validated support surfaces for HSSD asset.
 
@@ -388,17 +422,50 @@ def load_hssd_support_surfaces(
         config: Configuration object with clearance settings.
         scene: RoomScene object for generating unique surface IDs.
         data_dir: Optional data directory. If None, uses default from project root.
+        surface_policy: Strict general filtering or the narrowly gated upholstered
+            seating policy.
+        furniture_bbox_min: Unscaled furniture-local lower bounds, required by the
+            upholstered seating policy.
+        furniture_bbox_max: Unscaled furniture-local upper bounds, required by the
+            upholstered seating policy.
+        furniture_scale_factor: Scale applied after loading, used to bound the seat
+            inset in world meters.
 
     Returns:
         List of SupportSurface objects in scenesmith coordinates (Z-up, Y-forward,
         mesh-local frame), or None if surfaces not found or loading fails.
     """
-    if data_dir is None:
-        # Default to project root data directory.
-        data_dir = Path(__file__).parent.parent.parent.parent / "data"
+    if surface_policy not in _SUPPORTED_SURFACE_POLICIES:
+        raise ValueError(f"Unknown HSSD support surface policy: {surface_policy}")
+    json_path = hssd_support_surface_path(mesh_id=mesh_id, data_dir=data_dir)
 
-    support_surfaces_dir = data_dir / "hssd-models" / "support-surfaces"
-    json_path = support_surfaces_dir / mesh_id / f"{mesh_id}.supportSurface.json.gz"
+    furniture_lower = None
+    furniture_upper = None
+    furniture_scale = float(furniture_scale_factor)
+    if surface_policy == "upholstered_seat":
+        if furniture_bbox_min is None or furniture_bbox_max is None:
+            console_logger.warning(
+                "Upholstered-seat policy requires furniture-local bounds for %s",
+                mesh_id[:8],
+            )
+            return None
+        furniture_lower = np.asarray(furniture_bbox_min, dtype=float)
+        furniture_upper = np.asarray(furniture_bbox_max, dtype=float)
+        if (
+            furniture_lower.shape != (3,)
+            or furniture_upper.shape != (3,)
+            or not np.all(
+                np.isfinite(np.concatenate((furniture_lower, furniture_upper)))
+            )
+            or np.any(furniture_upper <= furniture_lower)
+            or not np.isfinite(furniture_scale)
+            or furniture_scale <= 0.0
+        ):
+            console_logger.warning(
+                "Upholstered-seat policy received invalid furniture bounds for %s",
+                mesh_id[:8],
+            )
+            return None
 
     if not json_path.exists():
         console_logger.debug(
@@ -426,9 +493,81 @@ def load_hssd_support_surfaces(
             # Convert corners from HSM to scenesmith coordinates.
             corners_scenesmith = _convert_hsm_to_scenesmith_coords(hsm_surface.corners)
 
-            # Adjust clearance for surface offset (match HSM-computed behavior).
-            # This prevents fake collisions by accounting for the gravity settling offset.
-            clearance_adjusted = hsm_surface.clearance - config.surface_offset_m
+            strict_min = hsm_surface.clearance
+            clearance_p90 = (
+                float(np.percentile(hsm_surface.clearance_samples, 90))
+                if hsm_surface.clearance_samples
+                else strict_min
+            )
+            clearance_adjusted = strict_min - config.surface_offset_m
+
+            if surface_policy == "upholstered_seat":
+                surface_height = float(corners_scenesmith[:, 2].mean())
+                furniture_height = float(furniture_upper[2] - furniture_lower[2])
+                height_fraction = (
+                    surface_height - float(furniture_lower[2])
+                ) / furniture_height
+                if height_fraction < 0.25 or height_fraction > 0.75:
+                    console_logger.debug(
+                        "Filtering upholstered-seat surface %s: local height %.1f%% "
+                        "outside 25%%-75%% (strict-min=%.3fm, p90=%.3fm)",
+                        hsm_surface.index,
+                        100.0 * height_fraction,
+                        strict_min,
+                        clearance_p90,
+                    )
+                    continue
+                p90_adjusted = clearance_p90 - config.surface_offset_m
+                if p90_adjusted < config.min_clearance_m:
+                    console_logger.debug(
+                        "Filtering upholstered-seat surface %s: adjusted p90 "
+                        "clearance %.3fm < min %.3fm (strict-min=%.3fm, p90=%.3fm)",
+                        hsm_surface.index,
+                        p90_adjusted,
+                        config.min_clearance_m,
+                        strict_min,
+                        clearance_p90,
+                    )
+                    continue
+
+                furniture_dimensions = furniture_upper - furniture_lower
+                inset_world = np.clip(
+                    0.05 * furniture_dimensions[:2] * furniture_scale,
+                    0.02,
+                    0.08,
+                )
+                inset_local = inset_world / furniture_scale
+                surface_lower = corners_scenesmith.min(axis=0)
+                surface_upper = corners_scenesmith.max(axis=0)
+                inset_lower = surface_lower[:2] + inset_local
+                inset_upper = surface_upper[:2] - inset_local
+                if np.any(inset_upper <= inset_lower):
+                    console_logger.debug(
+                        "Filtering upholstered-seat surface %s: furniture-scaled "
+                        "inset removes the XY bounds",
+                        hsm_surface.index,
+                    )
+                    continue
+                corners_scenesmith = corners_scenesmith.copy()
+                corners_scenesmith[:, 0] = np.clip(
+                    corners_scenesmith[:, 0], inset_lower[0], inset_upper[0]
+                )
+                corners_scenesmith[:, 1] = np.clip(
+                    corners_scenesmith[:, 1], inset_lower[1], inset_upper[1]
+                )
+                clearance_adjusted = min(clearance_p90, config.top_surface_clearance_m)
+                console_logger.info(
+                    "Selected HSSD surface %s for %s: policy=upholstered_seat, "
+                    "strict-min=%.3fm, p90=%.3fm, tool-clearance=%.3fm, "
+                    "inset=(%.3fm, %.3fm)",
+                    hsm_surface.index,
+                    mesh_id[:8],
+                    strict_min,
+                    clearance_p90,
+                    clearance_adjusted,
+                    inset_world[0],
+                    inset_world[1],
+                )
 
             # Filter out surfaces with insufficient clearance (use adjusted value).
             if clearance_adjusted < config.min_clearance_m:

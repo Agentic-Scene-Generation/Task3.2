@@ -2,6 +2,7 @@ import asyncio
 import math
 
 from contextlib import nullcontext
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, call, patch
 
@@ -105,6 +106,103 @@ def test_required_bbox_fallback_does_not_invent_sofa_surface() -> None:
         )
         == []
     )
+
+
+@pytest.mark.parametrize(
+    (
+        "subject_category",
+        "target_category",
+        "is_prompt_required",
+        "annotation_exists",
+        "relation",
+        "expected",
+    ),
+    [
+        ("cushion", "loveseat", True, True, "on_top_of", "upholstered_seat"),
+        ("cup", "sofa", True, True, "on_top_of", "general"),
+        ("throw_blanket", "armchair", False, True, "on_top_of", "general"),
+        ("pillow", "table", True, True, "on_top_of", "general"),
+        ("bolster", "sofa", True, False, "on_top_of", "general"),
+        ("blanket", "sofa", True, True, "one_per_support", "general"),
+    ],
+)
+def test_upholstered_seat_policy_requires_hard_prompt_owned_cohort(
+    subject_category: str,
+    target_category: str,
+    is_prompt_required: bool,
+    annotation_exists: bool,
+    relation: str,
+    expected: str,
+) -> None:
+    furniture_id = UniqueID(f"{target_category}_0")
+    furniture = SimpleNamespace(
+        object_id=furniture_id,
+        name=target_category,
+        description=target_category,
+        metadata={
+            "asset_source": "hssd",
+            "hssd_mesh_id": "annotated_mesh",
+            "semantic_name": target_category,
+        },
+    )
+    selection = FurnitureSelection(
+        furniture_id=furniture_id,
+        suggested_items=subject_category,
+        prompt_constraints="structured hard support requirement",
+        style_notes="",
+        is_prompt_required=is_prompt_required,
+    )
+    cohort = SimpleNamespace(
+        target_id=str(furniture_id),
+        relation=relation,
+        category=subject_category,
+    )
+    annotation_path = Mock()
+    annotation_path.exists.return_value = annotation_exists
+
+    with (
+        patch(
+            "scenesmith.manipuland_agents.stateful_manipuland_agent."
+            "contract_manipuland_support_cohorts",
+            return_value=[cohort],
+        ),
+        patch(
+            "scenesmith.manipuland_agents.stateful_manipuland_agent."
+            "hssd_support_surface_path",
+            return_value=annotation_path,
+        ),
+    ):
+        policy = StatefulManipulandAgent._required_target_support_surface_policy(
+            scene=Mock(),
+            furniture=furniture,
+            furniture_id=furniture_id,
+            selection=selection,
+            config=SimpleNamespace(
+                hssd_data_dir=Path("/unused"), recompute_hssd_surfaces=False
+            ),
+        )
+
+    assert policy == expected
+
+
+def test_upholstered_seat_policy_does_not_override_hssd_recompute() -> None:
+    selection = FurnitureSelection(
+        furniture_id=UniqueID("loveseat_0"),
+        suggested_items="cushion",
+        prompt_constraints="hard support requirement",
+        style_notes="",
+        is_prompt_required=True,
+    )
+
+    policy = StatefulManipulandAgent._required_target_support_surface_policy(
+        scene=Mock(),
+        furniture=SimpleNamespace(metadata={}),
+        furniture_id=selection.furniture_id,
+        selection=selection,
+        config=SimpleNamespace(recompute_hssd_surfaces=True),
+    )
+
+    assert policy == "general"
 
 
 def test_dining_prompt_requires_table_and_sideboard_targets() -> None:
