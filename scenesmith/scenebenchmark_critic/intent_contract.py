@@ -909,6 +909,7 @@ def contract_seating_targets(case_pack: dict[str, Any]) -> dict[str, set[str]]:
         case_pack,
         relations=(
             "faces",
+            "across_from",
             "aligned_with",
             "paired_with",
             "against_wall",

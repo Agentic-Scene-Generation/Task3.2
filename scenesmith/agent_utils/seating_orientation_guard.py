@@ -11,7 +11,12 @@ from dataclasses import dataclass
 import numpy as np
 
 from pydrake.math import RigidTransform, RollPitchYaw
+from shapely.geometry import Polygon, box
 
+from scenesmith.agent_utils.clearance_zones import (
+    compute_door_clearance_violations,
+    compute_window_clearance_violations,
+)
 from scenesmith.agent_utils.room import ObjectType, RoomScene, SceneObject
 from scenesmith.utils.geometry_utils import compute_optimal_facing_yaw
 
@@ -24,9 +29,17 @@ SEATING_TOKENS = {
     "chair",
     "dining_chair",
     "loveseat",
+    "l_sofa",
     "office_chair",
+    "sectional",
     "sofa",
     "stool",
+}
+SOFA_TOKENS = {
+    "l_sofa",
+    "loveseat",
+    "sectional",
+    "sofa",
 }
 SURFACE_TOKENS = {
     "bar_table",
@@ -65,9 +78,9 @@ def align_seating_to_nearest_surface(
 ) -> list[SeatingOrientationFix]:
     """Rotate seating only toward an allowed or legacy-nearest target.
 
-    ``allowed_targets_by_seat`` is supplied by intent-contract mode.  An empty
-    mapping entry means the prompt did not establish a facing/wall relation, so
-    this direct pre-critic guard must leave the seat untouched.
+    ``allowed_targets_by_seat`` is supplied by intent-contract mode. An empty
+    mapping entry leaves ordinary seating untouched and applies only the
+    reversible nearest-wall parallel preference to sofa-like seating.
     """
     furniture = [
         obj for obj in scene.objects.values() if obj.object_type == ObjectType.FURNITURE
@@ -84,17 +97,26 @@ def align_seating_to_nearest_surface(
             if allowed_targets_by_seat is not None
             else None
         )
-        if allowed_targets_by_seat is not None and not allowed_targets:
-            continue
         walls = scene.get_objects_by_type(ObjectType.WALL)
+        if allowed_targets_by_seat is not None and not allowed_targets:
+            default_fix = _align_default_sofa_parallel_to_wall(scene, seat, walls)
+            if default_fix is not None:
+                fixes.append(default_fix)
+            continue
         if allowed_targets is not None:
             walls = [wall for wall in walls if str(wall.object_id) in allowed_targets]
         candidate_surfaces = surfaces
         if allowed_targets is not None:
+            # Contract targets can be wall-mounted media.  Restricting this
+            # lookup to floor-standing work surfaces made an explicit
+            # sofa->television relation disappear and let the legacy nearest
+            # table fallback rotate the sofa later in the pipeline.
             candidate_surfaces = [
-                surface
-                for surface in surfaces
-                if str(surface.object_id) in allowed_targets
+                target
+                for target in scene.objects.values()
+                if str(target.object_id) in allowed_targets
+                and target.object_id != seat.object_id
+                and target.object_type not in (ObjectType.WALL, ObjectType.FLOOR)
             ]
         wall_target = _nearest_wall_anchor(
             seat,
@@ -162,7 +184,12 @@ def align_seating_to_nearest_surface(
             )
             if new_transform is None:
                 continue
-            seat.transform = new_transform
+            if not _apply_transform_without_geometry_regression(
+                scene,
+                seat,
+                new_transform,
+            ):
+                continue
             fixes.append(
                 SeatingOrientationFix(
                     subject_id=str(seat.object_id),
@@ -182,7 +209,7 @@ def align_seating_to_nearest_surface(
         )
         # 2026-07-22 修改原因：functional dependency 要求座椅朝向 table/desk
         # 的夹角不超过 45°；独立墙边座椅已在上方分支优先按墙法线朝向室内。
-        seat.transform = RigidTransform(
+        candidate = RigidTransform(
             rpy=RollPitchYaw(
                 old_rpy.roll_angle(),
                 old_rpy.pitch_angle(),
@@ -190,6 +217,12 @@ def align_seating_to_nearest_surface(
             ),
             p=seat.transform.translation(),
         )
+        if not _apply_transform_without_geometry_regression(
+            scene,
+            seat,
+            candidate,
+        ):
+            continue
         fixes.append(
             SeatingOrientationFix(
                 subject_id=str(seat.object_id),
@@ -435,8 +468,224 @@ def _is_wall_anchor_candidate(obj: SceneObject) -> bool:
             "chair",
             "dining_chair",
             "office_chair",
+            "sectional",
+            "sofa",
             "stool",
         }
+    )
+
+
+def _is_sofa_like(obj: SceneObject) -> bool:
+    tokens = _object_tokens(obj)
+    return bool(tokens & SOFA_TOKENS) or ("gaming" in tokens and "sofa" in tokens)
+
+
+def _align_default_sofa_parallel_to_wall(
+    scene: RoomScene,
+    seat: SceneObject,
+    walls: list[SceneObject],
+    *,
+    tolerance_deg: float = 3.0,
+) -> SeatingOrientationFix | None:
+    """Cardinalize an unconstrained sofa without worsening its geometry.
+
+    This is a presentation preference, not a hard semantic relation.  It is
+    therefore used only when the intent contract supplied no facing/wall
+    target, and it changes yaw only.  Explicit media, table, and wall-facing
+    contracts are handled by the branches above.
+    """
+    if not _is_sofa_like(seat) or not walls:
+        return None
+    seat_bounds = seat.compute_world_bounds()
+    if seat_bounds is None:
+        return None
+    ranked: list[tuple[float, str, SceneObject]] = []
+    for wall in walls:
+        wall_bounds = wall.compute_world_bounds()
+        if wall_bounds is None:
+            continue
+        ranked.append(
+            (
+                _aabb_gap_xy(
+                    seat_bounds[0], seat_bounds[1], wall_bounds[0], wall_bounds[1]
+                ),
+                str(wall.object_id),
+                wall,
+            )
+        )
+    if not ranked:
+        return None
+    ranked.sort(key=lambda item: (item[0], item[1]))
+    wall = ranked[0][2]
+    target_point = _wall_away_target_point(seat, wall)
+    if target_point is None:
+        return None
+    angle = _front_angle_to_point_deg(seat, target_point)
+    if angle is None or angle <= tolerance_deg:
+        return None
+
+    old_rpy = RollPitchYaw(seat.transform.rotation())
+    new_yaw_deg = compute_optimal_facing_yaw(
+        origin_a=seat.transform.translation(),
+        target_point=target_point,
+    )
+    candidate = RigidTransform(
+        rpy=RollPitchYaw(
+            old_rpy.roll_angle(),
+            old_rpy.pitch_angle(),
+            math.radians(new_yaw_deg),
+        ),
+        p=seat.transform.translation(),
+    )
+    if not _apply_transform_without_geometry_regression(scene, seat, candidate):
+        return None
+    return SeatingOrientationFix(
+        subject_id=str(seat.object_id),
+        target_id=str(wall.object_id),
+        old_yaw_deg=math.degrees(old_rpy.yaw_angle()),
+        new_yaw_deg=new_yaw_deg,
+        angle_to_target_deg=angle,
+    )
+
+
+def _room_overflow_area(scene: RoomScene, obj: SceneObject) -> float:
+    geometry = scene.room_geometry
+    footprint = _object_footprint_polygon(obj)
+    if geometry is None or footprint is None:
+        return 0.0
+    length = float(getattr(geometry, "length", 0.0) or 0.0)
+    width = float(getattr(geometry, "width", 0.0) or 0.0)
+    if length <= 0.0 or width <= 0.0:
+        return 0.0
+    room = box(-length / 2.0, -width / 2.0, length / 2.0, width / 2.0)
+    return max(0.0, float(footprint.area - footprint.intersection(room).area))
+
+
+def _apply_transform_without_geometry_regression(
+    scene: RoomScene,
+    subject: SceneObject,
+    candidate: RigidTransform,
+) -> bool:
+    """Apply a seating candidate only when physical geometry does not worsen."""
+    old_transform = subject.transform
+    old_overflow = _room_overflow_area(scene, subject)
+    old_overlap = _furniture_overlap_volume(scene, subject)
+    old_wall_overlap = _wall_overlap_volume(scene, subject)
+    old_openings = _opening_violation_profile(scene, subject)
+    subject.transform = candidate
+    new_overflow = _room_overflow_area(scene, subject)
+    new_overlap = _furniture_overlap_volume(scene, subject)
+    new_wall_overlap = _wall_overlap_volume(scene, subject)
+    new_openings = _opening_violation_profile(scene, subject)
+    if (
+        new_overflow > old_overflow + 1e-6
+        or new_overlap > old_overlap + 1e-6
+        or new_wall_overlap > old_wall_overlap + 1e-6
+        or _severity_profile_regresses(old_openings, new_openings)
+    ):
+        subject.transform = old_transform
+        return False
+    return True
+
+
+def _object_footprint_polygon(obj: SceneObject) -> Polygon | None:
+    if obj.bbox_min is None or obj.bbox_max is None:
+        return None
+    lower = np.asarray(obj.bbox_min, dtype=float)
+    upper = np.asarray(obj.bbox_max, dtype=float)
+    local = (
+        (lower[0], lower[1]),
+        (upper[0], lower[1]),
+        (upper[0], upper[1]),
+        (lower[0], upper[1]),
+    )
+    points = []
+    for x, y in local:
+        world = obj.transform @ np.asarray([x, y, 0.0], dtype=float)
+        points.append((float(world[0]), float(world[1])))
+    footprint = Polygon(points)
+    return footprint if footprint.is_valid and not footprint.is_empty else None
+
+
+def _overlap_volume(first: SceneObject, second: SceneObject) -> float:
+    first_footprint = _object_footprint_polygon(first)
+    second_footprint = _object_footprint_polygon(second)
+    first_bounds = first.compute_world_bounds()
+    second_bounds = second.compute_world_bounds()
+    if (
+        first_footprint is None
+        or second_footprint is None
+        or first_bounds is None
+        or second_bounds is None
+    ):
+        return 0.0
+    overlap_z = max(
+        0.0,
+        float(
+            min(first_bounds[1][2], second_bounds[1][2])
+            - max(first_bounds[0][2], second_bounds[0][2])
+        ),
+    )
+    return float(first_footprint.intersection(second_footprint).area) * overlap_z
+
+
+def _furniture_overlap_volume(
+    scene: RoomScene,
+    subject: SceneObject,
+) -> float:
+    total = 0.0
+    for other in scene.objects.values():
+        if (
+            other.object_id == subject.object_id
+            or other.object_type != ObjectType.FURNITURE
+        ):
+            continue
+        total += _overlap_volume(subject, other)
+    return total
+
+
+def _wall_overlap_volume(scene: RoomScene, subject: SceneObject) -> float:
+    return sum(
+        _overlap_volume(subject, wall)
+        for wall in scene.get_objects_by_type(ObjectType.WALL)
+    )
+
+
+def _opening_violation_profile(
+    scene: RoomScene,
+    subject: SceneObject,
+) -> dict[str, float]:
+    subject_id = str(subject.object_id)
+    profile: dict[str, float] = {}
+    try:
+        for violation in compute_door_clearance_violations(scene):
+            if violation.furniture_id == subject_id:
+                profile[f"door:{violation.door_label}"] = float(
+                    violation.penetration_depth
+                )
+    except Exception:
+        console_logger.debug("Could not evaluate seating door clearance", exc_info=True)
+    try:
+        for violation in compute_window_clearance_violations(scene):
+            if violation.furniture_id == subject_id:
+                profile[f"window:{violation.window_label}"] = max(
+                    0.0,
+                    float(violation.furniture_top_height - violation.sill_height),
+                )
+    except Exception:
+        console_logger.debug(
+            "Could not evaluate seating window clearance",
+            exc_info=True,
+        )
+    return profile
+
+
+def _severity_profile_regresses(
+    before: dict[str, float],
+    after: dict[str, float],
+) -> bool:
+    return bool(after.keys() - before.keys()) or any(
+        after[key] > before[key] + 1e-6 for key in before.keys() & after.keys()
     )
 
 
@@ -523,7 +772,7 @@ def _object_tokens(obj: SceneObject) -> set[str]:
 def _compound_tokens(text: str) -> set[str]:
     normalized = text.lower().replace("-", "_").replace(" ", "_")
     out: set[str] = set()
-    for token in SEATING_TOKENS | SURFACE_TOKENS:
+    for token in SEATING_TOKENS | SOFA_TOKENS | SURFACE_TOKENS:
         if re.search(rf"(?:^|_){re.escape(token)}(?:_|$)", normalized):
             out.add(token)
     return out

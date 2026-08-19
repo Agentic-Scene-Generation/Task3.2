@@ -56,7 +56,9 @@ _FURNITURE_GATE_STRATEGIES = (
     "furniture_relation",
     "edge_distribution",
 )
-_SYSTEM_REPAIRABLE_RELATIONS = frozenset({"room_containment"})
+_SYSTEM_REPAIRABLE_RELATIONS = frozenset(
+    {"activity_zone_separation", "room_containment"}
+)
 _PAIRED_SURFACE_RELATION = "furniture_faces_furniture"
 _OPENING_CLEARANCE_MARGIN_M = 0.03
 _WALL_BACKED_CONTACT_GAP_M = 0.03
@@ -83,6 +85,7 @@ _ROOM_BOUNDED_TOPOLOGY_RELATIONS = frozenset(
         "corner_of_room",
         "corner_distribution",
         "edge_distribution",
+        "activity_zone_separation",
         "room_containment",
     }
 )
@@ -543,17 +546,35 @@ def _candidate_improves(
     check_id: str,
 ) -> bool:
     candidate_score = _score_payload(candidate_payload)
+    introduced_failures = candidate_score.fail_ids - baseline_score.fail_ids
+    target_result = _result_by_id(baseline_payload, check_id)
+    target_constraint = ((target_result or {}).get("evidence") or {}).get(
+        "intent_constraint"
+    ) or {}
+    defers_window_repair = bool(
+        introduced_failures
+        and all(
+            failure_id.startswith("window_clearance__")
+            for failure_id in introduced_failures
+        )
+        and str(target_constraint.get("strength") or "").lower() == "hard"
+        and str(target_constraint.get("stage") or "furniture") == "furniture"
+    )
     # Hard failures are the primary repair objective.  An exact functional
     # slot can legitimately turn a heuristic accessibility check from pass to
     # degraded (for example, moving four remote dining chairs back to the four
     # requested table edges).  Rejecting every new soft degradation before
     # comparing hard failures leaves the original, unusable layout untouched.
     #
-    # Never introduce a new hard failure.  When at least one hard failure is
-    # removed, compare scores lexicographically and allow a soft degradation;
-    # later repair rounds can improve it.  Without a hard-failure reduction,
-    # retain the previous strict no-regression behavior.
-    if candidate_score.fail_ids - baseline_score.fail_ids:
+    # Never introduce a new hard failure except a window-clearance failure
+    # created while satisfying an explicit hard furniture relation. The
+    # stateful furniture transaction immediately hands that case to atomic
+    # window migration and rolls the relation move back if migration fails.
+    # When at least one hard failure is removed, compare scores
+    # lexicographically and allow a soft degradation; later repair rounds can
+    # improve it. Without a hard-failure reduction, retain the strict
+    # no-regression behavior.
+    if introduced_failures and not defers_window_repair:
         return False
     if candidate_score.global_key > baseline_score.global_key:
         return False
@@ -576,6 +597,11 @@ def _candidate_improves(
     old_result = _result_by_id(baseline_payload, check_id)
     new_result = _result_by_id(candidate_payload, check_id)
     if old_result is None or new_result is None:
+        return False
+    if (
+        str(old_result.get("relation_type") or "") == "activity_zone_separation"
+        and str(new_result.get("label") or "").lower() != "pass"
+    ):
         return False
     return _result_severity(new_result) < _result_severity(old_result)
 
@@ -651,6 +677,11 @@ def _result_severity(result: dict[str, Any]) -> tuple[int, float]:
             0.0,
             float(diagnostics.get("lateral_offset_m") or 0.0)
             - float(diagnostics.get("media_axis_pass_offset_m") or 0.0),
+        )
+    elif relation == "activity_zone_separation":
+        magnitude = max(
+            0.0,
+            float(diagnostics.get("intersection_area_m2") or 0.0),
         )
     elif relation in {"between_alignment", "centered_between_alignment"}:
         if relation == "centered_between_alignment":
@@ -1669,7 +1700,80 @@ def _room_containment_repair_targets(
     ]
 
 
+def _activity_zone_repair_targets(
+    context: _RepairHandlerContext,
+) -> list[_RepairTarget]:
+    """Translate a relation-derived dining group beside the viewing axis."""
+    group_ids = tuple(
+        sorted(
+            {
+                str(object_id)
+                for object_id in context.diagnostics.get("group_object_ids") or []
+                if object_id
+            }
+        )
+    )
+    anchor_id = str(context.result.get("primary_object") or "")
+    normal_raw = context.diagnostics.get("view_normal_unit") or []
+    if anchor_id not in group_ids or len(group_ids) < 2 or len(normal_raw) < 2:
+        return []
+    normal = np.asarray(normal_raw[:2], dtype=float)
+    norm = float(np.linalg.norm(normal))
+    if norm <= 1e-9:
+        return []
+    normal /= norm
+    centers: dict[str, tuple[float, float]] = {}
+    for object_id in group_ids:
+        obj = context.scene.objects.get(UniqueID(object_id))
+        center = _world_center_xy(obj) if obj is not None else None
+        if obj is None or obj.object_type != ObjectType.FURNITURE or center is None:
+            return []
+        centers[object_id] = center
+
+    room_diagonal = _room_diagonal_m(context.scene)
+    step_m = 0.25
+    distances = [
+        round(step_m * step, 3)
+        for step in range(1, int(math.floor(room_diagonal / step_m)) + 1)
+    ]
+    if room_diagonal > 0.0 and (
+        not distances or abs(distances[-1] - room_diagonal) > 1e-6
+    ):
+        distances.append(room_diagonal)
+    targets: list[_RepairTarget] = []
+    for distance in distances:
+        for sign in (-1.0, 1.0):
+            delta = normal * distance * sign
+            poses = tuple(
+                _RepairPose(
+                    object_id=object_id,
+                    target_center_xy=(
+                        centers[object_id][0] + float(delta[0]),
+                        centers[object_id][1] + float(delta[1]),
+                    ),
+                    target_yaw_deg=None,
+                )
+                for object_id in group_ids
+            )
+            anchor_center = centers[anchor_id]
+            targets.append(
+                _RepairTarget(
+                    object_id=anchor_id,
+                    relation_type="activity_zone_separation",
+                    check_id=context.check_id,
+                    target_center_xy=(
+                        anchor_center[0] + float(delta[0]),
+                        anchor_center[1] + float(delta[1]),
+                    ),
+                    target_yaw_deg=None,
+                    member_poses=poses,
+                )
+            )
+    return targets
+
+
 _REPAIR_TARGET_HANDLERS = {
+    "activity_zone_separation": _activity_zone_repair_targets,
     "faces": _faces_room_repair_targets,
     _PAIRED_SURFACE_RELATION: _paired_surface_targets,
     "generic_near_relation": _generic_near_repair_targets,

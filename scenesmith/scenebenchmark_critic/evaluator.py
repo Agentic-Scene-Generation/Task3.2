@@ -96,10 +96,12 @@ def run_case_pack_checks(
         if result is not None:
             results.append(_normalize_result(result, check))
     extension_times: dict[str, float] = {}
+    extension_case_pack = dict(case_pack)
+    extension_case_pack["_prior_extension_results"] = []
     for plugin in plugins:
         for extension in plugin.extension_evaluators:
             extension_start = time.perf_counter()
-            for result in extension(case_pack):
+            for result in extension(extension_case_pack):
                 normalized = _normalize_result(
                     result,
                     {
@@ -117,6 +119,7 @@ def run_case_pack_checks(
                         f"{normalized.get('metric')!r}"
                     )
                 results.append(normalized)
+                extension_case_pack["_prior_extension_results"].append(normalized)
             extension_times[plugin.name] = extension_times.get(plugin.name, 0.0) + (
                 time.perf_counter() - extension_start
             )

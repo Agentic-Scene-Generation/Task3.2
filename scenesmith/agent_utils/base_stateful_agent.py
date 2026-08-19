@@ -7,6 +7,7 @@ subclass-defined tools.
 """
 
 import copy
+import json
 import logging
 import os
 import shutil
@@ -17,8 +18,6 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 import yaml
-
-import os
 
 from agents import (
     Agent,
@@ -1183,7 +1182,7 @@ class BaseStatefulAgent(ABC):
         pre_hard = self._evaluate_current_furniture_hard_state()
         pre_checkpoint_hard = self._checkpoint_eligible_furniture_hard_state(pre_hard)
         if pre_checkpoint_hard and pre_checkpoint_hard.hard_valid:
-            controller.remember_hard_valid_scene_state(
+            self._remember_furniture_hard_valid_scene_state(
                 scene_state=pre_state,
                 source=f"pre-{call_kind}",
             )
@@ -1199,6 +1198,268 @@ class BaseStatefulAgent(ABC):
     def _restore_furniture_scene_state(self, scene_state: dict[str, Any]) -> None:
         self.scene.restore_from_state_dict(scene_state)
         self.rendering_manager.clear_cache()
+
+    def _furniture_disk_checkpoint_path(self) -> Path:
+        return (
+            Path(self.logger.output_dir)
+            / "scene_states"
+            / "furniture_best_hard_valid.json"
+        )
+
+    def _furniture_checkpoint_report_path(self) -> Path:
+        return (
+            Path(self.logger.output_dir)
+            / "scene_states"
+            / "furniture_best_hard_valid_report.json"
+        )
+
+    def _record_furniture_checkpoint_event(
+        self,
+        *,
+        event: str,
+        source: str,
+        reason: str = "",
+        scene_hash: str = "",
+    ) -> None:
+        path = self._furniture_checkpoint_report_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            payload: dict[str, Any] = {"version": 1, "events": []}
+            if path.exists():
+                loaded = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    payload.update(loaded)
+            events = payload.setdefault("events", [])
+            if not isinstance(events, list):
+                events = []
+                payload["events"] = events
+            events.append(
+                {
+                    "event": event,
+                    "source": source,
+                    "reason": reason,
+                    "scene_hash": scene_hash,
+                    "timestamp": time.time(),
+                }
+            )
+            temporary = path.with_suffix(path.suffix + ".tmp")
+            temporary.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            os.replace(temporary, path)
+        except Exception:
+            console_logger.warning(
+                "Could not record furniture checkpoint event", exc_info=True
+            )
+
+    def _persist_furniture_hard_valid_checkpoint(
+        self,
+        *,
+        scene_state: dict[str, Any],
+        source: str,
+    ) -> bool:
+        path = self._furniture_disk_checkpoint_path()
+        try:
+            hard_state = self._checkpoint_eligible_furniture_hard_state(
+                self._evaluate_current_hard_state()
+            )
+            if hard_state is not None and not hard_state.hard_valid:
+                reason = "; ".join(hard_state.hard_reasons or ["unknown hard failure"])
+                self._record_furniture_checkpoint_event(
+                    event="rejected",
+                    source=source,
+                    reason=reason,
+                    scene_hash=self.scene.content_hash(),
+                )
+                console_logger.info(
+                    "Rejected hard-invalid furniture disk checkpoint from %s: %s",
+                    source,
+                    reason,
+                )
+                return False
+            path.parent.mkdir(parents=True, exist_ok=True)
+            controller = self.furniture_safety_controller
+            scene_hash = self.scene.content_hash()
+            payload = {
+                "version": 1,
+                "source": source,
+                "scene_hash": scene_hash,
+                "scene_description": str(
+                    getattr(
+                        self.scene,
+                        "scene_expert_original_description",
+                        self.scene.text_description,
+                    )
+                    or ""
+                ),
+                "required_counts": dict(
+                    getattr(controller, "required_counts", {}) or {}
+                ),
+                "best_weighted_score": float(
+                    getattr(controller, "best_weighted_score", -1.0)
+                ),
+                "scene_state": copy.deepcopy(scene_state),
+                "timestamp": time.time(),
+            }
+            temporary = path.with_suffix(path.suffix + ".tmp")
+            temporary.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            os.replace(temporary, path)
+            self._record_furniture_checkpoint_event(
+                event="saved",
+                source=source,
+                scene_hash=scene_hash,
+            )
+            return True
+        except Exception:
+            console_logger.warning(
+                "Could not persist hard-valid furniture checkpoint", exc_info=True
+            )
+            return False
+
+    def _remember_furniture_hard_valid_scene_state(
+        self,
+        *,
+        scene_state: dict[str, Any],
+        source: str,
+        weighted_score: float | None = None,
+        scores: CritiqueWithScores | None = None,
+        render_dir: Path | None = None,
+    ) -> bool:
+        controller = self.furniture_safety_controller
+        remembered = controller.remember_hard_valid_scene_state(
+            scene_state=scene_state,
+            source=source,
+            weighted_score=weighted_score,
+            scores=scores,
+            render_dir=render_dir,
+        )
+        if remembered:
+            self._persist_furniture_hard_valid_checkpoint(
+                scene_state=scene_state,
+                source=source,
+            )
+        return remembered
+
+    def _load_furniture_hard_valid_checkpoint(
+        self,
+        *,
+        restore_when_current_invalid: bool,
+    ) -> bool:
+        path = self._furniture_disk_checkpoint_path()
+        if not path.exists():
+            return False
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            scene_state = payload.get("scene_state")
+            if not isinstance(scene_state, dict):
+                raise ValueError("checkpoint scene_state is missing")
+            expected_description = str(
+                getattr(
+                    self.scene,
+                    "scene_expert_original_description",
+                    self.scene.text_description,
+                )
+                or ""
+            )
+            if str(payload.get("scene_description") or "") != expected_description:
+                self._record_furniture_checkpoint_event(
+                    event="rejected",
+                    source="disk_load",
+                    reason="scene description mismatch",
+                )
+                return False
+
+            current_state = copy.deepcopy(self.scene.to_state_dict())
+            current_hard = self._checkpoint_eligible_furniture_hard_state(
+                self._evaluate_current_hard_state()
+            )
+            self._restore_furniture_scene_state(scene_state)
+            checkpoint_hard = self._checkpoint_eligible_furniture_hard_state(
+                self._evaluate_current_hard_state()
+            )
+            if checkpoint_hard is None or not checkpoint_hard.hard_valid:
+                self._restore_furniture_scene_state(current_state)
+                reason = "; ".join(
+                    getattr(checkpoint_hard, "hard_reasons", None) or ["unknown"]
+                )
+                self._record_furniture_checkpoint_event(
+                    event="rejected",
+                    source="disk_load",
+                    reason=reason,
+                )
+                return False
+
+            controller = self.furniture_safety_controller
+            controller.best_scene_state = copy.deepcopy(scene_state)
+            controller.best_scores = None
+            controller.best_render_dir = None
+            controller.best_weighted_score = float(
+                payload.get("best_weighted_score") or 0.0
+            )
+            controller.best_reasons = ["fresh-verified disk hard-valid checkpoint"]
+            current_invalid = current_hard is not None and not current_hard.hard_valid
+            if not (restore_when_current_invalid and current_invalid):
+                self._restore_furniture_scene_state(current_state)
+                event = "loaded"
+            else:
+                event = "restored"
+            self._record_furniture_checkpoint_event(
+                event=event,
+                source="disk_load",
+                scene_hash=str(payload.get("scene_hash") or ""),
+            )
+            console_logger.info(
+                "%s fresh-verified disk hard-valid furniture checkpoint",
+                "Restored" if event == "restored" else "Loaded",
+            )
+            return True
+        except Exception as exc:
+            self._record_furniture_checkpoint_event(
+                event="rejected",
+                source="disk_load",
+                reason=str(exc),
+            )
+            console_logger.warning(
+                "Could not load hard-valid furniture checkpoint", exc_info=True
+            )
+            return False
+
+    def _ensure_furniture_checkpoint_integrity(self, *, source: str) -> None:
+        """Fresh-verify the persisted furniture state and restore the best valid one."""
+        hard_state = self._checkpoint_eligible_furniture_hard_state(
+            self._evaluate_current_hard_state()
+        )
+        if hard_state is None or hard_state.hard_valid:
+            return
+        controller = self.furniture_safety_controller
+        best_state = getattr(controller, "best_scene_state", None)
+        if best_state is not None:
+            self._restore_furniture_scene_state(best_state)
+            restored = self._checkpoint_eligible_furniture_hard_state(
+                self._evaluate_current_hard_state()
+            )
+            if restored is None or restored.hard_valid:
+                self._record_furniture_checkpoint_event(
+                    event="restored",
+                    source=source,
+                    scene_hash=self.scene.content_hash(),
+                )
+                return
+        if self._load_furniture_hard_valid_checkpoint(
+            restore_when_current_invalid=True
+        ):
+            restored = self._checkpoint_eligible_furniture_hard_state(
+                self._evaluate_current_hard_state()
+            )
+            if restored is None or restored.hard_valid:
+                return
+        reasons = "; ".join(hard_state.hard_reasons or ["unknown hard failure"])
+        self._record_furniture_checkpoint_event(
+            event="rejected",
+            source=source,
+            reason=reasons,
+        )
+        raise RuntimeError(
+            "Furniture checkpoint integrity failed after " f"{source}: {reasons}"
+        )
 
     def _end_furniture_design_transaction(
         self, transaction: dict[str, Any] | None
@@ -1257,7 +1518,7 @@ class BaseStatefulAgent(ABC):
                     hard_eval
                 )
             if checkpoint_hard and checkpoint_hard.hard_valid:
-                controller.remember_hard_valid_scene_state(
+                self._remember_furniture_hard_valid_scene_state(
                     scene_state=copy.deepcopy(self.scene.to_state_dict()),
                     source=f"post-{call_kind}",
                 )
@@ -1336,6 +1597,10 @@ class BaseStatefulAgent(ABC):
         if decision.accepted:
             checkpoint_scores = scores
             checkpoint_render_dir = images_dir
+            self._persist_furniture_hard_valid_checkpoint(
+                scene_state=candidate_state,
+                source="accepted_critique",
+            )
         if decision.rollback_to_best and controller.best_scene_state is not None:
             self._restore_furniture_scene_state(controller.best_scene_state)
             if controller.best_scores is not None:
@@ -1829,7 +2094,9 @@ class BaseStatefulAgent(ABC):
         ):
             should_restore_best = controller.best_scores is not None
             if not should_restore_best:
-                current_hard_state = self._evaluate_current_hard_state()
+                current_hard_state = self._checkpoint_eligible_furniture_hard_state(
+                    self._evaluate_current_hard_state()
+                )
                 should_restore_best = (
                     current_hard_state is None or not current_hard_state.hard_valid
                 )
@@ -1896,7 +2163,9 @@ class BaseStatefulAgent(ABC):
                 self.final_render_dir = self.checkpoint_render_dir
 
         if self._final_hard_validation_enabled():
-            final_hard_state = self._evaluate_current_hard_state()
+            final_hard_state = self._checkpoint_eligible_furniture_hard_state(
+                self._evaluate_current_hard_state()
+            )
             final_hard_state, _, final_repair_actions = (
                 self._try_deterministic_repair_for_hard_state(
                     final_hard_state,
@@ -1908,6 +2177,9 @@ class BaseStatefulAgent(ABC):
                     "Deterministic repair attempted during finalization: %s",
                     "; ".join(final_repair_actions),
                 )
+            final_hard_state = self._checkpoint_eligible_furniture_hard_state(
+                self._evaluate_current_hard_state()
+            )
             if final_hard_state is not None and not final_hard_state.hard_valid:
                 if getattr(controller, "best_scene_state", None) is not None:
                     self._restore_furniture_scene_state(controller.best_scene_state)
@@ -1921,7 +2193,9 @@ class BaseStatefulAgent(ABC):
                         "Final hard-check failed after repair; restored best "
                         "hard-valid checkpoint instead of failing the stage."
                     )
-                    final_hard_state = self._evaluate_current_hard_state()
+                    final_hard_state = self._checkpoint_eligible_furniture_hard_state(
+                        self._evaluate_current_hard_state()
+                    )
                     if final_hard_state is None or final_hard_state.hard_valid:
                         reasons = ""
                     else:

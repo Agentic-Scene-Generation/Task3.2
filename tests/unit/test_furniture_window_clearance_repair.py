@@ -1,4 +1,5 @@
 from unittest.mock import Mock
+from types import SimpleNamespace
 
 from scenesmith.furniture_agents import stateful_furniture_agent
 from scenesmith.furniture_agents.stateful_furniture_agent import StatefulFurnitureAgent
@@ -33,6 +34,24 @@ def _relation_result(label: str) -> dict:
         "evidence": {
             "intent_constraint": {
                 "constraint_id": "storage_pair",
+                "relation": "next_to",
+                "strength": "hard",
+            }
+        },
+    }
+
+
+def _window_relation_result(label: str) -> dict:
+    return {
+        "check_id": "intent_next_to__window_0__desk_0",
+        "metric": "functional_dependency",
+        "label": label,
+        "scoring_tier": "core",
+        "primary_object": "window_0",
+        "related_objects": ["desk_0"],
+        "evidence": {
+            "intent_constraint": {
+                "constraint_id": "window_beside_desk",
                 "relation": "next_to",
                 "strength": "hard",
             }
@@ -153,3 +172,121 @@ def test_substantial_window_failure_disqualifies_rollback_checkpoint(
     assert result.hard_reasons == [
         "substantial window occlusion: window_clearance__window_0"
     ]
+
+
+def test_substantial_window_repair_prefers_atomic_window_migration(
+    monkeypatch,
+) -> None:
+    agent = _agent()
+    service = Mock()
+
+    def migrate_window_atomically(*, window_id, accept_candidate):
+        accepted, reason = accept_candidate({"same_wall": True})
+        assert accepted, reason
+        return SimpleNamespace(
+            success=True,
+            old_wall_direction="north",
+            new_wall_direction="north",
+            old_position_along_wall=1.0,
+            new_position_along_wall=2.2,
+        )
+
+    service.migrate_window_atomically.side_effect = migrate_window_atomically
+    agent._window_repair_service = service
+    baseline = {"results": [_window_result("fail", "core")]}
+    fresh = {"results": [_window_result("pass", "auxiliary")]}
+    monkeypatch.setattr(
+        stateful_furniture_agent,
+        "evaluate_room_scene",
+        Mock(side_effect=[baseline, fresh]),
+    )
+    monkeypatch.setattr(
+        stateful_furniture_agent,
+        "critic_config_from_any",
+        lambda _cfg: CriticConfig(enabled=True),
+    )
+
+    actions = agent._repair_substantial_window_clearance()
+
+    assert actions == ["migrated window_0 from north@1.000 to north@2.200"]
+    agent._repair_forbidden_zone_conflicts.assert_not_called()
+
+
+def test_window_migration_rejects_degraded_clearance_before_furniture_fallback(
+    monkeypatch,
+) -> None:
+    agent = _agent()
+    service = Mock()
+
+    def migrate_window_atomically(*, window_id, accept_candidate):
+        accepted, reason = accept_candidate({"same_wall": True})
+        assert not accepted
+        assert "not pass" in reason
+        return SimpleNamespace(success=False, reason=reason)
+
+    service.migrate_window_atomically.side_effect = migrate_window_atomically
+    agent._window_repair_service = service
+    baseline = {"results": [_window_result("fail", "core")]}
+    degraded = {"results": [_window_result("degraded", "auxiliary")]}
+    fresh = {"results": [_window_result("pass", "auxiliary")]}
+    monkeypatch.setattr(
+        stateful_furniture_agent,
+        "evaluate_room_scene",
+        Mock(side_effect=[baseline, degraded, fresh]),
+    )
+    monkeypatch.setattr(
+        stateful_furniture_agent,
+        "critic_config_from_any",
+        lambda _cfg: CriticConfig(enabled=True),
+    )
+
+    actions = agent._repair_substantial_window_clearance()
+
+    assert actions == [
+        "cleared substantial window occlusion for window_0 by moving wardrobe_0"
+    ]
+    agent._repair_forbidden_zone_conflicts.assert_called_once()
+
+
+def test_window_migration_rejects_explicit_window_relation_regression(
+    monkeypatch,
+) -> None:
+    agent = _agent()
+    agent._repair_forbidden_zone_conflicts.return_value = False
+    service = Mock()
+
+    def migrate_window_atomically(*, window_id, accept_candidate):
+        assert window_id == "window_0"
+        accepted, reason = accept_candidate({"same_wall": False})
+        assert not accepted
+        assert "window relation is not satisfied" in reason
+        assert "intent_next_to__window_0__desk_0" in reason
+        return SimpleNamespace(success=False, reason=reason)
+
+    service.migrate_window_atomically.side_effect = migrate_window_atomically
+    agent._window_repair_service = service
+    baseline = {
+        "results": [
+            _window_result("fail", "core"),
+            _window_relation_result("pass"),
+        ]
+    }
+    migrated = {
+        "results": [
+            _window_result("pass", "auxiliary"),
+            _window_relation_result("fail"),
+        ]
+    }
+    monkeypatch.setattr(
+        stateful_furniture_agent,
+        "evaluate_room_scene",
+        Mock(side_effect=[baseline, migrated]),
+    )
+    monkeypatch.setattr(
+        stateful_furniture_agent,
+        "critic_config_from_any",
+        lambda _cfg: CriticConfig(enabled=True),
+    )
+
+    assert agent._repair_substantial_window_clearance() == []
+    agent._repair_forbidden_zone_conflicts.assert_called_once()

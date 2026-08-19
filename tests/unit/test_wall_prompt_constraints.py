@@ -29,6 +29,20 @@ def test_explicit_wall_mounted_tv_requires_window_repair_before_offset() -> None
     assert "Never leave the display offset" in constraints
 
 
+def test_normalized_monitor_inventory_preserves_mounted_screen_wall_ownership() -> None:
+    constraints = build_required_wall_object_constraints(
+        "A mounted screen is opposite the sofa.",
+        task_spec={
+            "required_large_objects": ["sofa"],
+            "required_wall_objects": ["monitor"],
+            "required_small_objects": [],
+        },
+    )
+
+    assert "REQUIRED media display" in constraints
+    assert "No explicit wall-object obligations" not in constraints
+
+
 def test_desktop_monitor_does_not_become_wall_requirement() -> None:
     constraints = build_required_wall_object_constraints(
         "A desk centered against the back wall with a computer monitor on the desk."

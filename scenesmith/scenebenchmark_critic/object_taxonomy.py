@@ -373,6 +373,12 @@ def generation_owner(
 
     if normalized_category in _FLOOR_STANDING_DEFAULTS:
         return "furniture"
+    # The typed TaskCompiler inventory is direct generation evidence.  Keep it
+    # ahead of broad category defaults so a wall-declared ``screen`` (which is
+    # semantically normalized to ``monitor``) is not silently moved to the
+    # manipuland stage. Explicit support/mount relations above remain stronger.
+    if declared_owner in {"wall_mounted", "ceiling_mounted"}:
+        return declared_owner
     if normalized_category in WALL_MOUNTED_CATEGORIES:
         return "wall_mounted"
     if normalized_category in CEILING_MOUNTED_CATEGORIES:

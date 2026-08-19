@@ -1583,7 +1583,7 @@ def test_window_clearance_does_not_move_wall_backed_bookshelf(tmp_path: Path) ->
     after = evaluate_room_scene(scene, config=config, stage="window_after")
     result_by_id = {result["check_id"]: result for result in after["results"]}
     assert result_by_id["window_clearance__window_0"]["label"] == "fail"
-    assert result_by_id["window_clearance__window_0"]["scoring_tier"] == "auxiliary"
+    assert result_by_id["window_clearance__window_0"]["scoring_tier"] == "core"
     assert "wall_backed_storage__bookshelf_0" not in result_by_id
 
 
@@ -1798,6 +1798,165 @@ def test_media_axis_offset_fails_and_repairs_living_group(tmp_path: Path) -> Non
             "object_on_support",
             "centered_between_alignment",
         }
+    )
+
+
+def _activity_zone_scene(
+    tmp_path: Path,
+    *,
+    room_length: float = 5.0,
+) -> tuple[RoomScene, SceneObject, list[SceneObject]]:
+    sofa = _object("sofa_0", "sofa", (0.0, -1.5, 0.4), (2.0, 0.8, 0.8))
+    tv_stand = _object(
+        "tv_stand_0",
+        "tv_stand",
+        (0.0, 1.5, 0.3),
+        (1.4, 0.5, 0.6),
+        yaw_deg=180.0,
+    )
+    television = _object(
+        "television_0",
+        "television",
+        (0.0, 1.5, 0.91),
+        (0.9, 0.18, 0.6),
+        yaw_deg=180.0,
+    )
+    dining_table = _object(
+        "dining_table_0",
+        "dining_table",
+        (0.0, 0.0, 0.38),
+        (1.0, 0.7, 0.76),
+    )
+    chairs = [
+        _object(
+            f"dining_chair_{index}",
+            "dining_chair",
+            (0.0, y, 0.45),
+            (0.5, 0.5, 0.9),
+            yaw_deg=yaw,
+        )
+        for index, (y, yaw) in enumerate(((-0.65, 0.0), (0.65, 180.0)))
+    ]
+    scene = _scene(
+        tmp_path,
+        sofa,
+        tv_stand,
+        television,
+        dining_table,
+        *chairs,
+        text=(
+            "A living room with a sofa facing a TV stand and a separate dining "
+            "table with two dining chairs."
+        ),
+    )
+    scene.room_type = "living_room"
+    scene.room_geometry.length = room_length
+    _attach_intent_contract(
+        scene,
+        [
+            {
+                "relation": "across_from",
+                "stage": "furniture",
+                "strength": "hard",
+                "subjects": {"category": "sofa", "count": 1},
+                "targets": {"category": "television", "count": 1},
+                "source": "explicit_prompt",
+                "evidence_span": "sofa facing a television",
+            },
+            {
+                "relation": "edge_distribution",
+                "stage": "furniture",
+                "strength": "hard",
+                "subjects": {"category": "dining_chair", "count": 2},
+                "targets": {"category": "dining_table", "count": 1},
+                "edge_frame": "target_local_rectangle",
+                "groups": [
+                    {
+                        "edge_class": "long",
+                        "counts_per_edge": [1, 1],
+                        "spacing": "equal_segments",
+                    }
+                ],
+                "orientation": "unconstrained",
+                "source": "explicit_prompt",
+                "evidence_span": "two dining chairs at the dining table",
+            },
+        ],
+    )
+    return scene, dining_table, chairs
+
+
+def test_activity_zone_repair_moves_dining_group_beside_media_axis(
+    tmp_path: Path,
+) -> None:
+    scene, dining_table, chairs = _activity_zone_scene(tmp_path)
+    config = CriticConfig(enabled=True, metrics=("functional_dependency",))
+    before_offsets = {
+        str(chair.object_id): chair.transform.translation()[:2]
+        - dining_table.transform.translation()[:2]
+        for chair in chairs
+    }
+
+    before = evaluate_room_scene(scene, config=config, stage="activity_zone_before")
+    activity_before = next(
+        result
+        for result in before["results"]
+        if result.get("relation_type") == "activity_zone_separation"
+    )
+    assert activity_before["label"] == "fail"
+
+    fixes = improve_furniture_relations(scene, config=config)
+
+    assert any(fix.relation_type == "activity_zone_separation" for fix in fixes)
+    after = evaluate_room_scene(scene, config=config, stage="activity_zone_after")
+    activity_after = next(
+        result
+        for result in after["results"]
+        if result.get("relation_type") == "activity_zone_separation"
+    )
+    assert activity_after["label"] == "pass"
+    for chair in chairs:
+        np.testing.assert_allclose(
+            chair.transform.translation()[:2]
+            - dining_table.transform.translation()[:2],
+            before_offsets[str(chair.object_id)],
+        )
+
+
+def test_activity_zone_repair_keeps_group_when_room_has_no_side_space(
+    tmp_path: Path,
+) -> None:
+    scene, dining_table, chairs = _activity_zone_scene(tmp_path, room_length=3.2)
+    config = CriticConfig(enabled=True, metrics=("functional_dependency",))
+    old_positions = {
+        str(obj.object_id): obj.transform.translation().copy()
+        for obj in [dining_table, *chairs]
+    }
+
+    before = evaluate_room_scene(scene, config=config, stage="crowded_zone_before")
+    activity_before = next(
+        result
+        for result in before["results"]
+        if result.get("relation_type") == "activity_zone_separation"
+    )
+    assert activity_before["label"] == "fail"
+
+    fixes = improve_furniture_relations(scene, config=config)
+
+    assert not any(fix.relation_type == "activity_zone_separation" for fix in fixes)
+    for obj in [dining_table, *chairs]:
+        np.testing.assert_allclose(
+            obj.transform.translation(),
+            old_positions[str(obj.object_id)],
+        )
+    after = evaluate_room_scene(scene, config=config, stage="crowded_zone_after")
+    assert (
+        next(
+            result
+            for result in after["results"]
+            if result.get("relation_type") == "activity_zone_separation"
+        )["label"]
+        == "fail"
     )
 
 
@@ -2487,7 +2646,7 @@ def test_media_support_repair_does_not_move_pair_for_window(tmp_path: Path) -> N
     )
     assert support_result["label"] == "pass"
     assert result_by_id["window_clearance__window_0"]["label"] == "fail"
-    assert result_by_id["window_clearance__window_0"]["scoring_tier"] == "auxiliary"
+    assert result_by_id["window_clearance__window_0"]["scoring_tier"] == "core"
 
 
 def test_media_support_repair_leaves_between_group_for_window(tmp_path: Path) -> None:
@@ -2659,7 +2818,7 @@ def test_media_support_repair_leaves_between_group_for_window(tmp_path: Path) ->
     )
     assert support_result["label"] == "pass"
     assert result_by_id["window_clearance__window_0"]["label"] == "fail"
-    assert result_by_id["window_clearance__window_0"]["scoring_tier"] == "auxiliary"
+    assert result_by_id["window_clearance__window_0"]["scoring_tier"] == "core"
     assert (
         next(
             result

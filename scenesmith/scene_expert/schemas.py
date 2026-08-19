@@ -89,7 +89,7 @@ class SceneTaskSpec(BaseModel):
     )
     compiler_status: Literal["ok", "degraded"] = "ok"
     compiler_failure_reason: str = ""
-    compiler_spec_version: str = "scenesmith.task_compiler.v4"
+    compiler_spec_version: str = "scenesmith.task_compiler.v5"
 
 
 # ---------------------------------------------------------------------------

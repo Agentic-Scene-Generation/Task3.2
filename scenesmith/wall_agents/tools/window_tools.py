@@ -2,15 +2,25 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
+import os
+
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
 from agents import function_tool
 from omegaconf import DictConfig, OmegaConf
 
-from scenesmith.agent_utils.house import HouseLayout
+from scenesmith.agent_utils.house import (
+    HouseLayout,
+    Opening,
+    OpeningType,
+    Wall,
+    WallDirection,
+)
 from scenesmith.agent_utils.room import ObjectType, RoomScene
 from scenesmith.floor_plan_agents.stateful_floor_plan_agent import (
     StatefulFloorPlanAgent,
@@ -22,6 +32,19 @@ from scenesmith.floor_plan_agents.tools.floor_plan_tools import (
 from scenesmith.floor_plan_agents.tools.geometry_cache import GeometryCache
 
 console_logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class WindowMigrationResult:
+    """Outcome of one transactional window migration search."""
+
+    success: bool
+    window_id: str
+    old_wall_direction: str = ""
+    new_wall_direction: str = ""
+    old_position_along_wall: float = 0.0
+    new_position_along_wall: float = 0.0
+    reason: str = ""
 
 
 class _GeometryLogger:
@@ -215,6 +238,286 @@ class WindowRepairTools:
         result = self.floor_plan_tools._remove_window_impl(window_id)
         return self._finish_edit(result, f"removed window '{window_id}'")
 
+    def migrate_window_atomically(
+        self,
+        *,
+        window_id: str,
+        accept_candidate: Callable[[dict[str, Any]], bool | tuple[bool, str]],
+    ) -> WindowMigrationResult:
+        """Search legal exterior-wall positions and commit one fresh-validated pose."""
+        window = next(
+            (item for item in self.house_layout.windows if item.id == window_id),
+            None,
+        )
+        if window is None:
+            return WindowMigrationResult(
+                success=False,
+                window_id=window_id,
+                reason=f"Window '{window_id}' not found",
+            )
+        old_direction = window.wall_direction
+        old_position = float(window.position_along_wall)
+        snapshot = self._window_transaction_snapshot()
+        candidates = self._window_migration_candidates(window_id)
+        rejection_reasons: list[str] = []
+        for wall, position in candidates:
+            self._restore_window_transaction(snapshot, persist=False)
+            try:
+                self._set_window_location(
+                    window_id=window_id,
+                    wall_direction=wall.direction,
+                    position_along_wall=position,
+                )
+                self._rebuild_room_geometry(persist_layout=False)
+                self.refresh_wall_surfaces()
+                self.rendering_manager.clear_cache()
+                verdict = accept_candidate(
+                    {
+                        "window_id": window_id,
+                        "wall_direction": wall.direction.value,
+                        "position_along_wall": position,
+                        "same_wall": wall.direction == old_direction,
+                    }
+                )
+                if isinstance(verdict, tuple):
+                    accepted, reason = bool(verdict[0]), str(verdict[1])
+                else:
+                    accepted, reason = bool(verdict), "candidate rejected"
+                if accepted:
+                    self._persist_layout()
+                    return WindowMigrationResult(
+                        success=True,
+                        window_id=window_id,
+                        old_wall_direction=(
+                            old_direction.value if old_direction is not None else ""
+                        ),
+                        new_wall_direction=wall.direction.value,
+                        old_position_along_wall=old_position,
+                        new_position_along_wall=position,
+                    )
+                rejection_reasons.append(reason)
+            except Exception as exc:
+                rejection_reasons.append(
+                    f"{wall.direction.value}@{position:.3f}: {exc}"
+                )
+                console_logger.warning(
+                    "Rejected window migration candidate %s %s@%.3f",
+                    window_id,
+                    wall.direction.value,
+                    position,
+                    exc_info=True,
+                )
+
+        self._restore_window_transaction(snapshot, persist=False)
+        if candidates:
+            try:
+                # Candidate generation rewrites room SDF/mesh files in place.
+                # Rebuild once from the restored layout so rollback covers the
+                # on-disk wall holes as well as the in-memory scene and JSON.
+                self._rebuild_room_geometry(persist_layout=False)
+            except Exception:
+                self._restore_window_transaction(snapshot, persist=False)
+                console_logger.warning(
+                    "Could not rebuild original geometry after rejecting window "
+                    "migration candidates",
+                    exc_info=True,
+                )
+        self._persist_layout()
+        self.refresh_wall_surfaces()
+        self.rendering_manager.clear_cache()
+        return WindowMigrationResult(
+            success=False,
+            window_id=window_id,
+            old_wall_direction=(
+                old_direction.value if old_direction is not None else ""
+            ),
+            old_position_along_wall=old_position,
+            reason=(
+                "; ".join(dict.fromkeys(rejection_reasons))
+                if rejection_reasons
+                else "no legal exterior-wall candidate"
+            ),
+        )
+
+    def _window_transaction_snapshot(self) -> dict[str, Any]:
+        house_dir = Path(self.house_layout.house_dir or self.room_output_dir.parent)
+        return {
+            "layout": copy.deepcopy(self.house_layout.to_dict(scene_dir=house_dir)),
+            "scene": copy.deepcopy(self.scene.to_state_dict()),
+        }
+
+    def _restore_window_transaction(
+        self,
+        snapshot: dict[str, Any],
+        *,
+        persist: bool,
+    ) -> None:
+        house_dir = Path(self.house_layout.house_dir or self.room_output_dir.parent)
+        restored = HouseLayout.from_dict(
+            copy.deepcopy(snapshot["layout"]),
+            house_dir=house_dir,
+        )
+        self.house_layout.__dict__.clear()
+        self.house_layout.__dict__.update(restored.__dict__)
+        self.scene.restore_from_state_dict(copy.deepcopy(snapshot["scene"]))
+        if persist:
+            self._persist_layout()
+
+    def _window_migration_candidates(
+        self,
+        window_id: str,
+    ) -> list[tuple[Wall, float]]:
+        window = next(
+            (item for item in self.house_layout.windows if item.id == window_id),
+            None,
+        )
+        room = self.house_layout.get_placed_room(self.scene.room_id)
+        if window is None or room is None:
+            return []
+        old_position = float(window.position_along_wall)
+        margin = max(
+            0.0,
+            float(
+                getattr(
+                    self.floor_plan_tools.door_window_config,
+                    "window_segment_margin",
+                    0.1,
+                )
+            ),
+        )
+        walls = [wall for wall in room.walls if wall.is_exterior]
+        walls.sort(
+            key=lambda wall: (
+                0 if wall.direction == window.wall_direction else 1,
+                wall.direction.value,
+            )
+        )
+        candidates: list[tuple[Wall, float]] = []
+        seen: set[tuple[str, float]] = set()
+        for wall in walls:
+            if wall.length + 1e-9 < window.width + 2.0 * margin:
+                continue
+            occupied: list[tuple[float, float]] = []
+            for opening in wall.openings:
+                if opening.opening_id == window_id:
+                    continue
+                occupied.append(
+                    (
+                        max(
+                            margin,
+                            float(opening.position_along_wall)
+                            - self.floor_plan_tools.min_opening_separation,
+                        ),
+                        min(
+                            float(wall.length) - margin,
+                            float(opening.position_along_wall)
+                            + float(opening.width)
+                            + self.floor_plan_tools.min_opening_separation,
+                        ),
+                    )
+                )
+            for start, end in self._free_wall_intervals(
+                start=margin,
+                end=float(wall.length) - margin,
+                occupied=occupied,
+            ):
+                latest = end - float(window.width)
+                if latest < start - 1e-9:
+                    continue
+                for position in (start, (start + latest) / 2.0, latest):
+                    if (
+                        wall.direction == window.wall_direction
+                        and abs(position - old_position) < 1e-4
+                    ):
+                        continue
+                    key = (wall.direction.value, round(position, 6))
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    candidates.append((wall, float(position)))
+        return candidates
+
+    @staticmethod
+    def _free_wall_intervals(
+        *,
+        start: float,
+        end: float,
+        occupied: list[tuple[float, float]],
+    ) -> list[tuple[float, float]]:
+        cursor = start
+        free: list[tuple[float, float]] = []
+        for lower, upper in sorted(occupied):
+            if upper <= cursor:
+                continue
+            if lower > cursor:
+                free.append((cursor, min(lower, end)))
+            cursor = max(cursor, upper)
+            if cursor >= end:
+                break
+        if cursor < end:
+            free.append((cursor, end))
+        return [(lower, upper) for lower, upper in free if upper > lower]
+
+    def _set_window_location(
+        self,
+        *,
+        window_id: str,
+        wall_direction: WallDirection,
+        position_along_wall: float,
+    ) -> None:
+        window = next(
+            (item for item in self.house_layout.windows if item.id == window_id),
+            None,
+        )
+        room = self.house_layout.get_placed_room(self.scene.room_id)
+        if window is None or room is None:
+            raise RuntimeError(f"Window '{window_id}' is no longer available")
+        target_wall = next(
+            (item for item in room.walls if item.direction == wall_direction),
+            None,
+        )
+        if target_wall is None or not target_wall.is_exterior:
+            raise RuntimeError("Window migration target is not an exterior wall")
+        for room_wall in room.walls:
+            room_wall.openings = [
+                opening
+                for opening in room_wall.openings
+                if opening.opening_id != window_id
+            ]
+        boundary_label = self._exterior_boundary_label(target_wall.direction)
+        if boundary_label is None:
+            raise RuntimeError(
+                f"No exterior boundary label for {target_wall.direction.value} wall"
+            )
+        window.boundary_label = boundary_label
+        window.wall_direction = target_wall.direction
+        window.position_along_wall = float(position_along_wall)
+        target_wall.openings.append(
+            Opening(
+                opening_id=window.id,
+                opening_type=OpeningType.WINDOW,
+                position_along_wall=float(position_along_wall),
+                width=float(window.width),
+                height=float(window.height),
+                sill_height=float(window.sill_height),
+            )
+        )
+        self.house_layout.invalidate_room_geometry(window.room_id)
+
+    def _exterior_boundary_label(
+        self,
+        direction: WallDirection,
+    ) -> str | None:
+        for label, value in self.house_layout.boundary_labels.items():
+            room_a, room_b, direction_value = value
+            if (
+                str(room_a) == str(self.scene.room_id)
+                and room_b is None
+                and str(direction_value) == direction.value
+            ):
+                return str(label)
+        return None
+
     def _finish_edit(self, result: Any, description: str) -> str:
         if not getattr(result, "success", False):
             return json.dumps(
@@ -247,7 +550,7 @@ class WindowRepairTools:
             }
         )
 
-    def _rebuild_room_geometry(self) -> None:
+    def _rebuild_room_geometry(self, *, persist_layout: bool = True) -> None:
         room_id = self.scene.room_id
         room_spec = self.house_layout.get_room_spec(room_id)
         if room_spec is None:
@@ -277,10 +580,17 @@ class WindowRepairTools:
         for wall in new_geometry.walls:
             self.scene.add_object(wall)
 
-        # Persist the repaired layout so later stages and replay checkpoints use
-        # the same opening geometry instead of reloading the original window.
+        if persist_layout:
+            # Persist ordinary wall-tool edits immediately. Transactional
+            # migration candidates stay memory-only until fresh validation.
+            self._persist_layout()
+
+    def _persist_layout(self) -> None:
+        house_dir = Path(self.house_layout.house_dir or self.room_output_dir.parent)
         layout_path = house_dir / "house_layout.json"
-        layout_path.write_text(
+        temporary = layout_path.with_suffix(layout_path.suffix + ".tmp")
+        temporary.write_text(
             json.dumps(self.house_layout.to_dict(scene_dir=house_dir), indent=2),
             encoding="utf-8",
         )
+        os.replace(temporary, layout_path)

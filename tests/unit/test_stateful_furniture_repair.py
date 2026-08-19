@@ -1,5 +1,7 @@
 import asyncio
+import hashlib
 import unittest
+import xml.etree.ElementTree as ET
 
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,11 +14,20 @@ try:
     from pydrake.all import RigidTransform
 
     from scenesmith.agent_utils.base_stateful_agent import BaseStatefulAgent
-    from scenesmith.agent_utils.room import ObjectType
+    from scenesmith.agent_utils.house import RoomGeometry
+    from scenesmith.agent_utils.room import (
+        ObjectType,
+        RoomScene,
+        SceneObject,
+        UniqueID,
+    )
     from scenesmith.furniture_agents.stateful_furniture_agent import (
         REPAIR_ASSET_SPECS,
         StatefulFurnitureAgent,
     )
+    from scenesmith.scenebenchmark_critic.api import evaluate_room_scene
+    from scenesmith.scenebenchmark_critic.config import CriticConfig
+    from scenesmith.scenebenchmark_critic.intent_contract import SCHEMA_VERSION
 except ModuleNotFoundError as exc:
     RigidTransform = None
     BaseStatefulAgent = None
@@ -546,6 +557,165 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         StatefulFurnitureAgent is None,
         f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
     )
+    def test_bookshelf_chair_collision_repair_preserves_hard_next_to(self) -> None:
+        agent = object.__new__(StatefulFurnitureAgent)
+        chair = _FakeFurniture("chair_0", (-1.57, 0.0, 0.45), (0.70, 0.70, 0.90))
+        shelf = _FakeFurniture("bookshelf_0", (-1.50, 0.65, 0.90), (0.80, 0.70, 1.80))
+        agent.scene = _FakeCollisionScene(chair, shelf)
+        agent.cfg = SimpleNamespace(
+            furniture_safety_controller=SimpleNamespace(
+                deterministic_repair=SimpleNamespace(
+                    collision_separation_max_penetration_m=0.08,
+                    collision_separation_margin_m=0.025,
+                    wall_anchor_preservation_distance_m=0.16,
+                    wall_margin_m=0.08,
+                )
+            )
+        )
+        agent._get_cached_physics_context = lambda: (
+            "- chair_0 collides with bookshelf_0 (5cm penetration)"
+        )
+
+        def next_to_failures() -> set[str]:
+            chair_bounds = chair.compute_world_bounds()
+            shelf_bounds = shelf.compute_world_bounds()
+            axis_gaps = [
+                max(
+                    0.0,
+                    float(chair_bounds[0][axis] - shelf_bounds[1][axis]),
+                    float(shelf_bounds[0][axis] - chair_bounds[1][axis]),
+                )
+                for axis in (0, 1)
+            ]
+            gap = float(np.linalg.norm(axis_gaps))
+            return set() if gap <= 0.5 else {"intent_next_to__chair_0__bookshelf_0"}
+
+        agent._hard_relation_failure_ids = next_to_failures
+        agent._hard_relation_groups_for_object = lambda _object_id: [
+            ("bookshelf_0", "chair_0")
+        ]
+
+        self.assertEqual(next_to_failures(), set())
+        actions = agent._repair_shallow_furniture_collisions()
+
+        self.assertEqual(len(actions), 1)
+        self.assertEqual(agent._furniture_aabb_overlap_pairs(), set())
+        self.assertEqual(next_to_failures(), set())
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
+    def test_collision_repair_preserves_real_next_to_contract(self) -> None:
+        def furniture(
+            object_id: str,
+            name: str,
+            position: tuple[float, float, float],
+            size: tuple[float, float, float],
+        ) -> SceneObject:
+            half_size = np.asarray(size, dtype=float) / 2.0
+            return SceneObject(
+                object_id=UniqueID(object_id),
+                object_type=ObjectType.FURNITURE,
+                name=name,
+                description=name.replace("_", " "),
+                transform=RigidTransform(p=position),
+                bbox_min=-half_size,
+                bbox_max=half_size,
+            )
+
+        chair = furniture("chair_0", "chair", (-1.57, 0.0, 0.45), (0.70, 0.70, 0.90))
+        shelf = furniture(
+            "bookshelf_0",
+            "bookshelf",
+            (-1.50, 0.65, 0.90),
+            (0.80, 0.70, 1.80),
+        )
+        prompt = "A chair next to a bookshelf."
+        geometry = RoomGeometry(
+            sdf_tree=ET.ElementTree(ET.Element("sdf")),
+            sdf_path=Path("/tmp/collision-relation-test-room.sdf"),
+            width=4.0,
+            length=4.0,
+            wall_height=2.7,
+        )
+        scene = RoomScene(
+            room_geometry=geometry,
+            scene_dir=Path("/tmp"),
+            room_id="collision_relation_test",
+            room_type="reading_room",
+            text_description=prompt,
+            objects={chair.object_id: chair, shelf.object_id: shelf},
+        )
+        scene.scenebenchmark_intent_contract = {
+            "schema_version": SCHEMA_VERSION,
+            "prompt_sha256": hashlib.sha256(
+                " ".join(prompt.split()).encode("utf-8")
+            ).hexdigest(),
+            "constraints": [
+                {
+                    "relation": "next_to",
+                    "stage": "furniture",
+                    "strength": "hard",
+                    "subjects": {"category": "chair", "count": 1},
+                    "targets": {"category": "bookshelf", "count": 1},
+                    "source": "explicit_prompt",
+                    "evidence_span": "chair next to a bookshelf",
+                }
+            ],
+        }
+        critic_config = CriticConfig(
+            enabled=True,
+            metrics=("functional_dependency",),
+        )
+        agent = object.__new__(StatefulFurnitureAgent)
+        agent.scene = scene
+        agent.cfg = SimpleNamespace(
+            scenebenchmark_critic=critic_config,
+            furniture_safety_controller=SimpleNamespace(
+                deterministic_repair=SimpleNamespace(
+                    collision_separation_max_penetration_m=0.08,
+                    collision_separation_margin_m=0.025,
+                    wall_anchor_preservation_distance_m=0.16,
+                    wall_margin_m=0.08,
+                )
+            ),
+        )
+        agent._get_cached_physics_context = lambda: (
+            "- chair_0 collides with bookshelf_0 (5cm penetration)"
+        )
+
+        def next_to_result(stage: str) -> dict[str, Any]:
+            payload = evaluate_room_scene(
+                scene,
+                config=critic_config,
+                stage=stage,
+                annotate_assets=False,
+            )
+            return next(
+                result
+                for result in payload["results"]
+                if result.get("relation_type") == "generic_near_relation"
+            )
+
+        self.assertEqual(next_to_result("collision_relation_before")["label"], "pass")
+        self.assertEqual(
+            agent._furniture_aabb_overlap_pairs(),
+            {frozenset(("bookshelf_0", "chair_0"))},
+        )
+
+        actions = agent._repair_shallow_furniture_collisions()
+
+        self.assertEqual(len(actions), 1)
+        self.assertEqual(agent._furniture_aabb_overlap_pairs(), set())
+        after = next_to_result("collision_relation_after")
+        self.assertEqual(after["label"], "pass")
+        self.assertEqual(after["contract_state"], "passed")
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
     def test_deep_collision_uses_bounded_deterministic_repair(self) -> None:
         agent = object.__new__(StatefulFurnitureAgent)
         chair = _FakeFurniture("chair_0", (0.0, 0.0, 0.45), (0.70, 0.70, 0.90))
@@ -959,8 +1129,8 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         agent.furniture_safety_controller = SimpleNamespace(
             enabled=True,
             best_scene_state={"objects": ["old"]},
-            remember_hard_valid_scene_state=lambda scene_state, source: remembered.append(
-                (scene_state, source)
+            remember_hard_valid_scene_state=lambda **kwargs: remembered.append(
+                (kwargs["scene_state"], kwargs["source"])
             ),
             end_designer_call=lambda: ended.append(True),
         )
@@ -1005,8 +1175,8 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         agent.furniture_safety_controller = SimpleNamespace(
             enabled=True,
             best_scene_state=None,
-            remember_hard_valid_scene_state=lambda scene_state, source: remembered.append(
-                (scene_state, source)
+            remember_hard_valid_scene_state=lambda **kwargs: remembered.append(
+                (kwargs["scene_state"], kwargs["source"])
             ),
             end_designer_call=lambda: ended.append(True),
         )
@@ -1237,6 +1407,10 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         ):
             baseline = agent._hard_violation_fingerprints()
             validator = agent._relation_candidate_preserves_hard_baseline(baseline)
+            deferred_validator = agent._relation_candidate_preserves_hard_baseline(
+                baseline,
+                allow_deferred_window_repair=True,
+            )
             self.assertTrue(validator(agent.scene))
 
             window_violations.append(
@@ -1246,6 +1420,30 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
                 )
             )
             self.assertFalse(validator(agent.scene))
+            self.assertTrue(deferred_validator(agent.scene))
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
+    def test_relation_candidate_gate_rejects_same_collision_pair_worsening(
+        self,
+    ) -> None:
+        agent = object.__new__(StatefulFurnitureAgent)
+        agent.scene = object()
+        agent._hard_violation_fingerprints = lambda: {"collision:bookshelf_0:chair_0"}
+        severities = iter(
+            [
+                {"collision:bookshelf_0:chair_0": 0.019},
+                {"collision:bookshelf_0:chair_0": 0.031},
+            ]
+        )
+        agent._hard_violation_severity_profile = lambda: next(severities)
+        validator = agent._relation_candidate_preserves_hard_baseline(
+            {"collision:bookshelf_0:chair_0"}
+        )
+
+        self.assertFalse(validator(agent.scene))
 
     @unittest.skipIf(
         StatefulFurnitureAgent is None,
@@ -1394,6 +1592,69 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         self.assertEqual(state, {"pose": "baseline"})
         agent.rendering_manager.clear_cache.assert_called_once_with()
         agent._reset_critic_candidate_cache.assert_called_once_with()
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
+    def test_prompt_relation_repair_migrates_newly_blocked_window_before_commit(
+        self,
+    ) -> None:
+        agent = object.__new__(StatefulFurnitureAgent)
+        agent.scene = object()
+        agent.cfg = {
+            "scenebenchmark_critic": {
+                "enabled": True,
+                "metrics": ["functional_dependency", "interaction_clearance"],
+            }
+        }
+        transaction = ({"scene": "before"}, set(), {})
+        agent._begin_hard_state_transaction = lambda: transaction
+        agent._hard_violation_fingerprints = lambda: {"window:window_0:television_0"}
+        agent._hard_violation_severity_profile = lambda: {}
+        agent._repair_substantial_window_clearance = MagicMock(
+            return_value=["migrated window_0 from north@1.000 to north@2.200"]
+        )
+        agent._align_seating_with_hard_state_guard = MagicMock(return_value=[])
+        agent._commit_hard_state_transaction = MagicMock(return_value=True)
+        relation_fix = SimpleNamespace(
+            object_id="television_0",
+            relation_type="object_on_support",
+        )
+
+        def repair_relations(_scene, *, config, candidate_validator):
+            self.assertTrue(candidate_validator(agent.scene))
+            return [relation_fix]
+
+        with (
+            patch(
+                "scenesmith.furniture_agents.stateful_furniture_agent."
+                "improve_furniture_relations",
+                side_effect=repair_relations,
+            ),
+            patch(
+                "scenesmith.furniture_agents.stateful_furniture_agent."
+                "seating_orientation_targets",
+                return_value={},
+            ),
+        ):
+            actions = agent._repair_prompt_contract_relations(
+                "after hard constraint failure"
+            )
+
+        self.assertEqual(
+            actions,
+            [
+                "bound television_0 via object_on_support "
+                "after hard constraint failure",
+                "migrated window_0 from north@1.000 to north@2.200",
+            ],
+        )
+        agent._repair_substantial_window_clearance.assert_called_once_with()
+        agent._commit_hard_state_transaction.assert_called_once_with(
+            transaction,
+            source="prompt-contract relation",
+        )
 
     @unittest.skipIf(
         StatefulFurnitureAgent is None,

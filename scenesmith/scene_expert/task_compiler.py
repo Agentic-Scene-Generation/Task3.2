@@ -604,7 +604,10 @@ def _normalize_stage_ownership(
         if category in category_stages:
             category_stages[category] = "large"
     for category in _MANIPULAND_STAGE_CATEGORIES:
-        if category in category_stages:
+        if category in category_stages and category_stages[category] not in {
+            "wall",
+            "ceiling",
+        }:
             category_stages[category] = "small"
     for category in _FLOOR_STANDING_MEDIA_SUPPORT_CATEGORIES:
         if category in category_stages:

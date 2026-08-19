@@ -1380,6 +1380,7 @@ def _generate_room(
                     IndoorSceneGenerationExperiment.compatible_furniture_agents
                 ),
                 logger=logger,
+                house_layout=house_layout,
                 render_gpu_id=render_gpu_id,
             )
             try:
@@ -1734,7 +1735,10 @@ def _generate_room(
 
     # Final post-processing can be reached from a checkpoint resume. Reapply the
     # seating orientation guard so the final scene cannot inherit a backward seat.
-    align_seating_to_nearest_surface(scene)
+    align_seating_to_nearest_surface(
+        scene,
+        allowed_targets_by_seat=seating_orientation_targets(scene, config=cfg_dict),
+    )
 
     # Final post-processing (projection + simulation).
     if projection_cfg["enabled"] and projection_cfg["final"]["enabled"]:

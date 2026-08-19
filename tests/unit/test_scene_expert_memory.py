@@ -56,6 +56,9 @@ from scenesmith.scene_expert.schemas import (
     StageVerifyReport,
     VerifyIssue,
 )
+from scenesmith.agent_utils.scoring import CategoryScore, FurnitureCritiqueWithScores
+from scenesmith.agent_utils.stage_working_memory import StageWorkingMemory
+from scenesmith.scenebenchmark_critic.object_taxonomy import generation_owner
 from scenesmith.scene_expert.task_compiler import (
     _fallback_spec_from_prompt,
     _normalize_stage_ownership,
@@ -355,6 +358,58 @@ class SceneExpertMemoryTest(unittest.TestCase):
         self.assertEqual(["mirror"], spec.required_wall_objects)
         self.assertEqual([], spec.required_small_objects)
 
+    def test_task_compiler_keeps_wall_declared_screen_in_wall_inventory(self) -> None:
+        spec = _normalize_stage_ownership(
+            SceneTaskSpec(
+                room_type="living room",
+                style="functional",
+                required_large_objects=["sofa"],
+                required_wall_objects=["screen"],
+            ),
+            prompt="Mount a screen opposite the sofa.",
+        )
+
+        self.assertEqual(["sofa"], spec.required_large_objects)
+        self.assertEqual(["monitor"], spec.required_wall_objects)
+        self.assertEqual([], spec.required_small_objects)
+
+    def test_generation_owner_separates_inventory_stage_from_screen_semantics(
+        self,
+    ) -> None:
+        self.assertEqual(
+            "wall_mounted",
+            generation_owner("screen", declared_owner="wall_mounted"),
+        )
+        self.assertEqual(
+            "manipuland",
+            generation_owner(
+                "computer monitor",
+                relation="on_top_of",
+                endpoint="subject",
+                declared_owner="wall_mounted",
+            ),
+        )
+        self.assertEqual(
+            "wall_mounted",
+            generation_owner(
+                "projector screen",
+                declared_owner="wall_mounted",
+            ),
+        )
+        self.assertEqual(
+            "wall_mounted",
+            generation_owner(
+                "television",
+                relation="mounted_on_wall",
+                endpoint="subject",
+                declared_owner="furniture",
+            ),
+        )
+        self.assertEqual(
+            "furniture",
+            generation_owner("television", declared_owner="furniture"),
+        )
+
     def test_task_compiler_normalizes_descriptive_inventory_categories(self) -> None:
         spec = _normalize_stage_ownership(
             SceneTaskSpec(
@@ -469,7 +524,10 @@ class SceneExpertMemoryTest(unittest.TestCase):
         }
 
         results = []
-        for constraints in ([dict(required), dict(supported)], [dict(supported), dict(required)]):
+        for constraints in (
+            [dict(required), dict(supported)],
+            [dict(supported), dict(required)],
+        ):
             contract = {"constraints": constraints}
             results.append(
                 _reconcile_task_spec_stage_ownership(
