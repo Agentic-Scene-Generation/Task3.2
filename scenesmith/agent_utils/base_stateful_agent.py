@@ -1423,7 +1423,7 @@ class BaseStatefulAgent(ABC):
             return False
 
     def _ensure_furniture_checkpoint_integrity(self, *, source: str) -> None:
-        """Fresh-verify the persisted furniture state and restore the best valid one."""
+        """Fresh-verify furniture state without bypassing the stage abort policy."""
         hard_state = self._checkpoint_eligible_furniture_hard_state(
             self._evaluate_current_hard_state()
         )
@@ -1457,6 +1457,14 @@ class BaseStatefulAgent(ABC):
             source=source,
             reason=reasons,
         )
+        if not self._final_hard_validation_enabled():
+            console_logger.warning(
+                "Furniture checkpoint integrity remained hard-invalid after %s, "
+                "but the configured degraded-quality policy disables stage abort: %s",
+                source,
+                reasons,
+            )
+            return
         raise RuntimeError(
             "Furniture checkpoint integrity failed after " f"{source}: {reasons}"
         )

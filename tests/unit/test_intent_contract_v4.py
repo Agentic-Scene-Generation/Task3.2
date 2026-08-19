@@ -108,7 +108,7 @@ def test_structural_window_is_not_furniture_inventory() -> None:
         for row in contract["constraints"]
     )
     assert "window" not in intent_contract_required_counts(scene)
-    assert INTENT_COMPILER_SPEC_VERSION == "scenesmith.intent_compiler.v12"
+    assert INTENT_COMPILER_SPEC_VERSION == "scenesmith.intent_compiler.v14"
 
 
 def test_repair_placeholder_uses_stable_compound_name_as_category() -> None:

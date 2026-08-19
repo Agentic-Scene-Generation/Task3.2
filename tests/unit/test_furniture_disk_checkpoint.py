@@ -1,6 +1,8 @@
 import copy
 import json
 
+import pytest
+
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -42,6 +44,7 @@ def _agent(tmp_path, *, has_loveseat: bool) -> StatefulFurnitureAgent:
     agent.scene = _CheckpointScene(has_loveseat=has_loveseat)
     agent.rendering_manager = SimpleNamespace(clear_cache=Mock())
     agent.furniture_safety_controller = SimpleNamespace(
+        enabled=True,
         required_counts={"loveseat": 1},
         best_scene_state=None,
         best_scores=None,
@@ -57,6 +60,42 @@ def _agent(tmp_path, *, has_loveseat: bool) -> StatefulFurnitureAgent:
     )
     agent._checkpoint_eligible_furniture_hard_state = lambda state: state
     return agent
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "physics hard violation: collisions",
+        "physics hard violation: door clearance violations",
+        "unresolved prompt-core furniture relation: surround:table_0",
+    ],
+)
+def test_degraded_policy_records_invalid_checkpoint_without_aborting(
+    tmp_path,
+    reason: str,
+) -> None:
+    agent = _agent(tmp_path, has_loveseat=False)
+    agent.cfg = {"fail_stage_on_unresolved_hard_constraints": False}
+    agent._evaluate_current_hard_state = lambda: HardStateEvaluation(
+        hard_valid=False,
+        hard_reasons=[reason],
+    )
+
+    agent._ensure_furniture_checkpoint_integrity(source="inventory convergence")
+
+    report = json.loads(
+        agent._furniture_checkpoint_report_path().read_text(encoding="utf-8")
+    )
+    assert report["events"][-1]["event"] == "rejected"
+    assert report["events"][-1]["reason"] == reason
+
+
+def test_strict_policy_still_aborts_without_hard_valid_checkpoint(tmp_path) -> None:
+    agent = _agent(tmp_path, has_loveseat=False)
+    agent.cfg = {"fail_stage_on_unresolved_hard_constraints": True}
+
+    with pytest.raises(RuntimeError, match="missing required loveseat"):
+        agent._ensure_furniture_checkpoint_integrity(source="inventory convergence")
 
 
 def test_new_agent_restores_fresh_verified_disk_checkpoint_with_required_loveseat(

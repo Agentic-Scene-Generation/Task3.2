@@ -66,6 +66,7 @@ MANIPULAND_CATEGORIES = frozenset(
         "desk_lamp",
         "flower",
         "glass",
+        "glass_bowl",
         "keyboard",
         "laptop",
         "magazine",

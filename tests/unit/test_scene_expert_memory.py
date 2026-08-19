@@ -409,6 +409,15 @@ class SceneExpertMemoryTest(unittest.TestCase):
             "furniture",
             generation_owner("television", declared_owner="furniture"),
         )
+        self.assertEqual(
+            "manipuland",
+            generation_owner(
+                "glass_bowl",
+                relation="on_top_of",
+                endpoint="subject",
+                declared_owner="manipuland",
+            ),
+        )
 
     def test_task_compiler_normalizes_descriptive_inventory_categories(self) -> None:
         spec = _normalize_stage_ownership(
@@ -505,6 +514,31 @@ class SceneExpertMemoryTest(unittest.TestCase):
         )
         self.assertNotIn("television", media_spec.required_small_objects)
         self.assertEqual("furniture", media_contract["constraints"][0]["stage"])
+
+        bowl_contract = {
+            "constraints": [
+                {
+                    "relation": "on_top_of",
+                    "stage": "furniture",
+                    "strength": "hard",
+                    "subjects": {"category": "glass_bowl", "count": 1},
+                    "targets": {"category": "dining_table", "count": 1},
+                }
+            ]
+        }
+        bowl_spec = _reconcile_task_spec_stage_ownership(
+            SceneTaskSpec(
+                room_type="dining_room",
+                style="standard",
+                required_large_objects=["dining table"],
+                required_small_objects=["glass bowl"],
+            ),
+            bowl_contract,
+        )
+
+        self.assertIn("glass bowl", bowl_spec.required_small_objects)
+        self.assertNotIn("glass bowl", bowl_spec.required_large_objects)
+        self.assertEqual("manipuland", bowl_contract["constraints"][0]["stage"])
 
     def test_supported_plant_ownership_is_relation_first_and_order_independent(
         self,
