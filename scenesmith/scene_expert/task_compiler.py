@@ -819,8 +819,9 @@ class TaskCompiler:
             {"role": "system", "content": _SYSTEM_PROMPT},
             {"role": "user", "content": user_message},
         ]
-        if self._structured_llm is not None:
-            result = self._structured_llm.complete(
+        structured_llm = getattr(self, "_structured_llm", None)
+        if structured_llm is not None:
+            result = structured_llm.complete(
                 role="task_compiler",
                 stage="task_compiler",
                 event="compile",
@@ -902,6 +903,7 @@ class TaskCompiler:
             started_at = time.perf_counter()
             raw = ""
             response = None
+            response_elapsed_sec: float | None = None
             try:
                 response = self._client.chat.completions.create(
                     model=self._model,
@@ -920,6 +922,7 @@ class TaskCompiler:
                         "none", model=self._model
                     ),
                 )
+                response_elapsed_sec = round(time.perf_counter() - started_at, 6)
                 message = response.choices[0].message
                 raw = message.content
                 if not raw:
@@ -970,7 +973,7 @@ class TaskCompiler:
                     {
                         "input": messages,
                         "output": raw or "",
-                        "elapsed_sec": attempts[-1]["elapsed_sec"],
+                        "elapsed_sec": response_elapsed_sec,
                         "status": "ok",
                         "attempt": attempt,
                         "raw_task_spec": raw_task_spec.model_dump(
@@ -982,18 +985,6 @@ class TaskCompiler:
                         "normalization_warnings": normalization_warnings,
                     }
                 )
-                usage = getattr(response, "usage", None)
-                if usage is not None:
-                    usage_payload = (
-                        usage.model_dump()
-                        if hasattr(usage, "model_dump")
-                        else vars(usage)
-                    )
-                    record["token_usage"] = {
-                        str(key): int(value)
-                        for key, value in usage_payload.items()
-                        if isinstance(value, int)
-                    }
                 _append_llm_debug(record)
                 return task_spec
             except Exception as exc:
@@ -1021,7 +1012,11 @@ class TaskCompiler:
                     {
                         "input": messages,
                         "output": raw,
-                        "elapsed_sec": elapsed,
+                        "elapsed_sec": (
+                            response_elapsed_sec
+                            if response_elapsed_sec is not None
+                            else elapsed
+                        ),
                         "status": "error",
                         "attempt": attempt,
                     }

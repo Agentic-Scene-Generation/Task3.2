@@ -22,6 +22,7 @@ from typing import Any
 
 from flask import Flask, abort, jsonify, request, send_file
 from PIL import Image
+from scenesmith.utils.token_usage import normalize_token_usage
 
 
 DEFAULT_PROBE_ROOT = Path(__file__).resolve().parents[1] / "outputs" / "critic_probe"
@@ -754,6 +755,58 @@ def _timing_for_llm(
     )
 
 
+def _llm_elapsed_sec(
+    call: dict[str, Any], timing: dict[str, Any] | None
+) -> float | None:
+    """Prefer the response time persisted with a direct API call."""
+    for value in (
+        call.get("elapsed_sec"),
+        timing.get("elapsed_sec") if timing is not None else None,
+    ):
+        if isinstance(value, (int, float)) and math.isfinite(value) and value >= 0:
+            return float(value)
+    return None
+
+
+def _llm_token_breakdown(call: dict[str, Any]) -> dict[str, int]:
+    token_usage = call.get("token_usage")
+    return normalize_token_usage(token_usage) if isinstance(token_usage, dict) else {}
+
+
+def _scene_audit_summary(events: list[dict[str, Any]]) -> dict[str, Any]:
+    peaks: list[tuple[int, dict[str, Any]]] = []
+    for event in events:
+        if event.get("kind") != "llm":
+            continue
+        breakdown = event.get("token_breakdown")
+        context_tokens = (
+            breakdown.get("max_input_context_tokens")
+            if isinstance(breakdown, dict)
+            else None
+        )
+        if isinstance(context_tokens, int):
+            peaks.append(
+                (
+                    context_tokens,
+                    {
+                        "event_id": event["id"],
+                        "actor": event.get("actor", "LLM"),
+                        "stage": event.get("stage", "unknown"),
+                        "function": event.get("function", "llm_call"),
+                    },
+                )
+            )
+    if not peaks:
+        return {"max_input_context_tokens": None, "max_input_context_events": []}
+    max_context_tokens = max(value for value, _ in peaks)
+    return {
+        "max_input_context_tokens": max_context_tokens,
+        "max_input_context_events": [
+            event for value, event in peaks if value == max_context_tokens
+        ],
+    }
+
+
 def _audit_events(room_dir: Path) -> list[dict[str, Any]]:
     timings = _timing_records(room_dir)
     repair_records = _repair_records(room_dir)
@@ -999,7 +1052,7 @@ def _audit_events(room_dir: Path) -> list[dict[str, Any]]:
     for index, row in enumerate(_llm_records(room_dir)):
         timing = _timing_for_llm(row, timings)
         end_time = _parse_time(str(row.get("created_at", "")))
-        elapsed = timing.get("elapsed_sec") if timing else row.get("elapsed_sec")
+        elapsed = _llm_elapsed_sec(row, timing)
         started_at = None
         if end_time is not None and isinstance(elapsed, (int, float)):
             started_at = (end_time - timedelta(seconds=float(elapsed))).isoformat()
@@ -1029,6 +1082,7 @@ def _audit_events(room_dir: Path) -> list[dict[str, Any]]:
                     )
                 ),
                 "token_usage": row.get("token_usage", {}),
+                "token_breakdown": _llm_token_breakdown(row),
                 "prompt_chars": row.get("prompt_chars", 0),
                 "output_chars": row.get("output_chars", 0),
                 "has_error": bool(row.get("error")),
@@ -1230,7 +1284,7 @@ def _payload_for_llm_event(room_dir: Path, event_id: str) -> dict[str, Any] | No
     timing = _timing_for_llm(call, timings)
     completed_at = str(call.get("created_at", ""))
     completed = _parse_time(completed_at)
-    elapsed = timing.get("elapsed_sec") if timing else call.get("elapsed_sec")
+    elapsed = _llm_elapsed_sec(call, timing)
     started_at = None
     if completed is not None and isinstance(elapsed, (int, float)):
         started_at = (completed - timedelta(seconds=float(elapsed))).isoformat()
@@ -1503,6 +1557,7 @@ def create_app(probe_root: Path = DEFAULT_PROBE_ROOT) -> Flask:
                 "messages": _agent_messages(room),
                 "event_counts": Counter(row.get("stage", "unknown") for row in timings),
                 "audit_events": audit_events,
+                "audit_summary": _scene_audit_summary(audit_events),
             }
         )
 

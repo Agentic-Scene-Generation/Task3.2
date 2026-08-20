@@ -1421,6 +1421,7 @@ class IntentCompiler:
             started_at = time.perf_counter()
             raw = ""
             response = None
+            response_elapsed_sec: float | None = None
             response_warnings: list[str] = []
             try:
                 response = self._client.chat.completions.create(
@@ -1442,6 +1443,7 @@ class IntentCompiler:
                         "none", model=self._model
                     ),
                 )
+                response_elapsed_sec = round(time.perf_counter() - started_at, 6)
                 raw = self._raw_message(response)
                 finish_reason = self._finish_reason(response)
                 if finish_reason == "length":
@@ -1574,7 +1576,11 @@ class IntentCompiler:
                         "finish_reason": finish_reason,
                         "token_usage": token_usage,
                         "warnings": response_warnings,
-                        "elapsed_sec": round(time.perf_counter() - started_at, 6),
+                        "elapsed_sec": (
+                            response_elapsed_sec
+                            if response_elapsed_sec is not None
+                            else round(time.perf_counter() - started_at, 6)
+                        ),
                     }
                 )
                 self.last_trace["attempts"] = attempts
@@ -1592,8 +1598,8 @@ class IntentCompiler:
                         "output": raw,
                         "status": status,
                         "attempt": attempt,
+                        "elapsed_sec": response_elapsed_sec,
                         "finish_reason": finish_reason,
-                        "token_usage": token_usage,
                         "enriched_constraints": enriched_constraints,
                         "normalized_centered_above": normalized_centered_above,
                         "restored_targets": restored_targets,
@@ -1633,8 +1639,8 @@ class IntentCompiler:
                         "output": raw,
                         "status": "error",
                         "attempt": attempt,
+                        "elapsed_sec": round(time.perf_counter() - started_at, 6),
                         "finish_reason": self._finish_reason(response),
-                        "token_usage": self._token_usage(response),
                     }
                 )
                 logger.warning(

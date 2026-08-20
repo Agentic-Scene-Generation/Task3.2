@@ -27,6 +27,7 @@ from scenesmith.scene_expert.schemas import (
     StageBrief,
     StageRelationContext,
 )
+from scenesmith.utils.token_usage import normalize_token_usage
 
 
 def utc_now() -> str:
@@ -81,7 +82,7 @@ class ForbiddenZone(BaseModel):
 
 
 class LLMCallDebugRecord(BaseModel):
-    schema_version: str = "1.0"
+    schema_version: str = "scenesmith.llm_call_debug.v2"
     created_at: str = Field(default_factory=utc_now)
     stage: str
     agent_role: str
@@ -420,7 +421,7 @@ def build_llm_call_debug_record(
         output_chars=len(output_text),
         output_excerpt=compact_text(output_text, 1800),
         finish_reasons=_extract_finish_reasons(result or raw_response),
-        token_usage=_extract_token_usage(result),
+        token_usage=_extract_token_usage(result or raw_response),
         raw_response_excerpt=(
             compact_text(_stringify_prompt(raw_response), 2400)
             if raw_response is not None
@@ -432,25 +433,7 @@ def build_llm_call_debug_record(
 
 
 def _extract_token_usage(result: Any) -> dict[str, int]:
-    usage = getattr(getattr(result, "context_wrapper", None), "usage", None)
-    if usage is None:
-        usage = getattr(result, "usage", None)
-    if usage is None:
-        return {}
-    fields = {
-        "input_tokens": getattr(usage, "input_tokens", None)
-        or getattr(usage, "prompt_tokens", None),
-        "output_tokens": getattr(usage, "output_tokens", None)
-        or getattr(usage, "completion_tokens", None),
-        "total_tokens": getattr(usage, "total_tokens", None),
-        "requests": getattr(usage, "requests", None),
-    }
-    details = getattr(usage, "output_tokens_details", None) or getattr(
-        usage, "completion_tokens_details", None
-    )
-    if details is not None:
-        fields["reasoning_tokens"] = getattr(details, "reasoning_tokens", None)
-    return {k: int(v) for k, v in fields.items() if isinstance(v, int)}
+    return normalize_token_usage(result)
 
 
 def _extract_finish_reasons(value: Any) -> list[str]:

@@ -50,3 +50,8 @@ timing JSONL, action logs, score files, and critic SQLite session messages.
 The audit drawer combines timing records with full SQLite agent traces for old
 runs. New runs also persist complete LLM request/response payloads under the
 scene audit directory.
+
+LLM audit events expose normalized input/cache and output/reasoning token
+breakdowns when the provider reports them, the resolved API response time, and
+the selected scene's largest observed request input context. Historical runs
+without usage details remain readable and show these values as unavailable.

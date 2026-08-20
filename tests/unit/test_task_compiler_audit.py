@@ -18,7 +18,11 @@ def test_task_compiler_records_full_input_and_output(tmp_path, monkeypatch) -> N
     response = SimpleNamespace(
         choices=[SimpleNamespace(message=SimpleNamespace(content=raw_output))],
         usage=SimpleNamespace(
-            prompt_tokens=120, completion_tokens=40, total_tokens=160
+            prompt_tokens=120,
+            completion_tokens=40,
+            total_tokens=160,
+            prompt_tokens_details=SimpleNamespace(cached_tokens=20),
+            completion_tokens_details=SimpleNamespace(reasoning_tokens=15),
         ),
     )
     captured_request = {}
@@ -49,3 +53,7 @@ def test_task_compiler_records_full_input_and_output(tmp_path, monkeypatch) -> N
     assert record["output"] == raw_output
     assert record["elapsed_sec"] >= 0
     assert record["token_usage"]["total_tokens"] == 160
+    assert record["token_usage"]["input_non_cached_tokens"] == 100
+    assert record["token_usage"]["output_reasoning_tokens"] == 15
+    assert record["token_usage"]["output_text_tokens"] == 25
+    assert record["schema_version"] == "scenesmith.llm_call_debug.v2"

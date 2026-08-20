@@ -919,6 +919,8 @@ class GlobalPlanner:
                 )
             started_at = time.perf_counter()
             raw = ""
+            response = None
+            response_elapsed_sec: float | None = None
             try:
                 response = self._client.chat.completions.create(
                     model=self._model,
@@ -937,6 +939,7 @@ class GlobalPlanner:
                         "none", model=self._model
                     ),
                 )
+                response_elapsed_sec = round(time.perf_counter() - started_at, 6)
                 message = response.choices[0].message
                 raw = message.content
                 if not raw:
@@ -968,7 +971,11 @@ class GlobalPlanner:
                     {
                         "attempt": attempt,
                         "status": "ok",
-                        "elapsed_sec": round(time.perf_counter() - started_at, 6),
+                        "elapsed_sec": (
+                            response_elapsed_sec
+                            if response_elapsed_sec is not None
+                            else round(time.perf_counter() - started_at, 6)
+                        ),
                     }
                 )
                 self.last_trace = {
@@ -991,7 +998,11 @@ class GlobalPlanner:
                         output=raw or "",
                         raw_response=response,
                     ).model_dump()
-                    | {"attempt": attempt, "status": "ok"}
+                    | {
+                        "attempt": attempt,
+                        "status": "ok",
+                        "elapsed_sec": response_elapsed_sec,
+                    }
                 )
                 return brief
             except Exception as exc:
@@ -1012,9 +1023,14 @@ class GlobalPlanner:
                         event="generate_stage_brief",
                         prompt=messages,
                         output=raw,
+                        raw_response=response,
                         error=validation_error,
                     ).model_dump()
-                    | {"attempt": attempt, "status": "error"}
+                    | {
+                        "attempt": attempt,
+                        "status": "error",
+                        "elapsed_sec": round(time.perf_counter() - started_at, 6),
+                    }
                 )
 
         attempts.append(

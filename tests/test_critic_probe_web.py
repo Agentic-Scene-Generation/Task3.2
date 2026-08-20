@@ -472,6 +472,80 @@ def test_exposes_full_llm_audit_from_scene_trace(tmp_path: Path) -> None:
     assert payload["tool_calls"][0]["output"][0]["image_url"]["kind"] == "image_payload"
 
 
+def test_projects_llm_response_time_and_peak_input_context(tmp_path: Path) -> None:
+    room = tmp_path / "run_a" / "batch_001" / "scene_000" / "room_bedroom"
+    write(room / "action_log.json", "[]")
+    write(
+        room / "timing_stats.jsonl",
+        json.dumps(
+            {
+                "created_at": "2026-07-28T12:00:08Z",
+                "stage": "furniture",
+                "module": "planner",
+                "event": "review_layout",
+                "elapsed_sec": 9.0,
+            }
+        )
+        + "\n",
+    )
+    write(
+        room.parent / "scene_expert" / "timing" / "llm_calls.jsonl",
+        "\n".join(
+            json.dumps(
+                {
+                    "created_at": created_at,
+                    "stage": "furniture",
+                    "agent_role": actor,
+                    "event": "review_layout",
+                    "elapsed_sec": elapsed_sec,
+                    "token_usage": {
+                        "input_tokens": 130,
+                        "input_cached_tokens": 30,
+                        "output_tokens": 60,
+                        "output_reasoning_tokens": 20,
+                        "max_input_context_tokens": 150,
+                        "final_input_context_tokens": 120,
+                    },
+                }
+            )
+            for created_at, actor, elapsed_sec in (
+                ("2026-07-28T12:00:08Z", "critic", 2.5),
+                ("2026-07-28T12:00:09Z", "planner", None),
+            )
+        )
+        + "\n",
+    )
+
+    app = create_app(tmp_path)
+    path = str(room.relative_to(tmp_path))
+    payload = (
+        app.test_client().get("/api/scene", query_string={"path": path}).get_json()
+    )
+    events = [event for event in payload["audit_events"] if event["kind"] == "llm"]
+
+    assert events[0]["elapsed_sec"] == 2.5
+    assert events[1]["elapsed_sec"] == 9.0
+    assert events[0]["token_breakdown"]["input_non_cached_tokens"] == 100
+    assert events[0]["token_breakdown"]["output_text_tokens"] == 40
+    assert payload["audit_summary"] == {
+        "max_input_context_tokens": 150,
+        "max_input_context_events": [
+            {
+                "event_id": "llm:0",
+                "actor": "critic",
+                "stage": "furniture",
+                "function": "review_layout",
+            },
+            {
+                "event_id": "llm:1",
+                "actor": "planner",
+                "stage": "furniture",
+                "function": "review_layout",
+            },
+        ],
+    }
+
+
 def test_exposes_benchmark_evaluation_and_repairs(tmp_path: Path) -> None:
     room = tmp_path / "run_a" / "batch_001" / "scene_000" / "room_bedroom"
     write(room / "action_log.json", "[]")

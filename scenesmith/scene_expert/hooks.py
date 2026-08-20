@@ -603,7 +603,7 @@ def _contract_inventory_ownership(
                 f"evidence: {sorted(candidate_owners)}"
             )
         ownership[category] = (
-            max(candidate_owners, key=STAGE_ORDER.index),
+            max(candidate_owners, key=CONTRACT_STAGE_ORDER.index),
             count,
         )
     return ownership, conflicts
@@ -2101,12 +2101,14 @@ class SceneExpertHookRunner:
             )
 
         missing_stages = [
-            stage for stage in STAGE_ORDER if stage not in self._completed_stages
+            stage
+            for stage in CONTRACT_STAGE_ORDER
+            if stage not in self._completed_stages
         ]
         full_report = FullVerifyReport(
             deterministic_pass=False,
             pass_scene=False,
-            expected_stages=list(STAGE_ORDER),
+            expected_stages=list(CONTRACT_STAGE_ORDER),
             completed_stages=list(self._completed_stages),
             missing_stages=missing_stages,
             outcome_status="FAILED",
@@ -2146,9 +2148,9 @@ class SceneExpertHookRunner:
 
     def _initial_completed_stages(self, start_stage: str) -> list[str]:
         """Return the stage-order prefix already satisfied by a resumed run."""
-        if start_stage not in STAGE_ORDER:
+        if start_stage not in CONTRACT_STAGE_ORDER:
             return []
-        return STAGE_ORDER[: STAGE_ORDER.index(start_stage)]
+        return CONTRACT_STAGE_ORDER[: CONTRACT_STAGE_ORDER.index(start_stage)]
 
     def _validate_stage_transition(self, stage: str) -> None:
         """Enforce Harness FSM order while tolerating sequential multi-room runs."""
@@ -2209,7 +2211,7 @@ class SceneExpertHookRunner:
 
         lines: list[str] = []
         seen: set[str] = set()
-        for stage in STAGE_ORDER:
+        for stage in CONTRACT_STAGE_ORDER:
             try:
                 pack = self._retriever.retrieve(self._task_spec, stage)
             except Exception:

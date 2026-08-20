@@ -789,7 +789,7 @@ class SceneExpertMemoryTest(unittest.TestCase):
         self.assertIn("fully_opening_free_walls=north,south,east", bundle.scene_summary)
         self.assertIn("door_1", bundle.to_llm_text())
 
-    def test_stage_working_memory_commits_public_failure_event(self) -> None:
+    def test_stage_working_memory_commits_public_evidence_event(self) -> None:
         class FakeTransform:
             def translation(self):
                 return np.array([0.0, 0.0, 0.0])
@@ -850,8 +850,9 @@ class SceneExpertMemoryTest(unittest.TestCase):
                     os.environ["SCENEEXPERT_ACTIVE_MEMORY_BANK_DIR"] = old_env
 
             self.assertTrue((public_dir / "events.jsonl").exists())
-            self.assertTrue((public_dir / "failure_cases.jsonl").exists())
-            self.assertGreater((public_dir / "failure_cases.jsonl").stat().st_size, 0)
+            self.assertFalse((public_dir / "failure_cases.jsonl").exists())
+            event = json.loads((public_dir / "events.jsonl").read_text().strip())
+            self.assertEqual("evidence_only", event["promotion_status"])
 
     def test_furniture_stage_verifier_fails_hard_missing_and_collision(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -1566,6 +1567,7 @@ class SceneExpertMemoryTest(unittest.TestCase):
 
         fake_module = types.SimpleNamespace(BGEM3FlagModel=DummyBGEM3FlagModel)
         with TemporaryDirectory() as tmp:
+            (Path(tmp) / "model.safetensors").touch()
             with patch.dict(sys.modules, {"FlagEmbedding": fake_module}):
                 embedder = SceneMemoryEmbedder(model_dir=tmp, device="cpu")
                 matrix = embedder.encode(["bedroom furniture"])

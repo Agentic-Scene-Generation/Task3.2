@@ -13,6 +13,7 @@ import {
   Clock3,
   Command,
   Copy,
+  Gauge,
   Image as ImageIcon,
   LoaderCircle,
   PanelLeftClose,
@@ -491,6 +492,7 @@ function App() {
           <section className="metrics-strip">
             <Metric icon={<Clock3 size={17} />} label="Events" value={String(allEvents.length)} subtext={`${detail?.actions.length ?? 0} tool actions`} />
             <Metric icon={<Bot size={17} />} label="LLM calls" value={String(allEvents.filter((event) => event.kind === "llm").length)} subtext="task compiler, planner, designer and critic" />
+            <Metric icon={<Gauge size={17} />} label="Peak input context" value={tokenCount(detail?.audit_summary?.max_input_context_tokens)} subtext={peakContextCaption(detail)} />
             <Metric icon={<ImageIcon size={17} />} label="Snapshots" value={String(renders.length)} subtext="rendered scene states" />
             <Metric icon={<Command size={17} />} label="Quality" value={qualityValue(detail)} subtext={qualityCaption(detail)} emphasis />
           </section>
@@ -567,5 +569,7 @@ function DetailBlock({ label, value, code = false }: { label: string; value: str
 
 function qualityValue(detail: SceneDetail | null): string { const grades = Object.values(detail?.score_summary.grades ?? {}); if (!grades.length) return "--"; return `${(grades.reduce((total, grade) => total + grade, 0) / grades.length).toFixed(1)}/10`; }
 function qualityCaption(detail: SceneDetail | null): string { const grades = detail?.score_summary.grades ?? {}; return Object.keys(grades).length ? `${Object.keys(grades).length} critic dimensions` : "scores pending"; }
+function tokenCount(value?: number | null): string { return typeof value === "number" && Number.isFinite(value) ? value.toLocaleString() : "--"; }
+function peakContextCaption(detail: SceneDetail | null): string { const events = detail?.audit_summary?.max_input_context_events ?? []; if (!events.length) return "not recorded for this scene"; return events.map((event) => `${event.actor} / ${event.function.replaceAll("_", " ")}`).join(", "); }
 
 export default App;

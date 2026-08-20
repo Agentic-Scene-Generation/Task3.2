@@ -99,6 +99,7 @@ export type AuditEvent = {
   elapsed_sec?: number | null;
   audit_status: string;
   token_usage?: Record<string, number>;
+  token_breakdown?: TokenUsageBreakdown;
   detail?: Record<string, unknown>;
   metrics?: Record<string, unknown>;
   evaluation?: BenchmarkEvaluation;
@@ -113,6 +114,29 @@ export type AuditEvent = {
     phase: "dispatch" | "resume";
     child_agent: string;
   };
+};
+
+export type TokenUsageBreakdown = {
+  input_tokens?: number;
+  input_cached_tokens?: number;
+  input_non_cached_tokens?: number;
+  output_tokens?: number;
+  output_reasoning_tokens?: number;
+  output_text_tokens?: number;
+  total_tokens?: number;
+  requests?: number;
+  final_input_context_tokens?: number;
+  max_input_context_tokens?: number;
+};
+
+export type AuditSummary = {
+  max_input_context_tokens: number | null;
+  max_input_context_events: Array<{
+    event_id: string;
+    actor: string;
+    stage: string;
+    function: string;
+  }>;
 };
 
 export type BenchmarkResult = {
@@ -283,6 +307,7 @@ export type SceneDetail = {
   score_summary: { grades?: Record<string, number>; summary?: string };
   messages: Array<{ id: string; agent: string; created_at: string; content: string }>;
   event_counts: Record<string, number>;
+  audit_summary: AuditSummary;
 };
 
 export type Diff = {
