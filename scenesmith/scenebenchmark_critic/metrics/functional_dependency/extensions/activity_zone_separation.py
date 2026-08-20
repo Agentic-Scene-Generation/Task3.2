@@ -15,6 +15,15 @@ from scenesmith.scenebenchmark_critic.core.geometry import (
     object_category,
     object_footprint_polygon,
 )
+from scenesmith.scenebenchmark_critic.intent_contract import (
+    _normalize_selector_category,
+    bound_ids,
+    contract_constraints,
+)
+from scenesmith.scenebenchmark_critic.metrics.functional_dependency.semantics import (
+    _is_media_target,
+    _is_seating_subject,
+)
 
 
 _DINING_RELATIONS = {"dining_set", "edge_distribution"}
@@ -48,25 +57,7 @@ def evaluate_activity_zone_separation(
         return []
 
     results: list[dict[str, Any]] = []
-    for media_check in checks:
-        if str(media_check.get("relation_type") or "") != _MEDIA_RELATION:
-            continue
-        seat_id = str(
-            media_check.get("subject_id") or media_check.get("primary_object") or ""
-        )
-        target_ids = [
-            str(value)
-            for value in (
-                media_check.get("target_ids")
-                or media_check.get("related_objects")
-                or []
-            )
-            if value
-        ]
-        media_id = next(
-            (object_id for object_id in target_ids if object_id in store.objects),
-            "",
-        )
+    for seat_id, media_id, proxy_for in _media_axes(case_pack, checks, store.objects):
         seat = store.objects.get(seat_id)
         media = store.objects.get(media_id)
         if (
@@ -125,6 +116,7 @@ def evaluate_activity_zone_separation(
                     "group_object_ids": sorted(dining_ids),
                     "seating_object_id": seat_id,
                     "media_object_id": media_id,
+                    "media_proxy_for_category": proxy_for,
                     "view_axis_unit": [unit_axis[0], unit_axis[1]],
                     "view_normal_unit": [unit_normal[0], unit_normal[1]],
                     "view_half_width_m": half_width,
@@ -140,6 +132,84 @@ def evaluate_activity_zone_separation(
             }
         )
     return results
+
+
+def _media_axes(
+    case_pack: dict[str, Any],
+    checks: list[dict[str, Any]],
+    objects: dict[str, dict[str, Any]],
+) -> list[tuple[str, str, str]]:
+    """Resolve media corridors from checks or the immutable hard intent graph."""
+    axes: list[tuple[str, str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for media_check in checks:
+        if str(media_check.get("relation_type") or "") != _MEDIA_RELATION:
+            continue
+        seat_id = str(
+            media_check.get("subject_id") or media_check.get("primary_object") or ""
+        )
+        media_id = next(
+            (
+                str(value)
+                for value in (
+                    media_check.get("target_ids")
+                    or media_check.get("related_objects")
+                    or []
+                )
+                if str(value) in objects
+            ),
+            "",
+        )
+        if seat_id in objects and media_id:
+            axes.append((seat_id, media_id, ""))
+            seen.add((seat_id, media_id))
+
+    object_rows = list(objects.values())
+    constraints = contract_constraints(case_pack)
+    support_constraints = [
+        row
+        for row in constraints
+        if str(row.get("relation") or "") == "on_top_of"
+        and str(row.get("strength") or "hard").lower() == "hard"
+    ]
+    for relation in constraints:
+        if str(relation.get("relation") or "") not in {"faces", "across_from"}:
+            continue
+        if str(relation.get("strength") or "hard").lower() != "hard":
+            continue
+        seat_ids = [
+            object_id
+            for object_id in bound_ids(relation.get("subjects"), object_rows)
+            if _is_seating_subject(objects.get(object_id) or {})
+        ]
+        media_ids = [
+            object_id
+            for object_id in bound_ids(relation.get("targets"), object_rows)
+            if _is_media_target(objects.get(object_id) or {})
+        ]
+        proxy_for = ""
+        if not media_ids:
+            requested_category = _normalize_selector_category(
+                (relation.get("targets") or {}).get("category")
+            )
+            for support_relation in support_constraints:
+                supported_category = _normalize_selector_category(
+                    (support_relation.get("subjects") or {}).get("category")
+                )
+                if not requested_category or supported_category != requested_category:
+                    continue
+                support_ids = bound_ids(support_relation.get("targets"), object_rows)
+                if support_ids:
+                    media_ids = [support_ids[0]]
+                    proxy_for = requested_category
+                    break
+        for seat_id in seat_ids:
+            for media_id in media_ids:
+                if (seat_id, media_id) in seen:
+                    continue
+                axes.append((seat_id, media_id, proxy_for))
+                seen.add((seat_id, media_id))
+    return axes
 
 
 def _check_ids(check: dict[str, Any]) -> set[str]:

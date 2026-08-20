@@ -1824,6 +1824,13 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
             agent._is_hard_prompt_support_pair("television_0", "tv_stand_0")
         )
 
+        agent.scene.scenebenchmark_intent_contract["constraints"][0][
+            "stage"
+        ] = "manipuland"
+        self.assertFalse(
+            agent._is_hard_prompt_support_pair("television_0", "tv_stand_0")
+        )
+
     @unittest.skipIf(
         StatefulFurnitureAgent is None,
         f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
@@ -2082,6 +2089,35 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         )
 
         self.assertEqual(agent._repair_required_counts(), {"speaker": 4})
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
+    def test_authoritative_count_does_not_require_repair_asset_spec(self) -> None:
+        self.assertNotIn("side_table", REPAIR_ASSET_SPECS)
+        agent = object.__new__(StatefulFurnitureAgent)
+        agent.scene = SimpleNamespace(
+            objects={},
+            scene_expert_task_spec={
+                "required_large_objects": ["side table", "side table", "side table"]
+            },
+            scenebenchmark_intent_contract={
+                "constraints": [
+                    {
+                        "relation": "required_count",
+                        "stage": "furniture",
+                        "strength": "hard",
+                        "subjects": {"category": "side_table", "count": 3},
+                    }
+                ]
+            },
+        )
+        agent.furniture_safety_controller = SimpleNamespace(
+            required_counts={"side_table": 1}
+        )
+
+        self.assertEqual(agent._repair_required_counts(), {"side_table": 3})
 
     @unittest.skipIf(
         StatefulFurnitureAgent is None,

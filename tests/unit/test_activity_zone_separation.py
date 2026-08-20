@@ -114,6 +114,69 @@ def test_single_functional_group_does_not_enable_zone_rule() -> None:
     assert results == []
 
 
+def test_hard_contract_media_axis_does_not_depend_on_prior_check_order() -> None:
+    case_pack = _case_pack(dining_x=0.0)
+    case_pack["checks"] = [
+        check
+        for check in case_pack["checks"]
+        if check["relation_type"] != "seating_to_media"
+    ]
+    case_pack["intent_contract"] = {
+        "constraints": [
+            {
+                "relation": "faces",
+                "stage": "furniture",
+                "strength": "hard",
+                "subjects": {"category": "sofa", "count": 1},
+                "targets": {"category": "television", "count": 1},
+            }
+        ]
+    }
+
+    results = evaluate_activity_zone_separation(case_pack)
+
+    assert len(results) == 1
+    assert results[0]["label"] == "fail"
+    assert results[0]["diagnostics"]["media_object_id"] == "television_0"
+
+
+def test_future_media_can_use_explicit_present_support_as_axis_proxy() -> None:
+    case_pack = _case_pack(dining_x=0.0)
+    objects = case_pack["scene_geometry"]["objects"]
+    objects[:] = [obj for obj in objects if obj["id"] != "television_0"]
+    objects.append(_geometry_object("tv_stand_0", "tv_stand", (0.0, 2.0), (1.4, 0.5)))
+    case_pack["checks"] = [
+        check
+        for check in case_pack["checks"]
+        if check["relation_type"] != "seating_to_media"
+    ]
+    case_pack["intent_contract"] = {
+        "constraints": [
+            {
+                "relation": "faces",
+                "stage": "wall_mounted",
+                "strength": "hard",
+                "subjects": {"category": "sofa", "count": 1},
+                "targets": {"category": "television", "count": 1},
+            },
+            {
+                "relation": "on_top_of",
+                "stage": "wall_mounted",
+                "strength": "hard",
+                "subjects": {"category": "television", "count": 1},
+                "targets": {"category": "tv_stand", "count": 1},
+            },
+        ]
+    }
+
+    results = evaluate_activity_zone_separation(case_pack)
+
+    assert len(results) == 1
+    diagnostics = results[0]["diagnostics"]
+    assert diagnostics["media_object_id"] == "tv_stand_0"
+    assert diagnostics["media_proxy_for_category"] == "television"
+
+
 def _scene_object(object_id: str, center: tuple[float, float]) -> SceneObject:
     return SceneObject(
         object_id=UniqueID(object_id),

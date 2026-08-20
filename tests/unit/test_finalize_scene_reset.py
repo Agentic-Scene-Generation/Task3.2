@@ -92,6 +92,7 @@ class TestFinalizeSceneReset(unittest.TestCase):
         mock_cfg.reset_total_sum_threshold = 6
         mock_cfg.max_critique_rounds = 1
         mock_cfg.planner_context_limits = {}
+        mock_cfg.auto_score_after_design_attempts = False
 
         # Set up action_log_path as a real path for the action logger decorator.
         mock_scene.action_log_path = self.temp_dir / "action_log.json"
@@ -137,6 +138,43 @@ class TestFinalizeSceneReset(unittest.TestCase):
         tool_names = {getattr(tool, "name", "") for tool in tools}
 
         self.assertIn("finish_stage", tool_names)
+
+    def test_finish_stage_consumes_pending_hard_repair_after_score_budget(self):
+        agent = self._create_testable_agent(MagicMock(), MagicMock())
+        agent.stage_working_memory = MagicMock()
+        agent._planner_orchestration_calls = 0
+        agent._request_design_change_impl = AsyncMock(return_value="repair applied")
+        tools = {tool.name: tool for tool in agent._create_planner_tools()}
+        agent._planner_budget_exhausted = True
+        agent._pending_hard_repair_hint = "separate the remaining collision"
+
+        result = asyncio.run(
+            tools["finish_stage"].on_invoke_tool(
+                MagicMock(), '{"summary": "score budget complete"}'
+            )
+        )
+
+        self.assertIn("HARD_REPAIR_CONSUMED", result)
+        self.assertTrue(agent._planner_terminal_stop)
+        self.assertEqual(agent._hard_repair_design_change_calls, 1)
+        instruction = agent._request_design_change_impl.await_args.args[0]
+        self.assertIn("separate the remaining collision", instruction)
+        final = agent._planner_tools_to_final_output(
+            MagicMock(), [SimpleNamespace(output=result)]
+        )
+        self.assertTrue(final.is_final_output)
+        self.assertEqual(final.final_output, result)
+
+    def test_blocked_score_cycle_is_not_a_terminal_runner_result(self):
+        agent = self._create_testable_agent(MagicMock(), MagicMock())
+        agent._create_planner_tools()
+        agent._planner_budget_exhausted = True
+
+        result = agent._planner_tools_to_final_output(
+            MagicMock(), [SimpleNamespace(output="critique budget exhausted")]
+        )
+
+        self.assertFalse(result.is_final_output)
 
     def test_initial_designer_timeout_stops_planner_and_records_root_failure(self):
         mock_scene = MagicMock()

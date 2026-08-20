@@ -27,6 +27,7 @@ from agents import (
     Runner,
     RunResult,
     SQLiteSession,
+    ToolsToFinalOutputResult,
     function_tool,
 )
 from agents.memory.session import Session
@@ -211,6 +212,7 @@ class BaseStatefulAgent(ABC):
         self._planner_critique_tool_calls = 0
         self._planner_design_change_tool_calls = 0
         self._planner_budget_exhausted = False
+        self._planner_terminal_stop = False
         self._planner_orchestration_calls = 0
         self._planner_terminal_failure: dict[str, Any] | None = None
         self._critic_failed = False
@@ -1801,6 +1803,18 @@ class BaseStatefulAgent(ABC):
             model_settings=self._get_model_settings(
                 settings_key="planner", parallel_tool_calls=False
             ),
+            tool_use_behavior=self._planner_tools_to_final_output,
+        )
+
+    def _planner_tools_to_final_output(
+        self, _context: Any, tool_results: list[Any]
+    ) -> ToolsToFinalOutputResult:
+        """Stop Runner only after the workflow reaches a terminal tool result."""
+        if not getattr(self, "_planner_terminal_stop", False) or not tool_results:
+            return ToolsToFinalOutputResult(is_final_output=False, final_output=None)
+        return ToolsToFinalOutputResult(
+            is_final_output=True,
+            final_output=tool_results[-1].output,
         )
 
     def _create_sessions(self, session_prefix: str = "") -> tuple[Session, Session]:
@@ -2393,6 +2407,7 @@ class BaseStatefulAgent(ABC):
         self._planner_critique_tool_calls = 0
         self._planner_design_change_tool_calls = 0
         self._planner_budget_exhausted = False
+        self._planner_terminal_stop = False
         self._planner_terminal_failure = None
         self._critic_failed = False
         self._pending_hard_repair_hint = ""
@@ -2401,6 +2416,7 @@ class BaseStatefulAgent(ABC):
     def _stop_planner_after_failure(self, reason: str) -> str:
         """Convert a nested agent failure into a deterministic planner stop."""
         self._planner_budget_exhausted = True
+        self._planner_terminal_stop = True
         controller = getattr(self, "furniture_safety_controller", None)
         if controller and getattr(controller, "enabled", False):
             controller.should_finish = True
@@ -2470,16 +2486,16 @@ class BaseStatefulAgent(ABC):
 
     def _planner_budget_stop_message(self, tool_name: str) -> str:
         self._planner_budget_exhausted = True
-        controller = getattr(self, "furniture_safety_controller", None)
-        if controller and getattr(controller, "enabled", False):
-            controller.should_finish = True
+        next_action = (
+            "Use the pending deterministic hard-check repair before finishing."
+            if self._hard_repair_allowance_available()
+            else "Call finish_stage() now."
+        )
         return (
-            f"STOP: {tool_name} is blocked because the configured "
+            f"{tool_name} is blocked because the configured "
             f"max_critique_rounds={self.cfg.max_critique_rounds} budget has "
-            "been reached. Do not call request_critique(), "
-            "request_design_change(), or reset_scene_to_checkpoint() again. "
-            "Return your final concise workflow summary now. The framework will "
-            "run the final critique automatically after the planner exits."
+            "been reached. Do not request another scored critique cycle. "
+            f"{next_action}"
         )
 
     def _planner_budget_hint_after_critique(self) -> str:
@@ -2519,10 +2535,18 @@ class BaseStatefulAgent(ABC):
             return ""
         if self.cfg.max_critique_rounds <= 0:
             return ""
-        if self._planner_critique_tool_calls >= int(self.cfg.max_critique_rounds):
+        if self._planner_budget_exhausted or self._planner_critique_tool_calls >= int(
+            self.cfg.max_critique_rounds
+        ):
             self._planner_budget_exhausted = True
-            return "\n\n" + self._planner_budget_stop_message(
-                f"auto_score_after_{attempt_label.replace(' ', '_')}"
+            return (
+                "\n\n[Auto scoring] The scored-candidate budget is already "
+                "complete, so this design attempt was not scored again. "
+                + (
+                    "The pending deterministic hard repair must now be finalized."
+                    if self._hard_repair_allowance_available()
+                    else "Finish the stage and let final validation evaluate it."
+                )
             )
 
         current_hash = self.scene.content_hash()
@@ -2565,8 +2589,13 @@ class BaseStatefulAgent(ABC):
             self._planner_budget_exhausted = True
             budget_hint = (
                 "\n\n[Planner budget] The configured scored-candidate budget "
-                "is complete. Do not call more planner tools. Return the final "
-                "concise workflow summary now."
+                "is complete. Do not request another critique cycle. "
+                + (
+                    "A pending deterministic hard repair remains and may be "
+                    "executed once before final validation."
+                    if self._hard_repair_allowance_available()
+                    else "Call finish_stage() now."
+                )
             )
         return (
             f"\n\n## Auto Critique After {attempt_label.title()}\n"
@@ -2589,6 +2618,45 @@ class BaseStatefulAgent(ABC):
         """
         self._reset_planner_budget_tracking()
 
+        async def consume_pending_hard_repair(instruction: str, *, source: str) -> str:
+            """Consume the single pending hard-repair handoff and stop Runner."""
+            if not self._hard_repair_allowance_available():
+                return (
+                    "FINISH_STAGE_BLOCKED: no bounded hard-repair allowance is "
+                    "currently available."
+                )
+            repair_hint = self._pending_hard_repair_hint
+            repair_instruction = (
+                f"{instruction}\n\nMANDATORY HARD-CHECK REPAIR: {repair_hint}"
+            )
+            # Consume before delegation so a failed child call cannot be retried in
+            # a planner loop and obscure its original failure.
+            self._hard_repair_design_change_calls += 1
+            try:
+                result = await self._run_planner_delegation(
+                    operation="request_design_change",
+                    child_agent="designer",
+                    action=lambda: self._request_design_change_impl(repair_instruction),
+                    detail={"instruction": repair_instruction, "source": source},
+                )
+            except Exception as exc:
+                console_logger.exception("Planner hard-repair design change failed")
+                return self._stop_planner_after_failure(
+                    "Designer hard repair failed with " f"{type(exc).__name__}: {exc}."
+                )
+            result += await self._score_design_attempt_if_configured("hard repair")
+            self._planner_budget_exhausted = True
+            self._planner_terminal_stop = True
+            controller = getattr(self, "furniture_safety_controller", None)
+            if controller and getattr(controller, "enabled", False):
+                controller.should_finish = True
+            return self._truncate_planner_tool_output(
+                "HARD_REPAIR_CONSUMED: final validation will now decide the stage.\n"
+                + result,
+                label="hard repair",
+                max_chars=self._planner_context_limit("design_change_max_chars", 5000),
+            )
+
         @function_tool
         async def request_initial_design() -> str:
             """Request the designer to create the initial design.
@@ -2599,7 +2667,7 @@ class BaseStatefulAgent(ABC):
             Returns:
                 Designer's report of what was created and why.
             """
-            if self._planner_budget_exhausted:
+            if getattr(self, "_planner_terminal_stop", False):
                 return self._stop_planner_after_failure(
                     "The current design stage has already been marked complete or failed."
                 )
@@ -2637,7 +2705,7 @@ class BaseStatefulAgent(ABC):
             Returns:
                 Critic's detailed evaluation with specific improvement suggestions.
             """
-            if self._planner_budget_exhausted:
+            if getattr(self, "_planner_terminal_stop", False):
                 return self._stop_planner_after_failure(
                     "The current design stage has already been marked complete or failed."
                 )
@@ -2689,7 +2757,7 @@ class BaseStatefulAgent(ABC):
             Returns:
                 Designer's report of what was changed.
             """
-            if self._planner_budget_exhausted:
+            if getattr(self, "_planner_terminal_stop", False):
                 return self._stop_planner_after_failure(
                     "The current design stage has already been marked complete or failed."
                 )
@@ -2719,9 +2787,9 @@ class BaseStatefulAgent(ABC):
 
             hard_repair_allowance = self._hard_repair_allowance_available()
             if hard_repair_allowance:
-                instruction = (
-                    f"{instruction}\n\nMANDATORY HARD-CHECK REPAIR: "
-                    f"{self._pending_hard_repair_hint}"
+                return await consume_pending_hard_repair(
+                    instruction,
+                    source="request_design_change",
                 )
 
             try:
@@ -2736,8 +2804,6 @@ class BaseStatefulAgent(ABC):
                 return self._stop_planner_after_failure(
                     "Designer change failed with " f"{type(exc).__name__}: {exc}."
                 )
-            if hard_repair_allowance:
-                self._hard_repair_design_change_calls += 1
             result += await self._score_design_attempt_if_configured("design change")
             result = self._truncate_planner_tool_output(
                 result,
@@ -2765,12 +2831,13 @@ class BaseStatefulAgent(ABC):
             """
             console_logger.info("Tool called: finish_stage")
             if self._hard_repair_allowance_available():
-                return (
-                    "FINISH_STAGE_BLOCKED: a deterministic hard-check failure is "
-                    "still pending repair. You must call request_design_change() "
-                    f"first with this repair requirement: {self._pending_hard_repair_hint}"
+                return await consume_pending_hard_repair(
+                    "Repair the remaining deterministic hard-check failure while "
+                    "preserving all currently satisfied hard constraints.",
+                    source="finish_stage",
                 )
             self._planner_budget_exhausted = True
+            self._planner_terminal_stop = True
             controller = getattr(self, "furniture_safety_controller", None)
             if controller and getattr(controller, "enabled", False):
                 controller.should_finish = True

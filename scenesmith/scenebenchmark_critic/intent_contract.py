@@ -154,10 +154,19 @@ def intent_contract_constraints_for_scene(scene: Any) -> list[dict[str, Any]]:
     return [row for row in rows or [] if isinstance(row, dict)]
 
 
-def intent_contract_required_counts(scene: Any) -> dict[str, int]:
-    """Return hard object counts owned by the independent contract."""
+def intent_contract_required_counts(
+    scene: Any, *, stage: str | None = None
+) -> dict[str, int]:
+    """Return hard object counts owned by the independent contract.
+
+    ``stage=None`` preserves the historical all-stage inventory view. A stage
+    filter lets generation agents consume only obligations they own.
+    """
     counts: dict[str, int] = {}
     for row in intent_contract_constraints_for_scene(scene):
+        row_stage = str(row.get("stage") or "")
+        if stage is not None and row_stage not in {"", stage}:
+            continue
         relation = str(row.get("relation") or "")
         if relation in {"required_count", "edge_distribution"}:
             _record_contract_inventory_count(counts, row.get("subjects") or {})
@@ -166,7 +175,7 @@ def intent_contract_required_counts(scene: Any) -> dict[str, int]:
         # this, a monitor requested on a desk can be judged as missing but
         # never be eligible for inventory repair.
         if (
-            str(row.get("stage") or "") == "furniture"
+            row_stage in {"", stage or "furniture"}
             and str(row.get("strength") or "hard").lower() == "hard"
         ):
             _record_contract_inventory_count(counts, row.get("subjects") or {})

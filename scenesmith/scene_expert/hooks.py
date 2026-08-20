@@ -261,7 +261,13 @@ def _attach_stage_relation_context(
             metadata = {}
             setattr(scene, "metadata", metadata)
         metadata["scenebenchmark_intent_contract"] = intent_contract
-    setattr(scene, "scene_expert_task_spec", task_spec.model_dump())
+    task_spec_payload = task_spec.model_dump()
+    setattr(scene, "scene_expert_task_spec", task_spec_payload)
+    metadata = getattr(scene, "metadata", None)
+    if not isinstance(metadata, dict):
+        metadata = {}
+        setattr(scene, "metadata", metadata)
+    metadata["scene_expert_task_spec"] = task_spec_payload
 
 
 def _build_hybrid_retriever(
@@ -471,14 +477,23 @@ def _categories_match_inventory(first: str, second: str) -> bool:
 
 def _contract_inventory_ownership(
     contract: dict[str, Any], existing_owners: dict[str, str]
-) -> dict[str, tuple[str, int]]:
+) -> tuple[dict[str, tuple[str, int]], list[str]]:
     """Return contract-owned inventory categories and their generation stages."""
     counts: dict[str, int] = {}
     supported_counts: dict[str, dict[tuple[str, str, str, str], int]] = {}
-    relation_owners: dict[str, set[str]] = {}
-    fallback_owners: dict[str, set[str]] = {}
+    owner_evidence: dict[str, dict[int, set[str]]] = {}
 
-    def record(selector: Any, stage: str, *, explicit_relation: bool) -> None:
+    owner_bearing_relations = {
+        "on_top_of",
+        "on_floor",
+        "object_on_floor",
+        "mounted_on_wall",
+        "hung_on_wall",
+        "mounted_on_ceiling",
+        "hung_from_ceiling",
+    }
+
+    def record(selector: Any, stage: str, *, priority: int) -> None:
         if not isinstance(selector, dict):
             return
         category = _inventory_category(selector.get("category"))
@@ -491,8 +506,7 @@ def _contract_inventory_ownership(
         except (TypeError, ValueError):
             count = 1
         counts[category] = max(counts.get(category, 0), count)
-        owners = relation_owners if explicit_relation else fallback_owners
-        owners.setdefault(category, set()).add(stage)
+        owner_evidence.setdefault(category, {}).setdefault(priority, set()).add(stage)
 
     constraints = contract.get("constraints") if isinstance(contract, dict) else []
     for constraint in constraints or []:
@@ -513,7 +527,12 @@ def _contract_inventory_ownership(
                 endpoint="subject",
                 declared_owner=existing_owners.get(subject_category, ""),
             )
-            record(subject, subject_stage, explicit_relation=explicit_relation)
+            subject_priority = (
+                3
+                if explicit_relation and relation in owner_bearing_relations
+                else 2 if explicit_relation else 0
+            )
+            record(subject, subject_stage, priority=subject_priority)
 
             if relation == "on_top_of":
                 target = constraint.get("targets") or {}
@@ -548,7 +567,7 @@ def _contract_inventory_ownership(
                 endpoint="target",
                 declared_owner=existing_owners.get(target_category, ""),
             ),
-            explicit_relation=explicit_relation,
+            priority=1 if explicit_relation else 0,
         )
 
     # Distinct support cohorts cannot consume the same physical instance. A
@@ -560,17 +579,22 @@ def _contract_inventory_ownership(
             counts[category] = max(counts.get(category, 0), sum(per_support.values()))
 
     ownership: dict[str, tuple[str, int]] = {}
+    conflicts: list[str] = []
     for category, count in counts.items():
-        candidate_owners = relation_owners.get(category) or fallback_owners.get(
-            category
-        )
-        if not candidate_owners:
+        evidence = owner_evidence.get(category) or {}
+        if not evidence:
             continue
+        candidate_owners = evidence[max(evidence)]
+        if len(candidate_owners) > 1:
+            conflicts.append(
+                f"category {category!r} has conflicting strongest ownership "
+                f"evidence: {sorted(candidate_owners)}"
+            )
         ownership[category] = (
             max(candidate_owners, key=STAGE_ORDER.index),
             count,
         )
-    return ownership
+    return ownership, conflicts
 
 
 def _reconcile_task_spec_stage_ownership(
@@ -587,7 +611,7 @@ def _reconcile_task_spec_stage_ownership(
         for stage, field in _TASK_SPEC_STAGE_FIELDS.items()
         for label in getattr(task_spec, field)
     }
-    ownership = _contract_inventory_ownership(contract, existing_owners)
+    ownership, _conflicts = _contract_inventory_ownership(contract, existing_owners)
     if not ownership:
         return task_spec
 
@@ -713,6 +737,15 @@ def _audit_stage_ownership(
                 after_counts[category] = after_counts.get(category, 0) + 1
 
     errors: list[str] = []
+    before_owners = {
+        _inventory_category(label): stage
+        for stage, field in _TASK_SPEC_STAGE_FIELDS.items()
+        for label in getattr(before, field)
+    }
+    _ownership, ownership_conflicts = _contract_inventory_ownership(
+        contract, before_owners
+    )
+    errors.extend(ownership_conflicts)
     for category, stages in sorted(owners.items()):
         if len(stages) != 1:
             errors.append(

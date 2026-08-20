@@ -1937,6 +1937,11 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 or str(constraint.get("strength") or "hard").lower() != "hard"
             ):
                 continue
+            relation_stage = str(constraint.get("stage") or "").strip().lower()
+            if relation_stage not in {"", "furniture"}:
+                # A future-stage support contract cannot protect a current
+                # collision from the generic separator before its subject exists.
+                continue
             subjects = constraint.get("subjects") or {}
             targets = constraint.get("targets") or {}
             subject_category = self._repair_category_for_task_label(
@@ -1954,7 +1959,25 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 furniture_category_satisfies(second_category, subject_category)
                 and furniture_category_satisfies(first_category, target_category)
             ):
-                return True
+                subject_obj, support_obj = (
+                    (first, second)
+                    if furniture_category_satisfies(first_category, subject_category)
+                    else (second, first)
+                )
+                if (
+                    subject_obj.object_type != ObjectType.FURNITURE
+                    or support_obj.object_type != ObjectType.FURNITURE
+                ):
+                    continue
+                subject_bounds = subject_obj.compute_world_bounds()
+                support_bounds = support_obj.compute_world_bounds()
+                if subject_bounds is None or support_bounds is None:
+                    continue
+                subject_height = float(subject_bounds[1][2] - subject_bounds[0][2])
+                support_width = float(support_bounds[1][0] - support_bounds[0][0])
+                support_depth = float(support_bounds[1][1] - support_bounds[0][1])
+                if subject_height > 0.0 and support_width > 0.0 and support_depth > 0.0:
+                    return True
         return False
 
     def _reported_shallow_furniture_collisions(
@@ -2710,14 +2733,14 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         semantic_counts: dict[str, int] = {}
         for item in required or []:
             category = self._repair_category_for_task_label(item)
-            if category in REPAIR_ASSET_SPECS:
+            if category:
                 semantic_counts[category] = semantic_counts.get(category, 0) + 1
         contract_counts: dict[str, int] = {}
         for contract_category, count in intent_contract_required_counts(
-            self.scene
+            self.scene, stage="furniture"
         ).items():
             category = self._repair_category_for_task_label(contract_category)
-            if category in REPAIR_ASSET_SPECS and count > 0:
+            if category and count > 0:
                 contract_counts[category] = count
         if semantic_counts:
             counts.update(semantic_counts)
@@ -2798,7 +2821,9 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
     def _repair_request_semantic_name(self, category: str) -> str:
         """Use an unambiguous hard-contract label for repair retrieval."""
         compatible_contract_categories: list[str] = []
-        for contract_category in intent_contract_required_counts(self.scene):
+        for contract_category in intent_contract_required_counts(
+            self.scene, stage="furniture"
+        ):
             canonical = self._repair_category_for_task_label(contract_category)
             if not canonical or canonical in compatible_contract_categories:
                 continue

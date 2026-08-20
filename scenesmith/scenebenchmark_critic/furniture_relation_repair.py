@@ -379,6 +379,13 @@ def improve_furniture_relations(
                     if not candidate_valid:
                         continue
                 candidate_payload = evaluate_for_repair()
+                if not _fresh_support_candidate_is_valid(
+                    scene,
+                    baseline_payload,
+                    candidate_payload,
+                    target,
+                ):
+                    continue
                 if not _candidate_improves(
                     baseline_payload,
                     candidate_payload,
@@ -1937,6 +1944,70 @@ def _is_hard_support_collision_target(
         ):
             return True
     return False
+
+
+def _fresh_support_candidate_is_valid(
+    scene: RoomScene,
+    baseline_payload: dict[str, Any],
+    candidate_payload: dict[str, Any],
+    target: _RepairTarget,
+) -> bool:
+    """Require a hard support repair to pass its relation and fresh physics."""
+    if target.relation_type != "object_on_support":
+        return True
+    baseline_result = _result_by_id(baseline_payload, target.check_id) or {}
+    constraint = (baseline_result.get("evidence") or {}).get("intent_constraint") or {}
+    if str(constraint.get("strength") or "").lower() != "hard":
+        return True
+    candidate_result = _result_by_id(candidate_payload, target.check_id) or {}
+    if str(candidate_result.get("label") or "").lower() != "pass":
+        return False
+    diagnostics = baseline_result.get("diagnostics") or {}
+    support_ids = (
+        baseline_result.get("selected_related_objects")
+        or diagnostics.get("selected_target_ids")
+        or diagnostics.get("missing_target_ids")
+        or baseline_result.get("related_objects")
+        or []
+    )
+    expected_pairs = {
+        frozenset((target.object_id, str(support_id)))
+        for support_id in support_ids
+        if str(support_id)
+    }
+    if not expected_pairs:
+        return False
+    try:
+        collision_pairs = {
+            frozenset((str(pair.object_a_id), str(pair.object_b_id)))
+            for pair in compute_scene_collisions(scene)
+        }
+    except Exception:
+        console_logger.debug(
+            "Fresh physics unavailable for hard support candidate %s; "
+            "using world-bounds intersection fallback",
+            target.object_id,
+            exc_info=True,
+        )
+        for expected_pair in expected_pairs:
+            object_ids = sorted(expected_pair)
+            if len(object_ids) != 2:
+                return False
+            first = scene.objects.get(UniqueID(object_ids[0]))
+            second = scene.objects.get(UniqueID(object_ids[1]))
+            first_bounds = first.compute_world_bounds() if first is not None else None
+            second_bounds = (
+                second.compute_world_bounds() if second is not None else None
+            )
+            if first_bounds is None or second_bounds is None:
+                return False
+            if bool(
+                np.all(first_bounds[0] < second_bounds[1])
+                and np.all(first_bounds[1] > second_bounds[0])
+            ):
+                return False
+        return True
+    return not bool(expected_pairs & collision_pairs)
 
 
 def _order_targets_by_position_dependency(

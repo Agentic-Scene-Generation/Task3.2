@@ -25,6 +25,7 @@ from scenesmith.scene_expert.global_planner import (
 )
 from scenesmith.scene_expert.hooks import (
     SceneExpertHookRunner,
+    _attach_stage_relation_context,
     _reconcile_task_spec_stage_ownership,
 )
 from scenesmith.scene_expert.memory.embedding import (
@@ -56,8 +57,6 @@ from scenesmith.scene_expert.schemas import (
     StageVerifyReport,
     VerifyIssue,
 )
-from scenesmith.agent_utils.scoring import CategoryScore, FurnitureCritiqueWithScores
-from scenesmith.agent_utils.stage_working_memory import StageWorkingMemory
 from scenesmith.scenebenchmark_critic.object_taxonomy import generation_owner
 from scenesmith.scene_expert.task_compiler import (
     _fallback_spec_from_prompt,
@@ -539,6 +538,87 @@ class SceneExpertMemoryTest(unittest.TestCase):
         self.assertIn("glass bowl", bowl_spec.required_small_objects)
         self.assertNotIn("glass bowl", bowl_spec.required_large_objects)
         self.assertEqual("manipuland", bowl_contract["constraints"][0]["stage"])
+
+    def test_subject_support_ownership_beats_passive_media_target(self) -> None:
+        faces = {
+            "relation": "faces",
+            "stage": "wall_mounted",
+            "strength": "hard",
+            "subjects": {"category": "sofa", "count": 1},
+            "targets": {"category": "television", "count": 1},
+        }
+        supported = {
+            "relation": "on_top_of",
+            "stage": "wall_mounted",
+            "strength": "hard",
+            "subjects": {"category": "television", "count": 1},
+            "targets": {"category": "tv_stand", "count": 1},
+        }
+
+        for constraints in (
+            [dict(faces), dict(supported)],
+            [dict(supported), dict(faces)],
+        ):
+            contract = {"constraints": constraints}
+            reconciled = _reconcile_task_spec_stage_ownership(
+                SceneTaskSpec(
+                    room_type="living_room",
+                    style="standard",
+                    required_large_objects=["sofa", "tv stand"],
+                    required_wall_objects=["television"],
+                ),
+                contract,
+            )
+
+            self.assertIn("television", reconciled.required_large_objects)
+            self.assertNotIn("television", reconciled.required_wall_objects)
+            self.assertTrue(
+                all(row["stage"] == "furniture" for row in contract["constraints"])
+            )
+
+    def test_explicit_wall_mount_still_owns_television(self) -> None:
+        contract = {
+            "constraints": [
+                {
+                    "relation": "mounted_on_wall",
+                    "stage": "wall_mounted",
+                    "strength": "hard",
+                    "subjects": {"category": "television", "count": 1},
+                    "targets": {"category": "wall", "count": 1},
+                }
+            ]
+        }
+        reconciled = _reconcile_task_spec_stage_ownership(
+            SceneTaskSpec(
+                room_type="living_room",
+                style="standard",
+                required_large_objects=["television"],
+            ),
+            contract,
+        )
+
+        self.assertEqual(["television"], reconciled.required_wall_objects)
+        self.assertNotIn("television", reconciled.required_large_objects)
+
+    def test_attached_task_spec_is_checkpoint_serializable_metadata(self) -> None:
+        scene = SimpleNamespace(text_description="room", metadata={})
+        task_spec = SceneTaskSpec(
+            room_type="living_room",
+            style="standard",
+            required_large_objects=["side table", "side table", "side table"],
+        )
+
+        _attach_stage_relation_context(
+            scene,
+            relation_context=None,
+            intent_contract=None,
+            task_spec=task_spec,
+        )
+
+        self.assertEqual(
+            scene.scene_expert_task_spec,
+            scene.metadata["scene_expert_task_spec"],
+        )
 
     def test_supported_plant_ownership_is_relation_first_and_order_independent(
         self,

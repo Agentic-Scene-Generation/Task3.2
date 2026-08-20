@@ -1425,6 +1425,35 @@ def test_furniture_relation_endpoints_supply_contract_inventory_counts() -> None
     }
 
 
+def test_required_counts_can_be_filtered_by_generation_stage() -> None:
+    scene = SimpleNamespace(
+        scenebenchmark_intent_contract={
+            "constraints": [
+                {
+                    "relation": "required_count",
+                    "stage": "furniture",
+                    "strength": "hard",
+                    "subjects": {"category": "side_table", "count": 3},
+                },
+                {
+                    "relation": "required_count",
+                    "stage": "wall_mounted",
+                    "strength": "hard",
+                    "subjects": {"category": "storage_cabinet", "count": 2},
+                },
+            ]
+        }
+    )
+
+    assert intent_contract_required_counts(scene) == {
+        "side_table": 3,
+        "storage_cabinet": 2,
+    }
+    assert intent_contract_required_counts(scene, stage="furniture") == {
+        "side_table": 3
+    }
+
+
 def test_faces_room_is_evaluated_as_an_interior_direction() -> None:
     constraint = {
         "constraint_id": "guest_chair_faces_room",
