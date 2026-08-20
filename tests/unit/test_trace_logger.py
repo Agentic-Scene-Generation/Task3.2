@@ -6,6 +6,7 @@ import hashlib
 import json
 import shutil
 import subprocess
+
 from pathlib import Path
 
 import pytest
@@ -74,14 +75,20 @@ def test_trace_logger_persists_code_provenance_in_partial_and_final_traces(
         scene_index=7,
         prompt="A reproducible test scene.",
         code_provenance=provenance,
+        component_flags={"memory_writer": True, "harness_budget": False},
     )
 
     partial_path = logger.save_partial(status="running")
     partial = json.loads(partial_path.read_text(encoding="utf-8"))
     assert partial["code_provenance"] == provenance
+    assert partial["component_flags"] == {
+        "memory_writer": True,
+        "harness_budget": False,
+    }
 
     final_trace = logger.finalize(FullVerifyReport(), exports={})
     assert final_trace["code_provenance"] == provenance
+    assert final_trace["component_flags"]["memory_writer"] is True
     final_path = logger.save(final_trace)
     assert (
         json.loads(final_path.read_text(encoding="utf-8"))["code_provenance"]

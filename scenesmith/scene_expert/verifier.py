@@ -13,20 +13,21 @@ from __future__ import annotations
 
 import logging
 import re
+
 from pathlib import Path
 
 import yaml
 
-from scenesmith.scenebenchmark_critic.object_taxonomy import (
-    canonical_object_category,
-    categories_are_equivalent,
-)
 from scenesmith.scene_expert.schemas import (
     FullVerifyReport,
     SceneTaskSpec,
     StageBrief,
     StageVerifyReport,
     VerifyIssue,
+)
+from scenesmith.scenebenchmark_critic.object_taxonomy import (
+    canonical_object_category,
+    categories_are_equivalent,
 )
 
 console_logger = logging.getLogger(__name__)
@@ -486,9 +487,11 @@ class StageVerifier:
         self,
         pass_threshold: float = 0.6,
         visual_score_hard_gate: bool = False,
+        critic_bridge_enabled: bool = True,
     ) -> None:
         self._pass_threshold = pass_threshold
         self._visual_score_hard_gate = bool(visual_score_hard_gate)
+        self._critic_bridge_enabled = bool(critic_bridge_enabled)
 
     def verify(
         self,
@@ -517,16 +520,29 @@ class StageVerifier:
         repair_suggestions: list[str] = []
 
         # --- 1. Load SceneSmith scores ---
-        scores_path = _find_scores_yaml(stage_output_dir, stage=stage)
+        scores_path = (
+            _find_scores_yaml(stage_output_dir, stage=stage)
+            if self._critic_bridge_enabled
+            else None
+        )
         raw_scores, critique_summary = (
             _load_scores_yaml(scores_path) if scores_path else ({}, "")
         )
         mapped_scores = _map_scenesmith_scores(raw_scores)
+        bridged_scores = dict(mapped_scores)
 
         # If no scores available, use conservative defaults
         if not mapped_scores:
-            console_logger.warning(
-                f"No scores.yaml found for stage {stage}, using defaults"
+            reason = (
+                "no scores.yaml was found"
+                if self._critic_bridge_enabled
+                else "the critic bridge is disabled"
+            )
+            console_logger.info(
+                "StageVerifier: %s for stage %s; using neutral deterministic "
+                "verification scores",
+                reason,
+                stage,
             )
             mapped_scores = {
                 "semantic": 0.5,
@@ -567,7 +583,6 @@ class StageVerifier:
                     repair_suggestions.append(
                         f"Add missing object '{issue.object_name}' to the scene"
                     )
-
         # --- 2b. Optional visual-score ablation gate ---
         # Inventory is already checked from scene state above and physical
         # feasibility/geometry critic own collisions.  Do not let VLM prose or
@@ -671,9 +686,19 @@ class StageVerifier:
             stage=stage,
             pass_stage=pass_stage,
             scores=mapped_scores,
+            visual_scores=bridged_scores,
+            rule_scores={"deterministic_issue_free": 1.0 if not issues else 0.0},
             issues=issues,
             repair_suggestions=repair_suggestions,
             critique_summary=critique_summary,
+            score_source=(
+                "scenebenchmark_critic"
+                if self._critic_bridge_enabled and bool(bridged_scores)
+                else "neutral_default"
+            ),
+            vlm_scoring_performed=(
+                self._critic_bridge_enabled and bool(bridged_scores)
+            ),
         )
 
 
@@ -705,10 +730,16 @@ class FullVerifier:
         if not stage_reports:
             return FullVerifyReport()
 
-        # Aggregate scores across stages
+        # Aggregate authoritative visual scores across stages. ``scores`` remains
+        # a backward-compatible field for older callers, but the explicit
+        # neutral default produced while the critic bridge is disabled must not
+        # be treated as critic evidence or flow into memory-quality signals.
         all_scores: dict[str, list[float]] = {}
         for report in stage_reports:
-            for category, score in report.scores.items():
+            report_scores = report.visual_scores
+            if not report_scores and report.score_source == "unknown":
+                report_scores = report.scores
+            for category, score in report_scores.items():
                 all_scores.setdefault(category, []).append(score)
 
         def avg(key: str) -> float:

@@ -11,18 +11,20 @@ import logging
 import os
 import re
 import time
-from pathlib import Path
 
+from pathlib import Path
+from typing import Any
+
+from scenesmith.agent_utils.thinking import (
+    chat_template_kwargs_from_effort,
+    prepend_text_thinking_directive,
+    thinking_directive_from_effort,
+)
 from scenesmith.scene_expert.context_bundle import build_llm_call_debug_record
 from scenesmith.scene_expert.schemas import SceneTaskSpec
 from scenesmith.scenebenchmark_critic.object_taxonomy import (
     canonical_object_category,
     execution_owner,
-)
-from scenesmith.agent_utils.thinking import (
-    chat_template_kwargs_from_effort,
-    prepend_text_thinking_directive,
-    thinking_directive_from_effort,
 )
 from scenesmith.utils.llm_json import parse_llm_json_object
 
@@ -778,17 +780,21 @@ class TaskCompiler:
         api_key: str | None = None,
         max_tokens: int = 1536,
         temperature: float = 0.0,
+        llm_client: Any | None = None,
     ) -> None:
-        from openai import OpenAI
-
         self._model = model
         self._max_tokens = max_tokens
         self._temperature = temperature
-        self._client = OpenAI(
-            base_url=api_base_url
-            or os.environ.get("OPENAI_BASE_URL", "http://localhost:8000/v1"),
-            api_key=api_key or os.environ.get("OPENAI_API_KEY", "dummy"),
-        )
+        self._structured_llm = llm_client
+        self._client = None
+        if self._structured_llm is None:
+            from openai import OpenAI
+
+            self._client = OpenAI(
+                base_url=api_base_url
+                or os.environ.get("OPENAI_BASE_URL", "http://localhost:8000/v1"),
+                api_key=api_key or os.environ.get("OPENAI_API_KEY", "dummy"),
+            )
         self.last_trace: dict = {}
 
     def compile(self, prompt: str) -> SceneTaskSpec:
@@ -805,6 +811,65 @@ class TaskCompiler:
         """
         console_logger.info(f"TaskCompiler: compiling prompt: {prompt[:100]}...")
         user_message = f"Extract scene requirements from: {prompt}"
+        base_messages = [
+            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "user", "content": user_message},
+        ]
+        if self._structured_llm is not None:
+            result = self._structured_llm.complete(
+                role="task_compiler",
+                stage="task_compiler",
+                event="compile",
+                messages=base_messages,
+                response_model=SceneTaskSpec,
+            )
+            if result.value is None:
+                reason = (f"{result.final_error_kind}: {result.final_error}").strip(
+                    ": "
+                )
+                task_spec = _fallback_spec_from_prompt(prompt).model_copy(
+                    update={"compiler_failure_reason": reason}
+                )
+                self.last_trace = {
+                    "status": "fallback",
+                    "attempts": [attempt.model_dump() for attempt in result.attempts],
+                    "retry_count": max(0, len(result.attempts) - 1),
+                    "failure_reason": reason,
+                    "normalized_task_spec": task_spec.model_dump(
+                        mode="json", exclude_none=True
+                    ),
+                    "normalization_warnings": [],
+                }
+                console_logger.warning(
+                    "Structured TaskCompiler failed; using deterministic contract: %s",
+                    reason,
+                )
+                return task_spec
+
+            raw_task_spec = result.value
+            task_spec = _normalize_stage_ownership(
+                raw_task_spec, prompt=prompt
+            ).model_copy(
+                update={"compiler_status": "ok", "compiler_failure_reason": ""}
+            )
+            normalization_warnings = _task_spec_normalization_warnings(
+                raw_task_spec, task_spec
+            )
+            self.last_trace = {
+                "status": "ok",
+                "attempts": [attempt.model_dump() for attempt in result.attempts],
+                "retry_count": max(0, len(result.attempts) - 1),
+                "failure_reason": "",
+                "raw_task_spec": raw_task_spec.model_dump(
+                    mode="json", exclude_none=True
+                ),
+                "normalized_task_spec": task_spec.model_dump(
+                    mode="json", exclude_none=True
+                ),
+                "normalization_warnings": normalization_warnings,
+            }
+            return task_spec
+
         attempts: list[dict] = []
         previous_output = ""
         validation_error = ""

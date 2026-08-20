@@ -1,9 +1,8 @@
-import unittest
-
 import json
 import os
 import sys
 import types
+import unittest
 
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -12,7 +11,22 @@ from unittest.mock import patch
 
 import numpy as np
 
-from scripts.build_memory_index import build_memory_indexes
+from scenesmith.agent_utils.scoring import CategoryScore, FurnitureCritiqueWithScores
+from scenesmith.agent_utils.stage_working_memory import StageWorkingMemory
+from scenesmith.scene_expert.context_bundle import (
+    build_llm_call_debug_record,
+    build_stage_context_bundle,
+)
+from scenesmith.scene_expert.global_planner import (
+    _SYSTEM_PROMPT,
+    GlobalPlanner,
+    _reconcile_floor_plan_zone_guidance,
+    _reconcile_stage_brief,
+)
+from scenesmith.scene_expert.hooks import (
+    SceneExpertHookRunner,
+    _reconcile_task_spec_stage_ownership,
+)
 from scenesmith.scene_expert.memory.embedding import (
     SceneMemoryEmbedder,
     resolve_memory_embedding_model_dir,
@@ -29,20 +43,6 @@ from scenesmith.scene_expert.memory.schemas import (
 from scenesmith.scene_expert.memory.store import FastMemoryStore
 from scenesmith.scene_expert.memory.text_builder import build_embedding_text
 from scenesmith.scene_expert.memory.writer import MemoryWriter
-from scenesmith.scene_expert.context_bundle import (
-    build_llm_call_debug_record,
-    build_stage_context_bundle,
-)
-from scenesmith.scene_expert.hooks import (
-    SceneExpertHookRunner,
-    _reconcile_task_spec_stage_ownership,
-)
-from scenesmith.scene_expert.global_planner import (
-    GlobalPlanner,
-    _SYSTEM_PROMPT,
-    _reconcile_floor_plan_zone_guidance,
-    _reconcile_stage_brief,
-)
 from scenesmith.scene_expert.repair_taxonomy import (
     FailureCategory,
     classify_hard_reasons,
@@ -56,8 +56,6 @@ from scenesmith.scene_expert.schemas import (
     StageVerifyReport,
     VerifyIssue,
 )
-from scenesmith.agent_utils.scoring import CategoryScore, FurnitureCritiqueWithScores
-from scenesmith.agent_utils.stage_working_memory import StageWorkingMemory
 from scenesmith.scene_expert.task_compiler import (
     _fallback_spec_from_prompt,
     _normalize_stage_ownership,
@@ -67,6 +65,7 @@ from scenesmith.scene_expert.verifier import (
     StageVerifier,
     _map_scenesmith_scores,
 )
+from scripts.build_memory_index import build_memory_indexes
 
 
 class SceneExpertMemoryTest(unittest.TestCase):
@@ -1195,32 +1194,7 @@ class SceneExpertMemoryTest(unittest.TestCase):
         self.assertEqual("stage", failure.content["scope"])
         self.assertTrue(failure.content["embedding_text"])
 
-    def test_memory_writer_extracts_reasoning_content_and_markdown_json(self) -> None:
-        writer = MemoryWriter.__new__(MemoryWriter)
-        message = types.SimpleNamespace(
-            content=None,
-            model_dump=lambda: {
-                "content": None,
-                "model_extra": {
-                    "reasoning_content": (
-                        "```json\n"
-                        '{"updates":[{"op":"NOOP","memory_type":"success_case","content":{}}]}'
-                        "\n```"
-                    )
-                },
-            },
-        )
-        response = types.SimpleNamespace(
-            choices=[types.SimpleNamespace(message=message, finish_reason="stop")]
-        )
-
-        raw = writer._extract_response_text(response)
-        data = writer._parse_json_payload(raw)
-
-        self.assertEqual(1, len(data["updates"]))
-        self.assertEqual("NOOP", data["updates"][0]["op"])
-
-    def test_memory_writer_builds_conservative_fallback_success_ops(self) -> None:
+    def test_memory_writer_never_builds_retrievable_fallback_success(self) -> None:
         writer = MemoryWriter.__new__(MemoryWriter)
         trace_summary = "\n".join(
             [
@@ -1234,16 +1208,7 @@ class SceneExpertMemoryTest(unittest.TestCase):
         full_report = FullVerifyReport(overall_score=0.8, pass_scene=True)
 
         ops = writer._fallback_success_ops(trace_summary, full_report)
-        filtered = writer._gate_and_enrich_ops(ops, full_report)
-
-        self.assertEqual(1, len(filtered))
-        op = filtered[0]
-        self.assertEqual("ADD", op.op)
-        self.assertEqual("success_case", op.memory_type)
-        self.assertEqual("furniture", op.content["stage"])
-        self.assertEqual("bedroom", op.content["room_type"])
-        self.assertIn("bed", op.content["required_objects"])
-        self.assertTrue(op.content["embedding_text"])
+        self.assertEqual([], ops)
 
     def test_embedding_model_dir_resolves_to_bge_m3_under_models_dir(self) -> None:
         with patch.dict(
@@ -1364,6 +1329,7 @@ class SceneExpertMemoryTest(unittest.TestCase):
                 str(Path("/models/bge-m3")),
                 index.manifest["embedding_model_dir"],
             )
+            self.assertTrue(index.manifest["records_fingerprint"])
 
     def test_hybrid_retriever_strict_mode_fails_on_missing_index(self) -> None:
         class DummyEmbedder:
@@ -1473,6 +1439,10 @@ class SceneExpertMemoryTest(unittest.TestCase):
                 positive_guidance=["use bed as the anchor"],
                 placement_reference=["bed_1 (bed): x=0.0, y=0.0, yaw=0"],
                 scores={"semantic": 0.9, "aesthetic": 0.8, "physics": 0.9},
+                source_task_id="task_prior",
+                source_task_ids=["task_prior"],
+                source_run_id="run_prior",
+                source_run_ids=["run_prior"],
             )
             failure = FailureCase(
                 failure_id="fail_asset_001",
@@ -1540,6 +1510,14 @@ class SceneExpertMemoryTest(unittest.TestCase):
             self.assertIn("do not retry", pack.failure_hints[0])
             self.assertEqual(1, len(pack.skill_texts))
             self.assertIn("arrange_bedroom_anchor", pack.skill_texts[0])
+            self.assertEqual(
+                ["task_prior"],
+                pack.retrieved_source_task_ids["success_bedroom_001"],
+            )
+            self.assertEqual(
+                ["run_prior"],
+                pack.retrieved_source_run_ids["success_bedroom_001"],
+            )
 
     def test_hybrid_retriever_writes_timing_jsonl(self) -> None:
         class DummyEmbedder:

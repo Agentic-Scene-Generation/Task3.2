@@ -302,6 +302,13 @@ prepare_memory_index_if_needed() {
     local embedding_model_dir="${SCENEEXPERT_MEMORY_EMBEDDING_MODEL_DIR:-${SCENEEXPERT_MODELS_DIR:-$PROJECT_DIR/models}/bge-m3}"
     local index_device="${SCENEEXPERT_MEMORY_EMBEDDING_INDEX_DEVICE:-cpu}"
 
+    if [ ! -f "$embedding_model_dir/model.safetensors" ] \
+        && [ -f "$embedding_model_dir/pytorch_model.bin" ]; then
+        echo "========== CONVERT BGE-M3 CHECKPOINT =========="
+        python scripts/convert_embedding_checkpoint.py \
+            --model-dir "$embedding_model_dir"
+    fi
+
     echo "========== BUILD SCENEEXPERT MEMORY INDEX =========="
     echo "Memory bank: $memory_bank_dir"
     echo "Embedding model dir: $embedding_model_dir"

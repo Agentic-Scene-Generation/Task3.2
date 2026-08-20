@@ -15,6 +15,76 @@ enabled: false   # Default: off. Set true in ablation_3/4/5 experiment configs.
 #   "full"           → harness_memory + LoRA model (model ID differs, behavior same)
 mode: "disabled"
 
+# Independent component gates. ``null`` inherits the legacy mode preset; an
+# explicit true/false overrides it. This preserves existing experiment names
+# while allowing strict single-variable ablations.
+components:
+  task_compiler:
+    enabled: null
+  harness:
+    enabled: null
+  # Limits only SceneExpert's outer planning/repair loop. It never overrides
+  # SceneSmith designer or critic iteration counts.
+  harness_budget:
+    enabled: null
+  global_planner:
+    enabled: null
+  prompt_injection:
+    enabled: null
+  fast_memory_retrieval:
+    enabled: null
+  memory_writer:
+    enabled: null
+  stage_working_memory:
+    enabled: null
+  verifier:
+    enabled: null
+  repair:
+    enabled: null
+  # Consume the authoritative SceneBenchmark critic result; never start a
+  # second critic loop.
+  critic_bridge:
+    enabled: null
+    source: "scenebenchmark_critic"
+  trace:
+    enabled: null
+  # Bounded JSON-schema transport for TaskCompiler, GlobalPlanner, and
+  # MemoryWriter. A failed writer call is auditable and performs no write.
+  structured_llm:
+    enabled: false
+
+# Direct structured calls made by SceneExpert itself. These roles share one
+# local OpenAI-compatible client, but each role has an explicit bounded budget.
+structured_llm:
+  roles:
+    task_compiler:
+      thinking_mode: "none"
+      max_tokens: 768
+      retry_max_tokens: 1536
+      timeout_seconds: 45
+      temperature: 0.1
+      max_attempts: 2
+      response_format: "json_schema"
+    global_planner:
+      thinking_mode: "none"
+      max_tokens: 1024
+      retry_max_tokens: 2048
+      timeout_seconds: 60
+      temperature: 0.1
+      max_attempts: 2
+      response_format: "json_schema"
+    memory_writer:
+      # Memory extraction is bounded schema transcription, not open-ended
+      # reasoning. Disabling hidden thinking preserves output tokens for the
+      # required JSON and avoids reasoning-only/length failures.
+      thinking_mode: "none"
+      max_tokens: ${oc.env:SCENEEXPERT_MEMORY_WRITER_MAX_TOKENS,2048}
+      retry_max_tokens: ${oc.env:SCENEEXPERT_MEMORY_WRITER_RETRY_MAX_TOKENS,4096}
+      timeout_seconds: 90
+      temperature: 0.1
+      max_attempts: 2
+      response_format: "json_schema"
+
 # Optional deterministic AgentSense-style resident behavior planner. This is
 # intentionally separate from the SceneExpert ablation mode and is a strict
 # no-op unless enabled explicitly.
@@ -43,6 +113,12 @@ memory:
     recall_top_k: ${oc.env:SCENEEXPERT_MEMORY_RECALL_TOP_K,30}
     sim_threshold: ${oc.env:SCENEEXPERT_MEMORY_SIM_THRESHOLD,0.0}
     object_overlap_threshold: ${oc.env:SCENEEXPERT_MEMORY_OBJECT_OVERLAP_THRESHOLD,0.15}
+    # Prevent an identical prompt from retrieving its own earlier output. This
+    # makes 4c evidence genuinely cross-task rather than replay leakage.
+    exclude_same_task: ${oc.env:SCENEEXPERT_MEMORY_EXCLUDE_SAME_TASK,true}
+  writer:
+    # Success memory requires both final/stage pass evidence and this score.
+    success_min_overall_score: ${oc.env:SCENEEXPERT_MEMORY_SUCCESS_MIN_SCORE,0.75}
   embedding:
     model_id: "${oc.env:SCENEEXPERT_MEMORY_EMBEDDING_MODEL_ID,BAAI/bge-m3}"
     # Actual local loading path. Keep BGE-M3 directly under models_dir/bge-m3.
@@ -57,7 +133,7 @@ memory:
   index:
     backend: "${oc.env:SCENEEXPERT_MEMORY_INDEX_BACKEND,numpy}"
     # Empty means <memory.dir>/indexes. Set env only for a custom shared index dir.
-    dir: "${oc.env:SCENEEXPERT_MEMORY_INDEX_DIR,}"
+    dir: "${oc.env:SCENEEXPERT_MEMORY_INDEX_DIR,''}"
     require_ready: ${oc.env:SCENEEXPERT_MEMORY_INDEX_REQUIRE_READY,true}
     # If true, hybrid/vector memory builds missing numpy indexes in-process
     # before retrieval starts. This keeps ACP runs robust when JSONL memory

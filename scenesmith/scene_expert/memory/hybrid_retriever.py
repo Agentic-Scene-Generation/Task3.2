@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import time
@@ -23,6 +24,7 @@ from scenesmith.scene_expert.memory.scoring import (
     task_required_objects,
 )
 from scenesmith.scene_expert.memory.store import FastMemoryStore
+from scenesmith.scene_expert.memory.text_builder import build_embedding_text
 from scenesmith.scene_expert.schemas import MemoryPack, SceneTaskSpec
 
 console_logger = logging.getLogger(__name__)
@@ -31,6 +33,10 @@ MemoryRecord = SuccessCase | FailureCase | Skill
 
 class HybridMemoryRetriever:
     """Retrieve success/failure/skill memory with vector recall + hybrid rerank."""
+
+    # The hook runner uses this marker to avoid appending a second, less
+    # informative timing row after this retriever has recorded its audit row.
+    writes_detailed_timing = True
 
     def __init__(
         self,
@@ -48,6 +54,7 @@ class HybridMemoryRetriever:
         require_indexes: bool = True,
         auto_build_indexes: bool = False,
         timing_path: str | Path | None = None,
+        exclude_source_task_id: str = "",
     ) -> None:
         self._store = store
         self._memory_dir = Path(memory_dir)
@@ -62,14 +69,34 @@ class HybridMemoryRetriever:
         self._weights = weights or HybridScoreWeights()
         self._index_cache: dict[tuple[str, str], NumpyMemoryIndex | None] = {}
         self._timing_path = Path(timing_path) if timing_path else None
+        self._require_indexes = require_indexes
         self._auto_build_indexes = auto_build_indexes
+        self._exclude_source_task_id = str(exclude_source_task_id or "")
 
         if require_indexes:
             self._ensure_required_indexes()
 
     def retrieve(self, task_spec: SceneTaskSpec, stage: str) -> MemoryPack:
         total_start = time.perf_counter()
+        if self._store.refresh_if_changed():
+            self._index_cache.clear()
         query_text = build_query_text(task_spec, stage)
+        if not self._has_active_stage_records(stage):
+            total_sec = time.perf_counter() - total_start
+            self._record_timing(
+                stage=stage,
+                query_text=query_text,
+                embedding_encode_sec=0.0,
+                bank_timings=[],
+                success_count=0,
+                failure_count=0,
+                skill_count=0,
+                total_sec=total_sec,
+            )
+            return MemoryPack(
+                memory_bank_id=self._store.bank_id,
+                memory_bank_revision=self._store.revision,
+            )
         encode_start = time.perf_counter()
         query_vec = self._embedder.encode([query_text])
         embedding_encode_sec = time.perf_counter() - encode_start
@@ -120,6 +147,8 @@ class HybridMemoryRetriever:
             skill_count=len(skills),
             total_sec=total_sec,
         )
+        selected_records = [record for _, record in [*success, *failure, *skills]]
+        source_task_ids, source_run_ids = self._selected_provenance(selected_records)
 
         return MemoryPack(
             success_hints=[
@@ -142,7 +171,68 @@ class HybridMemoryRetriever:
                 if isinstance(record, Skill)
             ],
             placement_reference=placement_reference,
-        )
+            success_case_ids=[
+                record.case_id
+                for _, record in success
+                if isinstance(record, SuccessCase)
+            ],
+            failure_case_ids=[
+                record.failure_id
+                for _, record in failure
+                if isinstance(record, FailureCase)
+            ],
+            skill_names=[
+                record.skill_name for _, record in skills if isinstance(record, Skill)
+            ],
+            retrieved_source_task_ids=source_task_ids,
+            retrieved_source_run_ids=source_run_ids,
+            memory_bank_id=self._store.bank_id,
+            memory_bank_revision=self._store.revision,
+        ).deduplicated()
+
+    @staticmethod
+    def _selected_provenance(
+        records: list[MemoryRecord],
+    ) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
+        """Return persisted task/run provenance for selected records."""
+        task_ids: dict[str, list[str]] = {}
+        run_ids: dict[str, list[str]] = {}
+        for record in records:
+            record_id = str(
+                getattr(record, "case_id", "")
+                or getattr(record, "failure_id", "")
+                or getattr(record, "skill_name", "")
+            )
+            if not record_id:
+                continue
+            task_ids[record_id] = sorted(
+                {
+                    *[value for value in record.source_task_ids if value],
+                    *([record.source_task_id] if record.source_task_id else []),
+                }
+            )
+            run_ids[record_id] = sorted(
+                {
+                    *[value for value in record.source_run_ids if value],
+                    *([record.source_run_id] if record.source_run_id else []),
+                }
+            )
+        return task_ids, run_ids
+
+    def _has_active_stage_records(self, stage: str) -> bool:
+        return any(self._active_stage_counts(stage).values())
+
+    def _active_stage_counts(self, stage: str) -> dict[str, int]:
+        """Return active-bank coverage for one stage before vector filtering."""
+        return {
+            "success": sum(
+                record.stage == stage for record in self._store.active_success_cases
+            ),
+            "failure": sum(
+                record.stage == stage for record in self._store.active_failure_cases
+            ),
+            "skill": sum(record.stage == stage for record in self._store.active_skills),
+        }
 
     def _retrieve_bank(
         self,
@@ -163,6 +253,7 @@ class HybridMemoryRetriever:
             "below_threshold_count": 0,
             "stale_count": 0,
             "structured_filtered_count": 0,
+            "same_task_filtered_count": 0,
             "accepted_count": 0,
             "returned_count": 0,
             "index_load_sec": 0.0,
@@ -196,6 +287,9 @@ class HybridMemoryRetriever:
             if record is None:
                 bank_timing["stale_count"] += 1
                 continue
+            if self._same_task(record):
+                bank_timing["same_task_filtered_count"] += 1
+                continue
             if not self._structured_filter(record, task_spec, stage, memory_type):
                 bank_timing["structured_filtered_count"] += 1
                 continue
@@ -217,6 +311,15 @@ class HybridMemoryRetriever:
         bank_timings.append(bank_timing)
         return output
 
+    def _same_task(self, record: MemoryRecord) -> bool:
+        if not self._exclude_source_task_id:
+            return False
+        task_ids = list(record.source_task_ids)
+        if record.source_task_id:
+            task_ids.append(record.source_task_id)
+        known_task_ids = {value for value in task_ids if value}
+        return known_task_ids == {self._exclude_source_task_id}
+
     def _structured_filter(
         self,
         record: MemoryRecord,
@@ -228,7 +331,22 @@ class HybridMemoryRetriever:
             return False
 
         if memory_type == "failure" and isinstance(record, FailureCase):
+            task_objects = task_required_objects(task_spec, stage)
+            if record.object and (
+                object_overlap([record.object], task_objects)
+                < self._object_overlap_threshold
+            ):
+                return False
             if record.scope in ("global", "stage") or record.is_deterministic:
+                # Geometry/physics rules may transfer across rooms, but an
+                # object-specific deterministic failure (for example a bed)
+                # must not be injected into an unrelated living-room task.
+                record_objects = record_required_objects(record)
+                if record_objects:
+                    return bool(task_objects) and (
+                        object_overlap(record_objects, task_objects)
+                        >= self._object_overlap_threshold
+                    )
                 return True
             if not record_room_compatible(record, task_spec):
                 return False
@@ -248,7 +366,9 @@ class HybridMemoryRetriever:
             return True
         task_objects = task_required_objects(task_spec, stage)
         if not task_objects:
-            return True
+            # Object-bearing success memory cannot invent furniture for a task
+            # that has no explicit object requirement in this stage.
+            return False
         return (
             object_overlap(record_objects, task_objects)
             >= self._object_overlap_threshold
@@ -256,23 +376,138 @@ class HybridMemoryRetriever:
 
     def _load_index(self, memory_type: str, stage: str) -> NumpyMemoryIndex | None:
         key = (memory_type, stage)
-        if key in self._index_cache:
-            return self._index_cache[key]
+        records = self._records_for_bank(memory_type, stage)
+        cached = self._index_cache.get(key)
+        if cached is not None and self._index_matches_records(cached, records):
+            return cached
+        if key in self._index_cache and cached is None and not records:
+            return None
+        self._index_cache.pop(key, None)
 
-        index = NumpyMemoryIndex.for_bank(self._index_dir, memory_type, stage)
-        if not index.vectors_path.exists() or not index.metadata_path.exists():
-            console_logger.warning(
-                "HybridMemoryRetriever: missing index for %s/%s under %s",
+        if not records:
+            # Empty banks are a normal cold-start state. They need no vector
+            # files and must not be reported as a degraded retrieval setup.
+            console_logger.debug(
+                "HybridMemoryRetriever: %s/%s bank is empty; skipping index",
                 memory_type,
                 stage,
-                self._index_dir,
             )
             self._index_cache[key] = None
             return None
 
+        index = NumpyMemoryIndex.for_bank(self._index_dir, memory_type, stage)
+        if not index.vectors_path.exists() or not index.metadata_path.exists():
+            index = self._build_runtime_index_if_enabled(memory_type, stage)
+            if index is None:
+                return self._handle_unavailable_index(
+                    memory_type,
+                    stage,
+                    reason="missing",
+                )
+
         index.load()
+        if not self._index_matches_records(index, records):
+            rebuilt = self._build_runtime_index_if_enabled(memory_type, stage)
+            if rebuilt is None:
+                return self._handle_unavailable_index(
+                    memory_type,
+                    stage,
+                    reason="stale",
+                )
+            rebuilt.load()
+            if not self._index_matches_records(rebuilt, records):
+                return self._handle_unavailable_index(
+                    memory_type,
+                    stage,
+                    reason="stale after rebuild",
+                )
+            index = rebuilt
+
         self._index_cache[key] = index
         return index
+
+    def _records_for_bank(
+        self,
+        memory_type: str,
+        stage: str,
+    ) -> list[MemoryRecord]:
+        if memory_type == "success":
+            records: list[MemoryRecord] = self._store.active_success_cases
+        elif memory_type == "failure":
+            records = self._store.active_failure_cases
+        elif memory_type == "skill":
+            records = self._store.active_skills
+        else:
+            raise ValueError(f"Unknown memory type: {memory_type}")
+        return [record for record in records if record.stage == stage]
+
+    def _index_matches_records(
+        self,
+        index: NumpyMemoryIndex,
+        records: list[MemoryRecord],
+    ) -> bool:
+        if index.vectors is None:
+            index.load()
+        indexed_ids = [str(item.get("memory_id", "")) for item in index.metadata]
+        record_ids = [_record_id(record) for record in records]
+        if indexed_ids != record_ids:
+            return False
+        manifest = index.manifest or {}
+        indexed_bank_id = str(manifest.get("memory_bank_id", ""))
+        indexed_revision = manifest.get("memory_bank_revision")
+        indexed_type_revision = manifest.get("memory_type_revision")
+        indexed_fingerprint = str(manifest.get("records_fingerprint", ""))
+        if indexed_bank_id and indexed_bank_id != self._store.bank_id:
+            return False
+        if isinstance(indexed_type_revision, int):
+            memory_type = str(manifest.get("memory_type", ""))
+            current_type_revision = int(
+                (self._store.manifest.get("bank_revisions", {}) or {}).get(
+                    memory_type, self._store.revision
+                )
+            )
+            if indexed_type_revision != current_type_revision:
+                return False
+        elif (
+            isinstance(indexed_revision, int)
+            and indexed_revision != self._store.revision
+        ):
+            return False
+        if indexed_fingerprint and indexed_fingerprint != _records_fingerprint(records):
+            return False
+        return True
+
+    def _build_runtime_index_if_enabled(
+        self,
+        memory_type: str,
+        stage: str,
+    ) -> NumpyMemoryIndex | None:
+        if not self._auto_build_indexes:
+            return None
+        self._auto_build_missing_indexes([(memory_type, stage)])
+        self._index_cache.pop((memory_type, stage), None)
+        index = NumpyMemoryIndex.for_bank(self._index_dir, memory_type, stage)
+        if not index.vectors_path.exists() or not index.metadata_path.exists():
+            return None
+        return index
+
+    def _handle_unavailable_index(
+        self,
+        memory_type: str,
+        stage: str,
+        *,
+        reason: str,
+    ) -> None:
+        message = (
+            f"HybridMemoryRetriever: {reason} index for {memory_type}/{stage} "
+            f"under {self._index_dir}. Run scripts/build_memory_index.py or set "
+            "scene_expert.memory.index.auto_build_missing=true."
+        )
+        if self._require_indexes:
+            raise FileNotFoundError(message)
+        console_logger.warning(message)
+        self._index_cache[(memory_type, stage)] = None
+        return None
 
     def _record_from_metadata(
         self,
@@ -281,11 +516,11 @@ class HybridMemoryRetriever:
     ) -> MemoryRecord | None:
         records: list[MemoryRecord]
         if memory_type == "success":
-            records = self._store.success_cases
+            records = self._store.active_success_cases
         elif memory_type == "failure":
-            records = self._store.failure_cases
+            records = self._store.active_failure_cases
         elif memory_type == "skill":
-            records = self._store.skills
+            records = self._store.active_skills
         else:
             return None
 
@@ -309,9 +544,9 @@ class HybridMemoryRetriever:
     def _missing_required_indexes(self) -> list[tuple[str, str]]:
         missing_keys: list[tuple[str, str]] = []
         for memory_type, records in (
-            ("success", self._store.success_cases),
-            ("failure", self._store.failure_cases),
-            ("skill", self._store.skills),
+            ("success", self._store.active_success_cases),
+            ("failure", self._store.active_failure_cases),
+            ("skill", self._store.active_skills),
         ):
             for stage in sorted({record.stage for record in records}):
                 index = NumpyMemoryIndex.for_bank(self._index_dir, memory_type, stage)
@@ -387,6 +622,12 @@ class HybridMemoryRetriever:
             float(x.get("vector_search_sec", 0.0)) for x in bank_timings
         )
         rerank_sec = sum(float(x.get("rerank_sec", 0.0)) for x in bank_timings)
+        active_stage_records = self._active_stage_counts(stage)
+        zero_result_reason = _zero_result_reason(
+            bank_timings=bank_timings,
+            active_stage_records=active_stage_records,
+            returned_count=success_count + failure_count + skill_count,
+        )
         payload = {
             "schema_version": "1.0",
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -394,12 +635,16 @@ class HybridMemoryRetriever:
             "retriever_type": "hybrid",
             "memory_dir": str(self._memory_dir),
             "index_dir": str(self._index_dir),
+            "memory_bank_id": self._store.bank_id,
+            "memory_bank_revision": self._store.revision,
             "query_text": query_text,
             "embedding_encode_sec": round(embedding_encode_sec, 6),
             "index_load_sec": round(index_load_sec, 6),
             "vector_search_sec": round(vector_search_sec, 6),
             "rerank_sec": round(rerank_sec, 6),
             "total_sec": round(total_sec, 6),
+            "active_stage_records": active_stage_records,
+            "zero_result_reason": zero_result_reason,
             "returned": {
                 "success": success_count,
                 "failure": failure_count,
@@ -418,7 +663,7 @@ class HybridMemoryRetriever:
         console_logger.info(
             "[SceneExpertTiming] stage=%s module=hybrid_memory_retrieval "
             "embedding_encode=%.3fs index_load=%.3fs vector_search=%.3fs "
-            "rerank=%.3fs total=%.3fs returned=%s/%s/%s",
+            "rerank=%.3fs total=%.3fs returned=%s/%s/%s zero_reason=%s",
             stage,
             embedding_encode_sec,
             index_load_sec,
@@ -428,12 +673,60 @@ class HybridMemoryRetriever:
             success_count,
             failure_count,
             skill_count,
+            zero_result_reason or "none",
         )
         if self._timing_path is None:
             return
-        self._timing_path.parent.mkdir(parents=True, exist_ok=True)
-        with self._timing_path.open("a", encoding="utf-8", newline="\n") as f:
-            f.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
+        try:
+            self._timing_path.parent.mkdir(parents=True, exist_ok=True)
+            with self._timing_path.open("a", encoding="utf-8", newline="\n") as file:
+                file.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
+        except OSError as error:
+            # Observability must never turn a valid retrieval into an empty pack.
+            console_logger.warning(
+                "Could not write hybrid-memory retrieval timing %s: %s",
+                self._timing_path,
+                error,
+            )
+
+
+def _zero_result_reason(
+    *,
+    bank_timings: list[dict[str, Any]],
+    active_stage_records: dict[str, int],
+    returned_count: int,
+) -> str:
+    """Explain an empty hybrid retrieval without weakening safety filters."""
+    if returned_count > 0:
+        return ""
+    if not any(active_stage_records.values()):
+        return "no_active_stage_records"
+    if bank_timings and not any(bool(bank.get("index_found")) for bank in bank_timings):
+        return "no_index_available"
+
+    candidates = sum(int(bank.get("candidate_count", 0)) for bank in bank_timings)
+    if candidates == 0:
+        return "no_vector_candidates"
+    below = sum(int(bank.get("below_threshold_count", 0)) for bank in bank_timings)
+    if below >= candidates:
+        return "below_similarity_threshold"
+    stale = sum(int(bank.get("stale_count", 0)) for bank in bank_timings)
+    remaining = max(0, candidates - below)
+    if stale >= remaining:
+        return "all_candidates_stale"
+    same_task = sum(
+        int(bank.get("same_task_filtered_count", 0)) for bank in bank_timings
+    )
+    remaining = max(0, remaining - stale)
+    if same_task >= remaining:
+        return "all_candidates_same_task"
+    structured = sum(
+        int(bank.get("structured_filtered_count", 0)) for bank in bank_timings
+    )
+    remaining = max(0, remaining - same_task)
+    if structured >= remaining:
+        return "no_structurally_compatible_memory"
+    return "no_accepted_candidates"
 
 
 def _record_id(record: MemoryRecord) -> str:
@@ -442,6 +735,22 @@ def _record_id(record: MemoryRecord) -> str:
     if isinstance(record, FailureCase):
         return record.failure_id
     return record.skill_name
+
+
+def _records_fingerprint(records: list[MemoryRecord]) -> str:
+    payload = [
+        {
+            "memory_id": _record_id(record),
+            "status": record.status,
+            "embedding_text": record.embedding_text or build_embedding_text(record),
+            "quality_score": record.quality_score,
+            "confidence": record.confidence,
+        }
+        for record in records
+    ]
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
 
 
 def build_query_text(task_spec: SceneTaskSpec, stage: str) -> str:

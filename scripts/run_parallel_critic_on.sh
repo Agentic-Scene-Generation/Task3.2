@@ -267,6 +267,7 @@ DISABLE_BWRAP="${SCENEEXPERT_DISABLE_BWRAP:-false}"
 SKIP_MAIN_BPY_IMPORT="${SCENEEXPERT_SKIP_MAIN_BPY_IMPORT:-true}"
 HSSD_RETRIEVAL_BACKEND="${HSSD_RETRIEVAL_BACKEND:-clip}"
 HSSD_RENDERED_ASSET_CHOICE="${HSSD_RENDERED_ASSET_CHOICE:-false}"
+HSSD_ZVEC_COLLECTION_PATH="${HSSD_ZVEC_COLLECTION_PATH:-}"
 # A directory check alone is insufficient for BGE-M3: recent Transformers
 # releases reject pickle checkpoints when the active Torch is too old. Load it
 # once in the controller before any batch starts so an incompatible runtime
@@ -734,6 +735,7 @@ export SCENEEXPERT_DISABLE_BWRAP="$DISABLE_BWRAP"
 export SCENEEXPERT_SKIP_MAIN_BPY_IMPORT="$SKIP_MAIN_BPY_IMPORT"
 export FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS
 export HSSD_RETRIEVAL_BACKEND HSSD_RENDERED_ASSET_CHOICE
+export HSSD_ZVEC_COLLECTION_PATH
 export CONVEX_MAX_OMP_THREADS SCENEEXPERT_OMP_NUM_THREADS
 export FLOOR_PLAN_DESIGNER_THINKING FLOOR_PLAN_CRITIC_THINKING
 export FURNITURE_DESIGNER_THINKING FURNITURE_CRITIC_THINKING
@@ -822,6 +824,17 @@ echo "final-view parallelism: $CRITIC_PROBE_FINAL_VIEW_PARALLELISM"
 echo "fail unresolved furniture hard constraints: $FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS"
 echo "quality failure policy: $QUALITY_FAILURE_POLICY"
 echo "HSSD retrieval: backend=$HSSD_RETRIEVAL_BACKEND rendered_asset_choice=$HSSD_RENDERED_ASSET_CHOICE"
+if [ "$HSSD_RETRIEVAL_BACKEND" = "embedding" ]; then
+    if [ -z "$HSSD_ZVEC_COLLECTION_PATH" ]; then
+        echo "ERROR: HSSD_ZVEC_COLLECTION_PATH is required for embedding retrieval" >&2
+        exit 1
+    fi
+    if [ ! -f "$HSSD_ZVEC_COLLECTION_PATH/0/embedding.index.3.proxima" ]; then
+        echo "ERROR: HSSD zvec index is missing or unreadable: $HSSD_ZVEC_COLLECTION_PATH" >&2
+        exit 1
+    fi
+    echo "HSSD zvec collection: $HSSD_ZVEC_COLLECTION_PATH"
+fi
 echo "skip controller bpy import: $SKIP_MAIN_BPY_IMPORT"
 if [ -n "$CONVEX_MAX_OMP_THREADS" ]; then
     echo "convex decomposition max OMP threads: $CONVEX_MAX_OMP_THREADS"
@@ -933,6 +946,57 @@ COMMON_ARGS=(
     "ceiling_agent.asset_manager.hssd.rendered_asset_choice.enabled=${HSSD_RENDERED_ASSET_CHOICE}"
     "manipuland_agent.asset_manager.hssd.rendered_asset_choice.enabled=${HSSD_RENDERED_ASSET_CHOICE}"
 )
+
+# Optional SceneExpert ablation controls. An unset variable adds no Hydra
+# override, preserving the selected experiment and main's existing defaults.
+# ``++`` supports both keys inherited from the root SceneExpert config and keys
+# absent from an experiment-specific override block.
+append_sceneexpert_component_override() {
+    local env_name="$1" component="$2" raw normalized
+    raw="${!env_name:-}"
+    if [ -z "$raw" ]; then
+        return 0
+    fi
+    case "${raw,,}" in
+        1|true|yes|on) normalized="true" ;;
+        0|false|no|off) normalized="false" ;;
+        *)
+            echo "ERROR: $env_name must be a boolean, got '$raw'" >&2
+            exit 2
+            ;;
+    esac
+    COMMON_ARGS+=(
+        "++experiment.scene_expert.components.${component}.enabled=${normalized}"
+    )
+    echo "SceneExpert component override: ${component}=${normalized}"
+}
+
+append_sceneexpert_component_override SCENEEXPERT_COMPONENT_TASK_COMPILER_ENABLED task_compiler
+append_sceneexpert_component_override SCENEEXPERT_COMPONENT_HARNESS_ENABLED harness
+append_sceneexpert_component_override SCENEEXPERT_COMPONENT_HARNESS_BUDGET_ENABLED harness_budget
+append_sceneexpert_component_override SCENEEXPERT_COMPONENT_GLOBAL_PLANNER_ENABLED global_planner
+append_sceneexpert_component_override SCENEEXPERT_COMPONENT_PROMPT_INJECTION_ENABLED prompt_injection
+append_sceneexpert_component_override SCENEEXPERT_COMPONENT_FAST_MEMORY_RETRIEVAL_ENABLED fast_memory_retrieval
+append_sceneexpert_component_override SCENEEXPERT_COMPONENT_MEMORY_WRITER_ENABLED memory_writer
+append_sceneexpert_component_override SCENEEXPERT_COMPONENT_STAGE_WORKING_MEMORY_ENABLED stage_working_memory
+append_sceneexpert_component_override SCENEEXPERT_COMPONENT_VERIFIER_ENABLED verifier
+append_sceneexpert_component_override SCENEEXPERT_COMPONENT_REPAIR_ENABLED repair
+append_sceneexpert_component_override SCENEEXPERT_COMPONENT_CRITIC_BRIDGE_ENABLED critic_bridge
+append_sceneexpert_component_override SCENEEXPERT_COMPONENT_TRACE_ENABLED trace
+append_sceneexpert_component_override SCENEEXPERT_COMPONENT_STRUCTURED_LLM_ENABLED structured_llm
+
+if [ "$HSSD_RETRIEVAL_BACKEND" = "embedding" ]; then
+    # Do not rely on paths.hssd_data_dir for the zvec index: on ACP hosts it
+    # resolves through the protected /mnt/afs FUSE mount. Explicitly override
+    # every agent so the override survives internal batch re-entry and Hydra
+    # composes the same writable local collection in each scene process.
+    COMMON_ARGS+=(
+        "furniture_agent.asset_manager.hssd.zvec.collection_path=${HSSD_ZVEC_COLLECTION_PATH}"
+        "wall_agent.asset_manager.hssd.zvec.collection_path=${HSSD_ZVEC_COLLECTION_PATH}"
+        "ceiling_agent.asset_manager.hssd.zvec.collection_path=${HSSD_ZVEC_COLLECTION_PATH}"
+        "manipuland_agent.asset_manager.hssd.zvec.collection_path=${HSSD_ZVEC_COLLECTION_PATH}"
+    )
+fi
 
 if [ -n "$CONVEX_MAX_OMP_THREADS" ]; then
     COMMON_ARGS+=(
@@ -1319,12 +1383,40 @@ if [ "${1:-}" = "--internal-run-batch" ]; then
     exit $?
 fi
 
+run_exit_code=0
 if [ "$GENERATE_SHARED_BASE" = "true" ]; then
-    run_batches shared_base
+    if run_batches shared_base; then
+        :
+    else
+        run_exit_code=$?
+    fi
 fi
-run_batches critic_on
+if [ "$run_exit_code" -eq 0 ]; then
+    if run_batches critic_on; then
+        :
+    else
+        run_exit_code=$?
+    fi
+fi
+
+# Metrics are generated for successful and failed probes alike.  The collector
+# is read-only outside OUTPUT_ROOT/metrics and is deliberately non-fatal so it
+# can never hide or replace the generation process exit code.
+if [ "$DRY_RUN" = "false" ]; then
+    echo "collecting independent run metrics: $OUTPUT_ROOT/metrics"
+    if ! "$PYTHON_BIN" -m scenesmith.scene_expert.run_metrics \
+        --output-root "$OUTPUT_ROOT" \
+        --run-id "$RUN_ID" \
+        --process-exit-code "$run_exit_code"; then
+        echo "WARNING: run metrics collection failed; generation artifacts are unchanged" >&2
+    fi
+fi
 if [ "$CRITIC_PROBE_RENDER_FINAL_VIEWS" = "true" ] \
     && [ "$PIPELINE_STOP_STAGE" != "manipuland" ]; then
     echo "skipping final combined-house views: pipeline stops at $PIPELINE_STOP_STAGE"
+fi
+if [ "$run_exit_code" -ne 0 ]; then
+    echo "critic-on probe failed with exit code $run_exit_code: $OUTPUT_ROOT" >&2
+    exit "$run_exit_code"
 fi
 echo "critic-on probe complete: $OUTPUT_ROOT"

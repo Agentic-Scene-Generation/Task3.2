@@ -82,6 +82,7 @@ class StageWorkingMemoryTest(unittest.TestCase):
             saved = json.loads(rows[0])
             self.assertEqual(record, saved)
             self.assertEqual("accepted", saved["status"])
+            self.assertEqual("scenesmith_core", saved["repair_owner"])
             self.assertEqual([0.58, -1.7], saved["affected_objects"][0]["after"]["xy"])
 
     def test_score_total_and_stage_canonicalization(self) -> None:

@@ -14,20 +14,21 @@ import os
 import shutil
 import subprocess
 import time
+
 from pathlib import Path
 from typing import Iterable
 
 from scenesmith.scene_expert.schemas import (
     FullVerifyReport,
-    HarnessContext,
     MemoryPack,
     RepairResult,
+    SceneTaskSpec,
     StageBrief,
     StageCost,
+    StageExecutionEvidence,
     StageRelationContext,
     StageTraceEntry,
     StageVerifyReport,
-    SceneTaskSpec,
 )
 
 console_logger = logging.getLogger(__name__)
@@ -105,9 +106,11 @@ def collect_code_provenance(
         except ValueError:
             continue
         if path.is_file():
-            source_hashes[str(relative_path)] = hashlib.sha256(
-                path.read_bytes()
-            ).hexdigest()
+            # Keep provenance stable across Windows and Linux checkouts. Git
+            # tracks these Python sources as text, while a Windows worktree may
+            # materialize CRLF bytes for the same committed content.
+            content = path.read_bytes().replace(b"\r\n", b"\n")
+            source_hashes[str(relative_path)] = hashlib.sha256(content).hexdigest()
     provenance["source_hashes"] = source_hashes
     return provenance
 
@@ -115,11 +118,17 @@ def collect_code_provenance(
 def _git_executable() -> str | None:
     """Find Git even when isolated workers receive a minimal ``PATH``."""
     configured = os.environ.get("GIT")
+    windows_candidates = (
+        str(Path(os.environ.get("ProgramFiles", "")) / "Git" / "cmd" / "git.exe"),
+        str(Path(os.environ.get("ProgramFiles", "")) / "Git" / "bin" / "git.exe"),
+        str(Path(os.environ.get("ProgramFiles(x86)", "")) / "Git" / "cmd" / "git.exe"),
+    )
     candidates = (
         shutil.which(configured) if configured else None,
         shutil.which("git"),
         "/usr/bin/git",
         "/bin/git",
+        *windows_candidates,
     )
     for candidate in candidates:
         if candidate and Path(candidate).is_file() and os.access(candidate, os.X_OK):
@@ -133,7 +142,7 @@ class TraceLogger:
     One TraceLogger instance per scene generation run.
     """
 
-    SCHEMA_VERSION = "1.4"
+    SCHEMA_VERSION = "1.5"
 
     def __init__(
         self,
@@ -142,7 +151,10 @@ class TraceLogger:
         prompt: str,
         experiment_name: str = "",
         config_hash: str = "",
+        task_spec_status: dict | None = None,
+        task_spec: dict | None = None,
         code_provenance: dict[str, object] | None = None,
+        component_flags: dict[str, bool] | None = None,
     ) -> None:
         self._output_dir = Path(output_dir)
         self._traces_dir = self._output_dir / "traces"
@@ -166,13 +178,32 @@ class TraceLogger:
         self._prompt = prompt
         self._experiment_name = experiment_name
         self._config_hash = config_hash
+        self._task_spec = dict(task_spec or {})
         self._code_provenance = dict(code_provenance or {})
+        self._component_flags = {
+            str(name): bool(enabled)
+            for name, enabled in dict(component_flags or {}).items()
+        }
         self._stage_entries: list[StageTraceEntry] = []
         self._start_time = time.time()
         self._full_report: FullVerifyReport | None = None
         self._exports: dict = {}
         self._task_compiler: dict = {}
         self._intent_compiler: dict = {}
+        self._component_status: dict[str, dict] = {
+            "task_compiler": dict(task_spec_status or {})
+        }
+
+    def record_component_status(self, component: str, status: dict) -> None:
+        """Record whether an optional component used model output or fallback."""
+        self._component_status[component] = dict(status)
+
+    def _degraded_components(self) -> list[str]:
+        return [
+            name
+            for name, status in self._component_status.items()
+            if bool(status.get("degraded", False))
+        ]
 
     def record_task_compiler(
         self, task_spec: SceneTaskSpec, compiler_trace: dict | None = None
@@ -185,6 +216,17 @@ class TraceLogger:
             "task_spec": task_spec.model_dump(mode="json", exclude_none=True),
             "structured_output": dict(compiler_trace or {}),
         }
+        self._task_spec = task_spec.model_dump(mode="json", exclude_none=True)
+        self.record_component_status(
+            "task_compiler",
+            {
+                "source": (
+                    "fallback" if task_spec.compiler_status == "degraded" else "llm"
+                ),
+                "degraded": task_spec.compiler_status == "degraded",
+                "failure_reason": task_spec.compiler_failure_reason,
+            },
+        )
         path = self._trace_debug_dir / "task_compiler.json"
         self._write_json(path, self._task_compiler)
         self.save_partial(status="running")
@@ -202,14 +244,15 @@ class TraceLogger:
         self,
         stage: str,
         memory_pack: MemoryPack,
-        relation_context: StageRelationContext | None,
-        planner_trace: dict | None,
-        stage_brief: StageBrief | None,
-        scene_state_path: str,
-        verify_report: StageVerifyReport | None,
-        repair_actions: list[RepairResult],
+        relation_context: StageRelationContext | None = None,
+        planner_trace: dict | None = None,
+        stage_brief: StageBrief | None = None,
+        scene_state_path: str = "",
+        verify_report: StageVerifyReport | None = None,
+        repair_actions: list[RepairResult] | None = None,
         qwen_calls: int = 0,
         stage_time_sec: float | None = None,
+        execution_evidence: StageExecutionEvidence | None = None,
     ) -> None:
         """Record a completed stage's data."""
         elapsed = (
@@ -223,8 +266,9 @@ class TraceLogger:
             stage_brief=stage_brief,
             scene_state_path=scene_state_path,
             verify_report=verify_report,
-            repair_actions=repair_actions,
+            repair_actions=list(repair_actions or []),
             cost=StageCost(qwen_calls=qwen_calls, stage_time_sec=round(elapsed, 1)),
+            execution_evidence=execution_evidence or StageExecutionEvidence(),
         )
         self._stage_entries.append(entry)
         self._save_stage_entry(entry)
@@ -238,6 +282,7 @@ class TraceLogger:
         relation_context: StageRelationContext | None,
         stage_brief: StageBrief | None,
         phase: str = "pre",
+        execution_evidence: StageExecutionEvidence | None = None,
     ) -> Path:
         """Save pre/post-stage planning context for interrupted runs."""
         payload = {
@@ -254,6 +299,9 @@ class TraceLogger:
                 else None
             ),
             "stage_brief": stage_brief.model_dump() if stage_brief else None,
+            "execution_evidence": (
+                execution_evidence.model_dump() if execution_evidence else None
+            ),
         }
         path = (
             self._stage_debug_dir
@@ -323,18 +371,31 @@ class TraceLogger:
         """Set the final report and return the full trace dict (before saving)."""
         self._full_report = full_report
         self._exports = exports
+        outcome_status = str(full_report.outcome_status or "COMPLETE").casefold()
+        trace_status = (
+            "degraded_incomplete"
+            if outcome_status == "degraded_incomplete"
+            else "completed"
+        )
 
         trace = {
             "schema_version": self.SCHEMA_VERSION,
             "trace_id": self._trace_id,
             "scene_id": self._scene_id,
-            "status": "completed",
+            "status": trace_status,
+            "degraded": bool(
+                self._degraded_components() or trace_status == "degraded_incomplete"
+            ),
+            "degraded_components": self._degraded_components(),
+            "component_flags": self._component_flags,
+            "component_status": self._component_status,
             "experiment_name": self._experiment_name,
             "config_hash": self._config_hash,
             "code_provenance": self._code_provenance,
             "prompt": self._prompt,
             "task_compiler": self._task_compiler,
             "intent_compiler": self._intent_compiler,
+            "task_spec": self._task_spec,
             "model": model,
             "total_time_sec": round(time.time() - self._start_time, 1),
             "stages": [entry.model_dump() for entry in self._stage_entries],
@@ -350,6 +411,10 @@ class TraceLogger:
             "trace_id": self._trace_id,
             "scene_id": self._scene_id,
             "status": status,
+            "degraded": bool(self._degraded_components()),
+            "degraded_components": self._degraded_components(),
+            "component_flags": self._component_flags,
+            "component_status": self._component_status,
             "error": error,
             "experiment_name": self._experiment_name,
             "config_hash": self._config_hash,
@@ -357,6 +422,7 @@ class TraceLogger:
             "prompt": self._prompt,
             "task_compiler": self._task_compiler,
             "intent_compiler": self._intent_compiler,
+            "task_spec": self._task_spec,
             "total_time_sec": round(time.time() - self._start_time, 1),
             "stages": [entry.model_dump() for entry in self._stage_entries],
         }
@@ -373,12 +439,17 @@ class TraceLogger:
                 "trace_id": self._trace_id,
                 "scene_id": self._scene_id,
                 "status": "partial",
+                "degraded": bool(self._degraded_components()),
+                "degraded_components": self._degraded_components(),
+                "component_flags": self._component_flags,
+                "component_status": self._component_status,
                 "experiment_name": self._experiment_name,
                 "config_hash": self._config_hash,
                 "code_provenance": self._code_provenance,
                 "prompt": self._prompt,
                 "task_compiler": self._task_compiler,
                 "intent_compiler": self._intent_compiler,
+                "task_spec": self._task_spec,
                 "stages": [entry.model_dump() for entry in self._stage_entries],
             }
 
@@ -470,3 +541,53 @@ class TraceLogger:
                 f"pass={'YES' if self._full_report.pass_scene else 'NO'}"
             )
         return "\n".join(lines)
+
+    def build_memory_writer_evidence(self) -> dict[str, object]:
+        """Return the structured, untruncated evidence contract for memory writing.
+
+        The long-term writer consumes the existing main critic output through
+        ``verify_report`` and never has to infer scores, task metadata, or repair
+        outcomes from the human-readable summary.
+        """
+        stages: list[dict[str, object]] = []
+        for entry in self._stage_entries:
+            stages.append(
+                {
+                    "stage": entry.stage,
+                    "scene_state_path": entry.scene_state_path,
+                    "stage_brief": (
+                        entry.stage_brief.model_dump() if entry.stage_brief else None
+                    ),
+                    "verify_report": (
+                        entry.verify_report.model_dump()
+                        if entry.verify_report
+                        else None
+                    ),
+                    "repair_actions": [
+                        action.model_dump() for action in entry.repair_actions
+                    ],
+                    "execution_evidence": entry.execution_evidence.model_dump(),
+                    "retrieved_memory_ids": (
+                        list(entry.memory_pack.success_case_ids)
+                        + list(entry.memory_pack.failure_case_ids)
+                        + list(entry.memory_pack.skill_names)
+                    ),
+                }
+            )
+        return {
+            "schema_version": "sceneexpert.memory_writer_evidence.v1",
+            "trace_id": self._trace_id,
+            "scene_id": self._scene_id,
+            "run_id": str(self._output_dir.resolve()),
+            "experiment_name": self._experiment_name,
+            "config_hash": self._config_hash,
+            "prompt": self._prompt,
+            "task_spec": dict(self._task_spec),
+            "stages": stages,
+            "full_report": (
+                self._full_report.model_dump() if self._full_report else None
+            ),
+            "component_flags": dict(self._component_flags),
+            "component_status": dict(self._component_status),
+            "code_provenance": dict(self._code_provenance),
+        }

@@ -16,6 +16,11 @@ defaults:
 scene_expert:
   enabled: true
   mode: "harness_memory"
+  components:
+    # Use the bounded schema/retry transport for SceneExpert's direct roles.
+    # This does not alter SceneSmith designer/critic calls.
+    structured_llm:
+      enabled: true
   memory:
     dir: "${paths.memory_dir}/ablation_4c"
     retriever_type: "hybrid"

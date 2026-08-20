@@ -14,16 +14,16 @@ import logging
 import os
 import re
 import time
+
 from pathlib import Path
+from typing import Any
 
-from openai import OpenAI
-
-from scenesmith.scene_expert.context_bundle import build_llm_call_debug_record
 from scenesmith.agent_utils.thinking import (
     chat_template_kwargs_from_effort,
     prepend_text_thinking_directive,
     thinking_directive_from_effort,
 )
+from scenesmith.scene_expert.context_bundle import build_llm_call_debug_record
 from scenesmith.scene_expert.schemas import (
     HarnessContext,
     MemoryPack,
@@ -113,6 +113,144 @@ _STAGE_DESCRIPTIONS = {
     "ceiling_mounted": "Place ceiling-mounted objects (lights, fans) on the ceiling.",
     "manipuland": "Place small manipulable objects (books, cups, plants) on furniture surfaces.",
 }
+
+_STAGE_CRITIC_CHECKS = {
+    "floor_plan": [
+        "Verify room footprint, dimensions, wall geometry, and floor layout",
+        "Verify doors/openings provide valid access and room connectivity",
+        "Verify windows/openings have architecturally reasonable placement and daylight",
+        "Do not evaluate furniture, wall decor, ceiling fixtures, or manipulands",
+    ],
+    "furniture": [
+        "Verify prompt-required furniture is present with correct semantic assets",
+        "Verify furniture poses, orientation, functional relationships, and clearance",
+        "Verify furniture is collision-free, reachable, and inside the room",
+        "Do not require wall decor, ceiling fixtures, or manipulands",
+    ],
+    "wall_mounted": [
+        "Verify stage-required wall-mounted objects are present and correctly mounted",
+        "Verify mounting height, spacing, opening clearance, and visual balance",
+        "Do not redesign furniture or require ceiling/manipuland objects",
+    ],
+    "ceiling_mounted": [
+        "Verify stage-required ceiling objects are present and correctly mounted",
+        "Verify coverage, spacing, clearance, and visual balance",
+        "Do not redesign upstream stages or require manipulands",
+    ],
+    "manipuland": [
+        "Verify stage-required small objects are present on valid support surfaces",
+        "Verify support, usability, local spacing, and collision-free placement",
+        "Treat all upstream architecture and furniture as fixed context",
+    ],
+}
+
+_COMMON_DOWNSTREAM_OBJECT_TERMS = {
+    "furniture",
+    "wall decor",
+    "ceiling fixture",
+    "manipuland",
+    "bed",
+    "nightstand",
+    "wardrobe",
+    "dresser",
+    "sofa",
+    "couch",
+    "table",
+    "chair",
+    "desk",
+    "rug",
+    "plant",
+    "cabinet",
+    "shelf",
+    "books",
+    "cup",
+}
+
+
+def _contains_term(text: str, term: str) -> bool:
+    normalized_term = str(term or "").casefold().strip()
+    if not normalized_term:
+        return False
+    return bool(
+        re.search(
+            rf"(?<![a-z0-9_]){re.escape(normalized_term)}(?![a-z0-9_])",
+            text,
+        )
+    )
+
+
+def _floor_plan_rule_mentions_downstream_placement(
+    text: str,
+    task_spec: SceneTaskSpec,
+) -> bool:
+    """Reject floor-plan hints that attempt downstream object placement."""
+    lowered = str(text or "").casefold()
+    object_terms = {
+        *_COMMON_DOWNSTREAM_OBJECT_TERMS,
+        *(
+            str(value).casefold()
+            for value in (
+                task_spec.required_large_objects
+                + task_spec.required_wall_objects
+                + task_spec.required_ceiling_objects
+                + task_spec.required_small_objects
+            )
+            if str(value).strip()
+        ),
+    }
+    if not any(_contains_term(lowered, term) for term in object_terms):
+        return False
+    capacity_only = any(
+        marker in lowered
+        for marker in ("reserve", "capacity", "accommodate", "plan space")
+    ) and any(
+        marker in lowered for marker in ("do not place", "downstream", "later stage")
+    )
+    return not capacity_only
+
+
+def enforce_stage_brief_scope(
+    stage_brief: StageBrief,
+    task_spec: SceneTaskSpec,
+) -> StageBrief:
+    """Keep planner output within deterministic pipeline-stage ownership."""
+    stage = stage_brief.stage
+    constraints = list(stage_brief.constraints_for_designer)
+    failures = list(stage_brief.failure_patterns_to_avoid)
+    recommended_skills = list(stage_brief.recommended_skills)
+    stage_objective = stage_brief.stage_objective
+    if stage == "floor_plan":
+        stage_objective = (
+            f"Complete the floor_plan stage for a {task_spec.room_type}: "
+            f"{_STAGE_DESCRIPTIONS['floor_plan']}"
+        )
+        constraints = [
+            value
+            for value in constraints
+            if not _floor_plan_rule_mentions_downstream_placement(value, task_spec)
+        ]
+        recommended_skills = [
+            value
+            for value in recommended_skills
+            if not _floor_plan_rule_mentions_downstream_placement(value, task_spec)
+        ]
+        failures = [
+            value
+            for value in failures
+            if not _floor_plan_rule_mentions_downstream_placement(value, task_spec)
+        ]
+    return stage_brief.model_copy(
+        update={
+            "stage_objective": stage_objective,
+            "recommended_skills": recommended_skills,
+            "constraints_for_designer": constraints,
+            "checks_for_critic": list(
+                _STAGE_CRITIC_CHECKS.get(stage, stage_brief.checks_for_critic)
+            ),
+            "failure_patterns_to_avoid": failures,
+        }
+    )
+
 
 _INVENTORY_CLOSING_PATTERNS = (
     re.compile(
@@ -537,7 +675,13 @@ def _format_task_spec(task_spec: SceneTaskSpec, stage: str) -> str:
     ]
 
     required = _stage_required_objects(task_spec, stage)
-    if required:
+    if stage == "floor_plan" and task_spec.required_large_objects:
+        lines.append(
+            "Downstream furniture capacity requirements (plan space only; do not "
+            "place these objects in floor_plan): "
+            + ", ".join(task_spec.required_large_objects)
+        )
+    elif required:
         lines.append(
             "Required objects for this stage (minimum, not exhaustive): "
             f"{', '.join(required)}"
@@ -589,15 +733,21 @@ class GlobalPlanner:
         api_key: str | None = None,
         max_tokens: int = 2048,
         temperature: float = 0.2,
+        llm_client: Any | None = None,
     ) -> None:
         self._model = model
         self._max_tokens = max_tokens
         self._temperature = temperature
-        self._client = OpenAI(
-            base_url=api_base_url
-            or os.environ.get("OPENAI_BASE_URL", "http://localhost:8000/v1"),
-            api_key=api_key or os.environ.get("OPENAI_API_KEY", "dummy"),
-        )
+        self._structured_llm = llm_client
+        self._client = None
+        if self._structured_llm is None:
+            from openai import OpenAI
+
+            self._client = OpenAI(
+                base_url=api_base_url
+                or os.environ.get("OPENAI_BASE_URL", "http://localhost:8000/v1"),
+                api_key=api_key or os.environ.get("OPENAI_API_KEY", "dummy"),
+            )
         self.last_trace: dict = {}
 
     def generate_stage_brief(
@@ -651,6 +801,78 @@ class GlobalPlanner:
             scene_state_summary,
             original_task=original_task,
         )
+
+        if self._structured_llm is not None:
+            result = self._structured_llm.complete(
+                role="global_planner",
+                stage=stage,
+                event="generate_stage_brief",
+                messages=[
+                    {"role": "system", "content": _SYSTEM_PROMPT},
+                    {"role": "user", "content": user_message},
+                ],
+                response_model=StageBrief,
+            )
+            attempts = [
+                attempt.model_dump() | {"attempt": max(0, int(attempt.attempt) - 1)}
+                for attempt in result.attempts
+            ]
+            failure_reason = f"{result.final_error_kind}: {result.final_error}".strip(
+                ": "
+            )
+            if result.value is not None and result.value.stage == stage:
+                brief = _reconcile_stage_brief(
+                    result.value,
+                    original_task=original_task,
+                    room_type=context.task_spec.room_type,
+                    required_objects=_stage_required_objects(context.task_spec, stage),
+                )
+                brief = _reconcile_floor_plan_zone_guidance(
+                    brief,
+                    original_task=original_task,
+                    functional_zones=context.task_spec.functional_zones,
+                )
+                brief = enforce_stage_brief_scope(brief, context.task_spec)
+                brief = _add_floor_plan_reservation_guidance(brief, context)
+                self.last_trace = {
+                    "status": "ok",
+                    "stage": stage,
+                    "attempts": attempts,
+                    "hard_constraint_ids": (
+                        context.relation_context.hard_constraint_ids
+                        if context.relation_context is not None
+                        else []
+                    ),
+                    "hard_constraint_coverage": 1.0,
+                }
+                return brief
+
+            if result.value is not None:
+                failure_reason = (
+                    f"StageBrief.stage must be {stage!r}, "
+                    f"got {result.value.stage!r}"
+                )
+            self.last_trace = {
+                "status": "fallback",
+                "stage": stage,
+                "attempts": attempts,
+                "failure_reason": failure_reason,
+                "hard_constraint_ids": (
+                    context.relation_context.hard_constraint_ids
+                    if context.relation_context is not None
+                    else []
+                ),
+                "hard_constraint_coverage": 1.0,
+            }
+            console_logger.warning(
+                "Structured GlobalPlanner failed for %s; using main-compatible "
+                "fallback brief: %s",
+                stage,
+                failure_reason,
+            )
+            return _add_floor_plan_reservation_guidance(
+                self._fallback_brief(context), context
+            )
 
         attempts: list[dict] = []
         previous_output = ""
@@ -722,6 +944,7 @@ class GlobalPlanner:
                     original_task=original_task,
                     functional_zones=context.task_spec.functional_zones,
                 )
+                brief = enforce_stage_brief_scope(brief, context.task_spec)
                 brief = _add_floor_plan_reservation_guidance(brief, context)
                 attempts.append(
                     {
@@ -861,16 +1084,17 @@ class GlobalPlanner:
                     ),
                 ]
 
-        parts += [
-            "",
-            "## Retrieved Memory",
-            memory_text,
-            "",
-            f"## Budget: max_designer_iterations={context.stage_budget.max_designer_iterations}, "
-            f"max_repair_steps={context.stage_budget.max_repair_steps}",
-            "",
-            "Generate the StageBrief JSON for the designer agent.",
-        ]
+        parts += ["", "## Retrieved Memory", memory_text]
+        if (
+            context.stage_budget.max_designer_iterations > 0
+            or context.stage_budget.max_repair_steps > 0
+        ):
+            parts += [
+                "",
+                f"## Budget: max_designer_iterations={context.stage_budget.max_designer_iterations}, "
+                f"max_repair_steps={context.stage_budget.max_repair_steps}",
+            ]
+        parts += ["", "Generate the StageBrief JSON for the designer agent."]
 
         return "\n".join(parts)
 
@@ -880,7 +1104,14 @@ class GlobalPlanner:
         required = _stage_required_objects(context.task_spec, stage)
 
         constraints = []
-        if required:
+        if stage == "floor_plan" and context.task_spec.required_large_objects:
+            constraints.append(
+                "Reserve adequate floor area and circulation for downstream "
+                "furniture: "
+                + ", ".join(context.task_spec.required_large_objects)
+                + ". Do not place furniture during floor_plan."
+            )
+        elif required:
             constraints.append(
                 f"Ensure these objects are present: {', '.join(required)}"
             )
@@ -892,22 +1123,29 @@ class GlobalPlanner:
                 "reinterpret objects owned by another stage."
             )
 
-        return StageBrief(
-            stage=stage,
-            stage_objective=(
-                f"Complete the {stage} stage for a {context.task_spec.room_type}"
-                if required
-                else f"Preserve the existing scene during the empty {stage} stage"
-            ),
-            recommended_skills=[],
-            constraints_for_designer=constraints,
-            checks_for_critic=[
-                (
-                    "Verify all required objects are present"
+        return enforce_stage_brief_scope(
+            StageBrief(
+                stage=stage,
+                stage_objective=(
+                    f"Complete the {stage} stage for a {context.task_spec.room_type}"
                     if required
-                    else "Verify no cross-stage object was created or moved"
+                    else f"Preserve the existing scene during the empty {stage} stage"
                 ),
-                "Check for collisions" if required else "Preserve existing geometry",
-            ],
-            failure_patterns_to_avoid=[],
+                recommended_skills=[],
+                constraints_for_designer=constraints,
+                checks_for_critic=[
+                    (
+                        "Verify all required objects are present"
+                        if required
+                        else "Verify no cross-stage object was created or moved"
+                    ),
+                    (
+                        "Check for collisions"
+                        if required
+                        else "Preserve existing geometry"
+                    ),
+                ],
+                failure_patterns_to_avoid=[],
+            ),
+            context.task_spec,
         )

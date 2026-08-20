@@ -12,7 +12,6 @@ from scenesmith.scene_expert.memory.schemas import FailureCase, Skill, SuccessCa
 from scenesmith.scene_expert.memory.store import FastMemoryStore
 from scenesmith.scene_expert.schemas import MemoryPack, SceneTaskSpec
 
-
 _ALIASES = {
     "卧室": ["bedroom"],
     "客厅": ["living_room", "living", "room"],
@@ -82,6 +81,14 @@ def _keyword_score(query_tokens: set[str], candidate_tokens: list[str]) -> float
     return len(intersection) / (len(query_tokens | candidate_set) + 1e-9)
 
 
+def _room_type_matches(record_room: str, task_room: str) -> bool:
+    """Require room-scoped memories to match instead of merely adding a bonus."""
+    generic = {"", "*", "all", "any", "generic"}
+    record_norm = str(record_room or "").lower().replace("_", " ").strip()
+    task_norm = str(task_room or "").lower().replace("_", " ").strip()
+    return record_norm in generic or task_norm in generic or record_norm == task_norm
+
+
 def _build_query_tokens(task_spec: SceneTaskSpec, stage: str) -> set[str]:
     """Build a flat token set from the task spec for retrieval matching."""
     texts = (
@@ -98,6 +105,23 @@ def _build_query_tokens(task_spec: SceneTaskSpec, stage: str) -> set[str]:
     return tokens
 
 
+def _stage_required_object_tokens(
+    task_spec: SceneTaskSpec,
+    stage: str,
+) -> set[str]:
+    by_stage = {
+        "floor_plan": task_spec.required_large_objects,
+        "furniture": task_spec.required_large_objects,
+        "wall_mounted": task_spec.required_wall_objects,
+        "ceiling_mounted": task_spec.required_ceiling_objects,
+        "manipuland": task_spec.required_small_objects,
+    }
+    tokens: set[str] = set()
+    for value in by_stage.get(stage, []):
+        tokens.update(_tokenize(value))
+    return tokens
+
+
 class MemoryRetriever:
     """Retrieves relevant memory entries for a given task spec and stage."""
 
@@ -107,47 +131,116 @@ class MemoryRetriever:
         max_success: int = 3,
         max_failure: int = 3,
         max_skills: int = 2,
+        exclude_source_task_id: str = "",
     ) -> None:
         self._store = store
         self._max_success = max_success
         self._max_failure = max_failure
         self._max_skills = max_skills
+        self._exclude_source_task_id = str(exclude_source_task_id or "")
+
+    def _same_task(self, record: SuccessCase | FailureCase | Skill) -> bool:
+        if not self._exclude_source_task_id:
+            return False
+        task_ids = list(record.source_task_ids)
+        if record.source_task_id:
+            task_ids.append(record.source_task_id)
+        known_task_ids = {value for value in task_ids if value}
+        return known_task_ids == {self._exclude_source_task_id}
 
     def retrieve(self, task_spec: SceneTaskSpec, stage: str) -> MemoryPack:
         """Retrieve and format memory for injection into a StageBrief."""
+        self._store.refresh_if_changed()
         query_tokens = _build_query_tokens(task_spec, stage)
 
-        success_hints, placement_reference = self._retrieve_success(
+        success_hints, placement_reference, success_ids = self._retrieve_success(
             task_spec, stage, query_tokens
         )
-        failure_hints = self._retrieve_failure(task_spec, stage, query_tokens)
-        skill_texts = self._retrieve_skills(task_spec, stage, query_tokens)
+        failure_hints, failure_ids = self._retrieve_failure(
+            task_spec, stage, query_tokens
+        )
+        skill_texts, skill_names = self._retrieve_skills(task_spec, stage, query_tokens)
+        source_task_ids, source_run_ids = self._selected_provenance(
+            [*success_ids, *failure_ids, *skill_names]
+        )
 
         return MemoryPack(
             success_hints=success_hints,
             failure_hints=failure_hints,
             skill_texts=skill_texts,
             placement_reference=placement_reference,
-        )
+            success_case_ids=success_ids,
+            failure_case_ids=failure_ids,
+            skill_names=skill_names,
+            retrieved_source_task_ids=source_task_ids,
+            retrieved_source_run_ids=source_run_ids,
+            memory_bank_id=self._store.bank_id,
+            memory_bank_revision=self._store.revision,
+        ).deduplicated()
+
+    def _selected_provenance(
+        self, selected_ids: list[str]
+    ) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
+        """Return persisted task/run provenance for the selected records."""
+        wanted = set(selected_ids)
+        task_ids: dict[str, list[str]] = {}
+        run_ids: dict[str, list[str]] = {}
+        records: list[SuccessCase | FailureCase | Skill] = [
+            *self._store.active_success_cases,
+            *self._store.active_failure_cases,
+            *self._store.active_skills,
+        ]
+        for record in records:
+            record_id = str(
+                getattr(record, "case_id", "")
+                or getattr(record, "failure_id", "")
+                or getattr(record, "skill_name", "")
+            )
+            if record_id not in wanted:
+                continue
+            task_ids[record_id] = sorted(
+                {
+                    *[value for value in record.source_task_ids if value],
+                    *([record.source_task_id] if record.source_task_id else []),
+                }
+            )
+            run_ids[record_id] = sorted(
+                {
+                    *[value for value in record.source_run_ids if value],
+                    *([record.source_run_id] if record.source_run_id else []),
+                }
+            )
+        return task_ids, run_ids
 
     def _retrieve_success(
         self, task_spec: SceneTaskSpec, stage: str, query_tokens: set[str]
-    ) -> tuple[list[str], str]:
-        """Return (hint_strings, placement_reference_text).
+    ) -> tuple[list[str], str, list[str]]:
+        """Return hints, placement reference, and source case IDs.
 
         hint_strings: compressed one-liners for GlobalPlanner context.
         placement_reference_text: full placement block from the top case,
             to be injected directly into the designer prompt.
         """
         scored: list[tuple[float, SuccessCase]] = []
-        for case in self._store.success_cases:
-            if case.stage != stage:
+        required_tokens = _stage_required_object_tokens(task_spec, stage)
+        for case in self._store.active_success_cases:
+            if self._same_task(case):
                 continue
-            room_bonus = 1.5 if case.room_type == task_spec.room_type else 1.0
+            if case.stage != stage or not _room_type_matches(
+                case.room_type, task_spec.room_type
+            ):
+                continue
+            case_object_tokens = set(
+                _tokenize(" ".join(case.required_objects or case.task_signature))
+            )
+            if case_object_tokens and not (
+                required_tokens and case_object_tokens & required_tokens
+            ):
+                continue
             candidate_tokens = _tokenize(
                 " ".join([case.room_type, case.style] + case.task_signature)
             )
-            score = _keyword_score(query_tokens, candidate_tokens) * room_bonus
+            score = _keyword_score(query_tokens, candidate_tokens) * 1.5
             scored.append((score, case))
 
         scored.sort(key=lambda x: x[0], reverse=True)
@@ -163,35 +256,57 @@ class MemoryRetriever:
                 placement_reference = ref
                 break
 
-        return hints, placement_reference
+        return hints, placement_reference, [case.case_id for _, case in top]
 
     def _retrieve_failure(
         self, task_spec: SceneTaskSpec, stage: str, query_tokens: set[str]
-    ) -> list[str]:
+    ) -> tuple[list[str], list[str]]:
         scored: list[tuple[float, FailureCase]] = []
-        for case in self._store.failure_cases:
-            if case.stage != stage:
+        task_object_tokens = _stage_required_object_tokens(task_spec, stage)
+        for case in self._store.active_failure_cases:
+            if self._same_task(case):
                 continue
-            room_bonus = 1.5 if case.room_type == task_spec.room_type else 1.0
+            if case.stage != stage or not _room_type_matches(
+                case.room_type, task_spec.room_type
+            ):
+                continue
+            case_object_tokens = set(_tokenize(case.object))
+            if case_object_tokens and not (case_object_tokens & task_object_tokens):
+                continue
             candidate_tokens = _tokenize(
                 " ".join(
                     [case.room_type, case.object, case.failure_type, case.bad_pattern]
                 )
             )
-            score = _keyword_score(query_tokens, candidate_tokens) * room_bonus
+            score = _keyword_score(query_tokens, candidate_tokens) * 1.5
             scored.append((score, case))
 
         scored.sort(key=lambda x: x[0], reverse=True)
-        return [case.to_hint_text() for _, case in scored[: self._max_failure] if _ > 0]
+        top = [
+            (score, case) for score, case in scored[: self._max_failure] if score > 0
+        ]
+        return (
+            [case.to_hint_text() for _, case in top],
+            [case.failure_id for _, case in top],
+        )
 
     def _retrieve_skills(
         self, task_spec: SceneTaskSpec, stage: str, query_tokens: set[str]
-    ) -> list[str]:
+    ) -> tuple[list[str], list[str]]:
         scored: list[tuple[float, Skill]] = []
-        for skill in self._store.skills:
+        for skill in self._store.active_skills:
+            if self._same_task(skill):
+                continue
             if skill.stage != stage:
                 continue
-            room_bonus = 1.5 if task_spec.room_type in skill.room_types else 1.0
+            skill_rooms = list(skill.room_types)
+            if getattr(skill, "room_type", ""):
+                skill_rooms.append(skill.room_type)
+            if skill_rooms and not any(
+                _room_type_matches(room, task_spec.room_type) for room in skill_rooms
+            ):
+                continue
+            room_bonus = 1.5 if skill_rooms else 1.0
             candidate_tokens = _tokenize(
                 " ".join(
                     [skill.skill_name, skill.stage]
@@ -204,8 +319,10 @@ class MemoryRetriever:
             scored.append((score, skill))
 
         scored.sort(key=lambda x: x[0], reverse=True)
-        return [
-            skill.to_procedure_text()
-            for _, skill in scored[: self._max_skills]
-            if _ > 0
+        top = [
+            (score, skill) for score, skill in scored[: self._max_skills] if score > 0
         ]
+        return (
+            [skill.to_procedure_text() for _, skill in top],
+            [skill.skill_name for _, skill in top],
+        )

@@ -51,11 +51,11 @@ from scenesmith.furniture_agents.stateful_furniture_agent import StatefulFurnitu
 from scenesmith.manipuland_agents.stateful_manipuland_agent import (
     StatefulManipulandAgent,
 )
-from scenesmith.scenebenchmark_critic.config import critic_config_from_any
 from scenesmith.scenebenchmark_critic.api import (
     seating_orientation_targets,
     write_room_stage_report,
 )
+from scenesmith.scenebenchmark_critic.config import critic_config_from_any
 from scenesmith.scenebenchmark_critic.furniture_relation_repair import (
     improve_furniture_relations,
     unresolved_furniture_relation_failures,
@@ -2975,7 +2975,16 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
 
             except Exception as e:
                 if scene_expert_hooks:
-                    scene_expert_hooks.save_partial_trace(error=str(e))
+                    try:
+                        scene_expert_hooks.finalize_failure(error=str(e))
+                    except Exception as hook_error:
+                        # Additive diagnostics must never replace main's original
+                        # exception or change its success/failure semantics.
+                        console_logger.warning(
+                            "SceneExpert failure finalization failed: %s",
+                            hook_error,
+                        )
+                        scene_expert_hooks.save_partial_trace(error=str(e))
                 _write_scene_status(
                     output_dir=output_dir,
                     scene_id=scene_id,
@@ -3179,13 +3188,17 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
         # concurrent harness_memory/full scenes can interleave JSONL updates or
         # retrieve a stale index. Preserve correctness by serializing those
         # modes; disabled/harness_only experiments remain scene-parallel.
-        scene_expert_mode = OmegaConf.select(
-            self.cfg, "scene_expert.mode", default="disabled"
+        from scenesmith.scene_expert.config_utils import resolve_component_flags
+
+        resolved_cfg = OmegaConf.to_container(self.cfg, resolve=True)
+        component_flags = resolve_component_flags(resolved_cfg)
+        shared_memory_writes = (
+            component_flags["memory_writer"] or component_flags["stage_working_memory"]
         )
-        if num_workers > 1 and scene_expert_mode in {"harness_memory", "full"}:
+        if num_workers > 1 and shared_memory_writes:
             console_logger.warning(
-                f"scene_expert.mode={scene_expert_mode!r} uses a shared online "
-                "memory bank; forcing experiment.num_workers=1"
+                "Enabled memory writers use a shared online memory bank; "
+                "forcing experiment.num_workers=1"
             )
             num_workers = 1
 

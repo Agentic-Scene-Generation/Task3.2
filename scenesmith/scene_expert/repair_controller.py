@@ -13,7 +13,6 @@ same hook call. Actual re-execution requires explicit pipeline-level support.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 
 from scenesmith.scene_expert.memory.schemas import FailureCase
 from scenesmith.scene_expert.memory.store import FastMemoryStore
@@ -131,7 +130,9 @@ class RepairController:
         else:
             console_logger.warning(f"Unknown repair type: {repair_type}, skipping")
             return RepairResult(
-                repair_type="skipped", failure_type="unknown_repair_type"
+                repair_type="skipped",
+                execution_status="skipped",
+                failure_type="unknown_repair_type",
             )
 
     def _local_repair(
@@ -218,9 +219,10 @@ class RepairController:
         verify_report: StageVerifyReport,
         repair_verified: bool,
     ) -> FailureCase | None:
-        """Build a FailureCase from a completed repair for the memory store.
+        """Build a candidate failure and journal its verified repair evidence.
 
-        Returns None if there's nothing worth recording (e.g., no clear failure pattern).
+        Active long-term promotion remains the final MemoryWriter's responsibility.
+        Returns None if there is no clear failure pattern.
         """
         if not verify_report.issues:
             return None
@@ -241,7 +243,20 @@ class RepairController:
         )
 
         if self._memory_store and repair_verified:
-            self._memory_store.add_failure_case(case)
-            console_logger.debug(f"RepairController: recorded failure case {case_id}")
+            self._memory_store.append_event(
+                {
+                    "schema_version": "sceneexpert.repair_evidence.v1",
+                    "event_type": "verified_repair",
+                    "promotion_status": "evidence_only",
+                    "stage": stage,
+                    "room_type": room_type,
+                    "failure_candidate": case.model_dump(),
+                    "verify_report": verify_report.model_dump(),
+                    "repair_result": repair_result.model_dump(),
+                }
+            )
+            console_logger.debug(
+                "RepairController: journaled verified repair evidence %s", case_id
+            )
 
         return case
