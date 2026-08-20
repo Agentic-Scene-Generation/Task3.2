@@ -1964,6 +1964,31 @@ class BaseStatefulAgent(ABC):
                     "Planner exited without calling request_initial_design after "
                     "the mandatory workflow recovery turn"
                 )
+        elif (
+            getattr(self, "_planner_review_existing", False)
+            and self._planner_review_existing_workflow_calls == 0
+        ):
+            recovery_input = (
+                "MANDATORY EXISTING-CANDIDATE RECOVERY: this stage starts from a "
+                "restored furniture candidate. Do not create an initial design and "
+                "do not finish yet. Immediately call request_critique() to inspect "
+                "the candidate, then call request_design_change() only when the "
+                "critique identifies a concrete repair."
+            )
+            console_logger.warning(
+                "Planner returned without reviewing the existing candidate; "
+                "running one mandatory workflow recovery turn."
+            )
+            self._planner_budget_exhausted = False
+            result = await run_once(
+                recovery_input,
+                event="coordinate_existing_candidate_recovery",
+            )
+            if self._planner_review_existing_workflow_calls == 0:
+                raise RuntimeError(
+                    "Planner exited without a critique or design change for the "
+                    "existing candidate after the mandatory workflow recovery turn"
+                )
 
         self._record_module_timing(
             "planner",
@@ -2412,6 +2437,7 @@ class BaseStatefulAgent(ABC):
         self._critic_failed = False
         self._pending_hard_repair_hint = ""
         self._hard_repair_design_change_calls = 0
+        self._planner_review_existing_workflow_calls = 0
 
     def _stop_planner_after_failure(self, reason: str) -> str:
         """Convert a nested agent failure into a deterministic planner stop."""
@@ -2724,6 +2750,8 @@ class BaseStatefulAgent(ABC):
                 return self._planner_budget_stop_message("request_critique")
 
             self._planner_critique_tool_calls += 1
+            if getattr(self, "_planner_review_existing", False):
+                self._planner_review_existing_workflow_calls += 1
             try:
                 result = await self._run_planner_delegation(
                     operation="request_critique",
@@ -2761,6 +2789,8 @@ class BaseStatefulAgent(ABC):
                 return self._stop_planner_after_failure(
                     "The current design stage has already been marked complete or failed."
                 )
+            if getattr(self, "_planner_review_existing", False):
+                self._planner_review_existing_workflow_calls += 1
             counts_as_critique_cycle = (
                 self._planner_critique_tool_calls
                 > self._planner_design_change_tool_calls
@@ -2830,6 +2860,15 @@ class BaseStatefulAgent(ABC):
                 Confirmation that the planner should return its final answer.
             """
             console_logger.info("Tool called: finish_stage")
+            if (
+                getattr(self, "_planner_review_existing", False)
+                and self._planner_review_existing_workflow_calls == 0
+            ):
+                return (
+                    "FINISH_STAGE_BLOCKED: the restored candidate has not been "
+                    "reviewed. Call request_critique() or request_design_change() "
+                    "before finishing this stage."
+                )
             if self._hard_repair_allowance_available():
                 return await consume_pending_hard_repair(
                     "Repair the remaining deterministic hard-check failure while "

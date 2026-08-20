@@ -1,5 +1,7 @@
 """Tests for production SceneExpert stage-commit retries."""
 
+import asyncio
+import json
 import time
 
 from contextlib import nullcontext
@@ -9,6 +11,8 @@ from unittest.mock import Mock, patch
 import pytest
 
 from scenesmith.experiments import indoor_scene_generation as scene_generation
+from scenesmith.agent_utils.base_stateful_agent import BaseStatefulAgent
+from scenesmith.agent_utils.room import AgentType
 from scenesmith.scene_expert.harness import Harness, RepairDecision
 from scenesmith.scene_expert.hooks import SceneExpertHookRunner, StageCommitResult
 from scenesmith.scene_expert.schemas import (
@@ -483,11 +487,11 @@ def test_rejected_stage_restarts_from_the_failed_stage(tmp_path) -> None:
         get_room_geometry=lambda room_id: object(),
     )
     logger = SimpleNamespace(room_context=lambda room_id: nullcontext(tmp_path))
-    attempts: list[str] = []
+    attempts: list[tuple[str, int]] = []
     final_scene = object()
 
     def generate_room(**kwargs):
-        attempts.append(kwargs["start_stage"])
+        attempts.append((kwargs["start_stage"], kwargs["scene_expert_retry_attempt"]))
         if len(attempts) == 1:
             raise scene_generation.SceneExpertStageCommitError(
                 "wall_mounted",
@@ -509,7 +513,7 @@ def test_rejected_stage_restarts_from_the_failed_stage(tmp_path) -> None:
             scene_expert_hooks=Mock(),
         )
 
-    assert attempts == ["furniture", "wall_mounted"]
+    assert attempts == [("furniture", 0), ("wall_mounted", 1)]
     assert rooms == {"office": final_scene}
 
 
@@ -569,3 +573,148 @@ def test_exhausted_stage_repair_remains_an_explicit_failure(tmp_path) -> None:
         )
 
     generate.assert_called_once()
+
+
+def test_rejected_furniture_checkpoint_rebinds_current_prompt_and_contract(
+    tmp_path,
+) -> None:
+    checkpoint_path = tmp_path / "scene_state.json"
+    checkpoint_path.write_text(
+        json.dumps(
+            {
+                "text_description": "stale prompt",
+                "metadata": {"scenebenchmark_intent_contract": {"source": "old"}},
+                "objects": {"table_0": {"object_type": "furniture"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    scene = SimpleNamespace(text_description="", metadata={}, objects={})
+
+    def restore(state):
+        scene.text_description = state["text_description"]
+        scene.metadata = dict(state["metadata"])
+        scene.objects = {
+            object_id: SimpleNamespace(
+                object_type=SimpleNamespace(value=object_data["object_type"])
+            )
+            for object_id, object_data in state["objects"].items()
+        }
+
+    scene.restore_from_state_dict = Mock(side_effect=restore)
+    contract = {"source": "current"}
+
+    scene_generation._restore_rejected_furniture_checkpoint(
+        scene=scene,
+        checkpoint_state_path=checkpoint_path,
+        room_prompt="current prompt",
+        intent_contract=contract,
+        attempt=1,
+    )
+
+    assert scene.text_description == "current prompt"
+    assert scene.scenebenchmark_intent_contract is contract
+    assert scene.metadata["scenebenchmark_intent_contract"] is contract
+    assert set(scene.objects) == {"table_0"}
+
+
+@pytest.mark.parametrize(
+    ("contents", "expected"),
+    [
+        (None, "checkpoint is missing"),
+        ("not json", "checkpoint is unreadable"),
+        (
+            json.dumps({"objects": {"wall_0": {"object_type": "wall"}}}),
+            "no furniture objects",
+        ),
+    ],
+)
+def test_rejected_furniture_checkpoint_requires_a_valid_candidate(
+    tmp_path, contents, expected
+) -> None:
+    checkpoint_path = tmp_path / "scene_state.json"
+    if contents is not None:
+        checkpoint_path.write_text(contents, encoding="utf-8")
+    scene = SimpleNamespace(text_description="", metadata={}, objects={})
+    scene.restore_from_state_dict = Mock(
+        side_effect=lambda state: setattr(
+            scene,
+            "objects",
+            {
+                object_id: SimpleNamespace(
+                    object_type=SimpleNamespace(value=object_data["object_type"])
+                )
+                for object_id, object_data in state.get("objects", {}).items()
+            },
+        )
+    )
+
+    with pytest.raises((FileNotFoundError, RuntimeError), match=expected) as error:
+        scene_generation._restore_rejected_furniture_checkpoint(
+            scene=scene,
+            checkpoint_state_path=checkpoint_path,
+            room_prompt="current prompt",
+            intent_contract={"source": "current"},
+            attempt=2,
+        )
+
+    assert "stage=furniture" in str(error.value)
+    assert "attempt=2" in str(error.value)
+    assert str(checkpoint_path) in str(error.value)
+
+
+class _ReviewPlannerAgent(BaseStatefulAgent):
+    def __init__(self) -> None:
+        self.cfg = SimpleNamespace(
+            max_critique_rounds=1,
+            planner_context_limits={},
+            auto_score_after_design_attempts=False,
+        )
+        self.scene = Mock()
+
+    @property
+    def agent_type(self) -> AgentType:
+        return AgentType.FURNITURE
+
+    def _get_final_scores_directory(self) -> Path:
+        return Path("/tmp")
+
+    def _get_critique_prompt_enum(self):
+        return None
+
+    def _get_design_change_prompt_enum(self):
+        return None
+
+    def _get_initial_design_prompt_enum(self):
+        return None
+
+    def _get_initial_design_prompt_kwargs(self) -> dict:
+        return {}
+
+    def _set_placement_noise_profile(self, _mode) -> None:
+        return None
+
+
+def test_review_existing_hides_initial_design_and_blocks_early_finish() -> None:
+    agent = _ReviewPlannerAgent()
+    agent._planner_skip_initial_design = True
+    agent._planner_review_existing = True
+    tools = {tool.name: tool for tool in agent._create_planner_tools()}
+
+    assert "request_initial_design" not in tools
+    result = asyncio.run(tools["finish_stage"].on_invoke_tool(Mock(), "{}"))
+    assert "FINISH_STAGE_BLOCKED" in result
+    assert not agent._planner_terminal_stop
+
+
+def test_review_existing_can_finish_after_a_workflow_call() -> None:
+    agent = _ReviewPlannerAgent()
+    agent._planner_skip_initial_design = True
+    agent._planner_review_existing = True
+    tools = {tool.name: tool for tool in agent._create_planner_tools()}
+    agent._planner_review_existing_workflow_calls = 1
+
+    result = asyncio.run(tools["finish_stage"].on_invoke_tool(Mock(), "{}"))
+
+    assert "FINISH_STAGE_ACCEPTED" in result
+    assert agent._planner_terminal_stop

@@ -775,6 +775,26 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         StatefulFurnitureAgent is None,
         f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
     )
+    def test_existing_candidate_turn_limit_requires_a_workflow_call(self) -> None:
+        from agents.exceptions import MaxTurnsExceeded
+
+        agent = object.__new__(StatefulFurnitureAgent)
+        agent._planner_review_existing = True
+        agent._planner_review_existing_workflow_calls = 0
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "exhausted its turn budget without reviewing or repairing",
+        ):
+            agent._raise_for_unreviewed_existing_candidate_turn_limit(
+                MaxTurnsExceeded("limit"),
+                review_existing=True,
+            )
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
     def test_planner_turn_limit_preserves_prior_delegation_failure(self) -> None:
         from agents.exceptions import MaxTurnsExceeded
 

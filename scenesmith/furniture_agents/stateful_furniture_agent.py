@@ -427,12 +427,24 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         scene: RoomScene,
         *,
         resume_from_initial_render: bool = False,
+        review_existing: bool = False,
+        scene_expert_retry_attempt: int = 0,
     ) -> None:
         """Add furniture to a scene.
 
         Args:
-            scene: RoomScene to add furniture to (mutated in place)
+            scene: RoomScene to add furniture to (mutated in place).
+            resume_from_initial_render: Legacy render-resume compatibility flag.
+            review_existing: Review and repair an existing furniture candidate
+                instead of generating an initial layout.
+            scene_expert_retry_attempt: Retry number for a SceneExpert-rejected
+                furniture checkpoint. Each attempt uses fresh SQLite sessions.
         """
+        if scene_expert_retry_attempt < 0:
+            raise ValueError("scene_expert_retry_attempt must be non-negative")
+        review_existing = review_existing or resume_from_initial_render
+        if scene_expert_retry_attempt and not review_existing:
+            raise ValueError("scene_expert_retry_attempt requires review_existing=True")
         # Store everything as instance variables for closure access.
         self.scene = scene
         safety_description = getattr(
@@ -447,9 +459,9 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             restore_when_current_invalid=True,
         )
         if loaded_disk_checkpoint and scene.content_hash() != pre_disk_restore_hash:
-            resume_from_initial_render = True
+            review_existing = True
         self._placement_order_reference = ""
-        if not resume_from_initial_render:
+        if not review_existing:
             self._placement_order_reference = build_furniture_placement_order_reference(
                 cfg=self.cfg,
                 scene_prompt=safety_description,
@@ -463,7 +475,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             )
 
         # Generate context image if configured. If generation fails, continue without it.
-        if self.cfg.context_image_generation.enabled and not resume_from_initial_render:
+        if self.cfg.context_image_generation.enabled and not review_existing:
             try:
                 self.context_image_path = self._generate_and_save_context_image(scene)
             except Exception as e:
@@ -472,7 +484,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 )
                 self.context_image_path = None
 
-        if resume_from_initial_render:
+        if review_existing:
             # A restored render can already contain a complete but physically
             # invalid support pair plus unrelated clearance violations. First use
             # the normal deterministic hard-state repair so a relation candidate
@@ -494,12 +506,28 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             # a chance to spend its bounded tool budget on it.
             self._repair_contract_layout_before_first_critique()
 
+        # A rejected SceneExpert candidate must not inherit the prior planner's
+        # terminal or budget state. Keep the original sessions for audit only.
+        if scene_expert_retry_attempt:
+            session_prefix = f"scene_expert_retry_{scene_expert_retry_attempt:02d}_"
+            self.designer_session, self.critic_session = self._create_sessions(
+                session_prefix=session_prefix
+            )
+            console_logger.info(
+                "Created isolated SceneExpert retry sessions: %splanner.db, "
+                "%sdesigner.db, %scritic.db",
+                session_prefix,
+                session_prefix,
+                session_prefix,
+            )
+
         # Create designer, critic, and planner with tools once for this scene.
         designer_tools = self._create_designer_tools()
         self.designer = self._create_designer_agent(tools=designer_tools)
         critic_tools = self._create_critic_tools()
         self.critic = self._create_critic_agent(scene=scene, tools=critic_tools)
-        self._planner_skip_initial_design = resume_from_initial_render
+        self._planner_skip_initial_design = review_existing
+        self._planner_review_existing = review_existing
         planner_tools = self._create_planner_tools()
         self._planner_skip_initial_design = False
         self.planner = self._create_planner_agent(scene=scene, tools=planner_tools)
@@ -508,12 +536,12 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         runner_instruction = self.prompt_registry.get_prompt(
             prompt_enum=FurnitureAgentPrompts.STATEFUL_PLANNER_RUNNER_INSTRUCTION,
         )
-        if resume_from_initial_render:
+        if review_existing:
             runner_instruction += (
-                "\n\nRESUME MODE: this scene already contains a restored furniture "
-                "render. Do not create another "
-                "initial design. Start by calling request_critique(), then use "
-                "request_design_change() only to address concrete feedback."
+                "\n\nREVIEW-EXISTING MODE: this scene already contains a restored "
+                "furniture candidate. Do not create another initial design. Start "
+                "by calling request_critique(), then use request_design_change() "
+                "only to address concrete feedback."
             )
 
         # Run the furniture placement workflow.
@@ -522,9 +550,13 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             result = await self._run_planner_workflow(
                 runner_input=runner_instruction,
                 max_turns=self.cfg.agents.planner_agent.max_turns,
-                require_initial_design=not resume_from_initial_render,
+                require_initial_design=not review_existing,
             )
         except MaxTurnsExceeded as error:
+            self._raise_for_unreviewed_existing_candidate_turn_limit(
+                error,
+                review_existing=review_existing,
+            )
             self._recover_from_planner_turn_limit(error)
 
         if result is not None:
@@ -608,7 +640,23 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
 
     async def resume_from_furniture_render(self, scene: RoomScene) -> None:
         """Continue furniture critique/repair from any saved furniture render."""
-        await self.add_furniture(scene, resume_from_initial_render=True)
+        await self.add_furniture(scene, review_existing=True)
+
+    def _raise_for_unreviewed_existing_candidate_turn_limit(
+        self,
+        error: MaxTurnsExceeded,
+        *,
+        review_existing: bool = True,
+    ) -> None:
+        """Reject a turn-limit fallback that never inspected the restored scene."""
+        if (
+            review_existing
+            and getattr(self, "_planner_review_existing_workflow_calls", 0) == 0
+        ):
+            raise RuntimeError(
+                "Furniture planner exhausted its turn budget without reviewing or "
+                "repairing the existing candidate"
+            ) from error
 
     def _recover_from_planner_turn_limit(self, error: MaxTurnsExceeded) -> list[str]:
         """Continue only when bounded deterministic repair restores hard validity.
