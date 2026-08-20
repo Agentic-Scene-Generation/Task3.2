@@ -255,6 +255,15 @@ def _scene_identity(run_root: Path, room_dir: Path) -> dict[str, str]:
     }
 
 
+def _has_complete_final_views(room_dir: Path) -> bool:
+    """Return whether both visual final-view artifacts are available."""
+    final_view_dir = room_dir.parent / "critic_final_views"
+    return all(
+        (final_view_dir / filename).is_file()
+        for filename in ("00_top.png", "01_side.png")
+    )
+
+
 def _stage_from_render_dir(render_dir: Path) -> str:
     name = render_dir.parent.name
     if name.startswith("manipulands_"):
@@ -1430,10 +1439,7 @@ def create_app(probe_root: Path = DEFAULT_PROBE_ROOT) -> Flask:
                     "updated_at": _iso_mtime(child),
                     "status": (
                         "complete"
-                        if any(
-                            (room / "scene_states" / "final_scene").exists()
-                            for room in rooms
-                        )
+                        if any(_has_complete_final_views(room) for room in rooms)
                         else "running"
                     ),
                     "modes": sorted(
@@ -1463,9 +1469,7 @@ def create_app(probe_root: Path = DEFAULT_PROBE_ROOT) -> Flask:
                     "path": relative_path,
                     **identity,
                     "status": (
-                        "complete"
-                        if (room / "scene_states" / "final_scene").exists()
-                        else "running"
+                        "complete" if _has_complete_final_views(room) else "running"
                     ),
                     "stages": stages,
                     "event_count": len(timings),

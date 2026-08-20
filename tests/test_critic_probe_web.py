@@ -86,6 +86,16 @@ def test_indexes_scene_and_rejects_paths_outside_probe_root(tmp_path: Path) -> N
 
     assert runs[0]["id"] == "run_a"
     assert scenes[0]["room"] == "bedroom"
+    assert runs[0]["status"] == "running"
+    assert scenes[0]["status"] == "running"
+
+    write(room.parent / "critic_final_views" / "00_top.png", "top")
+    write(room.parent / "critic_final_views" / "01_side.png", "side")
+
+    runs = client.get("/api/runs").get_json()["runs"]
+    scenes = client.get("/api/runs/run_a/scenes").get_json()["scenes"]
+
+    assert runs[0]["status"] == "complete"
     assert scenes[0]["status"] == "complete"
     assert client.get("/api/image?path=../../etc/passwd").status_code == 404
 

@@ -110,6 +110,34 @@ function sortByTime<T extends { created_at?: string }>(values: T[], order: SortO
   return [...values].sort((left, right) => direction * (eventTime(left.created_at) - eventTime(right.created_at)));
 }
 
+function renderSequence(render: Render): number | null {
+  const match = /\/renders_(\d+)$/.exec(render.id);
+  return match ? Number(match[1]) : null;
+}
+
+function sortRenders(values: Render[], order: SortOrder): Render[] {
+  const stages = new Map<string, Render[]>();
+  for (const render of values) {
+    const stageRenders = stages.get(render.stage) ?? [];
+    stageRenders.push(render);
+    stages.set(render.stage, stageRenders);
+  }
+
+  const orderedStages = [...stages.values()].sort(
+    (left, right) => Math.min(...left.map((render) => eventTime(render.created_at)))
+      - Math.min(...right.map((render) => eventTime(render.created_at))),
+  );
+  const chronological = orderedStages.flatMap((stageRenders) => [...stageRenders].sort((left, right) => {
+    const leftSequence = renderSequence(left);
+    const rightSequence = renderSequence(right);
+    if (leftSequence !== null && rightSequence !== null && leftSequence !== rightSequence) {
+      return leftSequence - rightSequence;
+    }
+    return eventTime(left.created_at) - eventTime(right.created_at);
+  }));
+  return order === "asc" ? chronological : chronological.reverse();
+}
+
 function actionStage(action: Action): string {
   const name = action.tool_name.toLowerCase();
   if (name.includes("manipuland")) return "manipuland";
@@ -268,7 +296,7 @@ function App() {
         const payload = await getJson<SceneDetail>(`/api/scene?path=${encodeURIComponent(selectedScene)}`);
         if (cancelled) return;
         setDetail(payload);
-        const chronological = sortByTime(payload.renders, "asc");
+        const chronological = sortRenders(payload.renders, "asc");
         setSelectedRender((current) => payload.renders.some((render) => render.id === current) ? current : chronological.at(-1)?.id || "");
         setComparisonRender((current) => payload.renders.some((render) => render.id === current) ? current : chronological.at(-2)?.id || "");
       } catch (reason) {
@@ -284,8 +312,8 @@ function App() {
   }, [selectedScene]);
 
   const activeScene = scenes.find((scene) => scene.path === selectedScene);
-  const chronologicalRenders = useMemo(() => sortByTime(detail?.renders ?? [], "asc"), [detail]);
-  const renders = useMemo(() => sortByTime(chronologicalRenders, sortOrder), [chronologicalRenders, sortOrder]);
+  const chronologicalRenders = useMemo(() => sortRenders(detail?.renders ?? [], "asc"), [detail]);
+  const renders = useMemo(() => sortRenders(chronologicalRenders, sortOrder), [chronologicalRenders, sortOrder]);
   const currentRender = renders.find((render) => render.id === selectedRender) ?? renders[0];
   const beforeRender = renders.find((render) => render.id === comparisonRender);
   const allEvents = useMemo(() => {
