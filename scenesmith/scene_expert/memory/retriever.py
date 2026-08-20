@@ -10,7 +10,11 @@ import re
 
 from scenesmith.scene_expert.memory.schemas import FailureCase, Skill, SuccessCase
 from scenesmith.scene_expert.memory.store import FastMemoryStore
-from scenesmith.scene_expert.schemas import MemoryPack, SceneTaskSpec
+from scenesmith.scene_expert.schemas import (
+    MemoryPack,
+    RetrievedMemorySelection,
+    SceneTaskSpec,
+)
 
 _ALIASES = {
     "卧室": ["bedroom"],
@@ -163,6 +167,13 @@ class MemoryRetriever:
         source_task_ids, source_run_ids = self._selected_provenance(
             [*success_ids, *failure_ids, *skill_names]
         )
+        selections = self._build_selections(
+            success_ids=success_ids,
+            failure_ids=failure_ids,
+            skill_names=skill_names,
+            source_task_ids=source_task_ids,
+            source_run_ids=source_run_ids,
+        )
 
         return MemoryPack(
             success_hints=success_hints,
@@ -176,7 +187,40 @@ class MemoryRetriever:
             retrieved_source_run_ids=source_run_ids,
             memory_bank_id=self._store.bank_id,
             memory_bank_revision=self._store.revision,
+            selections=selections,
         ).deduplicated()
+
+    def _build_selections(
+        self,
+        *,
+        success_ids: list[str],
+        failure_ids: list[str],
+        skill_names: list[str],
+        source_task_ids: dict[str, list[str]],
+        source_run_ids: dict[str, list[str]],
+    ) -> list[RetrievedMemorySelection]:
+        """Create stable source locators even for the lightweight retriever."""
+        rows: list[RetrievedMemorySelection] = []
+        specs = (
+            ("success", success_ids, "success_cases.jsonl"),
+            ("failure", failure_ids, "failure_cases.jsonl"),
+            ("skill", skill_names, "skills.jsonl"),
+        )
+        for memory_type, record_ids, filename in specs:
+            for rank, memory_id in enumerate(record_ids, start=1):
+                rows.append(
+                    RetrievedMemorySelection(
+                        memory_id=memory_id,
+                        memory_type=memory_type,
+                        rank=rank,
+                        source_path=str((self._store.memory_dir / filename).resolve()),
+                        source_task_ids=source_task_ids.get(memory_id, []),
+                        source_run_ids=source_run_ids.get(memory_id, []),
+                        bank_id=self._store.bank_id,
+                        bank_revision=self._store.revision,
+                    )
+                )
+        return rows
 
     def _selected_provenance(
         self, selected_ids: list[str]
@@ -299,7 +343,15 @@ class MemoryRetriever:
                 continue
             if skill.stage != stage:
                 continue
-            skill_rooms = list(skill.room_types)
+            if skill.applicability.excluded_room_types and any(
+                _room_type_matches(room, task_spec.room_type)
+                for room in skill.applicability.excluded_room_types
+            ):
+                continue
+            skill_rooms = [
+                *skill.room_types,
+                *skill.applicability.room_types,
+            ]
             if getattr(skill, "room_type", ""):
                 skill_rooms.append(skill.room_type)
             if skill_rooms and not any(
@@ -311,6 +363,8 @@ class MemoryRetriever:
                 " ".join(
                     [skill.skill_name, skill.stage]
                     + skill.room_types
+                    + skill.applicability.room_types
+                    + skill.applicability.required_object_roles
                     + skill.preconditions
                     + skill.procedure
                 )

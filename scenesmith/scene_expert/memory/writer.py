@@ -21,10 +21,13 @@ from typing import Any
 from scenesmith.scene_expert.memory.schemas import (
     FailureCase,
     FailureMemoryCandidate,
+    MemorySourceProvenance,
     MemoryUpdateOp,
     MemoryWriterResponse,
     Skill,
+    SkillApplicability,
     SkillMemoryCandidate,
+    SpatialRelationMemory,
     SuccessCase,
     SuccessMemoryCandidate,
 )
@@ -318,6 +321,8 @@ class MemoryWriter:
             prompt_fingerprint=context["prompt_fingerprint"],
             evidence_refs=self._evidence_refs(context, candidate.stage),
             critic_evidence=self._critic_evidence(stage_evidence),
+            provenance=self._provenance(context, candidate.stage),
+            spatial_relations=self._spatial_relations(stage_evidence),
         )
         return record.model_dump()
 
@@ -360,6 +365,15 @@ class MemoryWriter:
             prompt_fingerprint=context["prompt_fingerprint"],
             evidence_refs=self._evidence_refs(context, candidate.stage),
             critic_evidence=self._critic_evidence(stage_evidence),
+            provenance=self._provenance(context, candidate.stage),
+            spatial_relations=self._spatial_relations(
+                stage_evidence,
+                focus_terms=[
+                    candidate.object,
+                    candidate.failure_type,
+                    candidate.bad_pattern,
+                ],
+            ),
         )
         return record.model_dump()
 
@@ -400,6 +414,13 @@ class MemoryWriter:
             prompt_fingerprint=context["prompt_fingerprint"],
             evidence_refs=self._evidence_refs(context, candidate.stage),
             critic_evidence=self._critic_evidence(stage_evidence),
+            provenance=self._provenance(context, candidate.stage),
+            spatial_relations=self._spatial_relations(stage_evidence),
+            applicability=SkillApplicability(
+                room_types=[context["room_type"]] if context["room_type"] else [],
+                required_object_roles=required_objects,
+                required_relation_types=self._relation_types(stage_evidence),
+            ),
         )
         return record.model_dump()
 
@@ -442,6 +463,7 @@ class MemoryWriter:
                         record.case_id,
                     )
                     continue
+                record = self._rebuild_embedding(record)
                 filtered.append(op.model_copy(update={"content": record.model_dump()}))
                 continue
 
@@ -478,6 +500,7 @@ class MemoryWriter:
                         "confidence": 0.85,
                     }
                 )
+                record = self._rebuild_embedding(record)
                 filtered.append(op.model_copy(update={"content": record.model_dump()}))
                 continue
 
@@ -499,6 +522,7 @@ class MemoryWriter:
                         "MemoryWriter: rejected unsupported skill %s", record.skill_name
                     )
                     continue
+                record = self._rebuild_embedding(record)
                 filtered.append(op.model_copy(update={"content": record.model_dump()}))
         return filtered
 
@@ -510,10 +534,6 @@ class MemoryWriter:
             return None
         if record.stage not in _SUPPORTED_STAGES or not record.successful_pattern:
             return None
-        if not record.embedding_text:
-            record = record.model_copy(
-                update={"embedding_text": build_embedding_text(record)}
-            )
         return record
 
     def _validate_failure(self, content: dict[str, Any]) -> FailureCase | None:
@@ -524,10 +544,6 @@ class MemoryWriter:
             return None
         if record.stage not in _SUPPORTED_STAGES or not record.bad_pattern:
             return None
-        if not record.embedding_text:
-            record = record.model_copy(
-                update={"embedding_text": build_embedding_text(record)}
-            )
         return record
 
     def _validate_skill(self, content: dict[str, Any]) -> Skill | None:
@@ -538,11 +554,135 @@ class MemoryWriter:
             return None
         if record.stage not in _SUPPORTED_STAGES:
             return None
-        if not record.embedding_text:
-            record = record.model_copy(
-                update={"embedding_text": build_embedding_text(record)}
-            )
         return record
+
+    @staticmethod
+    def _rebuild_embedding(
+        record: SuccessCase | FailureCase | Skill,
+    ) -> SuccessCase | FailureCase | Skill:
+        """Build retrieval text only after all authoritative enrichment."""
+        return record.model_copy(
+            update={"embedding_text": build_embedding_text(record)}
+        )
+
+    def _provenance(
+        self,
+        context: dict[str, Any],
+        stage: str,
+    ) -> MemorySourceProvenance:
+        stage_evidence = self._stage_evidence(context, stage)
+        report = self._stage_report(stage_evidence)
+        return MemorySourceProvenance(
+            task_id=context.get("source_task_id", ""),
+            run_id=context.get("source_run_id", ""),
+            trace_id=context.get("trace_id", ""),
+            scene_state_path=str(stage_evidence.get("scene_state_path") or ""),
+            stage=stage,
+            prompt_fingerprint=context.get("prompt_fingerprint", ""),
+            evidence_refs=self._evidence_refs(context, stage),
+            critic_source=str(report.get("score_source") or "unknown"),
+        )
+
+    @staticmethod
+    def _selector_label(value: Any) -> str:
+        if isinstance(value, str):
+            return " ".join(value.split())
+        if not isinstance(value, dict):
+            return ""
+        parts = [
+            str(value.get(key) or "").strip()
+            for key in ("role", "category", "object", "name", "id")
+        ]
+        return ":".join(part for part in parts if part)
+
+    def _spatial_relations(
+        self,
+        stage_evidence: dict[str, Any],
+        focus_terms: list[str] | None = None,
+    ) -> list[SpatialRelationMemory]:
+        """Extract only relations already grounded in the intent/critic trace."""
+        context = dict(stage_evidence.get("relation_context") or {})
+        report = self._stage_report(stage_evidence)
+        verified = bool(report.get("pass_stage"))
+        output: list[SpatialRelationMemory] = []
+        for constraint in context.get("hard_constraints", []) or []:
+            if not isinstance(constraint, dict):
+                continue
+            if focus_terms:
+                haystack = (
+                    json.dumps(
+                        constraint, ensure_ascii=False, sort_keys=True, default=str
+                    )
+                    .casefold()
+                    .replace("_", " ")
+                )
+                focus_tokens = {
+                    token
+                    for value in focus_terms
+                    for token in re.findall(
+                        r"[a-z0-9\u4e00-\u9fff]+",
+                        str(value or "").casefold().replace("_", " "),
+                    )
+                    if len(token) >= 3
+                }
+                if focus_tokens and not any(
+                    token in haystack for token in focus_tokens
+                ):
+                    continue
+            relation_type = str(
+                constraint.get("relation_type")
+                or constraint.get("relation")
+                or constraint.get("predicate")
+                or constraint.get("type")
+                or ""
+            ).strip()
+            if not relation_type:
+                continue
+            subject = (
+                constraint.get("subject")
+                or constraint.get("subjects")
+                or constraint.get("subject_selector")
+                or constraint.get("source")
+            )
+            target = (
+                constraint.get("target")
+                or constraint.get("targets")
+                or constraint.get("target_selector")
+                or constraint.get("reference")
+            )
+            cardinality = {
+                key: value
+                for key in ("count", "min_count", "max_count", "quantifier")
+                if (value := constraint.get(key)) is not None
+            }
+            for prefix, selector in (("subject", subject), ("target", target)):
+                if not isinstance(selector, dict):
+                    continue
+                for key in ("count", "min_count", "max_count", "quantifier"):
+                    value = selector.get(key)
+                    if value is not None:
+                        cardinality[f"{prefix}_{key}"] = value
+            output.append(
+                SpatialRelationMemory(
+                    relation_type=relation_type,
+                    subject_role=self._selector_label(subject),
+                    target_role=self._selector_label(target),
+                    cardinality=cardinality,
+                    evidence_source=("critic" if report else "task_contract"),
+                    evidence_ref=str(constraint.get("constraint_id") or ""),
+                    geometry_verified=verified,
+                    confidence=0.85 if verified else 0.6,
+                )
+            )
+        return output
+
+    def _relation_types(self, stage_evidence: dict[str, Any]) -> list[str]:
+        return self._unique(
+            [
+                relation.relation_type
+                for relation in self._spatial_relations(stage_evidence)
+            ]
+        )
 
     def _canonical_context(
         self,

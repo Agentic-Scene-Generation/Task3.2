@@ -26,6 +26,7 @@ from scenesmith.scene_expert.memory.schemas import (
     Skill,
     SuccessCase,
 )
+from scenesmith.scene_expert.memory.text_builder import build_embedding_text
 
 console_logger = logging.getLogger(__name__)
 MANIFEST_SCHEMA_VERSION = "sceneexpert.memory_manifest.v2"
@@ -514,7 +515,16 @@ class FastMemoryStore:
             + incoming.source_run_ids
             + ([incoming.source_run_id] if incoming.source_run_id else [])
         )
+        spatial_by_key = {
+            json.dumps(
+                relation.model_dump(mode="json"),
+                ensure_ascii=False,
+                sort_keys=True,
+            ): relation
+            for relation in [*current.spatial_relations, *incoming.spatial_relations]
+        }
         updates: dict[str, Any] = {
+            "schema_version": MEMORY_SCHEMA_VERSION,
             "evidence_refs": evidence_refs,
             "critic_evidence": critic_evidence,
             "source_task_ids": source_task_ids,
@@ -523,14 +533,48 @@ class FastMemoryStore:
             "updated_at": incoming.updated_at or self._now(),
             "quality_score": max(current.quality_score, incoming.quality_score),
             "confidence": max(current.confidence, incoming.confidence),
+            "spatial_relations": list(spatial_by_key.values()),
+            "provenance": (
+                current.provenance
+                if current.provenance.trace_id
+                else incoming.provenance
+            ),
         }
         if not same_run:
             updates["observation_count"] = current.observation_count + 1
+        if isinstance(current, Skill) and isinstance(incoming, Skill):
+            updates["applicability"] = current.applicability.model_copy(
+                update={
+                    "room_types": self._unique(
+                        current.applicability.room_types
+                        + incoming.applicability.room_types
+                    ),
+                    "excluded_room_types": self._unique(
+                        current.applicability.excluded_room_types
+                        + incoming.applicability.excluded_room_types
+                    ),
+                    "required_object_roles": self._unique(
+                        current.applicability.required_object_roles
+                        + incoming.applicability.required_object_roles
+                    ),
+                    "required_relation_types": self._unique(
+                        current.applicability.required_relation_types
+                        + incoming.applicability.required_relation_types
+                    ),
+                    "forbidden_conditions": self._unique(
+                        current.applicability.forbidden_conditions
+                        + incoming.applicability.forbidden_conditions
+                    ),
+                }
+            )
         if same_run and all(
             getattr(current, key) == value for key, value in updates.items()
         ):
             return current
-        return current.model_copy(update=updates)
+        merged = current.model_copy(update=updates)
+        return merged.model_copy(
+            update={"embedding_text": build_embedding_text(merged)}
+        )
 
     def _apply_update_unlocked(self, op: MemoryUpdateOp, revision: int) -> bool:
         if op.memory_type == "success_case":

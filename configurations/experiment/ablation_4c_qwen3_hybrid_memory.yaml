@@ -13,6 +13,11 @@
 defaults:
   - base_experiment
 
+# The 4c harness must finish all downstream stages for memory/evaluation even
+# when an authoritative main critic marks one stage as quality-degraded.
+# Main's deterministic repair remains enabled and unchanged.
+quality_failure_policy: "degraded"
+
 scene_expert:
   enabled: true
   mode: "harness_memory"
@@ -21,6 +26,10 @@ scene_expert:
     # This does not alter SceneSmith designer/critic calls.
     structured_llm:
       enabled: true
+    # SceneExpert's outer text-only repair loop has not shown executed gains in
+    # validated 4c runs. Keep it off so main owns deterministic repair.
+    repair:
+      enabled: false
   memory:
     dir: "${paths.memory_dir}/ablation_4c"
     retriever_type: "hybrid"

@@ -36,6 +36,13 @@ console_logger = logging.getLogger(__name__)
 
 _DEFAULT_CODE_PROVENANCE_PATHS = (
     "scenesmith/scene_expert/hooks.py",
+    "scenesmith/scene_expert/experiment_identity.py",
+    "scenesmith/scene_expert/memory/activity.py",
+    "scenesmith/scene_expert/memory/injection.py",
+    "scenesmith/scene_expert/memory/retriever.py",
+    "scenesmith/scene_expert/memory/schemas.py",
+    "scenesmith/scene_expert/memory/writer.py",
+    "scenesmith/scene_expert/run_metrics.py",
     "scenesmith/scene_expert/task_compiler.py",
     "scenesmith/scene_expert/verifier.py",
     "scenesmith/scene_expert/repair_controller.py",
@@ -142,7 +149,7 @@ class TraceLogger:
     One TraceLogger instance per scene generation run.
     """
 
-    SCHEMA_VERSION = "1.5"
+    SCHEMA_VERSION = "1.6"
 
     def __init__(
         self,
@@ -151,6 +158,7 @@ class TraceLogger:
         prompt: str,
         experiment_name: str = "",
         config_hash: str = "",
+        experiment_signature: str = "",
         task_spec_status: dict | None = None,
         task_spec: dict | None = None,
         code_provenance: dict[str, object] | None = None,
@@ -178,6 +186,7 @@ class TraceLogger:
         self._prompt = prompt
         self._experiment_name = experiment_name
         self._config_hash = config_hash
+        self._experiment_signature = experiment_signature
         self._task_spec = dict(task_spec or {})
         self._code_provenance = dict(code_provenance or {})
         self._component_flags = {
@@ -391,6 +400,7 @@ class TraceLogger:
             "component_status": self._component_status,
             "experiment_name": self._experiment_name,
             "config_hash": self._config_hash,
+            "experiment_signature": self._experiment_signature,
             "code_provenance": self._code_provenance,
             "prompt": self._prompt,
             "task_compiler": self._task_compiler,
@@ -418,6 +428,7 @@ class TraceLogger:
             "error": error,
             "experiment_name": self._experiment_name,
             "config_hash": self._config_hash,
+            "experiment_signature": self._experiment_signature,
             "code_provenance": self._code_provenance,
             "prompt": self._prompt,
             "task_compiler": self._task_compiler,
@@ -445,6 +456,7 @@ class TraceLogger:
                 "component_status": self._component_status,
                 "experiment_name": self._experiment_name,
                 "config_hash": self._config_hash,
+                "experiment_signature": self._experiment_signature,
                 "code_provenance": self._code_provenance,
                 "prompt": self._prompt,
                 "task_compiler": self._task_compiler,
@@ -558,6 +570,11 @@ class TraceLogger:
                     "stage_brief": (
                         entry.stage_brief.model_dump() if entry.stage_brief else None
                     ),
+                    "relation_context": (
+                        entry.relation_context.model_dump()
+                        if entry.relation_context
+                        else None
+                    ),
                     "verify_report": (
                         entry.verify_report.model_dump()
                         if entry.verify_report
@@ -572,6 +589,7 @@ class TraceLogger:
                         + list(entry.memory_pack.failure_case_ids)
                         + list(entry.memory_pack.skill_names)
                     ),
+                    "memory_pack": entry.memory_pack.model_dump(),
                 }
             )
         return {
@@ -581,6 +599,7 @@ class TraceLogger:
             "run_id": str(self._output_dir.resolve()),
             "experiment_name": self._experiment_name,
             "config_hash": self._config_hash,
+            "experiment_signature": self._experiment_signature,
             "prompt": self._prompt,
             "task_spec": dict(self._task_spec),
             "stages": stages,

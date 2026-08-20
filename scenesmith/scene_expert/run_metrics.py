@@ -21,7 +21,7 @@ from typing import Any, Iterable
 
 console_logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = "sceneexpert.run_metrics.v2"
+SCHEMA_VERSION = "sceneexpert.run_metrics.v3"
 SCENE_COLUMNS = (
     "run_id",
     "batch_id",
@@ -47,6 +47,7 @@ SCENE_COLUMNS = (
     "sceneexpert_pass_scene",
     "experiment_name",
     "config_hash",
+    "experiment_signature",
     "model",
     "code_revision",
     "code_dirty",
@@ -79,6 +80,14 @@ SCENE_COLUMNS = (
     "memory_writer_fallback_written",
     "memory_writer_degraded",
     "scenesmith_repair_events",
+    "scenesmith_repairs_accepted",
+    "scenesmith_repairs_rejected",
+    "scenesmith_repairs_resolved",
+    "scenesmith_repair_strategies",
+    "scenesmith_repair_affected_objects",
+    "scenesmith_repair_timing_events",
+    "scenesmith_repair_overhead_sec",
+    "scene_rescued_by_scenesmith_repair",
     "sceneexpert_repair_plans",
     "sceneexpert_repairs_executed",
     "component_flags",
@@ -313,6 +322,11 @@ def _memory_metrics(
         memory_injected = bool(
             evidence.get("injected_memory_hash")
             or evidence.get("placement_reference_injected")
+            or (
+                ids
+                and evidence.get("final_injection_hash")
+                and evidence.get("designer_prompt_contains_memory")
+            )
         )
         if memory_injected:
             injected_stages.append(stage)
@@ -472,7 +486,7 @@ def _repair_metrics(
     scene_dir: Path,
     stages: list[dict[str, Any]],
     warnings: list[str],
-) -> dict[str, int]:
+) -> dict[str, Any]:
     raw_sceneexpert_actions = [
         action
         for stage in stages
@@ -508,8 +522,46 @@ def _repair_metrics(
         for action in sceneexpert_actions
         if str(action.get("execution_status") or "planned") == "executed"
     ]
+    accepted = [event for event in core_events if event.get("status") == "accepted"]
+    rejected = [event for event in core_events if event.get("status") == "rejected"]
+    resolved = [
+        event
+        for event in core_events
+        if bool((event.get("detail") or {}).get("resolved", False))
+    ]
+    timing_events = _read_jsonl(
+        scene_dir / "scene_expert" / "timing" / "stage_working_timing.jsonl",
+        warnings,
+    )
+    repair_timing_events = [
+        event
+        for event in timing_events
+        if str(event.get("module") or "") == "deterministic_repair"
+    ]
+    timing_overhead = sum(
+        _as_float(event.get("elapsed_sec")) or 0.0 for event in repair_timing_events
+    )
     return {
         "scenesmith_repair_events": len(core_events),
+        "scenesmith_repairs_accepted": len(accepted),
+        "scenesmith_repairs_rejected": len(rejected),
+        "scenesmith_repairs_resolved": len(resolved),
+        "scenesmith_repair_strategies": _unique(
+            str(event.get("strategy") or "") for event in core_events
+        ),
+        "scenesmith_repair_affected_objects": sum(
+            len(event.get("affected_objects") or []) for event in core_events
+        ),
+        "scenesmith_repair_timing_events": len(repair_timing_events),
+        "scenesmith_repair_overhead_sec": round(
+            timing_overhead
+            or sum(
+                _as_float((event.get("detail") or {}).get("elapsed_sec")) or 0.0
+                for event in core_events
+            ),
+            6,
+        ),
+        "scene_rescued_by_scenesmith_repair": bool(resolved),
         "sceneexpert_repair_plans": len(sceneexpert_actions),
         "sceneexpert_repairs_executed": len(executed),
     }
@@ -550,6 +602,7 @@ def _scene_metrics(
         ),
         "experiment_name": str(trace.get("experiment_name") or ""),
         "config_hash": str(trace.get("config_hash") or ""),
+        "experiment_signature": str(trace.get("experiment_signature") or ""),
         "model": str(trace.get("model") or ""),
         "code_revision": str(
             (trace.get("code_provenance") or {}).get("git_revision") or ""
@@ -651,6 +704,7 @@ def collect_run_metrics(
 
     revisions = _unique(row["code_revision"] for row in scene_rows)
     config_hashes = _unique(row["config_hash"] for row in scene_rows)
+    experiment_signatures = _unique(row["experiment_signature"] for row in scene_rows)
     experiment_names = _unique(row["experiment_name"] for row in scene_rows)
     models = _unique(row["model"] for row in scene_rows)
     provenance_by_signature = {
@@ -666,10 +720,14 @@ def collect_run_metrics(
         warnings.append(f"mixed_code_provenance:{len(provenance_by_signature)}")
     if len(config_hashes) > 1:
         warnings.append(f"mixed_config_hashes:{len(config_hashes)}")
+    if len(experiment_signatures) > 1:
+        warnings.append(f"mixed_experiment_signatures:{len(experiment_signatures)}")
     if not revisions:
         warnings.append("missing_code_revision")
     if not config_hashes:
         warnings.append("missing_config_hash")
+    if not experiment_signatures:
+        warnings.append("missing_experiment_signature")
     if not experiment_names:
         warnings.append("missing_experiment_name")
 
@@ -745,6 +803,29 @@ def collect_run_metrics(
         "scenesmith_repair_events": sum(
             row["scenesmith_repair_events"] for row in scene_rows
         ),
+        "scenesmith_repairs_accepted": sum(
+            row["scenesmith_repairs_accepted"] for row in scene_rows
+        ),
+        "scenesmith_repairs_rejected": sum(
+            row["scenesmith_repairs_rejected"] for row in scene_rows
+        ),
+        "scenesmith_repairs_resolved": sum(
+            row["scenesmith_repairs_resolved"] for row in scene_rows
+        ),
+        "scenesmith_repair_affected_objects": sum(
+            row["scenesmith_repair_affected_objects"] for row in scene_rows
+        ),
+        "scenesmith_repair_timing_events": sum(
+            row["scenesmith_repair_timing_events"] for row in scene_rows
+        ),
+        "scenesmith_repair_overhead_sec": round(
+            sum(row["scenesmith_repair_overhead_sec"] for row in scene_rows), 6
+        ),
+        "scenes_rescued_by_scenesmith_repair": sum(
+            bool(row["scene_rescued_by_scenesmith_repair"])
+            and row["status"] in {"completed", "completed_with_quality_issues"}
+            for row in scene_rows
+        ),
         "sceneexpert_repair_plans": sum(
             row["sceneexpert_repair_plans"] for row in scene_rows
         ),
@@ -792,6 +873,7 @@ def collect_run_metrics(
         "experiment_identity": {
             "experiment_names": experiment_names,
             "config_hashes": config_hashes,
+            "experiment_signatures": experiment_signatures,
             "models": models,
             "code_revisions": revisions,
             "code_dirty_values": sorted(
@@ -875,6 +957,12 @@ def _markdown(metrics: dict[str, Any]) -> str:
         "memory_writer_failure_scenes",
         "memory_writer_fallback_writes",
         "scenesmith_repair_events",
+        "scenesmith_repairs_accepted",
+        "scenesmith_repairs_rejected",
+        "scenesmith_repairs_resolved",
+        "scenes_rescued_by_scenesmith_repair",
+        "scenesmith_repair_timing_events",
+        "scenesmith_repair_overhead_sec",
         "sceneexpert_repair_plans",
         "sceneexpert_repairs_executed",
         "task_compiler_llm_scenes",

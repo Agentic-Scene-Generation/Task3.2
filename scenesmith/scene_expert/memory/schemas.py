@@ -9,13 +9,102 @@ scores, provenance, or promotion status.
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-MEMORY_SCHEMA_VERSION = "sceneexpert.memory.v2"
+MEMORY_SCHEMA_VERSION = "sceneexpert.memory.v3"
 MemoryStatus = Literal["candidate", "active", "quarantined"]
 MemorySource = Literal["llm", "deterministic", "legacy", "imported"]
+
+
+class MemorySourceProvenance(BaseModel):
+    """Stable locator for the evidence from which a memory was derived."""
+
+    task_id: str = ""
+    run_id: str = ""
+    trace_id: str = ""
+    scene_state_path: str = ""
+    stage: str = ""
+    prompt_fingerprint: str = ""
+    evidence_refs: list[str] = Field(default_factory=list)
+    critic_source: str = ""
+
+
+class SpatialRelationMemory(BaseModel):
+    """Transferable spatial relation grounded in critic or geometry evidence.
+
+    Exact coordinates are optional because they are usually scene-specific.  A
+    relation is safe to promote without coordinates only when its semantic
+    endpoints and evidence reference are retained.
+    """
+
+    relation_type: str = Field(min_length=1)
+    subject_role: str = ""
+    target_role: str = ""
+    normalized_offset: list[float] = Field(default_factory=list, max_length=3)
+    yaw_delta_deg: float | None = None
+    clearance_m: dict[str, float] = Field(default_factory=dict)
+    cardinality: dict[str, Any] = Field(default_factory=dict)
+    evidence_source: Literal[
+        "critic", "deterministic", "scene_geometry", "task_contract", "legacy"
+    ] = "legacy"
+    evidence_ref: str = ""
+    geometry_verified: bool = False
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+
+    def to_guidance_text(self) -> str:
+        """Render a compact designer-facing relation without inventing geometry."""
+        endpoints = " ".join(
+            value
+            for value in (self.subject_role, self.relation_type, self.target_role)
+            if value
+        )
+        parts = [endpoints or self.relation_type]
+        if self.normalized_offset:
+            parts.append(
+                "normalized offset="
+                + ",".join(f"{value:.3f}" for value in self.normalized_offset)
+            )
+        if self.yaw_delta_deg is not None:
+            parts.append(f"yaw delta={self.yaw_delta_deg:.1f}deg")
+        if self.clearance_m:
+            parts.append(
+                "clearance="
+                + ",".join(
+                    f"{key}:{value:.3f}m"
+                    for key, value in sorted(self.clearance_m.items())
+                )
+            )
+        return "; ".join(parts)
+
+
+class SkillApplicability(BaseModel):
+    """Explicit guardrails preventing a skill from leaking to unrelated tasks."""
+
+    room_types: list[str] = Field(default_factory=list)
+    excluded_room_types: list[str] = Field(default_factory=list)
+    required_object_roles: list[str] = Field(default_factory=list)
+    required_relation_types: list[str] = Field(default_factory=list)
+    forbidden_conditions: list[str] = Field(default_factory=list)
+
+
+class MemoryUtilityObservation(BaseModel):
+    """One immutable observation of how selected memory affected a later run."""
+
+    memory_id: str
+    memory_type: Literal["success", "failure", "skill"]
+    task_id: str = ""
+    run_id: str = ""
+    stage: str = ""
+    selected_rank: int = Field(default=0, ge=0)
+    retrieval_score: float | None = None
+    injected: bool = False
+    stage_passed: bool | None = None
+    quality_delta: float | None = None
+    latency_delta_sec: float | None = None
+    outcome: Literal["positive", "negative", "neutral", "unknown"] = "unknown"
+    evidence_ref: str = ""
 
 
 class MemoryRecordBase(BaseModel):
@@ -36,6 +125,8 @@ class MemoryRecordBase(BaseModel):
     positive_utility_count: int = Field(default=0, ge=0)
     negative_utility_count: int = Field(default=0, ge=0)
     updated_at: str = ""
+    provenance: MemorySourceProvenance = Field(default_factory=MemorySourceProvenance)
+    spatial_relations: list[SpatialRelationMemory] = Field(default_factory=list)
 
 
 class SuccessCase(MemoryRecordBase):
@@ -91,16 +182,18 @@ class SuccessCase(MemoryRecordBase):
 
     def to_placement_text(self) -> str:
         """Format placement_reference as a designer-readable reference block."""
-        if not self.placement_reference:
+        if not self.placement_reference and not self.spatial_relations:
             return ""
         score_str = ", ".join(f"{k}={v:.2f}" for k, v in self.scores.items())
         lines = [
             f"=== Reference Layout ({self.stage} / {self.room_type} / {self.style}) ===",
             f"Scores achieved: {score_str}",
-            "Object placements that produced these scores:",
+            "Grounded spatial references that produced these scores:",
         ]
         for entry in self.placement_reference:
             lines.append(f"  {entry}")
+        for relation in self.spatial_relations:
+            lines.append(f"  relation: {relation.to_guidance_text()}")
         lines.append(
             "Use this as a spatial reference. "
             "Adapt positions to the current room size and prompt if needed."
@@ -154,6 +247,13 @@ class FailureCase(MemoryRecordBase):
             parts.append(f"Fix: {self.repair_action}")
         if self.critic_check:
             parts.append(f"Check: {self.critic_check}")
+        if self.spatial_relations:
+            parts.append(
+                "Relations: "
+                + " | ".join(
+                    relation.to_guidance_text() for relation in self.spatial_relations
+                )
+            )
         return " ".join(part for part in parts if part)
 
 
@@ -180,10 +280,24 @@ class Skill(MemoryRecordBase):
     created_at: str = ""
     last_used_at: str = ""
     usage_count: int = 0
+    applicability: SkillApplicability = Field(default_factory=SkillApplicability)
 
     def to_procedure_text(self) -> str:
         """Format skill as an ordered procedure for prompt injection."""
         lines = [f"[Skill: {self.skill_name}]"]
+        applicable_rooms = self.applicability.room_types or self.room_types
+        if applicable_rooms:
+            lines.append("Applicable rooms: " + ", ".join(applicable_rooms))
+        if self.applicability.required_object_roles:
+            lines.append(
+                "Required object roles: "
+                + ", ".join(self.applicability.required_object_roles)
+            )
+        if self.applicability.forbidden_conditions:
+            lines.append(
+                "Do not apply when: "
+                + ", ".join(self.applicability.forbidden_conditions)
+            )
         if self.preconditions:
             lines.append("Preconditions: " + ", ".join(self.preconditions))
         if self.procedure:
@@ -192,6 +306,15 @@ class Skill(MemoryRecordBase):
         if self.failure_avoidance:
             lines.append("Avoid:")
             lines.extend(f"  - {rule}" for rule in self.failure_avoidance)
+        if self.postconditions:
+            lines.append("Postconditions:")
+            lines.extend(f"  - {condition}" for condition in self.postconditions)
+        if self.spatial_relations:
+            lines.append("Spatial relations:")
+            lines.extend(
+                f"  - {relation.to_guidance_text()}"
+                for relation in self.spatial_relations
+            )
         return "\n".join(lines)
 
 

@@ -97,6 +97,22 @@ class SceneTaskSpec(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class RetrievedMemorySelection(BaseModel):
+    """Auditable rank/provenance row for one retrieved memory record."""
+
+    memory_id: str
+    memory_type: Literal["success", "failure", "skill"]
+    rank: int = Field(ge=1)
+    score: float | None = None
+    score_components: dict[str, float] = Field(default_factory=dict)
+    source_path: str = ""
+    source_task_ids: list[str] = Field(default_factory=list)
+    source_run_ids: list[str] = Field(default_factory=list)
+    bank_id: str = ""
+    bank_revision: int = Field(default=0, ge=0)
+    injected_text: str = ""
+
+
 class MemoryPack(BaseModel):
     """Retrieved memory snippets to inject into a stage's StageBrief."""
 
@@ -135,6 +151,7 @@ class MemoryPack(BaseModel):
     )
     memory_bank_id: str = ""
     memory_bank_revision: int = 0
+    selections: list[RetrievedMemorySelection] = Field(default_factory=list)
 
     def deduplicated(self) -> "MemoryPack":
         """Return an order-preserving copy without repeated prompt content."""
@@ -143,8 +160,8 @@ class MemoryPack(BaseModel):
             seen: set[str] = set()
             result: list[str] = []
             for value in values:
-                text = " ".join(str(value or "").split())
-                key = text.casefold()
+                text = str(value or "").strip()
+                key = " ".join(text.split()).casefold()
                 if text and key not in seen:
                     result.append(text)
                     seen.add(key)
@@ -160,6 +177,19 @@ class MemoryPack(BaseModel):
                 "skill_names": unique_text(self.skill_names),
             }
         )
+
+
+class MemoryInjectionBundle(BaseModel):
+    """Canonical, single-pass memory transformation and injection artifact."""
+
+    stage: str
+    planner_stage_brief: "StageBrief | None" = None
+    enriched_stage_brief: "StageBrief | None" = None
+    brief_text: str = ""
+    memory_text: str = ""
+    placement_text: str = ""
+    final_text: str = ""
+    selected_memory_ids: list[str] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -414,6 +444,8 @@ class StageExecutionEvidence(BaseModel):
     designer_prompt_contains_brief: bool = False
     designer_prompt_contains_memory: bool = False
     placement_reference_injected: bool = False
+    final_injection_hash: str = ""
+    experiment_signature: str = ""
     degraded: bool = False
 
 

@@ -11,12 +11,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-SCHEMA_VERSION = "sceneexpert.paired_metrics.v1"
+SCHEMA_VERSION = "sceneexpert.paired_metrics.v2"
 PAIR_COLUMNS = (
     "case_id",
     "prompt_match",
     "baseline_status",
     "treatment_status",
+    "outcome_transition",
+    "memory_benefit_signal",
     "baseline_time_sec",
     "treatment_time_sec",
     "time_delta_sec",
@@ -92,6 +94,43 @@ def _identity_values(metrics: dict[str, Any], key: str) -> list[str]:
     return sorted(str(value) for value in values if str(value))
 
 
+_COMPLETED_STATUSES = {"completed", "completed_with_quality_issues"}
+
+
+def _is_completed(status: str) -> bool:
+    return status in _COMPLETED_STATUSES
+
+
+def _benefit_signal(
+    *,
+    before_status: str,
+    after_status: str,
+    time_delta: float | None,
+    quality_delta: float | None,
+) -> str:
+    before_complete = _is_completed(before_status)
+    after_complete = _is_completed(after_status)
+    if not before_complete and after_complete:
+        return "rescued"
+    if before_complete and not after_complete:
+        return "regressed"
+    if not before_complete and not after_complete:
+        return "both_incomplete"
+    faster = time_delta is not None and time_delta < 0
+    slower = time_delta is not None and time_delta > 0
+    better = quality_delta is not None and quality_delta > 0
+    worse = quality_delta is not None and quality_delta < 0
+    if faster and better:
+        return "faster_and_better"
+    if faster and worse:
+        return "faster_quality_tradeoff"
+    if slower and better:
+        return "better_speed_tradeoff"
+    if slower and worse:
+        return "slower_and_worse"
+    return "mixed_or_tied"
+
+
 def compare_run_metrics(
     baseline: dict[str, Any], treatment: dict[str, Any]
 ) -> dict[str, Any]:
@@ -109,7 +148,13 @@ def compare_run_metrics(
         )
 
     identity_checks: dict[str, bool] = {}
-    for key in ("experiment_names", "config_hashes", "models", "code_revisions"):
+    for key in (
+        "experiment_names",
+        "experiment_signatures",
+        "config_hashes",
+        "models",
+        "code_revisions",
+    ):
         baseline_values = _identity_values(baseline, key)
         treatment_values = _identity_values(treatment, key)
         matches = bool(baseline_values) and baseline_values == treatment_values
@@ -155,17 +200,37 @@ def compare_run_metrics(
         after_critic = _number(after.get("critic_score"))
         before_wrapper = _number(before.get("sceneexpert_overall_score"))
         after_wrapper = _number(after.get("sceneexpert_overall_score"))
+        time_delta = _delta(after_time, before_time)
+        critic_delta = _delta(after_critic, before_critic)
+        wrapper_delta = _delta(after_wrapper, before_wrapper)
+        before_status = str(before.get("status") or "")
+        after_status = str(after.get("status") or "")
+        if not _is_completed(before_status) and _is_completed(after_status):
+            outcome_transition = "rescued"
+        elif _is_completed(before_status) and not _is_completed(after_status):
+            outcome_transition = "regressed"
+        elif _is_completed(before_status) and _is_completed(after_status):
+            outcome_transition = "both_completed"
+        else:
+            outcome_transition = "both_incomplete"
         prompt_match = str(before.get("prompt") or "") == str(after.get("prompt") or "")
         prompt_mismatch = prompt_mismatch or not prompt_match
         pairs.append(
             {
                 "case_id": case_id,
                 "prompt_match": prompt_match,
-                "baseline_status": str(before.get("status") or ""),
-                "treatment_status": str(after.get("status") or ""),
+                "baseline_status": before_status,
+                "treatment_status": after_status,
+                "outcome_transition": outcome_transition,
+                "memory_benefit_signal": _benefit_signal(
+                    before_status=before_status,
+                    after_status=after_status,
+                    time_delta=time_delta,
+                    quality_delta=critic_delta,
+                ),
                 "baseline_time_sec": before_time,
                 "treatment_time_sec": after_time,
-                "time_delta_sec": _delta(after_time, before_time),
+                "time_delta_sec": time_delta,
                 "speedup_ratio": (
                     round(before_time / after_time, 6)
                     if before_time is not None and after_time not in {None, 0.0}
@@ -173,10 +238,10 @@ def compare_run_metrics(
                 ),
                 "baseline_critic_score": before_critic,
                 "treatment_critic_score": after_critic,
-                "critic_score_delta": _delta(after_critic, before_critic),
+                "critic_score_delta": critic_delta,
                 "baseline_sceneexpert_score": before_wrapper,
                 "treatment_sceneexpert_score": after_wrapper,
-                "sceneexpert_score_delta": _delta(after_wrapper, before_wrapper),
+                "sceneexpert_score_delta": wrapper_delta,
                 "treatment_memory_retrieved": bool(
                     after.get("memory_retrieved_stages")
                 ),
@@ -197,32 +262,74 @@ def compare_run_metrics(
         warnings.append("baseline_not_quality_ready")
     if not treatment_ready:
         warnings.append("treatment_not_quality_ready")
-    comparison_ready = bool(
+    required_identity_keys = {
+        "experiment_names",
+        "experiment_signatures",
+        "models",
+        "code_revisions",
+        "code_provenance.git_status_hash",
+        "code_provenance.source_hashes",
+        "memory_identity.memory_bank_ids",
+    }
+    outcome_comparison_ready = bool(
         pairs
         and baseline_cases == treatment_cases
         and not prompt_mismatch
-        and baseline_ready
-        and treatment_ready
-        and all(identity_checks.values())
+        and all(identity_checks.get(key, False) for key in required_identity_keys)
     )
     completed_pairs = [
         row
         for row in pairs
-        if row["baseline_status"] in {"completed", "completed_with_quality_issues"}
-        and row["treatment_status"] in {"completed", "completed_with_quality_issues"}
+        if _is_completed(row["baseline_status"])
+        and _is_completed(row["treatment_status"])
     ]
+    quality_delta_ready = bool(
+        outcome_comparison_ready
+        and completed_pairs
+        and baseline_ready
+        and treatment_ready
+    )
+    claim_status = "not_ready"
+    if quality_delta_ready:
+        claim_status = "paired_quality_and_outcomes_ready"
+    elif outcome_comparison_ready:
+        claim_status = "paired_outcomes_ready_with_partial_quality"
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "baseline_run_id": str(baseline.get("run_id") or ""),
         "treatment_run_id": str(treatment.get("run_id") or ""),
-        "comparison_ready": comparison_ready,
-        "claim_status": "paired_deltas_ready" if comparison_ready else "not_ready",
+        "comparison_ready": outcome_comparison_ready,
+        "outcome_comparison_ready": outcome_comparison_ready,
+        "quality_delta_ready": quality_delta_ready,
+        "claim_status": claim_status,
         "identity_checks": identity_checks,
         "data_quality_warnings": sorted(set(warnings)),
         "summary": {
             "paired_cases": len(pairs),
             "completed_pairs": len(completed_pairs),
+            "rescued_cases": sum(
+                row["outcome_transition"] == "rescued" for row in pairs
+            ),
+            "regressed_cases": sum(
+                row["outcome_transition"] == "regressed" for row in pairs
+            ),
+            "faster_completed_pairs": sum(
+                row["time_delta_sec"] is not None and row["time_delta_sec"] < 0
+                for row in completed_pairs
+            ),
+            "slower_completed_pairs": sum(
+                row["time_delta_sec"] is not None and row["time_delta_sec"] > 0
+                for row in completed_pairs
+            ),
+            "critic_quality_wins": sum(
+                row["critic_score_delta"] is not None and row["critic_score_delta"] > 0
+                for row in completed_pairs
+            ),
+            "critic_quality_losses": sum(
+                row["critic_score_delta"] is not None and row["critic_score_delta"] < 0
+                for row in completed_pairs
+            ),
             "baseline_completion_rate": (baseline.get("summary") or {}).get(
                 "completion_rate"
             ),

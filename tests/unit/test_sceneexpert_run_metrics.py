@@ -62,6 +62,7 @@ def test_metrics_survive_partial_failure_and_attribute_repairs(tmp_path) -> None
             "total_time_sec": 120.0,
             "experiment_name": "ablation_4c",
             "config_hash": "config-1",
+            "experiment_signature": "stable-4c-signature",
             "model": "qwen-test",
             "code_provenance": {
                 "git_revision": "abc123",
@@ -217,7 +218,28 @@ def test_metrics_survive_partial_failure_and_attribute_repairs(tmp_path) -> None
         encoding="utf-8",
     )
     (timing_dir / "repair_events.jsonl").write_text(
-        json.dumps({"schema_version": "scenesmith.repair_event.v1"}) + "\n",
+        json.dumps(
+            {
+                "schema_version": "scenesmith.repair_event.v1",
+                "repair_owner": "scenesmith_core",
+                "strategy": "deterministic_hard_state",
+                "status": "accepted",
+                "affected_objects": [{"object_id": "chair_1"}],
+                "detail": {"resolved": True, "elapsed_sec": 0.25},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (timing_dir / "stage_working_timing.jsonl").write_text(
+        json.dumps(
+            {
+                "module": "deterministic_repair",
+                "event": "critic_hard_state",
+                "elapsed_sec": 0.3,
+            }
+        )
+        + "\n",
         encoding="utf-8",
     )
 
@@ -249,6 +271,11 @@ def test_metrics_survive_partial_failure_and_attribute_repairs(tmp_path) -> None
     )
     assert metrics["summary"]["memory_writer_fallback_writes"] == 0
     assert metrics["summary"]["scenesmith_repair_events"] == 1
+    assert metrics["summary"]["scenesmith_repairs_accepted"] == 1
+    assert metrics["summary"]["scenesmith_repairs_resolved"] == 1
+    assert metrics["summary"]["scenesmith_repair_affected_objects"] == 1
+    assert metrics["summary"]["scenesmith_repair_timing_events"] == 1
+    assert metrics["summary"]["scenesmith_repair_overhead_sec"] == 0.3
     assert metrics["summary"]["sceneexpert_repair_plans"] == 1
     assert metrics["summary"]["sceneexpert_repairs_executed"] == 1
     assert metrics["summary"]["memory_zero_result_reasons"] == [

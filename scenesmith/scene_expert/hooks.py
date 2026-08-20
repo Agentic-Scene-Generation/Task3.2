@@ -33,9 +33,15 @@ from scenesmith.scene_expert.config_utils import (
     resolve_scene_expert_config,
 )
 from scenesmith.scene_expert.context_bundle import build_stage_context_bundle
+from scenesmith.scene_expert.experiment_identity import (
+    stable_config_hash as _stable_config_hash,
+    stable_experiment_signature as _stable_experiment_signature,
+)
 from scenesmith.scene_expert.failure_evidence import main_hard_failure_report
 from scenesmith.scene_expert.global_planner import GlobalPlanner
 from scenesmith.scene_expert.harness import Harness, RepairDecision
+from scenesmith.scene_expert.memory.activity import MemoryActivityLogger
+from scenesmith.scene_expert.memory.injection import build_memory_injection_bundle
 from scenesmith.scene_expert.memory.retriever import MemoryRetriever
 from scenesmith.scene_expert.memory.store import FastMemoryStore
 from scenesmith.scene_expert.memory.writer import MemoryWriter
@@ -43,6 +49,7 @@ from scenesmith.scene_expert.relation_context import StageRelationProjector
 from scenesmith.scene_expert.repair_controller import RepairController
 from scenesmith.scene_expert.schemas import (
     FullVerifyReport,
+    MemoryInjectionBundle,
     MemoryPack,
     RepairResult,
     SceneTaskSpec,
@@ -88,15 +95,6 @@ def _empty_memory_pack() -> MemoryPack:
     return MemoryPack(success_hints=[], failure_hints=[], skill_texts=[])
 
 
-def _stable_config_hash(cfg_dict: dict) -> str:
-    """Return a short stable hash for trace reproducibility metadata."""
-    try:
-        payload = json.dumps(cfg_dict, sort_keys=True, default=str)
-    except TypeError:
-        payload = repr(cfg_dict)
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
-
-
 def _deep_merge_dicts(base: dict, override: dict) -> dict:
     """Merge nested dicts without mutating either input."""
     merged = dict(base)
@@ -128,104 +126,6 @@ def _cfg_float(value: Any, default: float) -> float:
     if value is None or value == "":
         return default
     return float(value)
-
-
-def _compact_memory_text(text: str, max_chars: int = 300) -> str:
-    """Compress multiline memory hints for prompt/directive injection."""
-    compact = " ".join(text.strip().split())
-    return compact if len(compact) <= max_chars else compact[: max_chars - 3] + "..."
-
-
-def _extend_unique(target: list[str], items: list[str]) -> list[str]:
-    """Append non-empty unique strings while preserving order."""
-    seen = {item.strip() for item in target if item.strip()}
-    for item in items:
-        text = item.strip()
-        if text and text not in seen:
-            target.append(text)
-            seen.add(text)
-    return target
-
-
-def _skill_name_from_text(skill_text: str) -> str:
-    first_line = skill_text.strip().splitlines()[0] if skill_text.strip() else ""
-    if first_line.startswith("[Skill:") and first_line.endswith("]"):
-        return first_line[len("[Skill:") : -1].strip()
-    return _compact_memory_text(first_line, max_chars=80)
-
-
-def _apply_memory_to_stage_brief(
-    stage_brief: StageBrief,
-    memory_pack: MemoryPack,
-) -> StageBrief:
-    """Make retrieved memory survive even if GlobalPlanner underuses it."""
-    success_rules = [
-        "Retrieved success memory: " + _compact_memory_text(hint)
-        for hint in memory_pack.success_hints[:3]
-    ]
-    failure_rules = [
-        _compact_memory_text(hint) for hint in memory_pack.failure_hints[:3]
-    ]
-    critic_checks = [
-        "Verify retrieved failure is avoided: " + _compact_memory_text(hint)
-        for hint in memory_pack.failure_hints[:3]
-    ]
-    skill_names = [
-        name
-        for text in memory_pack.skill_texts[:3]
-        if (name := _skill_name_from_text(text))
-    ]
-
-    return stage_brief.model_copy(
-        update={
-            "constraints_for_designer": _extend_unique(
-                list(stage_brief.constraints_for_designer),
-                success_rules,
-            ),
-            "failure_patterns_to_avoid": _extend_unique(
-                list(stage_brief.failure_patterns_to_avoid),
-                failure_rules,
-            ),
-            "checks_for_critic": _extend_unique(
-                list(stage_brief.checks_for_critic),
-                critic_checks,
-            ),
-            "recommended_skills": _extend_unique(
-                list(stage_brief.recommended_skills),
-                skill_names,
-            ),
-        }
-    )
-
-
-def _format_memory_directives(memory_pack: MemoryPack) -> str:
-    """Format retrieved memory as a direct hook-level prompt block."""
-    parts: list[str] = []
-    if memory_pack.success_hints:
-        parts.append("Positive guidance from retrieved memory:")
-        parts.extend(
-            f"  - {_compact_memory_text(hint)}"
-            for hint in memory_pack.success_hints[:3]
-        )
-    if memory_pack.failure_hints:
-        parts.append("Negative constraints from retrieved memory:")
-        parts.extend(
-            f"  - {_compact_memory_text(hint)}"
-            for hint in memory_pack.failure_hints[:3]
-        )
-    if memory_pack.skill_texts:
-        parts.append("Reusable skills from retrieved memory:")
-        parts.extend(
-            f"  - {_compact_memory_text(skill)}"
-            for skill in memory_pack.skill_texts[:2]
-        )
-    if not parts:
-        return ""
-    return (
-        "=== SceneExpert Retrieved Memory Directives ===\n"
-        + "\n".join(parts)
-        + "\n=== End Retrieved Memory Directives ==="
-    )
 
 
 def _format_stage_relation_context(context: StageRelationContext) -> str:
@@ -859,6 +759,7 @@ class SceneExpertHookRunner:
         qwen_model: str,
         experiment_name: str = "",
         config_hash: str = "",
+        experiment_signature: str = "",
         start_stage: str = "floor_plan",
         intent_contract: dict[str, Any] | None = None,
         intent_trace: dict[str, Any] | None = None,
@@ -890,6 +791,7 @@ class SceneExpertHookRunner:
         self._qwen_model = qwen_model
         self._experiment_name = experiment_name
         self._config_hash = config_hash
+        self._experiment_signature = experiment_signature
         self._start_stage = start_stage
         self._intent_contract = dict(intent_contract or {})
         self._intent_trace = dict(intent_trace or {})
@@ -909,11 +811,22 @@ class SceneExpertHookRunner:
         self._stage_reports: list[StageVerifyReport] = []
         self._completed_stages: list[str] = list(self._stage_order_baseline)
         self._qwen_calls = len(self._intent_trace.get("attempts") or [])
+        self._memory_activity = MemoryActivityLogger(
+            self._scene_debug_dir,
+            scene_id=f"scene_{self._scene_id:03d}",
+            task_spec=self._task_spec,
+            experiment_signature=self._experiment_signature,
+            task_id=(
+                "task_" + hashlib.sha256(self._prompt.encode("utf-8")).hexdigest()[:16]
+            ),
+            run_id=str(self._output_dir.resolve()),
+        )
 
         # Current stage state (populated in pre_stage, consumed in post_stage)
         self._current_stage: str = ""
         self._current_memory_pack: MemoryPack = _empty_memory_pack()
         self._current_stage_brief: StageBrief | None = None
+        self._current_injection_bundle = MemoryInjectionBundle(stage="")
         self._current_execution_evidence = StageExecutionEvidence()
         self._current_relation_context: StageRelationContext | None = None
         self._current_planner_trace: dict[str, Any] = {}
@@ -1003,22 +916,10 @@ class SceneExpertHookRunner:
 
     def _build_execution_evidence(self, prompt: str) -> StageExecutionEvidence:
         """Capture proof that optional context crossed the designer boundary."""
-        brief_text = (
-            self._current_stage_brief.to_injection_text()
-            if self._current_stage_brief is not None
-            else ""
-        )
-        memory_text = _format_memory_directives(self._current_memory_pack)
-        placement_reference = self._current_memory_pack.placement_reference
-        memory_ids = list(
-            dict.fromkeys(
-                [
-                    *self._current_memory_pack.success_case_ids,
-                    *self._current_memory_pack.failure_case_ids,
-                    *self._current_memory_pack.skill_names,
-                ]
-            )
-        )
+        brief_text = self._current_injection_bundle.brief_text
+        memory_text = self._current_injection_bundle.memory_text
+        placement_reference = self._current_injection_bundle.placement_text
+        final_text = self._current_injection_bundle.final_text
         return StageExecutionEvidence(
             task_spec_source=(
                 "fallback"
@@ -1030,7 +931,7 @@ class SceneExpertHookRunner:
                 if self._current_stage_brief is not None
                 else "disabled_or_unavailable"
             ),
-            retrieved_memory_ids=memory_ids,
+            retrieved_memory_ids=self._current_injection_bundle.selected_memory_ids,
             injected_brief_hash=(
                 hashlib.sha256(brief_text.encode("utf-8")).hexdigest()
                 if brief_text
@@ -1048,13 +949,75 @@ class SceneExpertHookRunner:
                 brief_text and brief_text in str(prompt)
             ),
             designer_prompt_contains_memory=bool(
-                memory_text and memory_text in str(prompt)
+                self._current_injection_bundle.selected_memory_ids
+                and final_text
+                and final_text in str(prompt)
             ),
             placement_reference_injected=bool(
                 placement_reference and placement_reference in str(prompt)
             ),
+            final_injection_hash=(
+                hashlib.sha256(final_text.encode("utf-8")).hexdigest()
+                if final_text
+                else ""
+            ),
+            experiment_signature=self._experiment_signature,
             degraded=self._task_spec.compiler_status == "degraded",
         )
+
+    def _record_memory_pre_stage_activity(self) -> None:
+        """Persist exact retrieval, planner, and injection state for this stage."""
+        try:
+            self._memory_activity.record_pre_stage(
+                stage=self._current_stage,
+                memory_pack=self._current_memory_pack,
+                relation_context=self._current_relation_context,
+                planner_trace=self._current_planner_trace,
+                injection_bundle=self._current_injection_bundle,
+                execution_evidence=self._current_execution_evidence,
+            )
+        except Exception as error:
+            console_logger.warning(
+                "[SceneExpert] Failed to record memory activity for %s: %s",
+                self._current_stage,
+                error,
+            )
+
+    def _record_memory_post_stage_activity(
+        self,
+        *,
+        stage: str,
+        verify_report: StageVerifyReport | None,
+        repair_actions: list[RepairResult],
+        scene_state_path: str,
+    ) -> None:
+        """Persist the critic outcome linked to the exact retrieved records."""
+        try:
+            self._memory_activity.record_post_stage(
+                stage=stage,
+                verify_report=verify_report,
+                repair_actions=repair_actions,
+                scene_state_path=scene_state_path,
+            )
+        except Exception as error:
+            console_logger.warning(
+                "[SceneExpert] Failed to record post-stage memory activity for %s: %s",
+                stage,
+                error,
+            )
+
+    def _capture_main_repair_activity(self) -> None:
+        """Mirror main repair evidence into the SceneExpert audit, read-only."""
+        try:
+            self._memory_activity.capture_main_repair_events(
+                self._scene_debug_dir / "timing" / "repair_events.jsonl",
+                self._scene_debug_dir / "timing" / "stage_working_timing.jsonl",
+            )
+        except Exception as error:
+            console_logger.warning(
+                "[SceneExpert] Failed to capture deterministic repair activity: %s",
+                error,
+            )
 
     def _save_context_bundle(
         self,
@@ -1090,6 +1053,7 @@ class SceneExpertHookRunner:
                     "mode": self._mode,
                     "experiment_name": self._experiment_name,
                     "config_hash": self._config_hash,
+                    "experiment_signature": self._experiment_signature,
                 },
             )
             safe_stage = "".join(
@@ -1353,10 +1317,6 @@ class SceneExpertHookRunner:
                     scene_state_summary="No floor plan has been generated yet.",
                     original_task=self._prompt,
                 )
-                self._current_stage_brief = _apply_memory_to_stage_brief(
-                    self._current_stage_brief,
-                    self._current_memory_pack,
-                )
                 self._current_planner_trace = dict(
                     getattr(self._global_planner, "last_trace", {}) or {}
                 )
@@ -1377,21 +1337,25 @@ class SceneExpertHookRunner:
                     f"GlobalPlanner failed for {stage}, running without StageBrief: {e}"
                 )
 
+        self._current_injection_bundle = build_memory_injection_bundle(
+            stage=stage,
+            stage_brief=self._current_stage_brief,
+            memory_pack=self._current_memory_pack,
+        )
+        self._current_stage_brief = self._current_injection_bundle.enriched_stage_brief
         enhanced = self._prompt
-        if self._component_enabled("prompt_injection"):
-            if self._current_stage_brief is not None:
-                enhanced += "\n\n" + self._current_stage_brief.to_injection_text()
-            memory_directives = _format_memory_directives(self._current_memory_pack)
-            if memory_directives:
-                enhanced += "\n\n" + memory_directives
-            if self._current_memory_pack.placement_reference:
-                enhanced += "\n\n" + self._current_memory_pack.placement_reference
+        if (
+            self._component_enabled("prompt_injection")
+            and self._current_injection_bundle.final_text
+        ):
+            enhanced += "\n\n" + self._current_injection_bundle.final_text
         if self._current_relation_context is not None:
             enhanced += "\n\n" + _format_stage_relation_context(
                 self._current_relation_context
             )
         self._last_injected_floor_plan_prompt = enhanced
         self._current_execution_evidence = self._build_execution_evidence(enhanced)
+        self._record_memory_pre_stage_activity()
         self._save_context_bundle(
             stage=stage,
             agent_role="global_planner",
@@ -1497,6 +1461,12 @@ class SceneExpertHookRunner:
             verify_report=verify_report,
             scene_state_path=str(scene_dir),
             repair_actions=repair_actions,
+        )
+        self._record_memory_post_stage_activity(
+            stage=stage,
+            verify_report=verify_report,
+            repair_actions=repair_actions,
+            scene_state_path=str(scene_dir),
         )
         if self._trace_enabled():
             self._trace_logger.log_stage(
@@ -1618,10 +1588,6 @@ class SceneExpertHookRunner:
                         or self._prompt
                     ),
                 )
-                self._current_stage_brief = _apply_memory_to_stage_brief(
-                    self._current_stage_brief,
-                    self._current_memory_pack,
-                )
                 self._current_planner_trace = dict(
                     getattr(self._global_planner, "last_trace", {}) or {}
                 )
@@ -1642,21 +1608,23 @@ class SceneExpertHookRunner:
                     f"GlobalPlanner failed for {stage}, running without StageBrief: {e}"
                 )
 
-        # --- Step 3: Inject StageBrief into scene.text_description ---
-        memory_directives = _format_memory_directives(self._current_memory_pack)
-        if (
-            self._component_enabled("prompt_injection")
-            and self._current_stage_brief is not None
-        ):
-            brief_text = self._current_stage_brief.to_injection_text()
-            injection_text = brief_text
-            if memory_directives:
-                injection_text += "\n\n" + memory_directives
-            enhanced = scene.text_description + "\n\n" + injection_text
-            scene.text_description = enhanced
+        # --- Step 3: Build and inject one canonical memory-aware bundle ---
+        self._current_injection_bundle = build_memory_injection_bundle(
+            stage=stage,
+            stage_brief=self._current_stage_brief,
+            memory_pack=self._current_memory_pack,
+        )
+        self._current_stage_brief = self._current_injection_bundle.enriched_stage_brief
+        injection_text = self._current_injection_bundle.final_text
+        if self._component_enabled("prompt_injection") and injection_text:
+            scene.text_description += "\n\n" + injection_text
             setattr(scene, "scene_expert_brief", injection_text)
-            if memory_directives:
-                setattr(scene, "scene_expert_memory_directives", memory_directives)
+            if self._current_injection_bundle.memory_text:
+                setattr(
+                    scene,
+                    "scene_expert_memory_directives",
+                    self._current_injection_bundle.memory_text,
+                )
             briefs = getattr(scene, "scene_expert_briefs", {})
             if not isinstance(briefs, dict):
                 briefs = {}
@@ -1665,19 +1633,13 @@ class SceneExpertHookRunner:
             console_logger.debug(
                 f"[SceneExpert] Injected StageBrief into scene.text_description for {stage}"
             )
-        elif self._component_enabled("prompt_injection") and memory_directives:
-            scene.text_description = scene.text_description + "\n\n" + memory_directives
-            setattr(scene, "scene_expert_memory_directives", memory_directives)
-
-        # --- Step 4: Inject placement reference directly (bypasses GlobalPlanner) ---
-        # This gives the designer exact coordinates/surfaces from the best historical
-        # run, so it doesn't have to guess layout from scratch.
-        placement_ref = self._current_memory_pack.placement_reference
-        if self._component_enabled("prompt_injection") and placement_ref:
-            scene.text_description = scene.text_description + "\n\n" + placement_ref
+        if (
+            self._component_enabled("prompt_injection")
+            and self._current_injection_bundle.placement_text
+        ):
             console_logger.info(
                 f"[SceneExpert] Injected placement reference for {stage} "
-                f"({placement_ref.count(chr(10))+1} lines)"
+                f"({self._current_injection_bundle.placement_text.count(chr(10))+1} lines)"
             )
         if self._inject_pending_stage_repair(stage, scene):
             console_logger.info(
@@ -1700,6 +1662,7 @@ class SceneExpertHookRunner:
         self._current_execution_evidence = self._build_execution_evidence(
             scene.text_description
         )
+        self._record_memory_pre_stage_activity()
         if self._trace_enabled():
             self._trace_logger.save_stage_context(
                 stage=stage,
@@ -1844,6 +1807,12 @@ class SceneExpertHookRunner:
             scene_state_path=str(room_dir),
             repair_actions=repair_actions,
         )
+        self._record_memory_post_stage_activity(
+            stage=stage,
+            verify_report=verify_report,
+            repair_actions=repair_actions,
+            scene_state_path=str(room_dir),
+        )
         if self._trace_enabled():
             self._trace_logger.log_stage(
                 stage=stage,
@@ -1924,6 +1893,7 @@ class SceneExpertHookRunner:
                         "prompt": self._prompt,
                         "experiment_name": self._experiment_name,
                         "config_hash": self._config_hash,
+                        "experiment_signature": self._experiment_signature,
                         "task_spec": self._task_spec.model_dump(),
                         "stages": [
                             {
@@ -1939,6 +1909,11 @@ class SceneExpertHookRunner:
             if self._trace_enabled():
                 self._trace_logger.save_memory_update_ops(ops, full_report)
             apply_summary = self._memory_store.apply_updates(ops)
+            self._memory_activity.record_writer(
+                proposed_ops=ops,
+                writer_trace=dict(self._memory_writer.last_trace),
+                apply_summary=apply_summary,
+            )
             if self._trace_enabled():
                 self._trace_logger.record_component_status(
                     "memory_writer",
@@ -1959,6 +1934,22 @@ class SceneExpertHookRunner:
             return apply_summary
         except Exception as e:
             console_logger.warning(f"Memory update failed (non-fatal): {e}")
+            try:
+                self._memory_activity.record_writer(
+                    proposed_ops=[],
+                    writer_trace=(
+                        dict(self._memory_writer.last_trace)
+                        if self._memory_writer is not None
+                        else {}
+                    ),
+                    apply_summary=None,
+                    error=f"{type(e).__name__}: {e}",
+                )
+            except Exception as activity_error:
+                console_logger.warning(
+                    "[SceneExpert] Failed to record MemoryWriter failure: %s",
+                    activity_error,
+                )
             if self._trace_enabled():
                 self._trace_logger.record_component_status(
                     "memory_writer",
@@ -2050,6 +2041,7 @@ class SceneExpertHookRunner:
             )
             trace_path = self._trace_logger.save(trace_dict)
             console_logger.info(f"[SceneExpert] Trace saved to {trace_path}")
+        self._capture_main_repair_activity()
 
         console_logger.info(
             f"[SceneExpert] Scene {self._scene_id:03d} complete: "
@@ -2099,6 +2091,12 @@ class SceneExpertHookRunner:
                 scene_state_path=str(self._scene_debug_dir.parent),
                 repair_actions=[],
             )
+            self._record_memory_post_stage_activity(
+                stage=self._current_stage,
+                verify_report=failure_report,
+                repair_actions=[],
+                scene_state_path=str(self._scene_debug_dir.parent),
+            )
 
         missing_stages = [
             stage
@@ -2129,6 +2127,7 @@ class SceneExpertHookRunner:
         )
         trace_dict.update({"status": "failed", "degraded": True, "error": str(error)})
         self._trace_logger.save(trace_dict)
+        self._capture_main_repair_activity()
 
     def save_partial_trace(self, error: str = "") -> None:
         """Persist a partial trace from an exception path."""
@@ -2136,6 +2135,7 @@ class SceneExpertHookRunner:
             return
         try:
             path = self._trace_logger.save_partial(status="failed", error=error)
+            self._capture_main_repair_activity()
             console_logger.info(f"[SceneExpert] Partial trace saved to {path}")
         except Exception as save_error:
             console_logger.warning(
@@ -2578,6 +2578,7 @@ def build_hook_runner(
         .get("start_stage", "floor_plan")
     )
     config_hash = _stable_config_hash(cfg_dict)
+    experiment_signature = _stable_experiment_signature(cfg_dict)
     trace_logger: TraceLogger | None = None
     if component_flags["trace"]:
         trace_logger = TraceLogger(
@@ -2586,6 +2587,7 @@ def build_hook_runner(
             prompt=prompt,
             experiment_name=cfg_dict.get("name", ""),
             config_hash=config_hash,
+            experiment_signature=experiment_signature,
             task_spec=task_spec.model_dump(mode="json", exclude_none=True),
             task_spec_status={
                 "source": (
@@ -2617,6 +2619,7 @@ def build_hook_runner(
         qwen_model=model,
         experiment_name=cfg_dict.get("name", ""),
         config_hash=config_hash,
+        experiment_signature=experiment_signature,
         start_stage=start_stage,
         intent_contract=intent_contract,
         intent_trace=intent_trace,

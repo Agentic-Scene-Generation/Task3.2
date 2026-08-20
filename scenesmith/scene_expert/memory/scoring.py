@@ -77,12 +77,17 @@ def record_required_objects(record: MemoryRecord) -> list[str]:
         return record.required_objects or record.task_signature
     if isinstance(record, FailureCase):
         return record.required_objects or ([record.object] if record.object else [])
-    return record.required_objects
+    return record.required_objects or record.applicability.required_object_roles
 
 
 def record_room_compatible(record: MemoryRecord, task_spec: SceneTaskSpec) -> bool:
     if isinstance(record, Skill):
-        rooms = list(record.room_types)
+        excluded_rooms = record.applicability.excluded_room_types
+        if excluded_rooms and any(
+            room_compatible(room, task_spec.room_type) for room in excluded_rooms
+        ):
+            return False
+        rooms = [*record.room_types, *record.applicability.room_types]
         if record.room_type:
             rooms.append(record.room_type)
         if not rooms:
