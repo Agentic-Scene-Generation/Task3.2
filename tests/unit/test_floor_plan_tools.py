@@ -93,6 +93,72 @@ def test_opening_free_spans_treats_position_as_left_edge():
     assert opening_free_spans(wall) == [(0.0, 0.85), (2.15, 5.0)]
 
 
+def test_opposed_anchor_pair_uses_an_alternative_opening_free_axis() -> None:
+    layout = HouseLayout()
+    tools = FloorPlanTools(layout=layout, mode="house")
+    result = tools._generate_room_specs_impl(
+        room_specs_json=json.dumps(
+            [
+                {
+                    "type": "living_room",
+                    "prompt": "Living room",
+                    "width": 6.0,
+                    "depth": 5.0,
+                }
+            ]
+        )
+    )
+    assert result.success
+    room = layout.placed_rooms[0]
+    walls = {wall.direction: wall for wall in room.walls}
+    for direction in (WallDirection.EAST, WallDirection.WEST):
+        wall = walls[direction]
+        wall.openings.append(
+            Opening(
+                opening_id=f"blocked_{direction.value}",
+                opening_type=OpeningType.DOOR,
+                position_along_wall=0.0,
+                width=wall.length,
+                height=2.1,
+            )
+        )
+    manifest = FloorPlanReservationManifest(
+        enabled=True,
+        preserve_entrance_route=False,
+        adaptive_window_budget=False,
+        reservations=[
+            FloorPlanReservation(
+                reservation_id="seating-media-axis",
+                kind="opposed_anchor_pair",
+                room_type="living_room",
+                subject_categories=["seating_zone"],
+                target_categories=["entertainment_zone"],
+                min_wall_width_m=2.6,
+            )
+        ],
+    )
+
+    assert validate_floor_plan_reservations(layout, manifest).passed
+
+    for direction in (WallDirection.NORTH, WallDirection.SOUTH):
+        wall = walls[direction]
+        wall.openings.append(
+            Opening(
+                opening_id=f"blocked_{direction.value}",
+                opening_type=OpeningType.WINDOW,
+                position_along_wall=0.0,
+                width=wall.length,
+                height=1.2,
+                sill_height=0.9,
+            )
+        )
+    blocked = validate_floor_plan_reservations(layout, manifest)
+    assert any(
+        issue["issue_type"] == "missing_opposed_opening_free_media_axis"
+        for issue in blocked.issues
+    )
+
+
 def _opening_adjacency_layout() -> tuple[HouseLayout, object]:
     layout = HouseLayout()
     tools = FloorPlanTools(layout=layout, mode="house")

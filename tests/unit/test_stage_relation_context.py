@@ -195,6 +195,62 @@ def test_floor_plan_manifest_projects_media_zones_and_explicit_windows() -> None
     )
 
 
+def test_functional_seating_and_media_zones_reserve_opening_free_axis() -> None:
+    context = StageRelationProjector(
+        floor_plan_reservation_gate_enabled=True,
+    ).project(
+        stage="floor_plan",
+        task_spec=_task_spec(
+            room_type="living_room",
+            functional_zones=["seating_zone", "entertainment_zone"],
+        ),
+        intent_contract=None,
+    )
+
+    manifest = context.floor_plan_manifest
+    assert manifest is not None
+    pairs = [
+        item for item in manifest.reservations if item.kind == "opposed_anchor_pair"
+    ]
+    assert len(pairs) == 1
+    assert pairs[0].subject_categories == ["seating_zone"]
+    assert pairs[0].target_categories == ["entertainment_zone"]
+
+
+def test_furniture_projection_resolves_current_opening_reservations() -> None:
+    scene = SimpleNamespace(
+        room_geometry=SimpleNamespace(
+            length=6.0,
+            width=5.0,
+            openings=[
+                {
+                    "opening_id": "door_1",
+                    "opening_type": "door",
+                    "wall_direction": "west",
+                    "center_world": [-3.0, 0.75, 1.05],
+                    "width": 0.9,
+                    "clearance_bbox_min": [-3.0, 0.3, 0.0],
+                    "clearance_bbox_max": [-2.1, 1.2, 2.1],
+                }
+            ],
+        )
+    )
+
+    context = StageRelationProjector().project(
+        stage="furniture",
+        task_spec=_task_spec(room_type="living_room"),
+        intent_contract=None,
+        scene=scene,
+    )
+
+    resolved = context.resolved_opening_reservations
+    assert resolved["fully_opening_free_walls"] == ["north", "south", "east"]
+    assert resolved["zones"][0]["zone_id"] == "door_1"
+    injected = _format_stage_relation_context(context)
+    assert "Resolved Floor Plan Opening Reservations" in injected
+    assert "door_1" in injected
+
+
 def test_strict_window_adjacency_projects_v2_capacity_and_window_count() -> None:
     context = StageRelationProjector(
         floor_plan_reservation_gate_enabled=True,
@@ -269,9 +325,7 @@ def test_loose_window_near_requires_window_without_adjacency_capacity() -> None:
     manifest = context.floor_plan_manifest
     assert manifest is not None
     assert manifest.explicit_window_count == 1
-    assert not any(
-        item.kind == "opening_adjacency" for item in manifest.reservations
-    )
+    assert not any(item.kind == "opening_adjacency" for item in manifest.reservations)
 
 
 def test_floor_plan_manifest_scopes_multi_room_capacity_to_all_rooms() -> None:

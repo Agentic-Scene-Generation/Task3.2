@@ -755,6 +755,40 @@ class SceneExpertMemoryTest(unittest.TestCase):
         self.assertIn("original_task=A study", bundle.scene_summary)
         self.assertNotIn("Mutable StageBrief", bundle.scene_summary)
 
+    def test_stage_context_bundle_derives_opening_clearance_zones(self) -> None:
+        scene = types.SimpleNamespace(
+            room_geometry=types.SimpleNamespace(
+                length=6.0,
+                width=5.0,
+                openings=[
+                    {
+                        "opening_id": "door_1",
+                        "opening_type": "door",
+                        "wall_direction": "west",
+                        "center_world": [-3.0, 0.0, 1.05],
+                        "width": 0.9,
+                        "clearance_bbox_min": [-3.0, -0.45, 0.0],
+                        "clearance_bbox_max": [-2.1, 0.45, 2.1],
+                    }
+                ],
+            ),
+            objects={},
+            text_description="A living room.",
+        )
+
+        bundle = build_stage_context_bundle(
+            stage="furniture",
+            agent_role="designer",
+            event="request_initial_design",
+            scene=scene,
+        )
+
+        self.assertEqual(len(bundle.forbidden_zones), 1)
+        self.assertEqual(bundle.forbidden_zones[0].zone_id, "door_1")
+        self.assertEqual(bundle.forbidden_zones[0].severity, "hard")
+        self.assertIn("fully_opening_free_walls=north,south,east", bundle.scene_summary)
+        self.assertIn("door_1", bundle.to_llm_text())
+
     def test_stage_working_memory_commits_public_failure_event(self) -> None:
         class FakeTransform:
             def translation(self):

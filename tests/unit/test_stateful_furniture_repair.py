@@ -919,7 +919,12 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
             events.append("designer")
             return "designer report"
 
+        agent._repair_forbidden_zone_conflicts = (
+            lambda include_windows=False: events.append("openings") or True
+        )
         agent._repair_initial_contract_layout = lambda: events.append("repair") or []
+        agent.rendering_manager = SimpleNamespace(clear_cache=MagicMock())
+        agent._reset_critic_candidate_cache = MagicMock()
         with patch.object(
             BaseStatefulAgent,
             "_request_initial_design_impl",
@@ -928,7 +933,9 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
             report = asyncio.run(agent._request_initial_design_impl())
 
         self.assertEqual(report, "designer report")
-        self.assertEqual(events, ["designer", "repair"])
+        self.assertEqual(events, ["designer", "openings", "repair"])
+        agent.rendering_manager.clear_cache.assert_called_once_with()
+        agent._reset_critic_candidate_cache.assert_called_once_with()
 
     @unittest.skipIf(
         StatefulFurnitureAgent is None,

@@ -38,6 +38,7 @@ from scenesmith.agent_utils.clearance_zones import (
 )
 from scenesmith.agent_utils.furniture_layout_planning import (
     build_bedroom_anchor_plan,
+    format_opening_aware_reservation_guidance,
     format_bedroom_anchor_guidance,
     is_bedroom_scene,
 )
@@ -676,11 +677,18 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         }
 
     def _build_initial_design_input(self, instruction: str) -> str | list[dict]:
-        """Add deterministic room-aware bedroom guidance to the initial design."""
+        """Add deterministic room-aware guidance to the initial design."""
         instruction = append_placement_order_reference(
             instruction,
             self._placement_order_reference,
         )
+        opening_guidance = format_opening_aware_reservation_guidance(self.scene)
+        if opening_guidance:
+            instruction = (
+                f"{instruction}\n\n"
+                "# Deterministic Opening-Aware Floor Reservations\n"
+                f"{opening_guidance}"
+            )
         safety_cfg = getattr(self.cfg, "furniture_safety_controller", None)
         bedroom_cfg = getattr(safety_cfg, "bedroom_layout", None)
         guidance = format_bedroom_anchor_guidance(
@@ -705,7 +713,14 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         may move furniture before that first critique.
         """
         result = await super()._request_initial_design_impl()
+        opening_fixed = self._repair_forbidden_zone_conflicts(include_windows=False)
         self._repair_initial_contract_layout()
+        if opening_fixed:
+            self.rendering_manager.clear_cache()
+            self._reset_critic_candidate_cache()
+            console_logger.info(
+                "Cleared hard door/opening reservations before first critique"
+            )
         return result
 
     def _is_furniture_relation_candidate_hard_valid(self, scene: RoomScene) -> bool:

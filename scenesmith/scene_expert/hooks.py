@@ -230,11 +230,23 @@ def _format_memory_directives(memory_pack: MemoryPack) -> str:
 
 def _format_stage_relation_context(context: StageRelationContext) -> str:
     """Render the exact hard contract for the active stage."""
-    return (
+    text = (
         f"=== SceneExpert Hard Intent Contract: {context.stage} (authoritative) ===\n"
         + json.dumps(context.hard_constraints, ensure_ascii=False, sort_keys=True)
         + "\n=== End SceneExpert Hard Intent Contract ==="
     )
+    if context.resolved_opening_reservations:
+        text += (
+            "\n\n=== Resolved Floor Plan Opening Reservations "
+            "(authoritative geometry) ===\n"
+            + json.dumps(
+                context.resolved_opening_reservations,
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            + "\n=== End Resolved Floor Plan Opening Reservations ==="
+        )
+    return text
 
 
 def _attach_stage_relation_context(

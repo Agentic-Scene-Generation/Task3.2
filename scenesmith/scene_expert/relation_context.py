@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from typing import Any
 
+from scenesmith.agent_utils.furniture_layout_planning import (
+    build_opening_aware_reservation_plan,
+)
 from scenesmith.scene_expert.schemas import (
     FloorPlanReservation,
     FloorPlanReservationManifest,
@@ -98,9 +101,7 @@ def _floor_plan_reservations(constraints: list[dict[str, Any]]) -> list[dict[str
         }:
             furniture = target if subject_category == "window" else subject
             window = subject if subject_category == "window" else target
-            furniture_category = canonical_selector_category(
-                furniture.get("category")
-            )
+            furniture_category = canonical_selector_category(furniture.get("category"))
             if not furniture_category or furniture_category == "window":
                 continue
             source_id = str(constraint.get("constraint_id") or "")
@@ -243,6 +244,50 @@ def _media_pair_reservations(
     return reservations
 
 
+def _functional_zone_media_reservation(
+    task_spec: SceneTaskSpec, room_type: str
+) -> FloorPlanReservation | None:
+    """Derive a viewing axis when the task declares seating and media zones.
+
+    Some prompts describe the viewing relationship at a group level, so the
+    intent compiler may retain the two functional zones without emitting a
+    direct sofa-to-media relation.  The floor plan still needs one aligned,
+    opening-free wall pair for those zones.
+    """
+    zones = [canonical_selector_category(zone) for zone in task_spec.functional_zones]
+    seating = next(
+        (
+            zone
+            for zone in zones
+            if any(
+                token in zone.split("_") for token in ("seating", "living", "lounge")
+            )
+        ),
+        "",
+    )
+    media = next(
+        (
+            zone
+            for zone in zones
+            if any(
+                token in zone.split("_")
+                for token in ("entertainment", "media", "viewing")
+            )
+        ),
+        "",
+    )
+    if not seating or not media:
+        return None
+    return FloorPlanReservation(
+        reservation_id=f"media_zone_pair__{seating}__{media}",
+        kind="opposed_anchor_pair",
+        room_type=room_type,
+        subject_categories=[seating],
+        target_categories=[media],
+        min_wall_width_m=2.6,
+    )
+
+
 def _floor_plan_manifest(
     *,
     constraints: list[dict[str, Any]],
@@ -259,8 +304,7 @@ def _floor_plan_manifest(
         reservation_kind = str(raw.get("reservation_kind") or "wall_anchor")
         reservations.append(
             FloorPlanReservation(
-                reservation_id=source_id
-                or f"{reservation_kind}__{category}__{index}",
+                reservation_id=source_id or f"{reservation_kind}__{category}__{index}",
                 kind=reservation_kind,
                 source_constraint_ids=[source_id] if source_id else [],
                 room_type=room_scope,
@@ -271,7 +315,14 @@ def _floor_plan_manifest(
                 count=_selector_count(subject),
             )
         )
-    reservations.extend(_media_pair_reservations(constraints, room_scope))
+    media_reservations = _media_pair_reservations(constraints, room_scope)
+    reservations.extend(media_reservations)
+    if not media_reservations:
+        zone_media_reservation = _functional_zone_media_reservation(
+            task_spec, room_scope
+        )
+        if zone_media_reservation is not None:
+            reservations.append(zone_media_reservation)
     for index, zone in enumerate(task_spec.functional_zones):
         canonical = canonical_selector_category(zone)
         if not canonical:
@@ -338,6 +389,11 @@ class StageRelationProjector:
                 _floor_plan_reservations(constraints) if stage == "floor_plan" else []
             ),
             floor_plan_manifest=manifest,
+            resolved_opening_reservations=(
+                build_opening_aware_reservation_plan(scene).to_dict()
+                if scene is not None and stage != "floor_plan"
+                else {}
+            ),
             contract_constraint_count=len(constraints),
             projected_constraint_count=len(hard_constraints),
             projection_coverage=1.0,

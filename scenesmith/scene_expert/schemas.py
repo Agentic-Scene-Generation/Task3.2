@@ -221,6 +221,7 @@ class StageRelationContext(BaseModel):
     hard_constraints: list[dict[str, Any]] = Field(default_factory=list)
     floor_plan_reservations: list[dict[str, Any]] = Field(default_factory=list)
     floor_plan_manifest: FloorPlanReservationManifest | None = None
+    resolved_opening_reservations: dict[str, Any] = Field(default_factory=dict)
     contract_constraint_count: int = 0
     projected_constraint_count: int = 0
     projection_coverage: float = Field(default=1.0, ge=0.0, le=1.0)

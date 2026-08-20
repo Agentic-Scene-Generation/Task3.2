@@ -18,6 +18,9 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from scenesmith.agent_utils.furniture_layout_planning import (
+    build_opening_aware_reservation_plan,
+)
 from scenesmith.scene_expert.schemas import (
     MemoryPack,
     SceneTaskSpec,
@@ -268,6 +271,12 @@ def build_scene_summary(scene: Any | None) -> str:
                 typ = getattr(typ, "value", typ)
                 opening_bits.append(f"{idx}:{typ or 'opening'}@{wall or 'wall'}")
             parts.append("openings=" + ", ".join(opening_bits))
+            reservation_plan = build_opening_aware_reservation_plan(scene)
+            if reservation_plan.fully_opening_free_walls:
+                parts.append(
+                    "fully_opening_free_walls="
+                    + ",".join(reservation_plan.fully_opening_free_walls)
+                )
     # SceneExpert may append a StageBrief, memory, or previous critique to the
     # mutable scene description.  A context bundle shared with a critic must
     # retain the user's immutable task as its semantic source; otherwise a
@@ -307,6 +316,26 @@ def build_stage_context_bundle(
                 objects.append(_object_context(str(object_id), obj))
             except Exception:
                 continue
+
+    if forbidden_zones is None and scene is not None:
+        reservation_plan = build_opening_aware_reservation_plan(scene)
+        forbidden_zones = [
+            ForbiddenZone(
+                zone_id=zone.zone_id,
+                zone_type=zone.opening_type,
+                severity=zone.severity,
+                wall=zone.wall,
+                bounds_xy=[
+                    zone.bounds_min[0],
+                    zone.bounds_min[1],
+                    zone.bounds_max[0],
+                    zone.bounds_max[1],
+                ],
+                source="resolved_room_geometry",
+                clearance_m=reservation_plan.opening_margin_m,
+            )
+            for zone in reservation_plan.zones
+        ]
 
     retrieved_memory = {}
     if memory_pack is not None:

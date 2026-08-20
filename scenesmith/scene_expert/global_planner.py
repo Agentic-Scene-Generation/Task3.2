@@ -82,6 +82,10 @@ Guidelines:
   later-stage wall anchors. Reserve a continuous wall segment for every listed
   object; doors and windows must not intersect a reserved segment. Do not move
   a later object away from its explicit required wall merely to keep an opening.
+- After floor_plan, Resolved Opening Reservations contain authoritative room
+  geometry. Keep furniture out of hard door/open clearances. Place tall or focal
+  wall-backed furniture only on a continuous usable segment that does not cross
+  a window; prefer a fully opening-free wall when it satisfies the task relation.
 - Functional zones named only through later furniture (for example, living,
   dining, work, or storage areas) are not architectural partitions. At
   floor_plan, make those later arrangements feasible through dimensions,
@@ -601,9 +605,7 @@ def _add_floor_plan_reservation_guidance(
                 "aligned opening-free spans on opposed walls for each media-viewing pair"
             )
         opening_adjacency = [
-            item
-            for item in manifest.reservations
-            if item.kind == "opening_adjacency"
+            item for item in manifest.reservations if item.kind == "opening_adjacency"
         ]
         if opening_adjacency:
             details.append(
@@ -1095,6 +1097,16 @@ class GlobalPlanner:
                     "## Architectural Surface Reservations (hard)",
                     json.dumps(
                         context.relation_context.floor_plan_reservations,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ),
+                ]
+            if context.relation_context.resolved_opening_reservations:
+                parts += [
+                    "",
+                    "## Resolved Opening Reservations (authoritative geometry)",
+                    json.dumps(
+                        context.relation_context.resolved_opening_reservations,
                         ensure_ascii=False,
                         sort_keys=True,
                     ),
