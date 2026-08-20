@@ -16,6 +16,7 @@ from pathlib import Path
 def convert_checkpoint(model_dir: Path, overwrite: bool = False) -> Path:
     """Convert ``pytorch_model.bin`` in ``model_dir`` to ``model.safetensors``."""
     import torch
+
     from safetensors.torch import save_file
 
     source = model_dir / "pytorch_model.bin"

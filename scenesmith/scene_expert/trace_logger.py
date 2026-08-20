@@ -559,7 +559,9 @@ class TraceLogger:
                         entry.stage_brief.model_dump() if entry.stage_brief else None
                     ),
                     "verify_report": (
-                        entry.verify_report.model_dump() if entry.verify_report else None
+                        entry.verify_report.model_dump()
+                        if entry.verify_report
+                        else None
                     ),
                     "repair_actions": [
                         action.model_dump() for action in entry.repair_actions

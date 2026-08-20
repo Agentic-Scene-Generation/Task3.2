@@ -2081,9 +2081,9 @@ def build_hook_runner(
     exclude_source_task_id = ""
     ret_cfg = memory_cfg.get("retrieval", {}) or {}
     if _cfg_bool(ret_cfg.get("exclude_same_task"), True):
-        exclude_source_task_id = "task_" + hashlib.sha256(
-            prompt.encode("utf-8")
-        ).hexdigest()[:16]
+        exclude_source_task_id = (
+            "task_" + hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
+        )
     use_memory_store = any(
         component_flags[name]
         for name in (

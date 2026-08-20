@@ -231,9 +231,7 @@ class HybridMemoryRetriever:
             "failure": sum(
                 record.stage == stage for record in self._store.active_failure_cases
             ),
-            "skill": sum(
-                record.stage == stage for record in self._store.active_skills
-            ),
+            "skill": sum(record.stage == stage for record in self._store.active_skills),
         }
 
     def _retrieve_bank(
@@ -475,9 +473,7 @@ class HybridMemoryRetriever:
             and indexed_revision != self._store.revision
         ):
             return False
-        if indexed_fingerprint and indexed_fingerprint != _records_fingerprint(
-            records
-        ):
+        if indexed_fingerprint and indexed_fingerprint != _records_fingerprint(records):
             return False
         return True
 
@@ -683,12 +679,8 @@ class HybridMemoryRetriever:
             return
         try:
             self._timing_path.parent.mkdir(parents=True, exist_ok=True)
-            with self._timing_path.open(
-                "a", encoding="utf-8", newline="\n"
-            ) as file:
-                file.write(
-                    json.dumps(payload, ensure_ascii=False, default=str) + "\n"
-                )
+            with self._timing_path.open("a", encoding="utf-8", newline="\n") as file:
+                file.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
         except OSError as error:
             # Observability must never turn a valid retrieval into an empty pack.
             console_logger.warning(
@@ -709,9 +701,7 @@ def _zero_result_reason(
         return ""
     if not any(active_stage_records.values()):
         return "no_active_stage_records"
-    if bank_timings and not any(
-        bool(bank.get("index_found")) for bank in bank_timings
-    ):
+    if bank_timings and not any(bool(bank.get("index_found")) for bank in bank_timings):
         return "no_index_available"
 
     candidates = sum(int(bank.get("candidate_count", 0)) for bank in bank_timings)

@@ -3,7 +3,6 @@
 import time
 
 from contextlib import nullcontext
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 

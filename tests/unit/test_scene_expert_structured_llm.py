@@ -135,9 +135,7 @@ class SceneExpertStructuredLLMTest(unittest.TestCase):
 
         self.assertTrue(result.success)
         call = fake.calls[0]
-        self.assertFalse(
-            call["extra_body"]["chat_template_kwargs"]["enable_thinking"]
-        )
+        self.assertFalse(call["extra_body"]["chat_template_kwargs"]["enable_thinking"])
         self.assertEqual("Return JSON.", call["messages"][0]["content"])
 
     def test_dataclass_response_uses_the_same_structured_contract(self):

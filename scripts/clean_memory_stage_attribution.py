@@ -18,7 +18,6 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
-
 KNOWN_P1_POLLUTED_FAILURE_IDS = (
     "trace_000000_wall_mounted_collision",
     "failure_bedroom_ceiling_mounted_e1aa559564a1",

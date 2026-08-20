@@ -12,9 +12,7 @@ class SceneArtifactOrderingTest(unittest.TestCase):
             / "indoor_scene_generation.py"
         )
         source = source_path.read_text(encoding="utf-8")
-        snapshot_loop = source.index(
-            "for name, types in snapshots[:snapshot_count]:"
-        )
+        snapshot_loop = source.index("for name, types in snapshots[:snapshot_count]:")
         final_verification = source.index(
             'final_scene_path=str(scene_dir / "combined_house")',
             snapshot_loop,

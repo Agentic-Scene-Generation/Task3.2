@@ -13,20 +13,21 @@ from __future__ import annotations
 
 import logging
 import re
+
 from pathlib import Path
 
 import yaml
 
-from scenesmith.scenebenchmark_critic.object_taxonomy import (
-    canonical_object_category,
-    categories_are_equivalent,
-)
 from scenesmith.scene_expert.schemas import (
     FullVerifyReport,
     SceneTaskSpec,
     StageBrief,
     StageVerifyReport,
     VerifyIssue,
+)
+from scenesmith.scenebenchmark_critic.object_taxonomy import (
+    canonical_object_category,
+    categories_are_equivalent,
 )
 
 console_logger = logging.getLogger(__name__)

@@ -1,9 +1,8 @@
-import unittest
-
 import json
 import os
 import sys
 import types
+import unittest
 
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -12,7 +11,22 @@ from unittest.mock import patch
 
 import numpy as np
 
-from scripts.build_memory_index import build_memory_indexes
+from scenesmith.agent_utils.scoring import CategoryScore, FurnitureCritiqueWithScores
+from scenesmith.agent_utils.stage_working_memory import StageWorkingMemory
+from scenesmith.scene_expert.context_bundle import (
+    build_llm_call_debug_record,
+    build_stage_context_bundle,
+)
+from scenesmith.scene_expert.global_planner import (
+    _SYSTEM_PROMPT,
+    GlobalPlanner,
+    _reconcile_floor_plan_zone_guidance,
+    _reconcile_stage_brief,
+)
+from scenesmith.scene_expert.hooks import (
+    SceneExpertHookRunner,
+    _reconcile_task_spec_stage_ownership,
+)
 from scenesmith.scene_expert.memory.embedding import (
     SceneMemoryEmbedder,
     resolve_memory_embedding_model_dir,
@@ -29,20 +43,6 @@ from scenesmith.scene_expert.memory.schemas import (
 from scenesmith.scene_expert.memory.store import FastMemoryStore
 from scenesmith.scene_expert.memory.text_builder import build_embedding_text
 from scenesmith.scene_expert.memory.writer import MemoryWriter
-from scenesmith.scene_expert.context_bundle import (
-    build_llm_call_debug_record,
-    build_stage_context_bundle,
-)
-from scenesmith.scene_expert.hooks import (
-    SceneExpertHookRunner,
-    _reconcile_task_spec_stage_ownership,
-)
-from scenesmith.scene_expert.global_planner import (
-    GlobalPlanner,
-    _SYSTEM_PROMPT,
-    _reconcile_floor_plan_zone_guidance,
-    _reconcile_stage_brief,
-)
 from scenesmith.scene_expert.repair_taxonomy import (
     FailureCategory,
     classify_hard_reasons,
@@ -56,8 +56,6 @@ from scenesmith.scene_expert.schemas import (
     StageVerifyReport,
     VerifyIssue,
 )
-from scenesmith.agent_utils.scoring import CategoryScore, FurnitureCritiqueWithScores
-from scenesmith.agent_utils.stage_working_memory import StageWorkingMemory
 from scenesmith.scene_expert.task_compiler import (
     _fallback_spec_from_prompt,
     _normalize_stage_ownership,
@@ -67,6 +65,7 @@ from scenesmith.scene_expert.verifier import (
     StageVerifier,
     _map_scenesmith_scores,
 )
+from scripts.build_memory_index import build_memory_indexes
 
 
 class SceneExpertMemoryTest(unittest.TestCase):

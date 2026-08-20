@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+
 from pathlib import Path
 from typing import Literal
 
@@ -30,9 +31,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--model",
-        default=os.environ.get(
-            "SCENEEXPERT_MODEL_ID", "Qwen/Qwen3.5-35B-A3B"
-        ),
+        default=os.environ.get("SCENEEXPERT_MODEL_ID", "Qwen/Qwen3.5-35B-A3B"),
     )
     parser.add_argument(
         "--base-url",
@@ -89,8 +88,7 @@ def main() -> int:
             {
                 "role": "user",
                 "content": (
-                    'Return {"status":"ok","role":'
-                    '"scene_expert_structured_smoke"}.'
+                    'Return {"status":"ok","role":' '"scene_expert_structured_smoke"}.'
                 ),
             },
         ],

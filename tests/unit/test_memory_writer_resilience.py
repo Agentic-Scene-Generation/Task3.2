@@ -201,9 +201,9 @@ class MemoryWriterResilienceTest(unittest.TestCase):
             llm_client=_FakeStructuredClient(StructuredLLMResult(value=response)),
         )
         evidence = _evidence(hard_failure=False)
-        evidence["stages"][0]["verify_report"]["critique_summary"] = (
-            "No deterministic hard failure was found; only a possible visual overlap."
-        )
+        evidence["stages"][0]["verify_report"][
+            "critique_summary"
+        ] = "No deterministic hard failure was found; only a possible visual overlap."
 
         ops = writer.write(
             "Trace: trace_000001",

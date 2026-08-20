@@ -115,7 +115,11 @@ class MemoryWriter:
         retry_tokens = int(
             os.environ.get(
                 "SCENEEXPERT_MEMORY_WRITER_RETRY_MAX_TOKENS",
-                retry_max_tokens if retry_max_tokens is not None else max(max_tokens, 4096),
+                (
+                    retry_max_tokens
+                    if retry_max_tokens is not None
+                    else max(max_tokens, 4096)
+                ),
             )
         )
         self._profile = StructuredLLMProfile(
@@ -413,7 +417,10 @@ class MemoryWriter:
                 if (
                     not full_report.pass_scene
                     or full_report.overall_score < success_threshold
-                    or (has_structured_evidence and not self._stage_passed(stage_evidence))
+                    or (
+                        has_structured_evidence
+                        and not self._stage_passed(stage_evidence)
+                    )
                 ):
                     console_logger.info(
                         "MemoryWriter: rejected success %s because final/stage "
@@ -431,10 +438,14 @@ class MemoryWriter:
                 stage_evidence = self._stage_evidence(evidence, record.stage)
                 if has_structured_evidence:
                     repair_verified = self._repair_verified(stage_evidence)
-                    deterministic = self._deterministic_failure_in_evidence(stage_evidence)
+                    deterministic = self._deterministic_failure_in_evidence(
+                        stage_evidence
+                    )
                 else:
                     repair_verified = record.repair_verified
-                    deterministic = self._detect_deterministic_failure(record.model_dump())
+                    deterministic = self._detect_deterministic_failure(
+                        record.model_dump()
+                    )
                 if not repair_verified and not deterministic:
                     console_logger.info(
                         "MemoryWriter: rejected unverified/non-deterministic failure %s",
@@ -464,7 +475,10 @@ class MemoryWriter:
                 if (
                     not full_report.pass_scene
                     or full_report.overall_score < success_threshold
-                    or (has_structured_evidence and not self._stage_passed(stage_evidence))
+                    or (
+                        has_structured_evidence
+                        and not self._stage_passed(stage_evidence)
+                    )
                     or len(self._clean_list(record.procedure)) < 2
                 ):
                     console_logger.info(
@@ -483,7 +497,9 @@ class MemoryWriter:
         if record.stage not in _SUPPORTED_STAGES or not record.successful_pattern:
             return None
         if not record.embedding_text:
-            record = record.model_copy(update={"embedding_text": build_embedding_text(record)})
+            record = record.model_copy(
+                update={"embedding_text": build_embedding_text(record)}
+            )
         return record
 
     def _validate_failure(self, content: dict[str, Any]) -> FailureCase | None:
@@ -495,7 +511,9 @@ class MemoryWriter:
         if record.stage not in _SUPPORTED_STAGES or not record.bad_pattern:
             return None
         if not record.embedding_text:
-            record = record.model_copy(update={"embedding_text": build_embedding_text(record)})
+            record = record.model_copy(
+                update={"embedding_text": build_embedding_text(record)}
+            )
         return record
 
     def _validate_skill(self, content: dict[str, Any]) -> Skill | None:
@@ -507,7 +525,9 @@ class MemoryWriter:
         if record.stage not in _SUPPORTED_STAGES:
             return None
         if not record.embedding_text:
-            record = record.model_copy(update={"embedding_text": build_embedding_text(record)})
+            record = record.model_copy(
+                update={"embedding_text": build_embedding_text(record)}
+            )
         return record
 
     def _canonical_context(
@@ -516,7 +536,9 @@ class MemoryWriter:
         trace_summary: str,
     ) -> dict[str, Any]:
         task_spec = dict(evidence_payload.get("task_spec") or {})
-        prompt = str(evidence_payload.get("prompt") or self._extract_prompt(trace_summary))
+        prompt = str(
+            evidence_payload.get("prompt") or self._extract_prompt(trace_summary)
+        )
         prompt_fingerprint = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
         trace_id = str(
             evidence_payload.get("trace_id") or self._extract_trace_id(trace_summary)
@@ -618,7 +640,10 @@ class MemoryWriter:
         report = self._stage_report(stage_evidence)
         hard_report = report.get("hard_check_report") or {}
         if isinstance(hard_report, dict) and hard_report:
-            if hard_report.get("hard_valid") is False or hard_report.get("pass") is False:
+            if (
+                hard_report.get("hard_valid") is False
+                or hard_report.get("pass") is False
+            ):
                 return True
             if hard_report.get("failed_checks") or hard_report.get("hard_failures"):
                 return True
@@ -628,7 +653,9 @@ class MemoryWriter:
         evidence_text = json.dumps(
             report.get("issues", []), ensure_ascii=False, default=str
         ).lower()
-        return any(keyword in evidence_text for keyword in _DETERMINISTIC_FAILURE_KEYWORDS)
+        return any(
+            keyword in evidence_text for keyword in _DETERMINISTIC_FAILURE_KEYWORDS
+        )
 
     def _detect_deterministic_failure(self, content: dict[str, Any]) -> bool:
         text = " ".join(
@@ -698,8 +725,7 @@ class MemoryWriter:
             "Analyze this terminal run, which may have completed or failed. Treat "
             "evidence.verify_report and final_report as authoritative. Never infer "
             "success from a failed final_report. Return only schema-valid reusable "
-            "candidates.\n"
-            + json.dumps(payload, ensure_ascii=False, default=str)
+            "candidates.\n" + json.dumps(payload, ensure_ascii=False, default=str)
         )
 
     def _save_debug_payload(

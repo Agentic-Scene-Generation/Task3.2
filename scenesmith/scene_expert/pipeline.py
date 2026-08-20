@@ -30,17 +30,18 @@ import json
 import logging
 import os
 import time
+
 from pathlib import Path
 
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig
 
 from scenesmith.scene_expert.global_planner import GlobalPlanner
-from scenesmith.scene_expert.harness import STAGE_ORDER, Harness
+from scenesmith.scene_expert.harness import Harness
 from scenesmith.scene_expert.memory.retriever import MemoryRetriever
 from scenesmith.scene_expert.memory.store import FastMemoryStore
 from scenesmith.scene_expert.memory.writer import MemoryWriter
-from scenesmith.scene_expert.repair_controller import RepairController
 from scenesmith.scene_expert.relation_context import StageRelationProjector
+from scenesmith.scene_expert.repair_controller import RepairController
 from scenesmith.scene_expert.schemas import (
     FullVerifyReport,
     MemoryPack,
@@ -256,8 +257,8 @@ class SceneExpertPipeline:
             (scene_path, trace_dict, full_report) tuple.
         """
         from scenesmith.experiments.indoor_scene_generation import (
-            _generate_single_scene,
             PIPELINE_STAGES,
+            _generate_single_scene,
         )
 
         scene_dir = output_dir / f"scene_{scene_id:03d}"
@@ -288,9 +289,7 @@ class SceneExpertPipeline:
 
         # Compile hard relations from the original prompt plus the normalized
         # SceneTaskSpec. The helper is a no-op when the embedded critic is disabled.
-        from scenesmith.scene_expert.hooks import (
-            _compile_intent_contract_if_enabled,
-        )
+        from scenesmith.scene_expert.hooks import _compile_intent_contract_if_enabled
 
         _intent_contract, intent_trace = _compile_intent_contract_if_enabled(
             prompt=prompt,

@@ -4,8 +4,8 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from scenesmith.scene_expert.memory.schemas import MemoryUpdateOp, SuccessCase
 from scenesmith.scene_expert.memory.retriever import MemoryRetriever
+from scenesmith.scene_expert.memory.schemas import MemoryUpdateOp, SuccessCase
 from scenesmith.scene_expert.memory.store import FastMemoryStore
 from scenesmith.scene_expert.schemas import SceneTaskSpec
 
@@ -55,13 +55,15 @@ class FastMemoryStoreV2Test(unittest.TestCase):
                             "case_2",
                             "run_2",
                             "trace_2",
-                        ).model_copy(
+                        )
+                        .model_copy(
                             update={
                                 "successful_pattern": [
                                     "reserve wardrobe clearance before decoration"
                                 ]
                             }
-                        ).model_dump(),
+                        )
+                        .model_dump(),
                     ),
                 ]
             )
@@ -98,9 +100,7 @@ class FastMemoryStoreV2Test(unittest.TestCase):
             self.assertEqual(
                 ["trace_1", "trace_2"], second.success_cases[0].evidence_refs
             )
-            self.assertEqual(
-                ["run_1", "run_2"], second.success_cases[0].source_run_ids
-            )
+            self.assertEqual(["run_1", "run_2"], second.success_cases[0].source_run_ids)
 
             self.assertEqual(1, len(first.success_cases))
             self.assertTrue(first.refresh_if_changed())

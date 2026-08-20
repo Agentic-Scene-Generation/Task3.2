@@ -13,7 +13,6 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-
 MEMORY_SCHEMA_VERSION = "sceneexpert.memory.v2"
 MemoryStatus = Literal["candidate", "active", "quarantined"]
 MemorySource = Literal["llm", "deterministic", "legacy", "imported"]

@@ -13,7 +13,6 @@ same hook call. Actual re-execution requires explicit pipeline-level support.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 
 from scenesmith.scene_expert.memory.schemas import FailureCase
 from scenesmith.scene_expert.memory.store import FastMemoryStore

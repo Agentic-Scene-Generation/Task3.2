@@ -301,13 +301,21 @@ class FastMemoryStore:
 
     def add_success_case(self, case: SuccessCase) -> bool:
         summary = self.apply_updates(
-            [MemoryUpdateOp(op="ADD", memory_type="success_case", content=case.model_dump())]
+            [
+                MemoryUpdateOp(
+                    op="ADD", memory_type="success_case", content=case.model_dump()
+                )
+            ]
         )
         return bool(summary["changed"])
 
     def add_failure_case(self, case: FailureCase) -> bool:
         summary = self.apply_updates(
-            [MemoryUpdateOp(op="ADD", memory_type="failure_case", content=case.model_dump())]
+            [
+                MemoryUpdateOp(
+                    op="ADD", memory_type="failure_case", content=case.model_dump()
+                )
+            ]
         )
         return bool(summary["changed"])
 
@@ -399,7 +407,9 @@ class FastMemoryStore:
                         "failure_case": "failure",
                         "skill": "skill",
                     }[memory_type]
-                    bank_revisions[bank_name] = int(bank_revisions.get(bank_name, 0)) + 1
+                    bank_revisions[bank_name] = (
+                        int(bank_revisions.get(bank_name, 0)) + 1
+                    )
                 self._manifest.update(
                     {
                         "schema_version": MANIFEST_SCHEMA_VERSION,
