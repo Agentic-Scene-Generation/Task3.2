@@ -19,6 +19,7 @@ _COMPONENT_NAMES = (
     "critic_bridge",
     "trace",
     "structured_llm",
+    "slow_memory_capture",
 )
 
 _MODE_COMPONENTS = {
@@ -34,6 +35,7 @@ _MODE_COMPONENTS = {
             "verifier",
             "repair",
             "trace",
+            "slow_memory_capture",
         }
     ),
     "harness_memory": frozenset(
@@ -50,6 +52,7 @@ _MODE_COMPONENTS = {
             "verifier",
             "repair",
             "trace",
+            "slow_memory_capture",
         }
     ),
     "full": frozenset(
@@ -66,6 +69,7 @@ _MODE_COMPONENTS = {
             "verifier",
             "repair",
             "trace",
+            "slow_memory_capture",
         }
     ),
 }

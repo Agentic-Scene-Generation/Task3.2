@@ -10,18 +10,18 @@
 #   Repair loop:     ON
 #   Trace logger:    ON
 #   Memory writer:   ON
-#   Slow LoRA:       ON  (set openai.model to the LoRA-merged/served model ID)
+#   DPO capture:      ON  (observer-only, independently switchable)
+#   Slow LoRA:       ON  (SCENEEXPERT_FULL_MODEL_ID selects the served model)
 #
 # Prerequisites:
 #   1. Run offline SFT/DPO training on traces from ablation_4.
 #   2. Start a vLLM server with the LoRA-merged model.
 #   3. Set OPENAI_BASE_URL to the LoRA model endpoint.
-#   4. Override model ID: furniture_agent.openai.model="Qwen/Qwen3-SceneExpert-LoRA"
+#   4. Export SCENEEXPERT_FULL_MODEL_ID to that server's exact model alias.
 #
 # Usage:
-#   python main.py experiment=ablation_5_qwen3_full \
-#                  furniture_agent.openai.model="Qwen/Qwen3-SceneExpert-LoRA" \
-#                  [other agent model overrides]
+#   SCENEEXPERT_FULL_MODEL_ID="Qwen/SceneExpert-DPO" \
+#     python main.py experiment=ablation_5_qwen3_full
 
 defaults:
   - base_experiment
@@ -29,6 +29,10 @@ defaults:
 scene_expert:
   enabled: true
   mode: "full"   # harness + memory + LoRA (same as harness_memory at runtime; model is the difference)
+  slow_memory:
+    # This alias must exactly match the model name exposed by the inference
+    # server. If unset, the normal SCENEEXPERT_MODEL_ID remains in use.
+    served_model_id: ${oc.env:SCENEEXPERT_FULL_MODEL_ID,${oc.env:SCENEEXPERT_MODEL_ID,Qwen/Qwen3.5-35B-A3B}}
   memory:
     dir: "${paths.memory_dir}/ablation_5"
     retrieval:

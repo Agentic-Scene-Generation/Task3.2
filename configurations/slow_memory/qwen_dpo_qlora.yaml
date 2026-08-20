@@ -1,0 +1,61 @@
+# SceneExpert critic-grounded DPO defaults for a Qwen dense causal LM.
+# The current Qwen3.8 GGUF used by llama.cpp is inference-only. Set this to the
+# matching Hugging Face safetensors directory or Hub ID before training.
+model:
+  name_or_path: ""  # TODO: set a trainable Qwen safetensors path or Hub ID.
+  backend: "unsloth"
+  tuning_mode: "qlora"  # qlora=4-bit base; lora=bf16 base.
+  max_length: 4096
+  trust_remote_code: true
+  dtype: "bfloat16"
+
+lora:
+  rank: 32
+  alpha: 64
+  dropout: 0.0
+  bias: "none"
+  use_gradient_checkpointing: "unsloth"
+  # Dense Qwen attention and MLP projections. Override only after inspecting
+  # the exact trainable checkpoint architecture.
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
+
+data:
+  dataset_dir: "outputs/slow_memory/dpo_dataset"  # TODO: exported package path.
+  num_proc: 4
+
+training:
+  output_dir: "outputs/slow_memory/qwen_dpo"
+  run_name: "sceneexpert-qwen-dpo"
+  seed: 42
+  num_train_epochs: 1.0
+  learning_rate: 0.000005
+  beta: 0.1
+  per_device_train_batch_size: 1
+  per_device_eval_batch_size: 1
+  gradient_accumulation_steps: 16
+  warmup_ratio: 0.05
+  lr_scheduler_type: "cosine"
+  optim: "adamw_8bit"
+  max_grad_norm: 1.0
+  logging_steps: 1
+  eval_steps: 25
+  save_steps: 25
+  save_total_limit: 3
+  bf16: true
+  tf32: true
+  gradient_checkpointing: true
+  report_to: "trackio"
+  trackio_space_id: null
+  resume_from_checkpoint: null
+
+publish:
+  push_to_hub: false
+  hub_model_id: null
+  private: true

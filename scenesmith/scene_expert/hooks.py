@@ -11,7 +11,7 @@ Ablation mode controls which components are active:
   "disabled"         → hooks are never created; SceneSmith runs as-is
   "harness_only"     → Harness FSM + GlobalPlanner, NO memory retrieval
   "harness_memory"   → Harness FSM + GlobalPlanner + FastMemory (MVP default)
-  "full"             → harness_memory + future LoRA (placeholder)
+  "full"             → harness_memory + separately served Slow-Memory adapter
 """
 
 from __future__ import annotations
@@ -59,6 +59,7 @@ from scenesmith.scene_expert.schemas import (
     StageRelationContext,
     StageVerifyReport,
 )
+from scenesmith.scene_expert.slow_memory.trajectory import TrajectoryCollector
 from scenesmith.scene_expert.task_compiler import TaskCompiler
 from scenesmith.scene_expert.trace_logger import TraceLogger, collect_code_provenance
 from scenesmith.scene_expert.verifier import FullVerifier, StageVerifier
@@ -758,6 +759,7 @@ class SceneExpertHookRunner:
         memory_writer: MemoryWriter | None,
         memory_store: FastMemoryStore | None,
         qwen_model: str,
+        trajectory_collector: TrajectoryCollector | None = None,
         experiment_name: str = "",
         config_hash: str = "",
         experiment_signature: str = "",
@@ -789,6 +791,7 @@ class SceneExpertHookRunner:
         self._trace_logger = trace_logger
         self._memory_writer = memory_writer
         self._memory_store = memory_store
+        self._trajectory_collector = trajectory_collector
         self._qwen_model = qwen_model
         self._experiment_name = experiment_name
         self._config_hash = config_hash
@@ -1851,6 +1854,30 @@ class SceneExpertHookRunner:
             repair_actions=repair_actions,
             scene_state_path=str(room_dir),
         )
+        trajectory_collector = getattr(self, "_trajectory_collector", None)
+        if trajectory_collector is not None:
+            try:
+                capture_summary = trajectory_collector.capture_stage(
+                    stage=stage,
+                    verify_report=verify_report,
+                    repair_actions=repair_actions,
+                )
+                if self._trace_enabled():
+                    self._trace_logger.record_component_status(
+                        "slow_memory_capture",
+                        {
+                            "success": True,
+                            "observer_only": True,
+                            "stage": stage,
+                            **capture_summary,
+                        },
+                    )
+            except Exception as exc:
+                console_logger.warning(
+                    "[SceneExpert] Slow-memory capture failed (non-fatal): %s",
+                    exc,
+                    exc_info=True,
+                )
         if self._trace_enabled():
             self._trace_logger.log_stage(
                 stage=stage,
@@ -2103,6 +2130,19 @@ class SceneExpertHookRunner:
         Arbitrary runtime/infrastructure exceptions remain trace-only.
         """
         if not self._trace_enabled():
+            trajectory_collector = getattr(self, "_trajectory_collector", None)
+            failure_report = main_hard_failure_report(error, self._current_stage)
+            if trajectory_collector is not None and failure_report is not None:
+                try:
+                    trajectory_collector.capture_stage(
+                        stage=self._current_stage,
+                        verify_report=failure_report,
+                        repair_actions=[],
+                    )
+                except Exception as exc:
+                    console_logger.warning(
+                        "[SceneExpert] Failure trajectory capture failed: %s", exc
+                    )
             return
         failure_report = main_hard_failure_report(error, self._current_stage)
         if failure_report is None:
@@ -2136,6 +2176,18 @@ class SceneExpertHookRunner:
                 repair_actions=[],
                 scene_state_path=str(self._scene_debug_dir.parent),
             )
+            trajectory_collector = getattr(self, "_trajectory_collector", None)
+            if trajectory_collector is not None:
+                try:
+                    trajectory_collector.capture_stage(
+                        stage=self._current_stage,
+                        verify_report=failure_report,
+                        repair_actions=[],
+                    )
+                except Exception as exc:
+                    console_logger.warning(
+                        "[SceneExpert] Failure trajectory capture failed: %s", exc
+                    )
 
         missing_stages = [
             stage
@@ -2639,6 +2691,22 @@ def build_hook_runner(
             component_flags=component_flags,
         )
 
+    trajectory_collector: TrajectoryCollector | None = None
+    if component_flags["slow_memory_capture"]:
+        capture_cfg = (se_cfg.get("slow_memory", {}) or {}).get("capture", {}) or {}
+        trajectory_collector = TrajectoryCollector(
+            scene_debug_dir=scene_debug_dir,
+            prompt=prompt,
+            scene_id=f"scene_{scene_id:03d}",
+            run_id=str(output_dir.resolve()),
+            task_spec=task_spec,
+            experiment_signature=experiment_signature,
+            config_hash=config_hash,
+            model_id=model,
+            max_prompt_chars=_cfg_int(capture_cfg.get("max_prompt_chars"), 131072),
+            max_response_chars=_cfg_int(capture_cfg.get("max_response_chars"), 65536),
+        )
+
     return SceneExpertHookRunner(
         prompt=prompt,
         scene_id=scene_id,
@@ -2656,6 +2724,7 @@ def build_hook_runner(
         trace_logger=trace_logger,
         memory_writer=memory_writer,
         memory_store=memory_store,
+        trajectory_collector=trajectory_collector,
         qwen_model=model,
         experiment_name=cfg_dict.get("name", ""),
         config_hash=config_hash,
