@@ -2975,7 +2975,16 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
 
             except Exception as e:
                 if scene_expert_hooks:
-                    scene_expert_hooks.save_partial_trace(error=str(e))
+                    try:
+                        scene_expert_hooks.finalize_failure(error=str(e))
+                    except Exception as hook_error:
+                        # Additive diagnostics must never replace main's original
+                        # exception or change its success/failure semantics.
+                        console_logger.warning(
+                            "SceneExpert failure finalization failed: %s",
+                            hook_error,
+                        )
+                        scene_expert_hooks.save_partial_trace(error=str(e))
                 _write_scene_status(
                     output_dir=output_dir,
                     scene_id=scene_id,

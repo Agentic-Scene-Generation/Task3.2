@@ -156,6 +156,8 @@ class FastMemoryStoreV2Test(unittest.TestCase):
             )
 
             self.assertEqual(["other"], pack.success_case_ids)
+            self.assertEqual({"other": ["task_other"]}, pack.retrieved_source_task_ids)
+            self.assertEqual({"other": ["run_2"]}, pack.retrieved_source_run_ids)
 
 
 if __name__ == "__main__":

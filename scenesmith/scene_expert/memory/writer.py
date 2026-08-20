@@ -695,8 +695,10 @@ class MemoryWriter:
             "related_existing_memory": related_old_memory,
         }
         return (
-            "Analyze this completed run. Treat evidence.verify_report and final_report "
-            "as authoritative. Return only schema-valid reusable candidates.\n"
+            "Analyze this terminal run, which may have completed or failed. Treat "
+            "evidence.verify_report and final_report as authoritative. Never infer "
+            "success from a failed final_report. Return only schema-valid reusable "
+            "candidates.\n"
             + json.dumps(payload, ensure_ascii=False, default=str)
         )
 

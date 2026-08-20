@@ -160,6 +160,9 @@ class MemoryRetriever:
             task_spec, stage, query_tokens
         )
         skill_texts, skill_names = self._retrieve_skills(task_spec, stage, query_tokens)
+        source_task_ids, source_run_ids = self._selected_provenance(
+            [*success_ids, *failure_ids, *skill_names]
+        )
 
         return MemoryPack(
             success_hints=success_hints,
@@ -169,9 +172,45 @@ class MemoryRetriever:
             success_case_ids=success_ids,
             failure_case_ids=failure_ids,
             skill_names=skill_names,
+            retrieved_source_task_ids=source_task_ids,
+            retrieved_source_run_ids=source_run_ids,
             memory_bank_id=self._store.bank_id,
             memory_bank_revision=self._store.revision,
         ).deduplicated()
+
+    def _selected_provenance(
+        self, selected_ids: list[str]
+    ) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
+        """Return persisted task/run provenance for the selected records."""
+        wanted = set(selected_ids)
+        task_ids: dict[str, list[str]] = {}
+        run_ids: dict[str, list[str]] = {}
+        records: list[SuccessCase | FailureCase | Skill] = [
+            *self._store.active_success_cases,
+            *self._store.active_failure_cases,
+            *self._store.active_skills,
+        ]
+        for record in records:
+            record_id = str(
+                getattr(record, "case_id", "")
+                or getattr(record, "failure_id", "")
+                or getattr(record, "skill_name", "")
+            )
+            if record_id not in wanted:
+                continue
+            task_ids[record_id] = sorted(
+                {
+                    *[value for value in record.source_task_ids if value],
+                    *([record.source_task_id] if record.source_task_id else []),
+                }
+            )
+            run_ids[record_id] = sorted(
+                {
+                    *[value for value in record.source_run_ids if value],
+                    *([record.source_run_id] if record.source_run_id else []),
+                }
+            )
+        return task_ids, run_ids
 
     def _retrieve_success(
         self, task_spec: SceneTaskSpec, stage: str, query_tokens: set[str]

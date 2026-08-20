@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import logging
 import statistics
@@ -20,7 +21,7 @@ from typing import Any, Iterable
 
 console_logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = "sceneexpert.run_metrics.v1"
+SCHEMA_VERSION = "sceneexpert.run_metrics.v2"
 SCENE_COLUMNS = (
     "run_id",
     "batch_id",
@@ -44,14 +45,34 @@ SCENE_COLUMNS = (
     "critic_zero_fail",
     "sceneexpert_overall_score",
     "sceneexpert_pass_scene",
+    "experiment_name",
+    "config_hash",
+    "model",
+    "code_revision",
+    "code_dirty",
+    "task_compiler_source",
+    "task_compiler_degraded",
+    "global_planner_llm_stages",
+    "global_planner_fallback_stages",
+    "global_planner_noop_stages",
+    "brief_injection_verified_stages",
     "observed_stages",
     "memory_retrieved_stages",
     "memory_retrieved_ids",
     "memory_injected_stages",
     "memory_injection_verified_stages",
+    "memory_cross_task_verified_stages",
+    "memory_retrieved_source_task_ids",
+    "memory_retrieved_source_run_ids",
+    "memory_bank_ids",
+    "memory_bank_revisions",
+    "memory_dirs",
     "memory_zero_result_reasons",
+    "memory_zero_result_events",
     "memory_retrieval_time_sec",
     "memory_writer_status",
+    "memory_writer_candidate_count",
+    "memory_writer_noop_reason",
     "memory_writer_promoted",
     "memory_writer_added",
     "memory_writer_merged",
@@ -138,6 +159,8 @@ def _manifest_rows(output_root: Path, warnings: list[str]) -> list[dict[str, Any
     rows: list[dict[str, Any]] = []
     critic_root = output_root / "critic_on"
     for batch_dir in sorted(critic_root.glob("batch_*")):
+        if not batch_dir.is_dir():
+            continue
         manifest = batch_dir / "batch_cases.csv"
         if not manifest.is_file():
             warnings.append(f"missing_batch_manifest:{manifest}")
@@ -166,6 +189,8 @@ def _manifest_rows(output_root: Path, warnings: list[str]) -> list[dict[str, Any
 def _discover_rows(output_root: Path) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for batch_dir in sorted((output_root / "critic_on").glob("batch_*")):
+        if not batch_dir.is_dir():
+            continue
         hydra_dir = batch_dir / "hydra"
         scene_root = hydra_dir if hydra_dir.is_dir() else batch_dir
         for scene_dir in sorted(scene_root.glob("scene_*")):
@@ -201,19 +226,13 @@ def _load_trace(
     hydra_dir = scene_dir.parent
     final_candidates = (
         hydra_dir / "traces" / f"trace_{scene_index:06d}.json",
-        scene_dir
-        / "scene_expert"
-        / "trace"
-        / f"trace_{scene_index:06d}.json",
+        scene_dir / "scene_expert" / "trace" / f"trace_{scene_index:06d}.json",
     )
     for path in final_candidates:
         if path.is_file():
             return _read_json(path, warnings), str(path)
     partial = (
-        scene_dir
-        / "scene_expert"
-        / "trace"
-        / f"trace_{scene_index:06d}_partial.json"
+        scene_dir / "scene_expert" / "trace" / f"trace_{scene_index:06d}_partial.json"
     )
     if partial.is_file():
         return _read_json(partial, warnings), str(partial)
@@ -240,12 +259,19 @@ def _stage_payloads(
 def _memory_metrics(
     scene_dir: Path,
     stages: list[dict[str, Any]],
+    prompt: str,
     warnings: list[str],
 ) -> dict[str, Any]:
     retrieved_stages: list[str] = []
     retrieved_ids: list[str] = []
     injected_stages: list[str] = []
     verified_stages: list[str] = []
+    cross_task_stages: list[str] = []
+    source_task_ids: dict[str, list[str]] = {}
+    source_run_ids: dict[str, list[str]] = {}
+    bank_ids: list[str] = []
+    bank_revisions: list[int] = []
+    current_task_id = "task_" + hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
     for stage_payload in stages:
         stage = str(stage_payload.get("stage") or "")
         pack = stage_payload.get("memory_pack") or {}
@@ -255,6 +281,32 @@ def _memory_metrics(
             *list(pack.get("skill_names") or []),
         ]
         evidence = stage_payload.get("execution_evidence") or {}
+        task_provenance = pack.get("retrieved_source_task_ids") or {}
+        run_provenance = pack.get("retrieved_source_run_ids") or {}
+        if isinstance(task_provenance, dict):
+            for memory_id, values in task_provenance.items():
+                key = str(memory_id)
+                source_task_ids[key] = _unique(
+                    [*source_task_ids.get(key, []), *(values or [])]
+                )
+        if isinstance(run_provenance, dict):
+            for memory_id, values in run_provenance.items():
+                key = str(memory_id)
+                source_run_ids[key] = _unique(
+                    [*source_run_ids.get(key, []), *(values or [])]
+                )
+        if any(
+            source_id != current_task_id
+            for memory_id in ids
+            for source_id in source_task_ids.get(str(memory_id), [])
+        ):
+            cross_task_stages.append(stage)
+        bank_id = str(pack.get("memory_bank_id") or "")
+        if bank_id:
+            bank_ids.append(bank_id)
+        revision = pack.get("memory_bank_revision")
+        if isinstance(revision, int):
+            bank_revisions.append(revision)
         if ids:
             retrieved_stages.append(stage)
             retrieved_ids.extend(str(value) for value in ids)
@@ -276,22 +328,72 @@ def _memory_metrics(
     ]
     if not detailed_rows:
         detailed_rows = timing_rows
+    memory_dirs = _unique(str(row.get("memory_dir") or "") for row in detailed_rows)
+    bank_ids.extend(str(row.get("memory_bank_id") or "") for row in detailed_rows)
+    bank_revisions.extend(
+        int(row["memory_bank_revision"])
+        for row in detailed_rows
+        if isinstance(row.get("memory_bank_revision"), int)
+    )
     zero_reasons = _unique(
         str(row.get("zero_result_reason") or "") for row in detailed_rows
     )
     retrieval_time = sum(
-        _as_float(row.get("total_sec"))
-        or _as_float(row.get("elapsed_sec"))
-        or 0.0
+        _as_float(row.get("total_sec")) or _as_float(row.get("elapsed_sec")) or 0.0
         for row in detailed_rows
     )
+    zero_events = [
+        {
+            "stage": str(row.get("stage") or ""),
+            "reason": str(row.get("zero_result_reason") or ""),
+            "active_stage_records": dict(row.get("active_stage_records") or {}),
+            "banks": list(row.get("banks") or []),
+        }
+        for row in detailed_rows
+        if row.get("zero_result_reason")
+    ]
     return {
         "memory_retrieved_stages": _unique(retrieved_stages),
         "memory_retrieved_ids": _unique(retrieved_ids),
         "memory_injected_stages": _unique(injected_stages),
         "memory_injection_verified_stages": _unique(verified_stages),
+        "memory_cross_task_verified_stages": _unique(cross_task_stages),
+        "memory_retrieved_source_task_ids": source_task_ids,
+        "memory_retrieved_source_run_ids": source_run_ids,
+        "memory_bank_ids": _unique(bank_ids),
+        "memory_bank_revisions": sorted(set(bank_revisions)),
+        "memory_dirs": memory_dirs,
         "memory_zero_result_reasons": zero_reasons,
+        "memory_zero_result_events": zero_events,
         "memory_retrieval_time_sec": round(retrieval_time, 6),
+    }
+
+
+def _component_execution_metrics(
+    trace: dict[str, Any], stages: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Separate configured flags from observed model/fallback execution."""
+    component_status = trace.get("component_status") or {}
+    task_status = component_status.get("task_compiler") or {}
+    planner_by_status: dict[str, list[str]] = {"ok": [], "fallback": [], "no_op": []}
+    brief_verified: list[str] = []
+    for stage_payload in stages:
+        stage = str(stage_payload.get("stage") or "")
+        planner_status = str(
+            (stage_payload.get("planner_trace") or {}).get("status") or ""
+        )
+        if planner_status in planner_by_status:
+            planner_by_status[planner_status].append(stage)
+        evidence = stage_payload.get("execution_evidence") or {}
+        if bool(evidence.get("designer_prompt_contains_brief")):
+            brief_verified.append(stage)
+    return {
+        "task_compiler_source": str(task_status.get("source") or "not_observed"),
+        "task_compiler_degraded": bool(task_status.get("degraded", False)),
+        "global_planner_llm_stages": _unique(planner_by_status["ok"]),
+        "global_planner_fallback_stages": _unique(planner_by_status["fallback"]),
+        "global_planner_noop_stages": _unique(planner_by_status["no_op"]),
+        "brief_injection_verified_stages": _unique(brief_verified),
     }
 
 
@@ -309,8 +411,7 @@ def _critic_metrics(scene_dir: Path, warnings: list[str]) -> dict[str, Any]:
         )
     reports = [_read_json(path, warnings) for path in report_paths]
     summaries = [
-        (report.get("summary") or {}).get("scene_summary") or {}
-        for report in reports
+        (report.get("summary") or {}).get("scene_summary") or {} for report in reports
     ]
     totals = {
         key: sum(_as_int(summary.get(key)) for summary in summaries)
@@ -357,6 +458,8 @@ def _writer_metrics(
         "memory_writer_status": str(
             status.get("write_status") or status.get("status") or "not_observed"
         ),
+        "memory_writer_candidate_count": _as_int(status.get("candidate_count")),
+        "memory_writer_noop_reason": str(status.get("noop_reason") or ""),
         "memory_writer_promoted": _as_int(status.get("promoted_count")),
         "memory_writer_added": _as_int(store_apply.get("added")),
         "memory_writer_merged": _as_int(store_apply.get("merged")),
@@ -426,6 +529,7 @@ def _scene_metrics(
     )
     stages = _stage_payloads(scene_dir, trace, warnings)
     final_report = trace.get("final_report") or {}
+    code_provenance = dict(trace.get("code_provenance") or {})
     status = str(status_payload.get("status") or "missing")
     row: dict[str, Any] = {
         "run_id": run_id,
@@ -444,13 +548,20 @@ def _scene_metrics(
         "sceneexpert_pass_scene": (
             bool(final_report.get("pass_scene")) if final_report else None
         ),
-        "observed_stages": _unique(
-            str(stage.get("stage") or "") for stage in stages
+        "experiment_name": str(trace.get("experiment_name") or ""),
+        "config_hash": str(trace.get("config_hash") or ""),
+        "model": str(trace.get("model") or ""),
+        "code_revision": str(
+            (trace.get("code_provenance") or {}).get("git_revision") or ""
         ),
+        "code_dirty": (trace.get("code_provenance") or {}).get("dirty"),
+        "code_provenance": code_provenance,
+        "observed_stages": _unique(str(stage.get("stage") or "") for stage in stages),
         "component_flags": dict(trace.get("component_flags") or {}),
     }
+    row.update(_component_execution_metrics(trace, stages))
     row.update(_critic_metrics(scene_dir, warnings))
-    row.update(_memory_metrics(scene_dir, stages, warnings))
+    row.update(_memory_metrics(scene_dir, stages, row["prompt"], warnings))
     row.update(_writer_metrics(scene_dir, trace, warnings))
     row.update(_repair_metrics(scene_dir, stages, warnings))
     return row
@@ -485,13 +596,15 @@ def collect_run_metrics(
     degraded = [
         row
         for row in completed
-        if row["status"] == "completed_with_quality_issues"
-        or row["trace_degraded"]
+        if row["status"] == "completed_with_quality_issues" or row["trace_degraded"]
     ]
     critic_observed = [row for row in scene_rows if row["critic_effective_checks"] > 0]
     trace_observed = [row for row in scene_rows if row["trace_status"] != "missing"]
     retrieved = [row for row in scene_rows if row["memory_retrieved_stages"]]
     injected = [row for row in scene_rows if row["memory_injection_verified_stages"]]
+    cross_task_verified = [
+        row for row in scene_rows if row["memory_cross_task_verified_stages"]
+    ]
     retrieved_stage_count = sum(
         len(row["memory_retrieved_stages"]) for row in scene_rows
     )
@@ -504,8 +617,14 @@ def collect_run_metrics(
     writer_failures = [
         row
         for row in writer_observed
-        if row["memory_writer_status"] == "model_failure_no_write"
+        if row["memory_writer_status"]
+        in {"model_failure_no_write", "exception_no_write"}
         or row["memory_writer_degraded"]
+    ]
+    writer_noops = [
+        row
+        for row in writer_observed
+        if row["memory_writer_status"] == "no_valid_candidates"
     ]
     fallback_writes = [
         row for row in writer_observed if row["memory_writer_fallback_written"]
@@ -527,6 +646,46 @@ def collect_run_metrics(
         warnings.append(f"scenes_missing_trace:{len(scene_rows) - len(trace_observed)}")
     if fallback_writes:
         warnings.append(f"fallback_memory_writes_detected:{len(fallback_writes)}")
+    if retrieved and not cross_task_verified:
+        warnings.append("retrieved_memory_missing_cross_task_provenance")
+
+    revisions = _unique(row["code_revision"] for row in scene_rows)
+    config_hashes = _unique(row["config_hash"] for row in scene_rows)
+    experiment_names = _unique(row["experiment_name"] for row in scene_rows)
+    models = _unique(row["model"] for row in scene_rows)
+    provenance_by_signature = {
+        json.dumps(row["code_provenance"], sort_keys=True, default=str): row[
+            "code_provenance"
+        ]
+        for row in scene_rows
+        if row["code_provenance"]
+    }
+    if len(revisions) > 1:
+        warnings.append(f"mixed_code_revisions:{len(revisions)}")
+    if len(provenance_by_signature) > 1:
+        warnings.append(f"mixed_code_provenance:{len(provenance_by_signature)}")
+    if len(config_hashes) > 1:
+        warnings.append(f"mixed_config_hashes:{len(config_hashes)}")
+    if not revisions:
+        warnings.append("missing_code_revision")
+    if not config_hashes:
+        warnings.append("missing_config_hash")
+    if not experiment_names:
+        warnings.append("missing_experiment_name")
+
+    memory_bank_ids = _unique(
+        bank_id for row in scene_rows for bank_id in row["memory_bank_ids"]
+    )
+    memory_dirs = _unique(
+        memory_dir for row in scene_rows for memory_dir in row["memory_dirs"]
+    )
+    memory_bank_revisions = sorted(
+        {
+            int(revision)
+            for row in scene_rows
+            for revision in row["memory_bank_revisions"]
+        }
+    )
 
     summary = {
         "expected_scenes": expected,
@@ -547,6 +706,9 @@ def collect_run_metrics(
         ),
         "memory_retrieval_scene_coverage": _rate(len(retrieved), expected),
         "memory_injection_scene_coverage": _rate(len(injected), expected),
+        "memory_cross_task_verified_scene_coverage": _rate(
+            len(cross_task_verified), expected
+        ),
         "memory_injection_delivery_rate": _rate(
             injected_stage_count, retrieved_stage_count
         ),
@@ -566,6 +728,10 @@ def collect_run_metrics(
         ),
         "memory_writer_observed_scenes": len(writer_observed),
         "memory_writer_failure_scenes": len(writer_failures),
+        "memory_writer_noop_scenes": len(writer_noops),
+        "memory_writer_candidate_records": sum(
+            row["memory_writer_candidate_count"] for row in scene_rows
+        ),
         "memory_writer_promoted_records": sum(
             row["memory_writer_promoted"] for row in scene_rows
         ),
@@ -585,6 +751,21 @@ def collect_run_metrics(
         "sceneexpert_repairs_executed": sum(
             row["sceneexpert_repairs_executed"] for row in scene_rows
         ),
+        "task_compiler_llm_scenes": sum(
+            row["task_compiler_source"] == "llm" for row in scene_rows
+        ),
+        "task_compiler_degraded_scenes": sum(
+            row["task_compiler_degraded"] for row in scene_rows
+        ),
+        "global_planner_llm_stage_count": sum(
+            len(row["global_planner_llm_stages"]) for row in scene_rows
+        ),
+        "global_planner_fallback_stage_count": sum(
+            len(row["global_planner_fallback_stages"]) for row in scene_rows
+        ),
+        "brief_injection_verified_stage_count": sum(
+            len(row["brief_injection_verified_stages"]) for row in scene_rows
+        ),
     }
     quality_comparison_ready = bool(
         expected
@@ -594,6 +775,12 @@ def collect_run_metrics(
         and len(critic_observed) == expected
         and len(trace_observed) == expected
     )
+    memory_closed_loop_observed = bool(
+        summary["memory_writer_promoted_records"] > 0
+        and summary["unique_retrieved_memory_ids"] > 0
+        and cross_task_verified
+        and injected
+    )
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -601,6 +788,36 @@ def collect_run_metrics(
         "output_root": str(root),
         "process_exit_code": process_exit_code,
         "quality_comparison_ready": quality_comparison_ready,
+        "memory_closed_loop_observed": memory_closed_loop_observed,
+        "experiment_identity": {
+            "experiment_names": experiment_names,
+            "config_hashes": config_hashes,
+            "models": models,
+            "code_revisions": revisions,
+            "code_dirty_values": sorted(
+                {
+                    row["code_dirty"]
+                    for row in scene_rows
+                    if isinstance(row["code_dirty"], bool)
+                }
+            ),
+        },
+        "code_provenance": (
+            next(iter(provenance_by_signature.values()), {})
+            if len(provenance_by_signature) <= 1
+            else {"variants": list(provenance_by_signature.values())}
+        ),
+        "memory_identity": {
+            "scope": "persistent_configured_bank",
+            "memory_dirs": memory_dirs,
+            "memory_bank_ids": memory_bank_ids,
+            "memory_bank_revision_min": (
+                min(memory_bank_revisions) if memory_bank_revisions else None
+            ),
+            "memory_bank_revision_max": (
+                max(memory_bank_revisions) if memory_bank_revisions else None
+            ),
+        },
         "summary": summary,
         "data_quality_warnings": _unique(warnings),
         "scenes": scene_rows,
@@ -631,6 +848,8 @@ def _markdown(metrics: dict[str, Any]) -> str:
         "",
         f"- Run: `{metrics['run_id']}`",
         f"- Comparison ready: `{str(metrics['quality_comparison_ready']).lower()}`",
+        f"- Cross-task memory loop observed: "
+        f"`{str(metrics.get('memory_closed_loop_observed', False)).lower()}`",
         f"- Process exit code: `{metrics.get('process_exit_code')}`",
         "",
         "## Core KPIs",
@@ -650,14 +869,35 @@ def _markdown(metrics: dict[str, Any]) -> str:
         "memory_retrieval_scene_coverage",
         "memory_injection_scene_coverage",
         "memory_injection_delivery_rate",
+        "memory_cross_task_verified_scene_coverage",
         "memory_writer_promoted_records",
+        "memory_writer_noop_scenes",
         "memory_writer_failure_scenes",
         "memory_writer_fallback_writes",
         "scenesmith_repair_events",
         "sceneexpert_repair_plans",
         "sceneexpert_repairs_executed",
+        "task_compiler_llm_scenes",
+        "task_compiler_degraded_scenes",
+        "global_planner_llm_stage_count",
+        "global_planner_fallback_stage_count",
+        "brief_injection_verified_stage_count",
     ):
         lines.append(f"| `{key}` | {summary.get(key)} |")
+    identity = metrics.get("memory_identity") or {}
+    lines.extend(
+        [
+            "",
+            "## Memory identity",
+            "",
+            f"- Scope: `{identity.get('scope', '')}`",
+            f"- Directories: `{identity.get('memory_dirs', [])}`",
+            f"- Bank IDs: `{identity.get('memory_bank_ids', [])}`",
+            "- Revision range: "
+            f"`{identity.get('memory_bank_revision_min')}` → "
+            f"`{identity.get('memory_bank_revision_max')}`",
+        ]
+    )
     lines.extend(["", "## Data quality", ""])
     warnings = metrics.get("data_quality_warnings") or []
     if warnings:

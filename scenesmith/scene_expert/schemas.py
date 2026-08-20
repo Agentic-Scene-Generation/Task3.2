@@ -122,6 +122,17 @@ class MemoryPack(BaseModel):
     success_case_ids: list[str] = Field(default_factory=list)
     failure_case_ids: list[str] = Field(default_factory=list)
     skill_names: list[str] = Field(default_factory=list)
+    retrieved_source_task_ids: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description=(
+            "Selected memory ID to source task IDs. This is audit metadata used "
+            "to prove that guidance came from another task rather than a replay."
+        ),
+    )
+    retrieved_source_run_ids: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description="Selected memory ID to source run IDs for experiment provenance.",
+    )
     memory_bank_id: str = ""
     memory_bank_revision: int = 0
 

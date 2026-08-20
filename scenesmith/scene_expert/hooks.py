@@ -33,6 +33,7 @@ from scenesmith.scene_expert.config_utils import (
     resolve_scene_expert_config,
 )
 from scenesmith.scene_expert.context_bundle import build_stage_context_bundle
+from scenesmith.scene_expert.failure_evidence import main_hard_failure_report
 from scenesmith.scene_expert.global_planner import GlobalPlanner
 from scenesmith.scene_expert.harness import Harness, RepairDecision
 from scenesmith.scene_expert.memory.retriever import MemoryRetriever
@@ -969,6 +970,24 @@ class SceneExpertHookRunner:
                     for action in repair_actions
                 ],
                 "critique_summary": verify_report.critique_summary[:2000],
+                "retrieved_memory_ids": list(
+                    dict.fromkeys(
+                        [
+                            *self._current_memory_pack.success_case_ids,
+                            *self._current_memory_pack.failure_case_ids,
+                            *self._current_memory_pack.skill_names,
+                        ]
+                    )
+                ),
+                "retrieved_source_task_ids": dict(
+                    self._current_memory_pack.retrieved_source_task_ids
+                ),
+                "retrieved_source_run_ids": dict(
+                    self._current_memory_pack.retrieved_source_run_ids
+                ),
+                "memory_bank_id": self._current_memory_pack.memory_bank_id,
+                "memory_bank_revision": self._current_memory_pack.memory_bank_revision,
+                "execution_evidence": self._current_execution_evidence.model_dump(),
                 "promotion_status": "evidence_only",
             }
             self._memory_store.append_event(event)
@@ -1601,6 +1620,92 @@ class SceneExpertHookRunner:
     # Finalize: called after all stages complete
     # ------------------------------------------------------------------
 
+    def _write_long_term_memory(
+        self, full_report: FullVerifyReport
+    ) -> dict[str, Any] | None:
+        """Run the strict writer and atomically apply its evidence-gated ops."""
+        if (
+            self._memory_writer is None
+            or self._memory_store is None
+            or not self._component_enabled("memory_writer")
+            or not self._component_enabled("verifier")
+        ):
+            return None
+        try:
+            memory_start = time.time()
+            trace_summary = (
+                self._trace_logger.build_trace_summary()
+                if self._trace_enabled()
+                else json.dumps(
+                    [report.model_dump() for report in self._stage_reports],
+                    ensure_ascii=False,
+                    default=str,
+                )
+            )
+            related_old_memory = self._format_related_memory_for_writer()
+            ops = self._memory_writer.write(
+                trace_summary=trace_summary,
+                full_report=full_report,
+                related_old_memory=related_old_memory,
+                evidence_payload=(
+                    self._trace_logger.build_memory_writer_evidence()
+                    if self._trace_enabled()
+                    else {
+                        "trace_id": f"trace_{self._scene_id:06d}",
+                        "run_id": str(self._output_dir.resolve()),
+                        "prompt": self._prompt,
+                        "experiment_name": self._experiment_name,
+                        "config_hash": self._config_hash,
+                        "task_spec": self._task_spec.model_dump(),
+                        "stages": [
+                            {
+                                "stage": report.stage,
+                                "verify_report": report.model_dump(),
+                                "repair_actions": [],
+                            }
+                            for report in self._stage_reports
+                        ],
+                    }
+                ),
+            )
+            if self._trace_enabled():
+                self._trace_logger.save_memory_update_ops(ops, full_report)
+            apply_summary = self._memory_store.apply_updates(ops)
+            if self._trace_enabled():
+                self._trace_logger.record_component_status(
+                    "memory_writer",
+                    {
+                        **dict(self._memory_writer.last_trace),
+                        "store_apply": apply_summary,
+                    },
+                )
+            console_logger.info(
+                "[SceneExpert] Memory update: %d proposed, %d added, "
+                "%d merged, revision=%d in %.2fs",
+                len(ops),
+                apply_summary["added"],
+                apply_summary["merged"],
+                apply_summary["revision"],
+                time.time() - memory_start,
+            )
+            return apply_summary
+        except Exception as e:
+            console_logger.warning(f"Memory update failed (non-fatal): {e}")
+            if self._trace_enabled():
+                self._trace_logger.record_component_status(
+                    "memory_writer",
+                    {
+                        "success": False,
+                        "degraded": True,
+                        "source": "exception",
+                        "write_status": "exception_no_write",
+                        "fallback_written": False,
+                        "error": f"{type(e).__name__}: {e}",
+                    },
+                )
+                self._trace_logger.save_memory_update_ops([], full_report)
+            return None
+
     def finalize(self, final_scene_path: str) -> FullVerifyReport:
         """Run full verifier, save trace, update memory.
 
@@ -1650,83 +1755,8 @@ class SceneExpertHookRunner:
                 model=self._qwen_model,
             )
 
-        # Memory update (skip in harness_only mode)
-        if (
-            self._memory_writer is not None
-            and self._memory_store is not None
-            and self._component_enabled("memory_writer")
-            and self._component_enabled("verifier")
-        ):
-            try:
-                memory_start = time.time()
-                trace_summary = (
-                    self._trace_logger.build_trace_summary()
-                    if self._trace_enabled()
-                    else json.dumps(
-                        [report.model_dump() for report in self._stage_reports],
-                        ensure_ascii=False,
-                        default=str,
-                    )
-                )
-                related_old_memory = self._format_related_memory_for_writer()
-                ops = self._memory_writer.write(
-                    trace_summary=trace_summary,
-                    full_report=full_report,
-                    related_old_memory=related_old_memory,
-                    evidence_payload=(
-                        self._trace_logger.build_memory_writer_evidence()
-                        if self._trace_enabled()
-                        else {
-                            "trace_id": f"trace_{self._scene_id:06d}",
-                            "run_id": str(self._output_dir.resolve()),
-                            "prompt": self._prompt,
-                            "experiment_name": self._experiment_name,
-                            "config_hash": self._config_hash,
-                            "task_spec": self._task_spec.model_dump(),
-                            "stages": [
-                                {
-                                    "stage": report.stage,
-                                    "verify_report": report.model_dump(),
-                                    "repair_actions": [],
-                                }
-                                for report in self._stage_reports
-                            ],
-                        }
-                    ),
-                )
-                if self._trace_enabled():
-                    self._trace_logger.save_memory_update_ops(ops, full_report)
-                apply_summary = self._memory_store.apply_updates(ops)
-                if self._trace_enabled():
-                    self._trace_logger.record_component_status(
-                        "memory_writer",
-                        {
-                            **dict(self._memory_writer.last_trace),
-                            "store_apply": apply_summary,
-                        },
-                    )
-                console_logger.info(
-                    "[SceneExpert] Memory update: %d proposed, %d added, "
-                    "%d merged, revision=%d in %.2fs",
-                    len(ops),
-                    apply_summary["added"],
-                    apply_summary["merged"],
-                    apply_summary["revision"],
-                    time.time() - memory_start,
-                )
-            except Exception as e:
-                console_logger.warning(f"Memory update failed (non-fatal): {e}")
-                if self._trace_enabled():
-                    self._trace_logger.record_component_status(
-                        "memory_writer",
-                        {
-                            "success": False,
-                            "degraded": True,
-                            "source": "exception",
-                            "error": f"{type(e).__name__}: {e}",
-                        },
-                    )
-                    self._trace_logger.save_memory_update_ops([], full_report)
+        # Memory update (skip in harness_only mode).
+        self._write_long_term_memory(full_report)
 
         if self._trace_enabled():
             trace_dict = self._trace_logger.finalize(
@@ -1748,6 +1778,71 @@ class SceneExpertHookRunner:
             time.time() - finalize_start,
         )
         return full_report
+
+    def finalize_failure(self, error: str = "") -> None:
+        """Persist a failed trace and curate only recognized main hard-gate evidence.
+
+        This does not catch, suppress, retry, or otherwise change main's failure.
+        It gives the additive memory layer a chance to learn a negative lesson
+        from an authoritative deterministic gate that fires before ``post_stage``.
+        Arbitrary runtime/infrastructure exceptions remain trace-only.
+        """
+        if not self._trace_enabled():
+            return
+        failure_report = main_hard_failure_report(error, self._current_stage)
+        if failure_report is None:
+            self.save_partial_trace(error=error)
+            return
+
+        if self._current_stage not in self._completed_stages:
+            self._stage_reports.append(failure_report)
+            self._trace_logger.log_stage(
+                stage=self._current_stage,
+                memory_pack=self._current_memory_pack,
+                relation_context=self._current_relation_context,
+                planner_trace=self._current_planner_trace,
+                stage_brief=self._current_stage_brief,
+                scene_state_path=str(self._scene_debug_dir.parent),
+                verify_report=failure_report,
+                repair_actions=[],
+                qwen_calls=self._qwen_calls,
+                stage_time_sec=max(0.0, time.time() - self._stage_start_time),
+                execution_evidence=self._current_execution_evidence,
+            )
+            self._commit_stage_memory(
+                stage=self._current_stage,
+                verify_report=failure_report,
+                scene_state_path=str(self._scene_debug_dir.parent),
+                repair_actions=[],
+            )
+
+        missing_stages = [
+            stage for stage in STAGE_ORDER if stage not in self._completed_stages
+        ]
+        full_report = FullVerifyReport(
+            deterministic_pass=False,
+            pass_scene=False,
+            expected_stages=list(STAGE_ORDER),
+            completed_stages=list(self._completed_stages),
+            missing_stages=missing_stages,
+            outcome_status="FAILED",
+            degraded_reasons=[str(error)],
+            metric_sources={"failure": "scenesmith_main_hard_gate"},
+        )
+        exports = {"scene_dir": str(self._scene_debug_dir.parent)}
+        self._trace_logger.finalize(
+            full_report=full_report,
+            exports=exports,
+            model=self._qwen_model,
+        )
+        self._write_long_term_memory(full_report)
+        trace_dict = self._trace_logger.finalize(
+            full_report=full_report,
+            exports=exports,
+            model=self._qwen_model,
+        )
+        trace_dict.update({"status": "failed", "degraded": True, "error": str(error)})
+        self._trace_logger.save(trace_dict)
 
     def save_partial_trace(self, error: str = "") -> None:
         """Persist a partial trace from an exception path."""

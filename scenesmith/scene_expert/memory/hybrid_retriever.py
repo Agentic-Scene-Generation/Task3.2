@@ -147,6 +147,8 @@ class HybridMemoryRetriever:
             skill_count=len(skills),
             total_sec=total_sec,
         )
+        selected_records = [record for _, record in [*success, *failure, *skills]]
+        source_task_ids, source_run_ids = self._selected_provenance(selected_records)
 
         return MemoryPack(
             success_hints=[
@@ -182,9 +184,40 @@ class HybridMemoryRetriever:
             skill_names=[
                 record.skill_name for _, record in skills if isinstance(record, Skill)
             ],
+            retrieved_source_task_ids=source_task_ids,
+            retrieved_source_run_ids=source_run_ids,
             memory_bank_id=self._store.bank_id,
             memory_bank_revision=self._store.revision,
         ).deduplicated()
+
+    @staticmethod
+    def _selected_provenance(
+        records: list[MemoryRecord],
+    ) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
+        """Return persisted task/run provenance for selected records."""
+        task_ids: dict[str, list[str]] = {}
+        run_ids: dict[str, list[str]] = {}
+        for record in records:
+            record_id = str(
+                getattr(record, "case_id", "")
+                or getattr(record, "failure_id", "")
+                or getattr(record, "skill_name", "")
+            )
+            if not record_id:
+                continue
+            task_ids[record_id] = sorted(
+                {
+                    *[value for value in record.source_task_ids if value],
+                    *([record.source_task_id] if record.source_task_id else []),
+                }
+            )
+            run_ids[record_id] = sorted(
+                {
+                    *[value for value in record.source_run_ids if value],
+                    *([record.source_run_id] if record.source_run_id else []),
+                }
+            )
+        return task_ids, run_ids
 
     def _has_active_stage_records(self, stage: str) -> bool:
         return any(self._active_stage_counts(stage).values())

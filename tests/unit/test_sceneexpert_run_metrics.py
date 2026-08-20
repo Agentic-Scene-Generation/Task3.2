@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 
 from pathlib import Path
@@ -44,6 +45,10 @@ def test_metrics_survive_partial_failure_and_attribute_repairs(tmp_path) -> None
     batch = output_root / "critic_on" / "batch_001"
     hydra = batch / "hydra"
     _write_manifest(batch / "batch_cases.csv")
+    (output_root / "critic_on" / "batch_001.log").write_text(
+        "not a batch directory", encoding="utf-8"
+    )
+    bedroom_task_id = "task_" + hashlib.sha256(b"bedroom").hexdigest()[:16]
 
     scene0 = hydra / "scene_000"
     _write_json(
@@ -55,17 +60,27 @@ def test_metrics_survive_partial_failure_and_attribute_repairs(tmp_path) -> None
         {
             "status": "completed",
             "total_time_sec": 120.0,
+            "experiment_name": "ablation_4c",
+            "config_hash": "config-1",
+            "model": "qwen-test",
+            "code_provenance": {
+                "git_revision": "abc123",
+                "dirty": False,
+                "source_hashes": {"hooks.py": "hash-1"},
+            },
             "component_flags": {
                 "fast_memory_retrieval": True,
                 "memory_writer": True,
             },
             "component_status": {
+                "task_compiler": {"source": "llm", "degraded": False},
                 "memory_writer": {
                     "write_status": "promoted",
+                    "candidate_count": 1,
                     "promoted_count": 1,
                     "fallback_written": False,
                     "store_apply": {"added": 1, "merged": 0},
-                }
+                },
             },
             "stages": [
                 {
@@ -74,8 +89,21 @@ def test_metrics_survive_partial_failure_and_attribute_repairs(tmp_path) -> None
                         "success_case_ids": ["success-1"],
                         "failure_case_ids": [],
                         "skill_names": [],
+                        "retrieved_source_task_ids": {
+                            "success-1": [
+                                "task_from_another_prompt",
+                                "task_from_first_stage",
+                            ]
+                        },
+                        "retrieved_source_run_ids": {
+                            "success-1": ["run-cold", "run-earlier"]
+                        },
+                        "memory_bank_id": "bank-1",
+                        "memory_bank_revision": 2,
                     },
+                    "planner_trace": {"status": "ok"},
                     "execution_evidence": {
+                        "designer_prompt_contains_brief": True,
                         "injected_memory_hash": "abc",
                         "designer_prompt_contains_memory": True,
                     },
@@ -95,8 +123,16 @@ def test_metrics_survive_partial_failure_and_attribute_repairs(tmp_path) -> None
                         "success_case_ids": ["success-1"],
                         "failure_case_ids": [],
                         "skill_names": [],
+                        "retrieved_source_task_ids": {
+                            "success-1": ["task_from_another_prompt"]
+                        },
+                        "retrieved_source_run_ids": {"success-1": ["run-cold"]},
+                        "memory_bank_id": "bank-1",
+                        "memory_bank_revision": 2,
                     },
+                    "planner_trace": {"status": "ok"},
                     "execution_evidence": {
+                        "designer_prompt_contains_brief": True,
                         "injected_memory_hash": "abc",
                         "designer_prompt_contains_memory": True,
                     },
@@ -193,6 +229,24 @@ def test_metrics_survive_partial_failure_and_attribute_repairs(tmp_path) -> None
     assert metrics["summary"]["failed_scenes"] == 1
     assert metrics["summary"]["critic_mean_score"] == 1.0
     assert metrics["summary"]["memory_injection_delivery_rate"] == 1.0
+    assert metrics["summary"]["memory_cross_task_verified_scene_coverage"] == 0.5
+    assert metrics["memory_closed_loop_observed"] is True
+    assert metrics["summary"]["task_compiler_llm_scenes"] == 1
+    assert metrics["summary"]["global_planner_llm_stage_count"] == 1
+    assert metrics["summary"]["brief_injection_verified_stage_count"] == 1
+    assert metrics["memory_identity"]["memory_bank_ids"] == ["bank-1"]
+    assert metrics["code_provenance"]["git_revision"] == "abc123"
+    assert metrics["scenes"][0]["memory_retrieved_source_task_ids"]["success-1"] == [
+        "task_from_another_prompt",
+        "task_from_first_stage",
+    ]
+    assert metrics["scenes"][0]["memory_retrieved_source_run_ids"]["success-1"] == [
+        "run-cold",
+        "run-earlier",
+    ]
+    assert not any(
+        "batch_001.log" in warning for warning in metrics["data_quality_warnings"]
+    )
     assert metrics["summary"]["memory_writer_fallback_writes"] == 0
     assert metrics["summary"]["scenesmith_repair_events"] == 1
     assert metrics["summary"]["sceneexpert_repair_plans"] == 1
@@ -200,12 +254,14 @@ def test_metrics_survive_partial_failure_and_attribute_repairs(tmp_path) -> None
     assert metrics["summary"]["memory_zero_result_reasons"] == [
         "no_structurally_compatible_memory"
     ]
+    assert (
+        bedroom_task_id
+        not in metrics["scenes"][0]["memory_retrieved_source_task_ids"]["success-1"]
+    )
 
     paths = write_run_metrics(metrics)
     assert all(Path(path).is_file() for path in paths.values())
-    rows = list(
-        csv.DictReader(Path(paths["scene_csv"]).open("r", encoding="utf-8"))
-    )
+    rows = list(csv.DictReader(Path(paths["scene_csv"]).open("r", encoding="utf-8")))
     assert [row["status"] for row in rows] == ["completed", "failed"]
 
 

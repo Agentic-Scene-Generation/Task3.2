@@ -1440,6 +1440,10 @@ class SceneExpertMemoryTest(unittest.TestCase):
                 positive_guidance=["use bed as the anchor"],
                 placement_reference=["bed_1 (bed): x=0.0, y=0.0, yaw=0"],
                 scores={"semantic": 0.9, "aesthetic": 0.8, "physics": 0.9},
+                source_task_id="task_prior",
+                source_task_ids=["task_prior"],
+                source_run_id="run_prior",
+                source_run_ids=["run_prior"],
             )
             failure = FailureCase(
                 failure_id="fail_asset_001",
@@ -1507,6 +1511,14 @@ class SceneExpertMemoryTest(unittest.TestCase):
             self.assertIn("do not retry", pack.failure_hints[0])
             self.assertEqual(1, len(pack.skill_texts))
             self.assertIn("arrange_bedroom_anchor", pack.skill_texts[0])
+            self.assertEqual(
+                ["task_prior"],
+                pack.retrieved_source_task_ids["success_bedroom_001"],
+            )
+            self.assertEqual(
+                ["run_prior"],
+                pack.retrieved_source_run_ids["success_bedroom_001"],
+            )
 
     def test_hybrid_retriever_writes_timing_jsonl(self) -> None:
         class DummyEmbedder:
