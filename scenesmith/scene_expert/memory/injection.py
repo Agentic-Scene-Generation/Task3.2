@@ -9,6 +9,10 @@ from scenesmith.scene_expert.schemas import (
 )
 
 
+def _normalized_skill_name(value: str) -> str:
+    return "_".join(str(value or "").strip().casefold().replace("-", " ").split())
+
+
 def _compact(text: str, max_chars: int = 300) -> str:
     compact = " ".join(str(text or "").strip().split())
     return compact if len(compact) <= max_chars else compact[: max_chars - 3] + "..."
@@ -85,6 +89,22 @@ def build_memory_injection_bundle(
             ]
         )
     )
+    retrieved_skill_names = list(pack.skill_names)
+    recommended = {
+        _normalized_skill_name(value)
+        for value in (stage_brief.recommended_skills if stage_brief is not None else [])
+        if _normalized_skill_name(value)
+    }
+    planner_selected_skill_names = [
+        name
+        for name in retrieved_skill_names
+        if _normalized_skill_name(name) in recommended
+    ]
+    prompt_delivered_skill_names = [
+        name
+        for name in retrieved_skill_names
+        if f"[skill: {name.casefold()}]" in memory_text.casefold()
+    ]
     return MemoryInjectionBundle(
         stage=stage,
         planner_stage_brief=stage_brief,
@@ -94,4 +114,7 @@ def build_memory_injection_bundle(
         placement_text=placement_text,
         final_text=final_text,
         selected_memory_ids=selected_ids,
+        retrieved_skill_names=retrieved_skill_names,
+        planner_selected_skill_names=planner_selected_skill_names,
+        prompt_delivered_skill_names=prompt_delivered_skill_names,
     )

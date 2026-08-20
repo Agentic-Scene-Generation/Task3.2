@@ -113,6 +113,20 @@ class RetrievedMemorySelection(BaseModel):
     injected_text: str = ""
 
 
+class SkillSelectionDecision(BaseModel):
+    """Auditable deterministic gate applied before skill ranking/injection."""
+
+    skill_name: str
+    decision: Literal["eligible", "selected", "not_selected", "rejected"]
+    reasons: list[str] = Field(default_factory=list)
+    canonical_task_room: str = ""
+    canonical_skill_rooms: list[str] = Field(default_factory=list)
+    required_object_roles: list[str] = Field(default_factory=list)
+    required_relation_types: list[str] = Field(default_factory=list)
+    matched_constraint_ids: list[str] = Field(default_factory=list)
+    conflicting_constraint_ids: list[str] = Field(default_factory=list)
+
+
 class MemoryPack(BaseModel):
     """Retrieved memory snippets to inject into a stage's StageBrief."""
 
@@ -152,6 +166,7 @@ class MemoryPack(BaseModel):
     memory_bank_id: str = ""
     memory_bank_revision: int = 0
     selections: list[RetrievedMemorySelection] = Field(default_factory=list)
+    skill_filter_decisions: list[SkillSelectionDecision] = Field(default_factory=list)
 
     def deduplicated(self) -> "MemoryPack":
         """Return an order-preserving copy without repeated prompt content."""
@@ -190,6 +205,9 @@ class MemoryInjectionBundle(BaseModel):
     placement_text: str = ""
     final_text: str = ""
     selected_memory_ids: list[str] = Field(default_factory=list)
+    retrieved_skill_names: list[str] = Field(default_factory=list)
+    planner_selected_skill_names: list[str] = Field(default_factory=list)
+    prompt_delivered_skill_names: list[str] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -437,6 +455,9 @@ class StageExecutionEvidence(BaseModel):
     task_spec_source: str = "unknown"
     stage_brief_source: str = "unknown"
     retrieved_memory_ids: list[str] = Field(default_factory=list)
+    retrieved_skill_names: list[str] = Field(default_factory=list)
+    planner_selected_skill_names: list[str] = Field(default_factory=list)
+    prompt_delivered_skill_names: list[str] = Field(default_factory=list)
     context_bundle_hash: str = ""
     injected_brief_hash: str = ""
     injected_memory_hash: str = ""

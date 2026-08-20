@@ -655,6 +655,10 @@ class MemoryWriter:
                 for key in ("count", "min_count", "max_count", "quantifier")
                 if (value := constraint.get(key)) is not None
             }
+            for key in ("orientation", "edge_frame", "groups"):
+                value = constraint.get(key)
+                if value is not None:
+                    cardinality[key] = value
             for prefix, selector in (("subject", subject), ("target", target)):
                 if not isinstance(selector, dict):
                     continue

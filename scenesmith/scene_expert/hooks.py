@@ -43,6 +43,7 @@ from scenesmith.scene_expert.harness import Harness, RepairDecision
 from scenesmith.scene_expert.memory.activity import MemoryActivityLogger
 from scenesmith.scene_expert.memory.injection import build_memory_injection_bundle
 from scenesmith.scene_expert.memory.retriever import MemoryRetriever
+from scenesmith.scene_expert.memory.schemas import MemoryUtilityObservation
 from scenesmith.scene_expert.memory.store import FastMemoryStore
 from scenesmith.scene_expert.memory.writer import MemoryWriter
 from scenesmith.scene_expert.relation_context import StageRelationProjector
@@ -821,6 +822,7 @@ class SceneExpertHookRunner:
             ),
             run_id=str(self._output_dir.resolve()),
         )
+        self._pending_skill_observations: list[MemoryUtilityObservation] = []
 
         # Current stage state (populated in pre_stage, consumed in post_stage)
         self._current_stage: str = ""
@@ -932,6 +934,15 @@ class SceneExpertHookRunner:
                 else "disabled_or_unavailable"
             ),
             retrieved_memory_ids=self._current_injection_bundle.selected_memory_ids,
+            retrieved_skill_names=(
+                self._current_injection_bundle.retrieved_skill_names
+            ),
+            planner_selected_skill_names=(
+                self._current_injection_bundle.planner_selected_skill_names
+            ),
+            prompt_delivered_skill_names=(
+                self._current_injection_bundle.prompt_delivered_skill_names
+            ),
             injected_brief_hash=(
                 hashlib.sha256(brief_text.encode("utf-8")).hexdigest()
                 if brief_text
@@ -993,18 +1004,39 @@ class SceneExpertHookRunner:
     ) -> None:
         """Persist the critic outcome linked to the exact retrieved records."""
         try:
-            self._memory_activity.record_post_stage(
+            observations = self._memory_activity.record_post_stage(
                 stage=stage,
                 verify_report=verify_report,
                 repair_actions=repair_actions,
                 scene_state_path=scene_state_path,
             )
+            if isinstance(observations, list):
+                pending = list(getattr(self, "_pending_skill_observations", []))
+                pending.extend(observations)
+                self._pending_skill_observations = pending
         except Exception as error:
             console_logger.warning(
                 "[SceneExpert] Failed to record post-stage memory activity for %s: %s",
                 stage,
                 error,
             )
+
+    def _flush_skill_outcomes(self) -> dict[str, Any] | None:
+        """Commit verified skill utility once, after all stage retrieval is done."""
+        observations = list(getattr(self, "_pending_skill_observations", []))
+        if self._memory_store is None or not observations:
+            return None
+        try:
+            summary = self._memory_store.record_skill_outcomes(observations)
+            self._memory_activity.record_skill_learning(summary=summary)
+            self._pending_skill_observations = []
+            return summary
+        except Exception as error:
+            console_logger.warning(
+                "[SceneExpert] Failed to persist skill utility observations: %s",
+                error,
+            )
+            return None
 
     def _capture_main_repair_activity(self) -> None:
         """Mirror main repair evidence into the SceneExpert audit, read-only."""
@@ -1258,13 +1290,21 @@ class SceneExpertHookRunner:
         self._stage_start_time = time.time()
         self._qwen_calls = 0
 
+        self._current_relation_context = self._relation_projector.project(
+            stage=stage,
+            task_spec=self._task_spec,
+            intent_contract=self._intent_contract,
+        )
+
         if self._retriever is not None and self._component_enabled(
             "fast_memory_retrieval"
         ):
             try:
                 retrieval_start = time.time()
                 self._current_memory_pack = self._retriever.retrieve(
-                    self._task_spec, stage
+                    self._task_spec,
+                    stage,
+                    relation_context=self._current_relation_context,
                 )
                 retrieval_elapsed = time.time() - retrieval_start
                 n_hints = len(self._current_memory_pack.success_hints) + len(
@@ -1296,11 +1336,6 @@ class SceneExpertHookRunner:
         else:
             self._current_memory_pack = _empty_memory_pack()
 
-        self._current_relation_context = self._relation_projector.project(
-            stage=stage,
-            task_spec=self._task_spec,
-            intent_contract=self._intent_contract,
-        )
         self._current_stage_brief = None
         self._current_planner_trace = {}
         if self._component_enabled("global_planner"):
@@ -1522,6 +1557,13 @@ class SceneExpertHookRunner:
         # available separately for LLM prompting.
         setattr(scene, "scene_expert_original_description", scene.text_description)
 
+        self._current_relation_context = self._relation_projector.project(
+            stage=stage,
+            task_spec=self._task_spec,
+            intent_contract=self._intent_contract,
+            scene=scene,
+        )
+
         # --- Step 1: Memory retrieval (skip in harness_only mode) ---
         if self._retriever is not None and self._component_enabled(
             "fast_memory_retrieval"
@@ -1529,7 +1571,9 @@ class SceneExpertHookRunner:
             try:
                 retrieval_start = time.time()
                 self._current_memory_pack = self._retriever.retrieve(
-                    self._task_spec, stage
+                    self._task_spec,
+                    stage,
+                    relation_context=self._current_relation_context,
                 )
                 retrieval_elapsed = time.time() - retrieval_start
                 n_hints = len(self._current_memory_pack.success_hints) + len(
@@ -1562,12 +1606,6 @@ class SceneExpertHookRunner:
             self._current_memory_pack = _empty_memory_pack()
 
         # --- Step 2: Global Planner -> StageBrief ---
-        self._current_relation_context = self._relation_projector.project(
-            stage=stage,
-            task_spec=self._task_spec,
-            intent_contract=self._intent_contract,
-            scene=scene,
-        )
         self._current_stage_brief = None
         self._current_planner_trace = {}
         if self._component_enabled("global_planner"):
@@ -2032,6 +2070,7 @@ class SceneExpertHookRunner:
 
         # Memory update (skip in harness_only mode).
         self._write_long_term_memory(full_report)
+        self._flush_skill_outcomes()
 
         if self._trace_enabled():
             trace_dict = self._trace_logger.finalize(
@@ -2120,6 +2159,7 @@ class SceneExpertHookRunner:
             model=self._qwen_model,
         )
         self._write_long_term_memory(full_report)
+        self._flush_skill_outcomes()
         trace_dict = self._trace_logger.finalize(
             full_report=full_report,
             exports=exports,

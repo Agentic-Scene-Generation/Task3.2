@@ -9,11 +9,15 @@ from __future__ import annotations
 import re
 
 from scenesmith.scene_expert.memory.schemas import FailureCase, Skill, SuccessCase
+from scenesmith.scene_expert.memory.room_taxonomy import room_types_compatible
+from scenesmith.scene_expert.memory.skill_policy import evaluate_skill_for_task
 from scenesmith.scene_expert.memory.store import FastMemoryStore
 from scenesmith.scene_expert.schemas import (
     MemoryPack,
     RetrievedMemorySelection,
     SceneTaskSpec,
+    SkillSelectionDecision,
+    StageRelationContext,
 )
 
 _ALIASES = {
@@ -86,11 +90,8 @@ def _keyword_score(query_tokens: set[str], candidate_tokens: list[str]) -> float
 
 
 def _room_type_matches(record_room: str, task_room: str) -> bool:
-    """Require room-scoped memories to match instead of merely adding a bonus."""
-    generic = {"", "*", "all", "any", "generic"}
-    record_norm = str(record_room or "").lower().replace("_", " ").strip()
-    task_norm = str(task_room or "").lower().replace("_", " ").strip()
-    return record_norm in generic or task_norm in generic or record_norm == task_norm
+    """Require canonical, explicitly compatible room scopes."""
+    return room_types_compatible(record_room, task_room)
 
 
 def _build_query_tokens(task_spec: SceneTaskSpec, stage: str) -> set[str]:
@@ -152,7 +153,12 @@ class MemoryRetriever:
         known_task_ids = {value for value in task_ids if value}
         return known_task_ids == {self._exclude_source_task_id}
 
-    def retrieve(self, task_spec: SceneTaskSpec, stage: str) -> MemoryPack:
+    def retrieve(
+        self,
+        task_spec: SceneTaskSpec,
+        stage: str,
+        relation_context: StageRelationContext | None = None,
+    ) -> MemoryPack:
         """Retrieve and format memory for injection into a StageBrief."""
         self._store.refresh_if_changed()
         query_tokens = _build_query_tokens(task_spec, stage)
@@ -163,7 +169,12 @@ class MemoryRetriever:
         failure_hints, failure_ids = self._retrieve_failure(
             task_spec, stage, query_tokens
         )
-        skill_texts, skill_names = self._retrieve_skills(task_spec, stage, query_tokens)
+        skill_texts, skill_names, skill_decisions = self._retrieve_skills(
+            task_spec,
+            stage,
+            query_tokens,
+            relation_context=relation_context,
+        )
         source_task_ids, source_run_ids = self._selected_provenance(
             [*success_ids, *failure_ids, *skill_names]
         )
@@ -188,6 +199,7 @@ class MemoryRetriever:
             memory_bank_id=self._store.bank_id,
             memory_bank_revision=self._store.revision,
             selections=selections,
+            skill_filter_decisions=skill_decisions,
         ).deduplicated()
 
     def _build_selections(
@@ -218,9 +230,34 @@ class MemoryRetriever:
                         source_run_ids=source_run_ids.get(memory_id, []),
                         bank_id=self._store.bank_id,
                         bank_revision=self._store.revision,
+                        injected_text=self._selection_text(memory_type, memory_id),
                     )
                 )
         return rows
+
+    def _selection_text(self, memory_type: str, memory_id: str) -> str:
+        """Resolve the exact retriever-formatted text for an audit row."""
+        records: list[SuccessCase | FailureCase | Skill]
+        if memory_type == "success":
+            records = self._store.active_success_cases
+        elif memory_type == "failure":
+            records = self._store.active_failure_cases
+        else:
+            records = self._store.active_skills
+        for record in records:
+            record_id = str(
+                getattr(record, "case_id", "")
+                or getattr(record, "failure_id", "")
+                or getattr(record, "skill_name", "")
+            )
+            if record_id != memory_id:
+                continue
+            if isinstance(record, SuccessCase):
+                return record.to_positive_guidance()
+            if isinstance(record, FailureCase):
+                return record.to_negative_constraint()
+            return record.to_procedure_text()
+        return ""
 
     def _selected_provenance(
         self, selected_ids: list[str]
@@ -335,29 +372,32 @@ class MemoryRetriever:
         )
 
     def _retrieve_skills(
-        self, task_spec: SceneTaskSpec, stage: str, query_tokens: set[str]
-    ) -> tuple[list[str], list[str]]:
+        self,
+        task_spec: SceneTaskSpec,
+        stage: str,
+        query_tokens: set[str],
+        *,
+        relation_context: StageRelationContext | None = None,
+    ) -> tuple[list[str], list[str], list[SkillSelectionDecision]]:
         scored: list[tuple[float, Skill]] = []
+        decisions: dict[str, SkillSelectionDecision] = {}
         for skill in self._store.active_skills:
             if self._same_task(skill):
                 continue
             if skill.stage != stage:
                 continue
-            if skill.applicability.excluded_room_types and any(
-                _room_type_matches(room, task_spec.room_type)
-                for room in skill.applicability.excluded_room_types
-            ):
+            policy = evaluate_skill_for_task(
+                skill,
+                task_spec,
+                stage,
+                relation_context=relation_context,
+            )
+            decisions[skill.skill_name] = policy.decision
+            if not policy.eligible:
                 continue
-            skill_rooms = [
-                *skill.room_types,
-                *skill.applicability.room_types,
-            ]
-            if getattr(skill, "room_type", ""):
+            skill_rooms = [*skill.room_types, *skill.applicability.room_types]
+            if skill.room_type:
                 skill_rooms.append(skill.room_type)
-            if skill_rooms and not any(
-                _room_type_matches(room, task_spec.room_type) for room in skill_rooms
-            ):
-                continue
             room_bonus = 1.5 if skill_rooms else 1.0
             candidate_tokens = _tokenize(
                 " ".join(
@@ -376,7 +416,19 @@ class MemoryRetriever:
         top = [
             (score, skill) for score, skill in scored[: self._max_skills] if score > 0
         ]
+        selected_names = {skill.skill_name for _, skill in top}
+        for skill_name, decision in list(decisions.items()):
+            if decision.decision == "rejected":
+                continue
+            decisions[skill_name] = decision.model_copy(
+                update={
+                    "decision": (
+                        "selected" if skill_name in selected_names else "not_selected"
+                    )
+                }
+            )
         return (
             [skill.to_procedure_text() for _, skill in top],
             [skill.skill_name for _, skill in top],
+            list(decisions.values()),
         )

@@ -7,6 +7,7 @@ import time
 from dataclasses import dataclass
 
 from scenesmith.scene_expert.memory.retriever import _tokenize
+from scenesmith.scene_expert.memory.room_taxonomy import room_types_compatible
 from scenesmith.scene_expert.memory.schemas import FailureCase, Skill, SuccessCase
 from scenesmith.scene_expert.schemas import SceneTaskSpec
 
@@ -62,14 +63,8 @@ def object_overlap(record_objects: list[str], task_objects: list[str]) -> float:
 
 
 def room_compatible(record_room: str, task_room: str) -> bool:
-    """Return true when room labels are empty or token-compatible."""
-    if not record_room or not task_room:
-        return True
-    record_norm = record_room.lower().replace("_", " ").strip()
-    task_norm = task_room.lower().replace("_", " ").strip()
-    if record_norm == task_norm:
-        return True
-    return bool(normalized_token_set([record_room]) & normalized_token_set([task_room]))
+    """Return true only for canonical or explicitly compatible room types."""
+    return room_types_compatible(record_room, task_room)
 
 
 def record_required_objects(record: MemoryRecord) -> list[str]:

@@ -22,6 +22,7 @@ from pydantic import BaseModel
 from scenesmith.scene_expert.memory.schemas import (
     MEMORY_SCHEMA_VERSION,
     FailureCase,
+    MemoryUtilityObservation,
     MemoryUpdateOp,
     Skill,
     SuccessCase,
@@ -365,6 +366,140 @@ class FastMemoryStore:
         )
         return bool(summary["changed"])
 
+    def record_skill_outcomes(
+        self,
+        observations: list[MemoryUtilityObservation],
+        *,
+        harmful_quarantine_threshold: int = 2,
+    ) -> dict[str, Any]:
+        """Learn from independently verified downstream skill observations.
+
+        A repeated run of the same task is useful for experiment metrics but is
+        not independent evidence for mutating a reusable skill.  Therefore the
+        durable bank accepts at most one utility observation per task, retains
+        the run ID for provenance, and never treats the skill's source task as
+        transfer evidence. Different tasks within one ACP run remain independent.
+        """
+        updated = 0
+        quarantined: list[str] = []
+        skipped_non_skill = 0
+        skipped_unverified = 0
+        skipped_non_independent = 0
+        with self._file_lock():
+            self._manifest = self._read_or_create_manifest_unlocked()
+            self._reload_from_disk_unlocked()
+            next_revision = int(self._manifest.get("revision", 0)) + 1
+
+            for observation in observations:
+                if observation.memory_type != "skill":
+                    skipped_non_skill += 1
+                    continue
+                if (
+                    not observation.prompt_delivered
+                    or observation.outcome not in {"positive", "negative"}
+                    or not observation.task_id
+                    or not observation.run_id
+                ):
+                    skipped_unverified += 1
+                    continue
+                skill_index = next(
+                    (
+                        index
+                        for index, skill in enumerate(self.skills)
+                        if skill.skill_name.casefold()
+                        == observation.memory_id.casefold()
+                    ),
+                    None,
+                )
+                if skill_index is None:
+                    skipped_unverified += 1
+                    continue
+                skill = self.skills[skill_index]
+                source_tasks = {
+                    skill.source_task_id,
+                    *skill.source_task_ids,
+                } - {""}
+                observed_tasks = {
+                    item.task_id for item in skill.utility_observations if item.task_id
+                }
+                if (
+                    observation.task_id in source_tasks
+                    or observation.task_id in observed_tasks
+                ):
+                    skipped_non_independent += 1
+                    continue
+
+                positive = skill.positive_utility_count + int(
+                    observation.outcome == "positive"
+                )
+                negative = skill.negative_utility_count + int(
+                    observation.outcome == "negative"
+                )
+                status = skill.status
+                if (
+                    negative >= max(2, int(harmful_quarantine_threshold))
+                    and negative > positive
+                ):
+                    status = "quarantined"
+                    quarantined.append(skill.skill_name)
+                # Beta(1,1) posterior keeps one successful transfer from
+                # spuriously producing a perfect utility estimate.
+                success_rate = (positive + 1.0) / (positive + negative + 2.0)
+                retained_observations = [
+                    *skill.utility_observations[-63:],
+                    observation,
+                ]
+                changed = skill.model_copy(
+                    update={
+                        "status": status,
+                        "positive_utility_count": positive,
+                        "negative_utility_count": negative,
+                        "success_rate": success_rate,
+                        "utility_observations": retained_observations,
+                        "usage_count": skill.usage_count + 1,
+                        "last_used_at": self._now(),
+                        "updated_at": self._now(),
+                        "bank_version": next_revision,
+                    }
+                )
+                self.skills[skill_index] = changed.model_copy(
+                    update={"embedding_text": build_embedding_text(changed)}
+                )
+                updated += 1
+
+            if updated:
+                self._rewrite(self._skills_path, self.skills)
+                now = self._now()
+                bank_revisions = dict(self._manifest.get("bank_revisions") or {})
+                bank_revisions["skill"] = int(bank_revisions.get("skill", 0)) + 1
+                self._manifest.update(
+                    {
+                        "schema_version": MANIFEST_SCHEMA_VERSION,
+                        "record_schema_version": MEMORY_SCHEMA_VERSION,
+                        "revision": next_revision,
+                        "bank_revisions": bank_revisions,
+                        "updated_at": now,
+                        "last_mutation": "record_skill_outcomes",
+                        "counts": self._record_counts(),
+                    }
+                )
+                self._atomic_write_json(self._manifest_path, self._manifest)
+
+            self._loaded_revision = int(self._manifest.get("revision", 0))
+            self._loaded_disk_signature = self._disk_signature()
+
+        summary = {
+            "changed": updated > 0,
+            "revision": self.revision,
+            "updated": updated,
+            "quarantined": sorted(set(quarantined)),
+            "skipped_non_skill": skipped_non_skill,
+            "skipped_unverified": skipped_unverified,
+            "skipped_non_independent": skipped_non_independent,
+        }
+        self.last_apply_summary = summary
+        return summary
+
     def apply_updates(self, ops: list[MemoryUpdateOp]) -> dict[str, Any]:
         """Apply one atomic, deduplicated mutation batch and increment revision once."""
         changed_banks: set[str] = set()
@@ -485,8 +620,31 @@ class FastMemoryStore:
             id_matches = identity(current) == incoming_id
             if not id_matches and signature(current) != incoming_signature:
                 continue
-            if id_matches and incoming.source_run_id == current.source_run_id:
+            if (
+                id_matches
+                and incoming.source_run_id == current.source_run_id
+                and incoming.source_task_id == current.source_task_id
+            ):
                 return False, True
+            if isinstance(current, Skill) and isinstance(incoming, Skill):
+                current_tasks = {
+                    current.source_task_id,
+                    *current.source_task_ids,
+                } - {""}
+                incoming_tasks = {
+                    incoming.source_task_id,
+                    *incoming.source_task_ids,
+                } - {""}
+                incoming_runs = {
+                    incoming.source_run_id,
+                    *incoming.source_run_ids,
+                } - {""}
+                if (
+                    not incoming_tasks
+                    or not incoming_runs
+                    or not (incoming_tasks - current_tasks)
+                ):
+                    return False, True
             merged = self._merge_observation(current, incoming)
             if merged == current:
                 return False, True
@@ -498,6 +656,7 @@ class FastMemoryStore:
     def _merge_observation(self, current: Any, incoming: Any) -> Any:
         same_run = bool(incoming.source_run_id) and (
             incoming.source_run_id == current.source_run_id
+            and incoming.source_task_id == current.source_task_id
         )
         evidence_refs = self._unique(current.evidence_refs + incoming.evidence_refs)
         critic_evidence = self._unique(
@@ -543,6 +702,10 @@ class FastMemoryStore:
         if not same_run:
             updates["observation_count"] = current.observation_count + 1
         if isinstance(current, Skill) and isinstance(incoming, Skill):
+            incoming_is_stronger = (
+                incoming.quality_score,
+                incoming.confidence,
+            ) > (current.quality_score, current.confidence)
             updates["applicability"] = current.applicability.model_copy(
                 update={
                     "room_types": self._unique(
@@ -564,6 +727,33 @@ class FastMemoryStore:
                     "forbidden_conditions": self._unique(
                         current.applicability.forbidden_conditions
                         + incoming.applicability.forbidden_conditions
+                    ),
+                }
+            )
+            updates.update(
+                {
+                    "room_types": self._unique(
+                        current.room_types + incoming.room_types
+                    ),
+                    "required_objects": self._unique(
+                        current.required_objects + incoming.required_objects
+                    ),
+                    "functional_zones": self._unique(
+                        current.functional_zones + incoming.functional_zones
+                    ),
+                    "preconditions": self._unique(
+                        current.preconditions + incoming.preconditions
+                    ),
+                    "procedure": (
+                        list(incoming.procedure)
+                        if incoming_is_stronger and incoming.procedure
+                        else list(current.procedure)
+                    ),
+                    "failure_avoidance": self._unique(
+                        current.failure_avoidance + incoming.failure_avoidance
+                    ),
+                    "postconditions": self._unique(
+                        current.postconditions + incoming.postconditions
                     ),
                 }
             )

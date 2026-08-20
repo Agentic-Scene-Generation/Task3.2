@@ -100,10 +100,14 @@ class MemoryUtilityObservation(BaseModel):
     selected_rank: int = Field(default=0, ge=0)
     retrieval_score: float | None = None
     injected: bool = False
+    retrieved: bool = True
+    planner_selected: bool = False
+    prompt_delivered: bool = False
     stage_passed: bool | None = None
     quality_delta: float | None = None
     latency_delta_sec: float | None = None
     outcome: Literal["positive", "negative", "neutral", "unknown"] = "unknown"
+    outcome_basis: str = ""
     evidence_ref: str = ""
 
 
@@ -281,6 +285,7 @@ class Skill(MemoryRecordBase):
     last_used_at: str = ""
     usage_count: int = 0
     applicability: SkillApplicability = Field(default_factory=SkillApplicability)
+    utility_observations: list[MemoryUtilityObservation] = Field(default_factory=list)
 
     def to_procedure_text(self) -> str:
         """Format skill as an ordered procedure for prompt injection."""
@@ -292,6 +297,11 @@ class Skill(MemoryRecordBase):
             lines.append(
                 "Required object roles: "
                 + ", ".join(self.applicability.required_object_roles)
+            )
+        if self.applicability.required_relation_types:
+            lines.append(
+                "Required task relations: "
+                + ", ".join(self.applicability.required_relation_types)
             )
         if self.applicability.forbidden_conditions:
             lines.append(

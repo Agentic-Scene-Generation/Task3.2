@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 
 from pathlib import Path
@@ -85,34 +86,62 @@ class MemoryActivityLogger:
         verify_report: StageVerifyReport | None,
         repair_actions: list[Any],
         scene_state_path: str,
-    ) -> None:
+    ) -> list[MemoryUtilityObservation]:
         """Attach the authoritative critic result to the selected memory."""
         stage_entry = self._payload["stages"].setdefault(stage, {})
         retrieval = stage_entry.get("retrieval") or {}
+        injection = stage_entry.get("injection") or {}
         execution = stage_entry.get("execution_evidence") or {}
-        observations = []
+        planner_selected = set(injection.get("planner_selected_skill_names") or [])
+        prompt_delivered = set(injection.get("prompt_delivered_skill_names") or [])
+        skill_decisions = {
+            str(item.get("skill_name") or ""): item
+            for item in retrieval.get("skill_filter_decisions", []) or []
+            if isinstance(item, dict) and str(item.get("skill_name") or "")
+        }
+        observations: list[MemoryUtilityObservation] = []
         for selection in retrieval.get("selections", []) or []:
             if not isinstance(selection, dict):
                 continue
+            memory_id = str(selection.get("memory_id") or "")
+            memory_type = str(selection.get("memory_type") or "success")
+            delivered = bool(
+                memory_type == "skill"
+                and memory_id in prompt_delivered
+                and execution.get("designer_prompt_contains_memory")
+            )
+            outcome, outcome_basis = self._classify_outcome(
+                memory_type=memory_type,
+                delivered=delivered,
+                skill_decision=skill_decisions.get(memory_id),
+                verify_report=verify_report,
+            )
             observations.append(
                 MemoryUtilityObservation(
-                    memory_id=str(selection.get("memory_id") or ""),
-                    memory_type=str(selection.get("memory_type") or "success"),
+                    memory_id=memory_id,
+                    memory_type=memory_type,
                     task_id=self._payload["task_id"],
                     run_id=self._payload["run_id"],
                     stage=stage,
                     selected_rank=int(selection.get("rank") or 0),
                     retrieval_score=selection.get("score"),
-                    injected=bool(execution.get("designer_prompt_contains_memory")),
+                    injected=(
+                        delivered
+                        if memory_type == "skill"
+                        else bool(execution.get("designer_prompt_contains_memory"))
+                    ),
+                    retrieved=True,
+                    planner_selected=(
+                        memory_type == "skill" and memory_id in planner_selected
+                    ),
+                    prompt_delivered=delivered,
                     stage_passed=(
                         verify_report.pass_stage if verify_report is not None else None
                     ),
-                    # A single run establishes delivery and downstream outcome,
-                    # not causal utility. Paired evaluation may classify this
-                    # observation later without rewriting the source artifact.
-                    outcome="unknown",
+                    outcome=outcome,
+                    outcome_basis=outcome_basis,
                     evidence_ref=scene_state_path,
-                ).model_dump(mode="json")
+                )
             )
         stage_entry.update(
             {
@@ -130,9 +159,82 @@ class MemoryActivityLogger:
                     )
                     for action in repair_actions
                 ],
-                "utility_observations": observations,
+                "utility_observations": [
+                    observation.model_dump(mode="json") for observation in observations
+                ],
             }
         )
+        self._save()
+        return observations
+
+    @staticmethod
+    def _classify_outcome(
+        *,
+        memory_type: str,
+        delivered: bool,
+        skill_decision: dict[str, Any] | None,
+        verify_report: StageVerifyReport | None,
+    ) -> tuple[str, str]:
+        """Label verified skill co-occurrence without claiming causal impact."""
+        if memory_type != "skill" or not delivered or verify_report is None:
+            return "unknown", "not_a_delivered_skill"
+        hard_report = verify_report.hard_check_report or {}
+        if verify_report.pass_stage and hard_report.get("hard_valid") is not False:
+            return "positive", "verified_stage_pass_after_skill_delivery"
+        if hard_report.get("hard_valid") is not False:
+            return "unknown", "failure_not_owned_by_deterministic_hard_contract"
+
+        evidence_text = " ".join(
+            [
+                *[str(value) for value in hard_report.get("failed_checks", [])],
+                *[
+                    " ".join([issue.issue_type, issue.object_name, issue.description])
+                    for issue in verify_report.issues
+                ],
+            ]
+        )
+        decision = dict(skill_decision or {})
+        relevance_text = " ".join(
+            [
+                *[str(value) for value in decision.get("matched_constraint_ids", [])],
+                *[str(value) for value in decision.get("required_relation_types", [])],
+                *[str(value) for value in decision.get("required_object_roles", [])],
+            ]
+        )
+        evidence_tokens = MemoryActivityLogger._meaningful_tokens(evidence_text)
+        relevance_tokens = MemoryActivityLogger._meaningful_tokens(relevance_text)
+        if relevance_tokens and evidence_tokens & relevance_tokens:
+            return "negative", "relevant_hard_failure_after_skill_delivery"
+        if not relevance_tokens:
+            return "unknown", "skill_lacks_structured_hard_contract_scope"
+        return "unknown", "hard_failure_not_relevant_to_delivered_skill"
+
+    @staticmethod
+    def _meaningful_tokens(text: str) -> set[str]:
+        ignored = {
+            "and",
+            "avoid",
+            "for",
+            "from",
+            "must",
+            "object",
+            "place",
+            "room",
+            "skill",
+            "stage",
+            "the",
+            "this",
+            "with",
+        }
+        return {
+            token
+            for token in re.split(r"[^a-z0-9_]+", str(text or "").casefold())
+            if len(token) >= 3 and token not in ignored
+        }
+
+    def record_skill_learning(self, *, summary: dict[str, Any]) -> None:
+        """Attach the single end-of-scene durable-bank update to the audit."""
+        self._payload["skill_learning"] = dict(summary)
         self._save()
 
     def record_writer(
@@ -235,6 +337,13 @@ class MemoryActivityLogger:
                     )
                     + "`",
                     f"- Stage passed: `{report.get('pass_stage', 'not verified')}`",
+                    "- Skill funnel: retrieved=`"
+                    + ", ".join(injection.get("retrieved_skill_names", []))
+                    + "`; planner-selected=`"
+                    + ", ".join(injection.get("planner_selected_skill_names", []))
+                    + "`; prompt-delivered=`"
+                    + ", ".join(injection.get("prompt_delivered_skill_names", []))
+                    + "`.",
                     f"- Scene state: `{entry.get('scene_state_path', '')}`",
                     "",
                 ]
@@ -242,6 +351,14 @@ class MemoryActivityLogger:
         writer = self._payload.get("writer") or {}
         lines.extend(
             [
+                "## Skill learning",
+                "",
+                "- Store result: `"
+                + json.dumps(
+                    self._payload.get("skill_learning", {}), ensure_ascii=False
+                )
+                + "`",
+                "",
                 "## Memory writer",
                 "",
                 f"- Status: `{writer.get('status', 'not_run')}`",
