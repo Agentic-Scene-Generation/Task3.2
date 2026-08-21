@@ -1268,6 +1268,7 @@ append_sceneexpert_component_override SCENEEXPERT_COMPONENT_REPAIR_ENABLED repai
 append_sceneexpert_component_override SCENEEXPERT_COMPONENT_CRITIC_BRIDGE_ENABLED critic_bridge
 append_sceneexpert_component_override SCENEEXPERT_COMPONENT_TRACE_ENABLED trace
 append_sceneexpert_component_override SCENEEXPERT_COMPONENT_STRUCTURED_LLM_ENABLED structured_llm
+append_sceneexpert_component_override SCENEEXPERT_COMPONENT_SLOW_MEMORY_CAPTURE_ENABLED slow_memory_capture
 
 if [ "$HSSD_RETRIEVAL_BACKEND" = "embedding" ]; then
     # Do not rely on paths.hssd_data_dir for the zvec index: on ACP hosts it
@@ -1765,7 +1766,9 @@ fi
 
 run_exit_code=0
 if [ "$GENERATE_SHARED_BASE" = "true" ]; then
-    if ! run_shared_base_with_recovery; then
+    if run_shared_base_with_recovery; then
+        :
+    else
         run_exit_code=$?
     fi
 fi

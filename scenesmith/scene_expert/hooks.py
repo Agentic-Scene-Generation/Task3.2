@@ -764,6 +764,7 @@ class SceneExpertHookRunner:
         config_hash: str = "",
         experiment_signature: str = "",
         start_stage: str = "floor_plan",
+        allow_long_term_memory_updates: bool = True,
         intent_contract: dict[str, Any] | None = None,
         intent_trace: dict[str, Any] | None = None,
         task_compiler_trace: dict[str, Any] | None = None,
@@ -797,6 +798,11 @@ class SceneExpertHookRunner:
         self._config_hash = config_hash
         self._experiment_signature = experiment_signature
         self._start_stage = start_stage
+        # A normal, intentionally truncated pipeline (for example the
+        # floor-plan-only shared base used by critic probes) is not a complete
+        # scene outcome.  It may read memory and emit local audit artifacts,
+        # but it must not promote long-term memories or update skill utility.
+        self._allow_long_term_memory_updates = allow_long_term_memory_updates
         self._intent_contract = dict(intent_contract or {})
         self._intent_trace = dict(intent_trace or {})
         self._critic_config = critic_config
@@ -2095,9 +2101,32 @@ class SceneExpertHookRunner:
                 model=self._qwen_model,
             )
 
-        # Memory update (skip in harness_only mode).
-        self._write_long_term_memory(full_report)
-        self._flush_skill_outcomes()
+        # Only terminal pipeline runs own a complete scene outcome.  Shared
+        # bases deliberately stop at floor_plan and are later resumed by a
+        # critic-on run; promoting their partial reports would contaminate the
+        # active bank and count one task twice.
+        if getattr(self, "_allow_long_term_memory_updates", True):
+            self._write_long_term_memory(full_report)
+            self._flush_skill_outcomes()
+        else:
+            self._pending_skill_observations = []
+            if self._trace_enabled():
+                self._trace_logger.record_component_status(
+                    "memory_writer",
+                    {
+                        "success": True,
+                        "skipped": True,
+                        "write_status": "skipped_non_terminal_pipeline",
+                        "reason": (
+                            "Long-term memory promotion requires a run whose "
+                            "configured stop_stage is manipuland."
+                        ),
+                    },
+                )
+            console_logger.info(
+                "[SceneExpert] Skipped long-term memory and skill updates for "
+                "non-terminal pipeline run"
+            )
 
         if self._trace_enabled():
             trace_dict = self._trace_logger.finalize(
@@ -2669,6 +2698,11 @@ def build_hook_runner(
         .get("pipeline", {})
         .get("start_stage", "floor_plan")
     )
+    stop_stage = (
+        cfg_dict.get("experiment", {})
+        .get("pipeline", {})
+        .get("stop_stage", CONTRACT_STAGE_ORDER[-1])
+    )
     config_hash = _stable_config_hash(cfg_dict)
     experiment_signature = _stable_experiment_signature(cfg_dict)
     trace_logger: TraceLogger | None = None
@@ -2730,6 +2764,7 @@ def build_hook_runner(
         config_hash=config_hash,
         experiment_signature=experiment_signature,
         start_stage=start_stage,
+        allow_long_term_memory_updates=(stop_stage == CONTRACT_STAGE_ORDER[-1]),
         intent_contract=intent_contract,
         intent_trace=intent_trace,
         task_compiler_trace=task_compiler_trace,
