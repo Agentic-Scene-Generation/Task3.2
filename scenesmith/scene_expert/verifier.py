@@ -18,16 +18,20 @@ from pathlib import Path
 
 import yaml
 
+from scenesmith.scenebenchmark_critic.object_taxonomy import (
+    canonical_object_category,
+    categories_are_equivalent,
+)
+from scenesmith.scenebenchmark_critic.relation_registry import (
+    STAGE_ORDER as CONTRACT_STAGE_ORDER,
+    relation_spec,
+)
 from scenesmith.scene_expert.schemas import (
     FullVerifyReport,
     SceneTaskSpec,
     StageBrief,
     StageVerifyReport,
     VerifyIssue,
-)
-from scenesmith.scenebenchmark_critic.object_taxonomy import (
-    canonical_object_category,
-    categories_are_equivalent,
 )
 
 console_logger = logging.getLogger(__name__)
@@ -261,6 +265,97 @@ def _add_issue_once(issues: list[VerifyIssue], issue: VerifyIssue) -> None:
     issues.append(issue)
 
 
+def _result_intent_constraint(result: dict) -> dict:
+    evidence = result.get("evidence")
+    if not isinstance(evidence, dict):
+        return {}
+    constraint = evidence.get("intent_constraint")
+    return constraint if isinstance(constraint, dict) else {}
+
+
+def _result_is_due(result: dict, stage: str) -> bool:
+    """Whether a deterministic result's dependencies should already exist."""
+    if stage == "final":
+        return True
+    if stage not in CONTRACT_STAGE_ORDER:
+        return True
+    constraint = _result_intent_constraint(result)
+    diagnostics = result.get("diagnostics")
+    diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+    earliest = str(diagnostics.get("earliest_stage") or constraint.get("stage") or "")
+    if not earliest or earliest not in CONTRACT_STAGE_ORDER:
+        return True
+    return CONTRACT_STAGE_ORDER.index(earliest) <= CONTRACT_STAGE_ORDER.index(stage)
+
+
+def _deterministic_core_failures(payload: dict | None, stage: str) -> list[dict]:
+    failures: list[dict] = []
+    for result in (payload or {}).get("results") or []:
+        if not isinstance(result, dict):
+            continue
+        tier = str(result.get("scoring_tier") or "core").lower()
+        label = str(result.get("label") or "").lower()
+        metric = str(result.get("metric") or "")
+        constraint = _result_intent_constraint(result)
+        if constraint and str(constraint.get("strength") or "hard").lower() != "hard":
+            continue
+        hard_label = label == "fail" or (
+            label == "degraded" and metric == "visual_clearance"
+        )
+        if tier != "core" or not hard_label or not _result_is_due(result, stage):
+            continue
+        failures.append(result)
+    return failures
+
+
+def _issue_from_deterministic_result(result: dict) -> VerifyIssue:
+    constraint = _result_intent_constraint(result)
+    relation = str(constraint.get("relation") or result.get("relation_type") or "")
+    diagnostics = result.get("diagnostics")
+    diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+    binding_issue = bool(diagnostics.get("binding_issue")) or str(
+        result.get("check_id") or ""
+    ).endswith("__binding")
+    metric = str(result.get("metric") or "")
+    if binding_issue:
+        issue_type = "contract_binding_failure"
+    elif metric == "visual_clearance":
+        issue_type = "visual_clearance_failure"
+    elif metric == "functional_dependency":
+        issue_type = "deterministic_relation_failure"
+    elif metric == "interaction_clearance":
+        issue_type = "interaction_clearance_failure"
+    else:
+        issue_type = "deterministic_core_failure"
+    repair_strategy = ""
+    if relation:
+        try:
+            repair_strategy = relation_spec(relation).repair_strategy or ""
+        except (KeyError, ValueError):
+            repair_strategy = ""
+    primary = str(result.get("primary_object") or result.get("subject_id") or "")
+    related = [
+        str(item)
+        for item in (result.get("related_objects") or result.get("target_ids") or [])
+    ]
+    return VerifyIssue(
+        issue_type=issue_type,
+        object_name=primary,
+        description=str(
+            result.get("reason")
+            or f"Deterministic core check {result.get('check_id')} failed"
+        ),
+        constraint_id=str(constraint.get("constraint_id") or ""),
+        relation=relation,
+        subject_ids=[primary] if primary else [],
+        target_ids=related,
+        metric=metric,
+        scoring_tier=str(result.get("scoring_tier") or "core"),
+        repair_strategy=repair_strategy,
+        diagnostics=dict(diagnostics),
+    )
+
+
 def _check_required_objects(
     task_spec: SceneTaskSpec, stage: str, scene_state_info: dict
 ) -> list[VerifyIssue]:
@@ -393,12 +488,28 @@ def _object_labels_match(required: str, present: str) -> bool:
     present_label = _normalize_object_label(present)
     if not required_label or not present_label:
         return False
-    if categories_are_equivalent(required_label, present_label):
+    required_components = _object_label_component_categories(required)
+    present_components = _object_label_component_categories(present)
+    if any(
+        categories_are_equivalent(required_category, present_category)
+        for required_category in required_components
+        for present_category in present_components
+    ):
         return True
     return (
         f" {required_label} " in f" {present_label} "
         or f" {present_label} " in f" {required_label} "
     )
+
+
+def _object_label_component_categories(label: str) -> set[str]:
+    """Return both a label's primary category and compound asset components."""
+    words = re.sub(r"[^a-z0-9]+", " ", str(label).lower()).split()
+    while words and words[-1].isdigit():
+        words.pop()
+    categories = {canonical_object_category(" ".join(words))} if words else set()
+    categories.update(canonical_object_category(word) for word in words)
+    return {category for category in categories if category}
 
 
 def _description_contains_object_label(required: str, description: str) -> bool:
@@ -500,6 +611,7 @@ class StageVerifier:
         task_spec: SceneTaskSpec,
         stage_brief: StageBrief | None = None,
         scene_state_info: dict | None = None,
+        deterministic_critic_payload: dict | None = None,
     ) -> StageVerifyReport:
         """Run stage verification.
 
@@ -510,6 +622,8 @@ class StageVerifier:
             stage_brief: StageBrief injected for this stage (for constraint checking).
             scene_state_info: Lightweight scene info for rule checks.
                 Expected keys: "object_names" (list[str]).
+            deterministic_critic_payload: Fresh core critic output for hard,
+                geometry-derived stage checks.
 
         Returns:
             StageVerifyReport with pass/fail, scores, issues, and repair suggestions.
@@ -583,6 +697,17 @@ class StageVerifier:
                     repair_suggestions.append(
                         f"Add missing object '{issue.object_name}' to the scene"
                     )
+        deterministic_failures = _deterministic_core_failures(
+            deterministic_critic_payload, stage
+        )
+        for failure in deterministic_failures:
+            issue = _issue_from_deterministic_result(failure)
+            _add_issue_once(issues, issue)
+            repair_suggestions.append(
+                "Resolve deterministic core check "
+                f"{failure.get('check_id') or issue.issue_type} and rerun the fresh critic"
+            )
+
         # --- 2b. Optional visual-score ablation gate ---
         # Inventory is already checked from scene state above and physical
         # feasibility/geometry critic own collisions.  Do not let VLM prose or
@@ -717,6 +842,7 @@ class FullVerifier:
         self,
         stage_reports: list[StageVerifyReport],
         final_scene_path: str = "",
+        deterministic_critic_payload: dict | None = None,
     ) -> FullVerifyReport:
         """Compute final scene quality metrics from stage reports.
 
@@ -775,7 +901,9 @@ class FullVerifier:
         has_plausibility = "plausibility" in all_scores
         pass_plausibility = not has_plausibility or plausibility >= self._pass_threshold
 
-        deterministic_pass = self._deterministic_stage_passes(stage_reports)
+        deterministic_pass = self._deterministic_stage_passes(
+            stage_reports
+        ) and not _deterministic_core_failures(deterministic_critic_payload, "final")
         visual_scores_pass = overall >= self._pass_threshold and pass_plausibility
         report = FullVerifyReport(
             semantic_score=semantic,

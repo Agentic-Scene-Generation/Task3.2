@@ -16,9 +16,13 @@ from scenesmith.agent_utils.asset_manager import (
     AssetGenerationResult as DomainAssetGenerationResult,
     AssetManager,
 )
-from scenesmith.agent_utils.semantic_names import semantic_name_candidates_for_request
+from scenesmith.agent_utils.semantic_names import (
+    forbidden_semantic_components_for_request,
+    semantic_name_candidates_for_request,
+)
 from scenesmith.agent_utils.furniture_layout_planning import (
     apply_bedroom_asset_size_policy,
+    opening_clearance_conflict_for_transform,
 )
 from scenesmith.agent_utils.loop_detector import LoopDetector
 from scenesmith.agent_utils.placement_noise import (
@@ -362,6 +366,25 @@ class FurnitureTools:
             )
         return True, ""
 
+    def _check_opening_clearance_for_transform(
+        self, scene_obj: SceneObject, transform: RigidTransform
+    ) -> tuple[bool, str]:
+        """Reject candidate furniture poses inside hard door/open clearances."""
+        conflict = opening_clearance_conflict_for_transform(
+            scene=self.scene,
+            scene_obj=scene_obj,
+            transform=transform,
+        )
+        if conflict is None:
+            return True, ""
+        return (
+            False,
+            f"Full bounding box for {scene_obj.name} would overlap hard "
+            f"{conflict.opening_type} clearance {conflict.zone_id} on "
+            f"{conflict.wall}_wall. Choose an opening-free wall segment or a "
+            "position outside the clearance volume.",
+        )
+
     def _create_loop_error_response(
         self, method_name: str, attempt_count: int, args: tuple, kwargs: dict
     ) -> str:
@@ -506,6 +529,12 @@ class FurnitureTools:
                 scene_prompt_context=self.scene.text_description,
                 scene_id=self.scene.scene_dir.name,
                 semantic_name_candidates=semantic_name_candidates_for_request(
+                    getattr(self.scene, "scene_expert_task_spec", None),
+                    size_policy_result.short_names,
+                    ObjectType.FURNITURE,
+                    scene=self.scene,
+                ),
+                forbidden_semantic_components=forbidden_semantic_components_for_request(
                     getattr(self.scene, "scene_expert_task_spec", None),
                     size_policy_result.short_names,
                     ObjectType.FURNITURE,
@@ -786,6 +815,29 @@ class FurnitureTools:
                 )
                 scene_object.transform = base_transform
 
+            opening_valid, opening_error = self._check_opening_clearance_for_transform(
+                scene_obj=scene_object,
+                transform=scene_object.transform,
+            )
+            if not opening_valid:
+                base_opening_valid, _ = self._check_opening_clearance_for_transform(
+                    scene_obj=scene_object,
+                    transform=base_transform,
+                )
+                if base_opening_valid:
+                    console_logger.info(
+                        "Placement noise would enter an opening clearance for %s; "
+                        "using un-noised transform",
+                        scene_object.object_id,
+                    )
+                    scene_object.transform = base_transform
+                else:
+                    return self._create_failure_result(
+                        asset_id=asset_id,
+                        message=opening_error,
+                        error_type=FurnitureErrorType.INVALID_POSITION,
+                    )
+
             # Add to scene.
             self.scene.add_object(scene_object)
 
@@ -996,6 +1048,22 @@ class FurnitureTools:
                     message=base_error,
                     object_id=object_id,
                     error_type=FurnitureErrorType.POSITION_OUT_OF_BOUNDS,
+                ).to_json()
+
+            opening_valid, opening_error = self._check_opening_clearance_for_transform(
+                scene_obj=scene_obj,
+                transform=new_transform,
+            )
+            if not opening_valid:
+                return FurnitureOperationResult(
+                    success=False,
+                    message=opening_error,
+                    object_id=object_id,
+                    error_type=FurnitureErrorType.INVALID_POSITION,
+                    suggested_action=(
+                        "Use the opening-aware floor reservations and move to a "
+                        "continuous opening-free wall segment."
+                    ),
                 ).to_json()
 
             # Update object to new absolute pose.

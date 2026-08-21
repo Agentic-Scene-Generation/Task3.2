@@ -673,6 +673,126 @@ class BlenderRenderer(
         )
         return image_paths
 
+    def render_named_views_for_embedding(
+        self,
+        mesh_path: Path,
+        output_dir: Path,
+        view_names: list[str],
+        width: int = 224,
+        height: int = 224,
+        light_energy: float | None = None,
+    ) -> list[Path]:
+        """Render a clean named-view set for multimodal embedding.
+
+        The mesh must already be aligned so Blender +Y is the semantic front.
+        Supported views are top, bottom, front, back, left, right, and iso.
+        """
+        start_time = time.time()
+        console_logger.info(
+            f"Rendering {len(view_names)} named views for embedding "
+            f"({width}x{height}px): {view_names}"
+        )
+
+        direction_by_name = {
+            "top": Vector((0, 0, 1)),
+            "bottom": Vector((0, 0, -1)),
+            "front": Vector((0, 1, 0)),
+            "back": Vector((0, -1, 0)),
+            "left": Vector((-1, 0, 0)),
+            "right": Vector((1, 0, 0)),
+            "iso": Vector((1, 1, 1)),
+        }
+        unknown_views = [name for name in view_names if name not in direction_by_name]
+        if unknown_views:
+            raise ValueError(f"Unsupported named views: {unknown_views}")
+
+        with suppress_stdout_stderr():
+            bpy.ops.wm.read_factory_settings(use_empty=True)
+
+            scene = bpy.context.scene
+            scene.render.engine = "CYCLES"
+            scene.cycles.samples = CYCLES_CLIP_SAMPLES
+            scene.render.resolution_x = width
+            scene.render.resolution_y = height
+            scene.render.film_transparent = True
+            scene.render.image_settings.color_mode = "RGBA"
+
+            world = bpy.data.worlds.new("NamedViewWorld")
+            scene.world = world
+            world.use_nodes = True
+            bg_node = world.node_tree.nodes["Background"]
+            bg_node.inputs["Color"].default_value = (0.0, 0.0, 0.0, 1.0)
+
+            light = bpy.data.lights.new(name="Light", type="POINT")
+            light.energy = (
+                light_energy if light_energy is not None else VLM_ANALYSIS_LIGHT_ENERGY
+            )
+            light_obj = bpy.data.objects.new("Light", light)
+            scene.collection.objects.link(light_obj)
+
+            mesh_path_str = str(mesh_path)
+            if mesh_path_str.lower().endswith(".obj"):
+                bpy.ops.wm.obj_import(filepath=mesh_path_str)
+            else:
+                bpy.ops.import_scene.gltf(filepath=mesh_path_str)
+
+            bpy.ops.object.select_all(action="SELECT")
+            bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
+            disable_backface_culling(list(bpy.context.selected_objects))
+
+            mesh_objs = [
+                obj for obj in bpy.context.selected_objects if obj.type == "MESH"
+            ]
+            bbox_min = Vector((float("inf"),) * 3)
+            bbox_max = Vector((float("-inf"),) * 3)
+            for obj in mesh_objs:
+                for corner in obj.bound_box:
+                    world_corner = obj.matrix_world @ Vector(corner)
+                    bbox_min = Vector(map(min, bbox_min, world_corner))
+                    bbox_max = Vector(map(max, bbox_max, world_corner))
+
+            bbox_center = (bbox_min + bbox_max) / 2
+            bbox_size = bbox_max - bbox_min
+            max_dim = max(bbox_size)
+
+            camera = bpy.data.cameras.new(name="Camera")
+            camera_obj = bpy.data.objects.new("Camera", camera)
+            scene.collection.objects.link(camera_obj)
+            scene.camera = camera_obj
+            camera.type = "PERSP"
+            camera.lens = DEFAULT_CAMERA_LENS_MM
+            camera.sensor_width = DEFAULT_CAMERA_SENSOR_WIDTH_MM
+            camera.clip_start = DEFAULT_CAMERA_CLIP_START
+            camera.clip_end = DEFAULT_CAMERA_CLIP_END
+
+            fov = 2 * math.atan((camera.sensor_width / 2) / camera.lens)
+            base_distance = (max_dim / 2) / math.tan(fov / 2)
+            camera_distance = base_distance * CAMERA_DISTANCE_MARGIN_MULTIPLIER
+
+            image_paths = []
+            output_dir.mkdir(parents=True, exist_ok=True)
+            for view_name in view_names:
+                direction = direction_by_name[view_name].normalized()
+                camera_obj.location = bbox_center + direction * camera_distance
+                look_at_target(camera_obj, bbox_center)
+                light_obj.location = camera_obj.location + direction * (
+                    camera_distance * LIGHT_DISTANCE_RATIO
+                )
+
+                output_path = output_dir / f"{view_name}.png"
+                scene.render.filepath = str(output_path)
+                bpy.ops.render.render(write_still=True)
+                image_paths.append(output_path)
+
+        for img_path in image_paths:
+            _composite_onto_grey(img_path)
+
+        console_logger.info(
+            f"Rendered {len(image_paths)} named views to {output_dir} in "
+            f"{time.time()-start_time:.2f}s"
+        )
+        return image_paths
+
     def render_floor_plan(
         self,
         mesh_path: Path,

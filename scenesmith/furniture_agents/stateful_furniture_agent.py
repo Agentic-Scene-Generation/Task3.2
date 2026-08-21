@@ -33,10 +33,12 @@ from scenesmith.agent_utils.clearance_zones import (
     WALL_HEIGHT_TOLERANCE_M,
     aabb_overlap_depths,
     compute_door_clearance_violations,
+    compute_window_clearance_violations,
     door_swing_clearance_bounds,
 )
 from scenesmith.agent_utils.furniture_layout_planning import (
     build_bedroom_anchor_plan,
+    format_opening_aware_reservation_guidance,
     format_bedroom_anchor_guidance,
     is_bedroom_scene,
 )
@@ -44,13 +46,16 @@ from scenesmith.agent_utils.furniture_placement_order import (
     build_furniture_placement_order_reference,
 )
 from scenesmith.agent_utils.furniture_safety import (
+    FURNITURE_CATEGORY_COMPONENT_SHADOWS,
     furniture_category_satisfies,
     furniture_object_category_matches,
     infer_furniture_category,
     infer_furniture_object_category,
 )
+from scenesmith.agent_utils.house import HouseLayout
 from scenesmith.agent_utils.mesh_physics_analyzer import MeshPhysicsAnalysis
 from scenesmith.agent_utils.placement_noise import PlacementNoiseMode
+from scenesmith.agent_utils.physics_validation import compute_scene_collisions
 from scenesmith.agent_utils.reachability import (
     compute_reachability,
     format_reachability_for_critic,
@@ -81,10 +86,14 @@ from scenesmith.furniture_agents.tools.scene_tools import SceneTools
 from scenesmith.furniture_agents.tools.vision_tools import VisionTools
 from scenesmith.prompts.registry import FurnitureAgentPrompts
 from scenesmith.scene_expert.repair_taxonomy import FailureCategory, build_repair_plan
-from scenesmith.scenebenchmark_critic.api import seating_orientation_targets
+from scenesmith.scenebenchmark_critic.api import (
+    evaluate_room_scene,
+    seating_orientation_targets,
+)
 from scenesmith.scenebenchmark_critic.config import critic_config_from_any
 from scenesmith.scenebenchmark_critic.furniture_relation_repair import (
     improve_furniture_relations,
+    unresolved_furniture_relation_failures,
 )
 from scenesmith.scenebenchmark_critic.intent_contract import (
     intent_contract_required_counts,
@@ -119,6 +128,10 @@ REPAIR_ASSET_SPECS: dict[str, tuple[str, list[float]]] = {
         "Ergonomic office task chair with an adjustable back",
         [0.60, 0.60, 1.05],
     ),
+    "sofa_chair": (
+        "Single-seat upholstered sofa chair with a supportive back",
+        [0.85, 0.85, 0.90],
+    ),
     "guest_chair": (
         "Compact upholstered guest chair with a fixed wooden frame",
         [0.60, 0.65, 0.90],
@@ -146,6 +159,10 @@ REPAIR_ASSET_SPECS: dict[str, tuple[str, list[float]]] = {
     "rug": ("Square low-pile area rug", [1.80, 1.80, 0.03]),
     "armchair": ("Compact upholstered armchair", [0.75, 0.75, 0.95]),
     "floor_lamp": ("Slim standing floor lamp", [0.40, 0.40, 1.60]),
+    "speaker": (
+        "Tall floor-standing speaker tower with a compact footprint",
+        [0.40, 0.35, 1.20],
+    ),
     "tv_stand": ("Low media console TV stand", [1.60, 0.45, 0.65]),
     "television": ("Slim flat-screen television display", [1.10, 0.18, 0.65]),
     "sideboard": ("Compact dining room sideboard", [1.40, 0.45, 0.80]),
@@ -191,6 +208,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         materials_server_host: str = "127.0.0.1",
         materials_server_port: int = 7008,
         num_workers: int = 1,
+        house_layout: HouseLayout | None = None,
         render_gpu_id: int | None = None,
     ):
         # Initialize base agent (sessions, checkpoint state, prompt registry).
@@ -225,6 +243,8 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
 
         # Context image for designer initialization (furniture-specific).
         self.context_image_path: Path | None = None
+        self.house_layout = house_layout
+        self._window_repair_service: Any | None = None
         # Populated per scene only when the optional feature is enabled.
         self._placement_order_reference: str = ""
 
@@ -407,12 +427,24 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         scene: RoomScene,
         *,
         resume_from_initial_render: bool = False,
+        review_existing: bool = False,
+        scene_expert_retry_attempt: int = 0,
     ) -> None:
         """Add furniture to a scene.
 
         Args:
-            scene: RoomScene to add furniture to (mutated in place)
+            scene: RoomScene to add furniture to (mutated in place).
+            resume_from_initial_render: Legacy render-resume compatibility flag.
+            review_existing: Review and repair an existing furniture candidate
+                instead of generating an initial layout.
+            scene_expert_retry_attempt: Retry number for a SceneExpert-rejected
+                furniture checkpoint. Each attempt uses fresh SQLite sessions.
         """
+        if scene_expert_retry_attempt < 0:
+            raise ValueError("scene_expert_retry_attempt must be non-negative")
+        review_existing = review_existing or resume_from_initial_render
+        if scene_expert_retry_attempt and not review_existing:
+            raise ValueError("scene_expert_retry_attempt requires review_existing=True")
         # Store everything as instance variables for closure access.
         self.scene = scene
         safety_description = getattr(
@@ -422,8 +454,14 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         )
         self._configure_furniture_safety_for_scene(safety_description)
         self._synchronize_task_required_counts()
+        pre_disk_restore_hash = scene.content_hash()
+        loaded_disk_checkpoint = self._load_furniture_hard_valid_checkpoint(
+            restore_when_current_invalid=True,
+        )
+        if loaded_disk_checkpoint and scene.content_hash() != pre_disk_restore_hash:
+            review_existing = True
         self._placement_order_reference = ""
-        if not resume_from_initial_render:
+        if not review_existing:
             self._placement_order_reference = build_furniture_placement_order_reference(
                 cfg=self.cfg,
                 scene_prompt=safety_description,
@@ -437,7 +475,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             )
 
         # Generate context image if configured. If generation fails, continue without it.
-        if self.cfg.context_image_generation.enabled and not resume_from_initial_render:
+        if self.cfg.context_image_generation.enabled and not review_existing:
             try:
                 self.context_image_path = self._generate_and_save_context_image(scene)
             except Exception as e:
@@ -446,7 +484,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 )
                 self.context_image_path = None
 
-        if resume_from_initial_render:
+        if review_existing:
             # A restored render can already contain a complete but physically
             # invalid support pair plus unrelated clearance violations. First use
             # the normal deterministic hard-state repair so a relation candidate
@@ -468,12 +506,28 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             # a chance to spend its bounded tool budget on it.
             self._repair_contract_layout_before_first_critique()
 
+        # A rejected SceneExpert candidate must not inherit the prior planner's
+        # terminal or budget state. Keep the original sessions for audit only.
+        if scene_expert_retry_attempt:
+            session_prefix = f"scene_expert_retry_{scene_expert_retry_attempt:02d}_"
+            self.designer_session, self.critic_session = self._create_sessions(
+                session_prefix=session_prefix
+            )
+            console_logger.info(
+                "Created isolated SceneExpert retry sessions: %splanner.db, "
+                "%sdesigner.db, %scritic.db",
+                session_prefix,
+                session_prefix,
+                session_prefix,
+            )
+
         # Create designer, critic, and planner with tools once for this scene.
         designer_tools = self._create_designer_tools()
         self.designer = self._create_designer_agent(tools=designer_tools)
         critic_tools = self._create_critic_tools()
         self.critic = self._create_critic_agent(scene=scene, tools=critic_tools)
-        self._planner_skip_initial_design = resume_from_initial_render
+        self._planner_skip_initial_design = review_existing
+        self._planner_review_existing = review_existing
         planner_tools = self._create_planner_tools()
         self._planner_skip_initial_design = False
         self.planner = self._create_planner_agent(scene=scene, tools=planner_tools)
@@ -482,12 +536,12 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         runner_instruction = self.prompt_registry.get_prompt(
             prompt_enum=FurnitureAgentPrompts.STATEFUL_PLANNER_RUNNER_INSTRUCTION,
         )
-        if resume_from_initial_render:
+        if review_existing:
             runner_instruction += (
-                "\n\nRESUME MODE: this scene already contains a restored furniture "
-                "render. Do not create another "
-                "initial design. Start by calling request_critique(), then use "
-                "request_design_change() only to address concrete feedback."
+                "\n\nREVIEW-EXISTING MODE: this scene already contains a restored "
+                "furniture candidate. Do not create another initial design. Start "
+                "by calling request_critique(), then use request_design_change() "
+                "only to address concrete feedback."
             )
 
         # Run the furniture placement workflow.
@@ -496,9 +550,13 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             result = await self._run_planner_workflow(
                 runner_input=runner_instruction,
                 max_turns=self.cfg.agents.planner_agent.max_turns,
-                require_initial_design=not resume_from_initial_render,
+                require_initial_design=not review_existing,
             )
         except MaxTurnsExceeded as error:
+            self._raise_for_unreviewed_existing_candidate_turn_limit(
+                error,
+                review_existing=review_existing,
+            )
             self._recover_from_planner_turn_limit(error)
 
         if result is not None:
@@ -520,6 +578,13 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 "; ".join(pre_final_actions),
             )
         self._converge_prompt_required_inventory(source="before final critique")
+
+        window_actions = self._repair_substantial_window_clearance()
+        if window_actions:
+            console_logger.info(
+                "Deterministic window-clearance repair before final critique: %s",
+                "; ".join(window_actions),
+            )
 
         seating_fixes = self._align_seating_with_hard_state_guard(
             seating_orientation_targets(scene, config=self.cfg)
@@ -565,6 +630,9 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         # requested inventory once more so a checkpoint with an unpenalized
         # duplicate cannot become the persisted furniture-stage scene.
         self._converge_prompt_required_inventory(source="after finalization")
+        self._ensure_furniture_checkpoint_integrity(
+            source="inventory convergence",
+        )
 
     async def resume_from_initial_render(self, scene: RoomScene) -> None:
         """Compatibility entry point for a saved initial furniture render."""
@@ -572,7 +640,23 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
 
     async def resume_from_furniture_render(self, scene: RoomScene) -> None:
         """Continue furniture critique/repair from any saved furniture render."""
-        await self.add_furniture(scene, resume_from_initial_render=True)
+        await self.add_furniture(scene, review_existing=True)
+
+    def _raise_for_unreviewed_existing_candidate_turn_limit(
+        self,
+        error: MaxTurnsExceeded,
+        *,
+        review_existing: bool = True,
+    ) -> None:
+        """Reject a turn-limit fallback that never inspected the restored scene."""
+        if (
+            review_existing
+            and getattr(self, "_planner_review_existing_workflow_calls", 0) == 0
+        ):
+            raise RuntimeError(
+                "Furniture planner exhausted its turn budget without reviewing or "
+                "repairing the existing candidate"
+            ) from error
 
     def _recover_from_planner_turn_limit(self, error: MaxTurnsExceeded) -> list[str]:
         """Continue only when bounded deterministic repair restores hard validity.
@@ -588,6 +672,15 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             source="planner_turn_limit",
         )
         if repaired_state is None or not repaired_state.hard_valid:
+            delegation_failure = self._planner_terminal_failure_text()
+            if delegation_failure:
+                remaining = "; ".join(
+                    getattr(repaired_state or hard_state, "hard_reasons", None) or []
+                )
+                raise RuntimeError(
+                    f"Furniture planner stopped after {delegation_failure}; "
+                    f"remaining hard constraints: {remaining or 'unknown'}"
+                ) from error
             raise error
         console_logger.warning(
             "Furniture planner exhausted its turn budget; deterministic repair "
@@ -632,11 +725,18 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         }
 
     def _build_initial_design_input(self, instruction: str) -> str | list[dict]:
-        """Add deterministic room-aware bedroom guidance to the initial design."""
+        """Add deterministic room-aware guidance to the initial design."""
         instruction = append_placement_order_reference(
             instruction,
             self._placement_order_reference,
         )
+        opening_guidance = format_opening_aware_reservation_guidance(self.scene)
+        if opening_guidance:
+            instruction = (
+                f"{instruction}\n\n"
+                "# Deterministic Opening-Aware Floor Reservations\n"
+                f"{opening_guidance}"
+            )
         safety_cfg = getattr(self.cfg, "furniture_safety_controller", None)
         bedroom_cfg = getattr(safety_cfg, "bedroom_layout", None)
         guidance = format_bedroom_anchor_guidance(
@@ -661,7 +761,14 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         may move furniture before that first critique.
         """
         result = await super()._request_initial_design_impl()
+        opening_fixed = self._repair_forbidden_zone_conflicts(include_windows=False)
         self._repair_initial_contract_layout()
+        if opening_fixed:
+            self.rendering_manager.clear_cache()
+            self._reset_critic_candidate_cache()
+            console_logger.info(
+                "Cleared hard door/opening reservations before first critique"
+            )
         return result
 
     def _is_furniture_relation_candidate_hard_valid(self, scene: RoomScene) -> bool:
@@ -672,7 +779,10 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         return hard_state is None or hard_state.hard_valid
 
     def _relation_candidate_preserves_hard_baseline(
-        self, baseline: set[str]
+        self,
+        baseline: set[str],
+        *,
+        allow_deferred_window_repair: bool = False,
     ) -> Callable[[RoomScene], bool]:
         """Build a no-new-hard-failure gate for one relation-repair transaction.
 
@@ -685,19 +795,37 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         while retaining independent accepted targets such as a TV support pose.
         """
 
+        baseline_severity = self._hard_violation_severity_profile()
+
         def validator(scene: RoomScene) -> bool:
             if scene is not self.scene:
                 return True
             introduced = self._hard_violation_fingerprints() - baseline
-            if introduced:
+            if allow_deferred_window_repair:
+                introduced = {
+                    fingerprint
+                    for fingerprint in introduced
+                    if not self._is_window_hard_fingerprint(fingerprint)
+                }
+            severity_regressions = self._hard_severity_regressions(
+                baseline_severity,
+                self._hard_violation_severity_profile(),
+            )
+            if introduced or severity_regressions:
                 console_logger.debug(
-                    "Rejecting relation candidate that introduced hard failures: %s",
-                    "; ".join(sorted(introduced)),
+                    "Rejecting relation candidate with hard-state regression: %s",
+                    "; ".join(sorted(introduced) + severity_regressions),
                 )
                 return False
             return True
 
         return validator
+
+    @staticmethod
+    def _is_window_hard_fingerprint(fingerprint: str) -> bool:
+        return fingerprint.startswith("window:") or fingerprint.startswith(
+            "hard:substantial_window_occlusion"
+        )
 
     def _hard_violation_fingerprints(self) -> set[str]:
         """Return stable IDs for hard failures relevant to repair acceptance."""
@@ -709,7 +837,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         hard_state = self._evaluate_current_furniture_hard_state()
         checkpoint_state = self._checkpoint_eligible_furniture_hard_state(hard_state)
         for reason in getattr(checkpoint_state or hard_state, "hard_reasons", []) or []:
-            fingerprints.add(f"hard:{reason}")
+            fingerprints.add(self._stable_hard_reason_id(str(reason)))
         try:
             for violation in compute_door_clearance_violations(scene):
                 fingerprints.add(
@@ -720,9 +848,105 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 "Could not collect structured door violations for repair transaction",
                 exc_info=True,
             )
+        try:
+            for violation in compute_window_clearance_violations(scene):
+                fingerprints.add(
+                    "window:" f"{violation.window_label}:{violation.furniture_id}"
+                )
+        except Exception:
+            console_logger.debug(
+                "Could not collect structured window violations for repair transaction",
+                exc_info=True,
+            )
+        try:
+            for first_id, second_id, _depth in self._reported_furniture_collisions(
+                self._get_cached_physics_context()
+            ):
+                pair = ":".join(sorted((first_id, second_id)))
+                fingerprints.add(f"collision:{pair}")
+        except Exception:
+            console_logger.debug(
+                "Could not collect structured collision pairs for repair transaction",
+                exc_info=True,
+            )
         return fingerprints
 
-    def _begin_hard_state_transaction(self) -> tuple[dict[str, Any], set[str]] | None:
+    @staticmethod
+    def _stable_hard_reason_id(reason: str) -> str:
+        text = " ".join(str(reason or "").lower().split())
+        missing = re.search(r"missing required\s+([^:]+)", text)
+        if missing:
+            category = re.sub(r"[^a-z0-9_]+", "_", missing.group(1)).strip("_")
+            return f"required_count:{category or 'unknown'}"
+        relation = re.search(
+            r"unresolved prompt-core furniture relation:\s*([^;]+)", text
+        )
+        if relation:
+            identity = re.sub(r"\s+", "", relation.group(1))
+            return f"relation:{identity}"
+        for section in (
+            "collisions",
+            "door clearance violations",
+            "open connection blocked",
+            "wall height exceeded",
+            "geometry construction failed",
+            "fallen or below-floor",
+        ):
+            if section in text:
+                return f"physics:{section.replace(' ', '_')}"
+        normalized = re.sub(r"[^a-z0-9_]+", "_", text).strip("_")
+        return f"hard:{normalized or 'unknown'}"
+
+    def _hard_violation_severity_profile(self) -> dict[str, float]:
+        """Return structured magnitudes for stable hard-state identities."""
+        scene = getattr(self, "scene", None)
+        if scene is None:
+            return {}
+        profile: dict[str, float] = {}
+        try:
+            for violation in compute_door_clearance_violations(scene):
+                key = f"door:{violation.door_label}:{violation.furniture_id}"
+                profile[key] = max(
+                    profile.get(key, 0.0),
+                    float(getattr(violation, "penetration_depth", 0.0) or 0.0),
+                )
+        except Exception:
+            pass
+        try:
+            for violation in compute_window_clearance_violations(scene):
+                key = f"window:{violation.window_label}:{violation.furniture_id}"
+                top = float(getattr(violation, "furniture_top_height", 0.0) or 0.0)
+                sill = float(getattr(violation, "sill_height", 0.0) or 0.0)
+                profile[key] = max(profile.get(key, 0.0), max(0.0, top - sill))
+        except Exception:
+            pass
+        try:
+            for first_id, second_id, depth in self._reported_furniture_collisions(
+                self._get_cached_physics_context()
+            ):
+                pair = ":".join(sorted((first_id, second_id)))
+                key = f"collision:{pair}"
+                profile[key] = max(profile.get(key, 0.0), float(depth))
+        except Exception:
+            pass
+        return profile
+
+    @staticmethod
+    def _hard_severity_regressions(
+        before: dict[str, float],
+        after: dict[str, float],
+        *,
+        tolerance: float = 1e-6,
+    ) -> list[str]:
+        return [
+            f"{key} worsened {before[key]:.6f}->{after[key]:.6f}"
+            for key in sorted(before.keys() & after.keys())
+            if after[key] > before[key] + tolerance
+        ]
+
+    def _begin_hard_state_transaction(
+        self,
+    ) -> tuple[dict[str, Any], set[str], dict[str, float]] | None:
         """Snapshot the scene before a deterministic geometry repair."""
         scene = getattr(self, "scene", None)
         serialize = getattr(scene, "to_state_dict", None)
@@ -730,7 +954,11 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         if not callable(serialize) or not callable(restore):
             return None
         try:
-            return copy.deepcopy(serialize()), self._hard_violation_fingerprints()
+            return (
+                copy.deepcopy(serialize()),
+                self._hard_violation_fingerprints(),
+                self._hard_violation_severity_profile(),
+            )
         except Exception:
             console_logger.debug(
                 "Could not create hard-state repair transaction snapshot", exc_info=True
@@ -739,17 +967,22 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
 
     def _commit_hard_state_transaction(
         self,
-        transaction: tuple[dict[str, Any], set[str]] | None,
+        transaction: tuple[Any, ...] | None,
         *,
         source: str,
     ) -> bool:
         """Reject a candidate that adds any hard failure to its baseline."""
         if transaction is None:
             return True
-        snapshot, before = transaction
+        snapshot, before, *severity_state = transaction
+        before_severity = severity_state[0] if severity_state else {}
         after = self._hard_violation_fingerprints()
         introduced = sorted(after - before)
-        if not introduced:
+        severity_regressions = self._hard_severity_regressions(
+            before_severity,
+            self._hard_violation_severity_profile(),
+        )
+        if not introduced and not severity_regressions:
             return True
         self.scene.restore_from_state_dict(snapshot)
         if getattr(self, "rendering_manager", None) is not None:
@@ -758,9 +991,346 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         console_logger.info(
             "Rejected deterministic %s repair because it introduced hard failures: %s",
             source,
-            "; ".join(introduced),
+            "; ".join(introduced + severity_regressions),
         )
         return False
+
+    def _restore_hard_state_transaction(
+        self,
+        transaction: tuple[Any, ...] | None,
+        *,
+        source: str,
+        reasons: list[str],
+    ) -> None:
+        """Restore an outer deterministic-repair snapshot after critic rejection."""
+        if transaction is None:
+            return
+        snapshot, *_before = transaction
+        self.scene.restore_from_state_dict(snapshot)
+        if getattr(self, "rendering_manager", None) is not None:
+            self.rendering_manager.clear_cache()
+        self._reset_critic_candidate_cache()
+        console_logger.info(
+            "Rejected deterministic %s repair: %s",
+            source,
+            "; ".join(reasons),
+        )
+
+    @staticmethod
+    def _critic_core_window_failures(payload: dict[str, Any]) -> list[dict[str, Any]]:
+        return [
+            result
+            for result in payload.get("results") or []
+            if str(result.get("check_id") or "").startswith("window_clearance__")
+            and str(result.get("scoring_tier") or "").lower() == "core"
+            and str(result.get("label") or "").lower() == "fail"
+        ]
+
+    def _checkpoint_eligible_furniture_hard_state(
+        self, hard_state: HardStateEvaluation | None
+    ) -> HardStateEvaluation | None:
+        """Keep substantially window-blocked scenes out of rollback checkpoints."""
+        checkpoint_state = super()._checkpoint_eligible_furniture_hard_state(hard_state)
+        if checkpoint_state is None or not checkpoint_state.hard_valid:
+            return checkpoint_state
+        critic_config = critic_config_from_any(getattr(self, "cfg", {}))
+        if not critic_config.enabled or not critic_config.metric_enabled(
+            "interaction_clearance"
+        ):
+            return checkpoint_state
+        try:
+            payload = evaluate_room_scene(
+                self.scene,
+                config=critic_config,
+                stage="furniture_checkpoint_window_gate",
+                annotate_assets=False,
+            )
+        except Exception:
+            console_logger.warning(
+                "Could not evaluate window clearance for checkpoint safety",
+                exc_info=True,
+            )
+            return checkpoint_state
+        window_failures = self._critic_core_window_failures(payload)
+        if not window_failures:
+            return checkpoint_state
+        gated_state = copy.deepcopy(checkpoint_state)
+        gated_state.hard_valid = False
+        gated_state.hard_reasons.extend(
+            f"substantial window occlusion: {result.get('check_id')}"
+            for result in window_failures
+            if f"substantial window occlusion: {result.get('check_id')}"
+            not in gated_state.hard_reasons
+        )
+        return gated_state
+
+    @staticmethod
+    def _critic_core_failure_ids(payload: dict[str, Any]) -> set[str]:
+        return {
+            str(result.get("check_id") or f"result_{index}")
+            for index, result in enumerate(payload.get("results") or [])
+            if str(result.get("scoring_tier") or "core").lower() == "core"
+            and str(result.get("label") or "").lower() == "fail"
+        }
+
+    @staticmethod
+    def _critic_passing_explicit_relation_ids(payload: dict[str, Any]) -> set[str]:
+        passing: set[str] = set()
+        for index, result in enumerate(payload.get("results") or []):
+            if str(result.get("label") or "").lower() != "pass":
+                continue
+            constraint = (result.get("evidence") or {}).get("intent_constraint") or {}
+            if (
+                not constraint
+                or str(constraint.get("relation") or "") == "required_count"
+            ):
+                continue
+            if str(constraint.get("strength") or "hard").lower() != "hard":
+                continue
+            passing.add(str(result.get("check_id") or f"result_{index}"))
+        return passing
+
+    @staticmethod
+    def _critic_explicit_relation_ids_for_objects(
+        payload: dict[str, Any],
+        object_ids: set[str],
+    ) -> set[str]:
+        """Return hard prompt relation checks that bind any selected object."""
+        relation_ids: set[str] = set()
+        for index, result in enumerate(payload.get("results") or []):
+            constraint = (result.get("evidence") or {}).get("intent_constraint") or {}
+            if (
+                not constraint
+                or str(constraint.get("relation") or "") == "required_count"
+                or str(constraint.get("strength") or "hard").lower() != "hard"
+            ):
+                continue
+            bound_ids = {
+                str(result.get("primary_object") or ""),
+                *(str(value) for value in result.get("related_objects") or [] if value),
+                *(
+                    str(value)
+                    for value in result.get("selected_related_objects") or []
+                    if value
+                ),
+            }
+            if bound_ids & object_ids:
+                relation_ids.add(str(result.get("check_id") or f"result_{index}"))
+        return relation_ids
+
+    def _get_window_repair_service(self) -> Any | None:
+        existing = getattr(self, "_window_repair_service", None)
+        if existing is not None:
+            return existing
+        if getattr(self, "house_layout", None) is None:
+            return None
+        floor_plan_cfg = getattr(self.cfg, "floor_plan_geometry_config", None)
+        if floor_plan_cfg is None:
+            return None
+        from scenesmith.wall_agents.tools.window_tools import WindowRepairTools
+
+        self._window_repair_service = WindowRepairTools(
+            scene=self.scene,
+            house_layout=self.house_layout,
+            floor_plan_cfg=floor_plan_cfg,
+            room_output_dir=self.logger.output_dir,
+            refresh_wall_surfaces=lambda: None,
+            rendering_manager=self.rendering_manager,
+            logger=self.logger,
+        )
+        return self._window_repair_service
+
+    def _repair_substantial_window_clearance(self) -> list[str]:
+        """Migrate blocked windows first, then fall back to moving furniture."""
+        if self.scene is None:
+            return []
+        critic_config = critic_config_from_any(self.cfg)
+        if not critic_config.enabled or not critic_config.metric_enabled(
+            "interaction_clearance"
+        ):
+            return []
+        baseline = evaluate_room_scene(
+            self.scene,
+            config=critic_config,
+            stage="furniture_window_clearance_repair_baseline",
+            annotate_assets=False,
+        )
+        target_results = self._critic_core_window_failures(baseline)
+        if not target_results:
+            return []
+        if not any(result.get("primary_object") for result in target_results):
+            return []
+
+        actions: list[str] = []
+        service = self._get_window_repair_service()
+        current_baseline = baseline
+        remaining_results = list(target_results)
+        if service is not None:
+            for target in sorted(
+                target_results,
+                key=lambda item: str(item.get("check_id") or ""),
+            ):
+                window_id = str(target.get("primary_object") or "")
+                check_id = str(target.get("check_id") or "")
+                if not window_id or not check_id:
+                    continue
+                baseline_core = self._critic_core_failure_ids(current_baseline)
+                protected_relations = self._critic_passing_explicit_relation_ids(
+                    current_baseline
+                )
+                window_relations = self._critic_explicit_relation_ids_for_objects(
+                    current_baseline,
+                    {window_id},
+                )
+                accepted_payload: dict[str, Any] | None = None
+
+                def accept_candidate(
+                    _candidate: dict[str, Any],
+                ) -> tuple[bool, str]:
+                    nonlocal accepted_payload
+                    self._reset_critic_candidate_cache()
+                    fresh_payload = evaluate_room_scene(
+                        self.scene,
+                        config=critic_config,
+                        stage="furniture_window_migration_candidate",
+                        annotate_assets=False,
+                    )
+                    results_by_id = {
+                        str(result.get("check_id") or ""): result
+                        for result in fresh_payload.get("results") or []
+                    }
+                    reasons: list[str] = []
+                    target_result = results_by_id.get(check_id)
+                    if target_result is None:
+                        reasons.append("target window check disappeared")
+                    elif str(target_result.get("label") or "").lower() != "pass":
+                        reasons.append(
+                            "target window clearance is not pass "
+                            f"({target_result.get('label') or 'unknown'})"
+                        )
+                    fresh_core = self._critic_core_failure_ids(fresh_payload)
+                    introduced = sorted(fresh_core - baseline_core)
+                    if introduced:
+                        reasons.append("new core failures: " + ", ".join(introduced))
+                    fresh_relations = self._critic_passing_explicit_relation_ids(
+                        fresh_payload
+                    )
+                    lost = sorted(protected_relations - fresh_relations)
+                    if lost:
+                        reasons.append("lost explicit relations: " + ", ".join(lost))
+                    unresolved_window_relations = sorted(
+                        window_relations - fresh_relations
+                    )
+                    if unresolved_window_relations:
+                        reasons.append(
+                            "window relation is not satisfied: "
+                            + ", ".join(unresolved_window_relations)
+                        )
+                    if reasons:
+                        return False, "; ".join(reasons)
+                    accepted_payload = fresh_payload
+                    return True, "accepted"
+
+                migration = service.migrate_window_atomically(
+                    window_id=window_id,
+                    accept_candidate=accept_candidate,
+                )
+                if not migration.success:
+                    console_logger.info(
+                        "No accepted migration for %s; furniture fallback remains "
+                        "eligible: %s",
+                        window_id,
+                        migration.reason,
+                    )
+                    continue
+                actions.append(
+                    f"migrated {window_id} from {migration.old_wall_direction}"
+                    f"@{migration.old_position_along_wall:.3f} to "
+                    f"{migration.new_wall_direction}"
+                    f"@{migration.new_position_along_wall:.3f}"
+                )
+                if accepted_payload is not None:
+                    current_baseline = accepted_payload
+                remaining_results = [
+                    result
+                    for result in remaining_results
+                    if str(result.get("primary_object") or "") != window_id
+                ]
+
+        if not remaining_results:
+            self._reset_critic_candidate_cache()
+            return actions
+
+        target_check_ids = {str(result.get("check_id")) for result in remaining_results}
+        target_window_ids = {
+            str(result.get("primary_object") or "")
+            for result in remaining_results
+            if result.get("primary_object")
+        }
+        target_blocker_ids = {
+            str(object_id)
+            for result in remaining_results
+            for object_id in (
+                result.get("blocking_objects")
+                or (result.get("diagnostics") or {}).get("core_blocking_objects")
+                or []
+            )
+        }
+        if not target_window_ids or not target_blocker_ids:
+            return actions
+
+        transaction = self._begin_hard_state_transaction()
+        baseline_core_failures = self._critic_core_failure_ids(current_baseline)
+        protected_relations = self._critic_passing_explicit_relation_ids(
+            current_baseline
+        )
+        changed = self._repair_forbidden_zone_conflicts(
+            include_windows=True,
+            opening_ids=target_window_ids,
+            blocker_ids=target_blocker_ids,
+        )
+        if not changed:
+            return actions
+        self.rendering_manager.clear_cache()
+        self._reset_critic_candidate_cache()
+        fresh = evaluate_room_scene(
+            self.scene,
+            config=critic_config,
+            stage="furniture_window_clearance_repair_fresh",
+            annotate_assets=False,
+        )
+        fresh_result_ids = {
+            str(result.get("check_id") or "") for result in fresh.get("results") or []
+        }
+        fresh_core_failures = self._critic_core_failure_ids(fresh)
+        fresh_relations = self._critic_passing_explicit_relation_ids(fresh)
+        rejection_reasons: list[str] = []
+        if not target_check_ids.issubset(fresh_result_ids):
+            rejection_reasons.append("target window check disappeared")
+        unresolved = sorted(target_check_ids & fresh_core_failures)
+        if unresolved:
+            rejection_reasons.append("target blockers remain: " + ", ".join(unresolved))
+        introduced = sorted(fresh_core_failures - baseline_core_failures)
+        if introduced:
+            rejection_reasons.append("new core failures: " + ", ".join(introduced))
+        lost_relations = sorted(protected_relations - fresh_relations)
+        if lost_relations:
+            rejection_reasons.append(
+                "lost explicit relations: " + ", ".join(lost_relations)
+            )
+        if rejection_reasons:
+            self._restore_hard_state_transaction(
+                transaction,
+                source="window-clearance",
+                reasons=rejection_reasons,
+            )
+            return actions
+        actions.append(
+            "cleared substantial window occlusion "
+            f"for {', '.join(sorted(target_window_ids))} by moving "
+            f"{', '.join(sorted(target_blocker_ids))}"
+        )
+        return actions
 
     def _align_seating_with_hard_state_guard(
         self, allowed_targets_by_seat: dict[str, set[str]]
@@ -801,13 +1371,17 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             self.scene,
             config=critic_config,
             candidate_validator=self._relation_candidate_preserves_hard_baseline(
-                baseline_hard_failures
+                baseline_hard_failures,
+                allow_deferred_window_repair=True,
             ),
+        )
+        window_actions = (
+            self._repair_substantial_window_clearance() if relation_fixes else []
         )
         seating_fixes = self._align_seating_with_hard_state_guard(
             seating_orientation_targets(self.scene, config=critic_config)
         )
-        if not relation_fixes and not seating_fixes:
+        if not relation_fixes and not seating_fixes and not window_actions:
             return []
         if not self._commit_hard_state_transaction(
             transaction, source="prompt-contract relation"
@@ -822,6 +1396,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             f"{fix.subject_id}->{fix.target_id}:seating_orientation"
             for fix in seating_fixes
         ]
+        actions.extend(window_actions)
         affected_objects = [
             {
                 "object_id": fix.object_id,
@@ -957,11 +1532,16 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 # The shallow repair itself preserves hard support pairs, so it
                 # cannot horizontally split an object from its required surface.
                 actions.extend(self._repair_shallow_furniture_collisions())
+                actions.extend(self._repair_bounded_furniture_collisions())
                 actions.extend(
                     self._repair_prompt_contract_relations(
                         "after physical collision repair"
                     )
                 )
+                # A relation target may occupy the same region as an old
+                # collision. Check once more so an existing hard fingerprint
+                # cannot hide a pair reintroduced by relation repair.
+                actions.extend(self._repair_bounded_furniture_collisions())
             removed_excess = self._remove_excess_required_furniture(required_counts)
             if removed_excess:
                 actions.append(
@@ -1115,8 +1695,12 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             self.scene,
             config=critic_config,
             candidate_validator=self._relation_candidate_preserves_hard_baseline(
-                baseline_hard_failures
+                baseline_hard_failures,
+                allow_deferred_window_repair=True,
             ),
+        )
+        window_actions = (
+            self._repair_substantial_window_clearance() if relation_fixes else []
         )
         seating_fixes = self._align_seating_with_hard_state_guard(
             seating_orientation_targets(self.scene, config=critic_config)
@@ -1131,6 +1715,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             f"bound {fix.object_id} via {fix.relation_type} {action_context}"
             for fix in relation_fixes
         ]
+        actions.extend(window_actions)
         actions.extend(
             f"aligned {fix.subject_id} toward {fix.target_id} {action_context}"
             for fix in seating_fixes
@@ -1371,22 +1956,17 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             ]
             if not candidates:
                 continue
-            candidates.sort(key=self._collision_repair_candidate_key)
-            for moving in candidates:
-                other = second if moving is first else first
-                transform = self._safe_shallow_collision_transform(
-                    moving,
-                    other,
-                    penetration=penetration,
-                    clearance=clearance,
-                    before_pairs=before_pairs,
-                )
-                if transform is None:
-                    continue
-                self.scene.move_object(moving.object_id, transform)
+            moved_ids = self._apply_best_collision_repair_candidate(
+                first=first,
+                second=second,
+                penetration=penetration,
+                clearance=clearance,
+                before_pairs=before_pairs,
+            )
+            if moved_ids:
                 return [
                     "separated shallow collision "
-                    f"{first_id}<->{second_id} by moving {moving.object_id}"
+                    f"{first_id}<->{second_id} by moving {','.join(moved_ids)}"
                 ]
         return []
 
@@ -1420,6 +2000,11 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 or str(constraint.get("strength") or "hard").lower() != "hard"
             ):
                 continue
+            relation_stage = str(constraint.get("stage") or "").strip().lower()
+            if relation_stage not in {"", "furniture"}:
+                # A future-stage support contract cannot protect a current
+                # collision from the generic separator before its subject exists.
+                continue
             subjects = constraint.get("subjects") or {}
             targets = constraint.get("targets") or {}
             subject_category = self._repair_category_for_task_label(
@@ -1437,7 +2022,25 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 furniture_category_satisfies(second_category, subject_category)
                 and furniture_category_satisfies(first_category, target_category)
             ):
-                return True
+                subject_obj, support_obj = (
+                    (first, second)
+                    if furniture_category_satisfies(first_category, subject_category)
+                    else (second, first)
+                )
+                if (
+                    subject_obj.object_type != ObjectType.FURNITURE
+                    or support_obj.object_type != ObjectType.FURNITURE
+                ):
+                    continue
+                subject_bounds = subject_obj.compute_world_bounds()
+                support_bounds = support_obj.compute_world_bounds()
+                if subject_bounds is None or support_bounds is None:
+                    continue
+                subject_height = float(subject_bounds[1][2] - subject_bounds[0][2])
+                support_width = float(support_bounds[1][0] - support_bounds[0][0])
+                support_depth = float(support_bounds[1][1] - support_bounds[0][1])
+                if subject_height > 0.0 and support_width > 0.0 and support_depth > 0.0:
+                    return True
         return False
 
     def _reported_shallow_furniture_collisions(
@@ -1465,6 +2068,78 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 )
         return result
 
+    def _reported_furniture_collisions(
+        self, physics_context: str
+    ) -> list[tuple[str, str, float]]:
+        """Parse all object-addressable furniture collisions for bounded search."""
+        scale = {"mm": 0.001, "cm": 0.01, "m": 1.0}
+        result: list[tuple[str, str, float]] = []
+        for match in _SHALLOW_FURNITURE_COLLISION_RE.finditer(
+            str(physics_context or "")
+        ):
+            penetration = (
+                float(match.group("depth")) * scale[match.group("unit").lower()]
+            )
+            if penetration > 0.0:
+                result.append(
+                    (match.group("first"), match.group("second"), penetration)
+                )
+        return result
+
+    def _repair_bounded_furniture_collisions(self) -> list[str]:
+        """Separate one deep collision using bounded geometry candidates."""
+        if self.scene is None:
+            return []
+        room_bounds = self._room_bounds_xy()
+        if room_bounds is None:
+            return []
+        min_x, min_y, max_x, max_y = room_bounds
+        max_translation = min(1.5, math.hypot(max_x - min_x, max_y - min_y))
+        clearance = max(
+            0.005,
+            float(self._repair_cfg_value("collision_separation_margin_m", 0.025)),
+        )
+        reported = self._reported_furniture_collisions(
+            self._get_cached_physics_context()
+        )
+        if not reported:
+            return []
+
+        objects_by_id = {
+            str(object_id): obj for object_id, obj in self.scene.objects.items()
+        }
+        before_pairs = self._furniture_aabb_overlap_pairs()
+        for first_id, second_id, penetration in reported:
+            pair = frozenset((first_id, second_id))
+            if pair not in before_pairs or self._is_hard_prompt_support_pair(
+                first_id, second_id
+            ):
+                continue
+            first = objects_by_id.get(first_id)
+            second = objects_by_id.get(second_id)
+            if first is None or second is None:
+                continue
+            candidates = [
+                obj
+                for obj in (first, second)
+                if not getattr(obj, "immutable", False)
+                and getattr(obj, "object_type", None) == ObjectType.FURNITURE
+            ]
+            moved_ids = self._apply_best_collision_repair_candidate(
+                first=first,
+                second=second,
+                penetration=penetration,
+                clearance=clearance,
+                before_pairs=before_pairs,
+                max_translation=max_translation,
+            )
+            if moved_ids:
+                return [
+                    "separated bounded collision "
+                    f"{first_id}<->{second_id} by moving {','.join(moved_ids)}"
+                ]
+        return []
+
     def _collision_repair_candidate_key(self, obj: SceneObject) -> tuple[float, str]:
         """Prefer moving the smaller object when both are equally modifiable."""
         bounds = obj.compute_world_bounds()
@@ -1476,6 +2151,328 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             )
         return area, str(obj.object_id)
 
+    def _apply_best_collision_repair_candidate(
+        self,
+        *,
+        first: SceneObject,
+        second: SceneObject,
+        penetration: float,
+        clearance: float,
+        before_pairs: set[frozenset[str]],
+        max_translation: float | None = None,
+    ) -> tuple[str, ...]:
+        """Rank single-object and relation-group collision ejection candidates."""
+        target_pair = frozenset((str(first.object_id), str(second.object_id)))
+        baseline_relations = self._hard_relation_failure_ids()
+        baseline_openings = self._opening_violation_count()
+        ranked: list[
+            tuple[
+                tuple[int, float, int, int, float, float, tuple[str, ...]],
+                dict[str, RigidTransform],
+            ]
+        ] = []
+        movable = [
+            obj
+            for obj in (first, second)
+            if not getattr(obj, "immutable", False)
+            and getattr(obj, "object_type", None) == ObjectType.FURNITURE
+        ]
+        movable.sort(key=self._collision_repair_candidate_key)
+        for moving in movable:
+            other = second if moving is first else first
+            transforms = self._safe_shallow_collision_transforms(
+                moving,
+                other,
+                penetration=penetration,
+                clearance=clearance,
+                before_pairs=before_pairs,
+                max_translation=max_translation,
+            )
+            relation_groups = self._hard_relation_groups_for_object(
+                str(moving.object_id)
+            )
+            for transform in transforms:
+                override_candidates = [
+                    {str(moving.object_id): transform},
+                    *self._rigid_group_collision_overrides(
+                        moving,
+                        transform,
+                        relation_groups,
+                    ),
+                ]
+                for overrides in override_candidates:
+                    after_pairs = self._furniture_aabb_overlap_pairs(
+                        overrides=overrides
+                    )
+                    if target_pair in after_pairs or after_pairs - before_pairs:
+                        continue
+                    metrics = self._collision_candidate_metrics(overrides)
+                    if metrics is None:
+                        continue
+                    pair_count, max_depth, relation_ids, opening_count, containment = (
+                        metrics
+                    )
+                    if target_pair in relation_ids.get("collision_pairs", set()):
+                        continue
+                    relation_failures = set(
+                        relation_ids.get("relation_failures", set())
+                    )
+                    if relation_failures - baseline_relations or containment:
+                        continue
+                    movement = sum(
+                        float(
+                            np.linalg.norm(
+                                np.asarray(candidate.translation(), dtype=float)[:2]
+                                - np.asarray(
+                                    self.scene.objects[
+                                        object_id
+                                    ].transform.translation(),
+                                    dtype=float,
+                                )[:2]
+                            )
+                        )
+                        for object_id, candidate in overrides.items()
+                    )
+                    moved_area = sum(
+                        self._collision_repair_candidate_key(
+                            self.scene.objects[object_id]
+                        )[0]
+                        for object_id in overrides
+                    )
+                    moved_ids = tuple(sorted(overrides))
+                    score = (
+                        pair_count,
+                        max_depth,
+                        len(relation_failures),
+                        max(0, opening_count - baseline_openings),
+                        movement,
+                        moved_area,
+                        moved_ids,
+                    )
+                    ranked.append((score, overrides))
+        if not ranked:
+            return ()
+        ranked.sort(key=lambda item: item[0])
+        best = ranked[0][1]
+        for object_id, transform in best.items():
+            self.scene.move_object(self.scene.objects[object_id].object_id, transform)
+        return tuple(sorted(best))
+
+    def _rigid_group_collision_overrides(
+        self,
+        moving: SceneObject,
+        moving_transform: RigidTransform,
+        relation_groups: list[tuple[str, ...]],
+    ) -> list[dict[str, RigidTransform]]:
+        old_translation = np.asarray(moving.transform.translation(), dtype=float)
+        delta = (
+            np.asarray(moving_transform.translation(), dtype=float) - old_translation
+        )
+        candidates: list[dict[str, RigidTransform]] = []
+        for group in relation_groups:
+            overrides: dict[str, RigidTransform] = {}
+            valid = True
+            for object_id in group:
+                obj = self.scene.objects.get(object_id)
+                if (
+                    obj is None
+                    or obj.object_type != ObjectType.FURNITURE
+                    or getattr(obj, "immutable", False)
+                ):
+                    valid = False
+                    break
+                candidate = RigidTransform(
+                    R=obj.transform.rotation(),
+                    p=np.asarray(obj.transform.translation(), dtype=float) + delta,
+                )
+                fitted = self._fit_transform_inside_room(obj, candidate)
+                if (
+                    float(
+                        np.linalg.norm(
+                            np.asarray(fitted.translation(), dtype=float)
+                            - np.asarray(candidate.translation(), dtype=float)
+                        )
+                    )
+                    > 1e-5
+                ):
+                    valid = False
+                    break
+                overrides[object_id] = fitted
+            if valid and len(overrides) > 1:
+                candidates.append(overrides)
+        return candidates
+
+    def _hard_relation_failure_ids(self) -> set[str]:
+        try:
+            return {
+                str(result.get("check_id") or "")
+                for result in unresolved_furniture_relation_failures(
+                    self.scene,
+                    config=critic_config_from_any(self.cfg),
+                )
+                if result.get("check_id")
+            }
+        except Exception:
+            return set()
+
+    def _hard_relation_groups_for_object(
+        self,
+        object_id: str,
+    ) -> list[tuple[str, ...]]:
+        try:
+            payload = evaluate_room_scene(
+                self.scene,
+                config=critic_config_from_any(self.cfg),
+                stage="furniture_collision_relation_groups",
+                annotate_assets=False,
+            )
+        except Exception:
+            return []
+        groups: set[tuple[str, ...]] = set()
+        for result in payload.get("results") or []:
+            constraint = (result.get("evidence") or {}).get("intent_constraint") or {}
+            if str(constraint.get("strength") or "").lower() != "hard":
+                continue
+            ids = {
+                str(result.get("primary_object") or ""),
+                *(
+                    str(value)
+                    for value in (
+                        result.get("selected_related_objects")
+                        or result.get("related_objects")
+                        or []
+                    )
+                    if value
+                ),
+            }
+            ids.discard("")
+            furniture_ids = tuple(
+                sorted(
+                    candidate_id
+                    for candidate_id in ids
+                    if candidate_id in self.scene.objects
+                    and self.scene.objects[candidate_id].object_type
+                    == ObjectType.FURNITURE
+                )
+            )
+            if object_id in furniture_ids and len(furniture_ids) > 1:
+                groups.add(furniture_ids)
+        return sorted(groups)
+
+    def _opening_violation_count(self) -> int:
+        try:
+            return len(compute_door_clearance_violations(self.scene)) + len(
+                compute_window_clearance_violations(self.scene)
+            )
+        except Exception:
+            return 0
+
+    def _collision_candidate_metrics(
+        self,
+        overrides: dict[str, RigidTransform],
+    ) -> tuple[int, float, dict[str, Any], int, int] | None:
+        originals = {
+            object_id: self.scene.objects[object_id].transform
+            for object_id in overrides
+            if object_id in self.scene.objects
+        }
+        if len(originals) != len(overrides):
+            return None
+        try:
+            for object_id, transform in overrides.items():
+                self.scene.objects[object_id].transform = transform
+            collision_pairs: set[frozenset[str]] = set()
+            max_depth = 0.0
+            try:
+                for collision in compute_scene_collisions(self.scene):
+                    first_id = str(collision.object_a_id)
+                    second_id = str(collision.object_b_id)
+                    first_obj = self.scene.objects.get(first_id)
+                    second_obj = self.scene.objects.get(second_id)
+                    if (
+                        first_obj is None
+                        or second_obj is None
+                        or first_obj.object_type != ObjectType.FURNITURE
+                        or second_obj.object_type != ObjectType.FURNITURE
+                    ):
+                        continue
+                    collision_pairs.add(frozenset((first_id, second_id)))
+                    max_depth = max(
+                        max_depth,
+                        float(getattr(collision, "penetration_depth", 0.0) or 0.0),
+                    )
+            except Exception:
+                collision_pairs = self._furniture_aabb_overlap_pairs()
+                max_depth = self._maximum_furniture_aabb_penetration()
+            relation_failures = self._hard_relation_failure_ids()
+            opening_count = self._opening_violation_count()
+            containment = self._furniture_containment_violation_count()
+            return (
+                len(collision_pairs),
+                max_depth,
+                {
+                    "collision_pairs": collision_pairs,
+                    "relation_failures": relation_failures,
+                },
+                opening_count,
+                containment,
+            )
+        finally:
+            for object_id, transform in originals.items():
+                self.scene.objects[object_id].transform = transform
+
+    def _maximum_furniture_aabb_penetration(self) -> float:
+        furniture = [
+            obj
+            for obj in self.scene.objects.values()
+            if obj.object_type == ObjectType.FURNITURE
+            and obj.compute_world_bounds() is not None
+        ]
+        maximum = 0.0
+        for index, first in enumerate(furniture):
+            first_bounds = first.compute_world_bounds()
+            if first_bounds is None:
+                continue
+            for second in furniture[index + 1 :]:
+                second_bounds = second.compute_world_bounds()
+                if second_bounds is None:
+                    continue
+                overlap_x, overlap_y = self._xy_overlap_depths(
+                    first_bounds,
+                    second_bounds,
+                )
+                overlap_z = max(
+                    0.0,
+                    float(
+                        min(first_bounds[1][2], second_bounds[1][2])
+                        - max(first_bounds[0][2], second_bounds[0][2])
+                    ),
+                )
+                if overlap_x > 0.0 and overlap_y > 0.0 and overlap_z > 0.0:
+                    maximum = max(maximum, min(overlap_x, overlap_y, overlap_z))
+        return maximum
+
+    def _furniture_containment_violation_count(self) -> int:
+        room_bounds = self._room_bounds_xy()
+        if room_bounds is None:
+            return 0
+        min_x, min_y, max_x, max_y = room_bounds
+        count = 0
+        for obj in self.scene.objects.values():
+            if obj.object_type != ObjectType.FURNITURE:
+                continue
+            bounds = obj.compute_world_bounds()
+            if bounds is None:
+                continue
+            if (
+                float(bounds[0][0]) < min_x - 1e-6
+                or float(bounds[1][0]) > max_x + 1e-6
+                or float(bounds[0][1]) < min_y - 1e-6
+                or float(bounds[1][1]) > max_y + 1e-6
+            ):
+                count += 1
+        return count
+
     def _safe_shallow_collision_transform(
         self,
         moving: SceneObject,
@@ -1484,15 +2481,36 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         penetration: float,
         clearance: float,
         before_pairs: set[frozenset[str]],
+        max_translation: float | None = None,
     ) -> RigidTransform | None:
+        candidates = self._safe_shallow_collision_transforms(
+            moving,
+            other,
+            penetration=penetration,
+            clearance=clearance,
+            before_pairs=before_pairs,
+            max_translation=max_translation,
+        )
+        return candidates[0] if candidates else None
+
+    def _safe_shallow_collision_transforms(
+        self,
+        moving: SceneObject,
+        other: SceneObject,
+        *,
+        penetration: float,
+        clearance: float,
+        before_pairs: set[frozenset[str]],
+        max_translation: float | None = None,
+    ) -> list[RigidTransform]:
         moving_bounds = moving.compute_world_bounds()
         other_bounds = other.compute_world_bounds()
         if moving_bounds is None or other_bounds is None:
-            return None
+            return []
 
         allowed_axes = self._collision_separation_axes(moving)
         if not allowed_axes:
-            return None
+            return []
         overlap_x, overlap_y = self._xy_overlap_depths(moving_bounds, other_bounds)
         axes = sorted(allowed_axes, key=lambda axis: (overlap_x, overlap_y)[axis])
         old_translation = np.asarray(moving.transform.translation(), dtype=float)
@@ -1501,6 +2519,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         # reject new conflicts can overlap farther along the chosen axis.  The
         # larger value guarantees that this candidate clears both signals.
 
+        candidates: list[RigidTransform] = []
         for axis in axes:
             separation = max(penetration, (overlap_x, overlap_y)[axis]) + clearance
             delta = old_translation[axis] - other_translation[axis]
@@ -1515,13 +2534,33 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 )
                 if abs(actual_shift) < separation * 0.5:
                     continue
+                if (
+                    max_translation is not None
+                    and float(
+                        np.linalg.norm(
+                            np.asarray(candidate.translation(), dtype=float)[:2]
+                            - old_translation[:2]
+                        )
+                    )
+                    > max_translation
+                ):
+                    continue
                 after_pairs = self._furniture_aabb_overlap_pairs(
                     overrides={str(moving.object_id): candidate}
                 )
-                if after_pairs - before_pairs:
+                target_pair = frozenset((str(moving.object_id), str(other.object_id)))
+                if target_pair in after_pairs or after_pairs - before_pairs:
                     continue
-                return candidate
-        return None
+                candidates.append(candidate)
+        candidates.sort(
+            key=lambda transform: float(
+                np.linalg.norm(
+                    np.asarray(transform.translation(), dtype=float)[:2]
+                    - old_translation[:2]
+                )
+            )
+        )
+        return candidates
 
     def _collision_separation_axes(self, obj: SceneObject) -> tuple[int, ...]:
         """Keep wall-backed objects on their wall by moving along its tangent."""
@@ -1757,14 +2796,14 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         semantic_counts: dict[str, int] = {}
         for item in required or []:
             category = self._repair_category_for_task_label(item)
-            if category in REPAIR_ASSET_SPECS:
+            if category:
                 semantic_counts[category] = semantic_counts.get(category, 0) + 1
         contract_counts: dict[str, int] = {}
         for contract_category, count in intent_contract_required_counts(
-            self.scene
+            self.scene, stage="furniture"
         ).items():
             category = self._repair_category_for_task_label(contract_category)
-            if category in REPAIR_ASSET_SPECS and count > 0:
+            if category and count > 0:
                 contract_counts[category] = count
         if semantic_counts:
             counts.update(semantic_counts)
@@ -1782,6 +2821,11 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                     ) or furniture_category_satisfies(category, contract_category):
                         counts.pop(category, None)
             counts.update(contract_counts)
+        authoritative_categories = set(semantic_counts) | set(contract_counts)
+        for category in authoritative_categories:
+            for shadowed in FURNITURE_CATEGORY_COMPONENT_SHADOWS.get(category, ()):
+                if shadowed not in authoritative_categories:
+                    counts.pop(shadowed, None)
         for generic in ("desk", "chair"):
             if generic in contract_counts:
                 continue
@@ -1840,7 +2884,9 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
     def _repair_request_semantic_name(self, category: str) -> str:
         """Use an unambiguous hard-contract label for repair retrieval."""
         compatible_contract_categories: list[str] = []
-        for contract_category in intent_contract_required_counts(self.scene):
+        for contract_category in intent_contract_required_counts(
+            self.scene, stage="furniture"
+        ):
             canonical = self._repair_category_for_task_label(contract_category)
             if not canonical or canonical in compatible_contract_categories:
                 continue
@@ -2825,15 +3871,25 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         self.scene.move_object(wardrobe.object_id, best_transform)
         return True
 
-    def _repair_forbidden_zone_conflicts(self, include_windows: bool = False) -> bool:
+    def _repair_forbidden_zone_conflicts(
+        self,
+        include_windows: bool = False,
+        *,
+        opening_ids: set[str] | None = None,
+        blocker_ids: set[str] | None = None,
+    ) -> bool:
         """Move objects out of door/opening clearance zones using generic anchors."""
         if self.scene is None:
             return False
         transaction = self._begin_hard_state_transaction()
         zones = self._opening_forbidden_zones(include_windows=include_windows)
+        if opening_ids is not None:
+            zones = [zone for zone in zones if zone[0] in opening_ids]
         if not zones:
             return False
         blockers = self._objects_overlapping_zones(zones)
+        if blocker_ids is not None:
+            blockers = [item for item in blockers if item[0] in blocker_ids]
         if not blockers:
             return False
 
@@ -3010,12 +4066,84 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             return 1e9
         return self._zone_overlap_penalty(bounds, zones)
 
+    def _zone_ejection_candidate_transforms(
+        self,
+        obj: SceneObject,
+        zones: list[tuple[str, str, np.ndarray, np.ndarray]],
+    ) -> list[RigidTransform]:
+        """Return minimum axis translations that eject an object from a zone."""
+        bounds = obj.compute_world_bounds()
+        if bounds is None:
+            return []
+        obj_min, obj_max = bounds
+        original = np.asarray(obj.transform.translation(), dtype=float)
+        margin = max(
+            0.005,
+            float(self._repair_cfg_value("collision_separation_margin_m", 0.025)),
+        )
+        candidates: list[RigidTransform] = []
+        for _, _, zone_min, zone_max in zones:
+            overlap_x, overlap_y, _ = aabb_overlap_depths(
+                list(obj_min), list(obj_max), list(zone_min), list(zone_max)
+            )
+            if (
+                overlap_x <= AABB_INTERSECTION_EPSILON_M
+                or overlap_y <= AABB_INTERSECTION_EPSILON_M
+            ):
+                continue
+            deltas = (
+                (0, float(zone_min[0] - obj_max[0] - margin)),
+                (0, float(zone_max[0] - obj_min[0] + margin)),
+                (1, float(zone_min[1] - obj_max[1] - margin)),
+                (1, float(zone_max[1] - obj_min[1] + margin)),
+            )
+            for axis, delta in deltas:
+                translation = original.copy()
+                translation[axis] += delta
+                candidates.append(
+                    self._fit_transform_inside_room(
+                        obj,
+                        RigidTransform(R=obj.transform.rotation(), p=translation),
+                    )
+                )
+        return candidates
+
+    def _furniture_overlap_penalty_for_transform(
+        self, obj: SceneObject, transform: RigidTransform
+    ) -> float:
+        """Return total 3D AABB overlap volume with other furniture."""
+        bounds = self._bounds_for_transform(obj, transform)
+        if bounds is None:
+            return float("inf")
+        penalty = 0.0
+        for other_id, other in self.scene.objects.items():
+            if (
+                str(other_id) == str(obj.object_id)
+                or getattr(other, "immutable", False)
+                or getattr(other, "object_type", None) != ObjectType.FURNITURE
+            ):
+                continue
+            other_bounds = other.compute_world_bounds()
+            if other_bounds is None:
+                continue
+            overlap_x, overlap_y = self._xy_overlap_depths(bounds, other_bounds)
+            overlap_z = max(
+                0.0,
+                float(
+                    min(bounds[1][2], other_bounds[1][2])
+                    - max(bounds[0][2], other_bounds[0][2])
+                ),
+            )
+            penalty += overlap_x * overlap_y * overlap_z
+        return penalty
+
     def _best_forbidden_zone_repair_transform(
         self,
         obj: SceneObject,
         zones: list[tuple[str, str, np.ndarray, np.ndarray]],
     ) -> RigidTransform | None:
-        candidates = self._generic_wall_candidate_transforms(obj)
+        candidates = self._zone_ejection_candidate_transforms(obj, zones)
+        candidates.extend(self._generic_wall_candidate_transforms(obj))
         room_bounds = self._room_bounds_xy()
         if room_bounds is not None:
             min_x, min_y, max_x, max_y = room_bounds
@@ -3041,46 +4169,28 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                     )
         if not candidates:
             return None
-        obstacles = [
-            other
-            for other_id, other in self.scene.objects.items()
-            if str(other_id) != str(obj.object_id)
-            and not getattr(other, "immutable", False)
-            and getattr(other, "object_type", None) == ObjectType.FURNITURE
-        ]
-        best_transform = None
-        best_score = -1e18
+        before_pairs = self._furniture_aabb_overlap_pairs()
+        best_transform: RigidTransform | None = None
+        best_score: tuple[float, int, float, float] | None = None
         original_center = np.asarray(obj.transform.translation(), dtype=float)
         for transform in candidates:
             bounds = self._bounds_for_transform(obj, transform)
             if bounds is None:
                 continue
-            has_furniture_overlap = False
-            for obstacle in obstacles:
-                obstacle_bounds = obstacle.compute_world_bounds()
-                if obstacle_bounds is None:
-                    continue
-                overlap_x, overlap_y = self._xy_overlap_depths(bounds, obstacle_bounds)
-                overlap_z = max(
-                    0.0,
-                    float(
-                        min(bounds[1][2], obstacle_bounds[1][2])
-                        - max(bounds[0][2], obstacle_bounds[0][2])
-                    ),
-                )
-                if overlap_x > 1e-4 and overlap_y > 1e-4 and overlap_z > 1e-4:
-                    has_furniture_overlap = True
-                    break
-            if has_furniture_overlap:
+            after_pairs = self._furniture_aabb_overlap_pairs(
+                overrides={str(obj.object_id): transform}
+            )
+            if after_pairs - before_pairs:
                 continue
             zone_penalty = self._zone_overlap_penalty(bounds, zones)
             center = np.asarray(transform.translation(), dtype=float)
-            move_penalty = (
-                float(np.linalg.norm(center[:2] - original_center[:2])) * 0.15
+            score = (
+                zone_penalty,
+                len(after_pairs),
+                self._furniture_overlap_penalty_for_transform(obj, transform),
+                float(np.linalg.norm(center[:2] - original_center[:2])),
             )
-            wall_bonus = 0.25
-            score = wall_bonus - zone_penalty - move_penalty
-            if score > best_score:
+            if best_score is None or score < best_score:
                 best_score = score
                 best_transform = transform
         return best_transform
@@ -3145,10 +4255,11 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         return getattr(safety_cfg, "bedroom_layout", None)
 
     def _room_bounds_xy(self) -> tuple[float, float, float, float] | None:
-        if self.scene is None or self.scene.room_geometry is None:
+        geometry = getattr(self.scene, "room_geometry", None)
+        if geometry is None:
             return None
-        length = float(getattr(self.scene.room_geometry, "length", 0.0) or 0.0)
-        width = float(getattr(self.scene.room_geometry, "width", 0.0) or 0.0)
+        length = float(getattr(geometry, "length", 0.0) or 0.0)
+        width = float(getattr(geometry, "width", 0.0) or 0.0)
         if length <= 0 or width <= 0:
             return None
         return (-length / 2, -width / 2, length / 2, width / 2)

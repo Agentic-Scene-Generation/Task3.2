@@ -14,16 +14,20 @@ import math
 import time
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from scenesmith.agent_utils.furniture_layout_planning import (
+    build_opening_aware_reservation_plan,
+)
 from scenesmith.scene_expert.schemas import (
     MemoryPack,
     SceneTaskSpec,
     StageBrief,
     StageRelationContext,
 )
+from scenesmith.utils.token_usage import normalize_token_usage
 
 
 def utc_now() -> str:
@@ -78,11 +82,14 @@ class ForbiddenZone(BaseModel):
 
 
 class LLMCallDebugRecord(BaseModel):
-    schema_version: str = "1.0"
+    schema_version: str = "scenesmith.llm_call_debug.v2"
     created_at: str = Field(default_factory=utc_now)
     stage: str
     agent_role: str
     event: str
+    # This stream also captures deterministic audit decisions with prompt/output
+    # evidence that do not make a provider API request.
+    event_kind: Literal["llm", "system"] = "llm"
     prompt_chars: int = 0
     prompt_hash: str = ""
     prompt_excerpt: str = ""
@@ -268,6 +275,12 @@ def build_scene_summary(scene: Any | None) -> str:
                 typ = getattr(typ, "value", typ)
                 opening_bits.append(f"{idx}:{typ or 'opening'}@{wall or 'wall'}")
             parts.append("openings=" + ", ".join(opening_bits))
+            reservation_plan = build_opening_aware_reservation_plan(scene)
+            if reservation_plan.fully_opening_free_walls:
+                parts.append(
+                    "fully_opening_free_walls="
+                    + ",".join(reservation_plan.fully_opening_free_walls)
+                )
     # SceneExpert may append a StageBrief, memory, or previous critique to the
     # mutable scene description.  A context bundle shared with a critic must
     # retain the user's immutable task as its semantic source; otherwise a
@@ -307,6 +320,26 @@ def build_stage_context_bundle(
                 objects.append(_object_context(str(object_id), obj))
             except Exception:
                 continue
+
+    if forbidden_zones is None and scene is not None:
+        reservation_plan = build_opening_aware_reservation_plan(scene)
+        forbidden_zones = [
+            ForbiddenZone(
+                zone_id=zone.zone_id,
+                zone_type=zone.opening_type,
+                severity=zone.severity,
+                wall=zone.wall,
+                bounds_xy=[
+                    zone.bounds_min[0],
+                    zone.bounds_min[1],
+                    zone.bounds_max[0],
+                    zone.bounds_max[1],
+                ],
+                source="resolved_room_geometry",
+                clearance_m=reservation_plan.opening_margin_m,
+            )
+            for zone in reservation_plan.zones
+        ]
 
     retrieved_memory = {}
     if memory_pack is not None:
@@ -375,6 +408,7 @@ def build_llm_call_debug_record(
     raw_response: Any = None,
     error: str = "",
     elapsed_sec: float = 0.0,
+    event_kind: Literal["llm", "system"] = "llm",
 ) -> LLMCallDebugRecord:
     prompt_text = _stringify_prompt(prompt)
     output_text = _stringify_prompt(output)
@@ -382,6 +416,7 @@ def build_llm_call_debug_record(
         stage=stage,
         agent_role=agent_role,
         event=event,
+        event_kind=event_kind,
         prompt_chars=len(prompt_text),
         prompt_hash=stable_hash(prompt_text),
         prompt_excerpt=compact_text(prompt_text, 1800),
@@ -391,7 +426,7 @@ def build_llm_call_debug_record(
         output_chars=len(output_text),
         output_excerpt=compact_text(output_text, 1800),
         finish_reasons=_extract_finish_reasons(result or raw_response),
-        token_usage=_extract_token_usage(result),
+        token_usage=_extract_token_usage(result or raw_response),
         raw_response_excerpt=(
             compact_text(_stringify_prompt(raw_response), 2400)
             if raw_response is not None
@@ -403,25 +438,7 @@ def build_llm_call_debug_record(
 
 
 def _extract_token_usage(result: Any) -> dict[str, int]:
-    usage = getattr(getattr(result, "context_wrapper", None), "usage", None)
-    if usage is None:
-        usage = getattr(result, "usage", None)
-    if usage is None:
-        return {}
-    fields = {
-        "input_tokens": getattr(usage, "input_tokens", None)
-        or getattr(usage, "prompt_tokens", None),
-        "output_tokens": getattr(usage, "output_tokens", None)
-        or getattr(usage, "completion_tokens", None),
-        "total_tokens": getattr(usage, "total_tokens", None),
-        "requests": getattr(usage, "requests", None),
-    }
-    details = getattr(usage, "output_tokens_details", None) or getattr(
-        usage, "completion_tokens_details", None
-    )
-    if details is not None:
-        fields["reasoning_tokens"] = getattr(details, "reasoning_tokens", None)
-    return {k: int(v) for k, v in fields.items() if isinstance(v, int)}
+    return normalize_token_usage(result)
 
 
 def _extract_finish_reasons(value: Any) -> list[str]:

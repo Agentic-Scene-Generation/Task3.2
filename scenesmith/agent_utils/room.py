@@ -1661,6 +1661,8 @@ def extract_and_propagate_support_surfaces(
     scene: "RoomScene",
     furniture_object: SceneObject,
     config: SupportSurfaceExtractionConfig | None = None,
+    *,
+    surface_policy: str = "general",
 ) -> list[SupportSurface]:
     """Extract all support surfaces using HSM algorithm and propagate to identical furniture.
 
@@ -1673,6 +1675,8 @@ def extract_and_propagate_support_surfaces(
         scene: The scene containing all furniture objects.
         furniture_object: The furniture object to extract support surfaces from.
         config: HSM algorithm configuration (uses defaults if None).
+        surface_policy: HSSD annotation filtering policy. Non-HSSD extraction keeps
+            its existing behavior.
 
     Returns:
         List of SupportSurface objects for the selected furniture, sorted by area
@@ -1682,7 +1686,10 @@ def extract_and_propagate_support_surfaces(
         ValueError: If furniture object has no geometry path.
     """
     # Return existing support surfaces if already computed.
-    if furniture_object.support_surfaces:
+    stored_policy = str(
+        furniture_object.metadata.get("support_surface_policy", "general")
+    )
+    if furniture_object.support_surfaces and stored_policy == surface_policy:
         console_logger.info(
             f"Support surfaces already extracted for {furniture_object.object_id} "
             f"({len(furniture_object.support_surfaces)} surfaces)"
@@ -1707,11 +1714,26 @@ def extract_and_propagate_support_surfaces(
         )
 
         mesh_id = furniture_object.metadata["hssd_mesh_id"]
+        scale = float(furniture_object.scale_factor or 1.0)
+        unscaled_bbox_min = (
+            np.asarray(furniture_object.bbox_min, dtype=float) / scale
+            if furniture_object.bbox_min is not None and scale > 0.0
+            else None
+        )
+        unscaled_bbox_max = (
+            np.asarray(furniture_object.bbox_max, dtype=float) / scale
+            if furniture_object.bbox_max is not None and scale > 0.0
+            else None
+        )
         surfaces = load_hssd_support_surfaces(
             mesh_id=mesh_id,
             config=config,
             scene=scene,
             data_dir=config.hssd_data_dir,
+            surface_policy=surface_policy,
+            furniture_bbox_min=unscaled_bbox_min,
+            furniture_bbox_max=unscaled_bbox_max,
+            furniture_scale_factor=scale,
         )
         source = "HSSD"
 
@@ -1811,6 +1833,7 @@ def extract_and_propagate_support_surfaces(
         world_surfaces.append(world_surface)
 
     furniture_object.support_surfaces = world_surfaces
+    furniture_object.metadata["support_surface_policy"] = surface_policy
 
     console_logger.info(
         f"Extracted {len(world_surfaces)} support surfaces for "
@@ -1827,6 +1850,15 @@ def extract_and_propagate_support_surfaces(
 
         # Only propagate to identical furniture (same geometry file).
         if obj.geometry_path != target_geometry_path:
+            continue
+
+        # A relaxed upholstered-seat result belongs only to its hard prompt-owned
+        # target. Conversely, general propagation must not overwrite such a target.
+        if (
+            surface_policy != "general"
+            or str(obj.metadata.get("support_surface_policy", "general"))
+            == "upholstered_seat"
+        ):
             continue
 
         # Transform each surface to this object's world frame with scaling.
@@ -1863,6 +1895,7 @@ def extract_and_propagate_support_surfaces(
             obj_surfaces.append(obj_surface)
 
         obj.support_surfaces = obj_surfaces
+        obj.metadata["support_surface_policy"] = "general"
 
         console_logger.info(
             f"Propagated {len(obj_surfaces)} support surfaces from "

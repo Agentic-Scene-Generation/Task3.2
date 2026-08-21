@@ -111,6 +111,7 @@ class BaseExperiment(ABC):
         cfg_dict: dict | DictConfig,
         compatible_agents: dict[str, type],
         logger: BaseLogger,
+        house_layout: "HouseLayout | None" = None,
         render_gpu_id: int | None = None,
     ) -> BaseFurnitureAgent:
         """Build furniture agent from config dictionary.
@@ -142,6 +143,7 @@ class BaseExperiment(ABC):
         agent_config["stage_placement_order"] = config_dict["experiment"].get(
             "stage_placement_order", {}
         )
+        agent_config["floor_plan_geometry_config"] = config_dict["floor_plan_agent"]
         agent_name = agent_config["_name"]
 
         if agent_name not in compatible_agents:
@@ -170,6 +172,7 @@ class BaseExperiment(ABC):
         return compatible_agents[agent_name](
             cfg=OmegaConf.create(agent_config),
             logger=logger,
+            house_layout=house_layout,
             geometry_server_host=geometry_server_config.host,
             geometry_server_port=geometry_server_config.port,
             hssd_server_host=hssd_server_config.host,

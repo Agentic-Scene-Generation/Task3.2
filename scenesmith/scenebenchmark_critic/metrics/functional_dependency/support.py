@@ -6,6 +6,7 @@ from typing import Any
 from scenesmith.scenebenchmark_critic.core.geometry import (
     GeometryStore,
     bbox_gap_xy,
+    is_floor_covering,
     is_small_object,
     object_category,
     object_footprint_polygon,
@@ -92,6 +93,13 @@ def evaluate_support_relation(
     dz = abs(float(smin[2]) - support_top)
     gap = bbox_gap_xy(subject, target)
     support_modes = _support_modes(target)
+    floor_covering_result = _floor_covering_footprint_support(
+        subject,
+        target,
+        subject_bottom=float(smin[2]),
+    )
+    if floor_covering_result is not None:
+        return floor_covering_result
     stack_result = _eval_manipuland_stack_support_result(subject, target, store=store)
     if stack_result is not None:
         return stack_result
@@ -266,6 +274,52 @@ def evaluate_support_relation(
         _bbox_support_evidence(
             subject, target, overlap_ratio=overlap_ratio, height_delta=dz
         ),
+    )
+
+
+def _floor_covering_footprint_support(
+    subject: dict[str, Any],
+    target: dict[str, Any],
+    *,
+    subject_bottom: float,
+) -> SupportRelationResult | None:
+    """Evaluate ``on_top_of`` rugs as floor-footprint coverage, not rigid support."""
+    if not is_floor_covering(target):
+        return None
+    target_bbox = target.get("bbox_world") or {}
+    height_delta = abs(subject_bottom - _support_top_z(target_bbox))
+    overlap_ratio = _footprint_overlap_ratio_xy(subject, target, inflate=0.02)
+    evidence = _bbox_support_evidence(
+        subject,
+        target,
+        overlap_ratio=overlap_ratio,
+        height_delta=height_delta,
+    )
+    if overlap_ratio >= 0.80 and height_delta <= 0.10:
+        return _support_result(
+            "pass",
+            0.95,
+            "subject footprint lies on the floor covering "
+            f"(overlap {overlap_ratio:.2f}, height delta {height_delta:.2f}m).",
+            "floor_covering_footprint",
+            evidence,
+        )
+    if overlap_ratio >= 0.50 and height_delta <= 0.12:
+        return _support_result(
+            "degraded",
+            0.72,
+            "subject footprint only partially lies on the floor covering "
+            f"(overlap {overlap_ratio:.2f}, height delta {height_delta:.2f}m).",
+            "floor_covering_footprint",
+            evidence,
+        )
+    return _support_result(
+        "fail",
+        0.96,
+        "subject footprint does not lie on the floor covering "
+        f"(overlap {overlap_ratio:.2f}, height delta {height_delta:.2f}m).",
+        "floor_covering_footprint",
+        evidence,
     )
 
 

@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from scenesmith.scenebenchmark_critic.metrics.interaction_clearance.evaluator import (
     build_clearance_checks,
     build_door_clearance_checks,
     build_window_clearance_checks,
+    evaluate_clearance,
 )
+from scenesmith.scenebenchmark_critic.config import CriticConfig
+from scenesmith.scenebenchmark_critic.evaluator import evaluate_case_pack
 
 
 def _object(
@@ -190,3 +195,154 @@ def test_door_clearance_stays_core_while_window_clearance_is_auxiliary() -> None
 
     assert door_check["scoring_tier"] == "core"
     assert window_check["scoring_tier"] == "auxiliary"
+
+
+def _window_geometry() -> dict[str, object]:
+    return {
+        "scene_shell": {
+            "windows": [
+                {
+                    "id": "window_0",
+                    "sill_height": 0.9,
+                    "wall_direction": "north",
+                    "bbox": {
+                        "min": (-0.75, 1.9, 0.9),
+                        "max": (0.75, 2.1, 2.1),
+                    },
+                }
+            ]
+        }
+    }
+
+
+def _evaluate_window(*objects: dict[str, object], core_ratio: float = 0.15) -> dict:
+    check = build_window_clearance_checks(
+        _window_geometry(), {str(obj["id"]): obj for obj in objects}
+    )[0]
+    config = SimpleNamespace(
+        run=SimpleNamespace(
+            window_clearance_advisory_occlusion_ratio=0.02,
+            window_clearance_core_occlusion_ratio=core_ratio,
+        )
+    )
+    return evaluate_clearance(check, config=config)
+
+
+def test_window_clearance_ignores_furniture_below_sill() -> None:
+    bench = _object(
+        "bench_0",
+        category="bench",
+        object_type="furniture",
+        bbox_min=(-0.5, 1.8, 0.0),
+        bbox_max=(0.5, 2.0, 0.8),
+    )
+
+    result = _evaluate_window(bench)
+
+    assert result["label"] == "pass"
+    assert result["scoring_tier"] == "auxiliary"
+    assert result["diagnostics"]["occlusion_ratio"] == 0.0
+
+
+def test_window_clearance_marks_minor_projected_overlap_advisory() -> None:
+    narrow_decor = _object(
+        "narrow_decor_0",
+        category="decor",
+        object_type="furniture",
+        bbox_min=(-0.15, 1.8, 0.0),
+        bbox_max=(0.15, 2.0, 1.2),
+    )
+
+    result = _evaluate_window(narrow_decor)
+
+    assert result["label"] == "degraded"
+    assert result["scoring_tier"] == "auxiliary"
+    assert result["blocking_objects"] == []
+    assert result["diagnostics"]["advisory_blocking_objects"] == ["narrow_decor_0"]
+    assert result["diagnostics"]["occlusion_ratio"] == 0.05
+
+
+def test_window_clearance_upgrades_substantial_opaque_blockage_to_core() -> None:
+    cabinet = _object(
+        "cabinet_0",
+        category="cabinet",
+        object_type="furniture",
+        bbox_min=(-0.4, 1.8, 0.0),
+        bbox_max=(0.4, 2.0, 1.8),
+    )
+
+    result = _evaluate_window(cabinet)
+
+    assert result["label"] == "fail"
+    assert result["scoring_tier"] == "core"
+    assert result["blocking_objects"] == ["cabinet_0"]
+    assert result["diagnostics"]["occlusion_ratio"] == 0.4
+    evidence = result["diagnostics"]["occlusion_evidence"][0]
+    assert evidence["lateral_overlap_ratio"] > 0.5
+    assert evidence["vertical_overlap_ratio"] == 0.75
+
+
+def test_window_clearance_detects_wall_mounted_projected_blockage() -> None:
+    television = _object(
+        "television_0",
+        category="television",
+        object_type="wall_mounted",
+        bbox_min=(-0.7, 2.02, 1.0),
+        bbox_max=(0.7, 2.08, 2.0),
+    )
+
+    result = _evaluate_window(television)
+
+    assert result["label"] == "fail"
+    assert result["scoring_tier"] == "core"
+    assert result["diagnostics"]["wall_mounted_blocking_objects"] == ["television_0"]
+    assert result["diagnostics"]["occlusion_evidence"][0]["wall_mounted"] is True
+
+
+def test_window_clearance_thresholds_come_from_rule_config() -> None:
+    cabinet = _object(
+        "cabinet_0",
+        category="cabinet",
+        object_type="furniture",
+        bbox_min=(-0.4, 1.8, 0.0),
+        bbox_max=(0.4, 2.0, 1.8),
+    )
+
+    result = _evaluate_window(cabinet, core_ratio=0.5)
+
+    assert result["label"] == "degraded"
+    assert result["scoring_tier"] == "auxiliary"
+    assert result["diagnostics"]["core_occlusion_ratio_threshold"] == 0.5
+
+
+def test_window_thresholds_flow_through_full_critic_evaluation() -> None:
+    cabinet = _object(
+        "cabinet_0",
+        category="cabinet",
+        object_type="furniture",
+        bbox_min=(-0.4, 1.8, 0.0),
+        bbox_max=(0.4, 2.0, 1.8),
+    )
+    geometry = _window_geometry()
+    check = build_window_clearance_checks(geometry, {"cabinet_0": cabinet})[0]
+    case_pack = {
+        "stage": "final",
+        "scene_geometry": geometry,
+        "checks": [check],
+    }
+    config = CriticConfig(
+        enabled=True,
+        metrics=("interaction_clearance",),
+        extra={"window_clearance_core_occlusion_ratio": 0.5},
+    )
+
+    payload = evaluate_case_pack(case_pack, config=config)
+    result = next(
+        row
+        for row in payload["results"]
+        if row["check_id"] == "window_clearance__window_0"
+    )
+
+    assert result["label"] == "degraded"
+    assert result["scoring_tier"] == "auxiliary"
+    assert result["diagnostics"]["core_occlusion_ratio_threshold"] == 0.5

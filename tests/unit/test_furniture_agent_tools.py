@@ -13,6 +13,7 @@ import numpy as np
 from omegaconf import OmegaConf
 from pydrake.all import RigidTransform, RollPitchYaw
 
+from scenesmith.agent_utils.house import ClearanceOpeningData
 from scenesmith.agent_utils.room import ObjectType, RoomScene, SceneObject, UniqueID
 from scenesmith.furniture_agents.tools.furniture_tools import FurnitureTools
 from scenesmith.furniture_agents.tools.response_dataclasses import (
@@ -459,6 +460,53 @@ class TestFurnitureTools(BaseAgentToolsTest):
         self.assertAlmostEqual(float(world_min[2]), 0.0, places=6)
         self.assertAlmostEqual(result["position"]["z"], 0.97, places=6)
 
+    def test_add_rejects_hard_door_clearance_overlap(self):
+        self.mock_scene.room_geometry = Mock()
+        self.mock_scene.room_geometry.length = 10.0
+        self.mock_scene.room_geometry.width = 8.0
+        self.mock_scene.room_geometry.openings = [
+            ClearanceOpeningData(
+                opening_id="door_1",
+                opening_type="door",
+                wall_direction="west",
+                center_world=[-5.0, 0.0, 1.05],
+                width=0.9,
+                sill_height=0.0,
+                height=2.1,
+                clearance_bbox_min=[-5.0, -0.45, 0.0],
+                clearance_bbox_max=[-4.2, 0.45, 2.1],
+                wall_start=[-5.0, -4.0],
+                wall_end=[-5.0, 4.0],
+                position_along_wall=3.55,
+            )
+        ]
+        cabinet = SceneObject(
+            object_id=UniqueID("cabinet_asset"),
+            object_type=ObjectType.FURNITURE,
+            name="cabinet",
+            description="Test cabinet",
+            transform=RigidTransform(),
+            bbox_min=np.array([-0.2, -0.2, 0.0]),
+            bbox_max=np.array([0.2, 0.2, 1.0]),
+            metadata={},
+        )
+        self.mock_asset_manager.get_asset_by_id.return_value = cabinet
+        self.mock_scene.generate_unique_id.return_value = UniqueID("cabinet_0")
+        self.mock_scene.add_object = Mock()
+
+        result = json.loads(
+            self.furniture_tools._add_furniture_to_scene_impl(
+                asset_id="cabinet_asset", x=-4.5, y=0.0, z=0.0
+            )
+        )
+
+        self.assertFalse(result["success"])
+        self.assertEqual(
+            result["error_type"], FurnitureErrorType.INVALID_POSITION.value
+        )
+        self.assertIn("door clearance door_1", result["message"])
+        self.mock_scene.add_object.assert_not_called()
+
     def test_asset_id_not_found_error_handling(self):
         """Test error handling when asset_id doesn't exist in registry."""
         # Mock asset manager to return None (asset not found).
@@ -674,6 +722,58 @@ class TestFurnitureTools(BaseAgentToolsTest):
             result["error_type"], FurnitureErrorType.POSITION_OUT_OF_BOUNDS.value
         )
         self.assertIn("out of floor plan bounds", result["message"])
+
+    def test_move_rejects_hard_door_clearance_overlap(self):
+        self.mock_scene.room_geometry = Mock()
+        self.mock_scene.room_geometry.length = 10.0
+        self.mock_scene.room_geometry.width = 8.0
+        self.mock_scene.room_geometry.openings = [
+            ClearanceOpeningData(
+                opening_id="door_1",
+                opening_type="door",
+                wall_direction="west",
+                center_world=[-5.0, 0.0, 1.05],
+                width=0.9,
+                sill_height=0.0,
+                height=2.1,
+                clearance_bbox_min=[-5.0, -0.45, 0.0],
+                clearance_bbox_max=[-4.2, 0.45, 2.1],
+                wall_start=[-5.0, -4.0],
+                wall_end=[-5.0, 4.0],
+                position_along_wall=3.55,
+            )
+        ]
+        cabinet = SceneObject(
+            object_id=UniqueID("cabinet_0"),
+            object_type=ObjectType.FURNITURE,
+            name="cabinet",
+            description="Test cabinet",
+            transform=RigidTransform(),
+            bbox_min=np.array([-0.2, -0.2, 0.0]),
+            bbox_max=np.array([0.2, 0.2, 1.0]),
+            metadata={},
+        )
+        self.mock_scene.get_object.return_value = cabinet
+        self.mock_scene.move_object = Mock()
+
+        result = json.loads(
+            self.furniture_tools._move_furniture_impl(
+                object_id="cabinet_0",
+                x=-4.5,
+                y=0.0,
+                z=0.0,
+                roll=0.0,
+                pitch=0.0,
+                yaw=0.0,
+            )
+        )
+
+        self.assertFalse(result["success"])
+        self.assertEqual(
+            result["error_type"], FurnitureErrorType.INVALID_POSITION.value
+        )
+        self.assertIn("door clearance door_1", result["message"])
+        self.mock_scene.move_object.assert_not_called()
 
     def test_position_only_move_preserves_current_yaw(self):
         """Omitting yaw must not undo a wall/snapping orientation."""

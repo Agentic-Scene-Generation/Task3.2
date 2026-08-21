@@ -32,6 +32,7 @@ from scenesmith.scene_expert.context_bundle import (
     stable_hash,
     utc_now,
 )
+from scenesmith.utils.token_usage import normalize_token_usage
 
 console_logger = logging.getLogger(__name__)
 
@@ -598,7 +599,7 @@ class SceneExpertStructuredLLMClient:
             path = Path(path_value)
             path.parent.mkdir(parents=True, exist_ok=True)
             record = LLMCallDebugRecord(
-                schema_version="1.1",
+                schema_version="scenesmith.llm_call_debug.v2",
                 created_at=utc_now(),
                 stage=stage,
                 agent_role=role,
@@ -676,19 +677,4 @@ def _stringify_content(value: Any) -> str:
 
 
 def _raw_token_usage(response: Any) -> dict[str, int]:
-    usage = getattr(response, "usage", None)
-    if usage is None:
-        return {}
-    values = {
-        "input_tokens": getattr(usage, "prompt_tokens", None)
-        or getattr(usage, "input_tokens", None),
-        "output_tokens": getattr(usage, "completion_tokens", None)
-        or getattr(usage, "output_tokens", None),
-        "total_tokens": getattr(usage, "total_tokens", None),
-    }
-    details = getattr(usage, "completion_tokens_details", None) or getattr(
-        usage, "output_tokens_details", None
-    )
-    if details is not None:
-        values["reasoning_tokens"] = getattr(details, "reasoning_tokens", None)
-    return {key: int(value) for key, value in values.items() if isinstance(value, int)}
+    return normalize_token_usage(response)

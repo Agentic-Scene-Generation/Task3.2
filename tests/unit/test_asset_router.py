@@ -19,7 +19,10 @@ from scenesmith.agent_utils.asset_router.rendered_asset_choice import (
 )
 from scenesmith.agent_utils.hssd_retrieval_server.dataclasses import HssdRetrievalResult
 from scenesmith.agent_utils.room import AgentType, ObjectType
-from scenesmith.agent_utils.semantic_names import semantic_name_candidates_for_request
+from scenesmith.agent_utils.semantic_names import (
+    forbidden_semantic_components_for_request,
+    semantic_name_candidates_for_request,
+)
 
 
 class TestAnalysisResultWasModified(unittest.TestCase):
@@ -400,6 +403,303 @@ class TestRenderedHssdAssetChoice(unittest.TestCase):
 
         self.assertEqual(choice.semantic_name, "desk")
 
+    def test_forbidden_component_guard_overrides_rendered_choice(self) -> None:
+        candidates = [
+            self._candidate("stand_with_tv", "tv stand", 0.91),
+            self._candidate("stand_only", "tv stand", 0.89),
+        ]
+        vlm_service = MagicMock()
+        vlm_service.create_completion.return_value = json.dumps(
+            {
+                "candidate_assessments": [
+                    {
+                        "index": 1,
+                        "hssd_id": "stand_with_tv",
+                        "contains_forbidden_components": True,
+                        "forbidden_components": ["television"],
+                    },
+                    {
+                        "index": 2,
+                        "hssd_id": "stand_only",
+                        "contains_forbidden_components": False,
+                        "forbidden_components": [],
+                    },
+                ],
+                "selected_index": 1,
+                "selected_hssd_id": "stand_with_tv",
+                "reason": "includes the display",
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            for candidate in candidates:
+                self._write_iso(root, candidate.hssd_id)
+            choice = choose_hssd_candidate_from_iso_renders(
+                candidates=candidates,
+                object_description="low media console without a display",
+                scene_context="The TV is supported by a TV stand.",
+                vlm_service=vlm_service,
+                model="test-model",
+                reasoning_effort="low",
+                verbosity="low",
+                vision_detail="low",
+                rendered_assets_dir=root,
+                top_n=2,
+                forbidden_components=["television"],
+            )
+
+        self.assertEqual(choice.selected_hssd_id, "stand_only")
+        self.assertIn("forbidden-component guard", choice.reason)
+
+    def test_all_forbidden_candidates_fail_closed(self) -> None:
+        candidates = [
+            self._candidate("composite_a", "tv stand", 0.91),
+            self._candidate("composite_b", "tv stand", 0.89),
+        ]
+        vlm_service = MagicMock()
+        vlm_service.create_completion.return_value = json.dumps(
+            {
+                "candidate_assessments": [
+                    {
+                        "index": index,
+                        "hssd_id": candidate.hssd_id,
+                        "contains_forbidden_components": True,
+                        "forbidden_components": ["tv"],
+                    }
+                    for index, candidate in enumerate(candidates, start=1)
+                ],
+                "selected_index": 1,
+                "selected_hssd_id": "composite_a",
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            for candidate in candidates:
+                self._write_iso(root, candidate.hssd_id)
+            choice = choose_hssd_candidate_from_iso_renders(
+                candidates=candidates,
+                object_description="stand only",
+                scene_context=None,
+                vlm_service=vlm_service,
+                model="test-model",
+                reasoning_effort="low",
+                verbosity="low",
+                vision_detail="low",
+                rendered_assets_dir=root,
+                top_n=2,
+                forbidden_components=["television"],
+            )
+
+        self.assertEqual(choice.candidates, [])
+        self.assertIsNone(choice.selected_hssd_id)
+
+    def test_single_forbidden_candidate_is_rejected_after_rendered_assessment(
+        self,
+    ) -> None:
+        candidate = self._candidate("stand_with_tv", "tv stand", 0.91)
+        vlm_service = MagicMock()
+        vlm_service.create_completion.return_value = json.dumps(
+            {
+                "candidate_assessments": [
+                    {
+                        "index": 1,
+                        "hssd_id": "stand_with_tv",
+                        "contains_forbidden_components": True,
+                        "forbidden_components": ["television"],
+                    }
+                ],
+                "selected_index": 1,
+                "selected_hssd_id": "stand_with_tv",
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._write_iso(root, candidate.hssd_id)
+            choice = choose_hssd_candidate_from_iso_renders(
+                candidates=[candidate],
+                object_description="TV stand without a display",
+                scene_context=None,
+                vlm_service=vlm_service,
+                model="test-model",
+                reasoning_effort="low",
+                verbosity="low",
+                vision_detail="low",
+                rendered_assets_dir=root,
+                top_n=1,
+                forbidden_components=["television"],
+            )
+
+        self.assertEqual(choice.candidates, [])
+        vlm_service.create_completion.assert_called_once()
+
+    def test_single_safe_candidate_remains_usable_after_rendered_assessment(
+        self,
+    ) -> None:
+        candidate = self._candidate("stand_only", "tv stand", 0.91)
+        vlm_service = MagicMock()
+        vlm_service.create_completion.return_value = json.dumps(
+            {
+                "candidate_assessments": [
+                    {
+                        "index": 1,
+                        "hssd_id": "stand_only",
+                        "contains_forbidden_components": False,
+                        "forbidden_components": [],
+                    }
+                ],
+                "selected_index": 1,
+                "selected_hssd_id": "stand_only",
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._write_iso(root, candidate.hssd_id)
+            choice = choose_hssd_candidate_from_iso_renders(
+                candidates=[candidate],
+                object_description="TV stand without a display",
+                scene_context=None,
+                vlm_service=vlm_service,
+                model="test-model",
+                reasoning_effort="low",
+                verbosity="low",
+                vision_detail="low",
+                rendered_assets_dir=root,
+                top_n=1,
+                forbidden_components=["television"],
+            )
+
+        self.assertEqual(choice.selected_hssd_id, "stand_only")
+        self.assertEqual(choice.candidates, [candidate])
+
+    def test_single_candidate_without_render_evidence_fails_closed(self) -> None:
+        candidate = self._candidate("unrendered_stand", "tv stand", 0.91)
+        vlm_service = MagicMock()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            choice = choose_hssd_candidate_from_iso_renders(
+                candidates=[candidate],
+                object_description="TV stand without a display",
+                scene_context=None,
+                vlm_service=vlm_service,
+                model="test-model",
+                reasoning_effort="low",
+                verbosity="low",
+                vision_detail="low",
+                rendered_assets_dir=Path(tmpdir),
+                top_n=1,
+                forbidden_components=["television"],
+            )
+
+        self.assertEqual(choice.candidates, [])
+        vlm_service.create_completion.assert_not_called()
+
+    def test_missing_component_assessment_fails_closed(self) -> None:
+        candidate = self._candidate("unassessed_stand", "tv stand", 0.91)
+        vlm_service = MagicMock()
+        vlm_service.create_completion.return_value = json.dumps(
+            {"selected_index": 1, "selected_hssd_id": "unassessed_stand"}
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._write_iso(root, candidate.hssd_id)
+            choice = choose_hssd_candidate_from_iso_renders(
+                candidates=[candidate],
+                object_description="TV stand without a display",
+                scene_context=None,
+                vlm_service=vlm_service,
+                model="test-model",
+                reasoning_effort="low",
+                verbosity="low",
+                vision_detail="low",
+                rendered_assets_dir=root,
+                top_n=1,
+                forbidden_components=["television"],
+            )
+
+        self.assertEqual(choice.candidates, [])
+
+    def test_unassessed_candidate_is_not_used_as_forbidden_component_fallback(
+        self,
+    ) -> None:
+        candidates = [
+            self._candidate("stand_only", "tv stand", 0.91),
+            self._candidate("unassessed", "tv stand", 0.89),
+        ]
+        vlm_service = MagicMock()
+        vlm_service.create_completion.return_value = json.dumps(
+            {
+                "candidate_assessments": [
+                    {
+                        "index": 1,
+                        "hssd_id": "stand_only",
+                        "contains_forbidden_components": False,
+                        "forbidden_components": [],
+                    }
+                ],
+                "selected_index": 2,
+                "selected_hssd_id": "unassessed",
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            for candidate in candidates:
+                self._write_iso(root, candidate.hssd_id)
+            choice = choose_hssd_candidate_from_iso_renders(
+                candidates=candidates,
+                object_description="stand only",
+                scene_context=None,
+                vlm_service=vlm_service,
+                model="test-model",
+                reasoning_effort="low",
+                verbosity="low",
+                vision_detail="low",
+                rendered_assets_dir=root,
+                top_n=2,
+                forbidden_components=["television"],
+            )
+
+        self.assertEqual(choice.selected_hssd_id, "stand_only")
+        self.assertIn("forbidden-component guard", choice.reason)
+
+    def test_router_assesses_single_candidate_with_component_exclusion(self) -> None:
+        cfg = MagicMock()
+        router = AssetRouter(
+            agent_type=AgentType.FURNITURE,
+            vlm_service=MagicMock(),
+            cfg=cfg,
+        )
+        item = AssetItem(
+            description="TV stand without a display",
+            short_name="tv_stand",
+            dimensions=[1.4, 0.45, 0.7],
+            object_type=ObjectType.FURNITURE,
+            strategies=["hssd"],
+            forbidden_semantic_components=["television"],
+        )
+        candidate = self._candidate("stand", "tv stand", 0.91)
+        with (
+            patch.object(
+                router,
+                "_hssd_rendered_choice_options",
+                return_value=(True, 1, Path("/tmp")),
+            ),
+            patch(
+                "scenesmith.agent_utils.asset_router.router."
+                "choose_hssd_candidate_from_iso_renders",
+                return_value=MagicMock(candidates=[]),
+            ) as choice,
+        ):
+            ranked = router._rank_hssd_candidates_with_rendered_iso(
+                item=item,
+                candidates=[candidate],
+                enabled=True,
+                top_n=1,
+            )
+
+        self.assertEqual(ranked, [])
+        self.assertEqual(
+            choice.call_args.kwargs["forbidden_components"], ["television"]
+        )
+
     def test_task_compiler_candidates_preserve_stage_roles_and_short_name(self) -> None:
         task_spec = {
             "required_large_objects": [
@@ -419,6 +719,24 @@ class TestRenderedHssdAssetChoice(unittest.TestCase):
                 ["student_desk", "teacher_desk", "student_chair"],
             ],
         )
+
+    def test_task_compiler_separate_media_roles_forbid_bundled_display(self) -> None:
+        exclusions = forbidden_semantic_components_for_request(
+            {
+                "required_large_objects": ["tv stand"],
+                "required_wall_objects": ["television"],
+            },
+            ["tv_stand", "television"],
+            ObjectType.FURNITURE,
+        )
+        composite_only = forbidden_semantic_components_for_request(
+            {"required_large_objects": ["entertainment center with tv"]},
+            ["entertainment_center_with_tv"],
+            ObjectType.FURNITURE,
+        )
+
+        self.assertEqual(exclusions, [["television"], []])
+        self.assertEqual(composite_only, [[]])
 
     @patch(
         "scenesmith.scenebenchmark_critic.asset_library_annotations."

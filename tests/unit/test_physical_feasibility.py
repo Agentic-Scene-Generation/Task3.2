@@ -445,7 +445,10 @@ class TestApplyNonPenetrationProjection(PhysicalFeasibilityTestCase):
             body_index = Mock()
             plant = Mock()
             plant.get_body.return_value = Mock()
-            mock_depths.return_value = {ball.object_id: 0.002}
+            mock_depths.return_value = {
+                ball.object_id: 0.002,
+                table.object_id: 0.02,
+            }
             mock_create.return_value = (
                 plant,
                 Mock(),
@@ -464,6 +467,10 @@ class TestApplyNonPenetrationProjection(PhysicalFeasibilityTestCase):
                 scene,
                 weld_furniture=True,
                 influence_distance=0.02,
+            )
+
+            self.assertEqual(
+                mock_create.call_args.kwargs["free_objects"], [ball.object_id]
             )
 
             self.assertFalse(success)
@@ -1734,7 +1741,7 @@ class TestApplyFloorPenetrationFallback(PhysicalFeasibilityTestCase):
         class FakePair:
             id_A = "floor_geometry"
             id_B = "plant_geometry"
-            distance = -1.51
+            depth = 1.51
 
         class FakeInspector:
             @staticmethod
@@ -1743,10 +1750,7 @@ class TestApplyFloorPenetrationFallback(PhysicalFeasibilityTestCase):
 
         class FakeQuery:
             @staticmethod
-            def ComputeSignedDistancePairwiseClosestPoints(
-                max_distance: float,
-            ) -> list[FakePair]:
-                self.assertEqual(max_distance, 0.0)
+            def ComputePointPairPenetration() -> list[FakePair]:
                 return [FakePair()]
 
             @staticmethod
@@ -1814,6 +1818,27 @@ class TestApplyFloorPenetrationFallback(PhysicalFeasibilityTestCase):
                     2
                 ],
                 initial_z,
+            )
+
+    def test_native_penetration_query_error_preserves_scene(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            scene = self._create_floor_penetrating_scene(
+                Path(tmp_dir), penetration_depth=0.05
+            )
+            box = scene.get_object(UniqueID("box_0"))
+            initial_pose = box.transform.GetAsMatrix4().copy()
+
+            with patch(
+                "scenesmith.agent_utils.physical_feasibility."
+                "create_drake_plant_and_scene_graph_from_scene",
+                side_effect=RuntimeError("FCL assertion"),
+            ):
+                updated_scene, lifted_count = _apply_floor_penetration_fallback(scene)
+
+            self.assertEqual(lifted_count, 0)
+            np.testing.assert_allclose(
+                updated_scene.get_object(UniqueID("box_0")).transform.GetAsMatrix4(),
+                initial_pose,
             )
 
 

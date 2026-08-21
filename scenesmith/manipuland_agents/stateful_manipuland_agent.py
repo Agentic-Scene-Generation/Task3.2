@@ -24,6 +24,9 @@ from scenesmith.agent_utils.base_stateful_agent import (
     BaseStatefulAgent,
     log_agent_usage,
 )
+from scenesmith.agent_utils.hssd_retrieval.support_surface_loader import (
+    hssd_support_surface_path,
+)
 from scenesmith.agent_utils.manipuland_placement_order import (
     build_manipuland_placement_order_reference,
 )
@@ -55,6 +58,7 @@ from scenesmith.agent_utils.support_surface_extraction import (
 from scenesmith.agent_utils.workflow_tools import WorkflowTools
 from scenesmith.manipuland_agents.base_manipuland_agent import BaseManipulandAgent
 from scenesmith.manipuland_agents.cross_stage_inventory import (
+    contract_manipuland_support_cohorts,
     existing_floor_covering_ids,
     is_floor_target,
     is_single_explicit_required_category_request,
@@ -76,6 +80,10 @@ from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.d
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.manipuland_completeness import (
     evaluate_manipuland_completeness,
 )
+from scenesmith.scenebenchmark_critic.metrics.functional_dependency.constants import (
+    SEATING,
+)
+from scenesmith.scenebenchmark_critic.object_taxonomy import canonical_object_category
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.seat_surface_assignment import (
     assign_work_seats_to_surfaces,
     room_bounds_from_case_pack,
@@ -113,6 +121,10 @@ _REQUIRED_BBOX_SUPPORT_CATEGORIES = frozenset(
         "dresser",
         "tv_stand",
     }
+)
+
+_UPHOLSTERED_SEAT_MANIPULAND_TOKENS = frozenset(
+    {"cushion", "pillow", "bolster", "blanket", "throw"}
 )
 
 
@@ -750,7 +762,7 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
         return hard_state
 
     def _current_target_cardinality_failures(self) -> list[str]:
-        """Return hard exact-count failures uniquely owned by this furniture target."""
+        """Return hard count/support failures owned by this furniture target."""
         furniture_id = str(getattr(self, "current_furniture_id", "") or "")
         if not furniture_id or getattr(self, "scene", None) is None:
             return []
@@ -763,14 +775,50 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
             if isinstance(item, dict) and item.get("id")
         ]
         failures: list[str] = []
+        scene_objects = getattr(self.scene, "objects", {}) or {}
+        object_by_id = (
+            {str(object_id): obj for object_id, obj in scene_objects.items()}
+            if isinstance(scene_objects, dict)
+            else {}
+        )
+        target = object_by_id.get(furniture_id)
+        support_surface_ids = {
+            str(surface.surface_id)
+            for surface in getattr(target, "support_surfaces", []) or []
+            if getattr(surface, "surface_id", None)
+        }
+        support_cohorts = contract_manipuland_support_cohorts(self.scene)
+        for cohort in support_cohorts:
+            if cohort.target_id != furniture_id:
+                continue
+            subject_ids = selected_ids(cohort.subject_selector, objects)
+            observed_ids = []
+            for subject_id in subject_ids:
+                subject = object_by_id.get(str(subject_id))
+                placement = getattr(subject, "placement_info", None)
+                if (
+                    placement is not None
+                    and str(placement.parent_surface_id) in support_surface_ids
+                ):
+                    observed_ids.append(str(subject_id))
+            if len(observed_ids) < cohort.required_count:
+                failures.append(
+                    "support_capacity_or_wrong_support: prompt-required "
+                    f"{cohort.category} cohort {cohort.constraint_id} on "
+                    f"{furniture_id} requires {cohort.required_count} distinct "
+                    f"supported instance(s), found {len(observed_ids)}"
+                )
+
         for constraint in intent_contract_constraints_for_scene(self.scene):
             if not isinstance(constraint, dict):
                 continue
             subjects = constraint.get("subjects") or {}
             targets = constraint.get("targets") or {}
+            relation = str(constraint.get("relation") or "")
             if (
                 str(constraint.get("stage") or "") != "manipuland"
                 or not is_hard_constraint(constraint)
+                or (relation in {"on_top_of", "one_per_support"} and support_cohorts)
                 or str(subjects.get("quantifier") or "") != "exactly"
                 or not targets
             ):
@@ -1861,6 +1909,57 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
             )
         ]
 
+    @staticmethod
+    def _required_target_support_surface_policy(
+        *,
+        scene: RoomScene,
+        furniture: Any,
+        furniture_id: UniqueID,
+        selection: FurnitureSelection,
+        config: SupportSurfaceExtractionConfig,
+    ) -> str:
+        """Select the relaxed HSSD seat policy only for a hard soft-furnishing cohort."""
+        if not selection.is_prompt_required:
+            return "general"
+        if config.recompute_hssd_surfaces:
+            return "general"
+        metadata = getattr(furniture, "metadata", {}) or {}
+        mesh_id = str(metadata.get("hssd_mesh_id") or "")
+        if metadata.get("asset_source") != "hssd" or not mesh_id:
+            return "general"
+        if not hssd_support_surface_path(
+            mesh_id=mesh_id, data_dir=config.hssd_data_dir
+        ).exists():
+            return "general"
+
+        category_candidates = (
+            metadata.get("semantic_name"),
+            metadata.get("category"),
+            getattr(furniture, "name", ""),
+            getattr(furniture, "description", ""),
+            str(furniture_id),
+        )
+        target_category = next(
+            (
+                category
+                for value in category_candidates
+                if (category := canonical_object_category(value)) in SEATING
+            ),
+            "",
+        )
+        if not target_category:
+            return "general"
+
+        for cohort in contract_manipuland_support_cohorts(scene):
+            subject_tokens = set(canonical_object_category(cohort.category).split("_"))
+            if (
+                cohort.target_id == str(furniture_id)
+                and cohort.relation == "on_top_of"
+                and subject_tokens & _UPHOLSTERED_SEAT_MANIPULAND_TOKENS
+            ):
+                return "upholstered_seat"
+        return "general"
+
     async def add_manipulands(self, scene: RoomScene) -> None:
         """Add manipulands to furniture surfaces in the scene.
 
@@ -1904,6 +2003,10 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
 
         # Phase 1: Initial analysis - identify which furniture to populate.
         furniture_data = await self._analyze_furniture_for_placement(scene)
+        furniture_data = self._recover_contract_required_manipuland_targets(
+            scene=scene,
+            furniture_data=furniture_data,
+        )
         furniture_data = self._recover_prompt_required_manipuland_targets(
             scene=scene,
             furniture_data=furniture_data,
@@ -2019,9 +2122,25 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
                 hsm_config = SupportSurfaceExtractionConfig.from_config(
                     cfg=self.cfg.support_surface_extraction
                 )
+                surface_policy = self._required_target_support_surface_policy(
+                    scene=self.scene,
+                    furniture=furniture,
+                    furniture_id=furniture_id,
+                    selection=furniture_selection,
+                    config=hsm_config,
+                )
+                if surface_policy == "upholstered_seat":
+                    console_logger.info(
+                        "Using upholstered-seat HSSD support policy for hard "
+                        "prompt-owned target %s",
+                        furniture_id,
+                    )
                 try:
                     surfaces = extract_and_propagate_support_surfaces(
-                        scene=self.scene, furniture_object=furniture, config=hsm_config
+                        scene=self.scene,
+                        furniture_object=furniture,
+                        config=hsm_config,
+                        surface_policy=surface_policy,
                     )
                 except (FileNotFoundError, ValueError) as error:
                     if not furniture_selection.is_prompt_required:
@@ -2428,6 +2547,85 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
                     "Recovered prompt-required manipuland target omitted by VLM: %s (%s)",
                     obj.object_id,
                     obligation.category,
+                )
+        return recovered
+
+    def _recover_contract_required_manipuland_targets(
+        self,
+        *,
+        scene: RoomScene,
+        furniture_data: list[FurnitureSelection],
+    ) -> list[FurnitureSelection]:
+        """Recover support targets directly from the compiled hard contract."""
+        recovered = list(furniture_data)
+        by_target = {str(selection.furniture_id): selection for selection in recovered}
+        for cohort in contract_manipuland_support_cohorts(scene):
+            selection = by_target.get(cohort.target_id)
+            target_object = next(
+                (
+                    obj
+                    for object_id, obj in scene.objects.items()
+                    if str(object_id) == cohort.target_id
+                ),
+                None,
+            )
+            if target_object is None:
+                continue
+            count_word = (
+                "exactly" if cohort.quantifier in {"exactly", "exact"} else "at least"
+            )
+            category_label = cohort.category.replace("_", " ")
+            inventory_line = (
+                f"REQUIRED CONTRACT COHORT {cohort.constraint_id}: place {count_word} "
+                f"{cohort.required_count} distinct {category_label} instance(s) on "
+                f"{cohort.target_id}. This target owns its share of "
+                f"{cohort.cohort_total} across {', '.join(cohort.target_ids)}."
+            )
+            constraint_line = (
+                f"Contract relation {cohort.relation}: every counted {category_label} "
+                "must be placed on a verified support surface of this exact target. "
+                "For repeated identical items, generate or retrieve one reusable asset "
+                "template and call place_manipuland_on_surface separately for each "
+                "instance. If the verified surfaces cannot fit the required distinct "
+                "instances without overlap, stop with a support_capacity failure."
+            )
+            if selection is None:
+                selection = FurnitureSelection(
+                    furniture_id=next(
+                        object_id
+                        for object_id in scene.objects
+                        if str(object_id) == cohort.target_id
+                    ),
+                    suggested_items=inventory_line,
+                    prompt_constraints=constraint_line,
+                    style_notes="Preserve hard count and support provenance.",
+                    context_furniture_ids=[
+                        object_id
+                        for object_id in scene.objects
+                        if str(object_id) in set(cohort.target_ids)
+                        and str(object_id) != cohort.target_id
+                    ],
+                    is_prompt_required=True,
+                )
+                recovered.append(selection)
+                by_target[cohort.target_id] = selection
+                console_logger.warning(
+                    "Recovered contract-required manipuland target omitted by VLM: %s",
+                    cohort.target_id,
+                )
+                continue
+            selection.is_prompt_required = True
+            if inventory_line not in (selection.suggested_items or ""):
+                selection.suggested_items = "\n".join(
+                    value
+                    for value in (selection.suggested_items, inventory_line)
+                    if value
+                )
+            if constraint_line not in (selection.prompt_constraints or ""):
+                selection.prompt_constraints = "\n".join(
+                    value
+                    for value in (selection.prompt_constraints, constraint_line)
+                    if value
                 )
         return recovered
 

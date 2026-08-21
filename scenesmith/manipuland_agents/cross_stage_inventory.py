@@ -2,6 +2,7 @@
 
 import re
 
+from dataclasses import dataclass
 from typing import Any
 
 from scenesmith.agent_utils.room import ObjectType
@@ -13,6 +14,7 @@ from scenesmith.scenebenchmark_critic.object_taxonomy import (
     canonical_object_category,
     categories_are_equivalent,
     execution_owner,
+    generation_owner,
 )
 
 
@@ -27,6 +29,124 @@ _SINGLE_FLOOR_COVERING_REQUEST_PATTERN = re.compile(
     r"(?:rug|carpet|mat|doormat)\s*[.!]?\s*$",
     re.IGNORECASE,
 )
+
+
+@dataclass(frozen=True)
+class ManipulandSupportCohort:
+    """One target-local share of a hard manipuland support constraint."""
+
+    constraint_id: str
+    relation: str
+    category: str
+    quantifier: str
+    target_id: str
+    target_ids: tuple[str, ...]
+    required_count: int
+    cohort_total: int
+    subject_selector: dict[str, Any]
+
+
+def contract_manipuland_support_cohorts(scene: Any) -> list[ManipulandSupportCohort]:
+    """Project hard support relations into distinct per-target inventory shares.
+
+    Counts are split deterministically across every bound support target. Different
+    support constraints remain separate cohorts, so one physical instance cannot
+    satisfy both a bed and a desk requirement.
+    """
+    constraints = intent_contract_constraints_for_scene(scene)
+    if not constraints:
+        return []
+    objects = getattr(scene, "objects", {}) or {}
+    if not isinstance(objects, dict):
+        return []
+    object_rows = _contract_object_rows(objects)
+    declared_small = _declared_manipuland_categories(scene)
+    cohorts: list[ManipulandSupportCohort] = []
+    for index, constraint in enumerate(constraints):
+        relation = str(constraint.get("relation") or "")
+        if (
+            relation not in {"on_top_of", "one_per_support"}
+            or str(constraint.get("stage") or "") != "manipuland"
+            or str(constraint.get("strength") or "hard").lower() != "hard"
+        ):
+            continue
+        subjects = constraint.get("subjects") or {}
+        targets = constraint.get("targets") or {}
+        if not isinstance(subjects, dict) or not isinstance(targets, dict):
+            continue
+        category = canonical_object_category(subjects.get("category"))
+        if not category:
+            continue
+        declared_owner = (
+            "manipuland"
+            if any(
+                categories_are_equivalent(category, declared)
+                for declared in declared_small
+            )
+            else ""
+        )
+        if (
+            generation_owner(
+                category,
+                relation=relation,
+                endpoint="subject",
+                declared_owner=declared_owner,
+            )
+            != "manipuland"
+        ):
+            continue
+        target_ids = tuple(sorted(set(selected_ids(targets, object_rows))))
+        if not target_ids:
+            continue
+        try:
+            cohort_total = max(1, int(subjects.get("count") or 1))
+        except (TypeError, ValueError):
+            cohort_total = 1
+        if relation == "one_per_support":
+            cohort_total = max(cohort_total, len(target_ids))
+        quotient, remainder = divmod(cohort_total, len(target_ids))
+        constraint_id = str(
+            constraint.get("constraint_id") or f"support_cohort_{index}"
+        )
+        quantifier = str(subjects.get("quantifier") or "minimum")
+        for target_index, target_id in enumerate(target_ids):
+            required_count = quotient + (1 if target_index < remainder else 0)
+            if relation == "one_per_support":
+                required_count = max(1, required_count)
+            if required_count <= 0:
+                continue
+            cohorts.append(
+                ManipulandSupportCohort(
+                    constraint_id=constraint_id,
+                    relation=relation,
+                    category=category,
+                    quantifier=quantifier,
+                    target_id=target_id,
+                    target_ids=target_ids,
+                    required_count=required_count,
+                    cohort_total=cohort_total,
+                    subject_selector=dict(subjects),
+                )
+            )
+    return sorted(
+        cohorts,
+        key=lambda cohort: (
+            cohort.target_id,
+            cohort.category,
+            cohort.constraint_id,
+        ),
+    )
+
+
+def _declared_manipuland_categories(scene: Any) -> list[str]:
+    task_spec = getattr(scene, "scene_expert_task_spec", None)
+    if isinstance(task_spec, dict):
+        values = task_spec.get("required_small_objects", []) or []
+    else:
+        values = getattr(task_spec, "required_small_objects", []) or []
+    return [
+        category for value in values if (category := canonical_object_category(value))
+    ]
 
 
 def is_floor_covering_text(value: Any) -> bool:

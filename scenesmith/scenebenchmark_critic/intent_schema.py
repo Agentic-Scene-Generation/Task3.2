@@ -53,6 +53,7 @@ _GENERIC_SELECTOR_FAMILIES = {
     "desk": frozenset({"desk", "student_desk", "teacher_desk", "reception_desk"}),
     "plant": frozenset({"plant", "large_plant", "potted_plant"}),
     "sofa": frozenset({"sofa", "two_seater_sofa", "loveseat", "sectional_sofa"}),
+    "speaker": frozenset({"speaker", "floor_speaker"}),
 }
 
 
@@ -77,7 +78,7 @@ _selector_categories_overlap = selector_categories_overlap
 
 
 INTENT_CONTRACT_SCHEMA_VERSION = "scenesmith.intent_contract.v5"
-INTENT_COMPILER_SPEC_VERSION = "scenesmith.intent_compiler.v9"
+INTENT_COMPILER_SPEC_VERSION = "scenesmith.intent_compiler.v14"
 
 _WALL_QUALIFIED_DIRECTION_PATTERN = re.compile(
     r"(?P<subject>[^,.;!?]{1,100}?)\s+against\s+"
@@ -197,6 +198,7 @@ class IntentRelation(BaseModel):
     confidence: float = Field(default=1.0, ge=0.0, le=1.0)
     evidence_span: str = ""
     inference_reason: str = ""
+    reconciliation_reason: Literal["disjoint_support_cohort_minimum"] | None = None
 
     @field_validator("relation", mode="before")
     @classmethod

@@ -14,6 +14,9 @@ from scenesmith.scenebenchmark_critic.metrics.functional_dependency.evaluator im
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.bedside_group import (
     evaluate_bedside_group_alignment,
 )
+from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.activity_zone_separation import (
+    evaluate_activity_zone_separation,
+)
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.classroom_workstation import (
     evaluate_classroom_workstation_distribution,
 )
@@ -31,6 +34,9 @@ from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.m
 )
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.room_center import (
     evaluate_room_center_alignment,
+)
+from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.room_containment import (
+    evaluate_room_containment,
 )
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.study_furniture_layout import (
     evaluate_study_furniture_layout,
@@ -65,9 +71,9 @@ from scenesmith.scenebenchmark_critic.metrics.visual_clearance.evaluator import 
 
 
 def _interaction_evaluator(
-    _case_pack: dict, check: dict, _config: object
+    _case_pack: dict, check: dict, config: object
 ) -> dict | None:
-    return evaluate_clearance(check)
+    return evaluate_clearance(check, config=config)
 
 
 def _spatial_evaluator(case_pack: dict, check: dict, config: object) -> dict | None:
@@ -91,8 +97,10 @@ METRIC_REGISTRY: dict[str, MetricPlugin] = {
             evaluate_bedside_group_alignment,
             evaluate_classroom_workstation_distribution,
             evaluate_room_center_alignment,
+            evaluate_room_containment,
             evaluate_study_furniture_layout,
             evaluate_edge_distribution,
+            evaluate_activity_zone_separation,
             evaluate_manipuland_completeness,
             evaluate_dining_place_setting_alignment,
             evaluate_workstation_focal_alignment,

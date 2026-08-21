@@ -89,7 +89,7 @@ class SceneTaskSpec(BaseModel):
     )
     compiler_status: Literal["ok", "degraded"] = "ok"
     compiler_failure_reason: str = ""
-    compiler_spec_version: str = "scenesmith.task_compiler.v3"
+    compiler_spec_version: str = "scenesmith.task_compiler.v6"
 
 
 # ---------------------------------------------------------------------------
@@ -180,7 +180,12 @@ class FloorPlanReservation(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     reservation_id: str
-    kind: Literal["wall_anchor", "opposed_anchor_pair", "functional_zone"]
+    kind: Literal[
+        "wall_anchor",
+        "opposed_anchor_pair",
+        "functional_zone",
+        "opening_adjacency",
+    ]
     source_constraint_ids: list[str] = Field(default_factory=list)
     room_type: str = ""
     subject_categories: list[str] = Field(default_factory=list)
@@ -197,7 +202,7 @@ class FloorPlanReservationManifest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: str = "scenesmith.floor_plan_reservations.v1"
+    schema_version: str = "scenesmith.floor_plan_reservations.v2"
     enabled: bool = False
     reservations: list[FloorPlanReservation] = Field(default_factory=list)
     explicit_window_count: int = Field(default=0, ge=0)
@@ -216,6 +221,7 @@ class StageRelationContext(BaseModel):
     hard_constraints: list[dict[str, Any]] = Field(default_factory=list)
     floor_plan_reservations: list[dict[str, Any]] = Field(default_factory=list)
     floor_plan_manifest: FloorPlanReservationManifest | None = None
+    resolved_opening_reservations: dict[str, Any] = Field(default_factory=dict)
     contract_constraint_count: int = 0
     projected_constraint_count: int = 0
     projection_coverage: float = Field(default=1.0, ge=0.0, le=1.0)
@@ -310,6 +316,14 @@ class VerifyIssue(BaseModel):
     issue_type: str  # e.g., "unreachable", "missing_object", "overcrowded"
     object_name: str = ""
     description: str = ""
+    constraint_id: str = ""
+    relation: str = ""
+    subject_ids: list[str] = Field(default_factory=list)
+    target_ids: list[str] = Field(default_factory=list)
+    metric: str = ""
+    scoring_tier: str = ""
+    repair_strategy: str = ""
+    diagnostics: dict[str, Any] = Field(default_factory=dict)
 
 
 class StageVerifyReport(BaseModel):

@@ -1247,6 +1247,41 @@ def _restore_furniture_render_checkpoint(
     )
 
 
+def _restore_rejected_furniture_checkpoint(
+    *,
+    scene: RoomScene,
+    checkpoint_state_path: Path,
+    room_prompt: str,
+    intent_contract: dict[str, Any] | None,
+    attempt: int,
+) -> None:
+    """Restore a rejected furniture candidate for a bounded SceneExpert retry."""
+    context = (
+        "SceneExpert rejected furniture checkpoint recovery failed: "
+        f"stage=furniture attempt={attempt} path={checkpoint_state_path}"
+    )
+    if not checkpoint_state_path.is_file():
+        raise FileNotFoundError(f"{context}: checkpoint is missing")
+    try:
+        state = json.loads(checkpoint_state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"{context}: checkpoint is unreadable") from error
+    if not isinstance(state, dict):
+        raise RuntimeError(f"{context}: checkpoint is not a scene-state object")
+
+    try:
+        _restore_room_stage_checkpoint(
+            scene=scene,
+            state=state,
+            room_prompt=room_prompt,
+            intent_contract=intent_contract,
+        )
+    except Exception as error:
+        raise RuntimeError(f"{context}: checkpoint cannot be restored") from error
+    if not _furniture_object_ids(scene):
+        raise RuntimeError(f"{context}: checkpoint contains no furniture objects")
+
+
 def _generate_room(
     room_id: str,
     room_prompt: str,
@@ -1259,6 +1294,7 @@ def _generate_room(
     house_layout: HouseLayout | None = None,
     render_gpu_id: int | None = None,
     scene_expert_hooks: "SceneExpertHookRunner | None" = None,
+    scene_expert_retry_attempt: int = 0,
 ) -> RoomScene:
     """Generate a single room with furniture, wall/ceiling objects, and manipulands.
 
@@ -1294,11 +1330,15 @@ def _generate_room(
         house_layout: Optional HouseLayout for door/window export in SceneEval.
         render_gpu_id: GPU device ID for Blender rendering. When set, uses
             bubblewrap to isolate the BlenderServer to this GPU.
+        scene_expert_retry_attempt: Explicit retry count after a SceneExpert
+            verifier rejects the current stage checkpoint.
 
     Returns:
         RoomScene with furniture, wall/ceiling objects, and (optionally) manipulands.
     """
     room_start_time = time.time()
+    if scene_expert_retry_attempt < 0:
+        raise ValueError("scene_expert_retry_attempt must be non-negative")
 
     # Create scene and add walls and floor from room geometry.
     scene = RoomScene(
@@ -1358,17 +1398,47 @@ def _generate_room(
             furniture_render_resume_mode,
         )
 
+    rejected_furniture_retry = (
+        scene_expert_retry_attempt > 0 and start_stage == "furniture"
+    )
+    if rejected_furniture_retry:
+        rejected_checkpoint_path = (
+            room_dir / "scene_states" / "scene_after_furniture" / "scene_state.json"
+        )
+        _restore_rejected_furniture_checkpoint(
+            scene=scene,
+            checkpoint_state_path=rejected_checkpoint_path,
+            room_prompt=room_prompt,
+            intent_contract=(
+                intent_contract if isinstance(intent_contract, dict) else None
+            ),
+            attempt=scene_expert_retry_attempt,
+        )
+        console_logger.info(
+            "Restored rejected furniture checkpoint for SceneExpert retry %d: %s",
+            scene_expert_retry_attempt,
+            rejected_checkpoint_path,
+        )
+
     # Load projection config (needed for furniture and final post-processing).
     projection_cfg = cfg_dict["experiment"]["projection"]
 
     # Furniture stage.
     if start_idx <= 0:  # Run furniture if starting from furniture or earlier.
         with custom_span("furniture_placement"):
+            review_existing = (
+                bool(furniture_render_resume_mode) or rejected_furniture_retry
+            )
             action = (
-                "Resuming furniture critique/repair from saved render "
-                f"({furniture_render_resume_mode})"
-                if furniture_render_resume_mode
-                else "Adding furniture to scene"
+                "Reviewing rejected furniture checkpoint "
+                f"(SceneExpert retry {scene_expert_retry_attempt})"
+                if rejected_furniture_retry
+                else (
+                    "Resuming furniture critique/repair from saved render "
+                    f"({furniture_render_resume_mode})"
+                    if furniture_render_resume_mode
+                    else "Adding furniture to scene"
+                )
             )
             console_logger.info(action)
             start_time = time.time()
@@ -1380,15 +1450,17 @@ def _generate_room(
                     IndoorSceneGenerationExperiment.compatible_furniture_agents
                 ),
                 logger=logger,
+                house_layout=house_layout,
                 render_gpu_id=render_gpu_id,
             )
             try:
-                if furniture_render_resume_mode:
-                    asyncio.run(
-                        furniture_agent.resume_from_furniture_render(scene=scene)
+                asyncio.run(
+                    furniture_agent.add_furniture(
+                        scene=scene,
+                        review_existing=review_existing,
+                        scene_expert_retry_attempt=scene_expert_retry_attempt,
                     )
-                else:
-                    asyncio.run(furniture_agent.add_furniture(scene=scene))
+                )
                 end_time = time.time()
                 console_logger.info(
                     f"Furniture added to room {room_id} in "
@@ -1734,7 +1806,10 @@ def _generate_room(
 
     # Final post-processing can be reached from a checkpoint resume. Reapply the
     # seating orientation guard so the final scene cannot inherit a backward seat.
-    align_seating_to_nearest_surface(scene)
+    align_seating_to_nearest_surface(
+        scene,
+        allowed_targets_by_seat=seating_orientation_targets(scene, config=cfg_dict),
+    )
 
     # Final post-processing (projection + simulation).
     if projection_cfg["enabled"] and projection_cfg["final"]["enabled"]:
@@ -1890,6 +1965,7 @@ def _run_sequential_room_generation(
                             house_layout=house_layout,
                             render_gpu_id=render_gpu_id,
                             scene_expert_hooks=scene_expert_hooks,
+                            scene_expert_retry_attempt=retry_count,
                         )
                         break
                     except SceneExpertStageCommitError as error:

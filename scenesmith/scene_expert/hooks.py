@@ -59,9 +59,13 @@ from scenesmith.scenebenchmark_critic.intent_compiler import IntentCompiler
 from scenesmith.scenebenchmark_critic.object_taxonomy import (
     canonical_object_category,
     categories_are_equivalent,
-    execution_owner,
+    constraint_evaluation_stage,
+    generation_owner,
+    is_structural_anchor,
 )
-from scenesmith.scenebenchmark_critic.relation_registry import STAGE_ORDER
+from scenesmith.scenebenchmark_critic.relation_registry import (
+    STAGE_ORDER as CONTRACT_STAGE_ORDER,
+)
 
 console_logger = logging.getLogger(__name__)
 
@@ -226,11 +230,23 @@ def _format_memory_directives(memory_pack: MemoryPack) -> str:
 
 def _format_stage_relation_context(context: StageRelationContext) -> str:
     """Render the exact hard contract for the active stage."""
-    return (
+    text = (
         f"=== SceneExpert Hard Intent Contract: {context.stage} (authoritative) ===\n"
         + json.dumps(context.hard_constraints, ensure_ascii=False, sort_keys=True)
         + "\n=== End SceneExpert Hard Intent Contract ==="
     )
+    if context.resolved_opening_reservations:
+        text += (
+            "\n\n=== Resolved Floor Plan Opening Reservations "
+            "(authoritative geometry) ===\n"
+            + json.dumps(
+                context.resolved_opening_reservations,
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            + "\n=== End Resolved Floor Plan Opening Reservations ==="
+        )
+    return text
 
 
 def _attach_stage_relation_context(
@@ -257,7 +273,13 @@ def _attach_stage_relation_context(
             metadata = {}
             setattr(scene, "metadata", metadata)
         metadata["scenebenchmark_intent_contract"] = intent_contract
-    setattr(scene, "scene_expert_task_spec", task_spec.model_dump())
+    task_spec_payload = task_spec.model_dump()
+    setattr(scene, "scene_expert_task_spec", task_spec_payload)
+    metadata = getattr(scene, "metadata", None)
+    if not isinstance(metadata, dict):
+        metadata = {}
+        setattr(scene, "metadata", metadata)
+    metadata["scene_expert_task_spec"] = task_spec_payload
 
 
 def _build_hybrid_retriever(
@@ -443,6 +465,9 @@ _NON_OBJECT_INVENTORY_CATEGORIES = frozenset(
         "adjacent_wall",
         "entrance",
         "entry",
+        "door",
+        "opening",
+        "window",
     }
 )
 _GENERIC_INVENTORY_CATEGORIES = frozenset({"chair", "desk", "table"})
@@ -464,23 +489,36 @@ def _categories_match_inventory(first: str, second: str) -> bool:
 
 def _contract_inventory_ownership(
     contract: dict[str, Any], existing_owners: dict[str, str]
-) -> dict[str, tuple[str, int]]:
+) -> tuple[dict[str, tuple[str, int]], list[str]]:
     """Return contract-owned inventory categories and their generation stages."""
-    ownership: dict[str, tuple[str, int]] = {}
+    counts: dict[str, int] = {}
+    supported_counts: dict[str, dict[tuple[str, str, str, str], int]] = {}
+    owner_evidence: dict[str, dict[int, set[str]]] = {}
 
-    def record(selector: Any, stage: str) -> None:
+    owner_bearing_relations = {
+        "on_top_of",
+        "on_floor",
+        "object_on_floor",
+        "mounted_on_wall",
+        "hung_on_wall",
+        "mounted_on_ceiling",
+        "hung_from_ceiling",
+    }
+
+    def record(selector: Any, stage: str, *, priority: int) -> None:
         if not isinstance(selector, dict):
             return
         category = _inventory_category(selector.get("category"))
-        if category in _NON_OBJECT_INVENTORY_CATEGORIES:
+        if category in _NON_OBJECT_INVENTORY_CATEGORIES or is_structural_anchor(
+            category
+        ):
             return
         try:
             count = max(1, int(selector.get("count") or 1))
         except (TypeError, ValueError):
             count = 1
-        previous = ownership.get(category)
-        if previous is None or count > previous[1]:
-            ownership[category] = (stage, count)
+        counts[category] = max(counts.get(category, 0), count)
+        owner_evidence.setdefault(category, {}).setdefault(priority, set()).add(stage)
 
     constraints = contract.get("constraints") if isinstance(contract, dict) else []
     for constraint in constraints or []:
@@ -489,18 +527,43 @@ def _contract_inventory_ownership(
         if str(constraint.get("strength") or "hard").lower() != "hard":
             continue
         relation = str(constraint.get("relation") or "")
+        explicit_relation = relation != "required_count"
         subject = constraint.get("subjects")
         subject_category = _inventory_category(
             subject.get("category") if isinstance(subject, dict) else ""
         )
         if subject_category not in _NON_OBJECT_INVENTORY_CATEGORIES:
-            subject_stage = execution_owner(
+            subject_stage = generation_owner(
                 subject_category,
                 relation=relation,
                 endpoint="subject",
-                existing_owner=existing_owners.get(subject_category, ""),
+                declared_owner=existing_owners.get(subject_category, ""),
             )
-            record(subject, subject_stage)
+            subject_priority = (
+                3
+                if explicit_relation and relation in owner_bearing_relations
+                else 2 if explicit_relation else 0
+            )
+            record(subject, subject_stage, priority=subject_priority)
+
+            if relation == "on_top_of":
+                target = constraint.get("targets") or {}
+                target_category = _inventory_category(target.get("category"))
+                if target_category not in _NON_OBJECT_INVENTORY_CATEGORIES:
+                    support_key = (
+                        target_category,
+                        str(target.get("role") or ""),
+                        _inventory_category(target.get("secondary_category")),
+                        str(target.get("secondary_role") or ""),
+                    )
+                    try:
+                        supported_count = max(1, int(subject.get("count") or 1))
+                    except (TypeError, ValueError):
+                        supported_count = 1
+                    per_support = supported_counts.setdefault(subject_category, {})
+                    per_support[support_key] = max(
+                        per_support.get(support_key, 0), supported_count
+                    )
 
         # A target can be the only explicit mention of an object. It keeps its
         # intrinsic owner instead of inheriting a relation's later stage.
@@ -510,15 +573,40 @@ def _contract_inventory_ownership(
         )
         record(
             target,
-            execution_owner(
+            generation_owner(
                 target_category,
                 relation=relation,
                 endpoint="target",
-                existing_owner=existing_owners.get(target_category, ""),
+                declared_owner=existing_owners.get(target_category, ""),
             ),
+            priority=1 if explicit_relation else 0,
         )
 
-    return ownership
+    # Distinct support cohorts cannot consume the same physical instance. A
+    # prompt requiring objects on both a bed and desks therefore needs the sum
+    # of those minima, while duplicate descriptions of the same cohort retain
+    # only their maximum count.
+    for category, per_support in supported_counts.items():
+        if len(per_support) > 1:
+            counts[category] = max(counts.get(category, 0), sum(per_support.values()))
+
+    ownership: dict[str, tuple[str, int]] = {}
+    conflicts: list[str] = []
+    for category, count in counts.items():
+        evidence = owner_evidence.get(category) or {}
+        if not evidence:
+            continue
+        candidate_owners = evidence[max(evidence)]
+        if len(candidate_owners) > 1:
+            conflicts.append(
+                f"category {category!r} has conflicting strongest ownership "
+                f"evidence: {sorted(candidate_owners)}"
+            )
+        ownership[category] = (
+            max(candidate_owners, key=CONTRACT_STAGE_ORDER.index),
+            count,
+        )
+    return ownership, conflicts
 
 
 def _reconcile_task_spec_stage_ownership(
@@ -535,9 +623,41 @@ def _reconcile_task_spec_stage_ownership(
         for stage, field in _TASK_SPEC_STAGE_FIELDS.items()
         for label in getattr(task_spec, field)
     }
-    ownership = _contract_inventory_ownership(contract, existing_owners)
+    ownership, _conflicts = _contract_inventory_ownership(contract, existing_owners)
     if not ownership:
         return task_spec
+
+    # A larger sum of mutually exclusive support cohorts supersedes a smaller
+    # global exact count. Preserve it as a minimum so valid extra instances do
+    # not make the reconciled contract self-contradictory.
+    for constraint in contract.get("constraints") or []:
+        if not isinstance(constraint, dict):
+            continue
+        if str(constraint.get("relation") or "") != "required_count":
+            continue
+        subjects = constraint.get("subjects") or {}
+        category = _inventory_category(subjects.get("category"))
+        owned_category = next(
+            (
+                owned
+                for owned in ownership
+                if _categories_match_inventory(category, owned)
+            ),
+            None,
+        )
+        if owned_category is None:
+            continue
+        desired_count = ownership[owned_category][1]
+        try:
+            current_count = max(1, int(subjects.get("count") or 1))
+        except (TypeError, ValueError):
+            current_count = 1
+        if desired_count <= current_count:
+            continue
+        subjects["count"] = desired_count
+        subjects["quantifier"] = "minimum"
+        constraint["subjects"] = subjects
+        constraint["reconciliation_reason"] = "disjoint_support_cohort_minimum"
 
     # StageRelationProjector consumes the contract's ``stage`` field directly.
     # Keep it aligned with the inventory reconciliation so an object cannot be
@@ -548,31 +668,39 @@ def _reconcile_task_spec_stage_ownership(
         relation = str(constraint.get("relation") or "")
         subjects = constraint.get("subjects") or {}
         targets = constraint.get("targets") or {}
+
+        def reconciled_endpoint_stage(selector: dict[str, Any], endpoint: str) -> str:
+            category = _inventory_category(selector.get("category"))
+            owned_category = next(
+                (
+                    owned
+                    for owned in ownership
+                    if _categories_match_inventory(category, owned)
+                ),
+                None,
+            )
+            if owned_category is not None:
+                return ownership[owned_category][0]
+            return generation_owner(
+                category,
+                relation=relation,
+                endpoint=endpoint,
+                declared_owner=existing_owners.get(category, ""),
+            )
+
         endpoint_stages = [
-            execution_owner(
-                _inventory_category(subjects.get("category")),
-                relation=relation,
-                endpoint="subject",
-                existing_owner=existing_owners.get(
-                    _inventory_category(subjects.get("category")), ""
-                ),
-            ),
-            execution_owner(
-                _inventory_category(targets.get("category")),
-                relation=relation,
-                endpoint="target",
-                existing_owner=existing_owners.get(
-                    _inventory_category(targets.get("category")), ""
-                ),
-            ),
+            reconciled_endpoint_stage(subjects, "subject"),
+            reconciled_endpoint_stage(targets, "target"),
         ]
-        constraint["stage"] = max(endpoint_stages, key=STAGE_ORDER.index)
+        constraint["stage"] = constraint_evaluation_stage(*endpoint_stages)
 
     reconciled = {stage: [] for stage in _TASK_SPEC_STAGE_FIELDS}
     matched_counts = {category: 0 for category in ownership}
     for source_stage, field in _TASK_SPEC_STAGE_FIELDS.items():
         for label in getattr(task_spec, field):
             category = _inventory_category(label)
+            if is_structural_anchor(category):
+                continue
             matched_category = next(
                 (
                     owned
@@ -598,6 +726,107 @@ def _reconcile_task_spec_stage_ownership(
         field: reconciled[stage] for stage, field in _TASK_SPEC_STAGE_FIELDS.items()
     }
     return task_spec.model_copy(update=updates)
+
+
+def _audit_stage_ownership(
+    before: SceneTaskSpec,
+    after: SceneTaskSpec,
+    contract: dict[str, Any],
+) -> dict[str, Any]:
+    """Validate inventory preservation and relation-stage ordering."""
+    owners: dict[str, set[str]] = {}
+    before_counts: dict[str, int] = {}
+    after_counts: dict[str, int] = {}
+    for stage, field in _TASK_SPEC_STAGE_FIELDS.items():
+        for label in getattr(before, field):
+            category = _inventory_category(label)
+            if category and not is_structural_anchor(category):
+                before_counts[category] = before_counts.get(category, 0) + 1
+        for label in getattr(after, field):
+            category = _inventory_category(label)
+            if category and not is_structural_anchor(category):
+                owners.setdefault(category, set()).add(stage)
+                after_counts[category] = after_counts.get(category, 0) + 1
+
+    errors: list[str] = []
+    before_owners = {
+        _inventory_category(label): stage
+        for stage, field in _TASK_SPEC_STAGE_FIELDS.items()
+        for label in getattr(before, field)
+    }
+    _ownership, ownership_conflicts = _contract_inventory_ownership(
+        contract, before_owners
+    )
+    errors.extend(ownership_conflicts)
+    for category, stages in sorted(owners.items()):
+        if len(stages) != 1:
+            errors.append(
+                f"category {category!r} has multiple generation owners: {sorted(stages)}"
+            )
+    for category, count in sorted(before_counts.items()):
+        if after_counts.get(category, 0) < count:
+            errors.append(
+                f"category {category!r} lost inventory instances: "
+                f"before={count} after={after_counts.get(category, 0)}"
+            )
+
+    def endpoint_owner(selector: Any, relation: str, endpoint: str) -> str | None:
+        if not isinstance(selector, dict):
+            return None
+        category = _inventory_category(selector.get("category"))
+        if not category or category in _NON_OBJECT_INVENTORY_CATEGORIES:
+            return None
+        if is_structural_anchor(category):
+            return "floor_plan"
+        owned_category = next(
+            (known for known in owners if _categories_match_inventory(category, known)),
+            None,
+        )
+        declared = (
+            next(iter(owners[owned_category])) if owned_category is not None else ""
+        )
+        return generation_owner(
+            category,
+            relation=relation,
+            endpoint=endpoint,
+            declared_owner=declared,
+        )
+
+    for constraint in contract.get("constraints") or []:
+        if not isinstance(constraint, dict):
+            continue
+        relation = str(constraint.get("relation") or "")
+        endpoint_owners = [
+            owner
+            for owner in (
+                endpoint_owner(constraint.get("subjects"), relation, "subject"),
+                endpoint_owner(constraint.get("targets"), relation, "target"),
+            )
+            if owner is not None
+        ]
+        if not endpoint_owners:
+            continue
+        expected = constraint_evaluation_stage(*endpoint_owners)
+        actual = str(constraint.get("stage") or "")
+        if actual not in CONTRACT_STAGE_ORDER or CONTRACT_STAGE_ORDER.index(
+            actual
+        ) < CONTRACT_STAGE_ORDER.index(expected):
+            errors.append(
+                f"constraint {constraint.get('constraint_id') or '<unknown>'} "
+                f"stage {actual!r} precedes endpoint owner {expected!r}"
+            )
+
+    return {
+        "status": "ok" if not errors else "invalid",
+        "generation_owners": {
+            category: next(iter(stages))
+            for category, stages in sorted(owners.items())
+            if len(stages) == 1
+        },
+        "before_counts": before_counts,
+        "after_counts": after_counts,
+        "errors": errors,
+    }
 
 
 class SceneExpertHookRunner:
@@ -634,6 +863,7 @@ class SceneExpertHookRunner:
         intent_contract: dict[str, Any] | None = None,
         intent_trace: dict[str, Any] | None = None,
         task_compiler_trace: dict[str, Any] | None = None,
+        critic_config: Any | None = None,
     ) -> None:
         self._prompt = prompt
         self._scene_id = scene_id
@@ -663,6 +893,7 @@ class SceneExpertHookRunner:
         self._start_stage = start_stage
         self._intent_contract = dict(intent_contract or {})
         self._intent_trace = dict(intent_trace or {})
+        self._critic_config = critic_config
         self._stage_order_baseline = self._initial_completed_stages(start_stage)
         self._room_start_stage = (
             "furniture" if start_stage == "floor_plan" else start_stage
@@ -695,6 +926,8 @@ class SceneExpertHookRunner:
         self._pending_stage_repairs: dict[
             str, tuple[RepairResult, StageVerifyReport]
         ] = {}
+        self._latest_deterministic_payload: dict[str, Any] | None = None
+        self._latest_scene: RoomScene | None = None
 
     @property
     def floor_plan_reservation_manifest(self) -> dict[str, Any] | None:
@@ -713,10 +946,31 @@ class SceneExpertHookRunner:
         from the original room prompt.  Keep the signal scoped to the current
         stage so a stale planner trace cannot skip a later stage.
         """
-        return bool(
+        planner_no_op = bool(
             self._current_stage == stage
             and self._current_planner_trace.get("status") == "no_op"
         )
+        if not planner_no_op:
+            return False
+        inventory = (
+            self._stage_required_objects(stage)
+            if getattr(self, "_task_spec", None) is not None
+            else []
+        )
+        hard_constraints = (
+            self._current_relation_context.hard_constraints
+            if getattr(self, "_current_relation_context", None) is not None
+            else []
+        )
+        if inventory or hard_constraints:
+            console_logger.error(
+                "[SceneExpert] Refusing invalid no-op for %s: inventory=%d hard_constraints=%d",
+                stage,
+                len(inventory),
+                len(hard_constraints),
+            )
+            return False
+        return True
 
     def accept_degraded_stage(self, stage: str) -> None:
         """Record a terminal quality-failed stage as advanced by the pipeline.
@@ -1480,6 +1734,7 @@ class SceneExpertHookRunner:
         # Restore original text_description (keep scene clean for next stage)
         if stage in self._original_text_descriptions:
             scene.text_description = self._original_text_descriptions[stage]
+        self._latest_scene = scene
 
         # Extract lightweight scene state info for rule checks
         scene_state_info = self._extract_scene_state_info_from_scene(scene)
@@ -1493,12 +1748,25 @@ class SceneExpertHookRunner:
         result_reason = ""
         try:
             verify_start = time.time()
+            deterministic_critic_payload = None
+            critic_config = getattr(self, "_critic_config", None)
+            if critic_config is not None and critic_config.enabled:
+                from scenesmith.scenebenchmark_critic.api import evaluate_room_scene
+
+                deterministic_critic_payload = evaluate_room_scene(
+                    scene,
+                    config=critic_config,
+                    stage=f"{stage}_post_stage",
+                    annotate_assets=False,
+                )
+                self._latest_deterministic_payload = deterministic_critic_payload
             verify_report = self._run_stage_verifier(
                 stage=stage,
                 stage_output_dir=str(room_dir),
                 task_spec=self._task_spec,
                 stage_brief=self._current_stage_brief,
                 scene_state_info=scene_state_info,
+                deterministic_critic_payload=deterministic_critic_payload,
             )
             console_logger.info(
                 "[SceneExpertTiming] stage=%s module=stage_verifier elapsed=%.2fs",
@@ -1725,9 +1993,25 @@ class SceneExpertHookRunner:
         try:
             full_verify_start = time.time()
             if self._component_enabled("verifier"):
+                critic_config = getattr(self, "_critic_config", None)
+                latest_scene = getattr(self, "_latest_scene", None)
+                if (
+                    critic_config is not None
+                    and critic_config.enabled
+                    and latest_scene is not None
+                ):
+                    from scenesmith.scenebenchmark_critic.api import evaluate_room_scene
+
+                    self._latest_deterministic_payload = evaluate_room_scene(
+                        latest_scene,
+                        config=critic_config,
+                        stage="final_scene_verification",
+                        annotate_assets=False,
+                    )
                 full_report = self._full_verifier.verify(
                     stage_reports=self._stage_reports,
                     final_scene_path=final_scene_path,
+                    deterministic_critic_payload=self._latest_deterministic_payload,
                 )
             console_logger.info(
                 "[SceneExpertTiming] stage=full_scene module=full_verifier elapsed=%.2fs",
@@ -1817,12 +2101,14 @@ class SceneExpertHookRunner:
             )
 
         missing_stages = [
-            stage for stage in STAGE_ORDER if stage not in self._completed_stages
+            stage
+            for stage in CONTRACT_STAGE_ORDER
+            if stage not in self._completed_stages
         ]
         full_report = FullVerifyReport(
             deterministic_pass=False,
             pass_scene=False,
-            expected_stages=list(STAGE_ORDER),
+            expected_stages=list(CONTRACT_STAGE_ORDER),
             completed_stages=list(self._completed_stages),
             missing_stages=missing_stages,
             outcome_status="FAILED",
@@ -1862,9 +2148,9 @@ class SceneExpertHookRunner:
 
     def _initial_completed_stages(self, start_stage: str) -> list[str]:
         """Return the stage-order prefix already satisfied by a resumed run."""
-        if start_stage not in STAGE_ORDER:
+        if start_stage not in CONTRACT_STAGE_ORDER:
             return []
-        return STAGE_ORDER[: STAGE_ORDER.index(start_stage)]
+        return CONTRACT_STAGE_ORDER[: CONTRACT_STAGE_ORDER.index(start_stage)]
 
     def _validate_stage_transition(self, stage: str) -> None:
         """Enforce Harness FSM order while tolerating sequential multi-room runs."""
@@ -1925,7 +2211,7 @@ class SceneExpertHookRunner:
 
         lines: list[str] = []
         seen: set[str] = set()
-        for stage in STAGE_ORDER:
+        for stage in CONTRACT_STAGE_ORDER:
             try:
                 pack = self._retriever.retrieve(self._task_spec, stage)
             except Exception:
@@ -2069,6 +2355,7 @@ def build_hook_runner(
     console_logger.info(f"[SceneExpert] Building hook runner (mode={mode})")
 
     # Model / API settings (shared with SceneSmith agents)
+    critic_config = critic_config_from_any(cfg_dict)
     model = _intent_compiler_model(cfg_dict)
     api_base = os.environ.get("OPENAI_BASE_URL", "http://localhost:8000/v1")
     api_key = os.environ.get("OPENAI_API_KEY", "dummy")
@@ -2247,7 +2534,19 @@ def build_hook_runner(
         cfg_dict=cfg_dict,
         task_spec=task_spec,
     )
+    pre_reconciliation_task_spec = task_spec
     task_spec = _reconcile_task_spec_stage_ownership(task_spec, intent_contract)
+    ownership_audit = _audit_stage_ownership(
+        pre_reconciliation_task_spec,
+        task_spec,
+        intent_contract,
+    )
+    task_compiler_trace["ownership_reconciliation"] = ownership_audit
+    if ownership_audit["errors"]:
+        raise ValueError(
+            "Stage ownership reconciliation failed: "
+            + "; ".join(ownership_audit["errors"])
+        )
 
     # Harness always assembles planner context, while its FSM and budget
     # controls are independently gated at each control boundary.
@@ -2322,4 +2621,5 @@ def build_hook_runner(
         intent_contract=intent_contract,
         intent_trace=intent_trace,
         task_compiler_trace=task_compiler_trace,
+        critic_config=critic_config,
     )

@@ -468,7 +468,8 @@ def _plan_contract(
             ),
             dependency={
                 "subject_face": "back",
-                "max_angle_deg": 10.0,
+                "max_angle_deg": 3.0,
+                "max_degraded_angle_deg": 10.0,
                 "max_distance_m": 0.25,
             },
             prompt_explicit_wall=True,
@@ -539,7 +540,8 @@ def _plan_contract(
             ),
             dependency={
                 "subject_face": "back",
-                "max_angle_deg": 10.0,
+                "max_angle_deg": 3.0,
+                "max_degraded_angle_deg": 10.0,
                 "max_distance_m": 0.25,
             },
         )

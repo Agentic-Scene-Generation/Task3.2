@@ -239,6 +239,24 @@ class FurnitureSafetyControllerTest(unittest.TestCase):
         self.assertEqual(controller.required_counts["armchair"], 2)
         self.assertEqual(controller.required_counts["floor_lamp"], 1)
 
+    def test_sofa_chair_is_one_atomic_inventory_category(self) -> None:
+        controller = FurnitureSafetyController({"enabled": True})
+        controller.reset_for_scene("A lounge with four sofa chairs around a rug.")
+
+        self.assertEqual(controller.required_counts["sofa_chair"], 4)
+        self.assertNotIn("sofa", controller.required_counts)
+        self.assertNotIn("chair", controller.required_counts)
+
+    def test_sofa_chair_does_not_hide_independent_sofa(self) -> None:
+        controller = FurnitureSafetyController({"enabled": True})
+        controller.reset_for_scene(
+            "A lounge with four sofa chairs around a rug and one sofa."
+        )
+
+        self.assertEqual(controller.required_counts["sofa_chair"], 4)
+        self.assertEqual(controller.required_counts["sofa"], 1)
+        self.assertNotIn("chair", controller.required_counts)
+
     def test_dressing_table_is_not_a_second_generic_table_requirement(self) -> None:
         controller = FurnitureSafetyController({"enabled": True})
         controller.reset_for_scene(
@@ -332,6 +350,16 @@ class FurnitureSafetyControllerTest(unittest.TestCase):
                 "student_chair",
                 "classroom chair",
                 "chair",
+            )
+        )
+
+    def test_floor_speaker_satisfies_generic_speaker_inventory(self) -> None:
+        self.assertTrue(
+            furniture_object_category_matches(
+                "floor_speaker_0",
+                "floor_speaker",
+                "Tall floor-standing speaker tower",
+                "speaker",
             )
         )
 

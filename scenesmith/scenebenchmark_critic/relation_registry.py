@@ -66,6 +66,7 @@ MANIPULAND_CATEGORIES = frozenset(
         "desk_lamp",
         "flower",
         "glass",
+        "glass_bowl",
         "keyboard",
         "laptop",
         "magazine",
@@ -165,6 +166,11 @@ _RELATIONS = (
             "back_against_wall",
             "wall_backed_storage_alignment",
         ),
+        thresholds={
+            "max_gap_m": 0.25,
+            "max_angle_deg": 3.0,
+            "max_degraded_angle_deg": 10.0,
+        },
         exclusive_with=("centered_in_room",),
     ),
     _relation(

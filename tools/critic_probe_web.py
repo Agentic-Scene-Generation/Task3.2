@@ -22,6 +22,7 @@ from typing import Any
 
 from flask import Flask, abort, jsonify, request, send_file
 from PIL import Image
+from scenesmith.utils.token_usage import normalize_token_usage
 
 
 DEFAULT_PROBE_ROOT = Path(__file__).resolve().parents[1] / "outputs" / "critic_probe"
@@ -255,6 +256,15 @@ def _scene_identity(run_root: Path, room_dir: Path) -> dict[str, str]:
     }
 
 
+def _has_complete_final_views(room_dir: Path) -> bool:
+    """Return whether both visual final-view artifacts are available."""
+    final_view_dir = room_dir.parent / "critic_final_views"
+    return all(
+        (final_view_dir / filename).is_file()
+        for filename in ("00_top.png", "01_side.png")
+    )
+
+
 def _stage_from_render_dir(render_dir: Path) -> str:
     name = render_dir.parent.name
     if name.startswith("manipulands_"):
@@ -424,11 +434,47 @@ def _floor_plan_manifest(room_dir: Path) -> dict[str, Any] | None:
     return None
 
 
+def _floor_plan_reservation_record(
+    room_dir: Path,
+) -> tuple[dict[str, Any], str] | None:
+    """返回预留清单及其文件记录的创建时间。"""
+    for scene_dir in _floor_plan_scene_dirs(room_dir):
+        manifest_path = scene_dir / "floor_plan_reservation_manifest.json"
+        payload = _read_json(manifest_path)
+        if isinstance(payload, dict) and payload and manifest_path.is_file():
+            return payload, _iso_mtime(manifest_path)
+    return None
+
+
 def _floor_plan_payload(probe_root: Path, room_dir: Path) -> dict[str, Any]:
     return {
         "renders": _floor_plan_records(probe_root, room_dir),
         "reservation_manifest": _floor_plan_manifest(room_dir),
     }
+
+
+def _scene_prompt(room_dir: Path) -> str:
+    """从最新可用的 trace 中读取场景原始提示词。"""
+    trace_paths = [
+        path
+        for scene_dir in _floor_plan_scene_dirs(room_dir)
+        for trace_root in (scene_dir / "scene_expert" / "trace",)
+        for path in (
+            *trace_root.glob("trace_*.json"),
+            *trace_root.glob("*_partial.json"),
+        )
+    ]
+    trace_paths = sorted(
+        set(trace_paths),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    for trace_path in trace_paths:
+        payload = _read_json(trace_path, {})
+        prompt = payload.get("prompt") if isinstance(payload, dict) else None
+        if isinstance(prompt, str) and prompt.strip():
+            return prompt.strip()
+    return ""
 
 
 def _timing_records(room_dir: Path) -> list[dict[str, Any]]:
@@ -709,6 +755,72 @@ def _timing_for_llm(
     )
 
 
+def _llm_elapsed_sec(
+    call: dict[str, Any], timing: dict[str, Any] | None
+) -> float | None:
+    """Prefer the response time persisted with a direct API call."""
+    for value in (
+        call.get("elapsed_sec"),
+        timing.get("elapsed_sec") if timing is not None else None,
+    ):
+        if isinstance(value, (int, float)) and math.isfinite(value) and value >= 0:
+            return float(value)
+    return None
+
+
+def _llm_token_breakdown(call: dict[str, Any]) -> dict[str, int]:
+    token_usage = call.get("token_usage")
+    return normalize_token_usage(token_usage) if isinstance(token_usage, dict) else {}
+
+
+def _llm_audit_kind(call: dict[str, Any]) -> str:
+    """Classify provider calls separately from deterministic audit evidence."""
+    event_kind = call.get("event_kind")
+    if event_kind in {"llm", "system"}:
+        return event_kind
+
+    # v2 logs predate event_kind. A deterministic short-circuit is recorded in
+    # the shared debug stream for traceability, but does not contact an LLM.
+    event = str(call.get("event", ""))
+    if event.startswith("deterministic_") and not _llm_token_breakdown(call):
+        return "system"
+    return "llm"
+
+
+def _scene_audit_summary(events: list[dict[str, Any]]) -> dict[str, Any]:
+    peaks: list[tuple[int, dict[str, Any]]] = []
+    for event in events:
+        if event.get("kind") != "llm":
+            continue
+        breakdown = event.get("token_breakdown")
+        context_tokens = (
+            breakdown.get("max_input_context_tokens")
+            if isinstance(breakdown, dict)
+            else None
+        )
+        if isinstance(context_tokens, int):
+            peaks.append(
+                (
+                    context_tokens,
+                    {
+                        "event_id": event["id"],
+                        "actor": event.get("actor", "LLM"),
+                        "stage": event.get("stage", "unknown"),
+                        "function": event.get("function", "llm_call"),
+                    },
+                )
+            )
+    if not peaks:
+        return {"max_input_context_tokens": None, "max_input_context_events": []}
+    max_context_tokens = max(value for value, _ in peaks)
+    return {
+        "max_input_context_tokens": max_context_tokens,
+        "max_input_context_events": [
+            event for value, event in peaks if value == max_context_tokens
+        ],
+    }
+
+
 def _audit_events(room_dir: Path) -> list[dict[str, Any]]:
     timings = _timing_records(room_dir)
     repair_records = _repair_records(room_dir)
@@ -779,6 +891,29 @@ def _audit_events(room_dir: Path) -> list[dict[str, Any]]:
                     "retry_count": compiler.get("retry_count", 0),
                 },
                 "contract": contract,
+            }
+        )
+    reservation_record = _floor_plan_reservation_record(room_dir)
+    if reservation_record is not None:
+        manifest, created_at = reservation_record
+        reservations = manifest.get("reservations", [])
+        reservation_count = len(reservations) if isinstance(reservations, list) else 0
+        enabled = manifest.get("enabled") is not False
+        events.append(
+            {
+                "id": "contract:floor-reservation",
+                "kind": "contract",
+                "source": "floor_plan_reservation_manifest",
+                "created_at": created_at,
+                "stage": "floor_plan",
+                "actor": "floor_reservation",
+                "function": "compile_floor_reservation",
+                "title": "Compiled floor reservation",
+                "audit_status": "enabled" if enabled else "disabled",
+                "detail": {
+                    "reservation_count": reservation_count,
+                    "reservation_manifest": manifest,
+                },
             }
         )
     for index, row in enumerate(timings):
@@ -931,14 +1066,14 @@ def _audit_events(room_dir: Path) -> list[dict[str, Any]]:
     for index, row in enumerate(_llm_records(room_dir)):
         timing = _timing_for_llm(row, timings)
         end_time = _parse_time(str(row.get("created_at", "")))
-        elapsed = timing.get("elapsed_sec") if timing else row.get("elapsed_sec")
+        elapsed = _llm_elapsed_sec(row, timing)
         started_at = None
         if end_time is not None and isinstance(elapsed, (int, float)):
             started_at = (end_time - timedelta(seconds=float(elapsed))).isoformat()
         events.append(
             {
                 "id": f"llm:{index}",
-                "kind": "llm",
+                "kind": _llm_audit_kind(row),
                 "source": "llm",
                 "created_at": row.get("created_at"),
                 "started_at": started_at,
@@ -961,6 +1096,7 @@ def _audit_events(room_dir: Path) -> list[dict[str, Any]]:
                     )
                 ),
                 "token_usage": row.get("token_usage", {}),
+                "token_breakdown": _llm_token_breakdown(row),
                 "prompt_chars": row.get("prompt_chars", 0),
                 "output_chars": row.get("output_chars", 0),
                 "has_error": bool(row.get("error")),
@@ -1162,7 +1298,7 @@ def _payload_for_llm_event(room_dir: Path, event_id: str) -> dict[str, Any] | No
     timing = _timing_for_llm(call, timings)
     completed_at = str(call.get("created_at", ""))
     completed = _parse_time(completed_at)
-    elapsed = timing.get("elapsed_sec") if timing else call.get("elapsed_sec")
+    elapsed = _llm_elapsed_sec(call, timing)
     started_at = None
     if completed is not None and isinstance(elapsed, (int, float)):
         started_at = (completed - timedelta(seconds=float(elapsed))).isoformat()
@@ -1371,10 +1507,7 @@ def create_app(probe_root: Path = DEFAULT_PROBE_ROOT) -> Flask:
                     "updated_at": _iso_mtime(child),
                     "status": (
                         "complete"
-                        if any(
-                            (room / "scene_states" / "final_scene").exists()
-                            for room in rooms
-                        )
+                        if any(_has_complete_final_views(room) for room in rooms)
                         else "running"
                     ),
                     "modes": sorted(
@@ -1404,9 +1537,7 @@ def create_app(probe_root: Path = DEFAULT_PROBE_ROOT) -> Flask:
                     "path": relative_path,
                     **identity,
                     "status": (
-                        "complete"
-                        if (room / "scene_states" / "final_scene").exists()
-                        else "running"
+                        "complete" if _has_complete_final_views(room) else "running"
                     ),
                     "stages": stages,
                     "event_count": len(timings),
@@ -1430,6 +1561,7 @@ def create_app(probe_root: Path = DEFAULT_PROBE_ROOT) -> Flask:
         return _json_response(
             {
                 "path": relative_path,
+                "prompt": _scene_prompt(room),
                 "actions": action_log,
                 "timings": timings,
                 "llm_calls": llm_calls,
@@ -1439,6 +1571,7 @@ def create_app(probe_root: Path = DEFAULT_PROBE_ROOT) -> Flask:
                 "messages": _agent_messages(room),
                 "event_counts": Counter(row.get("stage", "unknown") for row in timings),
                 "audit_events": audit_events,
+                "audit_summary": _scene_audit_summary(audit_events),
             }
         )
 

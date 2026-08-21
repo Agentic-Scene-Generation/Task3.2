@@ -62,6 +62,55 @@ from scenesmith.scene_expert import hooks
 from scenesmith.scene_expert.schemas import SceneTaskSpec
 
 
+@pytest.mark.parametrize(
+    ("wording", "expected_relation"),
+    [
+        ("next to", "next_to"),
+        ("beside", "next_to"),
+        ("adjacent to", "next_to"),
+        ("near", "near"),
+    ],
+)
+def test_deterministic_parser_preserves_window_adjacency_strength(
+    wording: str, expected_relation: str
+) -> None:
+    contract = build_intent_contract(
+        f"A bedroom with a bed positioned {wording} a window."
+    )
+
+    window_rows = [
+        row
+        for row in contract["constraints"]
+        if row["relation"] in {"near", "next_to"}
+        and row["subjects"]["category"] == "bed"
+        and (row.get("targets") or {}).get("category") == "window"
+    ]
+
+    assert [row["relation"] for row in window_rows] == [expected_relation]
+    assert window_rows[0]["stage"] == "furniture"
+
+
+def test_structural_window_is_not_furniture_inventory() -> None:
+    contract = build_intent_contract(
+        "A bedroom with a bed next to a window.",
+        task_spec=SceneTaskSpec(
+            room_type="bedroom",
+            style="standard",
+            required_large_objects=["bed", "window"],
+            required_wall_objects=["door"],
+        ),
+    )
+    scene = SimpleNamespace(scenebenchmark_intent_contract=contract)
+
+    assert not any(
+        row["relation"] == "required_count"
+        and row["subjects"]["category"] in {"door", "opening", "window"}
+        for row in contract["constraints"]
+    )
+    assert "window" not in intent_contract_required_counts(scene)
+    assert INTENT_COMPILER_SPEC_VERSION == "scenesmith.intent_compiler.v14"
+
+
 def test_repair_placeholder_uses_stable_compound_name_as_category() -> None:
     placeholder = SimpleNamespace(
         object_id="water_dispenser_repair_placeholder_0",
@@ -313,6 +362,18 @@ def test_schema_canonicalizes_instructional_surface_aliases_to_wall_stage() -> N
         ("whiteboard", "instructional_surface"),
         ("entrance_route", "entrance"),
         ("batteries", "battery"),
+        ("circular ceramic table", "table"),
+        ("large rectangular rug", "rug"),
+        ("rectangular coffee table", "coffee_table"),
+        ("chest_of_drawer", "dresser"),
+        ("chest of drawers", "dresser"),
+        ("large abstract painting", "painting"),
+        ("wall_cabinet", "wall_cabinet"),
+        ("sofa_chair", "sofa_chair"),
+        ("sofa chair", "sofa_chair"),
+        ("glass bowls", "glass_bowl"),
+        ("vase_flowers", "vase_flower"),
+        ("unlisted modular console", "unlisted_modular_console"),
     ],
 )
 def test_schema_normalizes_common_plural_selector_categories(
@@ -1000,6 +1061,41 @@ def test_furniture_selector_ignores_later_stage_decor_with_parent_category() -> 
     assert selector_match_count(selector, [dresser, tabletop_mirror]) == 1
 
 
+@pytest.mark.parametrize("category", ["television", "media_cabinet"])
+def test_canonical_adapter_category_binds_wall_mounted_open_category(
+    category: str,
+) -> None:
+    mounted = _record("mounted_media_0", "decor", (0.0, 2.0), (1.2, 0.1, 0.7))
+    mounted.update(
+        {
+            "category_norm": category,
+            "object_type": "wall_mounted",
+            "metadata": {"semantic_name": "mounted_media_endpoint"},
+            "functional_hints": {"scene_object_type": "wall_mounted"},
+        }
+    )
+    selector = {"category": category, "count": 1, "quantifier": "exactly"}
+
+    assert selected_ids(selector, [mounted]) == ["mounted_media_0"]
+    assert bound_ids(selector, [mounted]) == ["mounted_media_0"]
+
+
+def test_open_vocabulary_canonical_adapter_category_binds_manipuland() -> None:
+    plush = _record("plush_toy_0", "decor", (0.0, 0.0), (0.2, 0.2, 0.2))
+    plush.update(
+        {
+            "category_norm": "plush_toy",
+            "object_type": "manipuland",
+            "metadata": {"semantic_name": "soft_bear_asset"},
+            "functional_hints": {"scene_object_type": "manipuland"},
+        }
+    )
+    selector = {"category": "plush_toy", "count": 1, "quantifier": "exactly"}
+
+    assert selected_ids(selector, [plush]) == ["plush_toy_0"]
+    assert bound_ids(selector, [plush]) == ["plush_toy_0"]
+
+
 def test_bedside_lamp_semantic_name_is_valid_for_nightstand_support() -> None:
     lamp = _record("bedside_lamp_0", "lamp", (0.0, 0.0), (0.15, 0.15, 0.3))
     lamp["metadata"] = {"semantic_name": "bedside_lamp"}
@@ -1326,6 +1422,35 @@ def test_furniture_relation_endpoints_supply_contract_inventory_counts() -> None
     assert intent_contract_required_counts(scene) == {
         "office_chair": 1,
         "desk": 1,
+    }
+
+
+def test_required_counts_can_be_filtered_by_generation_stage() -> None:
+    scene = SimpleNamespace(
+        scenebenchmark_intent_contract={
+            "constraints": [
+                {
+                    "relation": "required_count",
+                    "stage": "furniture",
+                    "strength": "hard",
+                    "subjects": {"category": "side_table", "count": 3},
+                },
+                {
+                    "relation": "required_count",
+                    "stage": "wall_mounted",
+                    "strength": "hard",
+                    "subjects": {"category": "storage_cabinet", "count": 2},
+                },
+            ]
+        }
+    )
+
+    assert intent_contract_required_counts(scene) == {
+        "side_table": 3,
+        "storage_cabinet": 2,
+    }
+    assert intent_contract_required_counts(scene, stage="furniture") == {
+        "side_table": 3
     }
 
 
@@ -2184,6 +2309,27 @@ def test_intent_compiler_injects_complete_task_spec_and_owns_inventory() -> None
     assert any("Inventory count conflict" in warning for warning in result["warnings"])
 
 
+def test_task_spec_inventory_drops_overlapping_prompt_fragment_counts() -> None:
+    task_spec = SceneTaskSpec(
+        room_type="living room",
+        style="standard",
+        required_large_objects=["sofa_chair"] * 4,
+        required_small_objects=["glass_bowl"] * 2,
+    )
+    compiler = _compiler_with_responses([_response('{"constraints": []}')])
+
+    result = compiler.compile(
+        "A room with four sofa chairs and two glass bowls.", task_spec=task_spec
+    )
+
+    required = {
+        row["subjects"]["category"]: row["subjects"]["count"]
+        for row in result["constraints"]
+        if row["relation"] == "required_count"
+    }
+    assert required == {"glass_bowl": 2, "sofa_chair": 4}
+
+
 def test_intent_compiler_retries_parseable_length_response() -> None:
     compiler = _compiler_with_responses(
         [
@@ -2321,7 +2467,17 @@ def test_contract_completeness_accepts_specific_endpoint_for_generic_inventory()
 
 @pytest.mark.parametrize(
     "anchor",
-    ["room", "wall", "floor", "ceiling", "entrance", "adjacent_wall"],
+    [
+        "room",
+        "wall",
+        "floor",
+        "ceiling",
+        "entrance",
+        "door",
+        "opening",
+        "window",
+        "adjacent_wall",
+    ],
 )
 def test_contract_completeness_accepts_environment_anchors(anchor: str) -> None:
     contract = build_intent_contract(
@@ -2541,6 +2697,63 @@ def test_intent_schema_requires_target_for_endpoint_relations() -> None:
     )
     assert "targets" in relation_schema["required"]
     assert zero_arity_condition["then"]["properties"]["targets"] == {"type": "null"}
+
+
+def test_intent_schema_preserves_supported_inventory_reconciliation_reason() -> None:
+    relation = {
+        "relation": "required_count",
+        "subjects": {
+            "category": "glass_bowl",
+            "count": 3,
+            "quantifier": "minimum",
+        },
+        "targets": None,
+        "source": "task_compiler_inventory",
+        "inference_reason": "SceneTaskSpec required_small_objects",
+        "reconciliation_reason": "disjoint_support_cohort_minimum",
+    }
+
+    validated = validate_intent_contract(_contract(relation))
+
+    assert validated["constraints"][0]["reconciliation_reason"] == (
+        "disjoint_support_cohort_minimum"
+    )
+
+
+def test_intent_schema_rejects_unknown_reconciliation_reason() -> None:
+    relation = {
+        "relation": "required_count",
+        "subjects": {"category": "glass_bowl", "count": 3},
+        "targets": None,
+        "source": "task_compiler_inventory",
+        "inference_reason": "SceneTaskSpec required_small_objects",
+        "reconciliation_reason": "unknown_reason",
+    }
+
+    with pytest.raises(ValidationError, match="reconciliation_reason"):
+        validate_intent_contract(_contract(relation))
+
+
+def test_generic_speaker_selector_matches_floor_speaker_assets() -> None:
+    selector = {"category": "speaker", "count": 4, "quantifier": "exactly"}
+    objects = [
+        {
+            "id": f"floor_speaker_{index}",
+            "category": "floor_speaker",
+            "category_norm": "floor_speaker",
+            "object_type": "furniture",
+            "metadata": {"semantic_name": "floor_speaker"},
+        }
+        for index in range(4)
+    ]
+
+    assert selected_ids(selector, objects) == [
+        "floor_speaker_0",
+        "floor_speaker_1",
+        "floor_speaker_2",
+        "floor_speaker_3",
+    ]
+    assert selector_match_count(selector, objects) == 4
 
 
 def test_intent_compiler_wire_schema_excludes_free_text_provenance() -> None:
@@ -3503,6 +3716,55 @@ def test_enabled_hook_runner_compiles_task_spec_before_intent(
         )
 
     assert events == ["task:A bedroom with a bed.", "intent"]
+
+
+def test_enabled_hook_runner_retains_normalized_critic_config(
+    monkeypatch, tmp_path
+) -> None:
+    task_spec = SceneTaskSpec(room_type="bedroom", style="standard")
+
+    class FakeTaskCompiler:
+        def __init__(self, **_kwargs):
+            self.last_trace = {}
+
+        def compile(self, _prompt: str) -> SceneTaskSpec:
+            return task_spec
+
+    monkeypatch.setattr(hooks, "TaskCompiler", FakeTaskCompiler)
+    monkeypatch.setattr(
+        hooks,
+        "apply_behavior_template",
+        lambda *_args, **_kwargs: (task_spec, None),
+    )
+    monkeypatch.setattr(
+        hooks,
+        "_compile_intent_contract_if_enabled",
+        lambda **_kwargs: ({}, {}),
+    )
+    monkeypatch.setattr(hooks, "GlobalPlanner", lambda **_kwargs: object())
+    monkeypatch.setattr(
+        hooks,
+        "SceneExpertHookRunner",
+        lambda **kwargs: kwargs,
+    )
+
+    runner_args = hooks.build_hook_runner(
+        prompt="A bedroom with a bed.",
+        scene_id=0,
+        output_dir=tmp_path,
+        cfg_dict={
+            "experiment": {"scene_expert": {"enabled": True, "mode": "harness_only"}},
+            "furniture_agent": {"openai": {"model": "test-model"}},
+            "scenebenchmark_critic": {
+                "enabled": True,
+                "metrics": ["visual_clearance"],
+            },
+        },
+    )
+
+    assert isinstance(runner_args, dict)
+    assert runner_args["critic_config"].enabled
+    assert runner_args["critic_config"].metric_enabled("visual_clearance")
 
 
 def test_new_scene_prompts_compile_complete_deterministic_contracts() -> None:

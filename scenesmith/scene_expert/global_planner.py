@@ -82,6 +82,10 @@ Guidelines:
   later-stage wall anchors. Reserve a continuous wall segment for every listed
   object; doors and windows must not intersect a reserved segment. Do not move
   a later object away from its explicit required wall merely to keep an opening.
+- After floor_plan, Resolved Opening Reservations contain authoritative room
+  geometry. Keep furniture out of hard door/open clearances. Place tall or focal
+  wall-backed furniture only on a continuous usable segment that does not cross
+  a window; prefer a fully opening-free wall when it satisfies the task relation.
 - Functional zones named only through later furniture (for example, living,
   dining, work, or storage areas) are not architectural partitions. At
   floor_plan, make those later arrangements feasible through dimensions,
@@ -574,7 +578,10 @@ def _add_floor_plan_reservation_guidance(
         category = str(subject.get("category") or "object").replace("_", " ")
         role = str(target.get("role") or "").strip().lower()
         relation = str(reservation.get("relation") or "")
-        if relation == "centered_on_wall" and role:
+        reservation_kind = str(reservation.get("reservation_kind") or "")
+        if reservation_kind == "opening_adjacency":
+            anchors.append(f"{category} next to a window")
+        elif relation == "centered_on_wall" and role:
             anchors.append(f"{category} centered on the {role} wall")
         elif role:
             anchors.append(f"{category} on a {role} wall")
@@ -596,6 +603,15 @@ def _add_floor_plan_reservation_guidance(
         if pair_count:
             details.append(
                 "aligned opening-free spans on opposed walls for each media-viewing pair"
+            )
+        opening_adjacency = [
+            item for item in manifest.reservations if item.kind == "opening_adjacency"
+        ]
+        if opening_adjacency:
+            details.append(
+                "a separate continuous opening-free wall segment on at least one "
+                "side of a matching window for every strict next-to reservation; "
+                "doors and other openings cannot share that capacity"
             )
         if zone_area:
             details.append(
@@ -622,7 +638,9 @@ def _add_floor_plan_reservation_guidance(
     )
     check = (
         "Verify every reserved wall-anchor segment remains large enough and "
-        "unobstructed by doors or windows before handing the room to furniture."
+        "unobstructed by doors or windows, and every reserved window-side segment "
+        "remains large enough and unobstructed by doors or other openings before "
+        "handing the room to furniture."
     )
     constraints = list(brief.constraints_for_designer)
     if guidance not in constraints:
@@ -901,6 +919,8 @@ class GlobalPlanner:
                 )
             started_at = time.perf_counter()
             raw = ""
+            response = None
+            response_elapsed_sec: float | None = None
             try:
                 response = self._client.chat.completions.create(
                     model=self._model,
@@ -919,6 +939,7 @@ class GlobalPlanner:
                         "none", model=self._model
                     ),
                 )
+                response_elapsed_sec = round(time.perf_counter() - started_at, 6)
                 message = response.choices[0].message
                 raw = message.content
                 if not raw:
@@ -950,7 +971,11 @@ class GlobalPlanner:
                     {
                         "attempt": attempt,
                         "status": "ok",
-                        "elapsed_sec": round(time.perf_counter() - started_at, 6),
+                        "elapsed_sec": (
+                            response_elapsed_sec
+                            if response_elapsed_sec is not None
+                            else round(time.perf_counter() - started_at, 6)
+                        ),
                     }
                 )
                 self.last_trace = {
@@ -973,7 +998,11 @@ class GlobalPlanner:
                         output=raw or "",
                         raw_response=response,
                     ).model_dump()
-                    | {"attempt": attempt, "status": "ok"}
+                    | {
+                        "attempt": attempt,
+                        "status": "ok",
+                        "elapsed_sec": response_elapsed_sec,
+                    }
                 )
                 return brief
             except Exception as exc:
@@ -994,9 +1023,14 @@ class GlobalPlanner:
                         event="generate_stage_brief",
                         prompt=messages,
                         output=raw,
+                        raw_response=response,
                         error=validation_error,
                     ).model_dump()
-                    | {"attempt": attempt, "status": "error"}
+                    | {
+                        "attempt": attempt,
+                        "status": "error",
+                        "elapsed_sec": round(time.perf_counter() - started_at, 6),
+                    }
                 )
 
         attempts.append(
@@ -1079,6 +1113,16 @@ class GlobalPlanner:
                     "## Architectural Surface Reservations (hard)",
                     json.dumps(
                         context.relation_context.floor_plan_reservations,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ),
+                ]
+            if context.relation_context.resolved_opening_reservations:
+                parts += [
+                    "",
+                    "## Resolved Opening Reservations (authoritative geometry)",
+                    json.dumps(
+                        context.relation_context.resolved_opening_reservations,
                         ensure_ascii=False,
                         sort_keys=True,
                     ),

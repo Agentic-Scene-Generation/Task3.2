@@ -75,6 +75,7 @@ DEFAULT_ALIASES = {
     ],
     "dining_chair": ["dining chair", "dining chairs"],
     "student_chair": ["student chair", "student chairs"],
+    "sofa_chair": ["sofa chair", "sofa chairs"],
     "armchair": ["armchair", "armchairs", "arm chair", "arm chairs"],
     "desk": ["desk", "desks"],
     "chair": ["chair", "chairs"],
@@ -110,6 +111,15 @@ DEFAULT_ALIASES = {
     "plant": ["plant", "plants", "potted plant", "potted plants"],
     "rug": ["rug", "rugs", "area rug", "area rugs"],
     "floor_lamp": ["floor lamp", "floor lamps", "floorlamp", "floorlamps"],
+    "floor_speaker": [
+        "floor speaker",
+        "floor speakers",
+        "floor-standing speaker",
+        "floor-standing speakers",
+        "speaker tower",
+        "speaker towers",
+    ],
+    "speaker": ["speaker", "speakers", "loudspeaker", "loudspeakers"],
     "tv_stand": [
         "tv stand",
         "tv stands",
@@ -148,12 +158,21 @@ FURNITURE_CATEGORY_PARENTS: dict[str, frozenset[str]] = {
     "guest_chair": frozenset({"chair"}),
     "dining_chair": frozenset({"chair"}),
     "student_chair": frozenset({"chair"}),
+    "sofa_chair": frozenset({"chair"}),
     "armchair": frozenset({"chair"}),
     "side_table": frozenset({"table"}),
     "coffee_table": frozenset({"table"}),
     "dining_table": frozenset({"table"}),
     "conference_table": frozenset({"table"}),
     "dressing_table": frozenset({"table"}),
+    "floor_speaker": frozenset({"speaker"}),
+}
+
+# Compound labels can contain another valid category token without being that
+# second physical object.  Remove the component requirement only when no
+# independent mention remains after masking every compound occurrence.
+FURNITURE_CATEGORY_COMPONENT_SHADOWS: dict[str, frozenset[str]] = {
+    "sofa_chair": frozenset({"sofa", "chair"}),
 }
 
 # Retrieval uses ``cabinet`` as the stable semantic name for the freestanding
@@ -236,6 +255,50 @@ def _remove_redundant_generic_furniture_requirements(
             else:
                 requirements.discard(generic)
 
+    for compound, shadowed_categories in FURNITURE_CATEGORY_COMPONENT_SHADOWS.items():
+        if compound not in requirements:
+            continue
+        for category in shadowed_categories:
+            if category not in requirements:
+                continue
+            standalone_text = _prompt_without_masked_categories(prompt, {compound})
+            standalone_count = _infer_prompt_category_count(standalone_text, category)
+            if standalone_count > 0:
+                if isinstance(requirements, dict):
+                    requirements[category] = standalone_count
+                continue
+            if isinstance(requirements, dict):
+                requirements.pop(category, None)
+            else:
+                requirements.discard(category)
+
+
+def _prompt_mentions_standalone_category(
+    prompt: str,
+    *,
+    category: str,
+    masked_categories: set[str],
+) -> bool:
+    """Return whether a category remains after longer compound spans are removed."""
+    remainder = _prompt_without_masked_categories(prompt, masked_categories)
+    return any(
+        _contains_alias(remainder, alias, category=category)
+        for alias in [category.replace("_", " "), *DEFAULT_ALIASES.get(category, [])]
+    )
+
+
+def _prompt_without_masked_categories(prompt: str, masked_categories: set[str]) -> str:
+    """Remove complete compound-category spans from prompt text."""
+    remainder = str(prompt or "").lower().replace("_", " ")
+    for masked in masked_categories:
+        aliases = [masked.replace("_", " "), *DEFAULT_ALIASES.get(masked, [])]
+        for alias in sorted(set(aliases), key=len, reverse=True):
+            alias_pattern = re.escape(alias.lower()).replace(r"\ ", r"\s+")
+            remainder = re.sub(
+                rf"(?<![a-z0-9]){alias_pattern}(?![a-z0-9])", " ", remainder
+            )
+    return remainder
+
 
 NUMBER_WORDS = {
     "a": 1,
@@ -247,6 +310,32 @@ NUMBER_WORDS = {
     "five": 5,
     "six": 6,
 }
+
+
+def _infer_prompt_category_count(prompt: str, canonical: str) -> int:
+    """Infer one category count from text whose longer compound spans are masked."""
+    text = str(prompt or "").lower().replace("_", " ")
+    number_pattern = "|".join([r"\d+", *NUMBER_WORDS.keys()])
+    best_count = 0
+    for alias in DEFAULT_ALIASES.get(canonical, [canonical.replace("_", " ")]):
+        escaped_alias = re.escape(alias.lower())
+        pattern = (
+            rf"(^|[^a-z0-9])(?:(?P<count>{number_pattern})\s+)?"
+            rf"(?:(?!(?:{number_pattern})\b)\w+\s+){{0,2}}{escaped_alias}"
+            rf"([^a-z0-9]|$)"
+        )
+        for match in re.finditer(pattern, text):
+            count_text = match.groupdict().get("count")
+            count = 1
+            if count_text:
+                count = (
+                    int(count_text)
+                    if count_text.isdigit()
+                    else NUMBER_WORDS.get(count_text, 1)
+                )
+            best_count = max(best_count, count)
+    return best_count
+
 
 DISTINCT_FURNITURE_ROLES = (
     "student",
@@ -333,13 +422,13 @@ def _contains_alias(
 
 def infer_furniture_category(text: str) -> str | None:
     """Return the most specific configured category found in object text."""
+    matches: list[tuple[int, int, str]] = []
     for canonical, aliases in DEFAULT_ALIASES.items():
-        if any(
-            _contains_alias(text, alias, category=canonical)
-            for alias in [canonical, *aliases]
-        ):
-            return canonical
-    return None
+        for alias in [canonical.replace("_", " "), *aliases]:
+            if _contains_alias(text, alias, category=canonical):
+                normalized = alias.lower().replace("_", " ")
+                matches.append((len(normalized.split()), len(normalized), canonical))
+    return max(matches)[2] if matches else None
 
 
 def furniture_category_matches(text: str, required_category: str) -> bool:

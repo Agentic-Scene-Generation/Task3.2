@@ -604,13 +604,12 @@ class StatefulWallAgent(BaseStatefulAgent, BaseWallAgent):
                 # The final critic call can identify an occluded clock/shelf after
                 # the planner has exhausted its designer budget. Repair those
                 # geometry-proven issues before the caller persists the wall stage.
-                fixes = improve_wall_visual_clearance(
+                improve_wall_visual_clearance(
                     scene,
                     wall_surfaces=self.wall_surfaces,
                     config=self.cfg,
+                    on_accept=self.rendering_manager.clear_cache,
                 )
-                if fixes:
-                    self.rendering_manager.clear_cache()
 
                 removed_media = converge_cross_stage_media_inventory(
                     scene, self.required_wall_object_constraints

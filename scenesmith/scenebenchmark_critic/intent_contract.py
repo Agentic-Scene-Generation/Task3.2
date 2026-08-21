@@ -41,6 +41,11 @@ from scenesmith.scenebenchmark_critic.intent_schema import (
     canonical_selector_category,
     validate_intent_contract,
 )
+from scenesmith.scenebenchmark_critic.object_taxonomy import OBJECT_CATEGORY_PHRASES
+from scenesmith.scenebenchmark_critic.object_taxonomy import (
+    is_known_object_category,
+    is_structural_anchor,
+)
 
 
 SCHEMA_VERSION = INTENT_CONTRACT_SCHEMA_VERSION
@@ -69,89 +74,7 @@ _DIRECT_FD_EVALUATORS = frozenset(
     }
 )
 
-_CATEGORY_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    (
-        "instructional_surface",
-        (
-            "chalkboard",
-            "blackboard",
-            "whiteboard",
-            "projection screen",
-            "projector screen",
-            "teaching screen",
-        ),
-    ),
-    ("student_desk", ("student desk",)),
-    ("teacher_desk", ("teacher desk", "instructor desk")),
-    ("reception_desk", ("reception desk", "reception counter")),
-    ("office_chair", ("office chair", "desk chair", "task chair")),
-    (
-        "guest_chair",
-        ("guest chair", "visitor chair", "guest armchair", "visitor armchair"),
-    ),
-    ("dining_chair", ("dining chair",)),
-    ("rocking_chair", ("rocking chair",)),
-    ("armchair", ("armchair", "arm chair")),
-    ("dining_table", ("dining table",)),
-    (
-        "conference_table",
-        ("conference table", "meeting table", "boardroom table"),
-    ),
-    ("coffee_table", ("coffee table",)),
-    ("side_table", ("side table", "end table", "accent table")),
-    (
-        "dressing_table",
-        ("dressing table", "vanity table", "makeup table", "vanity"),
-    ),
-    ("filing_cabinet", ("filing cabinet", "file cabinet")),
-    ("storage_cabinet", ("storage cabinet", "storage cupboard")),
-    (
-        "water_dispenser",
-        ("water dispenser", "water cooler", "drinking water dispenser"),
-    ),
-    ("tv_stand", ("tv stand", "television stand", "media console")),
-    ("television", ("television", "tv")),
-    (
-        "monitor",
-        ("computer monitor", "computer display", "monitor", "display", "screen"),
-    ),
-    ("brochure_holder", ("brochure holder", "leaflet holder", "brochure stand")),
-    ("printer", ("printer",)),
-    ("nightstand", ("nightstand", "bedside table")),
-    ("stool", ("stool", "vanity stool", "dressing stool")),
-    ("bookshelf", ("bookshelf", "bookcase", "shelving unit")),
-    ("sideboard", ("sideboard", "buffet")),
-    ("wardrobe", ("wardrobe", "closet", "armoire")),
-    ("dresser", ("dresser", "chest of drawers", "bureau")),
-    ("floor_lamp", ("floor lamp",)),
-    ("table_lamp", ("table lamp", "desk lamp")),
-    ("vase", ("vase",)),
-    ("flowers", ("flower", "flowers")),
-    ("alarm_clock", ("alarm clock",)),
-    ("plate", ("plate",)),
-    ("cutlery", ("cutlery", "fork", "knife", "spoon")),
-    ("glass", ("glass", "drinking glass", "wine glass")),
-    ("coaster", ("coaster",)),
-    ("book", ("book",)),
-    ("wastebasket", ("wastebasket", "waste basket", "trash can", "trash bin")),
-    ("bottle", ("bottle",)),
-    ("bowl", ("bowl",)),
-    ("cup", ("cup",)),
-    ("mug", ("mug",)),
-    ("keyboard", ("keyboard",)),
-    ("laptop", ("laptop",)),
-    ("remote", ("remote", "remote control")),
-    ("rug", ("rug", "carpet", "area rug")),
-    ("mirror", ("mirror",)),
-    ("table_setting", ("table setting", "place setting")),
-    ("plant", ("plant",)),
-    ("bed", ("bed",)),
-    ("sofa", ("sofa", "couch", "settee")),
-    ("desk", ("desk",)),
-    ("chair", ("chair", "seat")),
-    ("table", ("table",)),
-    ("floor", ("floor",)),
-)
+_CATEGORY_PATTERNS = OBJECT_CATEGORY_PHRASES
 
 _NUMBER_WORDS = {
     "a": 1,
@@ -231,10 +154,19 @@ def intent_contract_constraints_for_scene(scene: Any) -> list[dict[str, Any]]:
     return [row for row in rows or [] if isinstance(row, dict)]
 
 
-def intent_contract_required_counts(scene: Any) -> dict[str, int]:
-    """Return hard object counts owned by the independent contract."""
+def intent_contract_required_counts(
+    scene: Any, *, stage: str | None = None
+) -> dict[str, int]:
+    """Return hard object counts owned by the independent contract.
+
+    ``stage=None`` preserves the historical all-stage inventory view. A stage
+    filter lets generation agents consume only obligations they own.
+    """
     counts: dict[str, int] = {}
     for row in intent_contract_constraints_for_scene(scene):
+        row_stage = str(row.get("stage") or "")
+        if stage is not None and row_stage not in {"", stage}:
+            continue
         relation = str(row.get("relation") or "")
         if relation in {"required_count", "edge_distribution"}:
             _record_contract_inventory_count(counts, row.get("subjects") or {})
@@ -243,7 +175,7 @@ def intent_contract_required_counts(scene: Any) -> dict[str, int]:
         # this, a monitor requested on a desk can be judged as missing but
         # never be eligible for inventory repair.
         if (
-            str(row.get("stage") or "") == "furniture"
+            row_stage in {"", stage or "furniture"}
             and str(row.get("strength") or "hard").lower() == "hard"
         ):
             _record_contract_inventory_count(counts, row.get("subjects") or {})
@@ -255,7 +187,11 @@ def _record_contract_inventory_count(counts: dict[str, int], selector: Any) -> N
     if not isinstance(selector, dict):
         return
     category = _normalize_selector_category(selector.get("category"))
-    if not category or category in _NON_FURNITURE_INVENTORY_CATEGORIES:
+    if (
+        not category
+        or is_structural_anchor(category)
+        or category in _NON_FURNITURE_INVENTORY_CATEGORIES
+    ):
         return
     try:
         count = int(selector.get("count") or 0)
@@ -272,6 +208,9 @@ _NON_FURNITURE_INVENTORY_CATEGORIES = frozenset(
         "floor",
         "ceiling",
         "wall",
+        "door",
+        "opening",
+        "window",
         *ROOM_RELATIVE_WALL_CATEGORIES,
         *WALL_MOUNTED_CATEGORIES,
         *CEILING_MOUNTED_CATEGORIES,
@@ -979,6 +918,7 @@ def contract_seating_targets(case_pack: dict[str, Any]) -> dict[str, set[str]]:
         case_pack,
         relations=(
             "faces",
+            "across_from",
             "aligned_with",
             "paired_with",
             "against_wall",
@@ -1689,14 +1629,20 @@ def _explicit_prompt_constraints(prompt: str, lowered: str) -> list[dict[str, An
 
         for match in re.finditer(
             r"(?P<subject>[a-z0-9_\- ,']{1,70}?)\s+"
-            r"(?:tucked\s+under|at|beside|next\s+to)\s+(?:the\s+|a\s+|an\s+)?"
+            r"(?P<adjacency>tucked\s+under|at|beside|next\s+to)\s+"
+            r"(?:the\s+|a\s+|an\s+)?"
             r"(?P<target>(?:[a-z]+\s+){0,2}(?:desk|table|monitor|screen))\b",
             normalized,
         ):
             subject = selector_for_phrase(match.group("subject"))
             target = selector_for_phrase(match.group("target"))
             if subject is not None and target is not None:
-                relation = "aligned_with" if "tucked" in match.group(0) else "near"
+                adjacency = match.group("adjacency")
+                relation = (
+                    "aligned_with"
+                    if adjacency.startswith("tucked")
+                    else "next_to" if adjacency in {"beside", "next to"} else "near"
+                )
                 constraints.append(
                     _constraint(
                         relation,
@@ -1714,7 +1660,8 @@ def _explicit_prompt_constraints(prompt: str, lowered: str) -> list[dict[str, An
         for match in re.finditer(
             r"(?P<subject>[a-z0-9_\- ,']{1,70}?)\s+"
             r"(?:is |sits |placed |positioned )?"
-            r"(?:beside|next\s+to|adjacent\s+to|near)\s+(?:the\s+|a\s+|an\s+)?"
+            r"(?P<adjacency>beside|next\s+to|adjacent\s+to|near)\s+"
+            r"(?:the\s+|a\s+|an\s+)?"
             r"(?P<target>[a-z0-9_\- ,']{1,70}?)(?:[,.;]|$)",
             normalized,
         ):
@@ -1726,7 +1673,7 @@ def _explicit_prompt_constraints(prompt: str, lowered: str) -> list[dict[str, An
             if subject is not None and target is not None:
                 constraints.append(
                     _constraint(
-                        "near",
+                        ("near" if match.group("adjacency") == "near" else "next_to"),
                         subject,
                         target,
                         source="explicit_prompt",
@@ -2428,13 +2375,9 @@ def _explicit_required_count_constraints(prompt: str) -> list[dict[str, Any]]:
     constraints: list[dict[str, Any]] = []
     filtered_candidates = []
     for span, candidate in candidates.items():
-        category, _count, _evidence = candidate
-        if category in generic_categories and any(
-            other_span != span
-            and other_span[0] <= span[0]
-            and other_span[1] >= span[1]
-            and other_candidate[0] not in generic_categories
-            for other_span, other_candidate in candidates.items()
+        if any(
+            other_span != span and other_span[0] <= span[0] and other_span[1] >= span[1]
+            for other_span in candidates
         ):
             continue
         filtered_candidates.append(candidate)
@@ -2717,7 +2660,11 @@ def _task_spec_inventory_constraints(task_spec: Any | None) -> list[dict[str, An
     ):
         for value in payload.get(field) or []:
             category = _normalize_selector_category(value)
-            if not category or category in {"room", "wall", "floor", "ceiling"}:
+            if (
+                not category
+                or is_structural_anchor(category)
+                or category in {"room", "wall", "floor", "ceiling"}
+            ):
                 continue
             counts[category] = counts.get(category, 0) + 1
             fields_by_category.setdefault(category, field)
@@ -2781,7 +2728,14 @@ def _task_spec_payload(task_spec: Any | None) -> dict[str, Any]:
 def _apply_task_spec_contract_metadata(
     constraints: list[dict[str, Any]], task_spec: Any | None
 ) -> list[dict[str, Any]]:
-    """Derive endpoint stage and existential selectors from typed inventory."""
+    """Derive endpoint stage and existential selectors from typed inventory.
+
+    When a TaskSpec supplies inventory, its generated ``required_count`` rows
+    are authoritative. Prompt parsing can find overlapping noun fragments in a
+    compound label (for example ``sofa`` and ``chair`` inside
+    ``sofa_chair``); retaining those fragments would require extra physical
+    objects that the TaskSpec never requested.
+    """
 
     payload = _task_spec_payload(task_spec)
     category_stages: dict[str, str] = {}
@@ -2802,6 +2756,12 @@ def _apply_task_spec_contract_metadata(
     result: list[dict[str, Any]] = []
     for original in constraints:
         constraint = dict(original)
+        if (
+            category_counts
+            and constraint.get("relation") == "required_count"
+            and constraint.get("source") != "task_compiler_inventory"
+        ):
+            continue
         subjects = _canonicalize_selector_to_typed_inventory(
             constraint.get("subjects"), category_counts
         )
@@ -3513,24 +3473,39 @@ def _selector_matches_object(category: str, role: str, obj: dict[str, Any]) -> b
         .lower()
         .replace("-", "_")
     )
+    base_category = _normalize_selector_category(
+        obj.get("category_norm") or obj.get("category")
+    )
+    exact_adapter_category = _matches_category_or_instance_suffix(
+        category, base_category
+    )
+    open_vocabulary_adapter_category = (
+        exact_adapter_category and not is_known_object_category(category)
+    )
     # Generated decor can retain a furniture category for retrieval, such as
     # ``dresser_mirror_tabletop``. It is still a manipuland and must not bind
     # a furniture contract endpoint solely because its parent noun appears in
     # the asset category.
-    if scene_object_type == "manipuland" and category not in MANIPULAND_CATEGORIES:
+    if (
+        scene_object_type == "manipuland"
+        and category not in MANIPULAND_CATEGORIES
+        and not open_vocabulary_adapter_category
+    ):
         return False
-    if scene_object_type == "wall_mounted" and category not in WALL_MOUNTED_CATEGORIES:
+    if (
+        scene_object_type == "wall_mounted"
+        and category not in WALL_MOUNTED_CATEGORIES
+        and not exact_adapter_category
+    ):
         return False
     if (
         scene_object_type == "ceiling_mounted"
         and category not in CEILING_MOUNTED_CATEGORIES
+        and not exact_adapter_category
     ):
         return False
     if _matches_category_or_instance_suffix(category, semantic_name):
         return _role_matches_object(role, obj)
-    base_category = _normalize_selector_category(
-        obj.get("category_norm") or obj.get("category")
-    )
     if _matches_category_or_instance_suffix(
         category, object_cat
     ) or _matches_category_or_instance_suffix(category, base_category):
@@ -3697,6 +3672,9 @@ def _selector_matches_object(category: str, role: str, obj: dict[str, Any]) -> b
             "stool",
             "bench",
         },
+        "speaker": base_category in {"speaker", "floor_speaker"}
+        or semantic_name in {"speaker", "floor_speaker"}
+        or semantic_name.endswith("_speaker"),
         "wall": base_category == "wall",
         "room": False,
     }.get(category)
@@ -3786,6 +3764,9 @@ def _relation_threshold_dependency(
     thresholds = relation_spec(str(constraint.get("relation") or "")).thresholds
     max_gap = thresholds.get("max_gap_m")
     dependency = {"max_distance_m": float(max_gap)} if max_gap is not None else {}
+    for key in ("max_angle_deg", "max_degraded_angle_deg"):
+        if key in thresholds:
+            dependency[key] = float(thresholds[key])
     if relation == "faces":
         # Prompt-level facing is directional.  Pairing/near constraints own
         # interaction distance, while a classroom desk may legitimately face

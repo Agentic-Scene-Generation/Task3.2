@@ -92,6 +92,20 @@ Rules:
 class MemoryWriter:
     """Generate typed memory candidates and promote only evidence-backed records."""
 
+    @staticmethod
+    def _normalize_update_op(raw_op: Any) -> dict[str, Any]:
+        """Normalize historical local-model NOOP payloads before validation."""
+        if not isinstance(raw_op, dict):
+            raise TypeError(
+                f"Memory update must be an object, got {type(raw_op).__name__}"
+            )
+        operation = dict(raw_op)
+        if operation.get("content") is None:
+            operation["content"] = {}
+        if operation.get("target_id") is None:
+            operation["target_id"] = ""
+        return operation
+
     def __init__(
         self,
         model: str,

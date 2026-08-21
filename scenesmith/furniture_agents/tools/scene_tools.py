@@ -10,6 +10,9 @@ from omegaconf import DictConfig
 from pydrake.all import RigidTransform, RollPitchYaw, RotationMatrix
 
 from scenesmith.agent_utils.action_logger import log_scene_action
+from scenesmith.agent_utils.furniture_layout_planning import (
+    opening_clearance_conflict_for_transform,
+)
 from scenesmith.agent_utils.room import RoomScene, SceneObject, UniqueID
 from scenesmith.furniture_agents.tools.response_dataclasses import (
     FacingCheckResult,
@@ -681,6 +684,29 @@ class SceneTools:
         # Use current position (after collision resolution and orientation).
         new_position = obj.transform.translation() + movement_vector
         new_transform = RigidTransform(R=obj.transform.rotation(), p=new_position)
+
+        opening_conflict = opening_clearance_conflict_for_transform(
+            scene=self.scene,
+            scene_obj=obj,
+            transform=new_transform,
+        )
+        if opening_conflict is not None:
+            obj.transform = RigidTransform(R=original_rotation, p=original_pos)
+            return self._create_snap_error(
+                object_id=object_id,
+                target_id=target_id,
+                error_type=FurnitureErrorType.INVALID_POSITION,
+                message=(
+                    f"Snapping {obj.name} to {target.name} would overlap hard "
+                    f"{opening_conflict.opening_type} clearance "
+                    f"{opening_conflict.zone_id} on "
+                    f"{opening_conflict.wall}_wall."
+                ),
+                suggested_action=(
+                    "Choose a different target or move both objects onto a "
+                    "continuous opening-free wall segment."
+                ),
+            )
 
         # Move object.
         self.scene.move_object(object_id=obj.object_id, new_transform=new_transform)

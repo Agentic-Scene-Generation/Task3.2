@@ -1199,8 +1199,19 @@ def _eval_face_against_wall(
     gap = bbox_gap_xy(subject, target)
     if gap is None:
         return "unknown", 0.0, "missing wall distance geometry."
+    if relation_type in {"back_against_wall", "side_or_back_against_wall"}:
+        interior_side = _is_on_wall_interior_side(subject, target)
+        if interior_side is False:
+            return (
+                "fail",
+                0.9,
+                "subject is on the exterior side of the wall rather than inside the room.",
+            )
     max_distance = _dependency_float(dependency, "max_distance_m", 0.25)
     max_angle = _dependency_float(dependency, "max_angle_deg", 45.0)
+    max_degraded_angle = _dependency_float(
+        dependency, "max_degraded_angle_deg", max_angle + 25.0
+    )
     requested_face = str(dependency.get("subject_face") or "").strip().lower()
     faces = (requested_face,) if requested_face in candidate_faces else candidate_faces
 
@@ -1221,7 +1232,7 @@ def _eval_face_against_wall(
             0.9,
             f"{best_face} face is wall-aligned: gap {gap:.2f}m, angle {best_angle:.0f}deg.",
         )
-    if gap <= max_distance and best_angle <= max_angle + 25.0:
+    if gap <= max_distance and best_angle <= max_degraded_angle:
         return (
             "degraded",
             0.72,
@@ -1230,7 +1241,7 @@ def _eval_face_against_wall(
     if (
         allow_distance_degraded
         and gap <= max_distance * 1.5
-        and best_angle <= max_angle + 25.0
+        and best_angle <= max_degraded_angle
     ):
         return (
             "degraded",
@@ -1252,6 +1263,47 @@ def _eval_face_against_wall(
         0.84,
         f"no allowed face is backed by the wall: gap {gap:.2f}m, best {best_face} angle {best_angle:.0f}deg.",
     )
+
+
+def _is_on_wall_interior_side(
+    subject: dict[str, Any], target: dict[str, Any]
+) -> bool | None:
+    """Determine whether a wall-backed object's centre is on the room side.
+
+    RoomGeometry walls conventionally carry a cardinal ID/name.  Prefer that
+    explicit direction, then retain the centred-room fallback for legacy wall
+    records.  The small tolerance allows a valid object to touch the wall plane
+    without accepting an object that has been pushed through it.
+    """
+    subject_center = bbox_center_xy(subject)
+    wall_center = bbox_center_xy(target)
+    if subject_center is None or wall_center is None:
+        return None
+
+    metadata = target.get("metadata") or {}
+    direction_text = " ".join(
+        str(value or "")
+        for value in (
+            target.get("id"),
+            target.get("name"),
+            metadata.get("wall_direction") if isinstance(metadata, dict) else "",
+        )
+    ).lower()
+    normal_axis = _wall_normal_axis(target)
+    tolerance = 0.01
+    if "north" in direction_text or "top" in direction_text:
+        return subject_center[1] <= wall_center[1] + tolerance
+    if "south" in direction_text or "bottom" in direction_text:
+        return subject_center[1] >= wall_center[1] - tolerance
+    if "east" in direction_text or "right" in direction_text:
+        return subject_center[0] <= wall_center[0] + tolerance
+    if "west" in direction_text or "left" in direction_text:
+        return subject_center[0] >= wall_center[0] - tolerance
+    if normal_axis == "x" and abs(wall_center[0]) > tolerance:
+        return (subject_center[0] - wall_center[0]) * wall_center[0] <= tolerance
+    if normal_axis == "y" and abs(wall_center[1]) > tolerance:
+        return (subject_center[1] - wall_center[1]) * wall_center[1] <= tolerance
+    return None
 
 
 def _eval_wall_contact_footprint_fallback(

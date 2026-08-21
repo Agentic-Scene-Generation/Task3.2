@@ -51,6 +51,68 @@ _OPPOSITE_HORIZONTAL_AXIS = {
     "+Y": "-Y",
     "-Y": "+Y",
 }
+_COMPONENT_EQUIVALENTS = {
+    "television": frozenset(
+        {"television", "tv", "display", "screen", "monitor", "flat_screen"}
+    ),
+}
+
+
+def _component_matches_forbidden(component: object, forbidden: list[str]) -> bool:
+    normalized = normalize_semantic_name(component)
+    if not normalized:
+        return False
+    for raw_forbidden in forbidden:
+        normalized_forbidden = normalize_semantic_name(raw_forbidden)
+        equivalents = _COMPONENT_EQUIVALENTS.get(
+            normalized_forbidden, frozenset({normalized_forbidden})
+        )
+        if normalized in equivalents:
+            return True
+    return False
+
+
+def _forbidden_candidate_ids(
+    response: dict[str, object],
+    evidence_records: list["_CandidateRenderEvidence"],
+    forbidden_components: list[str],
+) -> set[str]:
+    """Return candidates that are forbidden or lack an explicit safe assessment."""
+    if not forbidden_components:
+        return set()
+    records_by_index = {record.original_index: record for record in evidence_records}
+    records_by_id = {record.candidate.hssd_id: record for record in evidence_records}
+    rejected: set[str] = set()
+    assessed: set[str] = set()
+    assessments = response.get("candidate_assessments")
+    if not isinstance(assessments, list):
+        # A component-exclusion request may only use candidates that the VLM
+        # explicitly inspected.  Missing assessments must not bypass the guard.
+        return set(records_by_id)
+    for assessment in assessments:
+        if not isinstance(assessment, dict):
+            continue
+        record = records_by_id.get(str(assessment.get("hssd_id") or ""))
+        if record is None:
+            record = records_by_index.get(
+                _coerce_selected_index(assessment.get("index")) or -1
+            )
+        if record is None:
+            continue
+        components = assessment.get("forbidden_components")
+        component_values = components if isinstance(components, list) else []
+        contains_forbidden = assessment.get("contains_forbidden_components")
+        component_match = any(
+            _component_matches_forbidden(value, forbidden_components)
+            for value in component_values
+        )
+        if contains_forbidden is True or component_match:
+            assessed.add(record.candidate.hssd_id)
+            rejected.add(record.candidate.hssd_id)
+        elif contains_forbidden is False:
+            assessed.add(record.candidate.hssd_id)
+    rejected.update(set(records_by_id) - assessed)
+    return rejected
 
 
 def _normalized_tokens(*values: str | None) -> set[str]:
@@ -484,11 +546,17 @@ def choose_hssd_candidate_from_iso_renders(
     requested_dimensions: list[float] | tuple[float, ...] | None = None,
     requested_shape: str | None = None,
     semantic_name_candidates: list[str] | None = None,
+    forbidden_components: list[str] | None = None,
     audit_path: Path | None = None,
     retrieval_backend: str | None = None,
 ) -> RenderedAssetChoice:
     """Optionally reorder candidates using pre-rendered HSSD visual evidence."""
     fallback_semantic_name = normalize_semantic_name(object_short_name)
+    forbidden_components = [
+        normalized
+        for value in forbidden_components or []
+        if (normalized := normalize_semantic_name(value))
+    ]
     allowed_semantic_names = []
     for value in semantic_name_candidates or []:
         normalized = normalize_semantic_name(value)
@@ -496,7 +564,8 @@ def choose_hssd_candidate_from_iso_renders(
             allowed_semantic_names.append(normalized)
     if fallback_semantic_name and fallback_semantic_name not in allowed_semantic_names:
         allowed_semantic_names.append(fallback_semantic_name)
-    if top_n <= 1 or len(candidates) <= 1:
+    requires_component_assessment = bool(forbidden_components)
+    if (top_n <= 1 or len(candidates) <= 1) and not requires_component_assessment:
         _write_choice_audit(
             audit_path=audit_path,
             object_description=object_description,
@@ -513,6 +582,7 @@ def choose_hssd_candidate_from_iso_renders(
             vision_detail=vision_detail,
             status="skipped",
             retrieval_backend=retrieval_backend,
+            forbidden_components=forbidden_components,
             reason="top_n_or_candidate_count_too_small",
         )
         return RenderedAssetChoice(
@@ -520,7 +590,10 @@ def choose_hssd_candidate_from_iso_renders(
         )
 
     evidence_records: list[_CandidateRenderEvidence] = []
-    for original_index, candidate in enumerate(candidates[:top_n], start=1):
+    candidates_to_assess = (
+        candidates if requires_component_assessment else candidates[:top_n]
+    )
+    for original_index, candidate in enumerate(candidates_to_assess, start=1):
         asset_dir = rendered_assets_dir / candidate.hssd_id
         iso_path = asset_dir / "iso.png"
         if not iso_path.exists():
@@ -558,7 +631,47 @@ def choose_hssd_candidate_from_iso_renders(
             for record in evidence_records
         },
     )
-    if len(evidence_records) <= 1:
+    if requires_component_assessment and len(evidence_records) != len(candidates):
+        missing_evidence_ids = sorted(
+            candidate.hssd_id
+            for candidate in candidates
+            if candidate.hssd_id
+            not in {record.candidate.hssd_id for record in evidence_records}
+        )
+        _write_choice_audit(
+            audit_path=audit_path,
+            object_description=object_description,
+            scene_context=scene_context,
+            object_short_name=object_short_name,
+            requested_dimensions=requested_dimensions,
+            requested_shape=requested_shape,
+            candidates=candidates,
+            evidence_records=evidence_records,
+            top_n=top_n,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            verbosity=verbosity,
+            vision_detail=vision_detail,
+            status="insufficient_forbidden_component_evidence",
+            retrieval_backend=retrieval_backend,
+            forbidden_components=forbidden_components,
+            missing_evidence_candidate_ids=missing_evidence_ids,
+            used_image_count=used_image_count,
+            used_view_count=used_view_count,
+        )
+        console_logger.warning(
+            "Rejecting rendered HSSD candidates for '%s': missing visual evidence "
+            "for forbidden-component assessment",
+            object_description,
+        )
+        return RenderedAssetChoice(
+            candidates=[],
+            semantic_name=fallback_semantic_name or None,
+            reason="missing visual evidence for forbidden-component assessment",
+            used_image_count=used_image_count,
+        )
+
+    if len(evidence_records) <= 1 and not requires_component_assessment:
         _write_choice_audit(
             audit_path=audit_path,
             object_description=object_description,
@@ -575,6 +688,7 @@ def choose_hssd_candidate_from_iso_renders(
             vision_detail=vision_detail,
             status="insufficient_evidence",
             retrieval_backend=retrieval_backend,
+            forbidden_components=forbidden_components,
             used_image_count=used_image_count,
             used_view_count=used_view_count,
         )
@@ -582,7 +696,7 @@ def choose_hssd_candidate_from_iso_renders(
             "Skipping rendered HSSD choice for '%s': only %d/%d iso renders found",
             object_description,
             len(evidence_records),
-            min(top_n, len(candidates)),
+            len(candidates_to_assess),
         )
         return RenderedAssetChoice(
             candidates=candidates,
@@ -622,6 +736,11 @@ def choose_hssd_candidate_from_iso_renders(
             "Allowed semantic names (choose exactly one verbatim): "
             + json.dumps(allowed_semantic_names)
         )
+    if forbidden_components:
+        request_details.append(
+            "Forbidden bundled components (the selected mesh must not contain any): "
+            + json.dumps(forbidden_components)
+        )
     covering_guidance = (
         " For rugs, carpets, mats, and runners, near-zero visual thickness is "
         "expected and must not be penalized; prioritize semantic appearance, "
@@ -654,7 +773,13 @@ def choose_hssd_candidate_from_iso_renders(
         "material evidence; `low_material_detail` means the render is nearly "
         "monochrome and untextured, unless the request explicitly calls for that "
         "appearance." + covering_guidance + "\n"
-        'Return JSON only: {"selected_index": <index number>, '
+        "For every candidate, report whether any forbidden bundled component is "
+        "visibly present. A TV stand that already includes a television is invalid "
+        "when television is forbidden. Do not select an invalid candidate.\n"
+        'Return JSON only: {"candidate_assessments": [{"index": <index>, '
+        '"hssd_id": "<hssd_id>", "contains_forbidden_components": <boolean>, '
+        '"forbidden_components": ["<component>"]}], '
+        '"selected_index": <index number>, '
         '"selected_hssd_id": "<hssd_id>", '
         '"semantic_name": "<one allowed semantic name>", '
         '"reason": "<short reason>"}'
@@ -719,10 +844,24 @@ def choose_hssd_candidate_from_iso_renders(
             vision_detail=vision_detail,
             status="vlm_error",
             retrieval_backend=retrieval_backend,
+            forbidden_components=forbidden_components,
             used_image_count=used_image_count,
             used_view_count=used_view_count,
             error=str(exc),
         )
+        if requires_component_assessment:
+            console_logger.warning(
+                "Rejecting rendered HSSD candidates for '%s': forbidden-component "
+                "assessment failed: %s",
+                object_description,
+                exc,
+            )
+            return RenderedAssetChoice(
+                candidates=[],
+                semantic_name=fallback_semantic_name or None,
+                reason="forbidden-component assessment failed",
+                used_image_count=used_image_count,
+            )
         console_logger.warning(
             "Rendered HSSD choice failed for '%s'; keeping retrieval order: %s",
             object_description,
@@ -743,6 +882,47 @@ def choose_hssd_candidate_from_iso_renders(
         else fallback_semantic_name
     )
     reason = response_json.get("reason")
+    forbidden_ids = _forbidden_candidate_ids(
+        response_json, evidence_records, forbidden_components
+    )
+    eligible_records = [
+        record
+        for record in evidence_records
+        if record.candidate.hssd_id not in forbidden_ids
+    ]
+    if forbidden_components and not eligible_records:
+        _write_choice_audit(
+            audit_path=audit_path,
+            object_description=object_description,
+            scene_context=scene_context,
+            object_short_name=object_short_name,
+            requested_dimensions=requested_dimensions,
+            requested_shape=requested_shape,
+            candidates=candidates,
+            evidence_records=evidence_records,
+            top_n=top_n,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            verbosity=verbosity,
+            vision_detail=vision_detail,
+            status="rejected_all_forbidden_components",
+            retrieval_backend=retrieval_backend,
+            forbidden_components=forbidden_components,
+            forbidden_candidate_ids=sorted(forbidden_ids),
+            raw_response=response_text,
+            parsed_response=response_json,
+        )
+        console_logger.warning(
+            "All rendered HSSD candidates for '%s' contain forbidden components: %s",
+            object_description,
+            forbidden_components,
+        )
+        return RenderedAssetChoice(
+            candidates=[],
+            semantic_name=fallback_semantic_name or None,
+            reason="all rendered candidates contain forbidden components",
+            used_image_count=used_image_count,
+        )
 
     selected_candidate: "HssdRetrievalResult | None" = None
     if isinstance(selected_hssd_id, str) and selected_hssd_id:
@@ -764,6 +944,12 @@ def choose_hssd_candidate_from_iso_renders(
             None,
         )
 
+    if selected_candidate is None and forbidden_components and eligible_records:
+        selected_candidate = eligible_records[0].candidate
+        reason = (
+            "forbidden-component guard selected the first explicitly safe candidate"
+        )
+
     if selected_candidate is None:
         _write_choice_audit(
             audit_path=audit_path,
@@ -781,6 +967,7 @@ def choose_hssd_candidate_from_iso_renders(
             vision_detail=vision_detail,
             status="invalid_selection",
             retrieval_backend=retrieval_backend,
+            forbidden_components=forbidden_components,
             used_image_count=used_image_count,
             used_view_count=used_view_count,
             raw_response=response_text,
@@ -803,13 +990,31 @@ def choose_hssd_candidate_from_iso_renders(
             used_image_count=used_image_count,
         )
 
+    forbidden_override_used = False
+    if selected_candidate.hssd_id in forbidden_ids:
+        rejected_candidate = selected_candidate
+        selected_candidate = eligible_records[0].candidate
+        forbidden_override_used = True
+        reason = (
+            "forbidden-component guard overrode rendered choice "
+            f"{rejected_candidate.hssd_id}; selected {selected_candidate.hssd_id}"
+        )
+        console_logger.warning(
+            "Rendered HSSD choice for '%s' selected candidate %s with forbidden "
+            "components; using %s",
+            object_description,
+            rejected_candidate.hssd_id,
+            selected_candidate.hssd_id,
+        )
+
     quality_fallback_used = False
-    if quality_eligible_ids and selected_candidate.hssd_id not in quality_eligible_ids:
+    eligible_quality_ids = quality_eligible_ids - forbidden_ids
+    if eligible_quality_ids and selected_candidate.hssd_id not in eligible_quality_ids:
         rejected_candidate = selected_candidate
         selected_candidate = next(
             record.candidate
             for record in evidence_records
-            if record.candidate.hssd_id in quality_eligible_ids
+            if record.candidate.hssd_id in eligible_quality_ids
         )
         quality_fallback_used = True
         reason = (
@@ -828,6 +1033,7 @@ def choose_hssd_candidate_from_iso_renders(
         square_candidates = [
             record.candidate
             for record in evidence_records
+            if record.candidate.hssd_id not in forbidden_ids
             if _planar_aspect_ratio(record.candidate)
             <= _SQUARE_FOOTPRINT_MAX_ASPECT_RATIO
         ]
@@ -878,12 +1084,16 @@ def choose_hssd_candidate_from_iso_renders(
         reason=str(reason) if reason is not None else None,
         render_quality_by_hssd_id=render_quality_by_id,
         quality_fallback_used=quality_fallback_used,
+        forbidden_components=forbidden_components,
+        forbidden_candidate_ids=sorted(forbidden_ids),
+        forbidden_override_used=forbidden_override_used,
     )
 
     reordered = [selected_candidate] + [
         candidate
         for candidate in candidates
         if candidate.hssd_id != selected_candidate.hssd_id
+        and (not forbidden_components or candidate.hssd_id not in forbidden_ids)
     ]
     return RenderedAssetChoice(
         candidates=reordered,

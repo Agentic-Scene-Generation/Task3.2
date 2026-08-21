@@ -15,7 +15,7 @@ import time
 
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from scenesmith.agent_utils.furniture_safety import furniture_category_matches
 from scenesmith.agent_utils.scoring import compute_total_score, scores_to_dict
@@ -346,6 +346,7 @@ class StageWorkingMemory:
         result: Any = None,
         raw_response: Any = None,
         error: str = "",
+        event_kind: Literal["llm", "system"] = "llm",
     ) -> None:
         """Persist prompt/response metadata for one LLM call."""
         if not self.enabled:
@@ -359,6 +360,7 @@ class StageWorkingMemory:
             result=result,
             raw_response=raw_response,
             error=error,
+            event_kind=event_kind,
         )
         payload = record.model_dump()
         safe_name = "".join(
