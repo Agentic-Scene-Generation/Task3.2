@@ -546,6 +546,45 @@ def test_projects_llm_response_time_and_peak_input_context(tmp_path: Path) -> No
     }
 
 
+def test_classifies_deterministic_llm_stream_audit_as_system(tmp_path: Path) -> None:
+    room = tmp_path / "run_a" / "batch_001" / "scene_000" / "room_bedroom"
+    write(room / "action_log.json", "[]")
+    write(
+        room.parent / "scene_expert" / "timing" / "llm_calls.jsonl",
+        "\n".join(
+            json.dumps(record)
+            for record in (
+                {
+                    "created_at": "2026-07-28T12:00:00Z",
+                    "stage": "furniture",
+                    "agent_role": "critic",
+                    "event": "deterministic_hard_fail_short_circuit",
+                    "token_usage": {},
+                },
+                {
+                    "created_at": "2026-07-28T12:00:01Z",
+                    "stage": "furniture",
+                    "agent_role": "critic",
+                    "event": "review_layout",
+                    "token_usage": {},
+                },
+            )
+        )
+        + "\n",
+    )
+
+    payload = (
+        create_app(tmp_path)
+        .test_client()
+        .get("/api/scene", query_string={"path": str(room.relative_to(tmp_path))})
+        .get_json()
+    )
+
+    events = {event["function"]: event for event in payload["audit_events"]}
+    assert events["deterministic_hard_fail_short_circuit"]["kind"] == "system"
+    assert events["review_layout"]["kind"] == "llm"
+
+
 def test_exposes_benchmark_evaluation_and_repairs(tmp_path: Path) -> None:
     room = tmp_path / "run_a" / "batch_001" / "scene_000" / "room_bedroom"
     write(room / "action_log.json", "[]")

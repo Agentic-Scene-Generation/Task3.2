@@ -15,7 +15,7 @@ import time
 
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Literal
 
 import yaml
 
@@ -421,6 +421,7 @@ class BaseStatefulAgent(ABC):
         output: Any = "",
         result: Any = None,
         error: str = "",
+        event_kind: Literal["llm", "system"] = "llm",
     ) -> None:
         try:
             self.stage_working_memory.record_llm_call(
@@ -430,6 +431,7 @@ class BaseStatefulAgent(ABC):
                 output=output,
                 result=result,
                 error=error,
+                event_kind=event_kind,
             )
         except Exception as e:
             console_logger.warning("Failed to record LLM call debug: %s", e)
@@ -3034,6 +3036,7 @@ class BaseStatefulAgent(ABC):
                     "soft_reasons": hard_state.soft_reasons,
                 },
                 output=response.critique,
+                event_kind="system",
             )
             log_agent_response(response=response.critique, agent_name="CRITIC")
             log_critique_scores(response, title="DETERMINISTIC CRITIQUE SCORES")

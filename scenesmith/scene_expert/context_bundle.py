@@ -14,7 +14,7 @@ import math
 import time
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -87,6 +87,9 @@ class LLMCallDebugRecord(BaseModel):
     stage: str
     agent_role: str
     event: str
+    # This stream also captures deterministic audit decisions with prompt/output
+    # evidence that do not make a provider API request.
+    event_kind: Literal["llm", "system"] = "llm"
     prompt_chars: int = 0
     prompt_hash: str = ""
     prompt_excerpt: str = ""
@@ -405,6 +408,7 @@ def build_llm_call_debug_record(
     raw_response: Any = None,
     error: str = "",
     elapsed_sec: float = 0.0,
+    event_kind: Literal["llm", "system"] = "llm",
 ) -> LLMCallDebugRecord:
     prompt_text = _stringify_prompt(prompt)
     output_text = _stringify_prompt(output)
@@ -412,6 +416,7 @@ def build_llm_call_debug_record(
         stage=stage,
         agent_role=agent_role,
         event=event,
+        event_kind=event_kind,
         prompt_chars=len(prompt_text),
         prompt_hash=stable_hash(prompt_text),
         prompt_excerpt=compact_text(prompt_text, 1800),

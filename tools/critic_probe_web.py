@@ -773,6 +773,20 @@ def _llm_token_breakdown(call: dict[str, Any]) -> dict[str, int]:
     return normalize_token_usage(token_usage) if isinstance(token_usage, dict) else {}
 
 
+def _llm_audit_kind(call: dict[str, Any]) -> str:
+    """Classify provider calls separately from deterministic audit evidence."""
+    event_kind = call.get("event_kind")
+    if event_kind in {"llm", "system"}:
+        return event_kind
+
+    # v2 logs predate event_kind. A deterministic short-circuit is recorded in
+    # the shared debug stream for traceability, but does not contact an LLM.
+    event = str(call.get("event", ""))
+    if event.startswith("deterministic_") and not _llm_token_breakdown(call):
+        return "system"
+    return "llm"
+
+
 def _scene_audit_summary(events: list[dict[str, Any]]) -> dict[str, Any]:
     peaks: list[tuple[int, dict[str, Any]]] = []
     for event in events:
@@ -1059,7 +1073,7 @@ def _audit_events(room_dir: Path) -> list[dict[str, Any]]:
         events.append(
             {
                 "id": f"llm:{index}",
-                "kind": "llm",
+                "kind": _llm_audit_kind(row),
                 "source": "llm",
                 "created_at": row.get("created_at"),
                 "started_at": started_at,
