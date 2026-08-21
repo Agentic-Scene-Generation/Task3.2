@@ -1789,8 +1789,6 @@ if [ "$DRY_RUN" = "false" ]; then
         echo "WARNING: run metrics collection failed; generation artifacts are unchanged" >&2
     fi
 fi
-    fi
-fi
 if [ "$CRITIC_PROBE_RENDER_FINAL_VIEWS" = "true" ] \
     && [ "$PIPELINE_STOP_STAGE" != "manipuland" ]; then
     echo "skipping final combined-house views: pipeline stops at $PIPELINE_STOP_STAGE"
