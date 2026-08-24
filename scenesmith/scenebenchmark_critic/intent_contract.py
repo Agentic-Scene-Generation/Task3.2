@@ -39,6 +39,7 @@ from scenesmith.scenebenchmark_critic.intent_schema import (
     INTENT_COMPILER_SPEC_VERSION,
     INTENT_CONTRACT_SCHEMA_VERSION,
     canonical_selector_category,
+    migrate_intent_contract_payload,
     validate_intent_contract,
 )
 from scenesmith.scenebenchmark_critic.object_taxonomy import OBJECT_CATEGORY_PHRASES
@@ -269,7 +270,7 @@ def build_intent_contract(
     constraints = _apply_task_spec_contract_metadata(constraints, task_spec)
     constraints = _deduplicate_constraints(constraints)
     warnings = _task_spec_inventory_conflict_warnings(prompt_inventory, task_inventory)
-    return {
+    contract = {
         "schema_version": SCHEMA_VERSION,
         "prompt": normalized_prompt,
         "prompt_sha256": hashlib.sha256(normalized_prompt.encode("utf-8")).hexdigest(),
@@ -279,6 +280,122 @@ def build_intent_contract(
         "warnings": warnings,
         "constraints": constraints,
     }
+    return ensure_coverage_requirements(contract, task_spec=task_spec)
+
+
+def ensure_coverage_requirements(
+    contract: dict[str, Any], *, task_spec: Any | None = None
+) -> dict[str, Any]:
+    """Add deterministic audit rows without changing relation semantics.
+
+    Coverage is intentionally conservative: only explicit architectural or
+    functional-zone wording and explicit containment/overflow wording become
+    rows.  Generic style and layout prose remains outside critic scope.
+    """
+
+    result = migrate_intent_contract_payload(dict(contract))
+    prompt = " ".join(str(result.get("prompt") or "").split())
+    rows = [
+        row
+        for row in result.get("coverage_requirements") or []
+        if isinstance(row, dict)
+    ]
+    existing_ids = {str(row.get("requirement_id") or "") for row in rows}
+
+    def add_row(
+        *,
+        kind: str,
+        normalized: str,
+        evidence_span: str,
+        source: str = "explicit_prompt",
+        earliest_stage: str = "floor_plan",
+        final_stage: str = "final",
+        relation: str = "",
+    ) -> None:
+        normalized_value = "_".join(str(normalized).strip().lower().split())
+        evidence = " ".join(str(evidence_span or "").split())
+        digest = hashlib.sha1(
+            "|".join((kind, normalized_value, source, evidence)).encode("utf-8")
+        ).hexdigest()[:12]
+        requirement_id = f"coverage_{digest}"
+        if requirement_id in existing_ids:
+            return
+        rows.append(
+            {
+                "requirement_id": requirement_id,
+                "kind": kind,
+                "normalized": normalized_value,
+                "earliest_stage": earliest_stage,
+                "final_stage": final_stage,
+                "source": source,
+                "evidence_span": evidence,
+                "relation": relation,
+            }
+        )
+        existing_ids.add(requirement_id)
+
+    for match in re.finditer(r"\bwalk[- ]in\s+closet\b", prompt, re.IGNORECASE):
+        add_row(
+            kind="functional_zone",
+            normalized="walk_in_closet",
+            evidence_span=match.group(0),
+        )
+
+    task_payload = _task_spec_payload(task_spec)
+    for value in task_payload.get("required_architectural_features") or []:
+        text = " ".join(str(value or "").split())
+        if text:
+            add_row(
+                kind="architectural_feature",
+                normalized=text,
+                evidence_span=text,
+                source="task_spec_architectural_feature",
+            )
+    for value in task_payload.get("functional_zones") or []:
+        text = " ".join(str(value or "").replace("_", " ").split())
+        normalized = text.casefold()
+        if text and any(
+            token in normalized for token in ("closet", "enclos", "partition")
+        ):
+            add_row(
+                kind="functional_zone",
+                normalized=text,
+                evidence_span=text,
+                source="task_spec_functional_zone",
+            )
+
+    unsupported_patterns = (
+        r"\b(?:a|an|the)\s+[a-z0-9_-]+"
+        r"(?:\s+(?!(?:with|a|an|the)\b)[a-z0-9_-]+){0,4}\s+"
+        r"overflowing\s+with\s+[^.;!?]+",
+        r"\b(?:a|an|the)\s+[a-z0-9_-]+"
+        r"(?:\s+(?!(?:with|a|an|the)\b)[a-z0-9_-]+){0,4}\s+"
+        r"(?:contained|stored|stacked)\s+(?:in|inside)\s+[^.;!?]+",
+        r"\b(?:inside|within)\s+(?:the|a|an)\s+[^.;!?]+",
+    )
+    relation_rows = result.get("constraints") or []
+    relation_evidence = " ".join(
+        str(row.get("evidence_span") or "")
+        for row in relation_rows
+        if isinstance(row, dict)
+    ).casefold()
+    for pattern in unsupported_patterns:
+        for match in re.finditer(pattern, prompt, re.IGNORECASE):
+            evidence = " ".join(match.group(0).split())
+            if evidence.casefold() in relation_evidence:
+                continue
+            add_row(
+                kind="unsupported_relation",
+                normalized="containment",
+                evidence_span=evidence,
+                earliest_stage="manipuland",
+                relation="contains",
+            )
+
+    result["schema_version"] = INTENT_CONTRACT_SCHEMA_VERSION
+    result["intent_compiler_spec_version"] = INTENT_COMPILER_SPEC_VERSION
+    result["coverage_requirements"] = rows
+    return result
 
 
 def _normalize_group_required_counts(
@@ -430,6 +547,7 @@ def attach_intent_contract_to_case_pack(
     if cached.get("schema_version") == "scenesmith.intent_contract.v4":
         cached = dict(cached)
         cached["schema_version"] = SCHEMA_VERSION
+    cached = migrate_intent_contract_payload(cached)
     if cached.get("schema_version") != SCHEMA_VERSION:
         raise ValueError(
             "furniture checkpoint requires a compatible intent contract; "
@@ -508,6 +626,7 @@ def selected_ids(
         str(obj["id"])
         for obj in object_rows
         if _selector_matches_object(category, role, obj)
+        and _selector_context_matches(selector, obj)
     ]
     if not ids:
         # Rendered asset retrieval can preserve only a broad semantic label
@@ -519,8 +638,80 @@ def selected_ids(
             str(obj["id"])
             for obj in object_rows
             if _selector_matches_generic_fallback(category, role, obj)
+            and _selector_context_matches(selector, obj)
         ]
     return sorted(dict.fromkeys(ids))
+
+
+def _selector_context_matches(selector: dict[str, Any], obj: dict[str, Any]) -> bool:
+    """Apply stage/cohort/support/capability qualifiers after taxonomy matching."""
+    hints = (
+        obj.get("functional_hints")
+        if isinstance(obj.get("functional_hints"), dict)
+        else {}
+    )
+    metadata = obj.get("metadata") if isinstance(obj.get("metadata"), dict) else {}
+    expected_stage = str(selector.get("stage") or "").strip().lower().replace("-", "_")
+    if expected_stage:
+        object_type = (
+            str(obj.get("object_type") or hints.get("scene_object_type") or "")
+            .lower()
+            .replace("-", "_")
+        )
+        if object_type and object_type != expected_stage:
+            return False
+    expected_cohort = str(selector.get("cohort") or "").strip().lower()
+    if expected_cohort:
+        observed_cohort = (
+            str(
+                metadata.get("prompt_cohort")
+                or metadata.get("cohort")
+                or hints.get("prompt_cohort")
+                or hints.get("cohort")
+                or ""
+            )
+            .strip()
+            .lower()
+        )
+        if observed_cohort and observed_cohort != expected_cohort:
+            return False
+    expected_support = str(
+        selector.get("support_target") or selector.get("support_target_id") or ""
+    ).strip()
+    if expected_support:
+        placement = (
+            obj.get("placement_info")
+            if isinstance(obj.get("placement_info"), dict)
+            else {}
+        )
+        observed_support = str(
+            placement.get("parent_surface_id")
+            or metadata.get("support_target_id")
+            or metadata.get("support_target")
+            or hints.get("support_target_id")
+            or ""
+        ).strip()
+        if observed_support != expected_support:
+            return False
+    capabilities = (
+        selector.get("capabilities") or selector.get("required_capabilities") or []
+    )
+    if isinstance(capabilities, str):
+        capabilities = [capabilities]
+    if capabilities:
+        declared = {
+            str(value or "").strip().lower().replace("-", "_")
+            for key in ("functional_categories", "candidate_affordances", "affordances")
+            for value in (hints.get(key) or [])
+            if str(value or "").strip()
+        }
+        if hints.get("is_media_target"):
+            declared.add("media_target")
+        if not {
+            str(value or "").strip().lower().replace("-", "_") for value in capabilities
+        }.issubset(declared):
+            return False
+    return True
 
 
 def selector_match_count(
@@ -1212,6 +1403,12 @@ def _selector_category_family(category: str) -> set[str]:
             "desk",
         },
         "desk": {"desk", "teacher_desk", "student_desk", "reception_desk"},
+        "wall_light": {"wall_light", "wall_lamp", "wall_sconce", "sconce"},
+        "clock": {"clock", "alarm_clock", "bedside_clock"},
+        "cup": {"cup", "cup_of_tea", "tea_cup"},
+        "sculpture": {"sculpture", "wood_sculpture", "stone_sculpture"},
+        "tray": {"tray", "serving_tray", "cafeteria_tray"},
+        "glass": {"glass", "glass_bowl", "wine_glass", "drinking_glass"},
     }
     if category in families:
         return families[category]
@@ -2383,10 +2580,11 @@ def _explicit_required_count_constraints(prompt: str) -> list[dict[str, Any]]:
         filtered_candidates.append(candidate)
 
     for category, count, evidence in filtered_candidates:
+        quantifier = _prompt_count_quantifier(evidence)
         constraints.append(
             _constraint(
                 "required_count",
-                {"category": category, "count": count, "quantifier": "at_least"},
+                {"category": category, "count": count, "quantifier": quantifier},
                 None,
                 source="explicit_prompt",
                 evidence_span=evidence,
@@ -2493,6 +2691,17 @@ def _explicit_required_count_constraints(prompt: str) -> list[dict[str, Any]]:
                 )
             )
     return constraints
+
+
+def _prompt_count_quantifier(evidence: str) -> str:
+    """Return an exact bound only when prompt wording explicitly requires it."""
+    text = " ".join(str(evidence or "").lower().split())
+    if re.search(
+        r"\b(?:exactly|precisely|only|no\s+more\s+than|at\s+most|a\s+total\s+of)\b",
+        text,
+    ):
+        return "exactly"
+    return "at_least"
 
 
 def _room_ontology_constraints(
@@ -2675,11 +2884,10 @@ def _task_spec_inventory_constraints(task_spec: Any | None) -> list[dict[str, An
             {
                 "category": category,
                 "count": count,
-                "quantifier": (
-                    "at_least"
-                    if category in _NON_ATOMIC_INVENTORY_CATEGORIES
-                    else "exactly"
-                ),
+                # TaskSpec inventory records coverage, not an exact upper
+                # bound. Explicit prompt wording is reduced separately and
+                # wins conflicts in _deduplicate_constraints().
+                "quantifier": "at_least",
             },
             None,
             source="task_compiler_inventory",
@@ -2710,7 +2918,7 @@ def _task_spec_inventory_conflict_warnings(
             warnings.append(
                 "Inventory count conflict for "
                 f"{category}: prompt={prompt_count}, SceneTaskSpec={task_count}; "
-                "SceneTaskSpec is authoritative"
+                "explicit prompt cardinality wins; inventory remains a minimum"
             )
     return warnings
 
@@ -2756,12 +2964,8 @@ def _apply_task_spec_contract_metadata(
     result: list[dict[str, Any]] = []
     for original in constraints:
         constraint = dict(original)
-        if (
-            category_counts
-            and constraint.get("relation") == "required_count"
-            and constraint.get("source") != "task_compiler_inventory"
-        ):
-            continue
+        # Keep explicit prompt rows. Their evidence and quantifier are merged
+        # with inventory coverage after typed selector normalization.
         subjects = _canonicalize_selector_to_typed_inventory(
             constraint.get("subjects"), category_counts
         )
@@ -3133,6 +3337,24 @@ def _normalize_selector(value: Any) -> dict[str, Any] | None:
         secondary_count = value.get("secondary_count")
         if isinstance(secondary_count, (int, float)) and int(secondary_count) > 0:
             normalized["secondary_count"] = int(secondary_count)
+    raw_selector = value
+    for field in ("cohort", "support_target", "support_target_id", "stage"):
+        context_value = raw_selector.get(field)
+        if context_value:
+            normalized[field] = "_".join(str(context_value).strip().lower().split())
+    capabilities = raw_selector.get("capabilities")
+    if capabilities is None:
+        capabilities = raw_selector.get("required_capabilities")
+    if capabilities:
+        if isinstance(capabilities, str):
+            capabilities = [capabilities]
+        normalized["capabilities"] = sorted(
+            {
+                "_".join(str(item).strip().lower().split())
+                for item in capabilities
+                if str(item).strip()
+            }
+        )
     return normalized
 
 
@@ -3226,42 +3448,81 @@ def _constraint(
     return result
 
 
+def _merge_provenance_text(*values: Any) -> str:
+    """Join source explanations without losing conflict provenance."""
+    parts: list[str] = []
+    for value in values:
+        text = " ".join(str(value or "").split())
+        if text and text not in parts:
+            parts.append(text)
+    return " | ".join(parts)
+
+
 def _deduplicate_constraints(constraints: list[dict[str, Any]]) -> list[dict[str, Any]]:
     priority = {
-        "task_compiler_inventory": 0,
-        "explicit_prompt": 1,
+        "explicit_prompt": 0,
         "room_ontology": 2,
         "model_inferred": 3,
-        "vlm_observation": 4,
+        "task_compiler_inventory": 4,
+        "vlm_observation": 5,
     }
     keyed: dict[tuple[str, str, str, str, str, str], dict[str, Any]] = {}
-    required_by_category: dict[str, dict[str, Any]] = {}
+    required_by_category: dict[tuple[str, str], dict[str, Any]] = {}
     for constraint in constraints:
         relation = str(constraint.get("relation") or "")
         subjects = _normalize_selector(constraint.get("subjects")) or {}
         targets = _normalize_selector(constraint.get("targets")) or {}
         if relation == "required_count":
             category = str(subjects.get("category") or "")
-            previous = required_by_category.get(category)
+            role = str(subjects.get("role") or "")
+            key = (category, role)
+            previous = required_by_category.get(key)
             if previous is None:
-                required_by_category[category] = constraint
+                required_by_category[key] = constraint
             else:
                 previous_source = str(previous.get("source") or "")
                 current_source = str(constraint.get("source") or "")
                 previous_count = int((previous.get("subjects") or {}).get("count") or 0)
                 current_count = int(subjects.get("count") or 0)
-                if current_source == "task_compiler_inventory" or (
-                    previous_source != "task_compiler_inventory"
-                    and (
-                        current_count > previous_count
-                        or (
-                            current_count == previous_count
-                            and priority.get(current_source, 9)
-                            < priority.get(previous_source, 9)
-                        )
-                    )
+                previous_quantifier = str(
+                    (previous.get("subjects") or {}).get("quantifier") or "at_least"
+                )
+                current_quantifier = str(subjects.get("quantifier") or "at_least")
+                previous_exact = previous_quantifier == "exactly"
+                current_exact = current_quantifier == "exactly"
+                # Explicit prompt evidence owns an exact bound. Otherwise
+                # merge lower bounds so inventory cannot turn a natural plural
+                # into an exact upper bound or override an explicit number.
+                if (
+                    current_source == "explicit_prompt"
+                    and previous_source != "explicit_prompt"
                 ):
-                    required_by_category[category] = constraint
+                    required_by_category[key] = constraint
+                elif (
+                    previous_source == "explicit_prompt"
+                    and current_source != "explicit_prompt"
+                ):
+                    if current_count > previous_count and not previous_exact:
+                        merged = dict(previous)
+                        merged_subjects = dict(merged.get("subjects") or {})
+                        merged_subjects["count"] = current_count
+                        merged_subjects["quantifier"] = "at_least"
+                        merged["subjects"] = merged_subjects
+                        merged["inference_reason"] = _merge_provenance_text(
+                            merged.get("inference_reason"),
+                            constraint.get("inference_reason"),
+                        )
+                        required_by_category[key] = merged
+                elif current_exact and not previous_exact:
+                    required_by_category[key] = constraint
+                elif not current_exact and previous_exact:
+                    pass
+                elif current_count > previous_count:
+                    required_by_category[key] = constraint
+                elif current_count == previous_count and priority.get(
+                    current_source, 9
+                ) < priority.get(previous_source, 9):
+                    required_by_category[key] = constraint
             continue
         key = (
             relation,
@@ -3276,8 +3537,8 @@ def _deduplicate_constraints(constraints: list[dict[str, Any]]) -> list[dict[str
             str(constraint.get("source")), 9
         ) < priority.get(str(previous.get("source")), 9):
             keyed[key] = constraint
-    for category, constraint in required_by_category.items():
-        keyed[("required_count", category, "", "", "", "")] = constraint
+    for (category, role), constraint in required_by_category.items():
+        keyed[("required_count", category, role, "", "", "")] = constraint
     return sorted(
         keyed.values(),
         key=lambda item: (str(item.get("relation")), str(item.get("constraint_id"))),
@@ -3558,6 +3819,16 @@ def _selector_matches_object(category: str, role: str, obj: dict[str, Any]) -> b
     composite_identity = " ".join(
         value for value in (identity, container_identity, fill_identity) if value
     )
+    declared_capabilities = {
+        str(value or "").strip().lower().replace("-", "_")
+        for key in ("functional_categories", "candidate_affordances", "affordances")
+        for value in (hints.get(key) or [])
+        if str(value or "").strip()
+    }
+    if category in {"television", "monitor", "instructional_surface"} and (
+        bool(hints.get("is_media_target")) or "media" in declared_capabilities
+    ):
+        return _role_matches_object(role, obj)
     is_filled_floral_vase = (
         composite_type in {"filled_container", "filled_vase"}
         and "vase" in composite_identity
@@ -3675,6 +3946,27 @@ def _selector_matches_object(category: str, role: str, obj: dict[str, Any]) -> b
         "speaker": base_category in {"speaker", "floor_speaker"}
         or semantic_name in {"speaker", "floor_speaker"}
         or semantic_name.endswith("_speaker"),
+        "wall_light": base_category
+        in {"wall_light", "wall_lamp", "wall_sconce", "sconce"}
+        or semantic_name in {"wall_light", "wall_lamp", "wall_sconce", "sconce"}
+        or "wall light" in identity
+        or "wall lamp" in identity
+        or "sconce" in identity,
+        "tray": base_category in {"tray", "serving_tray", "cafeteria_tray"}
+        or semantic_name in {"tray", "serving_tray", "cafeteria_tray"}
+        or re.search(r"\b(?:serving|cafeteria)?\s*tray\b", identity) is not None,
+        "clock": base_category in {"clock", "alarm_clock", "bedside_clock"}
+        or semantic_name in {"clock", "alarm_clock", "bedside_clock"}
+        or re.search(r"\b(?:bedside|alarm|mantel)?\s*clock\b", identity) is not None,
+        "cup": base_category in {"cup", "cup_of_tea", "tea_cup"}
+        or semantic_name in {"cup", "cup_of_tea", "tea_cup"}
+        or re.search(r"\b(?:cup|tea cup)\b", identity) is not None,
+        "recliner": base_category in {"recliner", "armchair"}
+        or semantic_name in {"recliner", "armchair"}
+        or "recliner" in identity,
+        "sculpture": base_category in {"sculpture", "wood_sculpture", "stone_sculpture"}
+        or semantic_name in {"sculpture", "wood_sculpture", "stone_sculpture"}
+        or re.search(r"\b(?:wood|stone|metal)?\s*sculpture\b", identity) is not None,
         "wall": base_category == "wall",
         "room": False,
     }.get(category)

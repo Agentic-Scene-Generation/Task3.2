@@ -26,8 +26,10 @@ from scenesmith.scenebenchmark_critic.intent_schema import (
     validate_intent_contract,
 )
 from scenesmith.scenebenchmark_critic.intent_contract import (
+    HARD_SOURCES,
     _apply_task_spec_contract_metadata,
     build_intent_contract,
+    ensure_coverage_requirements,
 )
 from scenesmith.scenebenchmark_critic.relation_registry import (
     RELATION_REGISTRY,
@@ -102,7 +104,7 @@ def _validate_contract_completeness(
             if category and category not in _LEGAL_ENVIRONMENT_ANCHORS:
                 expected_counts[category] = expected_counts.get(category, 0) + 1
 
-    count_rows: dict[str, dict[str, Any]] = {}
+    count_rows: dict[str, list[dict[str, Any]]] = {}
     constraints = contract.get("constraints")
     if not isinstance(constraints, list):
         raise IncompleteIntentContractError("contract constraints must be a list")
@@ -116,22 +118,34 @@ def _validate_contract_completeness(
         category = canonical_selector_category(
             (row.get("subjects") or {}).get("category")
         )
-        count_rows[category] = row
+        count_rows.setdefault(category, []).append(row)
 
     for category, expected_count in expected_counts.items():
-        row = count_rows.get(category)
-        if row is None:
+        rows = count_rows.get(category, [])
+        if not rows:
             raise IncompleteIntentContractError(
                 f"missing authoritative required_count for {category!r}"
             )
-        actual_count = int((row.get("subjects") or {}).get("count") or 0)
-        if actual_count != expected_count:
+        # TaskSpec inventory is a minimum coverage obligation.  A validated
+        # explicit prompt row may intentionally win a conflicting inventory
+        # count (for example, ``exactly two bowls`` versus an inferred list of
+        # three).  Keep the exact prompt cardinality instead of rejecting the
+        # whole LLM attempt and consuming the retry response.
+        accepted = False
+        for row in rows:
+            subjects = row.get("subjects") or {}
+            actual_count = int(subjects.get("count") or 0)
+            source = str(row.get("source") or "")
+            if source == "explicit_prompt":
+                accepted = actual_count > 0
+                if accepted:
+                    break
+            elif actual_count == expected_count and source in HARD_SOURCES:
+                accepted = True
+                break
+        if not accepted:
             raise IncompleteIntentContractError(
-                f"required_count for {category!r} is {actual_count}, expected {expected_count}"
-            )
-        if row.get("source") != "task_compiler_inventory":
-            raise IncompleteIntentContractError(
-                f"required_count for {category!r} lacks task_compiler_inventory provenance"
+                f"required_count for {category!r} has no accepted count for expected {expected_count}"
             )
 
     resolvable = set(count_rows) | set(_LEGAL_ENVIRONMENT_ANCHORS)
@@ -1522,6 +1536,9 @@ class IntentCompiler:
                 # coverage requirement rather than an exact physical count.
                 result["constraints"] = _apply_task_spec_contract_metadata(
                     list(result.get("constraints") or []), normalized_task_spec
+                )
+                result = ensure_coverage_requirements(
+                    result, task_spec=normalized_task_spec
                 )
                 result = validate_intent_contract(result)
                 result["warnings"] = _merge_warnings(

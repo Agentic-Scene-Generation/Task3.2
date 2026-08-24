@@ -1,4 +1,4 @@
-"""Typed v5 schema for the independent SceneBenchmark intent contract.
+"""Typed schema for the independent SceneBenchmark intent contract.
 
 The contract is deliberately separate from :class:`SceneTaskSpec`.  The task
 compiler describes inventory and stage ownership; this module describes hard
@@ -36,6 +36,7 @@ _GENERIC_SELECTOR_FAMILIES = {
             "student_chair",
             "dining_chair",
             "armchair",
+            "recliner",
             "stool",
         }
     ),
@@ -54,6 +55,11 @@ _GENERIC_SELECTOR_FAMILIES = {
     "plant": frozenset({"plant", "large_plant", "potted_plant"}),
     "sofa": frozenset({"sofa", "two_seater_sofa", "loveseat", "sectional_sofa"}),
     "speaker": frozenset({"speaker", "floor_speaker"}),
+    "wall_light": frozenset({"wall_light", "wall_lamp", "wall_sconce", "sconce"}),
+    "clock": frozenset({"clock", "alarm_clock", "bedside_clock"}),
+    "cup": frozenset({"cup", "cup_of_tea", "tea_cup"}),
+    "sculpture": frozenset({"sculpture", "wood_sculpture", "stone_sculpture"}),
+    "tray": frozenset({"tray", "serving_tray", "cafeteria_tray"}),
 }
 
 
@@ -77,8 +83,9 @@ def selector_categories_overlap(first: str, second: str) -> bool:
 _selector_categories_overlap = selector_categories_overlap
 
 
-INTENT_CONTRACT_SCHEMA_VERSION = "scenesmith.intent_contract.v5"
-INTENT_COMPILER_SPEC_VERSION = "scenesmith.intent_compiler.v14"
+LEGACY_INTENT_CONTRACT_SCHEMA_VERSIONS = frozenset({"scenesmith.intent_contract.v5"})
+INTENT_CONTRACT_SCHEMA_VERSION = "scenesmith.intent_contract.v6"
+INTENT_COMPILER_SPEC_VERSION = "scenesmith.intent_compiler.v15"
 
 _WALL_QUALIFIED_DIRECTION_PATTERN = re.compile(
     r"(?P<subject>[^,.;!?]{1,100}?)\s+against\s+"
@@ -134,6 +141,10 @@ class IntentSelector(BaseModel):
     secondary_category: str = ""
     secondary_count: int | None = Field(default=None, ge=1)
     secondary_role: str = ""
+    cohort: str = ""
+    support_target: str = ""
+    stage: str = ""
+    capabilities: list[str] = Field(default_factory=list)
 
     @field_validator("category", "secondary_category", mode="before")
     @classmethod
@@ -144,6 +155,45 @@ class IntentSelector(BaseModel):
     @classmethod
     def _normalize_role(cls, value: Any) -> str:
         return "_".join(str(value or "").strip().lower().split())
+
+    @field_validator("cohort", "support_target", "stage", mode="before")
+    @classmethod
+    def _normalize_context(cls, value: Any) -> str:
+        return "_".join(str(value or "").strip().lower().split())
+
+    @field_validator("capabilities", mode="before")
+    @classmethod
+    def _normalize_capabilities(cls, value: Any) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            value = [value]
+        return sorted(
+            {
+                "_".join(str(item or "").strip().lower().split())
+                for item in value
+                if str(item or "").strip()
+            }
+        )
+
+
+class CoverageRequirement(BaseModel):
+    """Typed audit row for an explicit requirement outside relation syntax."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    requirement_id: str = Field(min_length=1)
+    kind: Literal[
+        "functional_zone",
+        "architectural_feature",
+        "unsupported_relation",
+    ]
+    normalized: str = Field(min_length=1)
+    earliest_stage: str = "floor_plan"
+    final_stage: str = "final"
+    source: str = "explicit_prompt"
+    evidence_span: str = ""
+    relation: str = ""
 
 
 class EdgeDistributionGroup(BaseModel):
@@ -314,6 +364,7 @@ class IntentContract(BaseModel):
     intent_compiler_spec_version: str = INTENT_COMPILER_SPEC_VERSION
     room_type: str = ""
     constraints: list[IntentRelation] = Field(default_factory=list)
+    coverage_requirements: list[CoverageRequirement] = Field(default_factory=list)
     retry_count: int = Field(default=0, ge=0, le=1)
     warnings: list[str] = Field(default_factory=list)
 
@@ -430,7 +481,8 @@ class IntentContract(BaseModel):
 def validate_intent_contract(payload: dict[str, Any]) -> dict[str, Any]:
     """Validate and normalize a wire payload, returning JSON-compatible data."""
 
-    contract = IntentContract.model_validate(payload)
+    normalized_payload = migrate_intent_contract_payload(payload)
+    contract = IntentContract.model_validate(normalized_payload)
     result = contract.model_dump(mode="json", exclude_none=True)
     constraints = result.get("constraints") or []
     seen: dict[str, int] = {}
@@ -476,6 +528,24 @@ def validate_intent_contract(payload: dict[str, Any]) -> dict[str, Any]:
         constraint["constraint_id"] = (
             f"intent_{digest}" if occurrence == 1 else f"intent_{digest}_{occurrence}"
         )
+    return result
+
+
+def migrate_intent_contract_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Upgrade a v5 payload while keeping optional coverage additive.
+
+    Checkpoints created before coverage auditing remain valid.  The migration
+    deliberately does not infer requirements from an old payload because the
+    original prompt is the only authoritative source for a new coverage row.
+    """
+
+    if not isinstance(payload, dict):
+        raise TypeError("intent contract payload must be an object")
+    result = dict(payload)
+    version = str(result.get("schema_version") or "")
+    if version in LEGACY_INTENT_CONTRACT_SCHEMA_VERSIONS:
+        result["schema_version"] = INTENT_CONTRACT_SCHEMA_VERSION
+        result.setdefault("coverage_requirements", [])
     return result
 
 

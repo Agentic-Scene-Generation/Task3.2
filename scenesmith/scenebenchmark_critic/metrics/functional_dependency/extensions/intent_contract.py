@@ -45,6 +45,13 @@ from scenesmith.scenebenchmark_critic.metrics.functional_dependency.seat_surface
     assign_work_seats_to_surfaces,
     room_bounds_from_case_pack,
 )
+from scenesmith.scenebenchmark_critic.metrics.functional_dependency.profiles import (
+    object_function_profile,
+)
+from scenesmith.scenebenchmark_critic.metrics.functional_dependency.support_scoring import (
+    build_support_surface_candidates,
+)
+from scenesmith.scenebenchmark_critic.object_taxonomy import generation_owner
 
 
 _ENTRANCE_CATEGORIES = frozenset({"door", "entrance", "entry"})
@@ -81,11 +88,16 @@ def evaluate_intent_contract_extensions(
         if isinstance(item, dict) and item.get("id")
     ]
     results: list[dict[str, Any]] = []
+    results.extend(_evaluate_coverage_requirements(case_pack, objects))
     for constraint in contract_constraints(case_pack):
         relation = str(constraint.get("relation") or "")
         if relation == "edge_distribution":
             # The dedicated edge evaluator owns complete subject binding and
             # slot assignment.  It must run before generic relation binding.
+            continue
+        readiness = _evaluate_support_readiness(case_pack, constraint, objects)
+        if readiness:
+            results.extend(readiness)
             continue
         binding_result = _binding_state_result(case_pack, constraint, objects)
         if binding_result is not None:
@@ -97,6 +109,311 @@ def evaluate_intent_contract_extensions(
         result = evaluator(constraint, geometry, objects, case_pack, "core")
         if result is not None:
             results.extend(result if isinstance(result, list) else [result])
+    return results
+
+
+def _evaluate_coverage_requirements(
+    case_pack: dict[str, Any], objects: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Evaluate explicit requirements that have no pairwise relation evaluator."""
+
+    contract = case_pack.get("intent_contract") or {}
+    requirements = contract.get("coverage_requirements") or []
+    if not isinstance(requirements, list):
+        return []
+    stage = _normalized_stage(str(case_pack.get("stage") or "adhoc"))
+    geometry = case_pack.get("scene_geometry") or {}
+    results: list[dict[str, Any]] = []
+    for requirement in requirements:
+        if not isinstance(requirement, dict) or not requirement.get("requirement_id"):
+            continue
+        kind = str(requirement.get("kind") or "")
+        normalized = str(requirement.get("normalized") or "")
+        earliest = str(requirement.get("earliest_stage") or "floor_plan")
+        if earliest not in STAGE_ORDER:
+            earliest = "floor_plan"
+        synthetic = dict(requirement)
+        synthetic["constraint_id"] = str(requirement["requirement_id"])
+        synthetic["relation"] = f"coverage_{kind}"
+        if STAGE_ORDER.index(stage) < STAGE_ORDER.index(earliest):
+            results.append(
+                _result(
+                    synthetic,
+                    suffix="pending",
+                    label="unknown",
+                    primary=str(requirement["requirement_id"]),
+                    related=[],
+                    relation_type="coverage",
+                    tier="auxiliary",
+                    contract_state="pending",
+                    reason=(
+                        f"Coverage requirement `{normalized}` is pending until "
+                        f"stage `{earliest}`; it is not treated as a pass."
+                    ),
+                    diagnostics={
+                        "coverage_status": "pending",
+                        "requirement_id": str(requirement["requirement_id"]),
+                        "kind": kind,
+                        "normalized": normalized,
+                        "current_stage": stage,
+                        "earliest_stage": earliest,
+                        "evidence_span": str(requirement.get("evidence_span") or ""),
+                    },
+                )
+            )
+            continue
+
+        if kind == "unsupported_relation":
+            results.append(
+                _result(
+                    synthetic,
+                    suffix="unsupported",
+                    label="degraded",
+                    primary=str(requirement["requirement_id"]),
+                    related=[],
+                    relation_type="coverage",
+                    tier="core",
+                    contract_state="degraded",
+                    reason=(
+                        f"Explicit requirement `{normalized}` is visible in the prompt, "
+                        "but no deterministic critic evaluator is registered for it."
+                    ),
+                    diagnostics={
+                        "coverage_status": "degraded",
+                        "requirement_id": str(requirement["requirement_id"]),
+                        "kind": kind,
+                        "normalized": normalized,
+                        "current_stage": stage,
+                        "evidence_span": str(requirement.get("evidence_span") or ""),
+                        "evidence_refs": ["original_prompt"],
+                    },
+                )
+            )
+            continue
+
+        evidence_state, evidence = _functional_requirement_evidence(
+            requirement, geometry, objects
+        )
+        if evidence_state == "unknown":
+            label, tier, state = "unknown", "auxiliary", "unknown"
+            reason = (
+                f"Coverage for `{normalized}` is unknown because structural scene "
+                "evidence is unavailable."
+            )
+        elif evidence_state == "pass":
+            label, tier, state = "pass", "core", "evaluated"
+            reason = (
+                f"Structural evidence confirms explicit requirement `{normalized}`."
+            )
+        else:
+            label, tier, state = "fail", "core", "evaluated"
+            reason = (
+                f"Structural evidence does not confirm explicit requirement `{normalized}`; "
+                "furniture clustering is insufficient evidence."
+            )
+        results.append(
+            _result(
+                synthetic,
+                suffix="evaluated",
+                label=label,
+                primary=str(requirement["requirement_id"]),
+                related=[],
+                relation_type="coverage",
+                tier=tier,
+                contract_state=state,
+                reason=reason,
+                diagnostics={
+                    "coverage_status": evidence_state,
+                    "requirement_id": str(requirement["requirement_id"]),
+                    "kind": kind,
+                    "normalized": normalized,
+                    "current_stage": stage,
+                    "evidence_span": str(requirement.get("evidence_span") or ""),
+                    "evidence_refs": evidence.get("evidence_refs") or [],
+                    "matched_room_ids": evidence.get("matched_room_ids") or [],
+                    "matched_object_ids": evidence.get("matched_object_ids") or [],
+                },
+            )
+        )
+    return results
+
+
+def _functional_requirement_evidence(
+    requirement: dict[str, Any],
+    geometry: dict[str, Any],
+    objects: list[dict[str, Any]],
+) -> tuple[str, dict[str, Any]]:
+    """Return pass/fail/unknown using room or architectural evidence only."""
+
+    if not isinstance(geometry, dict) or not geometry:
+        return "unknown", {}
+    rooms = [row for row in geometry.get("rooms") or [] if isinstance(row, dict)]
+    if not rooms and not objects:
+        return "unknown", {}
+    normalized = " ".join(
+        str(requirement.get("normalized") or "").replace("_", " ").split()
+    ).casefold()
+    matched_room_ids: list[str] = []
+    matched_object_ids: list[str] = []
+    for room in rooms:
+        room_text = (
+            " ".join(
+                str(room.get(field) or "")
+                for field in ("id", "room_id", "room_type", "type", "functional_zone")
+            )
+            .replace("_", " ")
+            .casefold()
+        )
+        zones = " ".join(
+            str(value or "") for value in room.get("functional_zones") or []
+        )
+        room_text = f"{room_text} {zones.replace('_', ' ').casefold()}"
+        if normalized and normalized in room_text:
+            matched_room_ids.append(str(room.get("id") or room.get("room_id") or ""))
+
+    architectural_tokens = ("partition", "enclosure", "closet", "architectural")
+    for obj in objects:
+        category = (
+            str(obj.get("category_norm") or obj.get("category") or "")
+            .replace("_", " ")
+            .casefold()
+        )
+        metadata = obj.get("metadata") or {}
+        role = str(
+            metadata.get("architectural_role") or metadata.get("semantic_role") or ""
+        )
+        if (
+            normalized
+            and normalized in f"{category} {role.replace('_', ' ').casefold()}"
+        ):
+            if any(
+                token in category or token in role.casefold()
+                for token in architectural_tokens
+            ):
+                matched_object_ids.append(str(obj.get("id") or ""))
+
+    evidence_refs: list[str] = []
+    if matched_room_ids:
+        evidence_refs.append("scene_geometry.rooms")
+    if matched_object_ids:
+        evidence_refs.append("scene_geometry.objects.architectural_metadata")
+    if matched_room_ids or matched_object_ids:
+        return "pass", {
+            "evidence_refs": evidence_refs,
+            "matched_room_ids": matched_room_ids,
+            "matched_object_ids": matched_object_ids,
+        }
+    if not rooms and not any(obj.get("metadata") for obj in objects):
+        return "unknown", {"evidence_refs": ["scene_geometry"]}
+    return "fail", {
+        "evidence_refs": ["scene_geometry.rooms", "scene_geometry.objects"],
+    }
+
+
+def _evaluate_support_readiness(
+    case_pack: dict[str, Any],
+    constraint: dict[str, Any],
+    objects: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Check a present support target before a later manipuland is generated."""
+    if str(constraint.get("relation") or "") != "on_top_of":
+        return []
+    stage = _normalized_stage(str(case_pack.get("stage") or "adhoc"))
+    subject_selector = constraint.get("subjects") or {}
+    target_selector = constraint.get("targets") or {}
+    subject_category = str(subject_selector.get("category") or "")
+    target_category = str(target_selector.get("category") or "")
+    declared_subject_stage = str(subject_selector.get("stage") or "")
+    if not declared_subject_stage and str(constraint.get("stage") or "") in {
+        "wall_mounted",
+        "ceiling_mounted",
+        "manipuland",
+    }:
+        declared_subject_stage = str(constraint.get("stage") or "")
+    subject_owner = generation_owner(
+        subject_category,
+        relation="on_top_of",
+        endpoint="subject",
+        declared_owner=declared_subject_stage,
+    )
+    target_owner = generation_owner(
+        target_category,
+        relation="on_top_of",
+        endpoint="target",
+        declared_owner=str(target_selector.get("stage") or ""),
+    )
+    if subject_owner not in STAGE_ORDER or target_owner not in STAGE_ORDER:
+        return []
+    if STAGE_ORDER.index(subject_owner) <= STAGE_ORDER.index(stage):
+        return []
+    if STAGE_ORDER.index(stage) < STAGE_ORDER.index(target_owner):
+        return []
+    subject_ids = bound_ids(subject_selector, objects)
+    target_ids = bound_ids(target_selector, objects)
+    if subject_ids or not target_ids:
+        return []
+
+    results: list[dict[str, Any]] = []
+    for target_id in target_ids:
+        target = next(
+            (item for item in objects if str(item.get("id")) == target_id), None
+        )
+        if target is None:
+            continue
+        profile = object_function_profile(target)
+        candidates = build_support_surface_candidates(target, profile)
+        bbox = target.get("bbox_world") or {}
+        has_bbox = len(bbox.get("min") or []) >= 3 and len(bbox.get("max") or []) >= 3
+        has_support_declaration = any(
+            key in target
+            for key in (
+                "support_surfaces",
+                "support_regions",
+                "object_function_profile",
+            )
+        )
+        if candidates:
+            label = "pass"
+            reason = (
+                f"Support target `{target_id}` exposes {len(candidates)} verified "
+                f"surface candidate(s) before `{subject_category}` is generated."
+            )
+        elif not has_bbox or not has_support_declaration:
+            label = "unknown"
+            reason = (
+                f"Support readiness for `{target_id}` is unknown: target geometry or "
+                "support metadata is incomplete."
+            )
+        else:
+            label = "fail"
+            reason = (
+                f"Support target `{target_id}` has no verified surface compatible "
+                f"with future `{subject_category}` placement."
+            )
+        results.append(
+            _result(
+                constraint,
+                suffix=f"support_readiness__{target_id}",
+                label=label,
+                primary=target_id,
+                related=[],
+                relation_type="support_readiness",
+                tier="core" if label != "unknown" else "auxiliary",
+                reason=reason,
+                diagnostics={
+                    "support_readiness": True,
+                    "current_stage": stage,
+                    "target_stage": target_owner,
+                    "dependent_stage": subject_owner,
+                    "target_id": target_id,
+                    "target_category": target_category,
+                    "surface_candidate_count": len(candidates),
+                    "support_profile_source": profile.source,
+                    "has_bbox": has_bbox,
+                    "has_support_declaration": has_support_declaration,
+                },
+            )
+        )
     return results
 
 

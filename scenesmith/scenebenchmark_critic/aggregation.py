@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from scenesmith.scenebenchmark_critic.config import CriticConfig, critic_config_from_any
+from scenesmith.scenebenchmark_critic.result_identity import deduplicate_results
 
 LABEL_TO_SCORE = {"pass": 1.0, "degraded": 0.5, "fail": 0.0}
 
@@ -48,6 +49,7 @@ def aggregate_results(
             if isinstance(results_or_case_pack, dict)
             else case_pack
         )
+    results = deduplicate_results(results)
     checks_by_id = _checks_by_id(case_pack)
     object_acc: dict[str, dict[str, Any]] = {}
     by_metric: dict[str, dict[str, Any]] = {}

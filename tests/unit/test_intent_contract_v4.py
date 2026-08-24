@@ -108,7 +108,7 @@ def test_structural_window_is_not_furniture_inventory() -> None:
         for row in contract["constraints"]
     )
     assert "window" not in intent_contract_required_counts(scene)
-    assert INTENT_COMPILER_SPEC_VERSION == "scenesmith.intent_compiler.v14"
+    assert INTENT_COMPILER_SPEC_VERSION == "scenesmith.intent_compiler.v15"
 
 
 def test_repair_placeholder_uses_stable_compound_name_as_category() -> None:
@@ -2302,7 +2302,7 @@ def test_intent_compiler_injects_complete_task_spec_and_owns_inventory() -> None
         if row["relation"] == "required_count"
     }
     assert required["nightstand"]["subjects"]["count"] == 2
-    assert required["nightstand"]["source"] == "task_compiler_inventory"
+    assert required["nightstand"]["source"] == "explicit_prompt"
     assert required["mirror"]["stage"] == "wall_mounted"
     assert required["ceiling_light"]["stage"] == "ceiling_mounted"
     assert required["book"]["stage"] == "manipuland"
@@ -2547,8 +2547,8 @@ def test_task_spec_components_replace_composite_table_setting_count() -> None:
         "plate": 5,
     }
     assert counts["cutlery"]["quantifier"] == "at_least"
-    assert counts["plate"]["quantifier"] == "exactly"
-    assert counts["glass"]["quantifier"] == "exactly"
+    assert counts["plate"]["quantifier"] == "at_least"
+    assert counts["glass"]["quantifier"] == "at_least"
 
 
 def test_intent_compiler_maps_reachability_to_near_not_flanking() -> None:
