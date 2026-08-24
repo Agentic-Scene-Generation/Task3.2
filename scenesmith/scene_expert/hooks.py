@@ -1699,6 +1699,11 @@ class SceneExpertHookRunner:
             task_spec=self._task_spec,
         )
         setattr(scene, "scene_expert_stage", stage)
+        setattr(
+            scene,
+            "scene_expert_slow_memory_capture_enabled",
+            self._component_enabled("slow_memory_capture"),
+        )
         self._save_context_bundle(
             stage=stage,
             agent_role="designer",
@@ -1863,10 +1868,43 @@ class SceneExpertHookRunner:
         trajectory_collector = getattr(self, "_trajectory_collector", None)
         if trajectory_collector is not None:
             try:
+                try:
+                    final_scene_context = build_stage_context_bundle(
+                        stage=stage,
+                        agent_role="designer",
+                        event="post_stage_observation",
+                        task_spec=self._task_spec,
+                        relation_context=self._current_relation_context,
+                        stage_brief=self._current_stage_brief,
+                        scene=scene,
+                        memory_pack=self._current_memory_pack,
+                        history_summary=self._build_scene_state_summary(),
+                        last_hard_issues=[
+                            str(issue.description or issue.issue_type)
+                            for issue in (verify_report.issues if verify_report else [])
+                        ],
+                        trace_id=f"trace_{self._scene_id:06d}",
+                        scene_id=f"scene_{self._scene_id:03d}",
+                        metadata={
+                            "observer_only": True,
+                            "mode": self._mode,
+                            "config_hash": self._config_hash,
+                            "experiment_signature": self._experiment_signature,
+                        },
+                    ).model_dump(mode="json")
+                except Exception as context_exc:
+                    final_scene_context = {}
+                    console_logger.warning(
+                        "[SceneExpert] Slow-memory final context capture failed "
+                        "(trajectory capture will continue): %s",
+                        context_exc,
+                    )
                 capture_summary = trajectory_collector.capture_stage(
                     stage=stage,
                     verify_report=verify_report,
                     repair_actions=repair_actions,
+                    final_scene_context=final_scene_context,
+                    scene_state_path=str(room_dir),
                 )
                 if self._trace_enabled():
                     self._trace_logger.record_component_status(

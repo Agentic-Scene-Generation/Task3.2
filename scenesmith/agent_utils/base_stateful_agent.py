@@ -229,6 +229,7 @@ class BaseStatefulAgent(ABC):
         self._last_critique_render_profile = "final"
         self._pending_hard_repair_hint = ""
         self._hard_repair_design_change_calls = 0
+        self._slow_memory_decision_contexts: dict[tuple[str, str], dict[str, Any]] = {}
 
     def _record_module_timing(
         self,
@@ -405,6 +406,16 @@ class BaseStatefulAgent(ABC):
                 },
             )
             self.stage_working_memory.save_context_bundle(bundle)
+            if bool(
+                getattr(
+                    getattr(self, "scene", None),
+                    "scene_expert_slow_memory_capture_enabled",
+                    False,
+                )
+            ):
+                self._slow_memory_decision_contexts[(agent_role, event)] = (
+                    bundle.model_dump(mode="json")
+                )
             if not self._stage_context_injection_enabled():
                 return ""
             return bundle.to_llm_text(max_chars=self._stage_context_max_chars())
@@ -424,6 +435,44 @@ class BaseStatefulAgent(ABC):
         event_kind: Literal["llm", "system"] = "llm",
     ) -> None:
         try:
+            capture_replay = bool(
+                getattr(
+                    getattr(self, "scene", None),
+                    "scene_expert_slow_memory_capture_enabled",
+                    False,
+                )
+            )
+            tools: list[Any] = []
+            system_instructions: Any = ""
+            context_snapshot: dict[str, Any] = {}
+            image_refs: list[str] = []
+            if capture_replay:
+                agent = getattr(self, agent_role, None)
+                tools = (
+                    list(getattr(agent, "tools", []) or []) if agent is not None else []
+                )
+                system_instructions = (
+                    getattr(agent, "instructions", "") if agent is not None else ""
+                )
+                context_snapshot = self._slow_memory_decision_contexts.get(
+                    (agent_role, event),
+                    self._slow_memory_decision_contexts.get(
+                        (agent_role, "request_critique"), {}
+                    ),
+                )
+                render_dir = getattr(
+                    getattr(self, "rendering_manager", None),
+                    "last_render_dir",
+                    None,
+                )
+                if render_dir is not None:
+                    try:
+                        image_refs = [
+                            str(path.resolve())
+                            for path in sorted(Path(render_dir).glob("*.png"))
+                        ]
+                    except OSError:
+                        image_refs = []
             self.stage_working_memory.record_llm_call(
                 agent_role=agent_role,
                 event=event,
@@ -432,6 +481,11 @@ class BaseStatefulAgent(ABC):
                 result=result,
                 error=error,
                 event_kind=event_kind,
+                tools=tools,
+                system_instructions=system_instructions,
+                context_snapshot=context_snapshot,
+                image_refs=image_refs,
+                capture_replay=capture_replay,
             )
         except Exception as e:
             console_logger.warning("Failed to record LLM call debug: %s", e)

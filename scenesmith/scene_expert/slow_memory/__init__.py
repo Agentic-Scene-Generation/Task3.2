@@ -8,6 +8,7 @@ turns verified observations into auditable offline training artifacts.
 from scenesmith.scene_expert.slow_memory.schemas import (
     DPOPreferencePair,
     PreferenceEvidence,
+    TrajectoryOutcome,
     TrajectoryRecord,
 )
 from scenesmith.scene_expert.slow_memory.trajectory import TrajectoryCollector
@@ -16,5 +17,6 @@ __all__ = [
     "DPOPreferencePair",
     "PreferenceEvidence",
     "TrajectoryCollector",
+    "TrajectoryOutcome",
     "TrajectoryRecord",
 ]
