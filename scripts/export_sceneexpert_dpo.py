@@ -11,7 +11,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from scenesmith.scene_expert.slow_memory.dpo import export_dpo_dataset
+from scenesmith.scene_expert.slow_memory.dpo import (
+    DEFAULT_TRAINING_TASK_TYPES,
+    export_dpo_dataset,
+)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -37,6 +40,22 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--min-quality-margin", type=float, default=0.05)
     parser.add_argument(
+        "--include-task-type",
+        action="append",
+        choices=(
+            "designer_initial",
+            "designer_repair",
+            "critic_advice",
+            "deterministic_repair",
+            "legacy",
+        ),
+        help=(
+            "Repeat to override the default designer/repair/causally verified "
+            "critic task mix. Deterministic repair and legacy rows are audit-only "
+            "unless explicitly selected."
+        ),
+    )
+    parser.add_argument(
         "--allow-empty",
         action="store_true",
         help="Write diagnostics and exit successfully when no train pair exists.",
@@ -53,6 +72,11 @@ def main() -> int:
         test_ratio=args.test_ratio,
         seed=args.seed,
         min_quality_margin=args.min_quality_margin,
+        include_task_types=(
+            set(args.include_task_type)
+            if args.include_task_type
+            else DEFAULT_TRAINING_TASK_TYPES
+        ),
     )
     print(json.dumps(manifest["stats"], indent=2, ensure_ascii=False))
     validation = manifest["validation"]
