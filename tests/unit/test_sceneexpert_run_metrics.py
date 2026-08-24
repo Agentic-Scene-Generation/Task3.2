@@ -108,6 +108,14 @@ def test_metrics_survive_partial_failure_and_attribute_repairs(tmp_path) -> None
                         "injected_memory_hash": "abc",
                         "designer_prompt_contains_memory": True,
                     },
+                    "verify_report": {
+                        "pass_stage": True,
+                        "issues": [],
+                        "hard_check_report": {
+                            "hard_valid": True,
+                            "relation_satisfaction": 0.9,
+                        },
+                    },
                     "repair_actions": [
                         {
                             "repair_owner": "scene_expert_repair_controller",
@@ -250,6 +258,8 @@ def test_metrics_survive_partial_failure_and_attribute_repairs(tmp_path) -> None
     assert metrics["summary"]["completed_scenes"] == 1
     assert metrics["summary"]["failed_scenes"] == 1
     assert metrics["summary"]["critic_mean_score"] == 1.0
+    assert metrics["summary"]["hard_constraint_pass_rate"] == 1.0
+    assert metrics["summary"]["mean_relation_satisfaction"] == 0.9
     assert metrics["summary"]["memory_injection_delivery_rate"] == 1.0
     assert metrics["summary"]["memory_cross_task_verified_scene_coverage"] == 0.5
     assert metrics["memory_closed_loop_observed"] is True

@@ -45,6 +45,9 @@ SCENE_COLUMNS = (
     "critic_zero_fail",
     "sceneexpert_overall_score",
     "sceneexpert_pass_scene",
+    "hard_constraint_pass",
+    "hard_violation_count",
+    "relation_satisfaction",
     "experiment_name",
     "config_hash",
     "experiment_signature",
@@ -567,6 +570,46 @@ def _repair_metrics(
     }
 
 
+def _verification_metrics(stages: list[dict[str, Any]]) -> dict[str, Any]:
+    """Summarize final per-stage hard and relation evidence without re-scoring."""
+
+    final_reports: dict[str, dict[str, Any]] = {}
+    for stage in stages:
+        report = stage.get("verify_report")
+        if isinstance(report, dict):
+            final_reports[str(stage.get("stage") or "")] = report
+    hard_passes: list[bool] = []
+    violation_count = 0
+    relation_scores: list[float] = []
+    for report in final_reports.values():
+        issues = [
+            issue for issue in report.get("issues") or [] if isinstance(issue, dict)
+        ]
+        violation_count += len(issues)
+        hard_report = (
+            report.get("hard_check_report")
+            if isinstance(report.get("hard_check_report"), dict)
+            else {}
+        )
+        hard_valid = hard_report.get("hard_valid", hard_report.get("hard_passed"))
+        if not isinstance(hard_valid, bool):
+            hard_valid = bool(report.get("pass_stage")) and not issues
+        hard_passes.append(hard_valid)
+        relation_value = hard_report.get(
+            "relation_satisfaction",
+            hard_report.get("constraint_satisfaction_rate"),
+        )
+        if isinstance(relation_value, (int, float)):
+            relation_scores.append(max(0.0, min(1.0, float(relation_value))))
+    return {
+        "hard_constraint_pass": all(hard_passes) if hard_passes else None,
+        "hard_violation_count": violation_count if final_reports else None,
+        "relation_satisfaction": (
+            round(statistics.fmean(relation_scores), 6) if relation_scores else None
+        ),
+    }
+
+
 def _scene_metrics(
     output_root: Path,
     run_id: str,
@@ -617,6 +660,7 @@ def _scene_metrics(
     row.update(_memory_metrics(scene_dir, stages, row["prompt"], warnings))
     row.update(_writer_metrics(scene_dir, trace, warnings))
     row.update(_repair_metrics(scene_dir, stages, warnings))
+    row.update(_verification_metrics(stages))
     return row
 
 
@@ -761,6 +805,13 @@ def collect_run_metrics(
         "critic_zero_fail_rate": _rate(
             sum(bool(row["critic_zero_fail"]) for row in critic_observed),
             len(critic_observed),
+        ),
+        "hard_constraint_pass_rate": _rate(
+            sum(row["hard_constraint_pass"] is True for row in scene_rows),
+            sum(row["hard_constraint_pass"] is not None for row in scene_rows),
+        ),
+        "mean_relation_satisfaction": _mean(
+            row["relation_satisfaction"] for row in scene_rows
         ),
         "memory_retrieval_scene_coverage": _rate(len(retrieved), expected),
         "memory_injection_scene_coverage": _rate(len(injected), expected),

@@ -1,11 +1,16 @@
-# SceneExpert critic-grounded DPO defaults for a Qwen dense causal LM.
+# SceneExpert hard-grounded DPO defaults for the trainable Qwen VLM checkpoint.
 # The current Qwen3.8 GGUF used by llama.cpp is inference-only. Set this to the
 # matching Hugging Face safetensors directory or Hub ID before training.
 model:
   name_or_path: ""  # TODO: set a trainable Qwen safetensors path or Hub ID.
-  backend: "unsloth"
+  backend: "transformers"
   tuning_mode: "qlora"  # qlora=4-bit base; lora=bf16 base.
-  max_length: 4096
+  multimodal: true
+  tool_calling: true
+  # VLM DPO must not truncate away image tokens. Set a length only after a
+  # complete exported dataset has passed an explicit token-boundary audit.
+  max_length: null
+  allow_verified_vision_truncation: false
   trust_remote_code: true
   dtype: "bfloat16"
 
@@ -15,8 +20,8 @@ lora:
   dropout: 0.0
   bias: "none"
   use_gradient_checkpointing: "unsloth"
-  # Dense Qwen attention and MLP projections. Override only after inspecting
-  # the exact trainable checkpoint architecture.
+  # Tune the language policy only. Keep the visual encoder frozen so preference
+  # learning changes scene decisions rather than destabilizing perception.
   target_modules:
     - q_proj
     - k_proj
@@ -25,17 +30,28 @@ lora:
     - gate_proj
     - up_proj
     - down_proj
+  exclude_modules: ".*(visual|vision_tower).*"
 
 data:
   dataset_dir: "outputs/slow_memory/dpo_dataset"  # TODO: exported package path.
   num_proc: 4
+  minimum_train_pairs: 16
+  minimum_unique_train_groups: 8
+  minimum_unique_train_stages: 3
+  required_task_types:
+    - designer_initial
+    - designer_repair
+  minimum_pairs_per_required_task_type: 4
+  maximum_single_task_type_ratio: 0.80
+  # TODO: keep false for reportable training. True is only for pipeline smoke tests.
+  allow_unsafe_small_dataset: false
 
 training:
   output_dir: "outputs/slow_memory/qwen_dpo"
   run_name: "sceneexpert-qwen-dpo"
   seed: 42
   num_train_epochs: 1.0
-  learning_rate: 0.000005
+  learning_rate: 0.00001
   beta: 0.1
   per_device_train_batch_size: 1
   per_device_eval_batch_size: 1
@@ -51,9 +67,32 @@ training:
   bf16: true
   tf32: true
   gradient_checkpointing: true
+  truncation_mode: "keep_start"
+  # DPO establishes the ordering; a small chosen-response SFT term improves
+  # executable tool syntax without overwhelming preference learning.
+  loss_type:
+    - sigmoid
+    - sft
+  loss_weights:
+    - 1.0
+    - 0.2
   report_to: "trackio"
   trackio_space_id: null
   resume_from_checkpoint: null
+
+quality_gate:
+  require_validation: true
+  require_test: true
+  minimum_preference_accuracy: 0.55
+  scene_level:
+    minimum_paired_cases: 20
+    require_memory_snapshot: true
+    minimum_completion_rate_delta: 0.0
+    minimum_hard_pass_rate_delta: 0.0
+    minimum_scene_pass_rate_delta: 0.0
+    minimum_mean_critic_score_delta: 0.01
+    minimum_relation_satisfaction_delta: 0.0
+    minimum_win_minus_loss_rate: 0.05
 
 publish:
   push_to_hub: false
