@@ -37,6 +37,7 @@ from scenesmith.scenebenchmark_critic.furniture_relation_repair import (
     _is_hard_support_collision_target,
     _near_candidate_centers,
     _prioritize_coordinated_seating_targets,
+    _repair_targets,
     _score_payload,
     improve_furniture_relations,
     unresolved_furniture_relation_failures,
@@ -159,6 +160,29 @@ def _complete_fixture_contract_evidence(scene: RoomScene) -> None:
     contract = scene.scenebenchmark_intent_contract
     for constraint in contract["constraints"]:
         constraint.setdefault("evidence_span", scene.text_description)
+
+
+def test_repair_target_filter_ignores_synthetic_coverage_relation(
+    tmp_path: Path,
+) -> None:
+    scene = _scene(tmp_path)
+    payload = {
+        "results": [
+            {
+                "check_id": "coverage_functional_zone__dining_zone",
+                "label": "fail",
+                "relation_type": "coverage_functional_zone",
+                "primary_object": "",
+                "evidence": {
+                    "intent_constraint": {
+                        "relation": "coverage_functional_zone",
+                    }
+                },
+            }
+        ]
+    }
+
+    assert _repair_targets(scene, payload) == []
 
 
 def _facing_yaw(origin: tuple[float, float], target=(0.0, 0.0)) -> float:

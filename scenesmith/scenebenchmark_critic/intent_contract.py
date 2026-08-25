@@ -1880,8 +1880,17 @@ def _explicit_prompt_constraints(prompt: str, lowered: str) -> list[dict[str, An
 
         for match in re.finditer(
             r"(?P<subject>[a-z0-9_\- ,']{1,70}?)\s+"
-            r"(?:on|sits\s+on|resting\s+on|placed\s+on)\s+(?:the\s+|a\s+|an\s+)?"
-            r"(?P<target>[a-z0-9_\- ,']{1,70}?)(?=\s+near\b|[,.;]|$)",
+            # Require the complete ``on top of`` phrase.  A bare ``on`` still
+            # handles ordinary support wording (``object on table``), while
+            # ``monitor on top and a sofa ...`` must not consume the next
+            # clause as a support target.
+            r"(?:on\s+top\s+of|on(?!\s+top\b)|sits\s+on|resting\s+on|placed\s+on)\s+"
+            r"(?:the\s+|a\s+|an\s+)?"
+            # A conjunction usually starts the next spatial clause (for
+            # example ``on top of a desk and a sofa chair in front``).  Stop
+            # the support endpoint there so selector parsing cannot bind the
+            # later object as the support surface.
+            r"(?P<target>[a-z0-9_\- ,']{1,70}?)(?=\s+(?:near|and|while|but)\b|[,.;]|$)",
             normalized,
         ):
             # "a nightstand with a lamp on each side of the bed" describes

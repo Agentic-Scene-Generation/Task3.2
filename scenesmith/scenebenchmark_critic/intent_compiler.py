@@ -31,6 +31,7 @@ from scenesmith.scenebenchmark_critic.intent_contract import (
     build_intent_contract,
     ensure_coverage_requirements,
 )
+from scenesmith.scenebenchmark_critic.object_taxonomy import is_known_object_category
 from scenesmith.scenebenchmark_critic.relation_registry import (
     RELATION_REGISTRY,
     ROOM_RELATIVE_WALL_CATEGORIES,
@@ -148,7 +149,23 @@ def _validate_contract_completeness(
                 f"required_count for {category!r} has no accepted count for expected {expected_count}"
             )
 
-    resolvable = set(count_rows) | set(_LEGAL_ENVIRONMENT_ANCHORS)
+    # Compound TaskSpec labels are retained as stable inventory identities
+    # (for example ``bowl_of_fruit``), while prompt relations may naturally
+    # refer to one of their concrete noun endpoints (``bowl``).  Admit only
+    # noun tokens that have an established taxonomy entry; this keeps the
+    # completeness gate strict for arbitrary hallucinated endpoints such as
+    # ``phantom_object``.
+    compound_nouns: set[str] = set()
+    for inventory_category in expected_counts:
+        tokens = inventory_category.split("_")
+        if len(tokens) < 2:
+            continue
+        for token in tokens:
+            noun = canonical_selector_category(token)
+            if noun and is_known_object_category(noun):
+                compound_nouns.add(noun)
+
+    resolvable = set(count_rows) | compound_nouns | set(_LEGAL_ENVIRONMENT_ANCHORS)
     for row in constraints:
         if not isinstance(row, dict) or row.get("relation") == "required_count":
             continue

@@ -170,6 +170,95 @@ def _contract(relation: dict) -> dict:
     }
 
 
+def test_edge_distribution_can_describe_cohort_above_minimum_inventory() -> None:
+    edge = _edge_relation(
+        subject_count=5,
+        groups=[
+            {"edge_class": "long", "counts_per_edge": [2, 2]},
+            {"edge_class": "short", "counts_per_edge": [1, 0]},
+        ],
+    )
+    required = {
+        "relation": "required_count",
+        "subjects": {
+            "category": "office_chair",
+            "count": 4,
+            "quantifier": "at_least",
+        },
+        "targets": None,
+        "source": "task_compiler_inventory",
+        "inference_reason": "SceneTaskSpec required_large_objects",
+    }
+
+    validated = validate_intent_contract(
+        {
+            **_contract(edge),
+            "constraints": [required, edge],
+        }
+    )
+
+    assert [
+        row["subjects"]["count"]
+        for row in validated["constraints"]
+        if row["relation"] == "edge_distribution"
+    ] == [5]
+
+
+def test_edge_distribution_rejects_conflict_with_exact_inventory() -> None:
+    edge = _edge_relation(
+        subject_count=5,
+        groups=[
+            {"edge_class": "long", "counts_per_edge": [2, 2]},
+            {"edge_class": "short", "counts_per_edge": [1, 0]},
+        ],
+    )
+    required = {
+        "relation": "required_count",
+        "subjects": {
+            "category": "office_chair",
+            "count": 4,
+            "quantifier": "exactly",
+        },
+        "targets": None,
+        "source": "explicit_prompt",
+        "evidence_span": "exactly four chairs",
+    }
+
+    with pytest.raises(ValidationError, match="conflicts with exact"):
+        validate_intent_contract(
+            {
+                **_contract(edge),
+                "constraints": [required, edge],
+            }
+        )
+
+
+def test_bare_on_top_without_of_does_not_create_support_relation() -> None:
+    contract = build_intent_contract(
+        "A study with a monitor on top and a sofa chair in front of it."
+    )
+
+    assert not any(
+        row["relation"] == "on_top_of" and row["subjects"]["category"] == "monitor"
+        for row in contract["constraints"]
+    )
+    ordinary = build_intent_contract("A study with a bowl on table.")
+    assert any(
+        row["relation"] == "on_top_of"
+        and row["subjects"]["category"] == "bowl"
+        and row["targets"]["category"] == "table"
+        for row in ordinary["constraints"]
+    )
+    explicit = build_intent_contract(
+        "A study with a monitor on top of a desk and a sofa chair in front of it."
+    )
+    assert [
+        (row["subjects"]["category"], row["targets"]["category"])
+        for row in explicit["constraints"]
+        if row["relation"] == "on_top_of"
+    ] == [("monitor", "desk")]
+
+
 def _record(
     object_id: str,
     category: str,
@@ -2463,6 +2552,40 @@ def test_contract_completeness_accepts_specific_endpoint_for_generic_inventory()
     )
 
     _validate_contract_completeness(contract, {"required_large_objects": ["chair"] * 6})
+
+
+def test_contract_completeness_accepts_stable_noun_from_compound_inventory() -> None:
+    contract = {
+        "constraints": [
+            {
+                "relation": "required_count",
+                "subjects": {"category": "bowl_of_fruit", "count": 1},
+                "targets": None,
+                "source": "task_compiler_inventory",
+            },
+            {
+                "relation": "required_count",
+                "subjects": {"category": "table", "count": 1},
+                "targets": None,
+                "source": "task_compiler_inventory",
+            },
+            {
+                "relation": "on_top_of",
+                "subjects": {"category": "bowl", "count": 1},
+                "targets": {"category": "table", "count": 1},
+                "source": "model_inferred",
+                "inference_reason": "fruit bowl support",
+            },
+        ]
+    }
+
+    _validate_contract_completeness(
+        contract,
+        {
+            "required_large_objects": ["table"],
+            "required_small_objects": ["bowl_of_fruit"],
+        },
+    )
 
 
 @pytest.mark.parametrize(

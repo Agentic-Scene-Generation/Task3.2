@@ -400,11 +400,31 @@ class IntentContract(BaseModel):
             if relation.relation != "edge_distribution":
                 continue
             expected = required_counts.get(relation.subjects.category)
-            if expected is not None and expected != relation.subjects.count:
-                raise ValueError(
-                    "edge_distribution subjects.count must match required_count "
-                    f"for {relation.subjects.category!r}"
-                )
+            if expected is None or expected == relation.subjects.count:
+                continue
+
+            # SceneTaskSpec inventory rows are lower bounds.  An explicit
+            # edge-distribution relation can describe a disjoint physical
+            # cohort whose cardinality is larger (or smaller) than that
+            # minimum, so do not reject the contract at schema time.  Exact
+            # prompt cardinalities remain hard contradictions and must still
+            # fail validation rather than silently weakening the prompt.
+            required = next(
+                candidate
+                for candidate in self.constraints
+                if candidate.relation == "required_count"
+                and candidate.subjects.category == relation.subjects.category
+            )
+            is_minimum = required.source == "task_compiler_inventory" or (
+                required.subjects.quantifier in {"at_least", "minimum"}
+            )
+            if is_minimum:
+                continue
+            raise ValueError(
+                "edge_distribution subjects.count conflicts with exact "
+                "required_count "
+                f"for {relation.subjects.category!r}"
+            )
 
         for relation in self.constraints:
             if relation.relation == "one_per_support":
