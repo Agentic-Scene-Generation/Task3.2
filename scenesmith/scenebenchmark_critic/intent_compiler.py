@@ -26,16 +26,19 @@ from scenesmith.scenebenchmark_critic.intent_schema import (
     validate_intent_contract,
 )
 from scenesmith.scenebenchmark_critic.intent_contract import (
+    HARD_SOURCES,
     _apply_task_spec_contract_metadata,
     build_intent_contract,
+    ensure_coverage_requirements,
 )
+from scenesmith.scenebenchmark_critic.object_taxonomy import is_known_object_category
 from scenesmith.scenebenchmark_critic.relation_registry import (
     RELATION_REGISTRY,
     ROOM_RELATIVE_WALL_CATEGORIES,
     relation_spec,
     relations_are_exclusive,
 )
-from scenesmith.utils.llm_json import parse_llm_json_object
+from scenesmith.utils.llm_json import json_response_format, parse_llm_json_object
 
 logger = logging.getLogger(__name__)
 
@@ -102,7 +105,7 @@ def _validate_contract_completeness(
             if category and category not in _LEGAL_ENVIRONMENT_ANCHORS:
                 expected_counts[category] = expected_counts.get(category, 0) + 1
 
-    count_rows: dict[str, dict[str, Any]] = {}
+    count_rows: dict[str, list[dict[str, Any]]] = {}
     constraints = contract.get("constraints")
     if not isinstance(constraints, list):
         raise IncompleteIntentContractError("contract constraints must be a list")
@@ -116,25 +119,53 @@ def _validate_contract_completeness(
         category = canonical_selector_category(
             (row.get("subjects") or {}).get("category")
         )
-        count_rows[category] = row
+        count_rows.setdefault(category, []).append(row)
 
     for category, expected_count in expected_counts.items():
-        row = count_rows.get(category)
-        if row is None:
+        rows = count_rows.get(category, [])
+        if not rows:
             raise IncompleteIntentContractError(
                 f"missing authoritative required_count for {category!r}"
             )
-        actual_count = int((row.get("subjects") or {}).get("count") or 0)
-        if actual_count != expected_count:
+        # TaskSpec inventory is a minimum coverage obligation.  A validated
+        # explicit prompt row may intentionally win a conflicting inventory
+        # count (for example, ``exactly two bowls`` versus an inferred list of
+        # three).  Keep the exact prompt cardinality instead of rejecting the
+        # whole LLM attempt and consuming the retry response.
+        accepted = False
+        for row in rows:
+            subjects = row.get("subjects") or {}
+            actual_count = int(subjects.get("count") or 0)
+            source = str(row.get("source") or "")
+            if source == "explicit_prompt":
+                accepted = actual_count > 0
+                if accepted:
+                    break
+            elif actual_count == expected_count and source in HARD_SOURCES:
+                accepted = True
+                break
+        if not accepted:
             raise IncompleteIntentContractError(
-                f"required_count for {category!r} is {actual_count}, expected {expected_count}"
-            )
-        if row.get("source") != "task_compiler_inventory":
-            raise IncompleteIntentContractError(
-                f"required_count for {category!r} lacks task_compiler_inventory provenance"
+                f"required_count for {category!r} has no accepted count for expected {expected_count}"
             )
 
-    resolvable = set(count_rows) | set(_LEGAL_ENVIRONMENT_ANCHORS)
+    # Compound TaskSpec labels are retained as stable inventory identities
+    # (for example ``bowl_of_fruit``), while prompt relations may naturally
+    # refer to one of their concrete noun endpoints (``bowl``).  Admit only
+    # noun tokens that have an established taxonomy entry; this keeps the
+    # completeness gate strict for arbitrary hallucinated endpoints such as
+    # ``phantom_object``.
+    compound_nouns: set[str] = set()
+    for inventory_category in expected_counts:
+        tokens = inventory_category.split("_")
+        if len(tokens) < 2:
+            continue
+        for token in tokens:
+            noun = canonical_selector_category(token)
+            if noun and is_known_object_category(noun):
+                compound_nouns.add(noun)
+
+    resolvable = set(count_rows) | compound_nouns | set(_LEGAL_ENVIRONMENT_ANCHORS)
     for row in constraints:
         if not isinstance(row, dict) or row.get("relation") == "required_count":
             continue
@@ -1431,14 +1462,11 @@ class IntentCompiler:
                     max_tokens=self._max_tokens,
                     # llama.cpp converts json_schema to a grammar and constrains
                     # every generated token to a schema-valid JSON value.
-                    response_format={
-                        "type": "json_schema",
-                        "json_schema": {
-                            "name": "intent_contract",
-                            "strict": True,
-                            "schema": intent_compiler_wire_json_schema(),
-                        },
-                    },
+                    response_format=json_response_format(
+                        model=self._model,
+                        name="intent_contract",
+                        schema=intent_compiler_wire_json_schema(),
+                    ),
                     extra_body=chat_template_kwargs_from_effort(
                         "none", model=self._model
                     ),
@@ -1522,6 +1550,9 @@ class IntentCompiler:
                 # coverage requirement rather than an exact physical count.
                 result["constraints"] = _apply_task_spec_contract_metadata(
                     list(result.get("constraints") or []), normalized_task_spec
+                )
+                result = ensure_coverage_requirements(
+                    result, task_spec=normalized_task_spec
                 )
                 result = validate_intent_contract(result)
                 result["warnings"] = _merge_warnings(

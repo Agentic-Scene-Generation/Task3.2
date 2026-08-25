@@ -18,6 +18,7 @@ from scenesmith.scenebenchmark_critic.intent_schema import (
     intent_contract_json_schema,
     validate_intent_contract,
 )
+from scenesmith.utils.llm_json import json_response_format
 from scenesmith.scenebenchmark_critic.intent_compiler import (
     IncompleteIntentContractError,
     IntentCompiler,
@@ -108,7 +109,7 @@ def test_structural_window_is_not_furniture_inventory() -> None:
         for row in contract["constraints"]
     )
     assert "window" not in intent_contract_required_counts(scene)
-    assert INTENT_COMPILER_SPEC_VERSION == "scenesmith.intent_compiler.v14"
+    assert INTENT_COMPILER_SPEC_VERSION == "scenesmith.intent_compiler.v15"
 
 
 def test_repair_placeholder_uses_stable_compound_name_as_category() -> None:
@@ -168,6 +169,95 @@ def _contract(relation: dict) -> dict:
         "prompt": "seven office chairs around the conference table",
         "constraints": [relation],
     }
+
+
+def test_edge_distribution_can_describe_cohort_above_minimum_inventory() -> None:
+    edge = _edge_relation(
+        subject_count=5,
+        groups=[
+            {"edge_class": "long", "counts_per_edge": [2, 2]},
+            {"edge_class": "short", "counts_per_edge": [1, 0]},
+        ],
+    )
+    required = {
+        "relation": "required_count",
+        "subjects": {
+            "category": "office_chair",
+            "count": 4,
+            "quantifier": "at_least",
+        },
+        "targets": None,
+        "source": "task_compiler_inventory",
+        "inference_reason": "SceneTaskSpec required_large_objects",
+    }
+
+    validated = validate_intent_contract(
+        {
+            **_contract(edge),
+            "constraints": [required, edge],
+        }
+    )
+
+    assert [
+        row["subjects"]["count"]
+        for row in validated["constraints"]
+        if row["relation"] == "edge_distribution"
+    ] == [5]
+
+
+def test_edge_distribution_rejects_conflict_with_exact_inventory() -> None:
+    edge = _edge_relation(
+        subject_count=5,
+        groups=[
+            {"edge_class": "long", "counts_per_edge": [2, 2]},
+            {"edge_class": "short", "counts_per_edge": [1, 0]},
+        ],
+    )
+    required = {
+        "relation": "required_count",
+        "subjects": {
+            "category": "office_chair",
+            "count": 4,
+            "quantifier": "exactly",
+        },
+        "targets": None,
+        "source": "explicit_prompt",
+        "evidence_span": "exactly four chairs",
+    }
+
+    with pytest.raises(ValidationError, match="conflicts with exact"):
+        validate_intent_contract(
+            {
+                **_contract(edge),
+                "constraints": [required, edge],
+            }
+        )
+
+
+def test_bare_on_top_without_of_does_not_create_support_relation() -> None:
+    contract = build_intent_contract(
+        "A study with a monitor on top and a sofa chair in front of it."
+    )
+
+    assert not any(
+        row["relation"] == "on_top_of" and row["subjects"]["category"] == "monitor"
+        for row in contract["constraints"]
+    )
+    ordinary = build_intent_contract("A study with a bowl on table.")
+    assert any(
+        row["relation"] == "on_top_of"
+        and row["subjects"]["category"] == "bowl"
+        and row["targets"]["category"] == "table"
+        for row in ordinary["constraints"]
+    )
+    explicit = build_intent_contract(
+        "A study with a monitor on top of a desk and a sofa chair in front of it."
+    )
+    assert [
+        (row["subjects"]["category"], row["targets"]["category"])
+        for row in explicit["constraints"]
+        if row["relation"] == "on_top_of"
+    ] == [("monitor", "desk")]
 
 
 def _record(
@@ -2202,14 +2292,11 @@ def test_intent_compiler_retries_once_without_task_spec_input() -> None:
     assert "TaskSpec" not in first_user_message
 
     for call in compiler._test_calls:
-        assert call["response_format"] == {
-            "type": "json_schema",
-            "json_schema": {
-                "name": "intent_contract",
-                "strict": True,
-                "schema": intent_compiler_wire_json_schema(),
-            },
-        }
+        assert call["response_format"] == json_response_format(
+            model=compiler._model,
+            name="intent_contract",
+            schema=intent_compiler_wire_json_schema(),
+        )
 
 
 def test_intent_compiler_injects_both_task_compiler_constraint_channels() -> None:
@@ -2302,7 +2389,7 @@ def test_intent_compiler_injects_complete_task_spec_and_owns_inventory() -> None
         if row["relation"] == "required_count"
     }
     assert required["nightstand"]["subjects"]["count"] == 2
-    assert required["nightstand"]["source"] == "task_compiler_inventory"
+    assert required["nightstand"]["source"] == "explicit_prompt"
     assert required["mirror"]["stage"] == "wall_mounted"
     assert required["ceiling_light"]["stage"] == "ceiling_mounted"
     assert required["book"]["stage"] == "manipuland"
@@ -2465,6 +2552,40 @@ def test_contract_completeness_accepts_specific_endpoint_for_generic_inventory()
     _validate_contract_completeness(contract, {"required_large_objects": ["chair"] * 6})
 
 
+def test_contract_completeness_accepts_stable_noun_from_compound_inventory() -> None:
+    contract = {
+        "constraints": [
+            {
+                "relation": "required_count",
+                "subjects": {"category": "bowl_of_fruit", "count": 1},
+                "targets": None,
+                "source": "task_compiler_inventory",
+            },
+            {
+                "relation": "required_count",
+                "subjects": {"category": "table", "count": 1},
+                "targets": None,
+                "source": "task_compiler_inventory",
+            },
+            {
+                "relation": "on_top_of",
+                "subjects": {"category": "bowl", "count": 1},
+                "targets": {"category": "table", "count": 1},
+                "source": "model_inferred",
+                "inference_reason": "fruit bowl support",
+            },
+        ]
+    }
+
+    _validate_contract_completeness(
+        contract,
+        {
+            "required_large_objects": ["table"],
+            "required_small_objects": ["bowl_of_fruit"],
+        },
+    )
+
+
 @pytest.mark.parametrize(
     "anchor",
     [
@@ -2547,8 +2668,8 @@ def test_task_spec_components_replace_composite_table_setting_count() -> None:
         "plate": 5,
     }
     assert counts["cutlery"]["quantifier"] == "at_least"
-    assert counts["plate"]["quantifier"] == "exactly"
-    assert counts["glass"]["quantifier"] == "exactly"
+    assert counts["plate"]["quantifier"] == "at_least"
+    assert counts["glass"]["quantifier"] == "at_least"
 
 
 def test_intent_compiler_maps_reachability_to_near_not_flanking() -> None:
