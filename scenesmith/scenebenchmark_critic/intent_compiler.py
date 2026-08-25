@@ -29,7 +29,6 @@ from scenesmith.scenebenchmark_critic.intent_contract import (
     HARD_SOURCES,
     _apply_task_spec_contract_metadata,
     build_intent_contract,
-    ensure_coverage_requirements,
 )
 from scenesmith.scenebenchmark_critic.object_taxonomy import is_known_object_category
 from scenesmith.scenebenchmark_critic.relation_registry import (
@@ -1550,9 +1549,6 @@ class IntentCompiler:
                 # coverage requirement rather than an exact physical count.
                 result["constraints"] = _apply_task_spec_contract_metadata(
                     list(result.get("constraints") or []), normalized_task_spec
-                )
-                result = ensure_coverage_requirements(
-                    result, task_spec=normalized_task_spec
                 )
                 result = validate_intent_contract(result)
                 result["warnings"] = _merge_warnings(
