@@ -18,6 +18,7 @@ from scenesmith.scenebenchmark_critic.intent_schema import (
     intent_contract_json_schema,
     validate_intent_contract,
 )
+from scenesmith.utils.llm_json import json_response_format
 from scenesmith.scenebenchmark_critic.intent_compiler import (
     IncompleteIntentContractError,
     IntentCompiler,
@@ -2291,14 +2292,11 @@ def test_intent_compiler_retries_once_without_task_spec_input() -> None:
     assert "TaskSpec" not in first_user_message
 
     for call in compiler._test_calls:
-        assert call["response_format"] == {
-            "type": "json_schema",
-            "json_schema": {
-                "name": "intent_contract",
-                "strict": True,
-                "schema": intent_compiler_wire_json_schema(),
-            },
-        }
+        assert call["response_format"] == json_response_format(
+            model=compiler._model,
+            name="intent_contract",
+            schema=intent_compiler_wire_json_schema(),
+        )
 
 
 def test_intent_compiler_injects_both_task_compiler_constraint_channels() -> None:

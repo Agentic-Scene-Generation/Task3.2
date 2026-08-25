@@ -38,7 +38,7 @@ from scenesmith.scenebenchmark_critic.relation_registry import (
     relation_spec,
     relations_are_exclusive,
 )
-from scenesmith.utils.llm_json import parse_llm_json_object
+from scenesmith.utils.llm_json import json_response_format, parse_llm_json_object
 
 logger = logging.getLogger(__name__)
 
@@ -1462,14 +1462,11 @@ class IntentCompiler:
                     max_tokens=self._max_tokens,
                     # llama.cpp converts json_schema to a grammar and constrains
                     # every generated token to a schema-valid JSON value.
-                    response_format={
-                        "type": "json_schema",
-                        "json_schema": {
-                            "name": "intent_contract",
-                            "strict": True,
-                            "schema": intent_compiler_wire_json_schema(),
-                        },
-                    },
+                    response_format=json_response_format(
+                        model=self._model,
+                        name="intent_contract",
+                        schema=intent_compiler_wire_json_schema(),
+                    ),
                     extra_body=chat_template_kwargs_from_effort(
                         "none", model=self._model
                     ),
