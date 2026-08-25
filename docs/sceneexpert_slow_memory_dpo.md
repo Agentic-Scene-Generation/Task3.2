@@ -19,19 +19,28 @@ additional raw SDK/tool/media state is collected. When enabled, every scene writ
 scene_XXX/scene_expert/slow_memory/
 ├── trajectories.jsonl
 ├── capture_manifest.json
+├── media/
+│   └── <content-sha256>.<ext>
 └── evidence/
     └── <stage>_<evidence-hash>.json
 ```
 
-Trajectory v2 retains the model-visible messages, tool schemas, observed tool
-calls/results, image content hashes, pre-decision spatial context, final scene
-context, model/config provenance, and label-only outcome evidence. Credentials are
-redacted before persistence.
+Trajectory v2 retains model-visible messages, tool schemas, observed tool
+calls/results, pre-decision spatial context, final scene context, model/config/code
+provenance, and label-only outcome evidence. Input images and images returned by
+tools are content-addressed under `media/`; trajectory JSON contains hashes and
+stable references rather than inline Base64. Duplicate raw SDK payloads remain in
+the normal audit tree and are represented by hashes, so training rows stay complete
+without carrying multi-megabyte copies. Credentials are redacted before persistence.
 
-Only the final Designer decision receives the authoritative post-stage verdict.
-Earlier Designer decisions remain `unlabeled`. Critic advice is captured but remains
-unlabeled until an independent downstream execution proves a causal outcome; Critic
-self-scoring is never used as its own training label.
+The final Designer decision receives the authoritative post-stage verdict. An
+earlier Designer decision is labeled `rejected` only when Main observably requested
+a downstream revision; otherwise it remains `unlabeled`. Critic advice is retained
+for audit but is excluded from the default training task types because current Main
+logs do not prove advice-to-repair causality. Critic self-scoring is never used as
+its own label. `capture_manifest.json` exposes incomplete rows, missing media,
+embedded-data leaks, resolved mode/component flags, and code provenance; require
+`quality_summary.default_training_payload_valid=true` before export.
 
 ## 2. Import external teacher candidates
 
@@ -108,9 +117,11 @@ task, stage, role, event, and task type. It ranks real outcomes in this order:
 4. deterministic and visual quality;
 5. action count and latency.
 
-It never synthesizes a rejected response. Deterministic repair and legacy rows are
-audit-only by default. Use repeated `--include-task-type` only for a deliberate
-custom mix. Images are content-addressed and copied into the exported package.
+It never synthesizes a rejected response. Critic advice, deterministic repair, and
+legacy rows are audit-only by default; the default dataset contains only
+`designer_initial` and `designer_repair`. Use repeated `--include-task-type` only
+for a deliberate custom mix. Images are content-addressed and copied into the
+exported package.
 Splits use `scenario_family_id` (falling back to `task_id`), preventing related
 prompts/scenes from leaking across train, validation, and test.
 

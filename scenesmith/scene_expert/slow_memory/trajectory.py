@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
 import logging
@@ -46,6 +48,9 @@ _SECRET_PATTERNS = (
     re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/-]{12,}"),
     re.compile(r"(?i)((?:api[_-]?key|hf_token|token)\s*[=:]\s*)[^\s,;]+"),
 )
+_DATA_IMAGE_URI = re.compile(
+    r"data:(?P<mime>image/[A-Za-z0-9.+-]+);base64,(?P<data>[A-Za-z0-9+/=]+)"
+)
 
 
 def _utc_now() -> str:
@@ -55,14 +60,6 @@ def _utc_now() -> str:
 def _stable_hash(value: Any, length: int = 24) -> str:
     encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:length]
-
-
-def _file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _stringify(value: Any) -> str:
@@ -275,7 +272,8 @@ def _replay_completion_messages(
     if not any(message.get("role") == "assistant" for message in messages):
         return []
     if fallback.strip() and not any(
-        message.get("role") == "assistant" and message.get("content") not in ("", [])
+        message.get("role") == "assistant"
+        and (message.get("content") not in ("", []) or bool(message.get("tool_calls")))
         for message in messages
     ):
         messages.append({"role": "assistant", "content": fallback})
@@ -413,24 +411,6 @@ def _message_prompt(payload: dict[str, Any], prompt: str) -> list[dict[str, Any]
     return messages
 
 
-def _image_references(payload: dict[str, Any]) -> list[dict[str, Any]]:
-    references: list[dict[str, Any]] = []
-    raw_refs = payload.get("image_refs")
-    if not isinstance(raw_refs, list):
-        return references
-    for raw in raw_refs:
-        path = Path(str(raw))
-        reference: dict[str, Any] = {"path": str(path), "sha256": ""}
-        try:
-            if path.is_file():
-                reference["sha256"] = _file_sha256(path)
-                reference["size_bytes"] = path.stat().st_size
-        except OSError:
-            pass
-        references.append(reference)
-    return references
-
-
 def _action_trace(payload: dict[str, Any]) -> list[dict[str, Any]]:
     trace = (
         payload.get("agent_trace")
@@ -458,6 +438,42 @@ def _action_trace(payload: dict[str, Any]) -> list[dict[str, Any]]:
                 "tool_result": _redact_value(results_by_id.get(call_id, {})),
             }
         )
+    return actions
+
+
+def _action_trace_from_messages(
+    messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Reconstruct ordered calls/results when SDK wrapper extraction is sparse."""
+
+    actions: list[dict[str, Any]] = []
+    by_id: dict[str, dict[str, Any]] = {}
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        if message.get("role") == "assistant":
+            for call in message.get("tool_calls") or []:
+                if not isinstance(call, dict):
+                    continue
+                normalized = _redact_value(call)
+                call_id = str(call.get("id") or call.get("call_id") or "")
+                action = {
+                    "sequence_index": len(actions),
+                    "tool_call": normalized,
+                    "tool_result": {},
+                }
+                actions.append(action)
+                if call_id:
+                    by_id[call_id] = action
+        elif message.get("role") == "tool":
+            call_id = str(message.get("tool_call_id") or "")
+            action = by_id.get(call_id)
+            if action is not None:
+                action["tool_result"] = {
+                    "tool_call_id": call_id,
+                    "name": str(message.get("name") or "tool"),
+                    "output": _redact_value(message.get("content", "")),
+                }
     return actions
 
 
@@ -516,7 +532,6 @@ def _outcome_from_report(
     for key in (
         "relation_satisfaction",
         "constraint_satisfaction_rate",
-        "projection_coverage",
     ):
         value = hard_report.get(key)
         if isinstance(value, (int, float)):
@@ -570,8 +585,11 @@ class TrajectoryCollector:
         experiment_signature: str = "",
         config_hash: str = "",
         model_id: str = "",
+        capture_mode: str = "full",
+        component_flags: dict[str, bool] | None = None,
+        code_provenance: dict[str, Any] | None = None,
         max_prompt_chars: int = 131072,
-        max_response_chars: int = 65536,
+        max_response_chars: int = 1048576,
     ) -> None:
         self.scene_debug_dir = Path(scene_debug_dir)
         self.output_dir = self.scene_debug_dir / "slow_memory"
@@ -585,6 +603,9 @@ class TrajectoryCollector:
         self.experiment_signature = experiment_signature
         self.config_hash = config_hash
         self.model_id = model_id
+        self.capture_mode = str(capture_mode)
+        self.component_flags = dict(component_flags or {})
+        self.code_provenance = _redact_value(code_provenance or {})
         self.max_prompt_chars = max(1024, int(max_prompt_chars))
         self.max_response_chars = max(1024, int(max_response_chars))
         self._seen_ids = {
@@ -593,6 +614,131 @@ class TrajectoryCollector:
             if record.get("trajectory_id")
         }
         self._counts = {"designer": 0, "critic": 0, "repair": 0, "unlabeled": 0}
+        self._invalid_media_count = 0
+
+    @staticmethod
+    def _media_suffix(data: bytes, declared_mime: str = "") -> tuple[str, str]:
+        if data.startswith(b"\x89PNG\r\n\x1a\n"):
+            return ".png", "image/png"
+        if data.startswith(b"\xff\xd8\xff"):
+            return ".jpg", "image/jpeg"
+        if data.startswith((b"GIF87a", b"GIF89a")):
+            return ".gif", "image/gif"
+        if data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+            return ".webp", "image/webp"
+        suffixes = {
+            "image/png": ".png",
+            "image/jpeg": ".jpg",
+            "image/jpg": ".jpg",
+            "image/webp": ".webp",
+            "image/gif": ".gif",
+        }
+        return suffixes.get(declared_mime.casefold(), ".bin"), (
+            declared_mime or "application/octet-stream"
+        )
+
+    def _store_media(
+        self,
+        data: bytes,
+        *,
+        declared_mime: str = "",
+        source_kind: str,
+    ) -> dict[str, Any]:
+        digest = hashlib.sha256(data).hexdigest()
+        suffix, mime_type = self._media_suffix(data, declared_mime)
+        relative = Path("media") / f"{digest}{suffix}"
+        destination = self.output_dir / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if not destination.exists():
+            destination.write_bytes(data)
+        return {
+            "path": relative.as_posix(),
+            "sha256": digest,
+            "size_bytes": len(data),
+            "mime_type": mime_type,
+            "source_kind": source_kind,
+        }
+
+    def _externalize_media_value(
+        self,
+        value: Any,
+        *,
+        source_kind: str,
+    ) -> tuple[Any, list[dict[str, Any]]]:
+        """Replace embedded image bytes with stable local URI references."""
+
+        refs: list[dict[str, Any]] = []
+        if isinstance(value, dict):
+            output: dict[str, Any] = {}
+            for key, item in value.items():
+                sanitized, nested = self._externalize_media_value(
+                    item, source_kind=source_kind
+                )
+                output[str(key)] = sanitized
+                refs.extend(nested)
+            return output, refs
+        if isinstance(value, (list, tuple)):
+            output_list: list[Any] = []
+            for item in value:
+                sanitized, nested = self._externalize_media_value(
+                    item, source_kind=source_kind
+                )
+                output_list.append(sanitized)
+                refs.extend(nested)
+            return output_list, refs
+        if not isinstance(value, str) or "data:image/" not in value:
+            return _redact_value(value), refs
+
+        def replace(match: re.Match[str]) -> str:
+            try:
+                data = base64.b64decode(match.group("data"), validate=True)
+            except (binascii.Error, ValueError):
+                self._invalid_media_count += 1
+                return "sceneexpert-media://invalid-base64"
+            reference = self._store_media(
+                data,
+                declared_mime=match.group("mime"),
+                source_kind=source_kind,
+            )
+            refs.append(reference)
+            return f"sceneexpert-media://sha256/{reference['sha256']}"
+
+        return _DATA_IMAGE_URI.sub(replace, redact_sensitive_text(value)), refs
+
+    def _materialize_input_images(
+        self, payload: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        references: list[dict[str, Any]] = []
+        for raw in payload.get("image_refs") or []:
+            source = Path(str(raw))
+            try:
+                if not source.is_file():
+                    self._invalid_media_count += 1
+                    references.append(
+                        {
+                            "path": "",
+                            "sha256": "",
+                            "size_bytes": 0,
+                            "source_kind": "model_input",
+                            "source_path_hash": _stable_hash(str(source), 64),
+                            "missing": True,
+                        }
+                    )
+                    continue
+                reference = self._store_media(
+                    source.read_bytes(),
+                    declared_mime="",
+                    source_kind="model_input",
+                )
+                reference["source_path_hash"] = _stable_hash(str(source.resolve()), 64)
+                references.append(reference)
+            except OSError:
+                self._invalid_media_count += 1
+                continue
+        unique: dict[str, dict[str, Any]] = {}
+        for reference in references:
+            unique[str(reference["sha256"])] = reference
+        return list(unique.values())
 
     def _relative_ref(self, path: Path) -> str:
         try:
@@ -689,6 +835,9 @@ class TrajectoryCollector:
                 else {}
             )
             has_actions = bool(trace.get("tool_calls"))
+            if role == "designer" and not has_actions:
+                replay_messages = _replay_completion_messages(trace, fallback="")
+                has_actions = bool(_action_trace_from_messages(replay_messages))
             if role == "designer" and payload.get("error") and not has_actions:
                 continue
             if not str(payload.get("output") or "").strip() and not has_actions:
@@ -721,9 +870,7 @@ class TrajectoryCollector:
                     "content": redact_sensitive_text(protocol_payload.get("prompt")),
                 }
             )
-            protocol_output, _ = _bounded_text(
-                protocol_payload.get("output"), self.max_response_chars
-            )
+            protocol_output = redact_sensitive_text(protocol_payload.get("output"))
             messages.extend(_assistant_messages(protocol_payload, protocol_output))
             raw_refs = protocol_payload.get("image_refs")
             if isinstance(raw_refs, list):
@@ -756,24 +903,42 @@ class TrajectoryCollector:
     ) -> bool:
         role = str(payload.get("agent_role") or "designer")
         event = str(payload.get("event") or role)
-        prompt, prompt_complete = _bounded_text(
-            payload.get("prompt"), self.max_prompt_chars
+        prompt_value, prompt_media_refs = self._externalize_media_value(
+            payload.get("prompt"), source_kind="prompt_embedded"
         )
+        prompt, prompt_complete = _bounded_text(prompt_value, self.max_prompt_chars)
         raw_output = payload.get("output")
+        sanitized_output, output_media_refs = self._externalize_media_value(
+            raw_output, source_kind="sdk_output"
+        )
         output_text, output_complete = _bounded_text(
-            raw_output, self.max_response_chars
+            sanitized_output, self.max_response_chars
         )
         completion_messages = _assistant_messages(payload, output_text)
+        completion_messages, completion_media_refs = self._externalize_media_value(
+            completion_messages, source_kind="tool_observation"
+        )
         action_trace = _action_trace(payload)
-        response_value: Any = completion_messages if action_trace else raw_output
+        if not action_trace:
+            action_trace = _action_trace_from_messages(completion_messages)
+        action_trace, action_media_refs = self._externalize_media_value(
+            action_trace, source_kind="tool_observation"
+        )
+        response_value: Any = completion_messages
         response, response_complete = _bounded_text(
             response_value, self.max_response_chars
         )
-        response_complete = response_complete and output_complete
         messages = _message_prompt(payload, prompt)
-        tools = _redact_value(payload.get("tools") or [])
-        image_refs = _image_references(payload)
-        spatial_context = _redact_value(payload.get("context_snapshot") or {})
+        messages, message_media_refs = self._externalize_media_value(
+            messages, source_kind="prompt_embedded"
+        )
+        tools, tool_schema_media_refs = self._externalize_media_value(
+            payload.get("tools") or [], source_kind="tool_schema"
+        )
+        image_refs = self._materialize_input_images(payload)
+        spatial_context, spatial_media_refs = self._externalize_media_value(
+            payload.get("context_snapshot") or {}, source_kind="spatial_context"
+        )
         canonical_context = {
             "role": role,
             "event": event,
@@ -845,16 +1010,24 @@ class TrajectoryCollector:
             self.max_prompt_chars,
             empty={},
         )
-        bounded_raw_items, raw_items_complete = _bounded_structure(
-            _redact_value(trace.get("new_items") or []),
-            self.max_response_chars,
-            empty=[],
-        )
-        bounded_raw_responses, raw_responses_complete = _bounded_structure(
-            _redact_value(trace.get("raw_responses") or []),
-            self.max_response_chars,
-            empty=[],
-        )
+        raw_items = trace.get("new_items") or []
+        raw_responses = trace.get("raw_responses") or []
+        raw_items_hash = _stable_hash(_redact_value(raw_items), 64)
+        raw_responses_hash = _stable_hash(_redact_value(raw_responses), 64)
+        embedded_media_refs = [
+            *prompt_media_refs,
+            *output_media_refs,
+            *completion_media_refs,
+            *action_media_refs,
+            *message_media_refs,
+            *tool_schema_media_refs,
+            *spatial_media_refs,
+        ]
+        unique_embedded_media = {
+            str(reference.get("sha256") or ""): reference
+            for reference in embedded_media_refs
+            if reference.get("sha256")
+        }
         record = TrajectoryRecord(
             trajectory_id=trajectory_id,
             created_at=str(payload.get("created_at") or _utc_now()),
@@ -900,6 +1073,7 @@ class TrajectoryCollector:
                 "model_id": self.model_id,
                 "tool_schema_hash": _stable_hash(tools, 64) if tools else "",
                 "image_hashes": [item.get("sha256", "") for item in image_refs],
+                "tool_media_refs": list(unique_embedded_media.values()),
             },
             metadata={
                 "task_spec": self.task_spec.model_dump(mode="json"),
@@ -910,13 +1084,17 @@ class TrajectoryCollector:
                 ),
                 "downstream_designer_payload_ref": downstream_ref,
                 "final_scene_context": bounded_final_context,
-                "raw_agent_items": bounded_raw_items,
-                "raw_provider_responses": bounded_raw_responses,
-                "audit_metadata_complete": bool(
-                    final_context_complete
-                    and raw_items_complete
-                    and raw_responses_complete
+                "raw_agent_items_sha256": raw_items_hash,
+                "raw_provider_responses_sha256": raw_responses_hash,
+                "raw_agent_item_count": (
+                    len(raw_items) if isinstance(raw_items, list) else 0
                 ),
+                "raw_provider_response_count": (
+                    len(raw_responses) if isinstance(raw_responses, list) else 0
+                ),
+                "duplicate_raw_sdk_payload_omitted": True,
+                "audit_metadata_complete": bool(final_context_complete),
+                "raw_output_complete": output_complete,
             },
         )
         return self._append(record)
@@ -934,6 +1112,16 @@ class TrajectoryCollector:
 
         added = {"designer": 0, "critic": 0, "repair": 0, "unlabeled": 0}
         payloads = self._llm_payloads(stage)
+        repair_events = [
+            event
+            for event in _load_jsonl(
+                self.scene_debug_dir / "timing" / "repair_events.jsonl"
+            )
+            if event.get("stage") == stage
+        ]
+        if not payloads and not repair_events and not repair_actions:
+            self._write_manifest()
+            return added
         designer_indices = [
             index
             for index, (_, payload) in enumerate(payloads)
@@ -995,6 +1183,49 @@ class TrajectoryCollector:
             elif index == final_designer_index and stage_evidence is not None:
                 evidence = stage_evidence.model_copy(deep=True)
                 outcome = stage_outcome
+            elif role == "designer":
+                next_designer_ref = ""
+                for next_path, next_payload in payloads[index + 1 :]:
+                    if next_payload.get("agent_role") == "designer":
+                        if next_payload.get("event") == "request_design_change":
+                            next_designer_ref = self._relative_ref(next_path)
+                        break
+                if next_designer_ref:
+                    evidence = PreferenceEvidence(
+                        evidence_id="evidence_"
+                        + _stable_hash(
+                            [self.run_id, self.scene_id, str(path), "revised"]
+                        ),
+                        kind="critic",
+                        verdict="rejected",
+                        source="main_revision_request",
+                        authoritative=True,
+                        quality_score=0.0,
+                        report_ref=next_designer_ref,
+                        details={
+                            "downstream_designer_payload_ref": next_designer_ref,
+                            "candidate_was_revised_by_main": True,
+                        },
+                    )
+                    outcome = TrajectoryOutcome(
+                        execution_complete=True,
+                        causal_link_verified=True,
+                        evidence_refs=[next_designer_ref],
+                    )
+                    downstream_ref = next_designer_ref
+                else:
+                    evidence = PreferenceEvidence(
+                        evidence_id="evidence_"
+                        + _stable_hash(
+                            [self.run_id, self.scene_id, str(path), "unlabeled"]
+                        ),
+                        source="insufficient_candidate_level_evidence",
+                        verdict="unlabeled",
+                        kind="none",
+                        authoritative=False,
+                        report_ref=report_ref if verify_report is not None else "",
+                    )
+                    outcome = TrajectoryOutcome()
             else:
                 evidence = PreferenceEvidence(
                     evidence_id="evidence_"
@@ -1022,11 +1253,7 @@ class TrajectoryCollector:
                 if evidence.verdict == "unlabeled":
                     added["unlabeled"] += 1
 
-        for event in _load_jsonl(
-            self.scene_debug_dir / "timing" / "repair_events.jsonl"
-        ):
-            if event.get("stage") != stage:
-                continue
+        for event in repair_events:
             self._capture_repair_event(event, added)
 
         for action in repair_actions or []:
@@ -1197,8 +1424,89 @@ class TrajectoryCollector:
 
     def _write_manifest(self) -> None:
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        raw_records = list(_load_jsonl(self.trajectory_path))
+        records: list[TrajectoryRecord] = []
+        invalid_record_count = 0
+        for raw_record in raw_records:
+            try:
+                records.append(TrajectoryRecord.model_validate(raw_record))
+            except (TypeError, ValueError):
+                invalid_record_count += 1
+        task_type_counts: dict[str, int] = {}
+        role_counts: dict[str, int] = {}
+        complete_count = 0
+        authoritative_count = 0
+        default_training_candidate_count = 0
+        incomplete_designer_count = 0
+        missing_media_count = 0
+        external_media_path_count = 0
+        media_hash_mismatch_count = 0
+        for record in records:
+            task_type_counts[record.task_type] = (
+                task_type_counts.get(record.task_type, 0) + 1
+            )
+            role_counts[record.agent_role] = role_counts.get(record.agent_role, 0) + 1
+            complete_count += int(record.prompt_complete and record.response_complete)
+            authoritative_count += int(record.evidence.authoritative)
+            default_training_candidate_count += int(
+                record.task_type in {"designer_initial", "designer_repair"}
+                and record.prompt_complete
+                and record.response_complete
+                and record.evidence.authoritative
+                and record.evidence.verdict in {"accepted", "rejected"}
+            )
+            if record.task_type in {"designer_initial", "designer_repair"} and not (
+                record.prompt_complete and record.response_complete
+            ):
+                incomplete_designer_count += 1
+            media_references = [
+                *record.image_refs,
+                *[
+                    reference
+                    for reference in (record.provenance.get("tool_media_refs") or [])
+                    if isinstance(reference, dict)
+                ],
+            ]
+            for reference in media_references:
+                relative_path = Path(str(reference.get("path") or ""))
+                path_value = str(reference.get("path") or "").strip()
+                if relative_path.is_absolute():
+                    external_media_path_count += 1
+                    media_path = relative_path
+                else:
+                    media_path = self.output_dir / relative_path
+                if not path_value or not media_path.is_file():
+                    missing_media_count += 1
+                    continue
+                expected_hash = str(reference.get("sha256") or "")
+                if expected_hash:
+                    try:
+                        observed_hash = hashlib.sha256(
+                            media_path.read_bytes()
+                        ).hexdigest()
+                    except OSError:
+                        missing_media_count += 1
+                    else:
+                        media_hash_mismatch_count += int(observed_hash != expected_hash)
+        media_count = len(list((self.output_dir / "media").glob("*")))
+        serialized_rows = "\n".join(
+            json.dumps(record, ensure_ascii=False, default=str)
+            for record in raw_records
+        )
+        embedded_data_uri_count = serialized_rows.count("data:image/")
+        default_training_payload_valid = not any(
+            (
+                invalid_record_count,
+                incomplete_designer_count,
+                missing_media_count,
+                external_media_path_count,
+                media_hash_mismatch_count,
+                embedded_data_uri_count,
+                self._invalid_media_count,
+            )
+        )
         payload = {
-            "schema_version": "sceneexpert.trajectory_manifest.v2",
+            "schema_version": "sceneexpert.trajectory_manifest.v3",
             "updated_at": _utc_now(),
             "run_id": self.run_id,
             "scene_id": self.scene_id,
@@ -1206,22 +1514,50 @@ class TrajectoryCollector:
             "experiment_signature": self.experiment_signature,
             "config_hash": self.config_hash,
             "model_id": self.model_id,
+            "resolved_mode": self.capture_mode,
+            "component_flags": self.component_flags,
+            "code_provenance": self.code_provenance,
             "trajectory_path": self.trajectory_path.name,
             "record_count": len(self._seen_ids),
             "records_added_this_process": self._counts,
             "capture_is_observer_only": True,
+            "quality_summary": {
+                "complete_record_count": complete_count,
+                "incomplete_record_count": len(records) - complete_count,
+                "invalid_record_count": invalid_record_count,
+                "incomplete_designer_record_count": incomplete_designer_count,
+                "missing_materialized_media_count": missing_media_count,
+                "external_media_path_count": external_media_path_count,
+                "media_hash_mismatch_count": media_hash_mismatch_count,
+                "invalid_embedded_media_count": self._invalid_media_count,
+                "embedded_data_uri_count": embedded_data_uri_count,
+                "authoritative_record_count": authoritative_count,
+                "default_training_candidate_count": default_training_candidate_count,
+                "has_default_training_candidates": bool(
+                    default_training_candidate_count
+                ),
+                "role_counts": role_counts,
+                "task_type_counts": task_type_counts,
+                "materialized_media_count": media_count,
+                "default_trainable_task_types": [
+                    "designer_initial",
+                    "designer_repair",
+                ],
+                "critic_records_are_audit_only": True,
+                "default_training_payload_valid": default_training_payload_valid,
+            },
             "captures": {
                 "exact_messages": True,
                 "tool_calls_and_results": True,
                 "spatial_context": True,
-                "critic_advice": True,
+                "critic_advice_audit_only": True,
                 "media_hashes": True,
                 "outcome_is_label_only": True,
             },
             "pairing_policy": (
                 "offline exporter requires exact decision context plus independent "
-                "authoritative accepted/rejected evidence; critic advice additionally "
-                "requires verified downstream causal evidence"
+                "authoritative accepted/rejected evidence; default training is limited "
+                "to designer_initial and designer_repair while critic advice remains audit-only"
             ),
         }
         self.manifest_path.write_text(

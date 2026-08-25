@@ -50,9 +50,9 @@ def _parse_args() -> argparse.Namespace:
             "legacy",
         ),
         help=(
-            "Repeat to override the default designer/repair/causally verified "
-            "critic task mix. Deterministic repair and legacy rows are audit-only "
-            "unless explicitly selected."
+            "Repeat to override the default designer-initial/designer-repair task "
+            "mix. Critic, deterministic-repair, and legacy rows are audit-only "
+            "unless explicitly selected; critic rows still require causal proof."
         ),
     )
     parser.add_argument(

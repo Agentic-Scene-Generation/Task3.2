@@ -66,6 +66,23 @@ def test_experiment_signature_ignores_runtime_paths_and_ports() -> None:
     assert stable_experiment_signature(first) != stable_experiment_signature(second)
 
 
+def test_experiment_signature_ignores_batch_labels_and_port_ranges() -> None:
+    first = {
+        "name": "critic_on_batch_001",
+        "experiment": {"pipeline": {"stop_stage": "manipuland"}},
+        "scene_expert": {"ports": {"server_port_range": [13000, 13399]}},
+    }
+    second = {
+        "name": "critic_on_batch_002",
+        "experiment": {"pipeline": {"stop_stage": "manipuland"}},
+        "scene_expert": {"ports": {"server_port_range": [13400, 13799]}},
+    }
+
+    assert stable_experiment_signature(first) == stable_experiment_signature(second)
+    second["experiment"]["name"] = "semantically_distinct_experiment"
+    assert stable_experiment_signature(first) != stable_experiment_signature(second)
+
+
 def test_canonical_bundle_does_not_repeat_memory_directives() -> None:
     success = "[Positive/furniture] Keep desks aligned to the teaching wall."
     failure = "[Avoid/furniture] Do not face student chairs away from desks."

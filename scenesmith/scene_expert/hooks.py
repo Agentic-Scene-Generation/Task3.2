@@ -2766,6 +2766,7 @@ def build_hook_runner(
     trajectory_collector: TrajectoryCollector | None = None
     if component_flags["slow_memory_capture"]:
         capture_cfg = (se_cfg.get("slow_memory", {}) or {}).get("capture", {}) or {}
+        code_provenance = collect_code_provenance()
         trajectory_collector = TrajectoryCollector(
             scene_debug_dir=scene_debug_dir,
             prompt=prompt,
@@ -2775,8 +2776,11 @@ def build_hook_runner(
             experiment_signature=experiment_signature,
             config_hash=config_hash,
             model_id=model,
+            capture_mode=mode,
+            component_flags=component_flags,
+            code_provenance=code_provenance,
             max_prompt_chars=_cfg_int(capture_cfg.get("max_prompt_chars"), 131072),
-            max_response_chars=_cfg_int(capture_cfg.get("max_response_chars"), 65536),
+            max_response_chars=_cfg_int(capture_cfg.get("max_response_chars"), 1048576),
         )
 
     return SceneExpertHookRunner(

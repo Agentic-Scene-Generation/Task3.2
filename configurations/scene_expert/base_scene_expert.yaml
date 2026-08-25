@@ -65,7 +65,9 @@ components:
 slow_memory:
   capture:
     max_prompt_chars: ${oc.env:SCENEEXPERT_SLOW_MEMORY_MAX_PROMPT_CHARS,131072}
-    max_response_chars: ${oc.env:SCENEEXPERT_SLOW_MEMORY_MAX_RESPONSE_CHARS,65536}
+    # Canonical tool trajectories can be long even after images are externalized.
+    # One MiB prevents loss while keeping duplicate raw SDK payloads out of rows.
+    max_response_chars: ${oc.env:SCENEEXPERT_SLOW_MEMORY_MAX_RESPONSE_CHARS,1048576}
 
 # Direct structured calls made by SceneExpert itself. These roles share one
 # local OpenAI-compatible client, but each role has an explicit bounded budget.

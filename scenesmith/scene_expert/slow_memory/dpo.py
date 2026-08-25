@@ -20,7 +20,7 @@ from scenesmith.scene_expert.slow_memory.schemas import (
 )
 
 DEFAULT_TRAINING_TASK_TYPES: frozenset[PreferenceTaskType] = frozenset(
-    {"designer_initial", "designer_repair", "critic_advice"}
+    {"designer_initial", "designer_repair"}
 )
 _VOLATILE_CONTEXT_KEYS = frozenset(
     {
@@ -147,6 +147,17 @@ def load_trajectories(
                         }
                     )
                     continue
+                resolved_refs: list[dict[str, Any]] = []
+                for reference in record.image_refs:
+                    normalized = dict(reference)
+                    path_value = str(normalized.get("path") or "").strip()
+                    image_path = Path(path_value)
+                    if path_value and not image_path.is_absolute():
+                        normalized["path"] = str((path.parent / image_path).resolve())
+                    resolved_refs.append(normalized)
+                record = record.model_copy(
+                    update={"image_refs": resolved_refs}, deep=True
+                )
                 existing = trajectories.get(record.trajectory_id)
                 if existing is not None and existing != record:
                     _append_diagnostic(

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import json
 import hashlib
+import base64
+import json
 
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from omegaconf import OmegaConf
 from scenesmith.agent_utils.stage_working_memory import _extract_agent_result_trace
 from scenesmith.scene_expert.schemas import SceneTaskSpec, StageVerifyReport
 from scenesmith.scene_expert.slow_memory.dpo import (
+    DEFAULT_TRAINING_TASK_TYPES,
     build_preference_pairs,
     export_dpo_dataset,
     validate_dataset_dir,
@@ -169,8 +171,9 @@ def test_collector_labels_only_final_designer_call_and_redacts_secrets(
         TrajectoryRecord.model_validate_json(line)
         for line in collector.trajectory_path.read_text(encoding="utf-8").splitlines()
     ]
-    assert summary == {"designer": 2, "critic": 0, "repair": 0, "unlabeled": 1}
-    assert rows[0].evidence.verdict == "unlabeled"
+    assert summary == {"designer": 2, "critic": 0, "repair": 0, "unlabeled": 0}
+    assert rows[0].evidence.verdict == "rejected"
+    assert rows[0].evidence.source == "main_revision_request"
     assert rows[1].evidence.verdict == "accepted"
     assert "sk-secret123456" not in rows[0].prompt
     assert "[REDACTED]" in rows[0].prompt
@@ -179,6 +182,173 @@ def test_collector_labels_only_final_designer_call_and_redacts_secrets(
     assert rows[1].action_trace[0]["tool_call"]["function"]["name"] == "rotate_object"
     assert rows[1].completion_messages[1]["role"] == "tool"
     assert rows[1].spatial_context["relations"][0]["subject"] == "chair"
+
+
+def test_collector_externalizes_tool_media_and_keeps_replay_complete(
+    tmp_path: Path,
+) -> None:
+    scene_debug = tmp_path / "scene_000" / "scene_expert"
+    payload_dir = scene_debug / "audit" / "llm_payloads"
+    payload_dir.mkdir(parents=True)
+    input_image = tmp_path / "input.png"
+    input_image.write_bytes(b"\x89PNG\r\n\x1a\ninput")
+    observation = base64.b64encode(b"\xff\xd8\xffobservation").decode("ascii")
+    run_input = [{"role": "user", "content": "Inspect and place the desk"}]
+    replay = [
+        *run_input,
+        {
+            "type": "function_call",
+            "call_id": "call_observe",
+            "name": "observe_scene",
+            "arguments": "{}",
+        },
+        {
+            "type": "function_call_output",
+            "call_id": "call_observe",
+            "output": json.dumps(
+                [{"image_url": f"data:image/png;base64,{observation}"}]
+            ),
+        },
+        {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "Placement complete."}],
+        },
+    ]
+    payload = {
+        "schema_version": "2.0",
+        "created_at": "2026-08-26T00:00:00Z",
+        "stage": "furniture",
+        "agent_role": "designer",
+        "event": "request_initial_design",
+        "prompt": "Inspect and place the desk",
+        "output": replay,
+        "error": "",
+        "image_refs": [str(input_image)],
+        "context_snapshot": {"relations": [{"subject": "chair", "target": "desk"}]},
+        "agent_trace": {
+            "run_input": run_input,
+            "replay_items": replay,
+            "tool_calls": [],
+            "tool_results": [],
+            "new_items": replay[1:],
+            "raw_responses": [{"output": replay[1:]}],
+        },
+    }
+    (payload_dir / "1000_designer.json").write_text(
+        json.dumps(payload), encoding="utf-8"
+    )
+    collector = TrajectoryCollector(
+        scene_debug_dir=scene_debug,
+        prompt="A classroom",
+        scene_id="scene_000",
+        run_id="run_full",
+        task_spec=SceneTaskSpec(room_type="classroom", style="modern"),
+        capture_mode="full",
+        component_flags={"slow_memory_capture": True},
+        code_provenance={"git_sha": "abc123"},
+        max_response_chars=4096,
+    )
+
+    collector.capture_stage(
+        stage="furniture",
+        verify_report=StageVerifyReport(
+            stage="furniture",
+            pass_stage=True,
+            rule_scores={"deterministic_issue_free": 1.0},
+            score_source="deterministic_only",
+        ),
+    )
+
+    raw_row = collector.trajectory_path.read_text(encoding="utf-8")
+    row = TrajectoryRecord.model_validate_json(raw_row)
+    manifest = json.loads(collector.manifest_path.read_text(encoding="utf-8"))
+    assert "data:image/" not in raw_row
+    assert row.response_complete
+    assert len(row.action_trace) == 1
+    assert row.action_trace[0]["tool_call"]["function"]["name"] == "observe_scene"
+    assert "sceneexpert-media://sha256/" in json.dumps(row.completion_messages)
+    assert len(list((collector.output_dir / "media").iterdir())) == 2
+    assert row.image_refs[0]["path"].startswith("media/")
+    assert (collector.output_dir / row.image_refs[0]["path"]).is_file()
+    assert manifest["resolved_mode"] == "full"
+    assert manifest["schema_version"] == "sceneexpert.trajectory_manifest.v3"
+    assert manifest["code_provenance"]["git_sha"] == "abc123"
+    assert manifest["quality_summary"]["incomplete_record_count"] == 0
+    assert manifest["quality_summary"]["critic_records_are_audit_only"] is True
+    assert manifest["quality_summary"]["default_training_payload_valid"] is True
+
+
+def test_default_dpo_scope_excludes_unproven_critic_policy() -> None:
+    assert DEFAULT_TRAINING_TASK_TYPES == {"designer_initial", "designer_repair"}
+
+
+def test_independent_designer_initial_calls_are_not_false_rejections(
+    tmp_path: Path,
+) -> None:
+    scene_debug = tmp_path / "scene_000" / "scene_expert"
+    payload_dir = scene_debug / "audit" / "llm_payloads"
+    payload_dir.mkdir(parents=True)
+    for index in (1, 2):
+        (payload_dir / f"{index}000_designer.json").write_text(
+            json.dumps(
+                {
+                    "stage": "manipuland",
+                    "agent_role": "designer",
+                    "event": "request_initial_design",
+                    "prompt": f"Place object {index}",
+                    "output": f"Placed object {index}",
+                    "error": "",
+                }
+            ),
+            encoding="utf-8",
+        )
+    collector = TrajectoryCollector(
+        scene_debug_dir=scene_debug,
+        prompt="Place two independent manipulands",
+        scene_id="scene_000",
+        run_id="run_full",
+        task_spec=SceneTaskSpec(room_type="dining_room", style="modern"),
+    )
+
+    collector.capture_stage(
+        stage="manipuland",
+        verify_report=StageVerifyReport(stage="manipuland", pass_stage=True),
+    )
+
+    rows = [
+        TrajectoryRecord.model_validate_json(line)
+        for line in collector.trajectory_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert rows[0].evidence.verdict == "unlabeled"
+    assert rows[1].evidence.verdict == "accepted"
+
+
+def test_noop_stage_does_not_create_orphan_slow_memory_evidence(
+    tmp_path: Path,
+) -> None:
+    scene_debug = tmp_path / "scene_000" / "scene_expert"
+    collector = TrajectoryCollector(
+        scene_debug_dir=scene_debug,
+        prompt="A room with no ceiling objects",
+        scene_id="scene_000",
+        run_id="run_full",
+        task_spec=SceneTaskSpec(room_type="bedroom", style="modern"),
+    )
+
+    summary = collector.capture_stage(
+        stage="ceiling_mounted",
+        verify_report=StageVerifyReport(
+            stage="ceiling_mounted",
+            pass_stage=True,
+        ),
+    )
+
+    manifest = json.loads(collector.manifest_path.read_text(encoding="utf-8"))
+    assert summary == {"designer": 0, "critic": 0, "repair": 0, "unlabeled": 0}
+    assert not (collector.output_dir / "evidence").exists()
+    assert manifest["record_count"] == 0
+    assert manifest["quality_summary"]["has_default_training_candidates"] is False
 
 
 def test_agent_result_trace_preserves_replayable_tool_events() -> None:
