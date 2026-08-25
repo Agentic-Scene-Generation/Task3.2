@@ -10,9 +10,9 @@ enabled: false   # Default: off. Set true in ablation_3/4/5 experiment configs.
 
 # Ablation mode controls which components are active:
 #   "disabled"       → no-op; hooks are never built
-#   "harness_only"   → TaskCompiler + Harness + GlobalPlanner; no memory
-#   "harness_memory" → TaskCompiler + Harness + GlobalPlanner + FastMemory (MVP)
-#   "full"           → harness_memory + LoRA model (model ID differs, behavior same)
+#   "harness_only"   → TaskCompiler + Harness + GlobalPlanner; no memory/capture
+#   "harness_memory" → Harness + FastMemory; no offline trajectory capture
+#   "full"           → harness_memory + observer-only Slow Memory capture
 mode: "disabled"
 
 # Independent component gates. ``null`` inherits the legacy mode preset; an
@@ -53,6 +53,8 @@ components:
   structured_llm:
     enabled: false
   # Observer-only capture of designer/repair trajectories for offline DPO.
+  # The full preset enables it; harness_only/harness_memory keep it off unless
+  # an explicit component override requests a dedicated capture experiment.
   # It never changes main's stage decisions or starts a training job.
   slow_memory_capture:
     enabled: null

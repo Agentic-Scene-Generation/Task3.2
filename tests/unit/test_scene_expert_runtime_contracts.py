@@ -78,6 +78,14 @@ class SceneExpertRuntimeBoundaryTest(unittest.TestCase):
         ):
             self.assertIn(f" {component}\n", runner_source)
 
+    def test_full_runtime_requires_the_same_hybrid_memory_preflight(self) -> None:
+        runner_source = self._source("scripts/run_parallel_critic_on.sh")
+
+        self.assertIn(
+            '|| [ "$EXPERIMENT" = "ablation_5_qwen3_full" ]',
+            runner_source,
+        )
+
     def test_parallel_runner_preserves_shared_base_recovery_failure(self) -> None:
         runner_source = self._source("scripts/run_parallel_critic_on.sh")
 
@@ -92,6 +100,19 @@ class SceneExpertRuntimeBoundaryTest(unittest.TestCase):
             hooks_source,
         )
         self.assertIn("skipped_non_terminal_pipeline", hooks_source)
+
+    def test_online_pipeline_never_starts_dpo_training(self) -> None:
+        online_sources = "\n".join(
+            self._source(path)
+            for path in (
+                "main.py",
+                "scenesmith/experiments/indoor_scene_generation.py",
+                "scenesmith/scene_expert/hooks.py",
+            )
+        )
+
+        self.assertNotIn("train_sceneexpert_dpo", online_sources)
+        self.assertNotIn("DPOTrainer", online_sources)
 
 
 if __name__ == "__main__":

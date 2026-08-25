@@ -6,9 +6,14 @@ the online Designer, Critic, checkpoint, deterministic repair, or stage decision
 
 ## 1. Capture replayable trajectories
 
-Enable `scene_expert.components.slow_memory_capture.enabled`. When disabled, the
-existing Main debug payload remains v1 and no additional raw SDK/tool/media state
-is collected. When enabled, every scene writes:
+The `ablation_4c_qwen3_hybrid_memory` preset keeps capture off so its online
+generation remains the clean Harness + Hybrid Fast Memory ablation. The
+`ablation_5_qwen3_full` preset inherits the complete 4c runtime and enables only
+`scene_expert.components.slow_memory_capture.enabled`. An explicit component
+override can still control capture for a dedicated diagnostic run.
+
+When capture is disabled, the existing Main debug payload remains v1 and no
+additional raw SDK/tool/media state is collected. When enabled, every scene writes:
 
 ```text
 scene_XXX/scene_expert/slow_memory/
@@ -158,11 +163,15 @@ configured paired Critic-score and net case-win improvements are not reached.
 
 ## 5. Select a validated adapter
 
-After the paired scene-level gate passes:
+After the paired scene-level gate passes, serve the validated checkpoint under an
+explicit alias and select that alias independently of the experiment mode:
 
 ```bash
-export SCENEEXPERT_FULL_MODEL_ID="Qwen/SceneExpert-DPO"
+export SCENEEXPERT_MODEL_ID="Qwen/SceneExpert-DPO"
 python main.py experiment=ablation_5_qwen3_full
 ```
 
-Ablations 1-4 continue to use their existing model selection and are unaffected.
+`ablation_5_qwen3_full` never starts DPO training and never selects a checkpoint on
+the user's behalf. Running it with the base-model alias produces 4c-equivalent scene
+generation plus capture; running it with a validated candidate alias evaluates that
+candidate under the same online pipeline.

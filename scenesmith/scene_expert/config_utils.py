@@ -35,7 +35,6 @@ _MODE_COMPONENTS = {
             "verifier",
             "repair",
             "trace",
-            "slow_memory_capture",
         }
     ),
     "harness_memory": frozenset(
@@ -52,7 +51,6 @@ _MODE_COMPONENTS = {
             "verifier",
             "repair",
             "trace",
-            "slow_memory_capture",
         }
     ),
     "full": frozenset(

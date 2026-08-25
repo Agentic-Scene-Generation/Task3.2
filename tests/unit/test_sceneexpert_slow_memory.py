@@ -796,7 +796,9 @@ def test_scene_level_promotion_requires_controlled_paired_gain() -> None:
     assert not failed["promotable"]
 
 
-def test_full_ablation_selects_only_the_explicit_slow_model(monkeypatch) -> None:
+def test_full_ablation_keeps_model_selection_explicit_and_inherits_4c(
+    monkeypatch,
+) -> None:
     config_dir = Path(__file__).resolve().parents[2] / "configurations"
     monkeypatch.setenv("SCENEEXPERT_MODEL_ID", "base-model")
     monkeypatch.setenv("SCENEEXPERT_FULL_MODEL_ID", "sceneexpert-dpo")
@@ -818,8 +820,26 @@ def test_full_ablation_selects_only_the_explicit_slow_model(monkeypatch) -> None
         config_dir / "furniture_agent" / "base_furniture_agent.yaml"
     )
 
-    assert full.llm.model_id == "sceneexpert-dpo"
-    assert full.furniture_agent.openai.model == "sceneexpert-dpo"
-    assert full.floor_plan_agent.openai.model == "sceneexpert-dpo"
+    full_experiment = full.experiment
+    four_c_experiment = OmegaConf.load(
+        config_dir / "experiment" / "ablation_4c_qwen3_hybrid_memory.yaml"
+    )
+    composed_full = OmegaConf.merge(four_c_experiment, full_experiment)
+
+    assert list(full_experiment.defaults) == [
+        "ablation_4c_qwen3_hybrid_memory",
+        "_self_",
+    ]
+    assert full_experiment.scene_expert.mode == "full"
+    assert full_experiment.scene_expert.components.slow_memory_capture.enabled is True
+    assert "served_model_id" not in full_experiment.scene_expert
+    assert composed_full.quality_failure_policy == "degraded"
+    assert composed_full.scene_expert.memory.retriever_type == "hybrid"
+    assert composed_full.scene_expert.memory.index.auto_build_missing is True
+    assert composed_full.scene_expert.components.structured_llm.enabled is True
+    assert composed_full.scene_expert.components.repair.enabled is False
+    assert full.llm.model_id == "base-model"
+    assert full.furniture_agent.openai.model == "base-model"
+    assert full.floor_plan_agent.openai.model == "base-model"
     assert memory.llm.model_id == "base-model"
     assert memory.furniture_agent.openai.model == "base-model"

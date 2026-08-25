@@ -19,10 +19,9 @@ openai:
 # LLM settings shared by all agents. The served model name must match the
 # vLLM --served-model-name value.
 llm:
-  # Ablations 1-4 keep the normal served model. Ablation 5 may select the
-  # separately served DPO adapter/merged checkpoint without changing any main
-  # agent config. SCENEEXPERT_MODEL_ID remains the backwards-compatible base.
-  model_id: ${oc.select:experiment.scene_expert.slow_memory.served_model_id,${oc.env:SCENEEXPERT_MODEL_ID,Qwen/Qwen3.5-35B-A3B}}
+  # Experiment mode never selects or trains a checkpoint implicitly. Serve the
+  # desired base or DPO candidate explicitly and expose its exact alias here.
+  model_id: ${oc.env:SCENEEXPERT_MODEL_ID,Qwen/Qwen3.5-35B-A3B}
 
 # User-customizable filesystem roots.
 paths:

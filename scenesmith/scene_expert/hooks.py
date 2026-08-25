@@ -11,7 +11,7 @@ Ablation mode controls which components are active:
   "disabled"         → hooks are never created; SceneSmith runs as-is
   "harness_only"     → Harness FSM + GlobalPlanner, NO memory retrieval
   "harness_memory"   → Harness FSM + GlobalPlanner + FastMemory (MVP default)
-  "full"             → harness_memory + separately served Slow-Memory adapter
+  "full"             → harness_memory + observer-only Slow Memory capture
 """
 
 from __future__ import annotations

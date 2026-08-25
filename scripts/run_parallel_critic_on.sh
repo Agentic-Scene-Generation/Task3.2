@@ -66,7 +66,8 @@ if [ -z "$MEMORY_EMBEDDING_MODEL_DIR" ]; then
     done
 fi
 if [ "$EXPERIMENT" = "ablation_4b_qwen3_vector_memory" ] \
-    || [ "$EXPERIMENT" = "ablation_4c_qwen3_hybrid_memory" ]; then
+    || [ "$EXPERIMENT" = "ablation_4c_qwen3_hybrid_memory" ] \
+    || [ "$EXPERIMENT" = "ablation_5_qwen3_full" ]; then
     if [ -z "$MEMORY_EMBEDDING_MODEL_DIR" ] || [ ! -d "$MEMORY_EMBEDDING_MODEL_DIR" ]; then
         echo "ERROR: local BGE-M3 directory is required for $EXPERIMENT" >&2
         echo "       Set SCENEEXPERT_MEMORY_EMBEDDING_MODEL_DIR to a valid bge-m3 directory." >&2

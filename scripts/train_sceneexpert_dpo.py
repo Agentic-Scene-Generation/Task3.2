@@ -408,7 +408,8 @@ def main() -> int:
         "served_model_note": (
             "Serve this adapter with its exact base checkpoint only after the "
             "paired SceneEval scene-level gate passes, then set "
-            "SCENEEXPERT_FULL_MODEL_ID to the served alias."
+            "SCENEEXPERT_MODEL_ID to the served alias. Experiment mode never "
+            "selects a checkpoint implicitly."
         ),
     }
     (output_dir / "training_manifest.json").write_text(
