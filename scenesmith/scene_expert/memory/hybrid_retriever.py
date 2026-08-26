@@ -15,6 +15,7 @@ import numpy as np
 from scenesmith.scene_expert.memory.embedding import SceneMemoryEmbedder
 from scenesmith.scene_expert.memory.index import NumpyMemoryIndex
 from scenesmith.scene_expert.memory.schemas import FailureCase, Skill, SuccessCase
+from scenesmith.scene_expert.memory.skill_policy import evaluate_skill_for_task
 from scenesmith.scene_expert.memory.scoring import (
     HybridScoreWeights,
     hybrid_score,
@@ -25,7 +26,13 @@ from scenesmith.scene_expert.memory.scoring import (
 )
 from scenesmith.scene_expert.memory.store import FastMemoryStore
 from scenesmith.scene_expert.memory.text_builder import build_embedding_text
-from scenesmith.scene_expert.schemas import MemoryPack, SceneTaskSpec
+from scenesmith.scene_expert.schemas import (
+    MemoryPack,
+    RetrievedMemorySelection,
+    SceneTaskSpec,
+    SkillSelectionDecision,
+    StageRelationContext,
+)
 
 console_logger = logging.getLogger(__name__)
 MemoryRecord = SuccessCase | FailureCase | Skill
@@ -76,7 +83,12 @@ class HybridMemoryRetriever:
         if require_indexes:
             self._ensure_required_indexes()
 
-    def retrieve(self, task_spec: SceneTaskSpec, stage: str) -> MemoryPack:
+    def retrieve(
+        self,
+        task_spec: SceneTaskSpec,
+        stage: str,
+        relation_context: StageRelationContext | None = None,
+    ) -> MemoryPack:
         total_start = time.perf_counter()
         if self._store.refresh_if_changed():
             self._index_cache.clear()
@@ -104,6 +116,7 @@ class HybridMemoryRetriever:
             query_vec = query_vec[0]
 
         bank_timings: list[dict[str, Any]] = []
+        skill_decisions: dict[str, SkillSelectionDecision] = {}
         success = self._retrieve_bank(
             "success",
             stage,
@@ -111,6 +124,8 @@ class HybridMemoryRetriever:
             task_spec,
             final_top_k=self._max_success,
             bank_timings=bank_timings,
+            relation_context=relation_context,
+            skill_decisions=skill_decisions,
         )
         failure = self._retrieve_bank(
             "failure",
@@ -119,6 +134,8 @@ class HybridMemoryRetriever:
             task_spec,
             final_top_k=self._max_failure,
             bank_timings=bank_timings,
+            relation_context=relation_context,
+            skill_decisions=skill_decisions,
         )
         skills = self._retrieve_bank(
             "skill",
@@ -127,7 +144,25 @@ class HybridMemoryRetriever:
             task_spec,
             final_top_k=self._max_skills,
             bank_timings=bank_timings,
+            relation_context=relation_context,
+            skill_decisions=skill_decisions,
         )
+
+        selected_skill_names = {
+            record.skill_name for _, record in skills if isinstance(record, Skill)
+        }
+        for skill_name, decision in list(skill_decisions.items()):
+            if decision.decision == "rejected":
+                continue
+            skill_decisions[skill_name] = decision.model_copy(
+                update={
+                    "decision": (
+                        "selected"
+                        if skill_name in selected_skill_names
+                        else "not_selected"
+                    )
+                }
+            )
 
         placement_reference = ""
         for _, record in success:
@@ -149,6 +184,13 @@ class HybridMemoryRetriever:
         )
         selected_records = [record for _, record in [*success, *failure, *skills]]
         source_task_ids, source_run_ids = self._selected_provenance(selected_records)
+        selections = self._build_selections(
+            success=success,
+            failure=failure,
+            skills=skills,
+            source_task_ids=source_task_ids,
+            source_run_ids=source_run_ids,
+        )
 
         return MemoryPack(
             success_hints=[
@@ -188,7 +230,51 @@ class HybridMemoryRetriever:
             retrieved_source_run_ids=source_run_ids,
             memory_bank_id=self._store.bank_id,
             memory_bank_revision=self._store.revision,
+            selections=selections,
+            skill_filter_decisions=list(skill_decisions.values()),
         ).deduplicated()
+
+    def _build_selections(
+        self,
+        *,
+        success: list[tuple[float, MemoryRecord]],
+        failure: list[tuple[float, MemoryRecord]],
+        skills: list[tuple[float, MemoryRecord]],
+        source_task_ids: dict[str, list[str]],
+        source_run_ids: dict[str, list[str]],
+    ) -> list[RetrievedMemorySelection]:
+        """Persist rerank order, scores, bank locators, and injected text."""
+        rows: list[RetrievedMemorySelection] = []
+        specs = (
+            ("success", success, "success_cases.jsonl"),
+            ("failure", failure, "failure_cases.jsonl"),
+            ("skill", skills, "skills.jsonl"),
+        )
+        for memory_type, scored_records, filename in specs:
+            for rank, (score, record) in enumerate(scored_records, start=1):
+                memory_id = _record_id(record)
+                if isinstance(record, SuccessCase):
+                    injected_text = record.to_positive_guidance()
+                elif isinstance(record, FailureCase):
+                    injected_text = record.to_negative_constraint()
+                else:
+                    injected_text = record.to_procedure_text()
+                rows.append(
+                    RetrievedMemorySelection(
+                        memory_id=memory_id,
+                        memory_type=memory_type,
+                        rank=rank,
+                        score=round(float(score), 6),
+                        score_components={"hybrid_total": round(float(score), 6)},
+                        source_path=str((self._memory_dir / filename).resolve()),
+                        source_task_ids=source_task_ids.get(memory_id, []),
+                        source_run_ids=source_run_ids.get(memory_id, []),
+                        bank_id=self._store.bank_id,
+                        bank_revision=self._store.revision,
+                        injected_text=injected_text,
+                    )
+                )
+        return rows
 
     @staticmethod
     def _selected_provenance(
@@ -242,6 +328,8 @@ class HybridMemoryRetriever:
         task_spec: SceneTaskSpec,
         final_top_k: int,
         bank_timings: list[dict[str, Any]],
+        relation_context: StageRelationContext | None,
+        skill_decisions: dict[str, SkillSelectionDecision],
     ) -> list[tuple[float, MemoryRecord]]:
         bank_timing: dict[str, Any] = {
             "memory_type": memory_type,
@@ -290,7 +378,14 @@ class HybridMemoryRetriever:
             if self._same_task(record):
                 bank_timing["same_task_filtered_count"] += 1
                 continue
-            if not self._structured_filter(record, task_spec, stage, memory_type):
+            if not self._structured_filter(
+                record,
+                task_spec,
+                stage,
+                memory_type,
+                relation_context=relation_context,
+                skill_decisions=skill_decisions,
+            ):
                 bank_timing["structured_filtered_count"] += 1
                 continue
             score = hybrid_score(
@@ -326,9 +421,23 @@ class HybridMemoryRetriever:
         task_spec: SceneTaskSpec,
         stage: str,
         memory_type: str,
+        *,
+        relation_context: StageRelationContext | None,
+        skill_decisions: dict[str, SkillSelectionDecision],
     ) -> bool:
         if record.stage != stage:
             return False
+
+        if memory_type == "skill" and isinstance(record, Skill):
+            policy = evaluate_skill_for_task(
+                record,
+                task_spec,
+                stage,
+                relation_context=relation_context,
+            )
+            skill_decisions[record.skill_name] = policy.decision
+            if not policy.eligible:
+                return False
 
         if memory_type == "failure" and isinstance(record, FailureCase):
             task_objects = task_required_objects(task_spec, stage)

@@ -62,6 +62,7 @@ def test_metrics_survive_partial_failure_and_attribute_repairs(tmp_path) -> None
             "total_time_sec": 120.0,
             "experiment_name": "ablation_4c",
             "config_hash": "config-1",
+            "experiment_signature": "stable-4c-signature",
             "model": "qwen-test",
             "code_provenance": {
                 "git_revision": "abc123",
@@ -106,6 +107,14 @@ def test_metrics_survive_partial_failure_and_attribute_repairs(tmp_path) -> None
                         "designer_prompt_contains_brief": True,
                         "injected_memory_hash": "abc",
                         "designer_prompt_contains_memory": True,
+                    },
+                    "verify_report": {
+                        "pass_stage": True,
+                        "issues": [],
+                        "hard_check_report": {
+                            "hard_valid": True,
+                            "relation_satisfaction": 0.9,
+                        },
                     },
                     "repair_actions": [
                         {
@@ -217,7 +226,28 @@ def test_metrics_survive_partial_failure_and_attribute_repairs(tmp_path) -> None
         encoding="utf-8",
     )
     (timing_dir / "repair_events.jsonl").write_text(
-        json.dumps({"schema_version": "scenesmith.repair_event.v1"}) + "\n",
+        json.dumps(
+            {
+                "schema_version": "scenesmith.repair_event.v1",
+                "repair_owner": "scenesmith_core",
+                "strategy": "deterministic_hard_state",
+                "status": "accepted",
+                "affected_objects": [{"object_id": "chair_1"}],
+                "detail": {"resolved": True, "elapsed_sec": 0.25},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (timing_dir / "stage_working_timing.jsonl").write_text(
+        json.dumps(
+            {
+                "module": "deterministic_repair",
+                "event": "critic_hard_state",
+                "elapsed_sec": 0.3,
+            }
+        )
+        + "\n",
         encoding="utf-8",
     )
 
@@ -228,6 +258,8 @@ def test_metrics_survive_partial_failure_and_attribute_repairs(tmp_path) -> None
     assert metrics["summary"]["completed_scenes"] == 1
     assert metrics["summary"]["failed_scenes"] == 1
     assert metrics["summary"]["critic_mean_score"] == 1.0
+    assert metrics["summary"]["hard_constraint_pass_rate"] == 1.0
+    assert metrics["summary"]["mean_relation_satisfaction"] == 0.9
     assert metrics["summary"]["memory_injection_delivery_rate"] == 1.0
     assert metrics["summary"]["memory_cross_task_verified_scene_coverage"] == 0.5
     assert metrics["memory_closed_loop_observed"] is True
@@ -249,6 +281,11 @@ def test_metrics_survive_partial_failure_and_attribute_repairs(tmp_path) -> None
     )
     assert metrics["summary"]["memory_writer_fallback_writes"] == 0
     assert metrics["summary"]["scenesmith_repair_events"] == 1
+    assert metrics["summary"]["scenesmith_repairs_accepted"] == 1
+    assert metrics["summary"]["scenesmith_repairs_resolved"] == 1
+    assert metrics["summary"]["scenesmith_repair_affected_objects"] == 1
+    assert metrics["summary"]["scenesmith_repair_timing_events"] == 1
+    assert metrics["summary"]["scenesmith_repair_overhead_sec"] == 0.3
     assert metrics["summary"]["sceneexpert_repair_plans"] == 1
     assert metrics["summary"]["sceneexpert_repairs_executed"] == 1
     assert metrics["summary"]["memory_zero_result_reasons"] == [

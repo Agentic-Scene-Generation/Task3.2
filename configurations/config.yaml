@@ -19,6 +19,8 @@ openai:
 # LLM settings shared by all agents. The served model name must match the
 # vLLM --served-model-name value.
 llm:
+  # Experiment mode never selects or trains a checkpoint implicitly. Serve the
+  # desired base or DPO candidate explicitly and expose its exact alias here.
   model_id: ${oc.env:SCENEEXPERT_MODEL_ID,Qwen/Qwen3.5-35B-A3B}
 
 # User-customizable filesystem roots.

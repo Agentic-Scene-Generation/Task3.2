@@ -10,9 +10,9 @@ enabled: false   # Default: off. Set true in ablation_3/4/5 experiment configs.
 
 # Ablation mode controls which components are active:
 #   "disabled"       → no-op; hooks are never built
-#   "harness_only"   → TaskCompiler + Harness + GlobalPlanner; no memory
-#   "harness_memory" → TaskCompiler + Harness + GlobalPlanner + FastMemory (MVP)
-#   "full"           → harness_memory + LoRA model (model ID differs, behavior same)
+#   "harness_only"   → TaskCompiler + Harness + GlobalPlanner; no memory/capture
+#   "harness_memory" → Harness + FastMemory; no offline trajectory capture
+#   "full"           → harness_memory + observer-only Slow Memory capture
 mode: "disabled"
 
 # Independent component gates. ``null`` inherits the legacy mode preset; an
@@ -52,6 +52,22 @@ components:
   # MemoryWriter. A failed writer call is auditable and performs no write.
   structured_llm:
     enabled: false
+  # Observer-only capture of designer/repair trajectories for offline DPO.
+  # The full preset enables it; harness_only/harness_memory keep it off unless
+  # an explicit component override requests a dedicated capture experiment.
+  # It never changes main's stage decisions or starts a training job.
+  slow_memory_capture:
+    enabled: null
+
+# Slow memory is an offline consumer of authoritative main artifacts. Runtime
+# capture is append-only and separately gated; dataset export and training are
+# explicit scripts, never automatic ACP side effects.
+slow_memory:
+  capture:
+    max_prompt_chars: ${oc.env:SCENEEXPERT_SLOW_MEMORY_MAX_PROMPT_CHARS,131072}
+    # Canonical tool trajectories can be long even after images are externalized.
+    # One MiB prevents loss while keeping duplicate raw SDK payloads out of rows.
+    max_response_chars: ${oc.env:SCENEEXPERT_SLOW_MEMORY_MAX_RESPONSE_CHARS,1048576}
 
 # Direct structured calls made by SceneExpert itself. These roles share one
 # local OpenAI-compatible client, but each role has an explicit bounded budget.

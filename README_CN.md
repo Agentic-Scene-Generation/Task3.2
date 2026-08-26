@@ -24,7 +24,7 @@ SceneExpert 增加在 `ablation_3/4/4a/4b/4c/5` 中：
 - `ablation_4a_qwen3_lexical_memory`：lexical 快速记忆消融。
 - `ablation_4b_qwen3_vector_memory`：BGE-M3 + numpy 向量记忆消融。
 - `ablation_4c_qwen3_hybrid_memory`：structured filter + vector recall + hybrid score 的推荐记忆配置。
-- `ablation_5_qwen3_full`：用于 LoRA/合并模型版本，运行时核心机制同 memory 版本，区别是 served model。
+- `ablation_5_qwen3_full`：与 4c 使用相同生成流程，并额外开启 observer-only Slow Memory 轨迹采集；不会启动训练或自动切换模型。
 
 `scripts/run_experiment.sh` 会在同一个 job 里启动 vLLM，然后运行：
 
@@ -783,7 +783,7 @@ export SCENEEXPERT_MAX_MODEL_LEN=65536
 | `ablation_4a_qwen3_lexical_memory` | Qwen3.5 + harness + lexical fast memory。 | memory 消融实验；不需要 BGE-M3 或 numpy index。 |
 | `ablation_4b_qwen3_vector_memory` | Qwen3.5 + harness + BGE-M3 numpy vector memory。 | memory 消融实验；需要先构建 memory index。 |
 | `ablation_4c_qwen3_hybrid_memory` | Qwen3.5 + harness + structured filter + vector recall + hybrid score。 | 推荐的增强 memory 实验；需要先构建 memory index。 |
-| `ablation_5_qwen3_full` | harness + memory + LoRA/合并后的专用模型。 | 只有 LoRA/合并模型已经准备好并由 vLLM served 时再跑。 |
+| `ablation_5_qwen3_full` | 与 4c 相同的生成流程 + observer-only Slow Memory 采集。 | 收集 DPO 候选轨迹时运行；模型仍由 `SCENEEXPERT_MODEL_ID` 独立选择。 |
 
 推荐顺序：
 
@@ -792,7 +792,7 @@ export SCENEEXPERT_MAX_MODEL_LEN=65536
 3. `ablation_4a_qwen3_lexical_memory`：确认 memory JSONL 读写和 lexical 检索可用。
 4. `ablation_4b_qwen3_vector_memory`：验证 BGE-M3 embedding + numpy index。
 5. `ablation_4c_qwen3_hybrid_memory`：正式 memory 增强实验。
-6. `ablation_5_qwen3_full`：仅在 LoRA/合并模型完成后运行。
+6. `ablation_5_qwen3_full`：验证 4c 稳定后，运行以收集 Slow Memory 训练候选轨迹。
 
 默认运行 Qwen naive baseline：
 
@@ -818,7 +818,7 @@ bash scripts/run_experiment.sh ablation_4b_qwen3_vector_memory
 bash scripts/run_experiment.sh ablation_4c_qwen3_hybrid_memory
 ```
 
-运行 full/LoRA 合并模型版本：
+运行 full 数据采集版本（以下模型别名可以是基座模型或已验证适配器）：
 
 ```bash
 export SCENEEXPERT_MODEL_ID="Qwen/Qwen3-SceneExpert-LoRA"
