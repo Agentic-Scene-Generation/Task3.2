@@ -1,6 +1,10 @@
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.support import (
     evaluate_support_relation,
 )
+from scenesmith.scenebenchmark_critic.metrics.functional_dependency.relations import (
+    evaluate_functional_dependency,
+)
+from scenesmith.scenebenchmark_critic.core.geometry import load_geometry
 
 
 def _object(
@@ -49,3 +53,30 @@ def test_floor_furniture_outside_rug_fails_footprint_coverage() -> None:
 
     assert result.label == "fail"
     assert result.evaluation_path == "floor_covering_footprint"
+
+
+def test_explicit_support_relation_uses_geometry_for_open_vocabulary_objects() -> None:
+    plinth = _object(
+        "display_plinth_0",
+        "display_plinth",
+        ((-0.6, -0.4, 0.0), (0.6, 0.4, 0.8)),
+    )
+    framed_photo = _object(
+        "framed_photo_0",
+        "framed_photo",
+        ((-0.1, -0.08, 0.8), (0.1, 0.08, 1.0)),
+    )
+    framed_photo["object_type"] = "manipuland"
+    case_pack = {"scene_geometry": {"objects": [plinth, framed_photo]}}
+    check = {
+        "check_id": "photo_on_plinth",
+        "metric": "functional_dependency",
+        "subject_id": "framed_photo_0",
+        "target_ids": ["display_plinth_0"],
+        "relation_type": "object_on_support",
+    }
+
+    result = evaluate_functional_dependency(load_geometry(case_pack), check)
+
+    assert result["label"] == "pass"
+    assert "target category is not compatible" not in result["reason"]

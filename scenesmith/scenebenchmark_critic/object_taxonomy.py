@@ -134,6 +134,10 @@ OBJECT_CATEGORY_PHRASES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("filing_cabinet", ("filing cabinet", "file cabinet")),
     ("storage_cabinet", ("storage cabinet", "storage cupboard")),
     (
+        "display_cabinet",
+        ("display cabinet", "display cupboard", "display case"),
+    ),
+    (
         "water_dispenser",
         ("water dispenser", "water cooler", "drinking water dispenser"),
     ),

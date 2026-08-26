@@ -451,6 +451,31 @@ _FLANKING_GROUNDING_PATTERNS = (
 )
 
 
+def _selector_phrase_pattern(selector: dict[str, Any] | None) -> str:
+    category = str((selector or {}).get("category") or "").strip().replace("_", " ")
+    if not category:
+        return ""
+    words = [re.escape(word) for word in category.split()]
+    return rf"(?<![a-z0-9]){'[ -]+'.join(words)}(?:s|es)?(?![a-z0-9])"
+
+
+def _on_top_relation_uses_containment_wording(
+    constraint: dict[str, Any], evidence: str
+) -> bool:
+    """Whether grounded endpoints are described as contained, not supported."""
+    subject = _selector_phrase_pattern(constraint.get("subjects"))
+    target = _selector_phrase_pattern(constraint.get("targets"))
+    if not subject or not target:
+        return False
+    bounded = r"[^.;!?]{0,100}"
+    patterns = (
+        rf"{target}{bounded}\b(?:holding|holds|containing|contains)\b{bounded}{subject}",
+        rf"{target}{bounded}\bwith\b{bounded}{subject}{bounded}\binside\b",
+        rf"{subject}{bounded}\b(?:inside|within|contained\s+(?:in|inside))\b{bounded}{target}",
+    )
+    return any(re.search(pattern, evidence, re.IGNORECASE) for pattern in patterns)
+
+
 def _validate_prompt_grounded_relations(
     payload: dict[str, Any], prompt: str
 ) -> dict[str, Any]:
@@ -478,6 +503,15 @@ def _validate_prompt_grounded_relations(
             raise ValueError(
                 "centered_on_wall hard intent requires explicit wall wording in "
                 "its grounded prompt or TaskCompiler constraint"
+            )
+        if (
+            relation == "on_top_of"
+            and source == "explicit_prompt"
+            and _on_top_relation_uses_containment_wording(constraint, evidence)
+        ):
+            raise ValueError(
+                "on_top_of hard intent cannot replace containment wording for "
+                "the same grounded endpoints"
             )
         if relation != "flanking":
             continue

@@ -225,6 +225,11 @@ def _eval_relation_over_targets(
             # proposals, but applying it here made floor objects near a desk or
             # dresser fail a support-surface check despite satisfying the prompt.
             target_relation = "generic_near_relation"
+        elif relation_type == "object_on_support":
+            # An explicit support contract is a geometric claim. Open-vocabulary
+            # assets can lack support taxonomy even when their contact geometry is
+            # conclusive, so let the deterministic support evaluator decide it.
+            pass
         elif not _relation_target_is_valid(subject, target, relation_type):
             inferred = _infer_relation_type(subject, target)
             if inferred and _relation_target_is_valid(subject, target, inferred):

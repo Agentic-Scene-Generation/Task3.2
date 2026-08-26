@@ -92,6 +92,47 @@ def test_repeated_mislabeled_surfaces_still_pair_one_to_one() -> None:
     }
 
 
+def test_runtime_manipuland_type_overrides_stale_seating_annotation() -> None:
+    desk = _object("desk_0", "desk", (0.0, 0.0), (1.2, 0.7))
+    pen = _object("blue_pen_0", "blue_pen", (0.0, 0.0), (0.04, 0.07))
+    pen["object_type"] = "manipuland"
+    pen["functional_hints"].update(
+        {
+            "scene_object_type": "furniture",
+            "category_group": "seating",
+            "functional_categories": ["sittable", "graspable"],
+        }
+    )
+    pen["object_function_profile"]["is_seating"] = True
+    pen["bbox_world"].update(
+        {
+            "center": [0.0, 0.0, 0.8],
+            "size": [0.04, 0.07, 0.01],
+            "min": [-0.02, -0.035, 0.795],
+            "max": [0.02, 0.035, 0.805],
+        }
+    )
+    case = _case([desk, pen], task="An office desk equipped with a pen.")
+
+    assert (
+        assign_work_seats_to_surfaces(
+            [desk, pen], task_instruction=case["task_instruction"], room_type="office"
+        )
+        == []
+    )
+    checks = build_functional_dependency_checks(case)
+    assert not any(
+        check.get("subject_id") == "blue_pen_0"
+        and check.get("relation_type") == "seating_to_work_surface"
+        for check in checks
+    )
+    assert not any(
+        check.get("relation_type") == "workstation"
+        and "blue_pen_0" in (check.get("target_ids") or [])
+        for check in checks
+    )
+
+
 def test_boundary_workstation_keeps_usable_desk_side() -> None:
     """Clamp a near-wall chair slot instead of assigning the desk's back side."""
     desk = _object("office_desk_0", "office_desk", (0.0, -2.5), (1.4, 0.7), yaw=180.0)

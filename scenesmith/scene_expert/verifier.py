@@ -298,7 +298,7 @@ def _result_intent_constraint(result: dict) -> dict:
 
 
 def _result_is_due(result: dict, stage: str) -> bool:
-    """Whether a deterministic result's dependencies should already exist."""
+    """Whether a deterministic result belongs to the current repair owner."""
     if stage == "final":
         return True
     if stage not in CONTRACT_STAGE_ORDER:
@@ -309,7 +309,7 @@ def _result_is_due(result: dict, stage: str) -> bool:
     earliest = str(diagnostics.get("earliest_stage") or constraint.get("stage") or "")
     if not earliest or earliest not in CONTRACT_STAGE_ORDER:
         return True
-    return CONTRACT_STAGE_ORDER.index(earliest) <= CONTRACT_STAGE_ORDER.index(stage)
+    return earliest == stage
 
 
 def _deterministic_core_failures(payload: dict | None, stage: str) -> list[dict]:

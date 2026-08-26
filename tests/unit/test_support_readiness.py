@@ -1,6 +1,9 @@
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.intent_contract import (
     evaluate_intent_contract_extensions,
 )
+from scenesmith.scenebenchmark_critic.intent_contract import (
+    apply_contract_execution_states,
+)
 
 
 def _bbox(z_top: float = 0.8) -> dict:
@@ -54,6 +57,24 @@ def test_support_readiness_fails_present_target_without_verified_surface() -> No
     assert results[0]["primary_object"] == "armchair_0"
 
 
+def test_support_readiness_failure_is_due_at_target_owning_stage() -> None:
+    target = {
+        "id": "armchair_0",
+        "category": "armchair",
+        "object_type": "furniture",
+        "bbox_world": _bbox(),
+        "support_surfaces": [],
+    }
+    case_pack = _case(target)
+    results = evaluate_intent_contract_extensions(case_pack)
+
+    apply_contract_execution_states(case_pack, results)
+
+    assert results[0]["label"] == "fail"
+    assert results[0]["scoring_tier"] == "core"
+    assert results[0]["contract_state"] == "failed"
+
+
 def test_support_readiness_passes_target_with_declared_surface() -> None:
     target = {
         "id": "desk_0",
@@ -64,7 +85,12 @@ def test_support_readiness_passes_target_with_declared_surface() -> None:
             {
                 "region_id": "desk_top",
                 "support_kind": "top_surface",
-                "polygon_xy": [[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]],
+                "polygon_world_xy": [
+                    [-0.5, -0.5],
+                    [0.5, -0.5],
+                    [0.5, 0.5],
+                    [-0.5, 0.5],
+                ],
                 "height_world_z": 0.75,
             }
         ],
@@ -79,6 +105,30 @@ def test_support_readiness_passes_target_with_declared_surface() -> None:
 
     assert results[0]["relation_type"] == "support_readiness"
     assert results[0]["label"] == "pass"
+
+
+def test_support_readiness_does_not_verify_synthetic_bbox_profile() -> None:
+    target = {
+        "id": "utility_cart_0",
+        "category": "utility_cart",
+        "object_type": "furniture",
+        "bbox_world": _bbox(0.95),
+        "support_surfaces": [],
+        "object_function_profile": {"can_support_top": True},
+    }
+    case_pack = _case(target)
+    case_pack["intent_contract"]["constraints"][0]["targets"] = {
+        "category": "utility_cart",
+        "count": 1,
+    }
+
+    results = evaluate_intent_contract_extensions(case_pack)
+
+    assert results[0]["relation_type"] == "support_readiness"
+    assert results[0]["label"] == "unknown"
+    assert results[0]["diagnostics"]["surface_candidate_count"] == 0
+    assert results[0]["diagnostics"]["inferred_surface_candidate_count"] == 1
+    assert results[0]["diagnostics"]["surface_candidate_sources"] == ["bbox_profile"]
 
 
 def test_support_readiness_does_not_replace_present_subject_evaluation() -> None:

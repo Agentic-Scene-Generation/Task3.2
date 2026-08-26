@@ -72,6 +72,50 @@ def test_bound_seat_is_removed_only_from_anchor_clearance() -> None:
     assert chair_clearance["blocking_objects"] == ["table_0"]
 
 
+def test_surround_seats_are_removed_only_from_anchor_clearance() -> None:
+    objects = {
+        "chair_0": _obj("chair_0", "dining_chair"),
+        "chair_1": _obj("chair_1", "dining_chair"),
+        "table_0": _obj("table_0", "dining_table"),
+    }
+    case_pack = {
+        "checks": [
+            {
+                "check_id": "clearance__table_0",
+                "metric": "interaction_clearance",
+                "subject_id": "table_0",
+                "clearance_result": {
+                    "label": "fail",
+                    "blocking_objects": ["chair_0", "chair_1", "other_0"],
+                    "intrusions": [
+                        {"object_id": "chair_0"},
+                        {"object_id": "chair_1"},
+                        {"object_id": "other_0"},
+                    ],
+                },
+            }
+        ],
+        "intent_contract": {
+            "constraints": [
+                {
+                    "constraint_id": "surround_0",
+                    "relation": "surround",
+                    "subjects": {"category": "dining_chair", "count": 2},
+                    "targets": {"category": "dining_table", "count": 1},
+                    "source": "explicit_prompt",
+                    "strength": "hard",
+                }
+            ]
+        },
+    }
+
+    attach_expected_clearance_companions(case_pack, objects)
+
+    clearance = case_pack["checks"][0]["clearance_result"]
+    assert clearance["label"] == "fail"
+    assert clearance["blocking_objects"] == ["other_0"]
+
+
 def test_rug_and_supported_small_object_are_ignored_without_direct_access_contract() -> (
     None
 ):

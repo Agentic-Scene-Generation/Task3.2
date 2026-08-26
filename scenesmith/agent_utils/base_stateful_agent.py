@@ -1990,10 +1990,13 @@ class BaseStatefulAgent(ABC):
 
         # A planner can return a natural-language acknowledgement without ever
         # invoking a workflow tool.  Letting that response pass makes the stage
-        # look successful while leaving required surfaces empty.  A fresh stage
-        # must create its initial design; a replay from an existing candidate
-        # intentionally starts with critique and repair instead.
-        if require_initial_design and self._planner_initial_design_tool_calls == 0:
+        # look successful while leaving required surfaces empty.  A normal fresh
+        # stage uses initial design, while a restored/retry candidate can already
+        # complete real design work through a successful designer mutation.
+        if (
+            require_initial_design
+            and getattr(self, "_planner_successful_designer_mutations", 0) == 0
+        ):
             recovery_input = (
                 "MANDATORY WORKFLOW RECOVERY: your previous turn returned without "
                 "calling a workflow tool, so no design work has been completed. "
@@ -2015,10 +2018,10 @@ class BaseStatefulAgent(ABC):
                 recovery_input,
                 event="coordinate_stage_recovery",
             )
-            if self._planner_initial_design_tool_calls == 0:
+            if getattr(self, "_planner_successful_designer_mutations", 0) == 0:
                 raise RuntimeError(
-                    "Planner exited without calling request_initial_design after "
-                    "the mandatory workflow recovery turn"
+                    "Planner exited without completing a scene mutation after the "
+                    "mandatory workflow recovery turn"
                 )
         elif (
             getattr(self, "_planner_review_existing", False)
@@ -2485,6 +2488,7 @@ class BaseStatefulAgent(ABC):
 
     def _reset_planner_budget_tracking(self) -> None:
         self._planner_initial_design_tool_calls = 0
+        self._planner_successful_designer_mutations = 0
         self._planner_critique_tool_calls = 0
         self._planner_design_change_tool_calls = 0
         self._planner_budget_exhausted = False
@@ -2494,6 +2498,15 @@ class BaseStatefulAgent(ABC):
         self._pending_hard_repair_hint = ""
         self._hard_repair_design_change_calls = 0
         self._planner_review_existing_workflow_calls = 0
+
+    def _planner_scene_hash(self) -> str:
+        """Return the committed scene hash used to audit designer mutations."""
+        return str(self.scene.content_hash())
+
+    def _record_successful_designer_mutation(self, before_hash: str) -> None:
+        """Count only designer calls whose final committed scene state changed."""
+        if self._planner_scene_hash() != before_hash:
+            self._planner_successful_designer_mutations += 1
 
     def _stop_planner_after_failure(self, reason: str) -> str:
         """Convert a nested agent failure into a deterministic planner stop."""
@@ -2714,6 +2727,7 @@ class BaseStatefulAgent(ABC):
             # Consume before delegation so a failed child call cannot be retried in
             # a planner loop and obscure its original failure.
             self._hard_repair_design_change_calls += 1
+            scene_hash_before = self._planner_scene_hash()
             try:
                 result = await self._run_planner_delegation(
                     operation="request_design_change",
@@ -2721,6 +2735,7 @@ class BaseStatefulAgent(ABC):
                     action=lambda: self._request_design_change_impl(repair_instruction),
                     detail={"instruction": repair_instruction, "source": source},
                 )
+                self._record_successful_designer_mutation(scene_hash_before)
             except Exception as exc:
                 console_logger.exception("Planner hard-repair design change failed")
                 return self._stop_planner_after_failure(
@@ -2759,12 +2774,14 @@ class BaseStatefulAgent(ABC):
                     "completed."
                 )
             self._planner_initial_design_tool_calls += 1
+            scene_hash_before = self._planner_scene_hash()
             try:
                 result = await self._run_planner_delegation(
                     operation="request_initial_design",
                     child_agent="designer",
                     action=self._request_initial_design_impl,
                 )
+                self._record_successful_designer_mutation(scene_hash_before)
             except Exception as exc:
                 console_logger.exception("Planner-requested initial design failed")
                 return self._stop_planner_after_failure(
@@ -2878,6 +2895,7 @@ class BaseStatefulAgent(ABC):
                     source="request_design_change",
                 )
 
+            scene_hash_before = self._planner_scene_hash()
             try:
                 result = await self._run_planner_delegation(
                     operation="request_design_change",
@@ -2885,6 +2903,7 @@ class BaseStatefulAgent(ABC):
                     action=lambda: self._request_design_change_impl(instruction),
                     detail={"instruction": instruction},
                 )
+                self._record_successful_designer_mutation(scene_hash_before)
             except Exception as exc:
                 console_logger.exception("Planner-requested design change failed")
                 return self._stop_planner_after_failure(

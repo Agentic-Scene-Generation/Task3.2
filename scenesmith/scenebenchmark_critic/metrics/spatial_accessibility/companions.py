@@ -30,11 +30,10 @@ def attach_expected_access_companions(
 ) -> None:
     """Exclude explicitly paired seats from their surface's access obstacles.
 
-    A seat is an expected occupant of the access zone only when the original
-    intent contract binds that same seat to the same target through both hard
-    ``in_front_of`` and ``faces`` relations.  This extends the existing
-    inferred desk/table pairing to purpose-specific surfaces such as a
-    dressing table, without authorizing an unrelated nearby chair.
+    A seat is an expected occupant of the access zone only when a generated
+    dependency or the original intent contract binds that same seat to the same
+    target. This covers explicit seating cohorts without authorizing an
+    unrelated nearby chair.
     """
     companions_by_surface: dict[str, set[str]] = {}
     for check in case_pack.get("checks") or []:
@@ -57,7 +56,7 @@ def attach_expected_access_companions(
             ):
                 companions_by_surface.setdefault(surface_id, set()).add(seat_id)
 
-    for seat_id, surface_id in _hard_bound_seating_pairs(case_pack, objects):
+    for seat_id, surface_id in _contract_companion_pairs(case_pack, objects):
         companions_by_surface.setdefault(surface_id, set()).add(seat_id)
 
     for check in case_pack.get("checks") or []:
@@ -129,21 +128,25 @@ def _contract_companion_pairs(
     pairs = set(_hard_bound_seating_pairs(case_pack, objects))
     for constraint in contract_constraints(
         case_pack,
-        relations=("paired_with", "flanking", "edge_distribution"),
+        relations=("paired_with", "flanking", "edge_distribution", "surround"),
         include_auxiliary=False,
     ):
+        if str(constraint.get("strength") or "hard").lower() != "hard":
+            continue
         subject_ids = bound_ids(constraint.get("subjects"), rows)
         target_ids = bound_ids(constraint.get("targets"), rows)
+        if len(target_ids) != 1:
+            continue
         for subject_id in subject_ids:
             subject = objects.get(subject_id)
             if subject is None or not _is_seating_subject(subject):
                 continue
-            for target_id in target_ids:
-                target = objects.get(target_id)
-                if target is not None and _is_actionable_seating_surface_pair(
-                    subject, target
-                ):
-                    pairs.add((subject_id, target_id))
+            target_id = target_ids[0]
+            target = objects.get(target_id)
+            if target is not None and _is_actionable_seating_surface_pair(
+                subject, target
+            ):
+                pairs.add((subject_id, target_id))
     return pairs
 
 

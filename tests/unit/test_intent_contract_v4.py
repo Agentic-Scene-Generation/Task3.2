@@ -1151,6 +1151,70 @@ def test_furniture_selector_ignores_later_stage_decor_with_parent_category() -> 
     assert selector_match_count(selector, [dresser, tabletop_mirror]) == 1
 
 
+def test_open_vocabulary_semantic_name_binds_manipuland_retrieval_category() -> None:
+    mini_fridge = _record(
+        "mini_fridge_0",
+        "refrigerator",
+        (0.0, 0.0),
+        (0.3, 0.2, 0.35),
+    )
+    mini_fridge.update(
+        {
+            "name": "mini_fridge",
+            "object_type": "manipuland",
+            "metadata": {"semantic_name": "mini_fridge"},
+        }
+    )
+
+    assert selected_ids({"category": "mini_fridge", "count": 1}, [mini_fridge]) == [
+        "mini_fridge_0"
+    ]
+
+
+def test_generic_open_vocabulary_selector_matches_declared_specialization() -> None:
+    bathtub = _record(
+        "freestanding_bathtub_0",
+        "freestanding_bathtub",
+        (0.0, 0.0),
+        (1.7, 0.8, 0.6),
+    )
+    bathtub["object_type"] = "furniture"
+
+    assert selected_ids({"category": "bathtub", "count": 1}, [bathtub]) == [
+        "freestanding_bathtub_0"
+    ]
+
+
+def test_composite_open_vocabulary_selector_requires_explicit_identity() -> None:
+    fruit_bowl = _record(
+        "filled_container_0",
+        "bowl",
+        (0.0, 0.0),
+        (0.3, 0.3, 0.2),
+    )
+    fruit_bowl.update(
+        {
+            "name": "filled_bowl_of_fruit",
+            "object_type": "manipuland",
+            "metadata": {
+                "composite_type": "filled_container",
+                "container_asset": {"name": "bowl_of_fruit"},
+                "fill_assets": [{"name": "apple"}, {"name": "pear"}],
+            },
+        }
+    )
+    empty_bowl = _record(
+        "empty_bowl_0",
+        "bowl",
+        (1.0, 0.0),
+        (0.3, 0.3, 0.2),
+    )
+    empty_bowl["object_type"] = "manipuland"
+
+    selector = {"category": "bowl_of_fruit", "count": 1}
+    assert selected_ids(selector, [fruit_bowl, empty_bowl]) == ["filled_container_0"]
+
+
 @pytest.mark.parametrize("category", ["television", "media_cabinet"])
 def test_canonical_adapter_category_binds_wall_mounted_open_category(
     category: str,
@@ -1184,6 +1248,79 @@ def test_open_vocabulary_canonical_adapter_category_binds_manipuland() -> None:
 
     assert selected_ids(selector, [plush]) == ["plush_toy_0"]
     assert bound_ids(selector, [plush]) == ["plush_toy_0"]
+
+
+def test_ceiling_selector_binds_exact_open_vocabulary_semantic_name() -> None:
+    string_light = _record(
+        "string_light_0",
+        "ceiling_object",
+        (0.0, 0.0),
+        (1.6, 0.4, 0.1),
+    )
+    string_light.update(
+        {
+            "object_type": "ceiling_mounted",
+            "metadata": {"semantic_name": "string_light"},
+            "functional_hints": {"scene_object_type": "ceiling_mounted"},
+        }
+    )
+
+    assert selected_ids({"category": "string_light", "count": 1}, [string_light]) == [
+        "string_light_0"
+    ]
+
+
+@pytest.mark.parametrize(
+    "semantic_name", ["pendant_lamp", "pendant_light", "ceiling_light"]
+)
+def test_generic_lamp_selector_binds_mounted_lighting_specialization(
+    semantic_name: str,
+) -> None:
+    pendant = _record(
+        "pendant_lamp_0",
+        "ceiling_object",
+        (0.0, 0.0),
+        (0.5, 0.5, 0.4),
+    )
+    pendant.update(
+        {
+            "object_type": "ceiling_mounted",
+            "metadata": {"semantic_name": semantic_name},
+            "functional_hints": {"scene_object_type": "ceiling_mounted"},
+        }
+    )
+
+    assert selected_ids({"category": "lamp", "count": 1}, [pendant]) == [
+        "pendant_lamp_0"
+    ]
+
+
+def test_stage_scoped_selector_count_uses_same_context_as_binding() -> None:
+    table_lamp = _record(
+        "table_lamp_0",
+        "lamp",
+        (0.0, 0.0),
+        (0.2, 0.2, 0.4),
+    )
+    table_lamp["object_type"] = "manipuland"
+    pendant = _record(
+        "pendant_lamp_0",
+        "ceiling_object",
+        (0.0, 0.0),
+        (0.5, 0.5, 0.4),
+    )
+    pendant.update(
+        {
+            "object_type": "ceiling_mounted",
+            "metadata": {"semantic_name": "pendant_light"},
+        }
+    )
+    selector = {"category": "lamp", "count": 1, "stage": "ceiling_mounted"}
+
+    assert selected_ids(selector, [table_lamp]) == []
+    assert selector_match_count(selector, [table_lamp]) == 0
+    assert selected_ids(selector, [table_lamp, pendant]) == ["pendant_lamp_0"]
+    assert selector_match_count(selector, [table_lamp, pendant]) == 1
 
 
 def test_bedside_lamp_semantic_name_is_valid_for_nightstand_support() -> None:
@@ -2149,6 +2286,101 @@ def test_spatial_accessibility_allows_hard_bound_seating_companion() -> None:
     )
 
     assert case_pack["checks"][0]["expected_companion_ids"] == ["stool_0"]
+
+
+@pytest.mark.parametrize("relation", ["edge_distribution", "surround"])
+def test_spatial_accessibility_allows_contract_seating_cohort(
+    relation: str,
+) -> None:
+    table = _record(
+        "dining_table_0",
+        "dining_table",
+        (0.0, 0.0),
+        (1.8, 0.9, 0.75),
+    )
+    chairs = [
+        _record(
+            f"dining_chair_{index}",
+            "dining_chair",
+            (x, 0.7),
+            (0.45, 0.45, 0.9),
+        )
+        for index, x in enumerate((-0.5, 0.5))
+    ]
+    case_pack = {
+        "checks": [
+            {
+                "check_id": "spatial_accessibility__dining_table_0",
+                "metric": "spatial_accessibility",
+                "subject_id": "dining_table_0",
+            }
+        ],
+        "intent_contract": {
+            "constraints": [
+                {
+                    "relation": relation,
+                    "subjects": {"category": "dining_chair", "count": 2},
+                    "targets": {"category": "dining_table", "count": 1},
+                    "source": "explicit_prompt",
+                    "strength": "hard",
+                }
+            ]
+        },
+    }
+
+    attach_expected_access_companions(
+        case_pack,
+        {obj["id"]: obj for obj in [table, *chairs]},
+    )
+
+    assert case_pack["checks"][0]["expected_companion_ids"] == [
+        "dining_chair_0",
+        "dining_chair_1",
+    ]
+
+
+def test_spatial_accessibility_does_not_cross_pair_grouped_surfaces() -> None:
+    desks = [
+        _record(f"desk_{index}", "desk", (float(index), 0.0), (1.2, 0.6, 0.75))
+        for index in range(2)
+    ]
+    chairs = [
+        _record(
+            f"chair_{index}",
+            "chair",
+            (float(index), 0.7),
+            (0.45, 0.45, 0.9),
+        )
+        for index in range(2)
+    ]
+    case_pack = {
+        "checks": [
+            {
+                "check_id": f"spatial_accessibility__desk_{index}",
+                "metric": "spatial_accessibility",
+                "subject_id": f"desk_{index}",
+            }
+            for index in range(2)
+        ],
+        "intent_contract": {
+            "constraints": [
+                {
+                    "relation": "paired_with",
+                    "subjects": {"category": "chair", "count": 2},
+                    "targets": {"category": "desk", "count": 2},
+                    "source": "explicit_prompt",
+                    "strength": "hard",
+                }
+            ]
+        },
+    }
+
+    attach_expected_access_companions(
+        case_pack,
+        {obj["id"]: obj for obj in [*desks, *chairs]},
+    )
+
+    assert all("expected_companion_ids" not in check for check in case_pack["checks"])
 
 
 def test_spatial_accessibility_requires_both_hard_seating_relations() -> None:
@@ -3215,6 +3447,70 @@ def test_intent_compiler_rejects_wall_center_from_table_side_grounding() -> None
     )
 
 
+@pytest.mark.parametrize(
+    ("prompt", "subject", "target"),
+    [
+        (
+            "There is a utility cart near the table with three plates inside.",
+            "plate",
+            "utility_cart",
+        ),
+        (
+            "A small cooler is holding utensils and napkins.",
+            "utensil",
+            "cooler",
+        ),
+    ],
+)
+def test_intent_compiler_rejects_top_support_for_containment_wording(
+    prompt: str,
+    subject: str,
+    target: str,
+) -> None:
+    invalid = (
+        '{"constraints": [{"relation": "on_top_of", '
+        f'"subjects": {{"category": "{subject}", "count": 1}}, '
+        f'"targets": {{"category": "{target}", "count": 1}}, '
+        '"grounding": "prompt:0"}]}'
+    )
+    compiler = _compiler_with_responses(
+        [_response(invalid), _response('{"constraints": []}')]
+    )
+
+    result = compiler.compile(prompt)
+
+    assert compiler.last_trace["status"] == "retry_ok"
+    assert "containment wording" in compiler.last_trace["attempts"][0]["error"]
+    assert not any(row["relation"] == "on_top_of" for row in result["constraints"])
+    assert any(
+        row["kind"] == "unsupported_relation" and row["normalized"] == "containment"
+        for row in result["coverage_requirements"]
+    )
+
+
+def test_room_endpoint_is_not_reported_as_unsupported_object_containment() -> None:
+    contract = build_intent_contract("A desk with two chairs inside the room.")
+
+    assert not any(
+        row["kind"] == "unsupported_relation"
+        for row in contract["coverage_requirements"]
+    )
+
+
+def test_room_endpoint_does_not_hide_earlier_container_coverage() -> None:
+    contract = build_intent_contract(
+        "A cabinet holding books, with two chairs inside the room."
+    )
+
+    containment = [
+        row
+        for row in contract["coverage_requirements"]
+        if row["kind"] == "unsupported_relation" and row["normalized"] == "containment"
+    ]
+    assert len(containment) == 1
+    assert "cabinet holding books" in containment[0]["evidence_span"]
+
+
 def test_intent_compiler_retry_spells_out_unary_target_cardinality() -> None:
     compiler = _compiler_with_responses(
         [
@@ -3304,6 +3600,52 @@ def test_deterministic_contract_recognizes_floor_near_manipulands() -> None:
         if row["subjects"]["category"] in {"alarm_clock", "wastebasket"}
     }
     assert stages == {"alarm_clock": "manipuland", "wastebasket": "furniture"}
+
+
+def test_room_center_with_table_side_seating_does_not_create_support() -> None:
+    contract = build_intent_contract(
+        "A table is placed in the middle of the room with two chairs on its long sides."
+    )
+
+    assert any(
+        row["relation"] == "centered_in_room" and row["subjects"]["category"] == "table"
+        for row in contract["constraints"]
+    )
+    assert not any(row["relation"] == "on_top_of" for row in contract["constraints"])
+
+
+def test_wall_anchor_does_not_attach_to_structural_adjacency_target() -> None:
+    contract = build_intent_contract(
+        "A fridge is positioned near the door against the wall."
+    )
+
+    assert not any(
+        row["relation"] == "against_wall"
+        and row["subjects"]["category"] in {"door", "window", "opening"}
+        for row in contract["constraints"]
+    )
+
+
+def test_display_cabinet_owns_window_adjacency_and_wall_anchor() -> None:
+    contract = build_intent_contract(
+        "A display cabinet is positioned next to a window against the wall."
+    )
+
+    assert any(
+        row["relation"] == "next_to"
+        and row["subjects"]["category"] == "display_cabinet"
+        and row["targets"]["category"] == "window"
+        for row in contract["constraints"]
+    )
+    assert any(
+        row["relation"] == "against_wall"
+        and row["subjects"]["category"] == "display_cabinet"
+        for row in contract["constraints"]
+    )
+    assert not any(
+        row["relation"] == "against_wall" and row["subjects"]["category"] == "window"
+        for row in contract["constraints"]
+    )
 
 
 def test_deterministic_contract_recognizes_room_center_contains_wording() -> None:

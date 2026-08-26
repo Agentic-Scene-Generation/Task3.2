@@ -399,5 +399,18 @@ class TestSupportSurfaceExtraction(unittest.TestCase):
             )
 
 
+def test_default_manipuland_config_uses_hsm_minimum_surface_area() -> None:
+    config_path = (
+        Path(__file__).parents[2]
+        / "configurations/manipuland_agent/base_manipuland_agent.yaml"
+    )
+    config = OmegaConf.load(config_path)
+
+    assert (
+        config.support_surface_extraction.filtering.min_surface_area_m2
+        == SupportSurfaceExtractionConfig().min_surface_area_m2
+    )
+
+
 if __name__ == "__main__":
     unittest.main()

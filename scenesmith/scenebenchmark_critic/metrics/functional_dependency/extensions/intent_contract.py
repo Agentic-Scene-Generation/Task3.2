@@ -362,6 +362,16 @@ def _evaluate_support_readiness(
             continue
         profile = object_function_profile(target)
         candidates = build_support_surface_candidates(target, profile)
+        verified_candidates = [
+            candidate
+            for candidate in candidates
+            if candidate.source == "support_region"
+        ]
+        inferred_candidates = [
+            candidate
+            for candidate in candidates
+            if candidate.source != "support_region"
+        ]
         bbox = target.get("bbox_world") or {}
         has_bbox = len(bbox.get("min") or []) >= 3 and len(bbox.get("max") or []) >= 3
         has_support_declaration = any(
@@ -372,11 +382,18 @@ def _evaluate_support_readiness(
                 "object_function_profile",
             )
         )
-        if candidates:
+        if verified_candidates:
             label = "pass"
             reason = (
-                f"Support target `{target_id}` exposes {len(candidates)} verified "
+                f"Support target `{target_id}` exposes {len(verified_candidates)} verified "
                 f"surface candidate(s) before `{subject_category}` is generated."
+            )
+        elif inferred_candidates:
+            label = "unknown"
+            reason = (
+                f"Support readiness for `{target_id}` is unknown: only inferred "
+                "bbox/profile surfaces are available, not consumer-compatible "
+                "support-region evidence."
             )
         elif not has_bbox or not has_support_declaration:
             label = "unknown"
@@ -404,10 +421,15 @@ def _evaluate_support_readiness(
                     "support_readiness": True,
                     "current_stage": stage,
                     "target_stage": target_owner,
+                    "earliest_stage": target_owner,
                     "dependent_stage": subject_owner,
                     "target_id": target_id,
                     "target_category": target_category,
-                    "surface_candidate_count": len(candidates),
+                    "surface_candidate_count": len(verified_candidates),
+                    "inferred_surface_candidate_count": len(inferred_candidates),
+                    "surface_candidate_sources": sorted(
+                        {candidate.source for candidate in candidates}
+                    ),
                     "support_profile_source": profile.source,
                     "has_bbox": has_bbox,
                     "has_support_declaration": has_support_declaration,

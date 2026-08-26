@@ -83,6 +83,88 @@ def test_low_ceiling_fixture_still_blocks_horizontal_clearance() -> None:
     assert _clearance_label(_monitor(), fixture) == "fail"
 
 
+def test_supported_small_object_does_not_block_its_surface_owner_clearance() -> None:
+    coffee_table = _object(
+        "coffee_table_0",
+        category="coffee_table",
+        object_type="furniture",
+        bbox_min=(-0.5, -0.5, 0.0),
+        bbox_max=(0.5, 0.5, 0.75),
+        clearance={
+            "clearance_type": "approach",
+            "direction": "ring",
+            "depth_m": 0.5,
+            "height_m": 1.8,
+        },
+    )
+    coffee_table["support_regions"] = [{"region_id": "coffee_table_top"}]
+    remote = _object(
+        "remote_0",
+        category="remote",
+        object_type="manipuland",
+        bbox_min=(0.45, -0.1, 0.75),
+        bbox_max=(0.65, 0.1, 0.85),
+    )
+    remote["placement_info"] = {"parent_surface_id": "coffee_table_top"}
+
+    checks = build_clearance_checks(
+        {"coffee_table_0": coffee_table, "remote_0": remote}
+    )
+    table_check = next(
+        check for check in checks if check["subject_id"] == "coffee_table_0"
+    )
+
+    assert table_check["clearance_result"]["label"] == "pass"
+    assert table_check["clearance_result"]["blocking_objects"] == []
+
+
+def test_small_object_on_other_surface_still_blocks_clearance() -> None:
+    coffee_table = _object(
+        "coffee_table_0",
+        category="coffee_table",
+        object_type="furniture",
+        bbox_min=(-0.5, -0.5, 0.0),
+        bbox_max=(0.5, 0.5, 0.75),
+        clearance={
+            "clearance_type": "approach",
+            "direction": "ring",
+            "depth_m": 0.5,
+            "height_m": 1.8,
+        },
+    )
+    coffee_table["support_regions"] = [{"region_id": "coffee_table_top"}]
+    side_table = _object(
+        "side_table_0",
+        category="side_table",
+        object_type="furniture",
+        bbox_min=(2.0, 2.0, 0.0),
+        bbox_max=(2.5, 2.5, 0.6),
+    )
+    side_table["support_regions"] = [{"region_id": "side_table_top"}]
+    remote = _object(
+        "remote_0",
+        category="remote",
+        object_type="manipuland",
+        bbox_min=(0.45, -0.1, 0.75),
+        bbox_max=(0.65, 0.1, 0.85),
+    )
+    remote["placement_info"] = {"parent_surface_id": "side_table_top"}
+
+    checks = build_clearance_checks(
+        {
+            "coffee_table_0": coffee_table,
+            "side_table_0": side_table,
+            "remote_0": remote,
+        }
+    )
+    table_check = next(
+        check for check in checks if check["subject_id"] == "coffee_table_0"
+    )
+
+    assert table_check["clearance_result"]["label"] == "fail"
+    assert table_check["clearance_result"]["blocking_objects"] == ["remote_0"]
+
+
 def test_door_sweep_uses_door_width_beyond_legacy_clearance_box() -> None:
     geometry = {
         "scene_shell": {

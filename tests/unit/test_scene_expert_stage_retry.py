@@ -5,8 +5,9 @@ import json
 import time
 
 from contextlib import nullcontext
+from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
@@ -24,6 +25,12 @@ from scenesmith.scene_expert.schemas import (
 )
 from scenesmith.scene_expert.verifier import FullVerifier, StageVerifier
 from scenesmith.scenebenchmark_critic.config import CriticConfig
+from scenesmith.scenebenchmark_critic.intent_contract import (
+    apply_contract_execution_states,
+)
+from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.intent_contract import (
+    evaluate_intent_contract_extensions,
+)
 
 
 def _failed_report(stage: str) -> StageVerifyReport:
@@ -129,6 +136,71 @@ def test_stage_verifier_defers_future_endpoint_binding_failure(tmp_path) -> None
     assert report.pass_stage
 
 
+def test_stage_verifier_does_not_repair_upstream_failure_in_later_stage(
+    tmp_path,
+) -> None:
+    report = StageVerifier().verify(
+        stage="ceiling_mounted",
+        stage_output_dir=str(tmp_path),
+        task_spec=SceneTaskSpec(room_type="living_room", style="standard"),
+        scene_state_info={"object_names": []},
+        deterministic_critic_payload=_binding_failure_payload(
+            earliest_stage="furniture"
+        ),
+    )
+
+    assert report.pass_stage
+
+
+def test_stage_verifier_fails_real_support_readiness_at_target_stage(tmp_path) -> None:
+    constraint = {
+        "constraint_id": "utensil_on_cooler",
+        "relation": "on_top_of",
+        "subjects": {
+            "category": "utensil",
+            "count": 1,
+            "stage": "manipuland",
+        },
+        "targets": {"category": "cooler", "count": 1},
+        "source": "explicit_prompt",
+        "strength": "hard",
+        "stage": "manipuland",
+        "evidence_span": "utensils on the cooler",
+    }
+    case_pack = {
+        "stage": "furniture",
+        "scene_geometry": {
+            "objects": [
+                {
+                    "id": "cooler_0",
+                    "category": "cooler",
+                    "object_type": "furniture",
+                    "bbox_world": {
+                        "min": [-0.4, -0.3, 0.0],
+                        "max": [0.4, 0.3, 0.4],
+                    },
+                    "support_surfaces": [],
+                }
+            ]
+        },
+        "intent_contract": {"constraints": [constraint]},
+    }
+    results = evaluate_intent_contract_extensions(case_pack)
+    apply_contract_execution_states(case_pack, results)
+
+    assert results[0]["diagnostics"]["earliest_stage"] == "furniture"
+    report = StageVerifier().verify(
+        stage="furniture",
+        stage_output_dir=str(tmp_path),
+        task_spec=SceneTaskSpec(room_type="dining_room", style="standard"),
+        scene_state_info={"object_names": ["cooler_0"]},
+        deterministic_critic_payload={"results": results},
+    )
+
+    assert not report.pass_stage
+    assert report.issues[0].constraint_id == "utensil_on_cooler"
+
+
 def test_stage_verifier_fails_due_endpoint_binding_failure(tmp_path) -> None:
     report = StageVerifier().verify(
         stage="manipuland",
@@ -162,6 +234,7 @@ def test_hook_finalize_refreshes_final_deterministic_payload(tmp_path) -> None:
     scene = SimpleNamespace()
     runner = object.__new__(SceneExpertHookRunner)
     runner._mode = "harness_only"
+    runner._component_flags = {"verifier": True, "trace": True}
     runner._scene_id = 1
     runner._stage_reports = [StageVerifyReport(stage="manipuland", pass_stage=True)]
     runner._latest_scene = scene
@@ -239,6 +312,8 @@ def test_wall_post_stage_passes_fresh_deterministic_payload_to_verifier(
     }
     runner = object.__new__(SceneExpertHookRunner)
     runner._mode = "harness_only"
+    runner._component_flags = {"verifier": True}
+    runner._current_stage = stage
     runner._original_text_descriptions = {stage: "original prompt"}
     runner._stage_verifier = Mock(
         verify=Mock(return_value=StageVerifyReport(stage=stage, pass_stage=True))
@@ -297,6 +372,8 @@ def test_failed_hook_stage_is_uncommitted_until_retry_verifies(tmp_path) -> None
     )
     runner = object.__new__(SceneExpertHookRunner)
     runner._mode = "harness_only"
+    runner._component_flags = {"verifier": True, "repair": True}
+    runner._current_stage = stage
     runner._original_text_descriptions = {stage: "original prompt"}
     runner._stage_verifier = Mock()
     runner._stage_verifier.verify.side_effect = [failed_report, passed_report]
@@ -409,6 +486,7 @@ def test_accept_degraded_stage_advances_harness_for_next_stage() -> None:
     runner._completed_stages = ["floor_plan", "furniture"]
     runner._pending_stage_repairs = {"wall_mounted": (Mock(), Mock())}
     runner._harness = Harness(SimpleNamespace())
+    runner._component_flags = {"harness": True}
 
     runner.accept_degraded_stage("wall_mounted")
 
@@ -432,6 +510,8 @@ def test_exhausted_quality_failure_is_retained_for_final_verification(
     failed_report = _failed_report("furniture")
     runner = object.__new__(SceneExpertHookRunner)
     runner._mode = "harness_only"
+    runner._component_flags = {"verifier": True, "repair": True}
+    runner._current_stage = "furniture"
     runner._original_text_descriptions = {"furniture": "original prompt"}
     runner._stage_verifier = Mock(verify=Mock(return_value=failed_report))
     runner._task_spec = SimpleNamespace(room_type="office")
@@ -745,3 +825,27 @@ def test_review_existing_can_finish_after_a_workflow_call() -> None:
 
     assert "FINISH_STAGE_ACCEPTED" in result
     assert agent._planner_terminal_stop
+
+
+@pytest.mark.parametrize(
+    ("hashes", "expected_mutations"),
+    [(["before", "after"], 1), (["before", "before"], 0)],
+)
+def test_design_change_counts_only_committed_scene_mutation(
+    hashes: list[str], expected_mutations: int
+) -> None:
+    agent = _ReviewPlannerAgent()
+    agent.scene.content_hash.side_effect = hashes
+    agent.stage_working_memory = Mock()
+    agent._planner_orchestration_calls = 0
+    agent._request_design_change_impl = AsyncMock(return_value="designer completed")
+    tools = {tool.name: tool for tool in agent._create_planner_tools()}
+
+    result = asyncio.run(
+        tools["request_design_change"].on_invoke_tool(
+            Mock(), '{"instruction": "repair the current candidate"}'
+        )
+    )
+
+    assert "designer completed" in result
+    assert agent._planner_successful_designer_mutations == expected_mutations
