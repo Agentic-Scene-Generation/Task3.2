@@ -14,7 +14,6 @@ from pydrake.math import RigidTransform, RollPitchYaw
 
 from scenesmith.agent_utils.room import ObjectType, RoomScene, SceneObject, UniqueID
 from scenesmith.scenebenchmark_critic.api import evaluate_room_scene
-from scenesmith.scenebenchmark_critic.auto_repair_stats import record_auto_repair_call
 from scenesmith.scenebenchmark_critic.config import CriticConfig, critic_config_from_any
 
 console_logger = logging.getLogger(__name__)
@@ -119,7 +118,6 @@ def improve_storage_front_access(
     max_candidate_evaluations: int | None = None,
     max_repairs: int | None = None,
     repair_degraded: bool = False,
-    record_stats: bool = True,
 ) -> list[FurnitureAccessibilityFix]:
     """Move storage-like furniture laterally when front access is insufficient.
 
@@ -128,12 +126,8 @@ def improve_storage_front_access(
     """
     base_config = critic_config_from_any(config) if config is not None else CriticConfig()
     if not base_config.enabled:
-        if record_stats:
-            record_auto_repair_call(scene, module="storage_accessibility", stage="scene_after_furniture", status="skipped", skip_reason="critic_disabled")
         return []
     if not base_config.auto_repair.should_repair("storage_accessibility"):
-        if record_stats:
-            record_auto_repair_call(scene, module="storage_accessibility", stage="scene_after_furniture", status="skipped", skip_reason="module_disabled")
         return []
     critic_config = _spatial_config(base_config)
     configured_budget = critic_config.auto_repair.storage_accessibility_budget
@@ -149,8 +143,6 @@ def improve_storage_front_access(
     if max_candidate_evaluations is not None:
         candidate_budget = min(candidate_budget, max_candidate_evaluations)
     if candidate_budget == 0:
-        if record_stats:
-            record_auto_repair_call(scene, module="storage_accessibility", stage="scene_after_furniture", status="skipped", skip_reason="budget_zero", candidate_budget=0)
         return []
     baseline_payload = _evaluate(scene, critic_config)
     baseline_score = _score_scene(baseline_payload)
@@ -160,8 +152,6 @@ def improve_storage_front_access(
         include_degraded=repair_degraded,
     )
     if not failing_subjects:
-        if record_stats:
-            record_auto_repair_call(scene, module="storage_accessibility", stage="scene_after_furniture", status="no_targets", candidate_budget=candidate_budget)
         return []
 
     fixes: list[FurnitureAccessibilityFix] = []
@@ -226,14 +216,6 @@ def improve_storage_front_access(
                 f"fail {fix.old_fail_count}->{fix.new_fail_count}"
                 for fix in fixes
             ),
-        )
-    if record_stats:
-        record_auto_repair_call(
-            scene, module="storage_accessibility", stage="scene_after_furniture",
-            status="committed" if fixes else "no_targets", candidate_budget=candidate_budget,
-            candidates_evaluated=candidate_evaluations, accepted_rounds=len(fixes),
-            fix_records=len(fixes), object_ids=(fix.subject_id for fix in fixes),
-            relation_types=("spatial_accessibility" for _ in fixes),
         )
     return fixes
 

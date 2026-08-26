@@ -19,7 +19,6 @@ from scenesmith.agent_utils.clearance_zones import (
     compute_window_clearance_violations,
 )
 from scenesmith.agent_utils.room import ObjectType, RoomScene, SceneObject
-from scenesmith.scenebenchmark_critic.auto_repair_stats import record_auto_repair_call
 from scenesmith.scenebenchmark_critic.config import CriticConfig, critic_config_from_any
 from scenesmith.utils.geometry_utils import compute_optimal_facing_yaw
 
@@ -72,7 +71,6 @@ def align_seating_to_nearest_surface(
     allowed_targets_by_seat: dict[str, set[str]] | None = None,
     config: CriticConfig | Any | None = None,
     max_repairs: int | None = None,
-    record_stats: bool = True,
     max_target_distance_m: float = 2.0,
     repair_angle_threshold_deg: float = 45.0,
     # Generated furniture can start roughly one seat-depth away from its
@@ -97,18 +95,12 @@ def align_seating_to_nearest_surface(
                 "using legacy uncontrolled behavior"
             )
             _LEGACY_CONFIG_WARNING_EMITTED = True
-        if record_stats:
-            record_auto_repair_call(scene, module="seating_orientation", stage="seating_orientation_guard", status="legacy_uncontrolled")
         critic_config: CriticConfig | None = None
     else:
         critic_config = config if isinstance(config, CriticConfig) else critic_config_from_any(config)
         if not critic_config.enabled:
-            if record_stats:
-                record_auto_repair_call(scene, module="seating_orientation", stage="seating_orientation_guard", status="skipped", skip_reason="critic_disabled")
             return []
         if not critic_config.auto_repair.should_repair("seating_orientation"):
-            if record_stats:
-                record_auto_repair_call(scene, module="seating_orientation", stage="seating_orientation_guard", status="skipped", skip_reason="module_disabled")
             return []
         if max_repairs is None:
             max_repairs = critic_config.auto_repair.max_repairs_per_call
@@ -122,8 +114,6 @@ def align_seating_to_nearest_surface(
     surfaces = [obj for obj in furniture if _is_functional_surface(obj)]
     fixes: list[SeatingOrientationFix] = []
     if not seating:
-        if critic_config is not None and record_stats:
-            record_auto_repair_call(scene, module="seating_orientation", stage="seating_orientation_guard", status="no_targets", candidate_budget=None)
         return fixes
 
     for seat in seating:
@@ -279,13 +269,6 @@ def align_seating_to_nearest_surface(
                 f"{fix.old_yaw_deg:.1f}°→{fix.new_yaw_deg:.1f}°"
                 for fix in fixes
             ),
-        )
-    if critic_config is not None and record_stats:
-        record_auto_repair_call(
-            scene, module="seating_orientation", stage="seating_orientation_guard",
-            status="committed" if fixes else "no_targets", accepted_rounds=len(fixes),
-            fix_records=len(fixes), object_ids=(fix.subject_id for fix in fixes),
-            relation_types=("seating_orientation" for _ in fixes),
         )
     return fixes
 

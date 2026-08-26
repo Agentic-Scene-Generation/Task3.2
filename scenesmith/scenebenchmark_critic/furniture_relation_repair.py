@@ -33,7 +33,6 @@ from scenesmith.agent_utils.room import (
     UniqueID,
 )
 from scenesmith.scenebenchmark_critic.api import evaluate_room_scene
-from scenesmith.scenebenchmark_critic.auto_repair_stats import record_auto_repair_call
 from scenesmith.scenebenchmark_critic.config import CriticConfig, critic_config_from_any
 from scenesmith.scenebenchmark_critic.opening_geometry import opening_physical_bounds
 from scenesmith.scenebenchmark_critic.relation_registry import (
@@ -223,7 +222,6 @@ def improve_furniture_relations(
     max_candidate_evaluations: int | None = None,
     allowed_relation_types: Collection[str] | None = None,
     candidate_validator: Callable[[RoomScene], bool] | None = None,
-    record_stats: bool = True,
 ) -> list[FurnitureRelationFix]:
     """Apply selected critic targets when the whole-scene evaluation improves.
 
@@ -237,16 +235,10 @@ def improve_furniture_relations(
         config if isinstance(config, CriticConfig) else critic_config_from_any(config)
     )
     if not critic_config.enabled:
-        if record_stats:
-            record_auto_repair_call(scene, module="furniture_relations", stage="furniture_relation_repair", status="skipped", skip_reason="critic_disabled")
         return []
     if not critic_config.metric_enabled("functional_dependency"):
-        if record_stats:
-            record_auto_repair_call(scene, module="furniture_relations", stage="furniture_relation_repair", status="skipped", skip_reason="metric_disabled")
         return []
     if not critic_config.auto_repair.should_repair("furniture_relations"):
-        if record_stats:
-            record_auto_repair_call(scene, module="furniture_relations", stage="furniture_relation_repair", status="skipped", skip_reason="module_disabled")
         return []
     configured_budget = critic_config.auto_repair.furniture_relation_budget
     if configured_budget is None:
@@ -261,8 +253,6 @@ def improve_furniture_relations(
     if max_candidate_evaluations is not None:
         candidate_budget = min(candidate_budget, max_candidate_evaluations)
     if candidate_budget == 0:
-        if record_stats:
-            record_auto_repair_call(scene, module="furniture_relations", stage="furniture_relation_repair", status="skipped", skip_reason="budget_zero", candidate_budget=0)
         return []
     repair_limit = max_repairs
     if critic_config.auto_repair.max_repairs_per_call is not None:
@@ -286,7 +276,6 @@ def improve_furniture_relations(
 
     candidate_evaluations = 0
     fixes: list[FurnitureRelationFix] = []
-    accepted_rounds = 0
     for _ in range(repair_limit):
         baseline_payload = evaluate_for_repair()
         baseline_score = _score_payload(baseline_payload)
@@ -368,7 +357,6 @@ def improve_furniture_relations(
                         config=critic_config,
                         max_candidate_evaluations=16,
                         repair_degraded=True,
-                        record_stats=False,
                     )
                 if baseline_collision_pairs is not None:
                     try:
@@ -452,7 +440,6 @@ def improve_furniture_relations(
                     )
                 keep_candidate = True
                 accepted = True
-                accepted_rounds += 1
                 break
             finally:
                 if not keep_candidate:
@@ -476,14 +463,6 @@ def improve_furniture_relations(
         candidate_evaluations,
         candidate_budget,
     )
-    if record_stats:
-        record_auto_repair_call(
-            scene, module="furniture_relations", stage=evaluation_stage,
-            status="committed" if fixes else "no_targets", candidate_budget=candidate_budget,
-            candidates_evaluated=candidate_evaluations, accepted_rounds=accepted_rounds,
-            fix_records=len(fixes), object_ids=(fix.object_id for fix in fixes),
-            relation_types=(fix.relation_type for fix in fixes),
-        )
     return fixes
 
 

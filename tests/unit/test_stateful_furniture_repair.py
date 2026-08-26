@@ -1649,9 +1649,8 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
             relation_type="object_on_support",
         )
 
-        def repair_relations(_scene, *, config, candidate_validator, record_stats=True):
+        def repair_relations(_scene, *, config, candidate_validator):
             self.assertTrue(candidate_validator(agent.scene))
-            self.assertFalse(record_stats)
             return [relation_fix]
 
         with (

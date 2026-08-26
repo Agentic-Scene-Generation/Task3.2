@@ -19,7 +19,6 @@ from scenesmith.agent_utils.room import (
     UniqueID,
 )
 from scenesmith.scenebenchmark_critic.api import evaluate_room_scene
-from scenesmith.scenebenchmark_critic.auto_repair_stats import record_auto_repair_call
 from scenesmith.scenebenchmark_critic.config import CriticConfig, critic_config_from_any
 
 console_logger = logging.getLogger(__name__)
@@ -127,13 +126,10 @@ def improve_wall_visual_clearance(
         config if isinstance(config, CriticConfig) else critic_config_from_any(config)
     )
     if not critic_config.enabled:
-        record_auto_repair_call(scene, module="visual_clearance", stage="wall_visual_clearance_repair", status="skipped", skip_reason="critic_disabled")
         return VisualClearanceRepairReport()
     if not {"visual_clearance", "functional_dependency"}.intersection(critic_config.metrics):
-        record_auto_repair_call(scene, module="visual_clearance", stage="wall_visual_clearance_repair", status="skipped", skip_reason="metric_disabled")
         return VisualClearanceRepairReport()
     if not critic_config.auto_repair.should_repair("visual_clearance"):
-        record_auto_repair_call(scene, module="visual_clearance", stage="wall_visual_clearance_repair", status="skipped", skip_reason="module_disabled")
         return VisualClearanceRepairReport()
 
     configured_budget = critic_config.auto_repair.visual_clearance_budget
@@ -143,7 +139,6 @@ def improve_wall_visual_clearance(
     if max_candidate_evaluations is not None:
         candidate_budget = min(candidate_budget, max_candidate_evaluations)
     if candidate_budget == 0:
-        record_auto_repair_call(scene, module="visual_clearance", stage="wall_visual_clearance_repair", status="skipped", skip_reason="budget_zero", candidate_budget=0)
         return VisualClearanceRepairReport()
     repair_limit = max_repairs
     if critic_config.auto_repair.max_repairs_per_call is not None:
@@ -255,19 +250,10 @@ def improve_wall_visual_clearance(
                 for fix in fixes
             ),
         )
-    report = VisualClearanceRepairReport(
+    return VisualClearanceRepairReport(
         accepted_fixes=tuple(fixes),
         rejections=tuple(rejections[key] for key in sorted(rejections)),
     )
-    record_auto_repair_call(
-        scene, module="visual_clearance", stage="wall_visual_clearance_repair",
-        status="committed" if fixes else "no_targets", candidate_budget=candidate_budget,
-        candidates_evaluated=candidate_evaluations, accepted_rounds=len(fixes),
-        fix_records=len(fixes),
-        object_ids=(object_id for fix in fixes for object_id in (fix.moved_object_ids or (fix.object_id,))),
-        relation_types=("visual_clearance" for _ in fixes),
-    )
-    return report
 
 
 @dataclass(frozen=True, order=True)
