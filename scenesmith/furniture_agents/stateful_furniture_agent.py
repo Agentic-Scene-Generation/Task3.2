@@ -91,6 +91,7 @@ from scenesmith.scenebenchmark_critic.api import (
     seating_orientation_targets,
 )
 from scenesmith.scenebenchmark_critic.config import critic_config_from_any
+from scenesmith.scenebenchmark_critic.auto_repair_stats import record_auto_repair_call
 from scenesmith.scenebenchmark_critic.furniture_relation_repair import (
     improve_furniture_relations,
     unresolved_furniture_relation_failures,
@@ -185,6 +186,37 @@ _SHALLOW_FURNITURE_COLLISION_RE = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 _OPENING_SAFE_WALL_MARGIN_M = 0.03
+
+
+def _record_committed_contract_repairs(
+    scene: RoomScene,
+    *,
+    relation_fixes: list[Any],
+    seating_fixes: list[Any],
+) -> None:
+    """Write repair events only after the caller-owned transaction commits."""
+    if relation_fixes:
+        record_auto_repair_call(
+            scene,
+            module="furniture_relations",
+            stage="furniture_relation_repair",
+            status="committed",
+            accepted_rounds=len(relation_fixes),
+            fix_records=len(relation_fixes),
+            object_ids=(fix.object_id for fix in relation_fixes),
+            relation_types=(fix.relation_type for fix in relation_fixes),
+        )
+    if seating_fixes:
+        record_auto_repair_call(
+            scene,
+            module="seating_orientation",
+            stage="seating_orientation_guard",
+            status="committed",
+            accepted_rounds=len(seating_fixes),
+            fix_records=len(seating_fixes),
+            object_ids=(fix.subject_id for fix in seating_fixes),
+            relation_types=("seating_orientation" for _ in seating_fixes),
+        )
 
 
 class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
@@ -586,9 +618,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 "; ".join(window_actions),
             )
 
-        seating_fixes = self._align_seating_with_hard_state_guard(
-            seating_orientation_targets(scene, config=self.cfg)
-        )
+        seating_fixes = self._align_seating_with_hard_state_guard()
         if seating_fixes:
             console_logger.info(
                 "Deterministic seating orientation guard before final critique: %s",
@@ -1145,9 +1175,29 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         if self.scene is None:
             return []
         critic_config = critic_config_from_any(self.cfg)
-        if not critic_config.enabled or not critic_config.metric_enabled(
-            "interaction_clearance"
-        ):
+        if not critic_config.enabled:
+            record_auto_repair_call(
+                self.scene, module="window_clearance", stage="furniture_window_clearance_repair",
+                status="skipped", skip_reason="critic_disabled",
+            )
+            return []
+        if not critic_config.metric_enabled("interaction_clearance"):
+            record_auto_repair_call(
+                self.scene, module="window_clearance", stage="furniture_window_clearance_repair",
+                status="skipped", skip_reason="metric_disabled",
+            )
+            return []
+        if not critic_config.auto_repair.should_repair("window_clearance"):
+            record_auto_repair_call(
+                self.scene, module="window_clearance", stage="furniture_window_clearance_repair",
+                status="skipped", skip_reason="module_disabled",
+            )
+            return []
+        if critic_config.auto_repair.max_repairs_per_call == 0:
+            record_auto_repair_call(
+                self.scene, module="window_clearance", stage="furniture_window_clearance_repair",
+                status="skipped", skip_reason="repair_limit_zero",
+            )
             return []
         baseline = evaluate_room_scene(
             self.scene,
@@ -1166,10 +1216,11 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         current_baseline = baseline
         remaining_results = list(target_results)
         if service is not None:
+            target_limit = critic_config.auto_repair.max_repairs_per_call
             for target in sorted(
                 target_results,
                 key=lambda item: str(item.get("check_id") or ""),
-            ):
+            )[:target_limit]:
                 window_id = str(target.get("primary_object") or "")
                 check_id = str(target.get("check_id") or "")
                 if not window_id or not check_id:
@@ -1332,19 +1383,42 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         )
         return actions
 
-    def _align_seating_with_hard_state_guard(
-        self, allowed_targets_by_seat: dict[str, set[str]]
-    ) -> list[Any]:
+    def _align_seating_with_hard_state_guard(self, *, record_stats: bool = True) -> list[Any]:
         """Apply seating orientation only when it preserves all hard invariants."""
+        critic_config = critic_config_from_any(self.cfg)
+        if not critic_config.enabled or not critic_config.auto_repair.should_repair(
+            "seating_orientation"
+        ):
+            return align_seating_to_nearest_surface(
+                self.scene, config=critic_config, record_stats=record_stats
+            )
+        allowed_targets_by_seat = seating_orientation_targets(
+            self.scene, config=critic_config
+        )
         transaction = self._begin_hard_state_transaction()
         fixes = align_seating_to_nearest_surface(
             self.scene,
+            config=critic_config,
             allowed_targets_by_seat=allowed_targets_by_seat,
+            record_stats=False,
         )
         if fixes and not self._commit_hard_state_transaction(
             transaction, source="seating orientation"
         ):
+            if record_stats:
+                record_auto_repair_call(
+                self.scene, module="seating_orientation", stage="seating_orientation_guard",
+                status="rolled_back", accepted_rounds=len(fixes), fix_records=len(fixes),
+                object_ids=(fix.subject_id for fix in fixes), relation_types=("seating_orientation" for _ in fixes),
+                )
             return []
+        if record_stats:
+            record_auto_repair_call(
+                self.scene, module="seating_orientation", stage="seating_orientation_guard",
+                status="committed" if fixes else "no_targets", accepted_rounds=len(fixes),
+                fix_records=len(fixes), object_ids=(fix.subject_id for fix in fixes),
+                relation_types=("seating_orientation" for _ in fixes),
+            )
         return fixes
 
     def _repair_contract_layout_before_first_critique(self) -> list[str]:
@@ -1374,19 +1448,21 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 baseline_hard_failures,
                 allow_deferred_window_repair=True,
             ),
+            record_stats=False,
         )
         window_actions = (
             self._repair_substantial_window_clearance() if relation_fixes else []
         )
-        seating_fixes = self._align_seating_with_hard_state_guard(
-            seating_orientation_targets(self.scene, config=critic_config)
-        )
+        seating_fixes = self._align_seating_with_hard_state_guard(record_stats=False)
         if not relation_fixes and not seating_fixes and not window_actions:
             return []
         if not self._commit_hard_state_transaction(
             transaction, source="prompt-contract relation"
         ):
             return []
+        _record_committed_contract_repairs(
+            self.scene, relation_fixes=relation_fixes, seating_fixes=seating_fixes
+        )
 
         # The next automatic critic request must render and evaluate the pose
         # just accepted above rather than use the designer's pre-repair cache.
@@ -1698,19 +1774,21 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 baseline_hard_failures,
                 allow_deferred_window_repair=True,
             ),
+            record_stats=False,
         )
         window_actions = (
             self._repair_substantial_window_clearance() if relation_fixes else []
         )
-        seating_fixes = self._align_seating_with_hard_state_guard(
-            seating_orientation_targets(self.scene, config=critic_config)
-        )
+        seating_fixes = self._align_seating_with_hard_state_guard(record_stats=False)
         if (
             relation_fixes or seating_fixes
         ) and not self._commit_hard_state_transaction(
             transaction, source="prompt-contract relation"
         ):
             return []
+        _record_committed_contract_repairs(
+            self.scene, relation_fixes=relation_fixes, seating_fixes=seating_fixes
+        )
         actions = [
             f"bound {fix.object_id} via {fix.relation_type} {action_context}"
             for fix in relation_fixes
@@ -1744,7 +1822,9 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         return removed
 
     def _converge_prompt_required_inventory(self, *, source: str) -> int:
-        """Remove prompt-counted duplicates independently of hard-check status."""
+        """Remove prompt-counted duplicates when deterministic repair is enabled."""
+        if not self._deterministic_repair_enabled():
+            return 0
         required_counts = self._repair_required_counts()
         removed = self._remove_excess_required_furniture(required_counts)
         if removed:

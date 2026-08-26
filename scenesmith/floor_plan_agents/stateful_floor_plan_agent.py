@@ -728,17 +728,24 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
             self.layout, self.reservation_manifest
         )
         if not reservation_validation.passed:
-            await self._repair_reservation_validation(reservation_validation)
-            reservation_validation = validate_floor_plan_reservations(
-                self.layout, self.reservation_manifest
-            )
+            if self._reservation_validation_auto_repair_enabled():
+                await self._repair_reservation_validation(reservation_validation)
+                reservation_validation = validate_floor_plan_reservations(
+                    self.layout, self.reservation_manifest
+                )
+            else:
+                console_logger.warning(
+                    "Final floor-plan reservation validation failed; automatic "
+                    "designer repair is disabled: %s",
+                    json.dumps(reservation_validation.issues, sort_keys=True),
+                )
         if not reservation_validation.passed:
             issue_types = [
                 str(issue.get("issue_type") or "reservation_failure")
                 for issue in reservation_validation.issues
             ]
             raise RuntimeError(
-                "Floor plan failed deterministic reservation validation after repair: "
+                "Floor plan failed deterministic reservation validation: "
                 + ", ".join(issue_types)
             )
 
@@ -765,6 +772,13 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
             self._geometry_cache = None
 
         return self.layout
+
+    def _reservation_validation_auto_repair_enabled(self) -> bool:
+        """Return whether a failed final reservation check may trigger an LLM edit."""
+        config = getattr(self.cfg, "reservation_validation", None)
+        if config is None:
+            return True
+        return bool(getattr(config, "auto_repair", True))
 
     async def _repair_reservation_validation(self, validation: Any) -> None:
         """Give the designer one bounded chance to repair hard layout constraints.

@@ -1,3 +1,5 @@
+import copy
+
 from abc import ABC, abstractmethod
 from pathlib import Path
 
@@ -49,6 +51,31 @@ class BaseExperiment(ABC):
     def __init__(self, cfg: DictConfig):
         self.cfg = cfg
         self.output_dir = Path(cfg.experiment.output_dir)
+
+    @staticmethod
+    def _with_experiment_hssd_scaling_config(
+        agent_config: dict, experiment_config: dict
+    ) -> dict:
+        """Copy the experiment-level HSSD dimension-fit policy into an agent.
+
+        Asset managers receive only their agent subtree, so the experiment-level
+        switch must be explicitly propagated at construction time.  Keep the
+        default enabled for compatibility with existing experiments.
+        """
+        configured = copy.deepcopy(agent_config)
+        asset_manager_config = configured.get("asset_manager")
+        if not isinstance(asset_manager_config, dict):
+            return configured
+
+        hssd_config = asset_manager_config.get("hssd")
+        if not isinstance(hssd_config, dict):
+            hssd_config = {}
+            asset_manager_config["hssd"] = hssd_config
+
+        hssd_config["scale_to_requested_dimensions"] = bool(
+            experiment_config.get("hssd_scale_to_requested_dimensions", True)
+        )
+        return configured
 
     @staticmethod
     def build_floor_plan_agent(
@@ -136,7 +163,9 @@ class BaseExperiment(ABC):
         # Agent configs are passed as isolated subtrees. Preserve the
         # experiment-level benchmark settings explicitly for critic prompt
         # injection inside BaseStatefulAgent.
-        agent_config = dict(config_dict["furniture_agent"])
+        agent_config = BaseExperiment._with_experiment_hssd_scaling_config(
+            config_dict["furniture_agent"], config_dict["experiment"]
+        )
         agent_config["scenebenchmark_critic"] = config_dict["experiment"].get(
             "scenebenchmark_critic", {}
         )
@@ -210,7 +239,9 @@ class BaseExperiment(ABC):
             else cfg_dict
         )
 
-        agent_config = dict(config_dict["manipuland_agent"])
+        agent_config = BaseExperiment._with_experiment_hssd_scaling_config(
+            config_dict["manipuland_agent"], config_dict["experiment"]
+        )
         agent_config["scenebenchmark_critic"] = config_dict["experiment"].get(
             "scenebenchmark_critic", {}
         )
@@ -288,7 +319,9 @@ class BaseExperiment(ABC):
             else cfg_dict
         )
 
-        agent_config = dict(config_dict["wall_agent"])
+        agent_config = BaseExperiment._with_experiment_hssd_scaling_config(
+            config_dict["wall_agent"], config_dict["experiment"]
+        )
         agent_config["scenebenchmark_critic"] = config_dict["experiment"].get(
             "scenebenchmark_critic", {}
         )
@@ -365,7 +398,9 @@ class BaseExperiment(ABC):
             else cfg_dict
         )
 
-        agent_config = config_dict["ceiling_agent"]
+        agent_config = BaseExperiment._with_experiment_hssd_scaling_config(
+            config_dict["ceiling_agent"], config_dict["experiment"]
+        )
         agent_name = agent_config["_name"]
 
         if agent_name not in compatible_agents:

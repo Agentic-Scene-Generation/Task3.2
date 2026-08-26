@@ -667,6 +667,16 @@ class AssetManager:
             )
         return final_path, bbox_min, bbox_max, applied_scale
 
+    def _should_scale_hssd_to_requested_dimensions(self) -> bool:
+        """Return whether HSSD meshes should be fitted to requested dimensions.
+
+        The requested dimensions are still sent to HSSD retrieval for candidate
+        ranking when this is false.  This switch controls only the local mesh
+        conversion step after a candidate has been selected.
+        """
+        hssd_config = getattr(getattr(self.cfg, "asset_manager", None), "hssd", None)
+        return bool(getattr(hssd_config, "scale_to_requested_dimensions", True))
+
     def _hssd_uniform_fit_min_ratio(self, description: str) -> float:
         """Choose a semantic floor for uniformly fitted HSSD proportions."""
         normalized = re.sub(r"[^a-z0-9]+", "_", description.lower())
@@ -1594,12 +1604,19 @@ class AssetManager:
             blender_server=self.blender_server,
             object_type=request.object_type,
         )
-        scaling_dimensions = self._align_linear_cutlery_requested_dimensions(
-            canonical_path=canonical_path,
-            object_type=request.object_type,
-            description=request.object_descriptions[index],
-            short_name=short_name,
-            desired_dimensions=request.desired_dimensions[index],
+        scale_to_requested_dimensions = (
+            self._should_scale_hssd_to_requested_dimensions()
+        )
+        scaling_dimensions = (
+            self._align_linear_cutlery_requested_dimensions(
+                canonical_path=canonical_path,
+                object_type=request.object_type,
+                description=request.object_descriptions[index],
+                short_name=short_name,
+                desired_dimensions=request.desired_dimensions[index],
+            )
+            if scale_to_requested_dimensions
+            else None
         )
 
         final_gltf_path, bbox_min, bbox_max, applied_scale = (
@@ -1650,6 +1667,7 @@ class AssetManager:
             "hssd_mesh_id": mesh_id,
             "requested_dimensions": list(request.desired_dimensions[index]),
             "actual_dimensions": (bbox_max - bbox_min).tolist(),
+            "requested_dimension_fit_applied": bool(scaling_dimensions),
         }
         if floor_covering:
             metadata.update(
@@ -2516,6 +2534,11 @@ class AssetManager:
         }
         if generated.hssd_id is not None:
             additional_metadata["hssd_mesh_id"] = generated.hssd_id
+        if generated.asset_source == "hssd":
+            additional_metadata["requested_dimensions"] = list(item.dimensions)
+            additional_metadata["requested_dimension_fit_applied"] = bool(
+                item.dimensions
+            ) and self._should_scale_hssd_to_requested_dimensions()
         if retrieved_floor_covering:
             actual_dimensions = bbox_max - bbox_min
             additional_metadata.update(
@@ -2999,8 +3022,8 @@ class AssetManager:
                 short_name=config.short_name,
                 desired_dimensions=desired_dimensions,
             )
-            if is_hssd
-            else desired_dimensions
+            if is_hssd and self._should_scale_hssd_to_requested_dimensions()
+            else (None if is_hssd else desired_dimensions)
         )
 
         # Scale mesh to desired dimensions while keeping glTF Y-up explicit.

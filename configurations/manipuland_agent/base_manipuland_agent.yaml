@@ -352,6 +352,11 @@ max_critique_rounds: 1
 # per-furniture loop could spend hours on every bed/wardrobe/nightstand.
 max_target_furniture: 2
 
+# Deterministic semantic repairs (for example, monitor orientation and dining
+# place-setting alignment) are separate from physical post-processing.
+code_level_auto_repair:
+  enabled: true
+
 # Optional exact-ID allowlist for targeted checkpoint replays. Empty keeps the
 # normal analyzer-selected behavior.
 target_furniture_ids: []

@@ -639,6 +639,14 @@ prompt: |
   pendant lights, ceiling fans). These are handled by wall_agent and ceiling_agent.
   Only evaluate FURNITURE as defined above.
 
+  **Support-Based Stage Ownership:** Stage ownership must follow the asset's intended
+  support: any asset that is intended to rest on another furniture object's support
+  surface, rather than directly on the floor (for example, a television on a media
+  console), is a deferred Manipuland-stage item. Do not count such assets as missing
+  furniture, penalize their absence in Furniture-stage scoring, or recommend
+  generating or placing them during Furniture-stage critique; they will be placed on
+  their designated support surface in the Manipuland stage.
+
   **When suggesting improvements:**
   - Only suggest adding FURNITURE (floor-standing items from the list above)
   - Do NOT suggest specific manipulands (toys, books, decorative objects)

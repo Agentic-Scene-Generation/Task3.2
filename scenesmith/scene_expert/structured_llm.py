@@ -32,6 +32,7 @@ from scenesmith.scene_expert.context_bundle import (
     stable_hash,
     utc_now,
 )
+from scenesmith.utils.openai_strict_schema import make_openai_strict_json_schema
 from scenesmith.utils.token_usage import normalize_token_usage
 
 console_logger = logging.getLogger(__name__)
@@ -414,7 +415,7 @@ class SceneExpertStructuredLLMClient:
                 "type": "json_schema",
                 "json_schema": {
                     "name": response_name,
-                    "schema": response_schema,
+                    "schema": make_openai_strict_json_schema(response_schema),
                     "strict": True,
                 },
             }

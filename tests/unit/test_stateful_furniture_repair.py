@@ -1649,8 +1649,9 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
             relation_type="object_on_support",
         )
 
-        def repair_relations(_scene, *, config, candidate_validator):
+        def repair_relations(_scene, *, config, candidate_validator, record_stats=True):
             self.assertTrue(candidate_validator(agent.scene))
+            self.assertFalse(record_stats)
             return [relation_fix]
 
         with (
@@ -2489,6 +2490,11 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         self,
     ) -> None:
         agent = object.__new__(StatefulFurnitureAgent)
+        agent.cfg = SimpleNamespace(
+            furniture_safety_controller=SimpleNamespace(
+                deterministic_repair=SimpleNamespace(enabled=True)
+            )
+        )
         furniture_type = SimpleNamespace(value="furniture")
         wall_backed = SimpleNamespace(
             object_id="sideboard_0",
@@ -2527,6 +2533,30 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
 
         self.assertEqual(removed, 1)
         self.assertEqual(set(agent.scene.objects), {"sideboard_0"})
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
+    def test_inventory_convergence_respects_disabled_deterministic_repair(
+        self,
+    ) -> None:
+        agent = object.__new__(StatefulFurnitureAgent)
+        agent.cfg = SimpleNamespace(
+            furniture_safety_controller=SimpleNamespace(
+                deterministic_repair=SimpleNamespace(enabled=False)
+            )
+        )
+        agent._repair_required_counts = MagicMock(
+            side_effect=AssertionError("inventory must not be inspected when disabled")
+        )
+        agent._remove_excess_required_furniture = MagicMock()
+
+        removed = agent._converge_prompt_required_inventory(source="test")
+
+        self.assertEqual(removed, 0)
+        agent._repair_required_counts.assert_not_called()
+        agent._remove_excess_required_furniture.assert_not_called()
 
     @unittest.skipIf(
         StatefulFurnitureAgent is None,

@@ -30,6 +30,7 @@ from scenesmith.scene_expert.schemas import (
     SceneTaskSpec,
     StageBrief,
 )
+from scenesmith.utils.openai_strict_schema import make_openai_strict_json_schema
 
 console_logger = logging.getLogger(__name__)
 
@@ -932,7 +933,9 @@ class GlobalPlanner:
                         "json_schema": {
                             "name": "stage_brief",
                             "strict": True,
-                            "schema": StageBrief.model_json_schema(),
+                            "schema": make_openai_strict_json_schema(
+                                StageBrief.model_json_schema()
+                            ),
                         },
                     },
                     extra_body=chat_template_kwargs_from_effort(

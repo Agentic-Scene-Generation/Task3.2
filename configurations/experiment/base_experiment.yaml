@@ -77,6 +77,11 @@ num_workers: 1
 # validation failures are not retried. One retry is the production default.
 scene_retry_attempts: 1
 
+# HSSD retrieval always uses requested dimensions to rank candidates. This
+# switch only controls whether the selected mesh is then uniformly fitted to
+# those dimensions during local asset conversion.
+hssd_scale_to_requested_dimensions: true
+
 # Deterministic quality failures are distinct from runtime failures. Production
 # remains strict by default; critic probes may select "degraded" to preserve
 # failed checkpoints, traces, and final renders without marking them successful.
@@ -107,7 +112,8 @@ pipeline:
 
 # Optional deterministic SceneBenchmark rule critic.  When enabled it adds
 # relevant geometry-rule feedback to the existing furniture/manipuland LLM
-# critic prompts; it does not change generation, retrieval, or VLM filtering.
+# critic prompts. Critic-driven deterministic repairs are separately controlled
+# below; furniture_safety_controller.deterministic_repair remains independent.
 scenebenchmark_critic:
   enabled: false
   metrics: ["functional_dependency", "spatial_accessibility", "interaction_clearance", "visual_clearance"]
@@ -123,6 +129,9 @@ scenebenchmark_critic:
   visual_grounding:
     enabled: false
   vlm_hard_gate: false
+  # true keeps legacy Critic-driven geometry repairs. Set false for Critic
+  # evaluate-only mode (LLM feedback and hard-gate remain enabled).
+  auto_repair: true
 
 # Optional soft placement-order references. Both stages are opt-in; set each
 # stage's enabled flag to true when validating the reference-guided flow.

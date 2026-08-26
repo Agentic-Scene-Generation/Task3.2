@@ -114,6 +114,11 @@ api_timeout:
 # Maximum number of critique-and-improve rounds before stopping
 max_critique_rounds: 2
 
+# A failed final reservation check may request one extra designer change after
+# the normal workflow. Disable this in unassisted-generation ablations.
+reservation_validation:
+  auto_repair: true
+
 # Scene reset thresholds for detecting quality degradation
 reset_single_category_threshold: 2
 reset_total_sum_threshold: 1

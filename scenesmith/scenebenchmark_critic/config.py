@@ -4,7 +4,55 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import os
-from typing import Any
+from typing import Any, Literal
+
+RepairModule = Literal[
+    "furniture_relations",
+    "visual_clearance",
+    "storage_accessibility",
+    "seating_orientation",
+    "window_clearance",
+]
+
+_REPAIR_MODULES = frozenset(
+    {
+        "furniture_relations",
+        "visual_clearance",
+        "storage_accessibility",
+        "seating_orientation",
+        "window_clearance",
+    }
+)
+
+
+@dataclass(frozen=True)
+class AutoRepairConfig:
+    """Controls deterministic repairs initiated by the SceneBenchmark critic.
+
+    This deliberately does not control the independent furniture safety
+    controller.  Keeping that boundary here makes evaluate-only experiments
+    explicit instead of silently changing their safety semantics.
+    """
+
+    enabled: bool = True
+    furniture_relations: bool = True
+    visual_clearance: bool = True
+    storage_accessibility: bool = True
+    seating_orientation: bool = True
+    window_clearance: bool = True
+    max_repairs_per_call: int | None = None
+    max_candidate_evaluations: int | None = None
+    furniture_relation_budget: int | None = None
+    visual_clearance_budget: int | None = None
+    storage_accessibility_budget: int | None = None
+
+    def should_repair(self, module: RepairModule) -> bool:
+        if module not in _REPAIR_MODULES:
+            raise ValueError(
+                f"Unknown auto-repair module {module!r}; expected one of "
+                f"{', '.join(sorted(_REPAIR_MODULES))}"
+            )
+        return self.enabled and bool(getattr(self, module))
 
 # 2026-07-16 修改原因：critic 迁移到统一 registry 后，四个一级指标必须
 # 使用同一默认集合，避免视觉规则在 API、配置和回放之间被静默漏掉。
@@ -33,6 +81,7 @@ class CriticConfig:
     intent_compiler: dict[str, Any] = field(default_factory=dict)
     visual_grounding: dict[str, Any] = field(default_factory=dict)
     vlm_hard_gate: bool = False
+    auto_repair: AutoRepairConfig = field(default_factory=AutoRepairConfig)
     extra: dict[str, Any] = field(default_factory=dict)
 
     def metric_enabled(self, metric: str) -> bool:
@@ -77,6 +126,7 @@ def critic_config_from_any(cfg: Any) -> CriticConfig:
         "intent_compiler",
         "visual_grounding",
         "vlm_hard_gate",
+        "auto_repair",
     }
     removed_mode_fields = {
         "constraint_mode",
@@ -123,6 +173,7 @@ def critic_config_from_any(cfg: Any) -> CriticConfig:
         # an accidental future config opt-in observable without granting it
         # authority in the evaluator.
         vlm_hard_gate=_as_bool(data.get("vlm_hard_gate", False)),
+        auto_repair=_auto_repair_config_from_any(data.get("auto_repair", None)),
         extra=extra,
     )
 
@@ -145,6 +196,89 @@ def _to_plain_dict(obj: Any) -> dict[str, Any]:
         for key in dir(obj)
         if not key.startswith("_") and not callable(getattr(obj, key))
     }
+
+
+def _auto_repair_config_from_any(value: Any) -> AutoRepairConfig:
+    """Parse only documented auto-repair shapes, with useful config errors."""
+    if value is None:
+        return AutoRepairConfig()
+    if type(value) is bool:
+        return AutoRepairConfig(enabled=value)
+    if not isinstance(value, dict) and not hasattr(value, "items"):
+        raise ValueError("scenebenchmark_critic.auto_repair must be a boolean or mapping")
+    data = dict(value.items())
+    known = {
+        "enabled",
+        "furniture_relations",
+        "visual_clearance",
+        "storage_accessibility",
+        "seating_orientation",
+        "window_clearance",
+        "max_repairs_per_call",
+        "max_candidate_evaluations",
+        "furniture_relation_budget",
+        "visual_clearance_budget",
+        "storage_accessibility_budget",
+    }
+    unknown = sorted(set(data) - known)
+    if unknown:
+        raise ValueError(
+            "Unknown scenebenchmark_critic.auto_repair field(s): "
+            f"{', '.join(unknown)}. Valid fields: {', '.join(sorted(known))}"
+        )
+    bool_fields = known - {
+        "max_repairs_per_call",
+        "max_candidate_evaluations",
+        "furniture_relation_budget",
+        "visual_clearance_budget",
+        "storage_accessibility_budget",
+    }
+    parsed_bools = {
+        name: _as_strict_bool(data.get(name, True), f"auto_repair.{name}")
+        for name in bool_fields
+    }
+    return AutoRepairConfig(
+        **parsed_bools,
+        max_repairs_per_call=_as_non_negative_int_or_none(
+            data.get("max_repairs_per_call"), "auto_repair.max_repairs_per_call"
+        ),
+        max_candidate_evaluations=_as_non_negative_int_or_none(
+            data.get("max_candidate_evaluations"),
+            "auto_repair.max_candidate_evaluations",
+        ),
+        furniture_relation_budget=_as_non_negative_int_or_none(
+            data.get("furniture_relation_budget"), "auto_repair.furniture_relation_budget"
+        ),
+        visual_clearance_budget=_as_non_negative_int_or_none(
+            data.get("visual_clearance_budget"), "auto_repair.visual_clearance_budget"
+        ),
+        storage_accessibility_budget=_as_non_negative_int_or_none(
+            data.get("storage_accessibility_budget"), "auto_repair.storage_accessibility_budget"
+        ),
+    )
+
+
+def _as_strict_bool(value: Any, name: str) -> bool:
+    if type(value) is bool:
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "yes", "on", "1"}:
+            return True
+        if normalized in {"false", "no", "off", "0"}:
+            return False
+    raise ValueError(f"{name} must be a boolean (or true/false-style string)")
+
+
+def _as_non_negative_int_or_none(value: Any, name: str) -> int | None:
+    if value is None:
+        return None
+    if type(value) is int:
+        if value >= 0:
+            return value
+    elif isinstance(value, str) and value.isdecimal():
+        return int(value)
+    raise ValueError(f"{name} must be None or a non-negative integer")
 
 
 def _as_bool(value: Any) -> bool:

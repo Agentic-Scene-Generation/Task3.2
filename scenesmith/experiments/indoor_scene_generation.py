@@ -796,18 +796,26 @@ async def _apply_and_rescore_final_furniture_state(
 
 def _apply_final_furniture_guards(*, scene: RoomScene, cfg_dict: dict) -> None:
     """Apply the idempotent guard sequence used around canonical re-scoring."""
-    align_seating_to_nearest_surface(
-        scene,
-        allowed_targets_by_seat=seating_orientation_targets(scene, config=cfg_dict),
-    )
+    _apply_seating_orientation_guard(scene=scene, config=cfg_dict)
     if critic_config_from_any(cfg_dict).enabled:
         improve_storage_front_access(scene, config=cfg_dict)
         improve_furniture_relations(scene, config=cfg_dict)
 
     # Candidate evaluation can move a wall seat while testing a relation repair.
-    align_seating_to_nearest_surface(
+    _apply_seating_orientation_guard(scene=scene, config=cfg_dict)
+
+
+def _apply_seating_orientation_guard(*, scene: RoomScene, config: Any) -> list[Any]:
+    """Gate before target construction, which itself evaluates critic contracts."""
+    critic_config = critic_config_from_any(config)
+    if not critic_config.enabled or not critic_config.auto_repair.should_repair(
+        "seating_orientation"
+    ):
+        return align_seating_to_nearest_surface(scene, config=critic_config)
+    return align_seating_to_nearest_surface(
         scene,
-        allowed_targets_by_seat=seating_orientation_targets(scene, config=cfg_dict),
+        config=critic_config,
+        allowed_targets_by_seat=seating_orientation_targets(scene, config=critic_config),
     )
 
 
@@ -1806,10 +1814,7 @@ def _generate_room(
 
     # Final post-processing can be reached from a checkpoint resume. Reapply the
     # seating orientation guard so the final scene cannot inherit a backward seat.
-    align_seating_to_nearest_surface(
-        scene,
-        allowed_targets_by_seat=seating_orientation_targets(scene, config=cfg_dict),
-    )
+    _apply_seating_orientation_guard(scene=scene, config=cfg_dict)
 
     # Final post-processing (projection + simulation).
     if projection_cfg["enabled"] and projection_cfg["final"]["enabled"]:

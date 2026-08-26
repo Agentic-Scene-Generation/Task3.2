@@ -1428,6 +1428,8 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
 
     def _repair_dining_alignment_after_physics(self, furniture_id: UniqueID) -> bool:
         """Jointly commit post-physics dining alignment and physical validity."""
+        if not self._code_level_auto_repair_enabled():
+            return False
         initial_status = self._dining_joint_contract_status(furniture_id)
         if initial_status is None or initial_status["valid"]:
             return False
@@ -1632,6 +1634,14 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
         if initial_status["valid"]:
             return
 
+        if not self._code_level_auto_repair_enabled():
+            console_logger.warning(
+                "Dining contract is invalid for %s, but code-level automatic "
+                "repair is disabled",
+                furniture_id,
+            )
+            return
+
         console_logger.info(
             "Final score rollback invalidated the dining joint contract for %s; "
             "reapplying deterministic semantic/physics repair",
@@ -1658,6 +1668,8 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
 
     def _enforce_dining_place_setting_alignment(self, furniture_id: UniqueID) -> bool:
         """Repair a failed dining place-setting contract before final scoring."""
+        if not self._code_level_auto_repair_enabled():
+            return False
         table_id = str(furniture_id)
         removed_duplicates = self._remove_duplicate_composite_members(furniture_id)
 
@@ -1704,6 +1716,8 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
 
     def _enforce_monitor_work_seat_orientation(self, furniture_id: UniqueID) -> bool:
         """Point monitors on this work surface towards its assigned work seat."""
+        if not self._code_level_auto_repair_enabled():
+            return False
         if not self._task_requires_monitor_work_seat_facing():
             return False
         tools = getattr(self, "manipuland_tools", None)
@@ -1792,6 +1806,13 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
                 furniture_id,
             )
         return moved
+
+    def _code_level_auto_repair_enabled(self) -> bool:
+        """Return whether non-physical deterministic scene edits are allowed."""
+        config = getattr(self.cfg, "code_level_auto_repair", None)
+        if config is None:
+            return True
+        return bool(getattr(config, "enabled", True))
 
     def _task_requires_monitor_work_seat_facing(self) -> bool:
         for constraint in intent_contract_constraints_for_scene(self.scene):

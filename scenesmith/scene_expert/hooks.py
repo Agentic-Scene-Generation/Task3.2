@@ -65,6 +65,7 @@ from scenesmith.scene_expert.trace_logger import TraceLogger, collect_code_prove
 from scenesmith.scene_expert.verifier import FullVerifier, StageVerifier
 from scenesmith.scenebenchmark_critic.config import critic_config_from_any
 from scenesmith.scenebenchmark_critic.intent_compiler import IntentCompiler
+from scenesmith.scenebenchmark_critic.intent_contract import build_intent_contract
 from scenesmith.scenebenchmark_critic.object_taxonomy import (
     canonical_object_category,
     categories_are_equivalent,
@@ -285,11 +286,57 @@ def _compile_intent_contract_if_enabled(
             sort_keys=True,
         ).encode("utf-8")
     ).hexdigest()
+    compiler_cfg = critic_config.intent_compiler
+    if not bool(compiler_cfg.get("enabled", True)):
+        # Keep the critic contract and downstream benchmark evaluation active,
+        # but avoid constructing the LLM-backed compiler.  This is useful for
+        # OpenAI-compatible relays that do not accept its strict JSON schema.
+        contract = build_intent_contract(
+            normalized_prompt,
+            room_type=str(task_spec_payload.get("room_type") or ""),
+            task_spec=task_spec_payload,
+        )
+        trace = {
+            "status": "disabled",
+            "mode": "deterministic",
+            "spec_version": IntentCompiler.SPEC_VERSION,
+            "prompt_sha256": prompt_hash,
+            "normalized_task_spec": task_spec_payload,
+            "constraints": contract.get("constraints", []),
+            "warnings": contract.get("warnings", []),
+            "retry_count": 0,
+            "attempts": [],
+            "failure_reason": "IntentCompiler disabled by configuration",
+        }
+        trace_path = (
+            output_dir
+            / f"scene_{scene_id:03d}"
+            / "scene_expert"
+            / "trace"
+            / "intent_compiler.json"
+        )
+        trace_path.parent.mkdir(parents=True, exist_ok=True)
+        trace_path.write_text(
+            json.dumps(trace, indent=2, ensure_ascii=False, default=str),
+            encoding="utf-8",
+            newline="\n",
+        )
+        cfg_dict["_scenebenchmark_intent_contract"] = contract
+        cfg_dict["_scenebenchmark_intent_trace"] = trace
+        cfg_dict["_scenebenchmark_intent_cache_key"] = {
+            "prompt_sha256": prompt_hash,
+            "task_spec_sha256": task_spec_hash,
+            "spec_version": IntentCompiler.SPEC_VERSION,
+            "schema_version": IntentCompiler.SCHEMA_VERSION,
+            "mode": "deterministic",
+        }
+        return contract, trace
     cache_key = {
         "prompt_sha256": prompt_hash,
         "task_spec_sha256": task_spec_hash,
         "spec_version": IntentCompiler.SPEC_VERSION,
         "schema_version": IntentCompiler.SCHEMA_VERSION,
+        "mode": "llm",
     }
     cached_contract = cfg_dict.get("_scenebenchmark_intent_contract")
     cached_trace = cfg_dict.get("_scenebenchmark_intent_trace")
@@ -300,7 +347,6 @@ def _compile_intent_contract_if_enabled(
         and cached_key == cache_key
     ):
         return cached_contract, cached_trace
-    compiler_cfg = critic_config.intent_compiler
     compiler = IntentCompiler(
         model=_intent_compiler_model(cfg_dict),
         api_base_url=os.environ.get("OPENAI_BASE_URL", "http://localhost:8000/v1"),
