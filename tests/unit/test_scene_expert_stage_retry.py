@@ -195,6 +195,33 @@ def test_hook_finalize_refreshes_final_deterministic_payload(tmp_path) -> None:
     )
 
 
+def test_hook_finalize_does_not_promote_partial_shared_base(tmp_path) -> None:
+    runner = object.__new__(SceneExpertHookRunner)
+    runner._mode = "harness_memory"
+    runner._scene_id = 1
+    runner._stage_reports = [StageVerifyReport(stage="floor_plan", pass_stage=True)]
+    runner._latest_scene = None
+    runner._latest_deterministic_payload = None
+    runner._critic_config = CriticConfig(enabled=False)
+    runner._component_flags = {"trace": False, "verifier": False}
+    runner._full_verifier = Mock()
+    runner._trace_logger = None
+    runner._qwen_model = "qwen"
+    runner._memory_writer = Mock()
+    runner._memory_store = Mock()
+    runner._allow_long_term_memory_updates = False
+    runner._pending_skill_observations = [Mock()]
+    runner._write_long_term_memory = Mock()
+    runner._flush_skill_outcomes = Mock()
+    runner._capture_main_repair_activity = Mock()
+
+    runner.finalize(str(tmp_path))
+
+    runner._write_long_term_memory.assert_not_called()
+    runner._flush_skill_outcomes.assert_not_called()
+    assert runner._pending_skill_observations == []
+
+
 def test_wall_post_stage_passes_fresh_deterministic_payload_to_verifier(
     tmp_path,
 ) -> None:

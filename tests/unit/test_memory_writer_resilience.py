@@ -45,6 +45,17 @@ def _evidence(
             {
                 "stage": "furniture",
                 "scene_state_path": "/tmp/scene/final_furniture",
+                "relation_context": {
+                    "stage": "furniture",
+                    "hard_constraints": [
+                        {
+                            "constraint_id": "face-desk",
+                            "relation_type": "facing",
+                            "subject": {"role": "student chair"},
+                            "target": {"role": "student desk"},
+                        }
+                    ],
+                },
                 "verify_report": {
                     "stage": "furniture",
                     "pass_stage": stage_passed,
@@ -147,6 +158,8 @@ class MemoryWriterResilienceTest(unittest.TestCase):
         self.assertTrue(content["source_run_id"].startswith("run_"))
         self.assertIn(content["source_run_id"], content["evidence_refs"])
         self.assertIn("score_source=scores.yaml", content["critic_evidence"])
+        self.assertEqual("trace_000001", content["provenance"]["trace_id"])
+        self.assertEqual("facing", content["spatial_relations"][0]["relation_type"])
         self.assertTrue(content["embedding_text"])
         self.assertFalse(writer.last_trace["fallback_written"])
         self.assertIs(client.calls[0]["response_model"], MemoryWriterResponse)
@@ -245,6 +258,7 @@ class MemoryWriterResilienceTest(unittest.TestCase):
         self.assertEqual(1, len(ops))
         self.assertTrue(ops[0].content["repair_verified"])
         self.assertTrue(ops[0].content["is_deterministic"])
+        self.assertIn("is_deterministic=true", ops[0].content["embedding_text"])
 
     def test_candidate_schema_rejects_uncontracted_fields(self) -> None:
         with self.assertRaises(ValidationError):

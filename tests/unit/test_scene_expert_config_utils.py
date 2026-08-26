@@ -51,6 +51,27 @@ class SceneExpertConfigUtilsTest(unittest.TestCase):
         self.assertFalse(flags["memory_writer"])
         self.assertTrue(flags["verifier"])
         self.assertTrue(flags["critic_bridge"])
+        self.assertFalse(flags["slow_memory_capture"])
+
+    def test_full_differs_from_harness_memory_only_by_capture(self) -> None:
+        memory_flags = resolve_component_flags(self.cfg)
+        self.cfg["experiment"]["scene_expert"]["mode"] = "full"
+        full_flags = resolve_component_flags(self.cfg)
+
+        self.assertFalse(memory_flags["slow_memory_capture"])
+        self.assertTrue(full_flags["slow_memory_capture"])
+        self.assertEqual(
+            {
+                key: value
+                for key, value in memory_flags.items()
+                if key != "slow_memory_capture"
+            },
+            {
+                key: value
+                for key, value in full_flags.items()
+                if key != "slow_memory_capture"
+            },
+        )
 
     def test_every_component_can_be_disabled_independently(self) -> None:
         inherited = resolve_component_flags(self.cfg)

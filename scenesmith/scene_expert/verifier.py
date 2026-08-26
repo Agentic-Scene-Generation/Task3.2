@@ -71,6 +71,13 @@ _SCENESMITH_SCORE_MAPPING = {
     "space_utilization": "semantic",
 }
 _DETERMINISTIC_HARD_CHECK_MARKER = "DETERMINISTIC HARD-CHECK FAILED BEFORE VLM SCORING"
+_INCOMPLETE_CRITIQUE_PATTERNS = (
+    re.compile(
+        r"^(?:i'll|i will|let me)\s+(?:first\s+)?(?:validate|check|inspect|review)\b",
+        re.I,
+    ),
+    re.compile(r"\bbefore drawing conclusions\b", re.I),
+)
 
 
 def _load_scores_yaml(scores_yaml_path: Path) -> tuple[dict[str, float], str]:
@@ -109,6 +116,17 @@ def _load_scores_yaml(scores_yaml_path: Path) -> tuple[dict[str, float], str]:
                     }
                 )
     return flat, summary
+
+
+def _critique_is_final(summary: str) -> bool:
+    """Reject obvious tool-use preambles accidentally persisted as conclusions."""
+
+    normalized = " ".join(str(summary or "").split())
+    if not normalized:
+        return False
+    if any(pattern.search(normalized) for pattern in _INCOMPLETE_CRITIQUE_PATTERNS):
+        return False
+    return True
 
 
 # Maps stage name → subdirectory under scene_states/ that holds the stage scores.yaml.
@@ -161,7 +179,13 @@ def _find_scores_yaml(stage_output_dir: str, stage: str = "") -> Path | None:
             # Return the most recent per-object scores file (last manipuland placed).
             return max(candidates, key=lambda p: p.stat().st_mtime)
 
-    # Generic fallback: most recent scores.yaml under scene_states/ only
+    # With an explicit stage, never borrow another stage's score. A missing
+    # stage-specific score is accurate "no visual evidence", while a recent
+    # cross-stage score silently creates a false Slow Memory label.
+    if stage:
+        return None
+
+    # Generic fallback is retained only for legacy callers without a stage.
     # (exclude scene_renders/ which has per-iteration files).
     scene_states_dir = root / "scene_states"
     if scene_states_dir.exists():
@@ -306,6 +330,72 @@ def _deterministic_core_failures(payload: dict | None, stage: str) -> list[dict]
             continue
         failures.append(result)
     return failures
+
+
+def _deterministic_hard_check_report(
+    payload: dict | None,
+    stage: str,
+) -> dict[str, object]:
+    """Summarize only actually evaluated, due hard constraints."""
+
+    evaluated: list[dict] = []
+    relation_results: list[dict] = []
+    for result in (payload or {}).get("results") or []:
+        if not isinstance(result, dict) or not _result_is_due(result, stage):
+            continue
+        tier = str(result.get("scoring_tier") or "core").lower()
+        constraint = _result_intent_constraint(result)
+        if tier != "core" or (
+            constraint and str(constraint.get("strength") or "hard").lower() != "hard"
+        ):
+            continue
+        label = str(result.get("label") or "").lower()
+        if label not in {"pass", "fail", "degraded"}:
+            continue
+        evaluated.append(result)
+        if constraint or result.get("relation_type"):
+            relation_results.append(result)
+
+    failed = [
+        result
+        for result in evaluated
+        if str(result.get("label") or "").lower() == "fail"
+        or (
+            str(result.get("label") or "").lower() == "degraded"
+            and str(result.get("metric") or "") == "visual_clearance"
+        )
+    ]
+    decided_relations = [
+        result
+        for result in relation_results
+        if str(result.get("label") or "").lower() in {"pass", "fail"}
+    ]
+    passed_relations = [
+        result
+        for result in decided_relations
+        if str(result.get("label") or "").lower() == "pass"
+    ]
+    relation_satisfaction = (
+        len(passed_relations) / len(decided_relations) if decided_relations else None
+    )
+    return {
+        "evaluation_available": bool(evaluated),
+        "hard_passed": not failed if evaluated else None,
+        "evaluated_check_ids": [
+            str(result.get("check_id") or "") for result in evaluated
+        ],
+        "failed_check_ids": [str(result.get("check_id") or "") for result in failed],
+        "evaluated_relation_check_ids": [
+            str(result.get("check_id") or "") for result in decided_relations
+        ],
+        "failed_relation_check_ids": [
+            str(result.get("check_id") or "")
+            for result in decided_relations
+            if str(result.get("label") or "").lower() == "fail"
+        ],
+        "relation_satisfaction": relation_satisfaction,
+        "constraint_satisfaction_rate": relation_satisfaction,
+    }
 
 
 def _issue_from_deterministic_result(result: dict) -> VerifyIssue:
@@ -642,6 +732,13 @@ class StageVerifier:
         raw_scores, critique_summary = (
             _load_scores_yaml(scores_path) if scores_path else ({}, "")
         )
+        if raw_scores and not _critique_is_final(critique_summary):
+            console_logger.warning(
+                "StageVerifier: ignoring non-final critic payload for stage %s at %s",
+                stage,
+                scores_path,
+            )
+            raw_scores, critique_summary = {}, ""
         mapped_scores = _map_scenesmith_scores(raw_scores)
         bridged_scores = dict(mapped_scores)
 
@@ -698,6 +795,9 @@ class StageVerifier:
                         f"Add missing object '{issue.object_name}' to the scene"
                     )
         deterministic_failures = _deterministic_core_failures(
+            deterministic_critic_payload, stage
+        )
+        hard_check_report = _deterministic_hard_check_report(
             deterministic_critic_payload, stage
         )
         for failure in deterministic_failures:
@@ -824,6 +924,7 @@ class StageVerifier:
             vlm_scoring_performed=(
                 self._critic_bridge_enabled and bool(bridged_scores)
             ),
+            hard_check_report=hard_check_report,
         )
 
 

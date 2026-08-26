@@ -9,6 +9,7 @@ def _run(run_id: str, *, ready: bool, time_sec: float, critic: float) -> dict:
         "quality_comparison_ready": ready,
         "experiment_identity": {
             "experiment_names": ["ablation_4c"],
+            "experiment_signatures": ["stable-4c-signature"],
             "config_hashes": ["config-1"],
             "models": ["qwen-test"],
             "code_revisions": ["abc123"],
@@ -46,18 +47,21 @@ def test_ready_pair_reports_signed_deltas() -> None:
     )
 
     assert result["comparison_ready"] is True
-    assert result["claim_status"] == "paired_deltas_ready"
+    assert result["claim_status"] == "paired_quality_and_outcomes_ready"
+    assert result["quality_delta_ready"] is True
     assert result["summary"]["mean_time_delta_sec"] == -20.0
     assert result["summary"]["median_speedup_ratio"] == 1.25
     assert result["summary"]["mean_critic_score_delta"] == 0.1
 
 
-def test_incomplete_run_refuses_comparison_claim() -> None:
+def test_incomplete_run_keeps_outcome_comparison_but_guards_quality_claim() -> None:
     result = compare_run_metrics(
         _run("cold", ready=True, time_sec=100.0, critic=0.8),
         _run("warm", ready=False, time_sec=80.0, critic=0.9),
     )
 
-    assert result["comparison_ready"] is False
-    assert result["claim_status"] == "not_ready"
+    assert result["comparison_ready"] is True
+    assert result["quality_delta_ready"] is False
+    assert result["claim_status"] == "paired_outcomes_ready_with_partial_quality"
+    assert result["summary"]["regressed_cases"] == 1
     assert "treatment_not_quality_ready" in result["data_quality_warnings"]
