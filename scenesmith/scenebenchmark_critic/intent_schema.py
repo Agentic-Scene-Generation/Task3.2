@@ -187,6 +187,7 @@ class CoverageRequirement(BaseModel):
         "functional_zone",
         "architectural_feature",
         "unsupported_relation",
+        "forbidden_inventory",
     ]
     normalized: str = Field(min_length=1)
     earliest_stage: str = "floor_plan"

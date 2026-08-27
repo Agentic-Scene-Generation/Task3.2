@@ -234,7 +234,9 @@ def _eval_relation_over_targets(
             inferred = _infer_relation_type(subject, target)
             if inferred and _relation_target_is_valid(subject, target, inferred):
                 target_relation = inferred
-            elif _relation_target_is_valid(target, subject, "object_on_support"):
+            elif relation_type == "object_on_support" and _relation_target_is_valid(
+                target, subject, "object_on_support"
+            ):
                 target_relation = "object_on_support"
                 eval_subject = target
                 eval_target = subject

@@ -22,6 +22,7 @@ from scenesmith.scenebenchmark_critic.intent_contract import (
     bound_ids,
     contract_constraints,
     selected_ids,
+    semantic_selector_matches,
     selector_match_count,
 )
 from scenesmith.scenebenchmark_critic.relation_registry import (
@@ -157,6 +158,60 @@ def _evaluate_coverage_requirements(
                         "normalized": normalized,
                         "current_stage": stage,
                         "earliest_stage": earliest,
+                        "evidence_span": str(requirement.get("evidence_span") or ""),
+                    },
+                )
+            )
+            continue
+
+        if kind == "forbidden_inventory":
+            selector = {"category": normalized, "quantifier": "all"}
+            matched_ids = selected_ids(selector, objects)
+            match_details = semantic_selector_matches(selector, objects)
+            if not geometry or not isinstance(geometry.get("objects"), list):
+                label, tier, state = "unknown", "auxiliary", "unknown"
+                reason = (
+                    f"Forbidden inventory `{normalized}` is unknown because scene "
+                    "object evidence is unavailable."
+                )
+            elif matched_ids:
+                label, tier, state = "fail", "core", "evaluated"
+                reason = (
+                    f"Explicitly forbidden inventory `{normalized}` is present: "
+                    + ", ".join(matched_ids)
+                    + "."
+                )
+            else:
+                label, tier, state = "pass", "core", "evaluated"
+                reason = (
+                    f"No object matches explicitly forbidden inventory `{normalized}`."
+                )
+            results.append(
+                _result(
+                    synthetic,
+                    suffix="forbidden_inventory",
+                    label=label,
+                    primary=str(requirement["requirement_id"]),
+                    related=matched_ids,
+                    relation_type="forbidden_inventory",
+                    tier=tier,
+                    contract_state=state,
+                    reason=reason,
+                    diagnostics={
+                        "coverage_status": state,
+                        "requirement_id": str(requirement["requirement_id"]),
+                        "requested_category": normalized,
+                        "observed_count": len(matched_ids),
+                        "matched_object_ids": matched_ids,
+                        "matched_categories": sorted(
+                            {
+                                str(row.get("observed_category") or "")
+                                for row in match_details
+                                if row.get("context_matched")
+                            }
+                            - {""}
+                        ),
+                        "match_details": match_details,
                         "evidence_span": str(requirement.get("evidence_span") or ""),
                     },
                 )
@@ -1991,32 +2046,37 @@ def _evaluate_corner_of_room(
     bounds = _room_bounds(geometry)
     if bounds is None:
         return []
-    corners = (
-        (bounds[0], bounds[1]),
-        (bounds[0], bounds[3]),
-        (bounds[2], bounds[1]),
-        (bounds[2], bounds[3]),
-    )
     allowed = max(0.5, 0.12 * math.hypot(bounds[2] - bounds[0], bounds[3] - bounds[1]))
     by_id = {str(obj["id"]): obj for obj in objects}
     results = []
     for object_id in bound_ids(constraint.get("subjects"), objects):
-        center = bbox_center_xy(by_id.get(object_id))
-        if center is None:
+        corner = _nearest_footprint_corner(by_id.get(object_id), bounds)
+        if corner is None:
             continue
-        distance = min(math.hypot(center[0] - x, center[1] - y) for x, y in corners)
+        distance, wall_x_distance, wall_y_distance, corner_xy = corner
+        passed = (
+            distance <= allowed
+            and wall_x_distance <= allowed
+            and wall_y_distance <= allowed
+        )
         results.append(
             _result(
                 constraint,
                 suffix=object_id,
-                label="pass" if distance <= allowed else "fail",
+                label="pass" if passed else "fail",
                 primary=object_id,
                 related=[],
                 relation_type="corner_of_room",
                 tier=tier,
-                reason=f"`{object_id}` is {distance:.2f}m from its nearest room corner (allowed {allowed:.2f}m).",
+                reason=(
+                    f"`{object_id}` footprint is {distance:.2f}m from its nearest "
+                    f"room corner (allowed {allowed:.2f}m)."
+                ),
                 diagnostics={
                     "nearest_corner_distance_m": distance,
+                    "nearest_corner_xy_m": list(corner_xy),
+                    "nearest_wall_x_distance_m": wall_x_distance,
+                    "nearest_wall_y_distance_m": wall_y_distance,
                     "allowed_distance_m": allowed,
                 },
             )
@@ -2043,17 +2103,18 @@ def _evaluate_corner_distribution(
     if not subject_ids:
         return []
     by_id = {str(obj["id"]): obj for obj in objects}
-    centers = [bbox_center_xy(by_id.get(object_id)) for object_id in subject_ids]
-    if any(center is None for center in centers) or len(subject_ids) > len(corners):
+    corner_distances = [
+        _footprint_corner_distances(by_id.get(object_id), bounds)
+        for object_id in subject_ids
+    ]
+    if any(not distances for distances in corner_distances) or len(subject_ids) > len(
+        corners
+    ):
         return []
-    typed_centers = [center for center in centers if center is not None]
     best: tuple[float, tuple[int, ...]] | None = None
     for assignment in permutations(range(len(corners)), len(subject_ids)):
         cost = sum(
-            math.hypot(
-                typed_centers[index][0] - corners[corner_index][0],
-                typed_centers[index][1] - corners[corner_index][1],
-            )
+            corner_distances[index][corner_index][0]
             for index, corner_index in enumerate(assignment)
         )
         if best is None or cost < best[0]:
@@ -2066,9 +2127,15 @@ def _evaluate_corner_distribution(
     )
     results: list[dict[str, Any]] = []
     for index, corner_index in enumerate(best[1]):
-        center = typed_centers[index]
         corner = corners[corner_index]
-        distance = math.hypot(center[0] - corner[0], center[1] - corner[1])
+        distance, wall_x_distance, wall_y_distance = corner_distances[index][
+            corner_index
+        ]
+        passed = (
+            distance <= allowed
+            and wall_x_distance <= allowed
+            and wall_y_distance <= allowed
+        )
         assignment = {
             "object_id": subject_ids[index],
             "corner_index": corner_index,
@@ -2079,7 +2146,7 @@ def _evaluate_corner_distribution(
             _result(
                 constraint,
                 suffix=subject_ids[index],
-                label="pass" if distance <= allowed else "fail",
+                label="pass" if passed else "fail",
                 primary=subject_ids[index],
                 related=[
                     object_id
@@ -2094,12 +2161,64 @@ def _evaluate_corner_distribution(
                 ),
                 diagnostics={
                     "assignment": assignment,
+                    "nearest_wall_x_distance_m": wall_x_distance,
+                    "nearest_wall_y_distance_m": wall_y_distance,
                     "distinct_corner_count": len(set(best[1])),
                     "allowed_distance_m": allowed,
                 },
             )
         )
     return results
+
+
+def _footprint_corner_distances(
+    obj: dict[str, Any] | None, bounds: tuple[float, float, float, float]
+) -> list[tuple[float, float, float]]:
+    if not isinstance(obj, dict):
+        return []
+    footprint_values = object_footprint_polygon(obj)
+    try:
+        footprint = Polygon(footprint_values)
+    except (TypeError, ValueError):
+        footprint = Polygon()
+    if footprint.is_empty or not footprint.is_valid:
+        center = bbox_center_xy(obj)
+        if center is None:
+            return []
+        footprint = Point(center)
+    corners = (
+        (bounds[0], bounds[1]),
+        (bounds[0], bounds[3]),
+        (bounds[2], bounds[1]),
+        (bounds[2], bounds[3]),
+    )
+    result: list[tuple[float, float, float]] = []
+    for x, y in corners:
+        corner_point = Point(x, y)
+        wall_x = abs(
+            float(footprint.distance(LineString([(x, bounds[1]), (x, bounds[3])])))
+        )
+        wall_y = abs(
+            float(footprint.distance(LineString([(bounds[0], y), (bounds[2], y)])))
+        )
+        result.append((float(footprint.distance(corner_point)), wall_x, wall_y))
+    return result
+
+
+def _nearest_footprint_corner(
+    obj: dict[str, Any] | None, bounds: tuple[float, float, float, float]
+) -> tuple[float, float, float, tuple[float, float]] | None:
+    distances = _footprint_corner_distances(obj, bounds)
+    if not distances:
+        return None
+    corners = (
+        (bounds[0], bounds[1]),
+        (bounds[0], bounds[3]),
+        (bounds[2], bounds[1]),
+        (bounds[2], bounds[3]),
+    )
+    index, value = min(enumerate(distances), key=lambda item: item[1][0])
+    return (*value, corners[index])
 
 
 def _evaluate_one_per_support(

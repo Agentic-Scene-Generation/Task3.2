@@ -295,12 +295,15 @@ def check_physics_violations(
             "Drake geometry construction failed during physics validation"
         )
         object_failures = _diagnose_geometry_construction_failures(scene)
+        _store_physics_evidence(scene, available=False, error=str(exc), collisions=[])
         if object_failures:
             console_logger.error(
                 "Likely problematic object(s) for geometry construction: %s",
                 "; ".join(object_failures),
             )
         return _format_geometry_construction_violation(exc, object_failures)
+
+    _store_physics_evidence(scene, available=True, collisions=collisions)
 
     thin_covering_overlaps = compute_thin_covering_overlaps(scene)
     thin_covering_boundary_violations = compute_thin_covering_boundary_violations(
@@ -365,6 +368,42 @@ def check_physics_violations(
         height_violations=height_violations,
         window_violations=window_violations,
     )
+
+
+def _store_physics_evidence(
+    scene: RoomScene,
+    *,
+    available: bool,
+    collisions: list | None = None,
+    error: str = "",
+) -> None:
+    """Persist the minimal structured physics contract consumed by the critic."""
+    rows = []
+    for collision in collisions or []:
+        rows.append(
+            {
+                "object_a_id": str(collision.object_a_id),
+                "object_b_id": str(collision.object_b_id),
+                "object_a_name": str(collision.object_a_name),
+                "object_b_name": str(collision.object_b_name),
+                "penetration_depth_m": float(collision.penetration_depth),
+                "classification": "hard",
+            }
+        )
+    evidence = {
+        "schema_version": "scenesmith.physics_evidence.v1",
+        "available": available,
+        "source_phase": "physics_validation",
+        "penetration_tolerance_m": 0.001,
+        "collisions": rows,
+        "scene_hash": str(scene.content_hash()),
+    }
+    if error:
+        evidence["error"] = error
+    if not isinstance(getattr(scene, "metadata", None), dict):
+        scene.metadata = {}
+    scene.metadata["scenebenchmark_physics_evidence"] = evidence
+    scene.scenebenchmark_physics_evidence = evidence
 
 
 class InertialProperties:

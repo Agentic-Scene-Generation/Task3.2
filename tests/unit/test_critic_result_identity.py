@@ -2,6 +2,7 @@ from scenesmith.scenebenchmark_critic.aggregation import aggregate_results
 from scenesmith.scenebenchmark_critic.result_identity import (
     deduplicate_checks,
     deduplicate_results,
+    semantic_signature,
 )
 
 
@@ -137,3 +138,21 @@ def test_transitive_merge_keeps_all_producer_and_constraint_provenance() -> None
     assert [
         row["constraint_id"] for row in results[0]["evidence"]["intent_constraints"]
     ] == ["constraint_a", "constraint_b"]
+
+
+def test_asymmetric_relation_signature_preserves_endpoint_ownership() -> None:
+    book_on_shelf = {
+        "metric": "functional_dependency",
+        "relation_type": "object_on_support",
+        "primary_object": "book_0",
+        "related_objects": ["bookshelf_0"],
+    }
+    shelf_on_book = {
+        "metric": "functional_dependency",
+        "relation_type": "object_on_support",
+        "primary_object": "bookshelf_0",
+        "related_objects": ["book_0"],
+    }
+
+    assert semantic_signature(book_on_shelf) != semantic_signature(shelf_on_book)
+    assert len(deduplicate_results([book_on_shelf, shelf_on_book])) == 2

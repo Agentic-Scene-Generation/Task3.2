@@ -44,8 +44,11 @@ from scenesmith.scenebenchmark_critic.intent_schema import (
 )
 from scenesmith.scenebenchmark_critic.object_taxonomy import OBJECT_CATEGORY_PHRASES
 from scenesmith.scenebenchmark_critic.object_taxonomy import (
+    canonical_object_category,
+    generation_owner,
     is_known_object_category,
     is_structural_anchor,
+    semantic_category_match,
 )
 
 
@@ -364,6 +367,15 @@ def ensure_coverage_requirements(
                 source="task_spec_functional_zone",
             )
 
+    for category, evidence in _explicit_forbidden_inventory(prompt):
+        owner = generation_owner(category)
+        add_row(
+            kind="forbidden_inventory",
+            normalized=category,
+            evidence_span=evidence,
+            earliest_stage=owner if owner in STAGE_ORDER else "furniture",
+        )
+
     unsupported_patterns = (
         r"\b(?:a|an|the)\s+[a-z0-9_-]+"
         r"(?:\s+(?!(?:with|a|an|the)\b)[a-z0-9_-]+){0,4}\s+"
@@ -442,6 +454,29 @@ def ensure_coverage_requirements(
     result["schema_version"] = INTENT_CONTRACT_SCHEMA_VERSION
     result["intent_compiler_spec_version"] = INTENT_COMPILER_SPEC_VERSION
     result["coverage_requirements"] = rows
+    return result
+
+
+def _explicit_forbidden_inventory(prompt: str) -> list[tuple[str, str]]:
+    """Compile only explicit absence wording into deterministic inventory rows."""
+    matches: list[tuple[int, str, str]] = []
+    for category, aliases in _CATEGORY_PATTERNS:
+        for alias in aliases:
+            pattern = re.compile(
+                r"\b(?:no|without|excluding|exclude)\s+(?:any\s+)?"
+                r"(?:a|an|the)?\s*" + re.escape(alias) + r"s?\b",
+                re.IGNORECASE,
+            )
+            for match in pattern.finditer(prompt):
+                matches.append(
+                    (match.start(), canonical_object_category(category), match.group(0))
+                )
+    result: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for _, category, evidence in sorted(matches):
+        if category and category not in seen:
+            result.append((category, evidence))
+            seen.add(category)
     return result
 
 
@@ -688,6 +723,48 @@ def selected_ids(
             and _selector_context_matches(selector, obj)
         ]
     return sorted(dict.fromkeys(ids))
+
+
+def semantic_selector_matches(
+    selector: dict[str, Any] | None,
+    objects: Iterable[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return provenance-rich category matches for the shared selector path."""
+    if not isinstance(selector, dict):
+        return []
+    category = _normalize_selector_category(selector.get("category"))
+    role = str(selector.get("role") or "").lower()
+    result: list[dict[str, Any]] = []
+    for obj in objects:
+        if not isinstance(obj, dict) or not obj.get("id"):
+            continue
+        metadata = obj.get("metadata") if isinstance(obj.get("metadata"), dict) else {}
+        observed = [
+            obj.get("category_norm"),
+            obj.get("category"),
+            metadata.get("semantic_name"),
+        ]
+        category_match = next(
+            (
+                match
+                for value in observed
+                if value
+                for match in (semantic_category_match(category, value),)
+                if match["matched"]
+            ),
+            None,
+        )
+        if category_match is None:
+            continue
+        if not _role_matches_object(role, obj):
+            continue
+        row = dict(category_match)
+        row["object_id"] = str(obj["id"])
+        row["context_matched"] = _selector_context_matches(selector, obj)
+        if not row["context_matched"]:
+            row["exclusion_reason"] = "selector_context"
+        result.append(row)
+    return result
 
 
 def _selector_context_matches(selector: dict[str, Any], obj: dict[str, Any]) -> bool:
@@ -3916,6 +3993,18 @@ def _selector_matches_object(category: str, role: str, obj: dict[str, Any]) -> b
         and not open_vocabulary_adapter_category
     ):
         return False
+    taxonomy_match = next(
+        (
+            match
+            for value in (base_category, semantic_name, object_cat)
+            if value
+            for match in (semantic_category_match(category, value),)
+            if match["matched"]
+        ),
+        None,
+    )
+    if taxonomy_match is not None:
+        return _role_matches_object(role, obj)
     if _matches_category_or_instance_suffix(category, semantic_name):
         return _role_matches_object(role, obj)
     if _matches_category_or_instance_suffix(

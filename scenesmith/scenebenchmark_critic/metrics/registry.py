@@ -56,6 +56,9 @@ from scenesmith.scenebenchmark_critic.metrics.interaction_clearance.builder impo
 from scenesmith.scenebenchmark_critic.metrics.interaction_clearance.evaluator import (
     evaluate_clearance,
 )
+from scenesmith.scenebenchmark_critic.metrics.physics_collision.evaluator import (
+    evaluate_physics_collision_evidence,
+)
 from scenesmith.scenebenchmark_critic.metrics.spatial_accessibility.builder import (
     build_spatial_accessibility_checks,
 )
@@ -118,6 +121,11 @@ METRIC_REGISTRY: dict[str, MetricPlugin] = {
         display_label_zh="交互净空",
         check_builder=build_interaction_clearance_checks,
         rule_evaluator=_interaction_evaluator,
+    ),
+    "physics_collision": MetricPlugin(
+        name="physics_collision",
+        display_label_zh="物理碰撞",
+        extension_evaluators=(evaluate_physics_collision_evidence,),
     ),
     "visual_clearance": MetricPlugin(
         name="visual_clearance",

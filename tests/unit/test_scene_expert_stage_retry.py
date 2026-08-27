@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import pytest
 
 from scenesmith.experiments import indoor_scene_generation as scene_generation
+from scenesmith.agent_utils import base_stateful_agent
 from scenesmith.agent_utils.base_stateful_agent import BaseStatefulAgent
 from scenesmith.agent_utils.room import AgentType
 from scenesmith.scene_expert.harness import Harness, RepairDecision
@@ -849,3 +850,36 @@ def test_design_change_counts_only_committed_scene_mutation(
 
     assert "designer completed" in result
     assert agent._planner_successful_designer_mutations == expected_mutations
+
+
+def test_planner_terminal_child_failure_skips_no_mutation_recovery(monkeypatch) -> None:
+    agent = _ReviewPlannerAgent()
+    agent._planner_successful_designer_mutations = 0
+    agent._planner_terminal_failure = {
+        "operation": "request_initial_design",
+        "child_agent": "designer",
+        "error_type": "APITimeoutError",
+        "error": "request timed out",
+        "recovered": False,
+    }
+    agent.planner = SimpleNamespace(instructions="planner")
+    agent.planner_session = SimpleNamespace(session_id="planner-test")
+    agent._reasoning_persistence_context_for_session = lambda _: nullcontext()
+    agent._create_run_config = lambda: None
+    agent._record_module_timing = lambda *args, **kwargs: None
+    agent._record_llm_call_debug = lambda **kwargs: None
+    run = AsyncMock(return_value=SimpleNamespace(final_output="stopped"))
+    monkeypatch.setattr(base_stateful_agent.Runner, "run", run)
+
+    with pytest.raises(
+        RuntimeError,
+        match="designer delegation request_initial_design failed with "
+        "APITimeoutError: request timed out",
+    ):
+        asyncio.run(
+            agent._run_planner_workflow(
+                runner_input="start", max_turns=2, require_initial_design=True
+            )
+        )
+
+    assert run.await_count == 1

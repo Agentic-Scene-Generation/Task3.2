@@ -313,6 +313,7 @@ class BaseStatefulAgent(ABC):
             }
             if getattr(self, "_planner_terminal_failure", None) is None:
                 self._planner_terminal_failure = failure_detail
+                self._persist_runtime_failure_checkpoint(failure_detail)
             self._record_planner_orchestration(
                 call_id=call_id,
                 phase="resume",
@@ -1997,6 +1998,13 @@ class BaseStatefulAgent(ABC):
             require_initial_design
             and getattr(self, "_planner_successful_designer_mutations", 0) == 0
         ):
+            terminal_failure = getattr(self, "_planner_terminal_failure", None)
+            if isinstance(terminal_failure, dict) and not terminal_failure.get(
+                "recovered", False
+            ):
+                raise RuntimeError(
+                    "Planner stopped after " f"{self._planner_terminal_failure_text()}"
+                )
             recovery_input = (
                 "MANDATORY WORKFLOW RECOVERY: your previous turn returned without "
                 "calling a workflow tool, so no design work has been completed. "
@@ -2507,6 +2515,46 @@ class BaseStatefulAgent(ABC):
         """Count only designer calls whose final committed scene state changed."""
         if self._planner_scene_hash() != before_hash:
             self._planner_successful_designer_mutations += 1
+
+    def _persist_runtime_failure_checkpoint(self, failure: dict[str, Any]) -> None:
+        """Persist only a previously mutated scene for bounded runtime salvage.
+
+        A child failure before any committed designer mutation has no usable
+        stage output and must continue through the normal failure path.  The
+        snapshot is additive evidence; policy selection happens at the stage
+        orchestration boundary where strict mode remains authoritative.
+        """
+        if getattr(self, "_planner_successful_designer_mutations", 0) <= 0:
+            return
+        logger = getattr(self, "logger", None)
+        if logger is None or not hasattr(logger, "log_scene"):
+            return
+        scene_hash = self._planner_scene_hash()
+        checkpoint_name = f"runtime_failure_{self.agent_type.value}"
+        try:
+            checkpoint_dir = logger.log_scene(self.scene, name=checkpoint_name)
+            state_path = Path(checkpoint_dir) / "scene_state.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            objects = state.get("objects") if isinstance(state, dict) else None
+            valid = isinstance(objects, (dict, list)) and bool(objects)
+        except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            failure["checkpoint"] = {
+                "validation": "error",
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+            return
+        checkpoint = {
+            "path": str(state_path),
+            "scene_hash": scene_hash,
+            "validation": "passed" if valid else "failed",
+            "persisted": True,
+        }
+        failure["checkpoint"] = checkpoint
+        metadata = getattr(self.scene, "metadata", None)
+        if not isinstance(metadata, dict):
+            metadata = {}
+            self.scene.metadata = metadata
+        metadata["scenesmith_runtime_failure"] = dict(failure)
 
     def _stop_planner_after_failure(self, reason: str) -> str:
         """Convert a nested agent failure into a deterministic planner stop."""

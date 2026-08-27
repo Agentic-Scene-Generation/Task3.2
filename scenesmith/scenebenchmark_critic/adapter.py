@@ -365,6 +365,7 @@ def room_scene_to_case_pack(
         "task_instruction": scene.text_description,
         "room_type": scene.room_type,
         "scene_geometry": scene_geometry,
+        "physics_evidence": _physics_evidence_for_scene(scene),
         "checks": [],
     }
     # Preserve the original task separately from the mutable stage prompt.
@@ -373,6 +374,17 @@ def room_scene_to_case_pack(
     attach_intent_contract_to_case_pack(scene, case_pack)
     case_pack["checks"] = build_all_checks(case_pack, metrics=metrics)
     return case_pack
+
+
+def _physics_evidence_for_scene(scene: RoomScene) -> dict[str, Any] | None:
+    """Read only the structured physics artifact, never a human log string."""
+    metadata = getattr(scene, "metadata", None)
+    if isinstance(metadata, dict):
+        evidence = metadata.get("scenebenchmark_physics_evidence")
+        if isinstance(evidence, dict):
+            return dict(evidence)
+    evidence = getattr(scene, "scenebenchmark_physics_evidence", None)
+    return dict(evidence) if isinstance(evidence, dict) else None
 
 
 def house_scene_to_case_pack(
