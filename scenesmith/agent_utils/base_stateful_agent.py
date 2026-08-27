@@ -2508,8 +2508,16 @@ class BaseStatefulAgent(ABC):
         self._planner_review_existing_workflow_calls = 0
 
     def _planner_scene_hash(self) -> str:
-        """Return the committed scene hash used to audit designer mutations."""
-        return str(self.scene.content_hash())
+        """Return the committed state hash used to audit designer mutations."""
+        for attribute in ("scene", "layout"):
+            state = getattr(self, attribute, None)
+            content_hash = getattr(state, "content_hash", None)
+            if callable(content_hash):
+                return str(content_hash())
+        raise RuntimeError(
+            f"{type(self).__name__} has no hashable scene or layout state for "
+            "planner mutation accounting"
+        )
 
     def _record_successful_designer_mutation(self, before_hash: str) -> None:
         """Count only designer calls whose final committed scene state changed."""

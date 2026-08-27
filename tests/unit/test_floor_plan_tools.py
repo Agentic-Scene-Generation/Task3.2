@@ -4,6 +4,8 @@ import json
 import random
 import unittest
 
+from types import SimpleNamespace
+
 from scenesmith.agent_utils.house import (
     HouseLayout,
     Opening,
@@ -16,6 +18,9 @@ from scenesmith.floor_plan_agents.reservation_validator import (
     adaptive_implicit_window_budget,
     opening_free_spans,
     validate_floor_plan_reservations,
+)
+from scenesmith.floor_plan_agents.stateful_floor_plan_agent import (
+    StatefulFloorPlanAgent,
 )
 from scenesmith.floor_plan_agents.tools.floor_plan_tools import FloorPlanTools
 from scenesmith.floor_plan_agents.tools.room_placement import get_shared_edge
@@ -30,6 +35,13 @@ class _CapturingFloorPlanAgent:
         self.cfg = cfg
         self.logger = logger
         self.render_gpu_id = render_gpu_id
+
+
+def test_floor_plan_mutation_accounting_hashes_layout_without_room_scene():
+    agent = object.__new__(StatefulFloorPlanAgent)
+    agent.layout = SimpleNamespace(content_hash=lambda: "floor-plan-hash")
+
+    assert agent._planner_scene_hash() == "floor-plan-hash"
 
 
 def test_floor_plan_agent_receives_experiment_materials_endpoint():
