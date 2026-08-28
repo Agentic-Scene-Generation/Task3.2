@@ -707,7 +707,7 @@ def selected_ids(
     ids = [
         str(obj["id"])
         for obj in object_rows
-        if _selector_matches_object(category, role, obj)
+        if _selector_matches_exact_category(category, role, obj)
         and _selector_context_matches(selector, obj)
     ]
     if not ids:
@@ -858,7 +858,7 @@ def selector_match_count(
     context_rows = [
         obj for obj in object_rows if _selector_context_matches(selector, obj)
     ]
-    matcher = _selector_matches_object
+    matcher = _selector_matches_exact_category
     if not any(matcher(category, role, obj) for obj in context_rows):
         matcher = _selector_matches_generic_fallback
     return sum(
@@ -955,6 +955,45 @@ def bound_ids(
     ):
         return []
     return ids
+
+
+_FINITE_RELATION_COHORTS = frozenset({"behind", "in_front_of", "near", "next_to"})
+
+
+def relation_candidate_ids(
+    constraint: dict[str, Any],
+    objects: Iterable[dict[str, Any]],
+    *,
+    endpoint: str = "subjects",
+) -> list[str]:
+    """Resolve finite relation candidates without weakening ordinary binding.
+
+    A broad selector can describe a bounded relation cohort even when
+    generated assets expose specialized child categories.  Relation
+    evaluators need to inspect those candidates to count witnesses; unrelated
+    selectors and all non-cohort relations retain the strict ``bound_ids``
+    cardinality gate.
+    """
+    selector = constraint.get(endpoint) or {}
+    strict_ids = bound_ids(selector, objects)
+    if strict_ids:
+        return strict_ids
+    relation = str(constraint.get("relation") or "")
+    if endpoint != "subjects" or relation not in _FINITE_RELATION_COHORTS:
+        return strict_ids
+    quantifier = str(selector.get("quantifier") or "all").strip().lower()
+    if quantifier not in {"all", "exactly"}:
+        return strict_ids
+    try:
+        requested_count = int(selector.get("count"))
+    except (TypeError, ValueError):
+        return strict_ids
+    if requested_count <= 0:
+        return strict_ids
+    candidates = selected_ids(selector, objects)
+    if len(candidates) <= requested_count:
+        return strict_ids
+    return candidates
 
 
 def selector_for_phrase(
@@ -1157,7 +1196,7 @@ def augment_contract_checks(case_pack: dict[str, Any]) -> bool:
         relation_type = _fd_relation_for_constraint(constraint)
         if relation_type is None:
             continue
-        subject_ids = bound_ids(constraint.get("subjects"), objects)
+        subject_ids = relation_candidate_ids(constraint, objects)
         target_ids = bound_ids(constraint.get("targets"), objects)
         if relation_type == "back_against_wall":
             # Direction words such as "back" and "side" are room-relative,
@@ -1332,6 +1371,18 @@ def apply_contract_execution_states(
             str(row.get("label") or "") == "pass" for row in rows
         ):
             status[constraint_id] = "pending"
+        elif (finite_witness_ids := _finite_subject_witness_ids(constraint, rows))[1]:
+            # A bounded relation may expose extra taxonomy-parent candidates
+            # (for example two accent tables plus one side table).  The
+            # relation is satisfied only by exactly the declared number of
+            # passing witnesses; extra passing candidates are not silently
+            # discarded.
+            status[constraint_id] = "passed" if finite_witness_ids[0] else "failed"
+        elif _minimum_subject_witness_ids(constraint, rows):
+            # ``at_least``/``minimum`` subjects describe a lower bound.  Extra
+            # category matches are valid independent objects and must not turn
+            # one satisfying witness into a hard relation failure.
+            status[constraint_id] = "passed"
         elif any(str(row.get("contract_state") or "") == "pending" for row in rows):
             status[constraint_id] = "pending"
         elif any(str(row.get("label") or "") == "fail" for row in rows):
@@ -1395,6 +1446,28 @@ def apply_contract_execution_states(
             results.append(synthetic)
             rows = [synthetic]
             by_constraint[constraint_id] = rows
+        witness_ids = _minimum_subject_witness_ids(constraint, rows)
+        finite_witness_ids, finite_candidate_cohort = _finite_subject_witness_ids(
+            constraint, rows
+        )
+        if finite_candidate_cohort and not witness_ids:
+            witness_ids = finite_witness_ids
+        if state == "passed" and witness_ids:
+            for row in rows:
+                if str(row.get("primary_object") or "") not in witness_ids and str(
+                    row.get("label") or ""
+                ) in {"degraded", "fail"}:
+                    row["label"] = "unknown"
+                    row["scoring_tier"] = "ignored"
+                    row.setdefault("diagnostics", {})[
+                        "minimum_subject_candidate"
+                    ] = "non_witness"
+                    row["reason"] = (
+                        "Candidate is outside the declared relation subject "
+                        "cohort; another matching subject satisfies the relation."
+                    )
+                    diagnostics = row.setdefault("diagnostics", {})
+                    diagnostics["relation_subject_candidate"] = "non_witness"
         for row in rows:
             row["contract_state"] = state
             diagnostics = row.setdefault("diagnostics", {})
@@ -1416,8 +1489,23 @@ def apply_contract_execution_states(
         if state == "failed" and not any(
             str(row.get("label") or "") == "fail" for row in rows
         ):
-            rows[0]["label"] = "fail"
-            rows[0]["scoring_tier"] = "core"
+            # Preserve every passing witness when an exact finite cohort has
+            # too many matches.  The cardinality conflict belongs to the
+            # contract execution state; changing a real pass into a synthetic
+            # fail would hide which candidates actually satisfied geometry.
+            finite_all_pass = bool(
+                finite_candidate_cohort
+                and rows
+                and all(str(row.get("label") or "") == "pass" for row in rows)
+            )
+            if finite_all_pass:
+                for row in rows:
+                    row.setdefault("diagnostics", {})[
+                        "finite_cohort_cardinality_conflict"
+                    ] = True
+            else:
+                rows[0]["label"] = "fail"
+                rows[0]["scoring_tier"] = "core"
         execution.append(
             {
                 "constraint_id": constraint_id,
@@ -1453,6 +1541,72 @@ def apply_contract_execution_states(
             sum(row["state"] == "passed" for row in execution) / len(execution), 6
         )
     return results
+
+
+def _minimum_subject_witness_ids(
+    constraint: dict[str, Any], rows: Iterable[dict[str, Any]]
+) -> set[str]:
+    """Return satisfying subjects when a relation declares a subject lower bound."""
+    subjects = constraint.get("subjects") or {}
+    quantifier = str(subjects.get("quantifier") or "").strip().lower()
+    if quantifier not in {"at_least", "minimum"}:
+        return set()
+    try:
+        requested = int(subjects.get("count") or 1)
+    except (TypeError, ValueError):
+        requested = 1
+    required = max(1, requested)
+    witness_ids: list[str] = []
+    for row in rows:
+        if str(row.get("label") or "") != "pass":
+            continue
+        object_id = str(row.get("primary_object") or "")
+        if object_id and object_id not in witness_ids:
+            witness_ids.append(object_id)
+    return set(witness_ids[:required]) if len(witness_ids) >= required else set()
+
+
+def _finite_subject_witness_ids(
+    constraint: dict[str, Any], rows: Iterable[dict[str, Any]]
+) -> tuple[set[str], bool]:
+    """Count exact witnesses for a finite relation subject cohort.
+
+    ``selected_ids`` can contain more specialized parent candidates than the
+    prompt's bounded ``all``/``exactly`` relation names.  Return a witness set
+    only when the candidate cohort is over-complete and exactly the declared
+    number of rows pass.  The second value reports that this special cohort
+    policy was applicable, including insufficient or excessive pass counts.
+    """
+    relation = str(constraint.get("relation") or "")
+    if relation not in _FINITE_RELATION_COHORTS:
+        return set(), False
+    subjects = constraint.get("subjects") or {}
+    quantifier = str(subjects.get("quantifier") or "all").strip().lower()
+    if quantifier not in {"all", "exactly"}:
+        return set(), False
+    try:
+        requested_count = int(subjects.get("count"))
+    except (TypeError, ValueError):
+        return set(), False
+    if requested_count <= 0:
+        return set(), False
+    rows = list(rows)
+    candidate_ids = {
+        str(row.get("primary_object") or "")
+        for row in rows
+        if str(row.get("primary_object") or "")
+    }
+    if len(candidate_ids) <= requested_count:
+        return set(), False
+    pass_ids = {
+        str(row.get("primary_object") or "")
+        for row in rows
+        if str(row.get("label") or "") == "pass"
+        and str(row.get("primary_object") or "")
+    }
+    if len(pass_ids) == requested_count:
+        return pass_ids, True
+    return set(), True
 
 
 def _dependency_selectors_overlap(
@@ -3784,9 +3938,10 @@ def _phrase_mentions_plural(text: str, category: str) -> bool:
 def _role_matches_object(role: str, obj: dict[str, Any]) -> bool:
     if not role:
         return True
+    normalized_role = _canonical_role_text(role)
     metadata = obj.get("metadata") if isinstance(obj.get("metadata"), dict) else {}
     identity = " ".join(
-        str(value or "").lower().replace("_", " ")
+        _canonical_role_text(value)
         for value in (
             metadata.get("semantic_name"),
             obj.get("id"),
@@ -3794,7 +3949,7 @@ def _role_matches_object(role: str, obj: dict[str, Any]) -> bool:
             obj.get("description"),
         )
     )
-    if role in {
+    if normalized_role in {
         "back",
         "main",
         "side",
@@ -3809,7 +3964,15 @@ def _role_matches_object(role: str, obj: dict[str, Any]) -> bool:
         return (
             str(obj.get("category_norm") or obj.get("category") or "").lower() == "wall"
         )
-    return role in identity
+    return (
+        re.search(rf"(?<![a-z0-9]){re.escape(normalized_role)}(?![a-z0-9])", identity)
+        is not None
+    )
+
+
+def _canonical_role_text(value: Any) -> str:
+    """Normalize role separators consistently for selectors and object identity."""
+    return re.sub(r"[^a-z0-9]+", " ", str(value or "").strip().lower()).strip()
 
 
 _GENERIC_SELECTOR_PARENTS = {
@@ -3903,6 +4066,86 @@ def _selector_matches_generic_fallback(
     return _role_matches_object(role, obj)
 
 
+def _selector_matches_exact_category(
+    category: str, role: str, obj: dict[str, Any]
+) -> bool:
+    """Match a selector's declared category without taxonomy parents.
+
+    Generic category selectors such as ``table`` may have specialized assets
+    such as ``side_table`` in the same room. Keep those taxonomy-parent
+    matches out of an exact cohort whenever an object advertises the
+    requested category directly; parent fallback remains available through
+    :func:`_selector_matches_generic_fallback` when no exact asset exists.
+    """
+    expected = _normalize_selector_category(category)
+    if expected == "television":
+        metadata = obj.get("metadata") if isinstance(obj.get("metadata"), dict) else {}
+        hints = (
+            obj.get("functional_hints")
+            if isinstance(obj.get("functional_hints"), dict)
+            else {}
+        )
+        structured_categories = {
+            _normalize_selector_category(value)
+            for value in (
+                obj.get("category_norm"),
+                obj.get("category"),
+                obj.get("asset_category"),
+                metadata.get("semantic_name"),
+            )
+            if value
+        }
+        explicit_tv_identity = any(
+            value in {"television", "tv"}
+            or value.startswith("television_")
+            or value.startswith("tv_")
+            for value in structured_categories
+        )
+        has_media_capability = bool(
+            hints.get("is_media_target")
+            or "media"
+            in {
+                str(value or "").strip().lower().replace("-", "_")
+                for key in (
+                    "functional_categories",
+                    "candidate_affordances",
+                    "affordances",
+                )
+                for value in (hints.get(key) or [])
+            }
+        )
+        if "display" in structured_categories and not (
+            explicit_tv_identity or has_media_capability
+        ):
+            return False
+    if not _selector_matches_object(expected, role, obj):
+        return False
+    metadata = obj.get("metadata") if isinstance(obj.get("metadata"), dict) else {}
+    observed_values = (
+        obj.get("category_norm"),
+        obj.get("category"),
+        obj.get("asset_category"),
+        metadata.get("semantic_name"),
+    )
+    if any(
+        _matches_category_or_instance_suffix(
+            expected, _normalize_selector_category(value)
+        )
+        for value in observed_values
+        if value
+    ):
+        return True
+    # A specialized category that is recognized only through the broad
+    # taxonomy (``side_table`` -> ``table``) is a fallback candidate, not an
+    # exact table.  Other semantic family matches such as ``floor_speaker``
+    # remain valid exact family assets when no declared parent edge exists.
+    return not any(
+        _generic_selector_parent(_normalize_selector_category(value)) == expected
+        for value in observed_values
+        if value
+    )
+
+
 def _selector_matches_object(category: str, role: str, obj: dict[str, Any]) -> bool:
     category = _normalize_selector_category(category)
     normalized_category = category.replace("_", " ")
@@ -3919,6 +4162,40 @@ def _selector_matches_object(category: str, role: str, obj: dict[str, Any]) -> b
     base_category = _normalize_selector_category(
         obj.get("category_norm") or obj.get("category")
     )
+    if category == "television":
+        # Adapters can retain a broad ``display`` category while preserving
+        # the authoritative asset identity in ``semantic_name``.  A display
+        # compound such as ``display_shelf`` is furniture, not a TV; do not
+        # let the media compatibility fallback below erase that identity.
+        structured_categories = {
+            value for value in (base_category, semantic_name, object_cat) if value
+        }
+        non_media_display_compound = any(
+            value.startswith("display_")
+            and value not in {"display_television", "display_monitor", "display_screen"}
+            for value in structured_categories
+        )
+        has_explicit_media_capability = bool(
+            hints.get("is_media_target")
+            or "media"
+            in {
+                str(value or "").strip().lower().replace("-", "_")
+                for key in (
+                    "functional_categories",
+                    "candidate_affordances",
+                    "affordances",
+                )
+                for value in (hints.get(key) or [])
+            }
+        )
+        if non_media_display_compound:
+            return False
+        if (
+            base_category == "display"
+            and semantic_name in {"", "display"}
+            and not has_explicit_media_capability
+        ):
+            return False
     exact_adapter_category = _matches_category_or_instance_suffix(
         category, base_category
     )

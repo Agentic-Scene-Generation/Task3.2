@@ -30,6 +30,8 @@ _CATEGORY_ALIASES = {
     "computer_display": "monitor",
     "computer_monitor": "monitor",
     "display_monitor": "monitor",
+    "display_shelves": "display_shelf",
+    "display_shelving": "display_shelf",
     "water_cooler": "water_dispenser",
     "drinking_water_dispenser": "water_dispenser",
     "storage_cupboard": "storage_cabinet",
@@ -138,6 +140,10 @@ OBJECT_CATEGORY_PHRASES: tuple[tuple[str, tuple[str, ...]], ...] = (
         ("display cabinet", "display cupboard", "display case"),
     ),
     (
+        "display_shelf",
+        ("display shelf", "display shelves", "display shelving"),
+    ),
+    (
         "water_dispenser",
         ("water dispenser", "water cooler", "drinking water dispenser"),
     ),
@@ -154,7 +160,13 @@ OBJECT_CATEGORY_PHRASES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("television", ("television", "tv")),
     (
         "monitor",
-        ("computer monitor", "computer display", "monitor", "display", "screen"),
+        (
+            "computer monitor",
+            "computer display",
+            "display monitor",
+            "monitor",
+            "screen",
+        ),
     ),
     ("brochure_holder", ("brochure holder", "leaflet holder", "brochure stand")),
     ("printer", ("printer",)),

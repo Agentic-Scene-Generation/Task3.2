@@ -21,6 +21,7 @@ from scenesmith.scenebenchmark_critic.intent_contract import (
     _normalize_selector_category,
     bound_ids,
     contract_constraints,
+    relation_candidate_ids,
     selected_ids,
     semantic_selector_matches,
     selector_match_count,
@@ -1302,11 +1303,14 @@ def _evaluate_axial_relation(
     relation also denotes the same centerline, preventing a disconnected
     lateral placement.
     """
-    subject_ids = bound_ids(constraint.get("subjects"), objects)
+    subject_ids = relation_candidate_ids(constraint, objects)
     target_ids = bound_ids(constraint.get("targets"), objects)
     target_is_existential = str(
         (constraint.get("targets") or {}).get("quantifier") or ""
     ) in {"at_least", "minimum"}
+    collective_target_group = _complete_collective_axial_target_group(
+        constraint, subject_ids, target_ids
+    )
     paired_targets: dict[str, str] = {}
     if len(target_ids) > 1 and not target_is_existential:
         paired_targets = _hard_paired_axial_targets(
@@ -1326,6 +1330,7 @@ def _evaluate_axial_relation(
         or (
             len(target_ids) != 1
             and not target_is_existential
+            and not collective_target_group
             and len(paired_targets) != len(subject_ids)
         )
     ):
@@ -1339,23 +1344,41 @@ def _evaluate_axial_relation(
         subject_center = bbox_center_xy(subject)
         if subject is None or subject_center is None:
             continue
-        candidate_target_ids = (
-            [paired_targets[subject_id]] if subject_id in paired_targets else target_ids
-        )
-        candidates = [
-            candidate
-            for target_id in candidate_target_ids
-            if (
-                candidate := _axial_candidate(
+        if collective_target_group:
+            # ``all`` over a counted target cohort is a group relation.  Do
+            # not choose the best member (which would silently turn it into
+            # an existential relation); the group evaluator checks every
+            # target's forward clearance and uses the cohort centroid for
+            # lateral alignment.
+            candidates = [
+                _collective_axial_candidate(
                     subject,
                     subject_center,
-                    by_id.get(target_id),
-                    target_id,
+                    [by_id.get(target_id) for target_id in target_ids],
+                    target_ids,
                     behind=behind,
                 )
+            ]
+        else:
+            candidate_target_ids = (
+                [paired_targets[subject_id]]
+                if subject_id in paired_targets
+                else target_ids
             )
-            is not None
-        ]
+            candidates = [
+                candidate
+                for target_id in candidate_target_ids
+                if (
+                    candidate := _axial_candidate(
+                        subject,
+                        subject_center,
+                        by_id.get(target_id),
+                        target_id,
+                        behind=behind,
+                    )
+                )
+                is not None
+            ]
         if not candidates:
             continue
         candidate = min(
@@ -1378,18 +1401,24 @@ def _evaluate_axial_relation(
         lateral_tolerance = candidate["lateral_tolerance"]
         label = candidate["label"]
 
-        repair_object_id, repair_center = _front_alignment_repair_pose(
-            subject_id=subject_id,
-            subject_center=subject_center,
-            target_id=target_id,
-            target_center=target_center,
-            front=front,
-            side=side,
-            forward_distance=forward_distance,
-            lateral_signed=lateral_signed,
-            minimum_forward_distance=min_forward,
-            centered_anchor_ids=centered_anchor_ids,
-        )
+        if collective_target_group:
+            # A cohort has no physical object that can safely receive a
+            # single-object repair pose.  Leave repair to the stage designer
+            # when the group-level relation is not satisfied.
+            repair_object_id, repair_center = None, None
+        else:
+            repair_object_id, repair_center = _front_alignment_repair_pose(
+                subject_id=subject_id,
+                subject_center=subject_center,
+                target_id=target_id,
+                target_center=target_center,
+                front=front,
+                side=side,
+                forward_distance=forward_distance,
+                lateral_signed=lateral_signed,
+                minimum_forward_distance=min_forward,
+                centered_anchor_ids=centered_anchor_ids,
+            )
         diagnostics: dict[str, Any] = {
             "subject_id": subject_id,
             "target_id": target_id,
@@ -1406,7 +1435,24 @@ def _evaluate_axial_relation(
             diagnostics["paired_target_id"] = target_id
         elif len(target_ids) > 1:
             diagnostics["candidate_target_ids"] = list(target_ids)
-            diagnostics["existential_target_selection"] = True
+            diagnostics["existential_target_selection"] = target_is_existential
+            diagnostics["collective_target_selection"] = collective_target_group
+            if collective_target_group:
+                diagnostics["collective_target_count"] = len(target_ids)
+                diagnostics["collective_axis_error_deg"] = round(
+                    float(candidate.get("axis_error") or 0.0), 6
+                )
+                diagnostics["collective_forward_distances_m"] = [
+                    round(float(value), 6)
+                    for value in candidate.get("forward_distances", [])
+                ]
+                diagnostics["collective_minimum_forwards_m"] = [
+                    round(float(value), 6)
+                    for value in candidate.get("minimum_forwards", [])
+                ]
+                diagnostics["collective_anchor_center_xy_m"] = [
+                    round(float(value), 6) for value in candidate["group_center"]
+                ]
         if repair_object_id is not None and repair_center is not None:
             diagnostics["repair_object_id"] = repair_object_id
             diagnostics["repair_target_center_xy_m"] = [
@@ -1419,7 +1465,7 @@ def _evaluate_axial_relation(
                 suffix=f"{subject_id}__{target_id}",
                 label=label,
                 primary=subject_id,
-                related=[target_id],
+                related=list(target_ids) if collective_target_group else [target_id],
                 relation_type=(
                     "rear_axis_alignment" if behind else "front_axis_alignment"
                 ),
@@ -1435,6 +1481,159 @@ def _evaluate_axial_relation(
             )
         )
     return results
+
+
+def _complete_collective_axial_target_group(
+    constraint: dict[str, Any],
+    subject_ids: list[str],
+    target_ids: list[str],
+) -> bool:
+    """Allow a singleton subject to evaluate an explicitly complete target group.
+
+    A phrase such as "three shelves with a sofa in front" names one subject
+    relative to a complete cohort.  It is safe to choose the best target axis
+    only when the contract supplies the cohort cardinality and every member
+    binds; an unbounded repeated selector remains ambiguous.
+    """
+    if str(constraint.get("relation") or "") not in {"in_front_of", "behind"}:
+        return False
+    if len(subject_ids) != 1 or len(target_ids) <= 1:
+        return False
+    targets = constraint.get("targets") or {}
+    if str(targets.get("quantifier") or "all").strip().lower() != "all":
+        return False
+    try:
+        target_count = int(targets.get("count"))
+    except (TypeError, ValueError):
+        return False
+    return target_count == len(target_ids) and target_count > 1
+
+
+def _collective_axial_candidate(
+    subject: dict[str, Any],
+    subject_center: tuple[float, float],
+    targets: list[dict[str, Any] | None],
+    target_ids: list[str],
+    *,
+    behind: bool,
+) -> dict[str, Any] | None:
+    """Evaluate an explicitly complete axial target cohort as one relation.
+
+    The target objects must agree on a usable front axis.  Every member then
+    contributes to the required forward clearance, while the cohort centroid
+    supplies the stable lateral anchor.  This preserves universal semantics
+    for ``quantifier=all`` without inventing a pair for an unpaired group.
+    """
+    if len(targets) != len(target_ids) or not targets:
+        return None
+    if any(target is None or bbox_center_xy(target) is None for target in targets):
+        return None
+
+    fronts: list[tuple[float, float]] = []
+    centers: list[tuple[float, float]] = []
+    for target in targets:
+        assert target is not None
+        center = bbox_center_xy(target)
+        raw_front = front_vector(target)
+        norm = math.hypot(*raw_front)
+        if center is None or norm <= 1e-6:
+            return None
+        front = (raw_front[0] / norm, raw_front[1] / norm)
+        if behind:
+            front = (-front[0], -front[1])
+        fronts.append(front)
+        centers.append(center)
+
+    reference_front = (
+        sum(front[0] for front in fronts),
+        sum(front[1] for front in fronts),
+    )
+    reference_norm = math.hypot(*reference_front)
+    if reference_norm <= 1e-6:
+        return None
+    reference_front = (
+        reference_front[0] / reference_norm,
+        reference_front[1] / reference_norm,
+    )
+    # A single group axis is only meaningful when every member faces within
+    # the same 30-degree half-plane.  Divergent orientations remain a strict
+    # failure instead of selecting whichever member happens to score best.
+    axis_error = max(_vector_angle_deg(front, reference_front) for front in fronts)
+    side = (-reference_front[1], reference_front[0])
+    group_center = (
+        sum(center[0] for center in centers) / len(centers),
+        sum(center[1] for center in centers) / len(centers),
+    )
+    subject_half_front = _projected_half_extent(subject, reference_front)
+    subject_half_side = _projected_half_extent(subject, side)
+    forward_distances: list[float] = []
+    minimum_forwards: list[float] = []
+    lateral_spread = 0.0
+    for target, target_center in zip(targets, centers):
+        assert target is not None
+        delta = (
+            subject_center[0] - target_center[0],
+            subject_center[1] - target_center[1],
+        )
+        forward_distances.append(
+            delta[0] * reference_front[0] + delta[1] * reference_front[1]
+        )
+        minimum_forwards.append(
+            max(
+                0.15,
+                _projected_half_extent(target, reference_front)
+                + subject_half_front
+                + 0.03,
+            )
+        )
+        lateral_spread = max(
+            lateral_spread,
+            abs(
+                (target_center[0] - group_center[0]) * side[0]
+                + (target_center[1] - group_center[1]) * side[1]
+            )
+            + _projected_half_extent(target, side),
+        )
+    lateral_signed = (subject_center[0] - group_center[0]) * side[0] + (
+        subject_center[1] - group_center[1]
+    ) * side[1]
+    lateral_tolerance = max(
+        0.18,
+        min(0.40, 0.15 * (subject_half_side + lateral_spread)),
+    )
+    forward_distance = min(forward_distances)
+    minimum_forward = max(minimum_forwards)
+    forward_pass = all(
+        distance + 1e-6 >= required
+        for distance, required in zip(forward_distances, minimum_forwards)
+    )
+    forward_nonnegative = all(distance >= 0.0 for distance in forward_distances)
+    if axis_error > 30.0:
+        label = "fail"
+    elif forward_pass and abs(lateral_signed) <= lateral_tolerance:
+        label = "pass"
+    elif forward_nonnegative and abs(lateral_signed) <= lateral_tolerance * 2.0:
+        label = "degraded"
+    else:
+        label = "fail"
+    return {
+        "target_id": f"cohort:{','.join(target_ids)}",
+        "target_center": group_center,
+        "front": reference_front,
+        "side": side,
+        "min_forward": minimum_forward,
+        "forward_distance": forward_distance,
+        "lateral_signed": lateral_signed,
+        "lateral_error": abs(lateral_signed),
+        "lateral_tolerance": lateral_tolerance,
+        "forward_error": max(0.0, minimum_forward - forward_distance),
+        "label": label,
+        "axis_error": axis_error,
+        "forward_distances": forward_distances,
+        "minimum_forwards": minimum_forwards,
+        "group_center": group_center,
+        "group_lateral_half_extent": lateral_spread,
+    }
 
 
 def _hard_paired_axial_targets(
@@ -1746,7 +1945,7 @@ def _binding_state_result(
         subject_ids = subject_matches
     else:
         subject_matches = selected_ids(subject_selector, objects)
-        subject_ids = bound_ids(subject_selector, objects)
+        subject_ids = relation_candidate_ids(constraint, objects)
         if not subject_matches and subject_ids:
             subject_matches = subject_ids
     virtual_targets = {"room", "ceiling"}
@@ -1843,6 +2042,9 @@ def _binding_state_result(
             )
         )
     )
+    collective_axial_target_group = _complete_collective_axial_target_group(
+        constraint, subject_ids, target_ids
+    )
     same_category_anchor_pair = (
         relation in {"between", "centered_between"}
         and str(target_selector.get("category") or "") == secondary_category
@@ -1857,6 +2059,7 @@ def _binding_state_result(
     ):
         ambiguous = ambiguous or (
             not same_category_anchor_pair
+            and not collective_axial_target_group
             and (len(target_ids) > 1 or len(secondary_ids) > 1)
         )
     if not missing and not ambiguous:
