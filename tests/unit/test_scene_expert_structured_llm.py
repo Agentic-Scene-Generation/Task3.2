@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from scenesmith.agent_utils.scoring import FloorPlanCritiqueWithScores
 from scenesmith.scene_expert.global_planner import (
     GlobalPlanner,
+    _apply_stage_policy,
     _format_task_spec,
     enforce_stage_brief_scope,
 )
@@ -16,6 +17,7 @@ from scenesmith.scene_expert.schemas import (
     FullVerifyReport,
     HarnessContext,
     MemoryPack,
+    OptionalAssetRecommendation,
     SceneTaskSpec,
     StageBrief,
     StageExecutionEvidence,
@@ -353,6 +355,80 @@ class SceneExpertStructuredLLMTest(unittest.TestCase):
         self.assertNotIn("place its bed", scoped.stage_objective)
         self.assertEqual([], scoped.failure_patterns_to_avoid)
         self.assertNotIn("bed is present", " ".join(scoped.checks_for_critic))
+
+    def test_empty_required_inventory_keeps_auto_stage_active(self):
+        context = HarnessContext(
+            stage="wall_mounted",
+            task_spec=SceneTaskSpec(room_type="living room", style="modern"),
+            memory_pack=MemoryPack(),
+            stage_policy="auto",
+        )
+
+        fallback = GlobalPlanner.__new__(GlobalPlanner)._fallback_brief(context)
+        injection = fallback.to_injection_text()
+
+        self.assertEqual("auto", fallback.stage_policy)
+        self.assertEqual([], fallback.required_objects)
+        self.assertIn("does NOT disable or skip the stage", injection)
+        self.assertIn("native designer judgment", injection)
+        self.assertNotIn("Preserve the existing scene during the empty", injection)
+
+    def test_required_only_removes_optional_proposals_without_skipping_stage(self):
+        context = HarnessContext(
+            stage="furniture",
+            task_spec=SceneTaskSpec(
+                room_type="office",
+                style="modern",
+                required_large_objects=["desk"],
+            ),
+            memory_pack=MemoryPack(),
+            stage_policy="required_only",
+        )
+        proposal = StageBrief(
+            stage="furniture",
+            stage_objective="Complete the office",
+            optional_asset_recommendations=[
+                OptionalAssetRecommendation(
+                    name="bookcase",
+                    rationale="Adds storage",
+                )
+            ],
+        )
+
+        resolved = _apply_stage_policy(proposal, context)
+
+        self.assertEqual(["desk"], resolved.required_objects)
+        self.assertEqual([], resolved.optional_asset_recommendations)
+        self.assertIn("still execute", resolved.to_injection_text())
+
+    def test_explicit_closed_inventory_overrides_auto_optional_proposals(self):
+        context = HarnessContext(
+            stage="furniture",
+            task_spec=SceneTaskSpec(
+                room_type="bedroom",
+                style="minimalist",
+                required_large_objects=["bed"],
+            ),
+            memory_pack=MemoryPack(),
+            stage_policy="auto",
+        )
+        proposal = StageBrief(
+            stage="furniture",
+            stage_objective="Complete the bedroom",
+            optional_asset_recommendations=[
+                OptionalAssetRecommendation(name="nightstand")
+            ],
+        )
+
+        resolved = _apply_stage_policy(
+            proposal,
+            context,
+            original_task="A room with a bed and no additional furniture.",
+        )
+
+        self.assertFalse(resolved.optional_assets_allowed)
+        self.assertEqual([], resolved.optional_asset_recommendations)
+        self.assertIn("closed-inventory user constraint", resolved.to_injection_text())
 
     def test_trace_exposes_fallback_and_stage_injection_evidence(self):
         with TemporaryDirectory() as tmp:

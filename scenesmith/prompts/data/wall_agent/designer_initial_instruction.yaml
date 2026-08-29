@@ -9,17 +9,24 @@ prompt: |
   {{ required_wall_objects }}
 
   REQUIRED-FIRST EXECUTION RULE:
-  - If the list above contains a REQUIRED item, this invocation is a focused
-    required-item pass. Generate, place, align, and verify ONLY those REQUIRED
-    wall objects, then return immediately. Do not create TODOs and do not generate
-    optional artwork, mirrors, shelves, clocks, or other decoration in this pass.
+  - If the list above contains a REQUIRED item, generate, place, align, and verify
+    every REQUIRED wall object before optional decoration. REQUIRED is a hard
+    minimum, not an exhaustive inventory. Do not return merely because the
+    required items are complete.
   - If the required placement intersects a window, call list_windows before any
     fallback placement. Resize the exact window first (prefer width 0.6m), then move
     it, and remove it only if necessary. Retry the required object at the support
     centerline and call align_wall_object_over_support. Never shift a required TV
     sideways merely to avoid the window.
-  - Only when there is no REQUIRED item should you perform the full decorative
-    workflow below.
+  - Under stage_policy=auto, continue with the full decorative workflow after the
+    required items are safe. Select optional objects from room type, style, usable
+    wall area, openings, and existing furniture; optional objects must not displace
+    or obstruct required objects.
+  - Under stage_policy=required_only, do not add optional objects, but still run
+    the stage, observe the walls, verify the required inventory, and return a
+    complete stage result.
+  - An empty REQUIRED list never means this stage is skipped. Under auto, perform
+    the full decorative workflow below using design judgment.
 
   Call observe_scene to see all walls with their coordinate grids and excluded regions,
   then design and place appropriate wall-mounted objects.

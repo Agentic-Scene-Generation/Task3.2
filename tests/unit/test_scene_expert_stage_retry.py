@@ -433,23 +433,24 @@ def test_failed_hook_stage_is_uncommitted_until_retry_verifies(tmp_path) -> None
     assert runner._repair_controller.record_failure_to_memory.call_count == 2
 
 
-def test_noop_stage_signal_is_scoped_to_current_stage() -> None:
+def test_legacy_noop_signal_never_skips_native_stage() -> None:
     runner = object.__new__(SceneExpertHookRunner)
     runner._current_stage = "wall_mounted"
     runner._current_planner_trace = {"status": "no_op"}
+    runner._stage_policies = {"wall_mounted": "auto"}
 
-    assert runner.should_skip_stage_agent("wall_mounted")
+    assert not runner.should_skip_stage_agent("wall_mounted")
     assert not runner.should_skip_stage_agent("ceiling_mounted")
 
     runner._current_planner_trace = {"status": "completed"}
     assert not runner.should_skip_stage_agent("wall_mounted")
 
 
-def test_pipeline_noop_gate_uses_hook_authority() -> None:
+def test_pipeline_noop_gate_is_non_skipping_compatibility_shim() -> None:
     hooks = Mock()
     hooks.should_skip_stage_agent.return_value = True
 
-    assert scene_generation._should_skip_noop_scene_expert_stage(
+    assert not scene_generation._should_skip_noop_scene_expert_stage(
         hooks, "ceiling_mounted"
     )
     hooks.should_skip_stage_agent.assert_called_once_with("ceiling_mounted")

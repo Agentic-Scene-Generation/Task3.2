@@ -3,6 +3,7 @@ import unittest
 from scenesmith.scene_expert.config_utils import (
     resolve_component_flags,
     resolve_scene_expert_config,
+    resolve_stage_policies,
 )
 
 
@@ -88,6 +89,28 @@ class SceneExpertConfigUtilsTest(unittest.TestCase):
         )
 
         self.assertFalse(any(resolve_component_flags(self.cfg).values()))
+
+    def test_stage_policy_defaults_to_auto_and_supports_per_stage_ablation(
+        self,
+    ) -> None:
+        self.cfg["scene_expert"]["stage_policy"] = {"default": "auto"}
+        self.cfg["experiment"]["scene_expert"]["stage_policy"] = {
+            "manipuland": "required_only"
+        }
+
+        policies = resolve_stage_policies(self.cfg)
+
+        self.assertEqual("auto", policies["furniture"])
+        self.assertEqual("auto", policies["wall_mounted"])
+        self.assertEqual("required_only", policies["manipuland"])
+
+    def test_stage_policy_rejects_skip_like_modes(self) -> None:
+        self.cfg["experiment"]["scene_expert"]["stage_policy"] = {
+            "wall_mounted": "disabled"
+        }
+
+        with self.assertRaisesRegex(ValueError, "must be one of"):
+            resolve_stage_policies(self.cfg)
 
 
 if __name__ == "__main__":

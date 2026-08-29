@@ -4,11 +4,11 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 from agents.exceptions import MaxTurnsExceeded
+from scenesmith.wall_agents import stateful_wall_agent
 from scenesmith.wall_agents.prompt_constraints import (
     build_required_wall_object_constraints,
     converge_cross_stage_media_inventory,
 )
-from scenesmith.wall_agents import stateful_wall_agent
 from scenesmith.wall_agents.stateful_wall_agent import StatefulWallAgent
 
 
@@ -68,7 +68,8 @@ Designer constraints:
     )
 
     assert "No explicit wall-object obligations" in constraints
-    assert "Do not create" in constraints
+    assert "not an empty-stage signal" in constraints
+    assert "appropriate optional wall objects" in constraints
     assert "REQUIRED media display" not in constraints
 
 
