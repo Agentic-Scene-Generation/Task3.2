@@ -304,6 +304,11 @@ def _admit_semantic_ir(
                 "semantic IR requirement has unexpected fields: "
                 + ", ".join(sorted(unexpected_fields))
             )
+        # Local JSON grammar implementations do not consistently enforce a
+        # per-item required list. Keep the wire contract deterministic even
+        # when the provider accepts an omitted nullable field.
+        if "target_ref" not in raw:
+            raise ValueError("semantic IR requirement omitted target_ref")
         requirement_id = str(raw.get("requirement_id") or "")
         grounding = str(raw.get("grounding") or "")
         kind = str(raw.get("kind") or "")
@@ -1825,7 +1830,9 @@ class IntentCompiler:
             "counts, roles, cohorts, or geometry fields. forbidden_inventory, "
             "unsupported, unresolved, and soft_scope are coverage-only rows: use "
             "reason/surface_mentions (and forbidden_category only for "
-            "forbidden_inventory), with no endpoint or relation fields."
+            "forbidden_inventory), with no endpoint or relation fields. Every "
+            "requirement must include target_ref: use null for inventory and all "
+            "coverage-only rows."
         )
         if validation_error:
             user += (
@@ -1840,7 +1847,13 @@ class IntentCompiler:
                     "\nThe previous response was truncated. Return a concise but "
                     "complete contract; do not repeat explanations or context."
                 )
-            if "omitted subject_ref" in validation_error:
+            if "semantic IR requirement omitted target_ref" in validation_error:
+                user += (
+                    "\nEvery SemanticIR requirement needs the target_ref field. Use "
+                    "null for inventory, forbidden_inventory, unsupported, unresolved, "
+                    "and soft_scope rows."
+                )
+            elif "omitted subject_ref" in validation_error:
                 user += (
                     "\nThe reported relation is missing subject_ref. Use the exact "
                     "entity_ref from the entity catalog for its subject; a "

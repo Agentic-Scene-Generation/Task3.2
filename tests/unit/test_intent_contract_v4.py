@@ -1541,6 +1541,45 @@ def test_singular_target_wording_is_normalized_to_existential_binding() -> None:
     )
 
 
+def test_semantic_ir_validation_does_not_reinterpret_evidence_quantifier() -> None:
+    contract = validate_intent_contract(
+        {
+            "schema_version": INTENT_CONTRACT_SCHEMA_VERSION,
+            "prompt": "a floor lamp beside one armchair",
+            "constraints": [
+                {
+                    "relation": "near",
+                    "subjects": {"category": "floor_lamp", "count": 1},
+                    "targets": {"category": "armchair", "count": 1},
+                    "source": "explicit_prompt",
+                    "evidence_span": "a floor lamp beside one armchair",
+                }
+            ],
+        },
+        validate_prompt_semantics=False,
+    )
+
+    assert contract["constraints"][0]["targets"]["quantifier"] == "all"
+
+
+def test_semantic_ir_validation_keeps_explicit_prompt_provenance_required() -> None:
+    with pytest.raises(ValidationError, match="explicit_prompt relations require"):
+        validate_intent_contract(
+            {
+                "schema_version": INTENT_CONTRACT_SCHEMA_VERSION,
+                "constraints": [
+                    {
+                        "relation": "near",
+                        "subjects": {"category": "floor_lamp", "count": 1},
+                        "targets": {"category": "armchair", "count": 1},
+                        "source": "explicit_prompt",
+                    }
+                ],
+            },
+            validate_prompt_semantics=False,
+        )
+
+
 def test_collective_subject_does_not_fail_contract_binding() -> None:
     contract = validate_intent_contract(
         {
@@ -2607,7 +2646,9 @@ def _semantic_ir(requirements: list[dict]) -> str:
     return json.dumps(
         {
             "schema_version": INTENT_COMPILER_SEMANTIC_IR_VERSION,
-            "requirements": requirements,
+            "requirements": [
+                {"target_ref": None, **requirement} for requirement in requirements
+            ],
         }
     )
 
@@ -3870,6 +3911,36 @@ def test_intent_compiler_wire_schema_requires_nullable_target_ref_field() -> Non
             {"type": "null"},
         ]
     }
+
+
+def test_intent_compiler_retries_when_provider_omits_required_target_ref() -> None:
+    missing_target_ref = json.dumps(
+        {
+            "schema_version": INTENT_COMPILER_SEMANTIC_IR_VERSION,
+            "requirements": [
+                {
+                    "requirement_id": "prompt_scope",
+                    "kind": "soft_scope",
+                    "grounding": "prompt:0",
+                    "reason": "non-geometric scope",
+                }
+            ],
+        }
+    )
+    compiler = _compiler_with_responses(
+        [_response(missing_target_ref), _response(_semantic_scope("prompt:0"))]
+    )
+
+    result = compiler.compile("A room with a desk.")
+
+    assert result["retry_count"] == 1
+    assert (
+        "semantic IR requirement omitted target_ref"
+        in compiler.last_trace["attempts"][0]["error"]
+    )
+    assert "Every SemanticIR requirement needs the target_ref field" in (
+        compiler._test_calls[1]["messages"][1]["content"]
+    )
 
 
 def test_intent_compiler_expands_grounding_ids_deterministically() -> None:

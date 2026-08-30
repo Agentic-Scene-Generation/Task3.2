@@ -67,6 +67,11 @@ def snap_to_oriented_wall(
     return movement, float(abs(signed_move))
 
 
+def _has_collision_geometry_source(obj: SceneObject) -> bool:
+    """Return whether an object can provide collision or visual fallback geometry."""
+    return bool(obj.sdf_path or obj.geometry_path)
+
+
 def snap_mesh_to_aabb(
     obj: SceneObject, target: SceneObject, cfg: DictConfig
 ) -> tuple[np.ndarray, float]:
@@ -428,8 +433,10 @@ def snap_with_iterative_collision_check(
     # Load SDF-authoritative collision geometry for obj.
     obj_collision_meshes = load_object_collision_geometry(obj)
 
-    # Load collision geometry for target.
-    if target.geometry_path and target.sdf_path:
+    # Load collision geometry for target. A generated furniture asset can have
+    # only an SDF: that still is authoritative collision geometry.
+    target_uses_mesh_geometry = _has_collision_geometry_source(target)
+    if target_uses_mesh_geometry:
         # Target has SDF-authoritative collision geometry.
         target_collision_meshes = load_object_collision_geometry(target)
     else:
@@ -450,7 +457,15 @@ def snap_with_iterative_collision_check(
 
     # Create collision manager for target (stays fixed).
     target_manager = trimesh.collision.CollisionManager()
-    target_matrix = rigid_transform_to_matrix(target.transform)
+    # Fallback AABB vertices are already expressed in world coordinates.
+    # Applying the target transform again shifts a translated wall/object a
+    # second time and makes the iterative collision guard disagree with its
+    # world-space bounds.
+    target_matrix = (
+        rigid_transform_to_matrix(target.transform)
+        if target_uses_mesh_geometry
+        else np.eye(4)
+    )
     for i, piece in enumerate(target_collision_meshes):
         target_manager.add_object(f"target_{i}", piece, transform=target_matrix)
 
@@ -884,7 +899,7 @@ def select_and_execute_snap_algorithm(
             local_axis = np.array([0.0, 1.0 if orientation == "toward" else -1.0, 0.0])
             axis_world = obj.transform.rotation() @ local_axis
 
-            if target.geometry_path and target.sdf_path:
+            if _has_collision_geometry_source(target):
                 # Target has mesh geometry: use iterative collision checking.
                 movement_vector, distance = snap_with_iterative_collision_check(
                     obj=obj, target=target, direction=axis_world, cfg=cfg
@@ -906,7 +921,9 @@ def select_and_execute_snap_algorithm(
                 )
         else:
             # Closest-point snapping.
-            if obj.geometry_path and target.geometry_path:
+            if _has_collision_geometry_source(obj) and _has_collision_geometry_source(
+                target
+            ):
                 # Use iterative mesh-to-mesh algorithm.
                 # Compute direction from the same collision geometry used below.
                 direction = compute_snap_direction_mesh_to_mesh(
@@ -917,7 +934,7 @@ def select_and_execute_snap_algorithm(
                     obj=obj, target=target, direction=direction, cfg=cfg
                 )
                 algorithm = "iterative-mesh-to-mesh"
-            elif obj.geometry_path:
+            elif _has_collision_geometry_source(obj):
                 # Use mesh-to-AABB algorithm.
                 movement_vector, distance = snap_mesh_to_aabb(obj, target, cfg)
                 algorithm = "mesh-to-AABB"
@@ -925,7 +942,7 @@ def select_and_execute_snap_algorithm(
                 # Object missing geometry.
                 return SnapToObjectResult(
                     success=False,
-                    message=f"{obj.name} missing geometry_path - cannot snap",
+                    message=f"{obj.name} missing collision/visual geometry - cannot snap",
                     object_id=object_id,
                     target_id=target_id,
                     error_type=FurnitureErrorType.INVALID_POSITION,

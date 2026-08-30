@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from copy import deepcopy
 from types import SimpleNamespace
@@ -508,6 +509,38 @@ def test_designer_gets_stage_only_json_and_critic_keeps_full_contract() -> None:
     assert case_pack["intent_contract"] == contract
 
 
+def test_case_pack_attachment_does_not_reparse_compiled_prompt_semantics() -> None:
+    prompt = "A sideboard against the wall behind the chairs."
+    contract = validate_intent_contract(
+        {
+            "schema_version": "scenesmith.intent_contract.v7",
+            "prompt": prompt,
+            "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+            "constraints": [
+                {
+                    "relation": "behind",
+                    "subjects": {"category": "sideboard", "count": 1},
+                    "targets": {"category": "dining_chair", "count": 1},
+                    "source": "explicit_prompt",
+                    "evidence_span": prompt,
+                }
+            ],
+        },
+        validate_prompt_semantics=False,
+    )
+    scene = SimpleNamespace(
+        text_description=prompt,
+        scene_expert_original_description=prompt,
+        scenebenchmark_intent_contract=contract,
+        metadata={},
+    )
+    case_pack: dict = {}
+
+    attached = attach_intent_contract_to_case_pack(scene, case_pack)
+
+    assert attached["constraints"][0]["relation"] == "behind"
+
+
 def test_global_planner_sees_relations_and_retries_strict_schema() -> None:
     invalid = json.dumps(
         {
@@ -569,13 +602,23 @@ def test_global_planner_sees_relations_and_retries_strict_schema() -> None:
     assert calls[0]["response_format"]["json_schema"]["strict"] is True
 
 
-def test_empty_stage_only_opens_for_hard_constraint() -> None:
+def test_empty_stage_runs_native_planner_without_hard_constraint() -> None:
     planner = object.__new__(GlobalPlanner)
     planner._model = "test"
     planner._max_tokens = 512
     planner._temperature = 0.0
     planner.last_trace = {}
-    client, calls = _client_with_responses([])
+    valid_empty_stage = json.dumps(
+        {
+            "stage": "wall_mounted",
+            "stage_objective": "Execute the native wall stage",
+            "recommended_skills": [],
+            "constraints_for_designer": [],
+            "checks_for_critic": [],
+            "failure_patterns_to_avoid": [],
+        }
+    )
+    client, calls = _client_with_responses([_response(valid_empty_stage)])
     planner._client = client
     empty_spec = _task_spec(required_wall_objects=[])
     context = HarnessContext(
@@ -585,9 +628,9 @@ def test_empty_stage_only_opens_for_hard_constraint() -> None:
         relation_context=StageRelationContext(stage="wall_mounted"),
     )
 
-    fallback = planner.generate_stage_brief(context)
-    assert "empty wall_mounted stage" in fallback.stage_objective
-    assert not calls
+    brief = planner.generate_stage_brief(context)
+    assert brief.stage == "wall_mounted"
+    assert len(calls) == 1
 
     valid = json.dumps(
         {

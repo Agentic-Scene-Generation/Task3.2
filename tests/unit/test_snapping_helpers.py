@@ -281,3 +281,86 @@ def test_mesh_to_mesh_direction_uses_collision_geometry_not_visual_mesh(
     )
 
     np.testing.assert_allclose(direction, [1.0, 0.0, 0.0], atol=1e-7)
+
+
+def test_iterative_snap_does_not_transform_world_aabb_target_twice(monkeypatch) -> None:
+    """A translated AABB fallback must stay in the same world frame as its mesh peer."""
+    source = _object("source", (-2.0, 0.0, 0.0))
+    wall = SceneObject(
+        object_id=UniqueID("wall"),
+        object_type=ObjectType.WALL,
+        name="wall",
+        description="wall",
+        transform=RigidTransform(p=[2.0, 0.0, 0.0]),
+        bbox_min=np.array([-0.5, -1.0, -1.0]),
+        bbox_max=np.array([0.5, 1.0, 1.0]),
+        immutable=True,
+    )
+    monkeypatch.setattr(
+        snapping_helpers,
+        "load_object_collision_geometry",
+        lambda _obj: [trimesh.creation.box(extents=(0.5, 0.5, 0.5))],
+    )
+    monkeypatch.setattr(
+        snapping_helpers.trimesh.collision,
+        "CollisionManager",
+        _NoCollisionManager,
+    )
+    cfg = OmegaConf.create(
+        {
+            "snap_to_object": {
+                "iterative_snap_step_m": 0.1,
+                "max_snap_distance_m": 10.0,
+            }
+        }
+    )
+
+    movement, _ = snapping_helpers.snap_with_iterative_collision_check(
+        source, wall, np.array([1.0, 0.0, 0.0]), cfg
+    )
+
+    # Source front is -1.75 and the wall's world-space near face is 1.5.
+    # The 10cm iterator stops one step before contact at 3.2m. Applying the
+    # wall transform to the already-world AABB would incorrectly move 5.2m.
+    assert abs(movement[0] - 3.2) < 1e-9
+
+
+def test_sdf_only_furniture_uses_iterative_mesh_dispatch(monkeypatch) -> None:
+    """Generated SDF-only furniture must not silently fall back to an AABB snap."""
+    source = _object("source", (0.0, 0.0, 0.0))
+    target = _object("target", (2.0, 0.0, 0.0))
+    source.geometry_path = None
+    target.geometry_path = None
+    calls: list[tuple[SceneObject, SceneObject, np.ndarray]] = []
+
+    monkeypatch.setattr(
+        snapping_helpers,
+        "compute_snap_direction_mesh_to_mesh",
+        lambda *_args, **_kwargs: np.array([1.0, 0.0, 0.0]),
+    )
+
+    def iterative(obj, target, direction, cfg):
+        calls.append((obj, target, direction))
+        return np.array([0.5, 0.0, 0.0]), 0.5
+
+    monkeypatch.setattr(
+        snapping_helpers, "snap_with_iterative_collision_check", iterative
+    )
+    cfg = OmegaConf.create({"snap_to_object": {"max_sample_vertices": 64}})
+
+    result = snapping_helpers.select_and_execute_snap_algorithm(
+        obj=source,
+        target=target,
+        orientation="none",
+        orientation_applied=False,
+        object_id="source",
+        target_id="target",
+        cfg=cfg,
+    )
+
+    assert not isinstance(result, str)
+    np.testing.assert_allclose(result[0], [0.5, 0.0, 0.0])
+    assert len(calls) == 1
+    assert calls[0][0] is source
+    assert calls[0][1] is target
+    np.testing.assert_allclose(calls[0][2], [1.0, 0.0, 0.0])

@@ -273,12 +273,12 @@ def _compile_intent_contract_if_enabled(
     cfg_dict: dict,
     task_spec: SceneTaskSpec | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Compile v5 exactly once when the embedded critic is enabled.
+    """Compile the SemanticIR-backed contract once when the critic is enabled.
 
     The private config entries are consumed by ``_generate_room`` so the
     contract survives the floor-plan boundary even when SceneExpert itself is
-    disabled.  The compiler itself falls back to the deterministic prompt
-    parser when the model cannot return a valid contract.
+    disabled. Invalid provider or SemanticIR responses remain explicit
+    compilation failures after the bounded corrective retry.
     """
     critic_config = critic_config_from_any(cfg_dict)
     if not critic_config.enabled:

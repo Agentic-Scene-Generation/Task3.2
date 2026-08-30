@@ -520,12 +520,31 @@ def validate_intent_contract(
 
     normalized_payload = migrate_intent_contract_payload(payload)
     validation_payload = dict(normalized_payload)
+    original_evidence: list[Any] = []
     if not validate_prompt_semantics:
         validation_payload["prompt"] = ""
+        # Evidence remains report provenance, but it is natural-language input.
+        # Do not let legacy evidence regexes reinterpret an admitted SemanticIR
+        # relation while checking its structural schema.
+        validation_constraints: list[Any] = []
+        for row in normalized_payload.get("constraints") or []:
+            if not isinstance(row, dict):
+                validation_constraints.append(row)
+                original_evidence.append(None)
+                continue
+            normalized_row = dict(row)
+            original_evidence.append(normalized_row.get("evidence_span"))
+            if str(normalized_row.get("evidence_span") or "").strip():
+                normalized_row["evidence_span"] = "LLM SemanticIR grounding"
+            validation_constraints.append(normalized_row)
+        validation_payload["constraints"] = validation_constraints
     contract = IntentContract.model_validate(validation_payload)
     result = contract.model_dump(mode="json", exclude_none=True)
     if not validate_prompt_semantics:
         result["prompt"] = str(normalized_payload.get("prompt") or "")
+        for index, evidence_span in enumerate(original_evidence):
+            if evidence_span is not None:
+                result["constraints"][index]["evidence_span"] = evidence_span
     constraints = result.get("constraints") or []
     seen: dict[str, int] = {}
     for constraint in constraints:

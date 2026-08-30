@@ -637,7 +637,10 @@ def attach_intent_contract_to_case_pack(
         )
     if cached.get("prompt_sha256") != prompt_hash:
         raise ValueError("intent contract prompt hash does not match original prompt")
-    cached = validate_intent_contract(cached)
+    # The cached contract was admitted from CompilerSemanticIR. Re-attachment
+    # rechecks its versioned structure and provenance without parsing prompt
+    # wording a second time.
+    cached = validate_intent_contract(cached, validate_prompt_semantics=False)
     setattr(scene, "scenebenchmark_intent_contract", cached)
     metadata = getattr(scene, "metadata", None)
     if isinstance(metadata, dict):
