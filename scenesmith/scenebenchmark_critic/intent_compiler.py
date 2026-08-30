@@ -81,6 +81,31 @@ _LEGAL_ENVIRONMENT_ANCHORS = frozenset(
         *ROOM_RELATIVE_WALL_CATEGORIES,
     }
 )
+_ENDPOINT_REF_FIELDS = (
+    "subject_ref",
+    "target_ref",
+    "secondary_target_ref",
+)
+_NON_ENDPOINT_REQUIREMENT_KINDS = frozenset(
+    {"forbidden_inventory", "unsupported", "unresolved", "soft_scope"}
+)
+_NON_ENDPOINT_IGNORED_FIELDS = frozenset(
+    {
+        "relation",
+        *_ENDPOINT_REF_FIELDS,
+        "subject_count",
+        "target_count",
+        "subject_quantifier",
+        "target_quantifier",
+        "subject_role",
+        "target_role",
+        "subject_cohort",
+        "target_cohort",
+        "edge_frame",
+        "groups",
+        "orientation",
+    }
+)
 
 
 def _entity_catalog(task_spec: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -132,7 +157,9 @@ def _rejected_entity_refs(
     for row in rows:
         if not isinstance(row, dict):
             continue
-        for field in ("subject_ref", "target_ref", "secondary_target_ref"):
+        if str(row.get("kind") or "") in _NON_ENDPOINT_REQUIREMENT_KINDS:
+            continue
+        for field in _ENDPOINT_REF_FIELDS:
             value = row.get(field)
             if value is None or not str(value).strip() or str(value) in catalog:
                 continue
@@ -296,11 +323,30 @@ def _admit_semantic_ir(
         seen_ids.add(requirement_id)
         covered_groundings.add(grounding)
         source = _semantic_source(grounding, grounding_catalog)
-        refs = [
+        raw_refs = [
             str(raw.get(field) or "")
-            for field in ("subject_ref", "target_ref", "secondary_target_ref")
+            for field in _ENDPOINT_REF_FIELDS
             if raw.get(field) is not None
         ]
+        ignored_fields: list[str] = []
+        if kind in _NON_ENDPOINT_REQUIREMENT_KINDS:
+            ignored_candidates = set(_NON_ENDPOINT_IGNORED_FIELDS)
+            if kind != "forbidden_inventory":
+                ignored_candidates.add("forbidden_category")
+            ignored_fields = sorted(
+                field for field in ignored_candidates if raw.get(field) is not None
+            )
+            for entity_ref in raw_refs:
+                if entity_ref:
+                    rejected.append(
+                        {
+                            "requirement_id": requirement_id,
+                            "grounding": grounding,
+                            "entity_ref": entity_ref,
+                            "reason": "ignored_non_endpoint_entity_ref",
+                        }
+                    )
+        refs = [] if kind in _NON_ENDPOINT_REQUIREMENT_KINDS else raw_refs
         ledger_row = {
             "requirement_id": requirement_id,
             "grounding": grounding,
@@ -309,6 +355,8 @@ def _admit_semantic_ir(
             "surface_mentions": list(raw.get("surface_mentions") or []),
             "reason": str(raw.get("reason") or ""),
         }
+        if ignored_fields:
+            ledger_row["ignored_semantic_fields"] = ignored_fields
         if kind == "relation":
             relation = str(raw.get("relation") or "")
             spec = relation_spec(relation)
@@ -378,65 +426,66 @@ def _admit_semantic_ir(
             ):
                 raise ValueError("inventory must not have target entity refs")
             ledger_row["disposition"] = "compiled"
-        elif kind == "forbidden_inventory":
-            category = canonical_selector_category(raw.get("forbidden_category"))
-            if not category or not is_known_object_category(category):
-                raise ValueError(
-                    "forbidden_inventory requires a known forbidden_category"
+        elif kind in _NON_ENDPOINT_REQUIREMENT_KINDS:
+            if kind == "forbidden_inventory":
+                category = canonical_selector_category(raw.get("forbidden_category"))
+                if not category or not is_known_object_category(category):
+                    raise ValueError(
+                        "forbidden_inventory requires a known forbidden_category"
+                    )
+                coverage_requirements.append(
+                    _coverage_row(
+                        raw,
+                        kind="forbidden_inventory",
+                        disposition="compiled",
+                        normalized=category,
+                        source=source,
+                        earliest_stage=execution_owner(category),
+                    )
                 )
-            coverage_requirements.append(
-                _coverage_row(
-                    raw,
-                    kind="forbidden_inventory",
-                    disposition="compiled",
-                    normalized=category,
-                    source=source,
-                    earliest_stage=execution_owner(category),
+                ledger_row["disposition"] = "compiled"
+            elif kind == "unsupported":
+                normalized = "_".join(
+                    str(raw.get("reason") or "unsupported").lower().split()
                 )
-            )
-            ledger_row["disposition"] = "compiled"
-        elif kind == "unsupported":
-            normalized = "_".join(
-                str(raw.get("reason") or "unsupported").lower().split()
-            )
-            coverage_requirements.append(
-                _coverage_row(
-                    raw,
-                    kind="unsupported_relation",
-                    disposition="unsupported",
-                    normalized=normalized,
-                    source=source,
+                coverage_requirements.append(
+                    _coverage_row(
+                        raw,
+                        kind="unsupported_relation",
+                        disposition="unsupported",
+                        normalized=normalized,
+                        source=source,
+                    )
                 )
-            )
-            ledger_row["disposition"] = "unsupported"
-        elif kind == "unresolved":
-            normalized = "_".join(
-                str(raw.get("reason") or "unresolved").lower().split()
-            )
-            coverage_requirements.append(
-                _coverage_row(
-                    raw,
-                    kind="unresolved",
-                    disposition="unresolved",
-                    normalized=normalized,
-                    source=source,
+                ledger_row["disposition"] = "unsupported"
+            elif kind == "unresolved":
+                normalized = "_".join(
+                    str(raw.get("reason") or "unresolved").lower().split()
                 )
-            )
-            ledger_row["disposition"] = "unresolved"
-        elif kind == "soft_scope":
-            normalized = "_".join(
-                str(raw.get("reason") or "soft_scope").lower().split()
-            )
-            coverage_requirements.append(
-                _coverage_row(
-                    raw,
-                    kind="soft_scope",
-                    disposition="soft_scope",
-                    normalized=normalized,
-                    source=source,
+                coverage_requirements.append(
+                    _coverage_row(
+                        raw,
+                        kind="unresolved",
+                        disposition="unresolved",
+                        normalized=normalized,
+                        source=source,
+                    )
                 )
-            )
-            ledger_row["disposition"] = "soft_scope"
+                ledger_row["disposition"] = "unresolved"
+            else:
+                normalized = "_".join(
+                    str(raw.get("reason") or "soft_scope").lower().split()
+                )
+                coverage_requirements.append(
+                    _coverage_row(
+                        raw,
+                        kind="soft_scope",
+                        disposition="soft_scope",
+                        normalized=normalized,
+                        source=source,
+                    )
+                )
+                ledger_row["disposition"] = "soft_scope"
         ledger.append(ledger_row)
 
     missing = sorted(set(grounding_catalog) - covered_groundings)
@@ -1772,7 +1821,11 @@ class IntentCompiler:
             "TaskSpec grounding needs a requirement disposition: relation/inventory "
             "for compiled semantics, forbidden_inventory, unsupported, unresolved, "
             "or soft_scope. required_count is generated from SceneTaskSpec only; do "
-            "not emit it. Relations require subject_ref and catalog target refs."
+            "not emit it. Only kind=relation uses relation, subject_ref, target_ref, "
+            "counts, roles, cohorts, or geometry fields. forbidden_inventory, "
+            "unsupported, unresolved, and soft_scope are coverage-only rows: use "
+            "reason/surface_mentions (and forbidden_category only for "
+            "forbidden_inventory), with no endpoint or relation fields."
         )
         if validation_error:
             user += (
@@ -1803,25 +1856,36 @@ class IntentCompiler:
                     "example, a relation targeting a window uses "
                     'target_ref="anchor:window".'
                 )
-            if "omitted required constraints field" in validation_error:
+            if "semantic IR requirements" in validation_error:
                 user += (
-                    "\nThe top-level constraints field is mandatory, even when it "
-                    "is an empty list. Return all hard relations in that field; "
-                    "warnings alone are not a complete contract."
+                    "\nThe top-level requirements field is mandatory, even when it "
+                    "is empty. Return every grounding disposition and hard relation "
+                    "inside that SemanticIR list."
                 )
-            if "requires 1 target(s), got 2" in validation_error:
+            if "unexpected secondary_target_ref" in validation_error:
                 user += (
-                    "\nFor every reported unary relation, remove its "
-                    "secondary_category, secondary_count, and secondary_role; "
-                    "keep exactly one primary target selector."
+                    "\nFor every unary relation, remove secondary_target_ref; keep "
+                    "exactly one target_ref."
                 )
-            if "requires 1 target(s), got 0" in validation_error or (
-                "requires 2 target(s), got 0" in validation_error
-            ):
+            if "omitted secondary_target_ref" in validation_error:
                 user += (
-                    "\nEvery non-count relation must include its prompt-grounded "
-                    "targets object. Do not explain the target in inference_reason; "
-                    "put the endpoint category in targets."
+                    "\nThe reported binary relation needs secondary_target_ref from "
+                    "the entity catalog in addition to target_ref."
+                )
+            if "must not have endpoint refs" in validation_error:
+                user += (
+                    "\nThe reported zero-target relation must omit target_ref and "
+                    "secondary_target_ref."
+                )
+            if "semantic IR coverage gap" in validation_error:
+                user += (
+                    "\nReturn at least one requirement disposition for every "
+                    "grounding ID in the grounding catalog."
+                )
+            if "unknown or unbound entity_ref" in validation_error:
+                user += (
+                    "\nReplace unknown refs with exact catalog entity_ref values, or "
+                    "mark that grounding unresolved instead of emitting a hard relation."
                 )
             if "wall-relative directional relation" in validation_error:
                 user += (

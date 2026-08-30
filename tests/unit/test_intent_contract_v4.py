@@ -11,6 +11,7 @@ import pytest
 
 from pydantic import ValidationError
 
+import scenesmith.scenebenchmark_critic.intent_compiler as intent_compiler_module
 from scenesmith.scenebenchmark_critic.intent_schema import (
     INTENT_COMPILER_SPEC_VERSION,
     INTENT_COMPILER_SEMANTIC_IR_VERSION,
@@ -2912,6 +2913,198 @@ def test_intent_compiler_retry_teaches_catalog_target_ref_not_target_role() -> N
     assert 'target_ref="anchor:window"' in correction
 
 
+def test_intent_compiler_retry_uses_semantic_ir_for_unary_secondary_ref() -> None:
+    task_spec = SceneTaskSpec(
+        room_type="bedroom", style="standard", required_large_objects=["bed"]
+    )
+    compiler = _compiler_with_responses(
+        [
+            _response(
+                _semantic_ir(
+                    [
+                        {
+                            "requirement_id": "bed_by_window",
+                            "kind": "relation",
+                            "grounding": "prompt:0",
+                            "relation": "next_to",
+                            "subject_ref": "inventory:bed",
+                            "target_ref": "anchor:window",
+                            "secondary_target_ref": "anchor:wall",
+                        }
+                    ]
+                )
+            ),
+            _response(
+                _semantic_ir(
+                    [
+                        {
+                            "requirement_id": "bed_by_window",
+                            "kind": "relation",
+                            "grounding": "prompt:0",
+                            "relation": "next_to",
+                            "subject_ref": "inventory:bed",
+                            "target_ref": "anchor:window",
+                        }
+                    ]
+                )
+            ),
+        ]
+    )
+
+    result = compiler.compile("Put the bed next to the window.", task_spec=task_spec)
+
+    assert result["retry_count"] == 1
+    correction = compiler._test_calls[1]["messages"][1]["content"]
+    assert "remove secondary_target_ref; keep exactly one target_ref" in correction
+    assert "secondary_category" not in correction
+    assert "targets object" not in correction
+
+
+def test_intent_compiler_exhaustion_never_calls_deterministic_prompt_fallback(
+    monkeypatch,
+) -> None:
+    def _unexpected_parser(*_args, **_kwargs):
+        raise AssertionError(
+            "live compiler must not invoke deterministic prompt parsing"
+        )
+
+    monkeypatch.setattr(
+        intent_compiler_module, "build_intent_contract", _unexpected_parser
+    )
+    compiler = _compiler_with_responses([_response("not json"), _response("still bad")])
+
+    with pytest.raises(IntentCompilationError, match="failed after two attempts"):
+        compiler.compile("A room with a desk.")
+
+    assert compiler.last_trace["status"] == "error"
+
+
+def test_intent_compiler_ignores_refs_and_relation_metadata_on_coverage_rows() -> None:
+    compiler = _compiler_with_responses(
+        [
+            _response(
+                _semantic_ir(
+                    [
+                        {
+                            "requirement_id": "no_tv",
+                            "kind": "forbidden_inventory",
+                            "grounding": "prompt:0",
+                            "forbidden_category": "television",
+                            "relation": "surround",
+                            "subject_ref": "inventory:phantom_tv",
+                            "target_ref": "anchor:room",
+                            "subject_count": 2,
+                            "target_count": 1,
+                            "subject_role": "toy",
+                            "target_role": "room_center",
+                        }
+                    ]
+                )
+            )
+        ]
+    )
+
+    result = compiler.compile("A room with no TV.")
+
+    assert result["retry_count"] == 0
+    assert compiler.last_trace["status"] == "ok"
+    assert compiler.last_trace["attempts"][0]["rejected_entity_refs"] == [
+        {
+            "requirement_id": "no_tv",
+            "grounding": "prompt:0",
+            "entity_ref": "inventory:phantom_tv",
+            "reason": "ignored_non_endpoint_entity_ref",
+        },
+        {
+            "requirement_id": "no_tv",
+            "grounding": "prompt:0",
+            "entity_ref": "anchor:room",
+            "reason": "ignored_non_endpoint_entity_ref",
+        },
+    ]
+    assert compiler.last_trace["attempts"][0]["accepted_entity_refs"] == []
+    assert result["constraints"] == []
+    assert result["coverage_requirements"][0]["kind"] == "forbidden_inventory"
+    assert result["coverage_ledger"] == [
+        {
+            "requirement_id": "no_tv",
+            "grounding": "prompt:0",
+            "kind": "forbidden_inventory",
+            "entity_refs": [],
+            "surface_mentions": [],
+            "reason": "",
+            "ignored_semantic_fields": [
+                "relation",
+                "subject_count",
+                "subject_ref",
+                "subject_role",
+                "target_count",
+                "target_ref",
+                "target_role",
+            ],
+            "disposition": "compiled",
+        }
+    ]
+
+
+def test_intent_compiler_soft_scope_discards_scene_like_relation_payload() -> None:
+    compiler = _compiler_with_responses(
+        [
+            _response(
+                _semantic_ir(
+                    [
+                        {
+                            "requirement_id": "playful_accents",
+                            "kind": "soft_scope",
+                            "grounding": "prompt:0",
+                            "reason": "playful decorative mood",
+                            "relation": "surround",
+                            "subject_ref": "inventory:plush_toy",
+                            "target_ref": "anchor:room",
+                            "subject_count": 3,
+                            "target_count": 1,
+                            "subject_role": "accent",
+                            "target_role": "center",
+                        }
+                    ]
+                )
+            )
+        ]
+    )
+
+    result = compiler.compile("Use playful plush toys around the room.")
+
+    assert result["retry_count"] == 0
+    assert result["constraints"] == []
+    assert result["coverage_requirements"] == [
+        {
+            "requirement_id": "playful_accents",
+            "kind": "soft_scope",
+            "disposition": "soft_scope",
+            "normalized": "playful_decorative_mood",
+            "earliest_stage": "floor_plan",
+            "final_stage": "final",
+            "source": "explicit_prompt",
+            "evidence_span": "Use playful plush toys around the room.",
+            "relation": "",
+        }
+    ]
+    ledger = result["coverage_ledger"][0]
+    assert ledger["entity_refs"] == []
+    assert ledger["ignored_semantic_fields"] == [
+        "relation",
+        "subject_count",
+        "subject_ref",
+        "subject_role",
+        "target_count",
+        "target_ref",
+        "target_role",
+    ]
+    assert [
+        row["entity_ref"] for row in compiler.last_trace["rejected_entity_refs"]
+    ] == ["inventory:plush_toy", "anchor:room"]
+
+
 def test_intent_compiler_rejects_unbound_inventory_claim_before_coverage_admission() -> (
     None
 ):
@@ -3663,7 +3856,7 @@ def test_intent_compiler_wire_schema_excludes_free_text_provenance() -> None:
     assert "required_count" not in requirement_schema["properties"]["relation"]["enum"]
 
 
-def test_intent_compiler_wire_schema_requires_an_explicit_target_ref() -> None:
+def test_intent_compiler_wire_schema_requires_nullable_target_ref_field() -> None:
     schema = intent_compiler_wire_json_schema()
     requirement_schema = schema["properties"]["requirements"]["items"]
 

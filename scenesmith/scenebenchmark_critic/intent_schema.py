@@ -733,9 +733,10 @@ def intent_compiler_wire_json_schema() -> dict[str, Any]:
                 "items": {"type": "string", "maxLength": 128},
             },
         },
-        # Local Qwen JSON grammar does not reliably enforce the relation-specific
-        # conditional branches below. Require this nullable field in every row so
-        # a relation cannot omit its target; non-relation dispositions use null.
+        # llama.cpp's JSON grammar does not reliably enforce conditional
+        # ``if/then`` requirements. Keep the endpoint field structurally
+        # present for every row, while allowing null for coverage-only rows;
+        # deterministic admission still requires a catalog ref for relations.
         "required": ["requirement_id", "kind", "grounding", "target_ref"],
     }
     return {

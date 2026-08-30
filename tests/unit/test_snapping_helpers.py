@@ -236,9 +236,9 @@ def test_high_poly_target_uses_bounded_vertex_pair_for_snap_direction(
     meshes = iter((source_mesh, target_mesh))
 
     monkeypatch.setattr(
-        snapping_helpers.trimesh,
-        "load",
-        lambda *args, **kwargs: next(meshes).copy(),
+        snapping_helpers,
+        "load_object_collision_geometry",
+        lambda _obj: [next(meshes).copy()],
     )
     monkeypatch.setattr(
         snapping_helpers.trimesh.proximity,
@@ -256,3 +256,28 @@ def test_high_poly_target_uses_bounded_vertex_pair_for_snap_direction(
     assert direction[0] > 0.9
     assert abs(direction[1]) < 0.1
     assert abs(direction[2]) < 0.1
+
+
+def test_mesh_to_mesh_direction_uses_collision_geometry_not_visual_mesh(
+    monkeypatch,
+) -> None:
+    """The direction source must match the physical snap/collision geometry."""
+    source = _object("source", (0.0, 0.0, 0.0))
+    target = _object("target", (3.0, 0.0, 0.0))
+    source.scale_factor = 0.5
+    target.scale_factor = 0.5
+    source_mesh = trimesh.creation.box(extents=(1.2, 0.8, 0.8))
+    target_mesh = trimesh.creation.box(extents=(1.2, 0.8, 0.8))
+    meshes = iter((source_mesh, target_mesh))
+    monkeypatch.setattr(
+        snapping_helpers,
+        "load_object_collision_geometry",
+        lambda _obj: [next(meshes).copy()],
+    )
+    cfg = OmegaConf.create({"snap_to_object": {"max_sample_vertices": 64}})
+
+    direction = snapping_helpers.compute_snap_direction_mesh_to_mesh(
+        source, target, cfg
+    )
+
+    np.testing.assert_allclose(direction, [1.0, 0.0, 0.0], atol=1e-7)
